@@ -1,0 +1,5 @@
+__pychache__/
+data/
+logs/
+*.log
+*.tmp
