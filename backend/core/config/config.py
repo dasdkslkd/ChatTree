@@ -19,17 +19,17 @@ DEFAULT_MODELS_CONFIG: Dict[ModelProvider, ModelProviderConfig] = {
         'base_url': '',
         'organization': '',
         'project': '',
-        'enabled': True,
+        'enabled': False,
         'default_model': 'gpt-3'
     },
     ModelProvider.OLLAMA: {
         'name': 'ollama',
         'models': [],
-        'api_key': '',
-        'base_url': '',
+        'api_key': '*',
+        'base_url': 'http://localhost:11434/v1',
         'organization': '',
         'project': '',
-        'enabled': True,
+        'enabled': False,
         'default_model': ''
     },
     ModelProvider.DEEPSEEK: {
@@ -39,10 +39,59 @@ DEFAULT_MODELS_CONFIG: Dict[ModelProvider, ModelProviderConfig] = {
         'base_url': '',
         'organization': '',
         'project': '',
-        'enabled': True,
+        'enabled': False,
         'default_model': ''
     },
-
+    ModelProvider.GEMINI: {
+        'name': 'gemini',
+        'models': [],
+        'api_key': '',
+        'base_url': '',
+        'organization': '',
+        'project': '',
+        'enabled': False,
+        'default_model': ''
+    },
+    ModelProvider.GROQ: {
+        'name': 'groq',
+        'models': [],
+        'api_key': '',
+        'base_url': '',
+        'organization': '',
+        'project': '',
+        'enabled': False,
+        'default_model': ''
+    },
+    ModelProvider.AZURE: {
+        'name': 'azure',
+        'models': [],
+        'api_key': '',
+        'base_url': '',
+        'organization': '',
+        'project': '',
+        'enabled': False,
+        'default_model': ''
+    },
+    ModelProvider.ANTHROPIC: {
+        'name': 'anthropic',
+        'models': [],
+        'api_key': '',
+        'base_url': '',
+        'organization': '',
+        'project': '',
+        'enabled': False,
+        'default_model': ''
+    },
+    ModelProvider.LOCAL: {
+        'name': 'local',
+        'models': [],
+        'api_key': '',
+        'base_url': '',
+        'organization': '',
+        'project': '',
+        'enabled': False,
+        'default_model': ''
+    }
 }
 
 class Config:
@@ -59,19 +108,27 @@ class Config:
                 return json.load(f)
         return {'provider': DEFAULT_MODELS_CONFIG.copy(), 'default_provider': ModelProvider.OPENAI}
     
+    def init_provider_configs(self, provider: ModelProvider):
+        """初始化提供商配置"""
+        if provider not in self.data['provider'] and provider in DEFAULT_MODELS_CONFIG:
+            self.data['provider'][provider] = DEFAULT_MODELS_CONFIG[provider]
+            self.save()
+    
     def save(self):
         """保存配置"""
         os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
         with open(self.config_path, 'w', encoding='utf-8') as f:
             json.dump(self.data, f, indent=2, ensure_ascii=False)
     
-    def get_model_config(self, model: ModelProvider) -> Optional[ModelProviderConfig]:
+    def get_provider_config(self, provider: ModelProvider) -> ModelProviderConfig:
         """获取模型配置"""
-        return self.data['provider'].get(model)
+        if provider not in self.data['provider']:
+            self.init_provider_configs(provider)
+        return self.data['provider'].get(provider)
     
-    def add_model_config(self, model: ModelProvider, config: ModelProviderConfig):
+    def add_provider_config(self, provider: ModelProvider, config: ModelProviderConfig):
         """添加模型配置"""
-        self.data['provider'][model] = config
+        self.data['provider'][provider] = config
         self.save()
     
     def set_default_model(self, provider: ModelProvider):

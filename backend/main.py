@@ -15,7 +15,7 @@ sys.path.insert(0, project_root)
 from backend.api.routes import conversations, messages, models, config
 from backend.core.chat.chat_manager import ChatManager
 from backend.core.model.model_manager import ModelManager
-from backend.core.storage.json_storage import ChatStorage
+from backend.core.storage.chat_storage import ChatStorage
 from backend.core.config.config import Config
 from backend.core.config.types import ChatConfig
 from backend.core.utils.logger import setup_logger

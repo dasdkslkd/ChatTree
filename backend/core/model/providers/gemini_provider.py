@@ -72,14 +72,14 @@ class GeminiProvider(BaseProvider):
         )
         yield response[0]
     
-    def get_model_info(self) -> Dict[str, Any]:
-        """获取模型信息"""
-        return {
-            "provider": "gemini",
-            "model": self.model,
-            "name": self.config.get("name", self.model),
-            "type": "gemini"
-        }
+    # def get_model_info(self) -> Dict[str, Any]:
+    #     """获取模型信息"""
+    #     return {
+    #         "provider": "gemini",
+    #         "model": self.model,
+    #         "name": self.config.get("name", self.model),
+    #         "type": "gemini"
+    #     }
     
     def list_models(self) -> List[str]:
         """获取可用模型列表"""

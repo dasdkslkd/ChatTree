@@ -2,29 +2,41 @@
 import uuid
 from datetime import datetime
 from typing import List, Optional, Dict, Any
-from ..config.types import ConversationData, ConversationTreeNode, ConversationMetadata, Message
+from ..config.types import ConversationTreeNode, ConversationMetadata, Message, ModelProvider
+from ..utils.logger import setup_logger
 
+logger = setup_logger('ConversationTree')
 class Conversation:
     """基于节点的树形对话类"""
     
-    def __init__(self, model: str, conversation_id: str = '', title: str = ''):
+    def __init__(self, conversation_id: str = '', title: str = '', provider: Optional[ModelProvider] = None, model: Optional[str] = None):
         self.metadata: ConversationMetadata = {
             "id": conversation_id or str(uuid.uuid4()),
             "title": title,
             "created_at": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat(),
-            "model": model,
             "total_tokens": {}
         }
         self.nodes: Dict[str, ConversationTreeNode] = {}
         self.root_node_id: Optional[str] = None
         self.current_node_id: Optional[str] = None
+        self.current_provider: Optional[ModelProvider] = provider
+        self.current_model: Optional[str] = model
     
-    def initialize_with_system_message(self, system_prompt: str):
+    def initialize_with_system_message(self, system_prompt: str, force = False):
         """初始化系统消息作为根节点"""
         from .node import NodeManager
+        if len(self.nodes) > 0 and not force:
+            logger.warning("对话已初始化，跳过系统消息初始化")
+            return  # 已初始化
+        self.clear()
         root_node = NodeManager.create_root_node(system_prompt)
         self.add_node(root_node, is_root=True)
+
+    def set_current_model(self, provider: ModelProvider, model: str):
+        """设置当前使用的模型"""
+        self.current_provider = provider
+        self.current_model = model
     
     def add_node(self, node: ConversationTreeNode, parent_id: Optional[str] = None, is_root: bool = False):
         """添加节点到对话树"""
@@ -77,7 +89,7 @@ class Conversation:
         current_id = target_id
         
         # 向前回溯到根节点
-        while current_id:
+        while current_id != 'None' and current_id:
             node = self.nodes[current_id]
             chain.insert(0, node)
             current_id = node.get("parent_id")
@@ -201,7 +213,8 @@ class Conversation:
         """从字典创建对话"""
         metadata = data["metadata"]
         conv = cls(
-            model=metadata["model"],
+            provider=None,
+            model=None,
             conversation_id=metadata["id"],
             title=metadata.get("title", "")
         )

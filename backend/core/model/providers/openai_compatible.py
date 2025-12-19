@@ -22,6 +22,7 @@ class OpenAICompatibleProvider(BaseProvider):
     
     def generate_response(
         self,
+        model: str,
         messages: List[Message],
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
@@ -32,7 +33,7 @@ class OpenAICompatibleProvider(BaseProvider):
         api_messages = self._convert_messages(messages)
         
         response = self.client.chat.completions.create(
-            model=self.model,# type: ignore
+            model=model,# type: ignore
             messages=api_messages,# type: ignore
             max_tokens=max_tokens,
             temperature=temperature,
@@ -47,6 +48,7 @@ class OpenAICompatibleProvider(BaseProvider):
     
     async def generate_response_stream(# type: ignore
         self,
+        model: str,
         messages: List[Message],
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
@@ -57,7 +59,7 @@ class OpenAICompatibleProvider(BaseProvider):
         api_messages = self._convert_messages(messages)
         
         stream = self.client.chat.completions.create(
-            model=self.model,# type: ignore
+            model=model,# type: ignore
             messages=api_messages,# type: ignore
             max_tokens=max_tokens,
             temperature=temperature,

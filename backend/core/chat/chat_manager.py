@@ -4,17 +4,18 @@ import uuid
 from datetime import datetime
 from .conversation import Conversation
 from .node import NodeManager
-from ..config.types import Message, Role, ConversationTreeNode, ChatConfig
-from ..storage.base import StorageInterface
+from ..config.types import Message, Role, ModelProvider, ChatConfig
+from ..storage.chat_storage import ChatStorage
 from ..model.model_manager import ModelManager
 from ..utils.logger import setup_logger
+from ..config.config import cfg
 
 logger = setup_logger('ChatManager')
 
 class ChatManager:
     """延迟加载模型的聊天管理器"""
     
-    def __init__(self, model_manager: ModelManager, storage: StorageInterface, config: ChatConfig):
+    def __init__(self, model_manager: ModelManager, storage: ChatStorage, config: ChatConfig):
         self.model_manager = model_manager
         self.storage = storage
         self.config = config
@@ -25,7 +26,7 @@ class ChatManager:
         创建新对话（不实例化模型，只保存配置ID）
         """
         # 创建对话，只保存model_id字符串引用
-        conversation = Conversation(model=self.model_manager.current_model, title=title)
+        conversation = Conversation(title=title)
         
         # 初始化系统消息
         system_prompt = self.config.get("system_prompt")
@@ -33,7 +34,7 @@ class ChatManager:
             conversation.initialize_with_system_message(system_prompt)
         
         self.current_conversation = conversation
-        logger.info(f"对话创建成功，将使用模型: {self.model_manager.current_model}")
+        logger.info(f"对话创建成功 id: {conversation.metadata['id']}")
         return conversation
     
     def load_conversation(self, conversation_id: str) -> bool:
@@ -85,8 +86,9 @@ class ChatManager:
             if target_model in models:
                 target_provider = provider
                 break
-        use_model = self.model_manager.get_model(target_provider)
-        if not use_model:
+        assert target_provider is not None, "无法找到模型对应的提供商"
+        provider = self.model_manager.get_model(target_provider)
+        if not provider:
             logger.error(f"无法找到模型实例: {target_model}")
             return ""
         
@@ -122,8 +124,9 @@ class ChatManager:
         try:
             # 使用模型的统一接口生成回复
             # 这行代码会触发实际的API调用
-            response_content, tokens = use_model.generate_response(
+            response_content, tokens = provider.generate_response(
                 messages=messages,
+                model=target_model,
                 # max_tokens=self.config.get("max_tokens"),
                 # temperature=self.config.get("temperature"),
                 # top_p=self.config.get("top_p"),
@@ -150,7 +153,7 @@ class ChatManager:
             #     self._process_tool_calls(new_node, tool_calls, use_model)
             
             # 更新token统计
-            self._update_token_stats(use_model, tokens)
+            self._update_token_stats(target_provider, tokens)
             
             # 保存对话
             if self.config.get("save_history", True):
@@ -168,19 +171,24 @@ class ChatManager:
             return []
         
         messages = self.current_conversation.get_message_chain_from_node(self.current_conversation.current_node_id)
+
+        msg_dict = []
+        for msg in messages:
+            msg_dict.append({
+                "role": msg["role"],
+                "content": msg["content"],
+            })
         
-        return messages
+        return msg_dict
     
-    def _update_token_stats(self, model, tokens: int):
+    def _update_token_stats(self, provider: ModelProvider, tokens: int):
         """更新token统计"""
-        model_key = model.get_model_info().get("id")
         assert self.current_conversation is not None
-        if model_key:
-            if model_key not in self.current_conversation.metadata["total_tokens"]:
-                self.current_conversation.metadata["total_tokens"][model_key] = 0
+        if provider not in self.current_conversation.metadata["total_tokens"]:
+            self.current_conversation.metadata["total_tokens"][provider] = 0
             
             # 粗略估算token数（实际应从API响应获取）
-            self.current_conversation.metadata["total_tokens"][model_key] += tokens
+            self.current_conversation.metadata["total_tokens"][provider] += tokens
     
     def get_conversation_history(self) -> List[Message]:
         """获取对话历史"""

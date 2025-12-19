@@ -12,6 +12,7 @@ class BaseProvider(ABC):
     @abstractmethod
     def generate_response(
         self,
+        model: str,
         messages: List[Message],
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
@@ -24,6 +25,7 @@ class BaseProvider(ABC):
     @abstractmethod
     async def generate_response_stream(
         self,
+        model: str,
         messages: List[Message],
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,

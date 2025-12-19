@@ -10,6 +10,17 @@ class Role(str, Enum):
     ASSISTANT = "assistant"
     TOOL = "tool"
 
+class ModelProvider(str, Enum):
+    """模型提供商枚举"""
+    OPENAI = "openai"
+    AZURE = "azure"
+    GEMINI = "gemini"
+    OLLAMA = "ollama"
+    DEEPSEEK = "deepseek"
+    ANTHROPIC = "anthropic"
+    GROQ = "groq"
+    LOCAL = "local"
+
 class Message(TypedDict):
     """基础消息类型"""
     id: str
@@ -39,8 +50,7 @@ class ConversationMetadata(TypedDict):
     title: str
     created_at: str
     updated_at: str
-    model: str
-    total_tokens: Dict[str, int]
+    total_tokens: Dict[ModelProvider, int]
 
 class ConversationData(TypedDict):
     """对话数据类型"""
@@ -54,17 +64,6 @@ class ChatConfig(TypedDict):
     save_history: bool
     max_history_messages: int
     system_prompt: Optional[str]
-
-class ModelProvider(str, Enum):
-    """模型提供商枚举"""
-    OPENAI = "openai"
-    AZURE = "azure"
-    GEMINI = "gemini"
-    OLLAMA = "ollama"
-    DEEPSEEK = "deepseek"
-    ANTHROPIC = "anthropic"
-    GROQ = "groq"
-    LOCAL = "local"
 
 class ModelProviderConfig(TypedDict, total=False):
     """单个模型配置"""

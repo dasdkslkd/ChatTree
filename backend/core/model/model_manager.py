@@ -23,16 +23,17 @@ class ModelManager:
     }
     
     def __init__(self):
-        self.model_instances: Dict[ModelProvider, BaseProvider] = {}
+        self.provider_instances: Dict[ModelProvider, BaseProvider] = {}
         self.model_list: Dict[ModelProvider, List[str]] = {}
-        self.current_model: ModelProvider = cfg.data.get('default_provider', ModelProvider.OPENAI)
-        self.model_list = cfg.data.get('provider', {}).get(self.current_model, {}).get('models', [])
+        for provider in ModelProvider:
+            provider_config = cfg.get_provider_config(provider)
+            if provider_config.get('enabled', True):
+                self.model_list[provider] = provider_config.get('models', [])
     
-    def get_model(self, provider: Optional[ModelProvider] = None) -> Optional[BaseProvider]:
+    def get_model(self, provider: ModelProvider) -> Optional[BaseProvider]:
         """获取模型实例（延迟加载）"""
-        provider = provider or self.current_model
-        if provider in self.model_instances:
-            return self.model_instances[provider]
+        if provider in self.provider_instances:
+            return self.provider_instances[provider]
         return self._create_model_instance(provider)
     
     def _create_model_instance(self, provider: ModelProvider) -> Optional[BaseProvider]:
@@ -50,16 +51,8 @@ class ModelManager:
             return None
         
         instance = provider_class(provider_config)
-        self.model_instances[provider] = instance
+        self.provider_instances[provider] = instance
         return instance
-    
-    def set_current_model(self, provider: ModelProvider) -> bool:
-        """设置默认模型"""
-        if provider in self.PROVIDER_MAP:
-            self.current_model = provider
-            cfg.set_default_model(provider)
-            return True
-        return False
     
     def list_available_models(self, provider: ModelProvider) -> List[str]:
         """获取指定提供商的可用模型列表"""
