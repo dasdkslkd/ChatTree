@@ -5,8 +5,9 @@ import asyncio
 from datetime import datetime
 from .conversation import Conversation
 from .node import NodeManager
-from ..config.types import Message, Role, ModelProvider, ChatConfig, StreamChunk, StreamStatus, StreamController
+from ..config.types import Message, Role, ModelProvider, StreamChunk, StreamStatus, StreamController
 from ..storage.chat_storage import ChatStorage
+from ..storage.prompt_storage import PromptStorage
 from ..model.model_manager import ModelManager
 from ..utils.logger import setup_logger
 from ..config.config import cfg
@@ -16,14 +17,14 @@ logger = setup_logger('ChatManager')
 class ChatManager:
     """延迟加载模型的聊天管理器"""
     
-    def __init__(self, model_manager: ModelManager, storage: ChatStorage, config: ChatConfig):
+    def __init__(self, model_manager: ModelManager, storage: ChatStorage, prompts: PromptStorage):
         self.model_manager = model_manager
         self.storage = storage
-        self.config = config
+        self.prompts = prompts
         self.current_conversation: Optional[Conversation] = None
         self._active_controllers: Dict[str, StreamController] = {}  # node_id -> controller
     
-    def create_conversation(self, title: str = '') -> Conversation:
+    def create_conversation(self, title: str = '', prompt_id: Optional[str] = None) -> Conversation:
         """
         创建新对话（不实例化模型，只保存配置ID）
         """
@@ -31,9 +32,8 @@ class ChatManager:
         conversation = Conversation(title=title)
         
         # 初始化系统消息
-        system_prompt = self.config.get("system_prompt")
-        if system_prompt:
-            conversation.initialize_with_system_message(system_prompt)
+        system_prompt = None if not prompt_id else self.prompts.load(prompt_id)
+        conversation.initialize_with_system_message(system_prompt)
         
         self.current_conversation = conversation
         logger.info(f"对话创建成功 id: {conversation.metadata['id']}")
@@ -158,8 +158,7 @@ class ChatManager:
             self._update_token_stats(target_provider, tokens)
             
             # 保存对话
-            if self.config.get("save_history", True):
-                self.save_conversation()
+            self.save_conversation()
             
             return response_content
             
@@ -291,8 +290,7 @@ class ChatManager:
             self._update_token_stats(target_provider, chunk.get("tokens_used", 0)) # type: ignore
             
             # 保存对话
-            if self.config.get("save_history", True):
-                self.save_conversation()
+            self.save_conversation()
             
         finally:
             # 清理控制器

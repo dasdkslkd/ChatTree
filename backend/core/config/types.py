@@ -59,12 +59,6 @@ class ConversationData(TypedDict):
     current_node_id: Optional[str]
     root_node_id: Optional[str]
 
-class ChatConfig(TypedDict):
-    """聊天配置"""
-    save_history: bool
-    max_history_messages: int
-    system_prompt: Optional[str]
-
 class ModelProviderConfig(TypedDict, total=False):
     """单个模型配置"""
     name: Optional[str]

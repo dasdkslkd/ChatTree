@@ -23,7 +23,7 @@ class Conversation:
         self.current_provider: Optional[ModelProvider] = provider
         self.current_model: Optional[str] = model
     
-    def initialize_with_system_message(self, system_prompt: str, force = False):
+    def initialize_with_system_message(self, system_prompt: Optional[str] = None, force = False):
         """初始化系统消息作为根节点"""
         from .node import NodeManager
         if len(self.nodes) > 0 and not force:

@@ -2,13 +2,7 @@
 import os
 import json
 from typing import Dict, Any, Optional
-from .types import ChatConfig, ModelProviderConfig, ModelProvider
-
-DEFAULT_CONFIG: ChatConfig = {
-    "save_history": True,
-    "max_history_messages": 50,
-    "system_prompt": ""
-}
+from .types import ModelProviderConfig, ModelProvider
 
 # 多模型默认配置
 DEFAULT_MODELS_CONFIG: Dict[ModelProvider, ModelProviderConfig] = {
