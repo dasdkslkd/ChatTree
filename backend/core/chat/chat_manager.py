@@ -1,10 +1,11 @@
 # chat/chat_manager.py - 适配延迟加载
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, AsyncIterator
 import uuid
+import asyncio  
 from datetime import datetime
 from .conversation import Conversation
 from .node import NodeManager
-from ..config.types import Message, Role, ModelProvider, ChatConfig
+from ..config.types import Message, Role, ModelProvider, ChatConfig, StreamChunk, StreamStatus, StreamController
 from ..storage.chat_storage import ChatStorage
 from ..model.model_manager import ModelManager
 from ..utils.logger import setup_logger
@@ -20,6 +21,7 @@ class ChatManager:
         self.storage = storage
         self.config = config
         self.current_conversation: Optional[Conversation] = None
+        self._active_controllers: Dict[str, StreamController] = {}  # node_id -> controller
     
     def create_conversation(self, title: str = '') -> Conversation:
         """
@@ -165,6 +167,152 @@ class ChatManager:
             logger.error(e)
             return ''
     
+    async def send_message_stream(
+        self,
+        content: str,
+        model_id: Optional[str] = None
+    ) -> AsyncIterator[StreamChunk]:
+        """
+        异步流式发送消息
+        前端可以：for chunk in stream: 实时更新UI
+        """
+        if not self.current_conversation:
+            logger.error("没有加载的对话")
+            yield StreamChunk(
+                status=StreamStatus.ERROR,
+                node_id=None,
+                conversation_id=None,
+                content="",
+                error="没有加载的对话",
+                tokens_used=0
+            )
+            return
+        # 确定模型
+        target_model = model_id or self.current_conversation.metadata.get("model")
+        if not target_model:
+            yield StreamChunk(
+                status=StreamStatus.ERROR,
+                node_id=None,
+                conversation_id=None,
+                content="",
+                error="未指定模型ID",
+                tokens_used=0
+            )
+            return
+        
+        # 获取提供商
+        target_provider = None
+        for provider, models in self.model_manager.model_list.items():
+            if target_model in models:
+                target_provider = provider
+                break
+        
+        if not target_provider:
+            yield StreamChunk(
+                status=StreamStatus.ERROR,
+                content="",
+                node_id=None,
+                conversation_id=None,
+                error=f"无法找到模型 {target_model} 对应的提供商",
+                tokens_used=0
+            )
+            return
+        
+        provider = self.model_manager.get_model(target_provider, True)
+        if not provider:
+            yield StreamChunk(
+                status=StreamStatus.ERROR,
+                content="",
+                node_id=None,
+                conversation_id=None,
+                error=f"无法初始化提供商 {target_provider}",
+                tokens_used=0
+            )
+            return
+        
+        # 创建用户消息
+        user_msg = Message({
+            "id": str(uuid.uuid4()),
+            "role": Role.USER,
+            "content": content,
+            "name": None,
+            "tool_calls": None,
+            "tool_call_id": None,
+            "timestamp": datetime.now().isoformat()
+        })
+        
+        # 创建新节点
+        current_node_id = self.current_conversation.current_node_id
+        new_node = NodeManager.create_node(
+            user_message=user_msg,
+            parent_id=current_node_id,
+            model_id=target_model
+        )
+        
+        # 添加到对话树
+        self.current_conversation.add_node(new_node, parent_id=current_node_id)
+        
+        # 创建流控制器
+        controller = StreamController(
+            node_id=new_node["id"],
+            conversation_id=self.current_conversation.metadata["id"]
+        )
+        self._active_controllers[new_node["id"]] = controller
+        
+        # 准备消息链
+        messages = self._prepare_messages_for_api()
+        
+        total_content = ""
+        
+        try:
+            # 流式生成
+            async for chunk in provider.generate_response_stream(
+                model=target_model,
+                messages=messages,
+                stream_controller=controller
+            ): # type: ignore
+                if data := chunk.get("content"):
+                    total_content += data
+                yield chunk
+            
+            # 保存助手消息到节点
+            assistant_msg = Message({
+                "id": str(uuid.uuid4()),
+                "role": Role.ASSISTANT,
+                "content": total_content,
+                "name": None,
+                "tool_calls": None,
+                "tool_call_id": None,
+                "timestamp": datetime.now().isoformat()
+            })
+            NodeManager.add_assistant_message(new_node, assistant_msg)
+            
+            # 更新token统计
+            self._update_token_stats(target_provider, chunk.get("tokens_used", 0)) # type: ignore
+            
+            # 保存对话
+            if self.config.get("save_history", True):
+                self.save_conversation()
+            
+        finally:
+            # 清理控制器
+            if new_node["id"] in self._active_controllers:
+                del self._active_controllers[new_node["id"]]
+
+    def stop_stream(self, node_id: str) -> bool:
+        """终止指定节点的流式生成"""
+        if node_id in self._active_controllers:
+            print("找到活跃的流控制器，正在终止...")
+            asyncio.create_task(self._active_controllers[node_id].stop())
+            logger.info(f"已请求终止节点 {node_id} 的流")
+            return True
+        return False
+    
+    def stop_all_streams(self):
+        """终止所有活跃流"""
+        for node_id in list(self._active_controllers.keys()):
+            self.stop_stream(node_id)
+
     def _prepare_messages_for_api(self) -> List[Message]:
         """准备API调用的消息列表"""
         if not self.current_conversation:

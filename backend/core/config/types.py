@@ -1,7 +1,7 @@
 # types.py - 更新类型定义
 from typing import TypedDict, List, Optional, Dict, Any, Union, Required
 from enum import Enum
-from datetime import datetime
+import asyncio
 
 class Role(str, Enum):
     """消息角色枚举"""
@@ -88,3 +88,46 @@ class ModelProviderConfig(TypedDict, total=False):
 #     default_model: str
 #     save_history: bool
 #     max_history_messages: int
+
+class StreamStatus(str, Enum):
+    """流状态枚举"""
+    START = "start"
+    CONTENT = "content" 
+    COMPLETE = "complete"
+    ERROR = "error"
+    STOPPED = "stopped"
+
+class StreamController:
+    """流控制器，用于终止和管理活跃流"""
+    def __init__(self, node_id: str, conversation_id: str):
+        self.node_id = node_id
+        self.conversation_id = conversation_id
+        self._is_stopped = False
+        self._lock = asyncio.Lock()
+    
+    async def stop(self):
+        """标记为停止"""
+        async with self._lock:
+            self._is_stopped = True
+    
+    async def is_stopped(self) -> bool:
+        """检查是否已停止"""
+        async with self._lock:
+            return self._is_stopped
+
+# 扩展StreamChunk，添加token统计
+class StreamChunk(TypedDict):
+    """流式数据块"""
+    status: StreamStatus
+    content: Optional[str]
+    node_id: Optional[str]
+    conversation_id: Optional[str]
+    error: Optional[str]
+    tokens_used: int  # 新增：当前chunk的token数
+
+class StreamResult(TypedDict):
+    """流最终结果"""
+    content: str
+    node_id: str
+    conversation_id: str
+    is_stopped: bool  # 是否被手动终止

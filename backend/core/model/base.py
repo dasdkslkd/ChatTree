@@ -1,7 +1,7 @@
 # model/base.py - 基础提供商接口
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional, AsyncIterator
-from ..config.types import Message
+from ..config.types import Message, StreamChunk, StreamController
 
 class BaseProvider(ABC):
     """基础模型提供商接口"""
@@ -27,12 +27,12 @@ class BaseProvider(ABC):
         self,
         model: str,
         messages: List[Message],
+        stream_controller: Optional['StreamController'] = None,  # 前向引用
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
-        top_p: Optional[float] = None,
         **kwargs
-    ) -> AsyncIterator[str]:
-        """流式生成回复"""
+    ) -> AsyncIterator[StreamChunk]:
+        """异步流式生成回复"""
         pass
     
     # @abstractmethod

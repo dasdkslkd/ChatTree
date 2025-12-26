@@ -30,16 +30,22 @@ class ModelManager:
             if provider_config.get('enabled', True):
                 self.model_list[provider] = provider_config.get('models', [])
     
-    def get_model(self, provider: ModelProvider) -> Optional[BaseProvider]:
+    def get_model(self, provider: ModelProvider, is_async: bool = False) -> Optional[BaseProvider]:
         """获取模型实例（延迟加载）"""
         if provider in self.provider_instances:
-            return self.provider_instances[provider]
-        return self._create_model_instance(provider)
+            if is_async and not getattr(self.provider_instances[provider], 'client', None).__class__.__name__.startswith('Async'):
+                # 如果需要异步实例但现有实例是同步的，重新创建
+                self.provider_instances.pop(provider)
+            else:
+                return self.provider_instances[provider]
+        return self._create_model_instance(provider, is_async)
     
-    def _create_model_instance(self, provider: ModelProvider) -> Optional[BaseProvider]:
+    def _create_model_instance(self, provider: ModelProvider, is_async: bool = False) -> Optional[BaseProvider]:
         """创建并缓存模型实例"""
         model_configs = cfg.data.get('provider', {})
         provider_config = model_configs.get(provider)
+        if provider_config is not None:
+            provider_config['is_async'] = is_async
         
         if not provider_config or not provider_config.get('enabled', True):
             logger.warning(f"提供商 {provider} 未启用或配置缺失")
