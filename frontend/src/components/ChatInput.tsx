@@ -9,7 +9,7 @@ import {
   DialogTitle,
   DialogFooter,
 } from '@/components/ui/dialog'
-import { SendHorizontal, Bot, StickyNote, X, Settings } from 'lucide-react'
+import { SendHorizontal, Bot, StickyNote, X, Settings, Square } from 'lucide-react'
 import { useState, useEffect, useRef } from 'react'
 import { useModelStore } from '../store/modelStore'
 import { usePromptStore } from '../store/promtStore'
@@ -18,11 +18,13 @@ import type { ModelProvider } from '../types/model'
 
 interface Props {
   onSend: (value: string, modelId?: string, systemPrompt?: string) => Promise<void>;
+  onStop?: () => void;
+  isStreaming?: boolean;
   disabled: boolean;
   conversationId: string | null;
 }
 
-export function ChatInput({ onSend, disabled, conversationId }: Props) {
+export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationId }: Props) {
   const { setCurrentPage } = useNavigationStore();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [value, setValue] = useState('');
@@ -185,16 +187,28 @@ export function ChatInput({ onSend, disabled, conversationId }: Props) {
             )}
           </div>
 
-          {/* 发送按钮 */}
-          <Button
-            size="sm"
-            className="h-7 w-7 p-0"
-            onClick={handleSend}
-            disabled={disabled || !value.trim()}
-            aria-label="发送消息"
-          >
-            <SendHorizontal className="h-4 w-4" />
-          </Button>
+          {/* 发送/终止按钮 */}
+          {isStreaming ? (
+            <Button
+              size="sm"
+              variant="destructive"
+              className="h-7 w-7 p-0"
+              onClick={onStop}
+              aria-label="终止生成"
+            >
+              <Square className="h-3 w-3 fill-current" />
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              className="h-7 w-7 p-0"
+              onClick={handleSend}
+              disabled={disabled || !value.trim()}
+              aria-label="发送消息"
+            >
+              <SendHorizontal className="h-4 w-4" />
+            </Button>
+          )}
         </div>
       </div>
 

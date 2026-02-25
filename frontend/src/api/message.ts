@@ -89,4 +89,9 @@ export const messageApi = {
     const response = await apiClient.get(`/conversations/${conversationId}/messages`);
     return response.data;
   },
+
+  // 停止流式消息生成
+  stopStream: async (conversationId: string, nodeId: string): Promise<void> => {
+    await apiClient.post(`/conversations/${conversationId}/messages/${nodeId}/stream/stop`);
+  },
 };

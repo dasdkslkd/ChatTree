@@ -174,7 +174,7 @@ export default function ChatPage() {
     }
   };
 
-  const { streamedContent, startStreaming, reset, isStreaming } = useStreaming({
+  const { streamedContent, startStreaming, reset, isStreaming, abortStreaming } = useStreaming({
     onComplete: async () => {
       reset();
       setPendingUserMessage(null);
@@ -434,6 +434,8 @@ export default function ChatPage() {
         <footer className="absolute bottom-5 left-1/2 -translate-x-1/2 w-[800px] max-w-[calc(100%-48px)] z-10">
           <ChatInput
             onSend={handleSend}
+            onStop={abortStreaming}
+            isStreaming={isStreaming}
             disabled={isStreaming}
             conversationId={currentConversation?.id || null}
           />
