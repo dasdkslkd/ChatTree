@@ -16,6 +16,7 @@ export const useStreaming = (options: UseStreamingOptions = {}) => {
   const [tokensUsed, setTokensUsed] = useState(0);
 
   const abortControllerRef = useRef<AbortController | null>(null);
+  const currentConversationIdRef = useRef<string | null>(null);
   
   // 使用 ref 存储回调，避免闭包问题
   const optionsRef = useRef(options);
@@ -29,6 +30,7 @@ export const useStreaming = (options: UseStreamingOptions = {}) => {
       setError(null);
       setTokensUsed(0);
       setCurrentNodeId(null);
+      currentConversationIdRef.current = conversationId;
 
       abortControllerRef.current = new AbortController();
       
@@ -75,11 +77,21 @@ export const useStreaming = (options: UseStreamingOptions = {}) => {
     [] // 空依赖数组，因为使用了 ref
   );
 
-  const abortStreaming = useCallback(() => {
+  const abortStreaming = useCallback(async () => {
     if (abortControllerRef.current && isStreaming) {
+      // 先调用后端 API 停止流式生成，避免继续消耗 token
+      const conversationId = currentConversationIdRef.current;
+      const nodeId = currentNodeId;
+      if (conversationId && nodeId) {
+        try {
+          await messageApi.stopStream(conversationId, nodeId);
+        } catch (e) {
+          console.error('Failed to stop stream:', e);
+        }
+      }
       abortControllerRef.current.abort();
     }
-  }, [isStreaming]);
+  }, [isStreaming, currentNodeId]);
 
   useEffect(() => {
     return () => {
