@@ -20,6 +20,7 @@ class ModelProvider(str, Enum):
     ANTHROPIC = "anthropic"
     GROQ = "groq"
     LOCAL = "local"
+    NVIDIA = "nvidia"
 
 class Message(TypedDict):
     """基础消息类型"""
@@ -29,7 +30,7 @@ class Message(TypedDict):
     name: Optional[str]
     tool_calls: Optional[List[Dict[str, Any]]]
     tool_call_id: Optional[str]
-    timestamp: str
+    timestamp: int
 
 class ConversationTreeNode(TypedDict):
     """对话树节点 - 一轮完整交互"""
@@ -40,7 +41,7 @@ class ConversationTreeNode(TypedDict):
     assistant_message: Optional[Message]
     tool_messages: List[Message]
     system_message: Optional[Message]  # 仅根节点有
-    timestamp: str
+    timestamp: int
     model_id: Optional[str]
     total_tokens: int
 
@@ -48,8 +49,8 @@ class ConversationMetadata(TypedDict):
     """对话元数据"""
     id: str
     title: str
-    created_at: str
-    updated_at: str
+    created_at: int
+    updated_at: int
     total_tokens: Dict[ModelProvider, int]
 
 class ConversationData(TypedDict):

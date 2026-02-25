@@ -2,7 +2,7 @@
 from typing import List, Optional, Dict, AsyncIterator
 import uuid
 import asyncio  
-from datetime import datetime
+from time import time
 from .conversation import Conversation
 from .node import NodeManager
 from ..config.types import Message, Role, ModelProvider, StreamChunk, StreamStatus, StreamController
@@ -62,10 +62,32 @@ class ChatManager:
         if self.current_conversation and self.current_conversation.metadata["id"] == conversation_id:
             self.current_conversation = None
     
+    def update_conversation_title(self, conversation_id: str, title: str) -> bool:
+        """更新对话标题"""
+        # 先加载对话数据
+        data = self.storage.load(conversation_id)
+        if not data:
+            return False
+        
+        # 更新标题
+        data["metadata"]["title"] = title
+        data["metadata"]["updated_at"] = int(time())
+        
+        # 保存更新后的对话
+        self.storage.save(data)
+        
+        # 如果是当前对话，同步更新内存中的对话
+        if self.current_conversation and self.current_conversation.metadata["id"] == conversation_id:
+            self.current_conversation.metadata["title"] = title
+            self.current_conversation.metadata["updated_at"] = int(time())
+        
+        return True
+    
     def send_message(
         self,
         content: str,
-        model_id: Optional[str] = None
+        model_id: Optional[str] = None,
+        node_id: Optional[str] = None
     ) -> str:
         """
         发送消息（在此首次实例化模型）
@@ -74,8 +96,15 @@ class ChatManager:
             logger.error("没有加载的对话，无法发送消息")
             return ""
         
-        # 确定使用的模型ID
-        target_model = model_id or self.current_conversation.metadata.get("model")
+        # 确定使用的模型ID：优先使用传入的model_id，其次使用对话的current_model，最后使用第一个可用模型
+        target_model = model_id or self.current_conversation.current_model
+        if not target_model:
+            # 尝试获取第一个可用的模型
+            for provider, models in self.model_manager.model_list.items():
+                if models:
+                    target_model = models[0]
+                    logger.info(f"使用默认模型: {target_model}")
+                    break
         
         if not target_model:
             logger.error("未指定模型ID，无法发送消息")
@@ -102,10 +131,12 @@ class ChatManager:
             "name": None,
             "tool_calls": None,
             "tool_call_id": None,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": int(time())
         })
         
         # 创建新节点
+        if node_id:
+            self.current_conversation.switch_to_node(node_id)
         current_node_id = self.current_conversation.current_node_id
         new_node = NodeManager.create_node(
             user_message=user_msg,
@@ -144,7 +175,7 @@ class ChatManager:
                 "name": None,
                 "tool_calls": tool_calls if tool_calls else None,
                 "tool_call_id": None,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": int(time())
             })
             
             # 添加到当前节点
@@ -169,7 +200,8 @@ class ChatManager:
     async def send_message_stream(
         self,
         content: str,
-        model_id: Optional[str] = None
+        model_id: Optional[str] = None,
+        node_id: Optional[str] = None
     ) -> AsyncIterator[StreamChunk]:
         """
         异步流式发送消息
@@ -186,8 +218,16 @@ class ChatManager:
                 tokens_used=0
             )
             return
-        # 确定模型
-        target_model = model_id or self.current_conversation.metadata.get("model")
+        # 确定模型：优先使用传入的model_id，其次使用对话的current_model，最后使用第一个可用模型
+        target_model = model_id or self.current_conversation.current_model
+        if not target_model:
+            # 尝试获取第一个可用的模型
+            for provider, models in self.model_manager.model_list.items():
+                if models:
+                    target_model = models[0]
+                    logger.info(f"使用默认模型: {target_model}")
+                    break
+        
         if not target_model:
             yield StreamChunk(
                 status=StreamStatus.ERROR,
@@ -237,10 +277,12 @@ class ChatManager:
             "name": None,
             "tool_calls": None,
             "tool_call_id": None,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": int(time())
         })
         
         # 创建新节点
+        if node_id:
+            self.current_conversation.switch_to_node(node_id)
         current_node_id = self.current_conversation.current_node_id
         new_node = NodeManager.create_node(
             user_message=user_msg,
@@ -282,7 +324,7 @@ class ChatManager:
                 "name": None,
                 "tool_calls": None,
                 "tool_call_id": None,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": int(time())
             })
             NodeManager.add_assistant_message(new_node, assistant_msg)
             

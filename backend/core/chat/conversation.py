@@ -1,6 +1,6 @@
 # chat/conversation.py - 重构为基于节点的对话管理
 import uuid
-from datetime import datetime
+from time import time
 from typing import List, Optional, Dict, Any
 from ..config.types import ConversationTreeNode, ConversationMetadata, Message, ModelProvider
 from ..utils.logger import setup_logger
@@ -13,8 +13,8 @@ class Conversation:
         self.metadata: ConversationMetadata = {
             "id": conversation_id or str(uuid.uuid4()),
             "title": title,
-            "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat(),
+            "created_at": int(time()),
+            "updated_at": int(time()),
             "total_tokens": {}
         }
         self.nodes: Dict[str, ConversationTreeNode] = {}
@@ -52,7 +52,7 @@ class Conversation:
             self.nodes[parent_id]["children_ids"].append(node_id)
             self.current_node_id = node_id
         
-        self.metadata["updated_at"] = datetime.now().isoformat()
+        self.metadata["updated_at"] = int(time())
 
     def del_node(self, node_id: str):
         """删除节点及其子节点"""
@@ -77,7 +77,7 @@ class Conversation:
         if self.current_node_id == node_id:
             self.current_node_id = parent_id
         
-        self.metadata["updated_at"] = datetime.now().isoformat()
+        self.metadata["updated_at"] = int(time())
     
     def get_node_chain(self, node_id: Optional[str] = None) -> List[ConversationTreeNode]:
         """获取从根节点到指定节点的完整路径"""
@@ -229,4 +229,4 @@ class Conversation:
         self.nodes.clear()
         self.root_node_id = None
         self.current_node_id = None
-        self.metadata["updated_at"] = datetime.now().isoformat()
+        self.metadata["updated_at"] = int(time())

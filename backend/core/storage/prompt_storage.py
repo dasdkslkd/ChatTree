@@ -1,5 +1,6 @@
 import os
 import json
+from time import time
 from typing import List, Dict, Any, Optional
 from .base import StorageInterface
 from ..utils.logger import setup_logger
@@ -21,6 +22,7 @@ class PromptStorage(StorageInterface):
                 self.index = json.load(f)
         else:
             self.index = {}
+            self._save_index()
 
     def _save_index(self):
         """保存索引"""
@@ -40,7 +42,7 @@ class PromptStorage(StorageInterface):
         self.index[prompt_id] = {
             "id": prompt_id,
             "title": data.get("title", ""),
-            "updated_at": data.get("updated_at", "")
+            "updated_at": int(time())
         }
         self._save_index()
         logger.debug(f"Prompt {prompt_id} 保存完成")
@@ -60,7 +62,7 @@ class PromptStorage(StorageInterface):
     
     def delete(self, id: str):
         """删除数据"""
-        file_path = os.path.join(self.storage_dir, f"{id}.json")
+        file_path = os.path.join(self.storage_dir, f"{id}.txt")
         if os.path.exists(file_path):
             os.remove(file_path)
         

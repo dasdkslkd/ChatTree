@@ -1,5 +1,5 @@
 # chat/message.py - 更新消息管理
-from datetime import datetime
+from time import time
 from typing import Optional, List
 import uuid
 from ..config.types import Message, Role
@@ -26,7 +26,7 @@ class MessageManager:
             "name": name,
             "tool_calls": tool_calls,
             "tool_call_id": tool_call_id,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": int(time()),
         }
     
     @staticmethod

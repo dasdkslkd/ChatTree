@@ -24,6 +24,7 @@ class ChatStorage(StorageInterface):
                 self.index = json.load(f)
         else:
             self.index = {}
+            self._save_index()
     
     def _save_index(self):
         """保存对话索引"""
@@ -134,7 +135,7 @@ class ChatStorage(StorageInterface):
             logger.error(f"加载对话 {id} 失败: {e}", exc_info=True)
             return None
     
-    def list(self) -> List[Dict[str, str]]:
+    def list(self) -> List[Dict[str, Any]]:
         """列出所有对话（从索引快速获取）"""
         self._load_index()
         # 返回索引的基本信息
@@ -143,7 +144,7 @@ class ChatStorage(StorageInterface):
             result.append({
                 "id": conv_id,
                 "title": info.get("title", ""),
-                "updated_at": info.get("updated_at", ""),
+                "updated_at": info.get("updated_at", 0),
                 "node_count": str(info.get("node_count", 0))
             })
         return result
