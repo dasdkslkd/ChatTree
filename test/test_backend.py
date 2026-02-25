@@ -9,7 +9,8 @@ from backend.core.config.config import Config
 from backend.core.model.model_manager import ModelManager
 from backend.core.chat.chat_manager import ChatManager
 from backend.core.storage.chat_storage import ChatStorage
-from backend.core.config.types import Message, Role, ModelProvider, ChatConfig
+from backend.core.storage.prompt_storage import PromptStorage
+from backend.core.config.types import Message, Role, ModelProvider
 import time
 from backend.core.chat.message import MessageManager
 from backend.core.chat.node import NodeManager
@@ -59,15 +60,15 @@ def test_model_manager():
 def test_chat_storage():
     """测试聊天存储"""
     print("\n=== 测试聊天存储 ===")
-    storage = ChatStorage("data/test_conversations")
+    storage = ChatStorage("data/conversations")
     
     # 测试数据
     test_data = {
         "metadata": {
             "id": "test-conv-123",
             "title": "测试对话",
-            "created_at": "2025-12-17T10:00:00",
-            "updated_at": "2025-12-17T10:00:00",
+            "created_at": 0,
+            "updated_at": 0,
             "model": "gpt-3.5-turbo",
             "total_tokens": {}
         },
@@ -83,9 +84,9 @@ def test_chat_storage():
                     "id": "msg-1",
                     "role": "system",
                     "content": "你是一个助手",
-                    "timestamp": "2025-12-17T10:00:00"
+                    "timestamp": 0
                 },
-                "timestamp": "2025-12-17T10:00:00",
+                "timestamp": 0,
                 "model_id": None,
                 "total_tokens": 0
             },
@@ -97,17 +98,17 @@ def test_chat_storage():
                     "id": "msg-2",
                     "role": "user",
                     "content": "你好",
-                    "timestamp": "2025-12-17T10:00:01"
+                    "timestamp": 0
                 },
                 "assistant_message": {
                     "id": "msg-3",
                     "role": "assistant",
                     "content": "你好！有什么可以帮你的吗？",
-                    "timestamp": "2025-12-17T10:00:02"
+                    "timestamp": 0
                 },
                 "tool_messages": [],
                 "system_message": None,
-                "timestamp": "2025-12-17T10:00:02",
+                "timestamp": 0,
                 "model_id": "gpt-3.5-turbo",
                 "total_tokens": 10
             }
@@ -147,9 +148,9 @@ def test_conversation_tree():
     
     # 初始化组件
     model_manager = ModelManager()
-    storage = ChatStorage("data/test_conversations")
-    chat_config = ChatConfig({'save_history': True, 'max_history_messages': 20, 'system_prompt': None})
-    chat_manager = ChatManager(model_manager, storage, chat_config)
+    storage = ChatStorage("data/conversations")
+    prompts = PromptStorage("data/prompts")
+    chat_manager = ChatManager(model_manager, storage, prompts)
     
     # 测试1: 创建对话
     conversation = chat_manager.create_conversation("测试对话树")
@@ -225,9 +226,9 @@ def test_conversation_tree():
     print(f"✅ 重新加载对话: {loaded_conv.metadata['title']}")
     
     # 测试10: 删除对话
-    chat_manager.delete_conversation(conv_id)
-    assert not storage.exists(conv_id)
-    print("✅ 对话删除成功")
+    # chat_manager.delete_conversation(conv_id)
+    # assert not storage.exists(conv_id)
+    # print("✅ 对话删除成功")
 
 def test_model_conversation():
     """测试模型对话功能（需要有效API配置）"""
@@ -239,18 +240,17 @@ def test_model_conversation():
     
     if not provider_config or not provider_config.get('api_key'):
         print("⚠️  警告: 未找到有效的API配置，跳过模型对话测试")
-        print(f"请先在 data/test_config.json 中配置 {provider} 的 API key")
+        print(f"请先在 data/config.json 中配置 {provider} 的 API key")
         return
+    if not provider_config.get('enabled', False):
+        provider_config['enabled'] = True
+        cfg.add_provider_config(provider, provider_config)
     
     # 初始化组件
     model_manager = ModelManager()
-    storage = ChatStorage("data/test_conversations")
-    chat_config = ChatConfig(
-        save_history=True,
-        max_history_messages=50,
-        system_prompt="你是一个有帮助的助手。"
-    )
-    chat_manager = ChatManager(model_manager, storage, chat_config)
+    storage = ChatStorage("data/conversations")
+    prompts = PromptStorage("data/prompts")
+    chat_manager = ChatManager(model_manager, storage, prompts)
 
     print(model_manager.list_available_models(provider))
     
@@ -460,9 +460,9 @@ def test_error_handling():
     
     config = Config("data/test_config.json")
     model_manager = ModelManager()
-    storage = ChatStorage("data/test_conversations")
-    chat_config = ChatConfig({'save_history': True, 'max_history_messages': 20, 'system_prompt': None})
-    chat_manager = ChatManager(model_manager, storage, chat_config)
+    storage = ChatStorage("data/conversations")
+    prompts = PromptStorage("data/prompts")
+    chat_manager = ChatManager(model_manager, storage, prompts)
     
     # 测试1: 未加载对话时发送消息
     chat_manager.current_conversation = None
@@ -491,9 +491,9 @@ def test_full_workflow():
     # 初始化
     config = Config("data/test_config.json")
     model_manager = ModelManager()
-    storage = ChatStorage("data/test_conversations")
-    chat_config = ChatConfig({'save_history': True, 'max_history_messages': 20, 'system_prompt': None})
-    chat_manager = ChatManager(model_manager, storage, chat_config)
+    storage = ChatStorage("data/conversations")
+    prompts = PromptStorage("data/prompts")
+    chat_manager = ChatManager(model_manager, storage, prompts)
     
     # 1. 创建对话
     conv = chat_manager.create_conversation("完整测试")

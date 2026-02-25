@@ -20,6 +20,9 @@ class ModelManager:
         ModelProvider.DEEPSEEK: OpenAICompatibleProvider,
         ModelProvider.GEMINI: GeminiProvider,
         ModelProvider.GROQ: OpenAICompatibleProvider,
+        ModelProvider.ANTHROPIC: OpenAICompatibleProvider,
+        ModelProvider.LOCAL: OpenAICompatibleProvider,
+        ModelProvider.NVIDIA: OpenAICompatibleProvider,
     }
     
     def __init__(self):

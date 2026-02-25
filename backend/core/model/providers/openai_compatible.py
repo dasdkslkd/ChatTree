@@ -105,7 +105,7 @@ class OpenAICompatibleProvider(BaseProvider):
                 if stream_controller and await stream_controller.is_stopped():
                     yield StreamChunk(
                         status=StreamStatus.STOPPED,
-                        content=total_content,
+                        content=None,  # 停止时不再发送内容，避免重复
                         node_id=stream_controller.node_id,
                         conversation_id=stream_controller.conversation_id,
                         error="用户手动终止",
@@ -133,7 +133,7 @@ class OpenAICompatibleProvider(BaseProvider):
             assert stream_controller is not None, "stream_controller不能为空"
             yield StreamChunk(
                 status=StreamStatus.COMPLETE,
-                content=total_content,
+                content=None,  # 完成时不再发送内容，避免重复
                 node_id=stream_controller.node_id,
                 conversation_id=stream_controller.conversation_id,
                 error=None,
@@ -145,7 +145,7 @@ class OpenAICompatibleProvider(BaseProvider):
             assert stream_controller is not None, "stream_controller不能为空"
             yield StreamChunk(
                 status=StreamStatus.STOPPED,
-                content=total_content,
+                content=None,  # 取消时不再发送内容，避免重复
                 node_id=stream_controller.node_id,
                 conversation_id=stream_controller.conversation_id,
                 error="任务被取消",
@@ -155,7 +155,7 @@ class OpenAICompatibleProvider(BaseProvider):
             assert stream_controller is not None, "stream_controller不能为空"
             yield StreamChunk(
                 status=StreamStatus.ERROR,
-                content=total_content,
+                content=None,  # 错误时不再发送内容，避免重复
                 node_id=stream_controller.node_id,
                 conversation_id=stream_controller.conversation_id,
                 error=str(e),
@@ -192,7 +192,7 @@ class OpenAICompatibleProvider(BaseProvider):
             return [model.id for model in models.data]
         except Exception as e:
             print(f"获取模型列表失败: {e}")
-            return self.config.get("models", [])
+            raise RuntimeError(f"获取模型列表失败: {e}")
     
     # def validate_config(self) -> bool:
     #     """验证配置"""

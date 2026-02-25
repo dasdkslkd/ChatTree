@@ -88,7 +88,7 @@ class GeminiProvider(BaseProvider):
             return [model.name.split('/')[-1] for model in models if 'generateContent' in model.supported_generation_methods]
         except Exception as e:
             print(f"获取Gemini模型列表失败: {e}")
-            return self.config.get("models", [])
+            raise RuntimeError(f"获取Gemini模型列表失败: {e}")
     
     def validate_config(self) -> bool:
         """验证配置"""

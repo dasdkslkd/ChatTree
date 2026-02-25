@@ -1,6 +1,6 @@
 # chat/node.py - 节点管理器
 import uuid
-from datetime import datetime
+from time import time
 from typing import Optional, List, Dict, Any
 from ..config.types import Message, Role, ConversationTreeNode
 
@@ -21,7 +21,7 @@ class NodeManager:
                 "name": None,
                 "tool_calls": None,
                 "tool_call_id": None,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": int(time())
             })
         
         return {
@@ -32,7 +32,7 @@ class NodeManager:
             "assistant_message": None,
             "tool_messages": [],
             "system_message": system_msg,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": int(time()),
             "model_id": None,
             "total_tokens": 0
         }
@@ -54,7 +54,7 @@ class NodeManager:
             "assistant_message": None,
             "tool_messages": [],
             "system_message": None,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": int(time()),
             "model_id": model_id,
             "total_tokens": 0
         }
@@ -63,13 +63,13 @@ class NodeManager:
     def add_assistant_message(node: ConversationTreeNode, message: Message):
         """添加助手回复到节点"""
         node["assistant_message"] = message
-        node["timestamp"] = datetime.now().isoformat()
+        node["timestamp"] = int(time())
     
     @staticmethod
     def add_tool_messages(node: ConversationTreeNode, messages: List[Message]):
         """添加工具调用结果到节点"""
         node["tool_messages"].extend(messages)
-        node["timestamp"] = datetime.now().isoformat()
+        node["timestamp"] = int(time())
     
     @staticmethod
     def mark_as_branch_point(node: ConversationTreeNode, child_id: str):

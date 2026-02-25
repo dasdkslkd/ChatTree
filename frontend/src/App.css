@@ -1,0 +1,124 @@
+/* Markdown content styling */
+
+/* ====== 去除 typography 插件为 code 添加的反引号伪元素 ====== */
+.prose code::before,
+.prose code::after {
+  content: none !important;
+}
+
+/* ====== 代码块包装器 ====== */
+.code-block-wrapper {
+  border: 1px solid #d1d5db;
+  border-radius: 0.5rem;
+  position: relative;
+  /* 不设 overflow，否则会裁剪 sticky 工具栏 */
+}
+
+/* 代码块工具栏 — sticky，吸顶到滚动容器顶部 */
+.code-toolbar-wrapper{
+  position: sticky;
+  top: -16px;
+  z-index: 2;
+  background-color: #f8f8f2;
+  margin-left: -1px;
+  margin-right: -1px;
+}
+.code-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.25rem 0.75rem;
+  background-color: #e8e8e0;
+  border: 1px solid #d1d5db;
+  border-top: none;
+  border-radius: calc(0.5rem - 1px) calc(0.5rem - 1px) 0 0;
+  box-sizing: border-box;
+}
+
+/* ====== 代码块（``` 包裹） ====== */
+.prose pre {
+  overflow-x: auto;
+  border-radius: 0 0 calc(0.5rem - 1px) calc(0.5rem - 1px);
+  padding: 1rem;
+  background-color: #f8f8f2;
+  border: none;
+  margin: 0;
+}
+
+/* 代码块内的 code */
+.prose pre code {
+  font-size: 1.1em;
+  color: #2d2d2d;
+  font-family: 'Fira Mono', 'Consolas', 'Menlo', 'Monaco', monospace;
+  background: none;
+  padding: 0;
+  white-space: pre;
+}
+
+/* ====== 行内代码（` 包裹） ====== */
+.prose :not(pre) > code {
+  font-size: 1.05em;
+  color: #2d2d2d;
+  font-family: 'Fira Mono', 'Consolas', 'Menlo', 'Monaco', monospace;
+  background-color: rgba(0, 0, 0, 0.07);
+  padding: 0.15em 0.4em;
+  border-radius: 0.25em;
+  white-space: nowrap;
+}
+
+/* 反色模式（用户消息）行内代码 */
+.prose-invert :not(pre) > code {
+  background-color: rgba(255, 255, 255, 0.18);
+  color: inherit;
+}
+
+/* 反色模式代码块 */
+.prose-invert .code-block-wrapper {
+  border-color: rgba(255, 255, 255, 0.15);
+}
+.prose-invert .code-toolbar {
+  background-color: rgba(0, 0, 0, 0.35);
+  border-bottom-color: rgba(255, 255, 255, 0.15);
+}
+.prose-invert pre {
+  background-color: rgba(0, 0, 0, 0.25);
+}
+.prose-invert pre code {
+  color: #e8e8e8;
+}
+
+.prose table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.prose th,
+.prose td {
+  border: 1px solid #e5e7eb;
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+}
+
+.prose th {
+  background-color: #f9fafb;
+  font-weight: 600;
+}
+
+.prose h1 {
+  font-size: 1.5em;
+}
+.prose h2 {
+  font-size: 1.35em;
+}
+.prose h3 {
+  font-size: 1.2em;
+}
+.prose h4 {
+  font-size: 1.1em;
+}
+.prose h5 {
+  font-size: 1em;
+}
+.prose h6 {
+  font-size: 0.95em;
+}
