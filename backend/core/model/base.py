@@ -2,6 +2,9 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional, AsyncIterator
 from ..config.types import Message, StreamChunk, StreamController
+from ..utils.logger import setup_logger
+
+logger = setup_logger('Provider')
 
 class BaseProvider(ABC):
     """基础模型提供商接口"""

@@ -104,7 +104,7 @@ async def stop_stream_message(
 ):
     """停止流式消息"""
     try:
-        if not chat_manager.load_conversation(conversation_id):
+        if not chat_manager.storage.index.get(conversation_id):
             raise HTTPException(status_code=404, detail="对话不存在")
         chat_manager.stop_stream(node_id)
         return {"detail": "流式消息已停止"}

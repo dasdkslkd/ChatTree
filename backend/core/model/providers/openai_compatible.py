@@ -2,7 +2,7 @@
 from typing import List, Dict, Any, Optional, AsyncIterator
 import openai
 import asyncio
-from ..base import BaseProvider
+from ..base import BaseProvider, logger
 from ...config.types import Message, StreamChunk, StreamStatus, StreamController
 
 class OpenAICompatibleProvider(BaseProvider):
@@ -22,6 +22,7 @@ class OpenAICompatibleProvider(BaseProvider):
         if base_url := self.config.get("base_url"):
             kwargs["base_url"] = base_url
         
+        logger.info(f"Creating async OpenAI client with kwargs: {kwargs}")
         return openai.AsyncOpenAI(timeout=5, **kwargs)
     
     def _create_client(self) -> openai.OpenAI:
@@ -30,7 +31,7 @@ class OpenAICompatibleProvider(BaseProvider):
 
         if base_url := self.config.get("base_url"):
             kwargs["base_url"] = base_url
-
+        logger.info(f"Creating OpenAI client with kwargs: {kwargs}")
         return openai.OpenAI(timeout=5, **kwargs)
     
     def generate_response(
@@ -111,6 +112,7 @@ class OpenAICompatibleProvider(BaseProvider):
                         error="用户手动终止",
                         tokens_used=total_tokens
                     )
+                    logger.warning(f"Stream stopped by user: {stream_controller.conversation_id} - {stream_controller.node_id}")
                     return
                 assert stream_controller is not None, "stream_controller不能为空"
                 if chunk.choices and chunk.choices[0].delta.content:
@@ -151,6 +153,7 @@ class OpenAICompatibleProvider(BaseProvider):
                 error="任务被取消",
                 tokens_used=total_tokens
             )
+            logger.warning(f"Stream cancelled: {stream_controller.conversation_id} - {stream_controller.node_id}")
         except Exception as e:
             assert stream_controller is not None, "stream_controller不能为空"
             yield StreamChunk(
@@ -161,6 +164,7 @@ class OpenAICompatibleProvider(BaseProvider):
                 error=str(e),
                 tokens_used=total_tokens
             )
+            logger.error(f"Stream error: {e} - Conversation: {stream_controller.conversation_id} - Node: {stream_controller.node_id}")
     
     def _convert_messages(self, messages: List[Message]) -> List[Dict[str, Any]]:
         """转换消息格式到OpenAI格式"""
@@ -191,7 +195,7 @@ class OpenAICompatibleProvider(BaseProvider):
             models = tmp_client.models.list()
             return [model.id for model in models.data]
         except Exception as e:
-            print(f"获取模型列表失败: {e}")
+            logger.error(f"获取模型列表失败: {e}")
             raise RuntimeError(f"获取模型列表失败: {e}")
     
     # def validate_config(self) -> bool:

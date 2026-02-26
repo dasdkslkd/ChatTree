@@ -342,7 +342,6 @@ class ChatManager:
     def stop_stream(self, node_id: str) -> bool:
         """终止指定节点的流式生成"""
         if node_id in self._active_controllers:
-            print("找到活跃的流控制器，正在终止...")
             asyncio.create_task(self._active_controllers[node_id].stop())
             logger.info(f"已请求终止节点 {node_id} 的流")
             return True
