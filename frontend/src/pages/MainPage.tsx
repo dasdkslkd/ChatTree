@@ -168,7 +168,7 @@ export default function ChatPage() {
 
 
 
-  const { streamedContent, startStreaming, reset, isStreaming, abortStreaming, streamingConversationId } = useStreaming({
+  const { streamedContent, startStreaming, reset, isStreaming, abortStreaming, streamingConversationId, streamDuration, streamStatus } = useStreaming({
     onComplete: async (_fullContent, completedConversationId) => {
       reset();
       // 清除对应对话的 pendingUserMessage
@@ -255,7 +255,7 @@ export default function ChatPage() {
   const handleJumpToMessage = (index: number) => {
     const element = document.getElementById(`message-${index}`);
     if (element) {
-      element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      element.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
   };
 
@@ -276,6 +276,33 @@ export default function ChatPage() {
       text: m.content.slice(0, 20) + (m.content.length > 20 ? '…' : ''),
       originalIndex: m.originalIndex,
     }));
+
+  // 格式化流式输出用时
+  const formatDuration = (ms: number): string => {
+    if (ms < 1000) {
+      return `${ms}ms`;
+    }
+    const seconds = Math.floor(ms / 1000);
+    const remainingMs = ms % 1000;
+    if (seconds < 60) {
+      return remainingMs > 0 ? `${seconds}.${Math.floor(remainingMs / 100)}s` : `${seconds}s`;
+    }
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = seconds % 60;
+    return `${minutes}m ${remainingSeconds}s`;
+  };
+
+  // 获取流式状态显示文本
+  const getStreamStatusText = (): string | null => {
+    switch (streamStatus) {
+      case 'error':
+        return '生成出错';
+      case 'stopped':
+        return '已停止';
+      default:
+        return null;
+    }
+  };
 
   const renderMsg = (m: typeof messages[0], index: number) => (
     <div
@@ -303,6 +330,19 @@ export default function ChatPage() {
             {m.content}
           </ReactMarkdown>
         </div>
+        {/* 助手消息的生成信息栏 */}
+        {m.role === 'assistant' && m.generation_info && (
+          <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
+            <span>{formatDuration(m.generation_info.duration_ms)}</span>
+            {m.generation_info.status !== 'completed' && (
+              <span className={cn(
+                m.generation_info.status === 'error' ? 'text-destructive' : 'text-amber-500'
+              )}>
+                {m.generation_info.status === 'stopped' ? '已停止' : '生成出错'}
+              </span>
+            )}
+          </div>
+        )}
         <Button
           variant="ghost"
           size="sm"
@@ -428,6 +468,13 @@ export default function ChatPage() {
                         <Loader2 className="h-4 w-4 animate-spin" />
                         <span className="text-sm text-muted-foreground">思考中...</span>
                       </div>
+                    )}
+                  </div>
+                  {/* 流式输出信息栏 */}
+                  <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
+                    <span>{formatDuration(streamDuration)}</span>
+                    {getStreamStatusText() && (
+                      <span className="text-destructive">{getStreamStatusText()}</span>
                     )}
                   </div>
                 </div>
