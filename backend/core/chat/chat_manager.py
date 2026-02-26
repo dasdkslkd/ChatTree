@@ -199,6 +199,7 @@ class ChatManager:
     
     async def send_message_stream(
         self,
+        conversation_id: str,
         content: str,
         model_id: Optional[str] = None,
         node_id: Optional[str] = None
@@ -207,19 +208,23 @@ class ChatManager:
         异步流式发送消息
         前端可以：for chunk in stream: 实时更新UI
         """
-        if not self.current_conversation:
-            logger.error("没有加载的对话")
+        # 加载指定对话，不依赖 current_conversation
+        conversation_data = self.storage.load(conversation_id)
+        if not conversation_data:
+            logger.error(f"对话 {conversation_id} 不存在")
             yield StreamChunk(
                 status=StreamStatus.ERROR,
                 node_id=None,
-                conversation_id=None,
+                conversation_id=conversation_id,
                 content="",
-                error="没有加载的对话",
+                error="对话不存在",
                 tokens_used=0
             )
             return
+        
+        conversation = Conversation.from_dict(conversation_data)
         # 确定模型：优先使用传入的model_id，其次使用对话的current_model，最后使用第一个可用模型
-        target_model = model_id or self.current_conversation.current_model
+        target_model = model_id or conversation.current_model
         if not target_model:
             # 尝试获取第一个可用的模型
             for provider, models in self.model_manager.model_list.items():
@@ -232,7 +237,7 @@ class ChatManager:
             yield StreamChunk(
                 status=StreamStatus.ERROR,
                 node_id=None,
-                conversation_id=None,
+                conversation_id=conversation_id,
                 content="",
                 error="未指定模型ID",
                 tokens_used=0
@@ -251,7 +256,7 @@ class ChatManager:
                 status=StreamStatus.ERROR,
                 content="",
                 node_id=None,
-                conversation_id=None,
+                conversation_id=conversation_id,
                 error=f"无法找到模型 {target_model} 对应的提供商",
                 tokens_used=0
             )
@@ -263,7 +268,7 @@ class ChatManager:
                 status=StreamStatus.ERROR,
                 content="",
                 node_id=None,
-                conversation_id=None,
+                conversation_id=conversation_id,
                 error=f"无法初始化提供商 {target_provider}",
                 tokens_used=0
             )
@@ -282,8 +287,8 @@ class ChatManager:
         
         # 创建新节点
         if node_id:
-            self.current_conversation.switch_to_node(node_id)
-        current_node_id = self.current_conversation.current_node_id
+            conversation.switch_to_node(node_id)
+        current_node_id = conversation.current_node_id
         new_node = NodeManager.create_node(
             user_message=user_msg,
             parent_id=current_node_id,
@@ -291,19 +296,20 @@ class ChatManager:
         )
         
         # 添加到对话树
-        self.current_conversation.add_node(new_node, parent_id=current_node_id)
+        conversation.add_node(new_node, parent_id=current_node_id)
         
         # 创建流控制器
         controller = StreamController(
             node_id=new_node["id"],
-            conversation_id=self.current_conversation.metadata["id"]
+            conversation_id=conversation.metadata["id"]
         )
         self._active_controllers[new_node["id"]] = controller
         
-        # 准备消息链
-        messages = self._prepare_messages_for_api()
+        # 准备消息链（使用传入的 conversation）
+        messages = self._prepare_messages_for_api_with_conversation(conversation)
         
         total_content = ""
+        tokens_used = 0
         
         try:
             # 流式生成
@@ -314,6 +320,8 @@ class ChatManager:
             ): # type: ignore
                 if data := chunk.get("content"):
                     total_content += data
+                # 更新 conversation_id 在 chunk 中
+                chunk["conversation_id"] = conversation_id
                 yield chunk
             
             # 保存助手消息到节点
@@ -329,10 +337,14 @@ class ChatManager:
             NodeManager.add_assistant_message(new_node, assistant_msg)
             
             # 更新token统计
-            self._update_token_stats(target_provider, chunk.get("tokens_used", 0)) # type: ignore
+            self._update_token_stats_for_conversation(conversation, target_provider, 0)
             
-            # 保存对话
-            self.save_conversation()
+            # 保存对话（直接保存，不依赖 current_conversation）
+            self.storage.save(conversation.to_dict())
+            
+            # 如果这是当前对话，同步更新 current_conversation
+            if self.current_conversation and self.current_conversation.metadata["id"] == conversation_id:
+                self.current_conversation = conversation
             
         finally:
             # 清理控制器
@@ -356,8 +368,11 @@ class ChatManager:
         """准备API调用的消息列表"""
         if not self.current_conversation:
             return []
-        
-        messages = self.current_conversation.get_message_chain_from_node(self.current_conversation.current_node_id)
+        return self._prepare_messages_for_api_with_conversation(self.current_conversation)
+    
+    def _prepare_messages_for_api_with_conversation(self, conversation: Conversation) -> List[Message]:
+        """准备API调用的消息列表（使用指定的 conversation）"""
+        messages = conversation.get_message_chain_from_node(conversation.current_node_id)
 
         msg_dict = []
         for msg in messages:
@@ -370,12 +385,14 @@ class ChatManager:
     
     def _update_token_stats(self, provider: ModelProvider, tokens: int):
         """更新token统计"""
-        assert self.current_conversation is not None
-        if provider not in self.current_conversation.metadata["total_tokens"]:
-            self.current_conversation.metadata["total_tokens"][provider] = 0
-            
-            # 粗略估算token数（实际应从API响应获取）
-            self.current_conversation.metadata["total_tokens"][provider] += tokens
+        if self.current_conversation:
+            self._update_token_stats_for_conversation(self.current_conversation, provider, tokens)
+    
+    def _update_token_stats_for_conversation(self, conversation: Conversation, provider: ModelProvider, tokens: int):
+        """更新token统计（使用指定的 conversation）"""
+        if provider not in conversation.metadata["total_tokens"]:
+            conversation.metadata["total_tokens"][provider] = 0
+        conversation.metadata["total_tokens"][provider] += tokens
     
     def get_conversation_history(self) -> List[Message]:
         """获取对话历史"""

@@ -3,9 +3,9 @@ import type { StreamChunk, SendMessageRequest } from '../types/message';
 import { messageApi } from '../api/message';
 
 interface UseStreamingOptions {
-  onChunk?: (chunk: StreamChunk) => void;
-  onComplete?: (fullContent: string) => void;
-  onError?: (error: Error) => void;
+  onChunk?: (chunk: StreamChunk, conversationId: string) => void;
+  onComplete?: (fullContent: string, conversationId: string) => void;
+  onError?: (error: Error, conversationId: string) => void;
 }
 
 export const useStreaming = (options: UseStreamingOptions = {}) => {
@@ -14,6 +14,8 @@ export const useStreaming = (options: UseStreamingOptions = {}) => {
   const [currentNodeId, setCurrentNodeId] = useState<string | null>(null);
   const [error, setError] = useState<Error | null>(null);
   const [tokensUsed, setTokensUsed] = useState(0);
+  // 跟踪当前流式请求的对话 ID
+  const [streamingConversationId, setStreamingConversationId] = useState<string | null>(null);
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const currentConversationIdRef = useRef<string | null>(null);
@@ -30,6 +32,7 @@ export const useStreaming = (options: UseStreamingOptions = {}) => {
       setError(null);
       setTokensUsed(0);
       setCurrentNodeId(null);
+      setStreamingConversationId(conversationId);
       currentConversationIdRef.current = conversationId;
 
       abortControllerRef.current = new AbortController();
@@ -53,7 +56,7 @@ export const useStreaming = (options: UseStreamingOptions = {}) => {
           if (chunk.tokens_used) {
             setTokensUsed(chunk.tokens_used);
           }
-          optionsRef.current.onChunk?.(chunk);
+          optionsRef.current.onChunk?.(chunk, conversationId);
 
           if (chunk.status === 'complete' || chunk.status === 'stopped') {
             break;
@@ -63,7 +66,7 @@ export const useStreaming = (options: UseStreamingOptions = {}) => {
         }
 
         setIsStreaming(false);
-        optionsRef.current.onComplete?.(fullContent);
+        optionsRef.current.onComplete?.(fullContent, conversationId);
       } catch (err) {
         if (err instanceof Error && err.name === 'AbortError') {
           setIsStreaming(false);
@@ -71,7 +74,7 @@ export const useStreaming = (options: UseStreamingOptions = {}) => {
         }
         setError(err as Error);
         setIsStreaming(false);
-        optionsRef.current.onError?.(err as Error);
+        optionsRef.current.onError?.(err as Error, conversationId);
       }
     },
     [] // 空依赖数组，因为使用了 ref
@@ -101,19 +104,23 @@ export const useStreaming = (options: UseStreamingOptions = {}) => {
     };
   }, [isStreaming, abortStreaming]);
 
+  const reset = useCallback(() => {
+    setStreamedContent('');
+    setError(null);
+    setTokensUsed(0);
+    setCurrentNodeId(null);
+    setStreamingConversationId(null);
+  }, []);
+
   return {
     isStreaming,
     streamedContent,
     currentNodeId,
     error,
     tokensUsed,
+    streamingConversationId,
     startStreaming,
     abortStreaming,
-    reset: () => {
-      setStreamedContent('');
-      setError(null);
-      setTokensUsed(0);
-      setCurrentNodeId(null);
-    },
+    reset,
   };
 };

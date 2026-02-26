@@ -85,6 +85,7 @@ export default function ChatPage() {
   const [scrollPositions, setScrollPositions] = useState<Record<string, number>>({});
   const [isScrolling, setIsScrolling] = useState(false);
   const [pendingUserMessage, setPendingUserMessage] = useState<string | null>(null);
+  const [pendingUserMessageConvId, setPendingUserMessageConvId] = useState<string | null>(null);
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
   const scrollTimeoutRef = useRef<number | null>(null);
   const historyRef = useRef<HTMLDivElement>(null);
@@ -165,20 +166,18 @@ export default function ChatPage() {
     setRenameTitle('');
   };
 
-  const refreshCurrentConversation = async (scrollToEnd = false) => {
-    if (currentConversation) {
-      await selectConversation(currentConversation.id);
-      if (scrollToEnd) {
-        setTimeout(() => scrollToBottom(false), 50);
-      }
-    }
-  };
 
-  const { streamedContent, startStreaming, reset, isStreaming, abortStreaming } = useStreaming({
-    onComplete: async () => {
+
+  const { streamedContent, startStreaming, reset, isStreaming, abortStreaming, streamingConversationId } = useStreaming({
+    onComplete: async (_fullContent, completedConversationId) => {
       reset();
-      setPendingUserMessage(null);
-      await refreshCurrentConversation(true);
+      // 清除对应对话的 pendingUserMessage
+      if (pendingUserMessageConvId === completedConversationId) {
+        setPendingUserMessage(null);
+        setPendingUserMessageConvId(null);
+      }
+      // 刷新完成流式的对话
+      await selectConversation(completedConversationId);
     },
   });
 
@@ -186,16 +185,17 @@ export default function ChatPage() {
   shouldAutoScrollRef.current = shouldAutoScroll;
 
   useEffect(() => {
-    if (isStreaming && shouldAutoScrollRef.current && !userScrollingRef.current) {
+    // 只在当前对话是流式对话时才自动滚动
+    if (isStreaming && streamingConversationId === currentConversation?.id && shouldAutoScrollRef.current && !userScrollingRef.current) {
       requestAnimationFrame(() => scrollToBottom(false));
     }
-  }, [streamedContent, isStreaming, scrollToBottom]);
+  }, [streamedContent, isStreaming, streamingConversationId, currentConversation?.id, scrollToBottom]);
 
   useEffect(() => {
-    if (pendingUserMessage) {
+    if (pendingUserMessage && pendingUserMessageConvId === currentConversation?.id) {
       requestAnimationFrame(() => scrollToBottom(false));
     }
-  }, [pendingUserMessage, scrollToBottom]);
+  }, [pendingUserMessage, pendingUserMessageConvId, currentConversation?.id, scrollToBottom]);
 
   useEffect(() => {
     (async () => {
@@ -205,6 +205,7 @@ export default function ChatPage() {
   }, []);
 
   const handleSelectConversation = async (id: string) => {
+    // 保存当前对话的滚动位置
     if (currentConversation && historyRef.current) {
       setScrollPositions(prev => ({
         ...prev,
@@ -231,6 +232,7 @@ export default function ChatPage() {
   const handleSend = async (val: string, modelId?: string, _systemPrompt?: string) => {
     if (!val.trim()) return;
     setPendingUserMessage(val);
+    setPendingUserMessageConvId(currentConversation?.id || null);
     setShouldAutoScroll(true);
 
     let conversationId = currentConversation?.id;
@@ -239,9 +241,12 @@ export default function ChatPage() {
       if (!newConv) {
         console.error('Failed to create conversation');
         setPendingUserMessage(null);
+        setPendingUserMessageConvId(null);
         return;
       }
       conversationId = newConv.id;
+      // 新创建的对话，更新 pendingUserMessageConvId
+      setPendingUserMessageConvId(conversationId);
     }
 
     await startStreaming(conversationId, { content: val, model_id: modelId });
@@ -401,8 +406,8 @@ export default function ChatPage() {
         >
           <div className="w-[800px] max-w-full flex flex-col px-4">
             {messages.map((m, index) => renderMsg(m, index))}
-            {/* 正在发送的用户消息 */}
-            {pendingUserMessage && (
+            {/* 正在发送的用户消息 - 只在当前对话是发送消息的对话时显示 */}
+            {pendingUserMessage && pendingUserMessageConvId === currentConversation?.id && (
               <div className="w-full my-2 flex flex-col items-end">
                 <div className="flex flex-col items-start max-w-full">
                   <div className="max-w-full w-fit px-3 py-2 rounded-[10px] rounded-br-[6px] leading-relaxed bg-primary text-primary-foreground prose prose-sm prose-invert max-w-none [&_p]:m-0">
@@ -411,8 +416,8 @@ export default function ChatPage() {
                 </div>
               </div>
             )}
-            {/* AI 流式响应 */}
-            {isStreaming && (
+            {/* AI 流式响应 - 只在当前对话是流式对话时显示 */}
+            {isStreaming && streamingConversationId === currentConversation?.id && (
               <div className="w-full my-2 flex flex-col items-start">
                 <div className="flex flex-col items-start max-w-full">
                   <div className="max-w-full w-fit px-3 py-2 rounded-[10px] rounded-bl-[6px] leading-relaxed bg-muted border prose prose-sm max-w-none [&_p]:m-0">
@@ -436,8 +441,9 @@ export default function ChatPage() {
             onSend={handleSend}
             onStop={abortStreaming}
             isStreaming={isStreaming}
-            disabled={isStreaming}
+            disabled={isStreaming && streamingConversationId === currentConversation?.id}
             conversationId={currentConversation?.id || null}
+            streamingConversationId={streamingConversationId}
           />
         </footer>
       </section>

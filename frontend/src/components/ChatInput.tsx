@@ -22,9 +22,10 @@ interface Props {
   isStreaming?: boolean;
   disabled: boolean;
   conversationId: string | null;
+  streamingConversationId?: string | null;
 }
 
-export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationId }: Props) {
+export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationId, streamingConversationId }: Props) {
   const { setCurrentPage } = useNavigationStore();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [value, setValue] = useState('');
@@ -82,8 +83,8 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationI
   const handleSend = async () => {
     if (!value.trim() || disabled) return;
     const systemPrompt = currentPrompt?.content;
-    await onSend(value, currentModel || undefined, systemPrompt);
     setValue('');
+    await onSend(value, currentModel || undefined, systemPrompt);
   };
 
   const handleProviderChange = (provider: ModelProvider) => {
@@ -188,7 +189,7 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationI
           </div>
 
           {/* 发送/终止按钮 */}
-          {isStreaming ? (
+          {isStreaming && streamingConversationId === conversationId ? (
             <Button
               size="sm"
               variant="destructive"
