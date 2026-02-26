@@ -95,9 +95,9 @@ export const useStreaming = (options: UseStreamingOptions = {}) => {
 
   useEffect(() => {
     return () => {
-      if (isStreaming) {
-        abortStreaming();
-      }
+      // if (isStreaming) {
+      //   abortStreaming();
+      // }
     };
   }, [isStreaming, abortStreaming]);
 
