@@ -5,7 +5,7 @@ import asyncio
 from time import time
 from .conversation import Conversation
 from .node import NodeManager
-from ..config.types import Message, Role, ModelProvider, StreamChunk, StreamStatus, StreamController
+from ..config.types import Message, Role, ModelProvider, StreamChunk, StreamStatus, StreamController, GenerationInfo
 from ..storage.chat_storage import ChatStorage
 from ..storage.prompt_storage import PromptStorage
 from ..model.model_manager import ModelManager
@@ -310,6 +310,9 @@ class ChatManager:
         
         total_content = ""
         tokens_used = 0
+        start_time = time()  # 记录开始时间
+        generation_status = "completed"  # 默认状态
+        error_message = None
         
         try:
             # 流式生成
@@ -324,7 +327,28 @@ class ChatManager:
                 chunk["conversation_id"] = conversation_id
                 yield chunk
             
-            # 保存助手消息到节点
+            # 检查是否被手动停止
+            if await controller.is_stopped():
+                generation_status = "stopped"
+            
+        except Exception as e:
+            generation_status = "error"
+            error_message = str(e)
+            logger.error(f"流式生成出错: {e}")
+            raise
+        finally:
+            # 计算用时
+            duration_ms = int((time() - start_time) * 1000)
+            
+            # 创建生成信息
+            generation_info: GenerationInfo = {
+                "duration_ms": duration_ms,
+                "status": generation_status,
+                "error_message": error_message,
+                "tokens_used": tokens_used
+            }
+            
+            # 保存助手消息到节点（包含生成信息）
             assistant_msg = Message({
                 "id": str(uuid.uuid4()),
                 "role": Role.ASSISTANT,
@@ -332,7 +356,8 @@ class ChatManager:
                 "name": None,
                 "tool_calls": None,
                 "tool_call_id": None,
-                "timestamp": int(time())
+                "timestamp": int(time()),
+                "generation_info": generation_info
             })
             NodeManager.add_assistant_message(new_node, assistant_msg)
             
@@ -346,7 +371,6 @@ class ChatManager:
             if self.current_conversation and self.current_conversation.metadata["id"] == conversation_id:
                 self.current_conversation = conversation
             
-        finally:
             # 清理控制器
             if new_node["id"] in self._active_controllers:
                 del self._active_controllers[new_node["id"]]

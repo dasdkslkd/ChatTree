@@ -22,15 +22,24 @@ class ModelProvider(str, Enum):
     LOCAL = "local"
     NVIDIA = "nvidia"
 
-class Message(TypedDict):
+class GenerationInfo(TypedDict, total=False):
+    """消息生成信息"""
+    duration_ms: int  # 生成用时（毫秒）
+    status: str  # 生成状态：completed, error, stopped
+    error_message: Optional[str]  # 错误信息
+    tokens_used: int  # 使用的token数
+
+
+class Message(TypedDict, total=False):
     """基础消息类型"""
-    id: str
-    role: Role
-    content: str
+    id: Required[str]
+    role: Required[Role]
+    content: Required[str]
     name: Optional[str]
     tool_calls: Optional[List[Dict[str, Any]]]
     tool_call_id: Optional[str]
-    timestamp: int
+    timestamp: Required[int]
+    generation_info: Optional[GenerationInfo]  # 生成信息（仅助手消息有，可选）
 
 class ConversationTreeNode(TypedDict):
     """对话树节点 - 一轮完整交互"""
