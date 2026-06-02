@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useLayoutEffect, useCallback } from 'react';
+﻿import { useEffect, useState, useRef, useLayoutEffect, useCallback } from 'react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -22,25 +22,25 @@ import {
 } from '@/components/ui/dropdown-menu';
 import {
   Plus, X, MoreHorizontal, ChevronLeft, ChevronRight,
-  Copy, Check, Pencil, Loader2, RotateCcw,
+  Copy, Check, Pencil, Loader2, RotateCcw, Network, MessageSquare, Trash2,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { rehypeMermaid } from 'react-markdown-mermaid';
 import { conversationApi } from '../api/conversation';
 import { useConversationStore } from '../store/conversationStore';
+import { useNavigationStore } from '../store/navigationStore';
 import { useStreaming } from '../hooks/useStreaming';
 import { ChatInput } from '../components/ChatInput';
+import TreeView from './TreeView';
 
-/* ---------- Markdown 自定义代码渲染 ---------- */
+/* ---------- Markdown custom code blocks ---------- */
 
-/** 代码块（```）包装器：sticky 工具栏 + 复制按钮 */
 function CodeBlockWrapper({ children, ...props }: React.HTMLAttributes<HTMLPreElement>) {
   const [copied, setCopied] = useState(false);
   const codeRef = useRef<HTMLDivElement>(null);
 
   const handleCopy = () => {
-    // 获取 pre 内的纯文本
     const pre = codeRef.current?.querySelector('pre');
     const text = pre?.textContent || '';
     navigator.clipboard.writeText(text);
@@ -51,19 +51,19 @@ function CodeBlockWrapper({ children, ...props }: React.HTMLAttributes<HTMLPreEl
   return (
     <div ref={codeRef} className="code-block-wrapper my-2">
       <div className="code-toolbar-wrapper">
-      <div className="code-toolbar">
-        <span className="text-xs text-muted-foreground select-none">代码</span>
-        <button
-          className="flex items-center gap-1 px-0 py-1.5 rounded text-xs text-muted-foreground hover:text-foreground hover:bg-black/5 transition-colors cursor-pointer"
-          onClick={handleCopy}
-          aria-label="复制代码"
-        >
-          {copied ? (
-            <><Check className="h-3 w-3" /> 已复制</>
-          ) : (
-            <><Copy className="h-3 w-3" /> 复制</>
-          )}
-        </button>
+        <div className="code-toolbar">
+          <span className="text-xs text-muted-foreground select-none">代码</span>
+          <button
+            className="flex items-center gap-1 px-0 py-1.5 rounded text-xs text-muted-foreground hover:text-foreground hover:bg-black/5 transition-colors cursor-pointer"
+            onClick={handleCopy}
+            aria-label="复制代码"
+          >
+            {copied ? (
+              <><Check className="h-3 w-3" /> 已复制</>
+            ) : (
+              <><Copy className="h-3 w-3" /> 复制</>
+            )}
+          </button>
         </div>
       </div>
       <pre {...props}>
@@ -77,7 +77,7 @@ const markdownComponents = {
   pre: CodeBlockWrapper,
 };
 
-/* ---------- 组件 ---------- */
+/* ---------- Component ---------- */
 export default function ChatPage() {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -97,6 +97,8 @@ export default function ChatPage() {
   const userScrollingRef = useRef(false);
   const scrollEndTimeoutRef = useRef<number | null>(null);
   const programmaticScrollRef = useRef(false);
+
+  const { chatViewMode, toggleChatViewMode } = useNavigationStore();
 
   const isAtBottom = useCallback(() => {
     if (!historyRef.current) return true;
@@ -118,7 +120,6 @@ export default function ChatPage() {
 
   const handleScroll = useCallback(() => {
     setIsScrolling(true);
-
     if (programmaticScrollRef.current) {
       programmaticScrollRef.current = false;
     } else {
@@ -126,10 +127,8 @@ export default function ChatPage() {
       const atBottom = isAtBottom();
       setShouldAutoScroll(atBottom);
     }
-
     if (scrollTimeoutRef.current) clearTimeout(scrollTimeoutRef.current);
     scrollTimeoutRef.current = window.setTimeout(() => setIsScrolling(false), 1000);
-
     if (scrollEndTimeoutRef.current) clearTimeout(scrollEndTimeoutRef.current);
     scrollEndTimeoutRef.current = window.setTimeout(() => {
       userScrollingRef.current = false;
@@ -138,11 +137,11 @@ export default function ChatPage() {
 
   const {
     conversations, currentConversation, messages,
+    pendingScrollNodeId, clearPendingScroll,
     createConversation, selectConversation, deleteConversation, loadConversations,
     clearCurrentConversation, updateConversationTitle,
   } = useConversationStore();
 
-  // 重命名对话的状态
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
   const [renameConversationId, setRenameConversationId] = useState<string | null>(null);
   const [renameTitle, setRenameTitle] = useState('');
@@ -168,17 +167,13 @@ export default function ChatPage() {
     setRenameTitle('');
   };
 
-
-
   const { streamedContent, startStreaming, reset, isStreaming, abortStreaming, streamingConversationId, streamDuration, streamStatus } = useStreaming({
     onComplete: async (_fullContent, completedConversationId) => {
       reset();
-      // 清除对应对话的 pendingUserMessage
       if (pendingUserMessageConvId === completedConversationId) {
         setPendingUserMessage(null);
         setPendingUserMessageConvId(null);
       }
-      // 刷新完成流式的对话
       await selectConversation(completedConversationId);
     },
     onError: async (_error, errorConversationId) => {
@@ -187,7 +182,6 @@ export default function ChatPage() {
         setPendingUserMessage(null);
         setPendingUserMessageConvId(null);
       }
-      // 刷新对话以显示已保存的内容（用户消息+部分助手消息）
       await selectConversation(errorConversationId);
     },
   });
@@ -196,7 +190,6 @@ export default function ChatPage() {
   shouldAutoScrollRef.current = shouldAutoScroll;
 
   useEffect(() => {
-    // 只在当前对话是流式对话时才自动滚动
     if (isStreaming && streamingConversationId === currentConversation?.id && shouldAutoScrollRef.current && !userScrollingRef.current) {
       requestAnimationFrame(() => scrollToBottom(false));
     }
@@ -216,7 +209,6 @@ export default function ChatPage() {
   }, []);
 
   const handleSelectConversation = async (id: string) => {
-    // 保存当前对话的滚动位置
     if (currentConversation && historyRef.current) {
       setScrollPositions(prev => ({
         ...prev,
@@ -240,6 +232,23 @@ export default function ChatPage() {
     }
   }, [currentConversation, messages, scrollPositions]);
 
+  // 从树视图双击跳转：等待消息渲染后滚动到目标节点
+  useEffect(() => {
+    if (!pendingScrollNodeId || chatViewMode !== 'chat') return;
+    const idx = messages.findIndex((m) => m.node_id === pendingScrollNodeId);
+    if (idx === -1) return;
+    const tryScroll = () => {
+      const el = document.getElementById('message-' + idx);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        clearPendingScroll();
+      } else {
+        requestAnimationFrame(tryScroll);
+      }
+    };
+    requestAnimationFrame(tryScroll);
+  }, [pendingScrollNodeId, messages, chatViewMode, clearPendingScroll]);
+
   const handleSend = async (val: string, modelId?: string, _systemPrompt?: string) => {
     if (!val.trim()) return;
     setPendingUserMessage(val);
@@ -256,7 +265,6 @@ export default function ChatPage() {
         return;
       }
       conversationId = newConv.id;
-      // 新创建的对话，更新 pendingUserMessageConvId
       setPendingUserMessageConvId(conversationId);
     }
 
@@ -280,46 +288,42 @@ export default function ChatPage() {
     }
   };
 
-  // 处理重试：删除当前AI消息所在的节点，重新发送用户消息
+  const handleDeleteBranch = async (nodeId: string) => {
+    if (!currentConversation || isStreaming) return;
+    if (!confirm('确定删除该消息及其所有后续分支？')) return;
+    try {
+      await conversationApi.deleteNode(currentConversation.id, nodeId);
+      await selectConversation(currentConversation.id);
+    } catch (err) {
+      console.error('删除失败:', err);
+    }
+  };
+
   const handleRetry = async (assistantNodeId: string, userContent: string) => {
     if (!currentConversation || isStreaming) return;
-
     try {
-      // 1. 删除节点（包含用户消息和AI消息）
       await conversationApi.deleteNode(currentConversation.id, assistantNodeId);
-
-      // 2. 重新加载对话，立即更新消息列表（移除已删除节点的消息）
       await selectConversation(currentConversation.id);
-
-      // 3. 设置待发送的用户消息（用于UI显示）
       setPendingUserMessage(userContent);
       setPendingUserMessageConvId(currentConversation.id);
       setShouldAutoScroll(true);
-
-      // 4. 开始流式发送（onComplete/onError 回调会处理后续清理）
       await startStreaming(currentConversation.id, { content: userContent });
     } catch (err) {
       console.error('重试失败:', err);
       setPendingUserMessage(null);
       setPendingUserMessageConvId(null);
-      // 重新加载对话以显示当前状态
       if (currentConversation) {
         await selectConversation(currentConversation.id);
       }
     }
   };
 
-  // 处理编辑用户消息：切换到父节点（开新分支），将消息填入输入框
   const handleEditUserMessage = async (nodeId: string, parentNodeId: string | undefined, userContent: string) => {
     if (!currentConversation || isStreaming) return;
-    if (!parentNodeId) return; // root节点无法编辑
-
+    if (!parentNodeId) return;
     try {
-      // 切换到父节点，后续消息不再渲染
       await conversationApi.switchNode(currentConversation.id, parentNodeId);
-      // 重新加载对话
       await selectConversation(currentConversation.id);
-      // 将用户消息填入输入框
       setEditValue(userContent);
     } catch (err) {
       console.error('编辑失败:', err);
@@ -330,41 +334,31 @@ export default function ChatPage() {
     .map((m, index) => ({ ...m, originalIndex: index }))
     .filter((m) => m.role === 'user')
     .map((m) => ({
-      text: m.content.slice(0, 20) + (m.content.length > 20 ? '…' : ''),
+      text: m.content.slice(0, 20) + (m.content.length > 20 ? '...' : ''),
       originalIndex: m.originalIndex,
     }));
 
-  // 格式化流式输出用时
   const formatDuration = (ms: number): string => {
-    if (ms < 1000) {
-      return `${ms}ms`;
-    }
+    if (ms < 1000) return `${ms}ms`;
     const seconds = Math.floor(ms / 1000);
     const remainingMs = ms % 1000;
-    if (seconds < 60) {
-      return remainingMs > 0 ? `${seconds}.${Math.floor(remainingMs / 100)}s` : `${seconds}s`;
-    }
+    if (seconds < 60) return remainingMs > 0 ? `${seconds}.${Math.floor(remainingMs / 100)}s` : `${seconds}s`;
     const minutes = Math.floor(seconds / 60);
     const remainingSeconds = seconds % 60;
     return `${minutes}m ${remainingSeconds}s`;
   };
 
-  // 获取流式状态显示文本
   const getStreamStatusText = (): string | null => {
     switch (streamStatus) {
-      case 'error':
-        return '生成出错';
-      case 'stopped':
-        return '已停止';
-      default:
-        return null;
+      case 'error': return '生成出错';
+      case 'stopped': return '已停止';
+      default: return null;
     }
   };
 
   const renderMsg = (m: typeof messages[0], index: number) => {
-    // 找到对应的上一条用户消息（用于重试）
-    const prevUserMessage = index > 0 && messages[index - 1]?.role === 'user' 
-      ? messages[index - 1] 
+    const prevUserMessage = index > 0 && messages[index - 1]?.role === 'user'
+      ? messages[index - 1]
       : null;
 
     return (
@@ -393,7 +387,6 @@ export default function ChatPage() {
               {m.content}
             </ReactMarkdown>
           </div>
-          {/* 助手消息的生成信息栏 */}
           {m.role === 'assistant' && m.generation_info && (
             <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
               <span>{formatDuration(m.generation_info.duration_ms)}</span>
@@ -406,7 +399,6 @@ export default function ChatPage() {
               )}
             </div>
           )}
-          {/* 操作按钮栏 */}
           <div className="flex items-center gap-1 mt-1">
             <Button
               variant="ghost"
@@ -421,7 +413,6 @@ export default function ChatPage() {
                 <Copy className="h-4 w-4" />
               )}
             </Button>
-            {/* 用户消息显示编辑按钮 */}
             {m.role === 'user' && (
               <Button
                 variant="ghost"
@@ -435,7 +426,19 @@ export default function ChatPage() {
                 <Pencil className="h-4 w-4" />
               </Button>
             )}
-            {/* 助手消息显示重试按钮 - 仅最后一条助手消息 */}
+            {m.role === 'user' && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="opacity-0 group-hover:opacity-100 transition-opacity h-7 w-7 p-0 text-destructive hover:text-destructive"
+                onClick={() => handleDeleteBranch(m.node_id)}
+                disabled={isStreaming}
+                aria-label="删除分支"
+                title="删除此消息及所有后续分支"
+              >
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            )}
             {m.role === 'assistant' && prevUserMessage && index === messages.length - 1 && (
               <Button
                 variant="ghost"
@@ -457,7 +460,7 @@ export default function ChatPage() {
 
   return (
     <div className="flex h-screen bg-background">
-      {/* 左侧对话列表（可折叠） */}
+      {/* Left conversation list (collapsible) */}
       <nav
         className="flex flex-col transition-[width] duration-200 overflow-y-auto overflow-x-hidden custom-scrollbar border-r bg-background"
         style={{ width: sidebarCollapsed ? '56px' : '260px' }}
@@ -526,102 +529,135 @@ export default function ChatPage() {
         ))}
       </nav>
 
-      {/* 中间历史消息 */}
+      {/* Center: title bar + content (chat or tree) */}
       <section className="flex-1 flex flex-col overflow-hidden relative bg-background">
+        {/* Title bar with view toggle */}
         <div className="flex justify-center items-center p-3 sticky top-0 bg-background z-[1] min-h-[56px] border-b">
           <span className="font-semibold">{currentConversation?.title || '请选择对话'}</span>
+          {/* View toggle button */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-8 w-8 p-0 ml-3"
+                onClick={toggleChatViewMode}
+              >
+                {chatViewMode === 'chat' ? (
+                  <Network className="h-4 w-4" />
+                ) : (
+                  <MessageSquare className="h-4 w-4" />
+                )}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {chatViewMode === 'chat' ? '切换到树视图' : '切换到对话视图'}
+            </TooltipContent>
+          </Tooltip>
         </div>
-        <div
-          ref={historyRef}
-          className={cn(
-            'w-full flex-1 overflow-y-scroll pt-4 pb-[140px] flex flex-col items-center custom-scrollbar',
-            isScrolling && 'scrollbar-visible'
-          )}
-          onScroll={handleScroll}
-        >
-          <div className="w-[800px] max-w-full flex flex-col px-4">
-            {messages.map((m, index) => renderMsg(m, index))}
-            {/* 正在发送的用户消息 - 只在当前对话是发送消息的对话时显示 */}
-            {pendingUserMessage && pendingUserMessageConvId === currentConversation?.id && (
-              <div className="w-full my-2 flex flex-col items-end">
-                <div className="flex flex-col items-start max-w-full">
-                  <div className="max-w-full w-fit px-3 py-2 rounded-[10px] rounded-br-[6px] leading-relaxed bg-primary text-primary-foreground prose prose-sm prose-invert max-w-none [&_p]:m-0">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{pendingUserMessage}</ReactMarkdown>
-                  </div>
-                </div>
-              </div>
-            )}
-            {/* AI 流式响应 - 只在当前对话是流式对话时显示 */}
-            {isStreaming && streamingConversationId === currentConversation?.id && (
-              <div className="w-full my-2 flex flex-col items-start">
-                <div className="flex flex-col items-start max-w-full">
-                  <div className="max-w-full w-fit px-3 py-2 rounded-[10px] rounded-bl-[6px] leading-relaxed bg-muted border prose prose-sm max-w-none [&_p]:m-0">
-                    {streamedContent ? (
-                      <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{streamedContent}</ReactMarkdown>
-                    ) : (
-                      <div className="flex items-center gap-2">
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                        <span className="text-sm text-muted-foreground">思考中...</span>
+
+        {/* Chat view */}
+        {chatViewMode === 'chat' && (
+          <>
+            <div
+              ref={historyRef}
+              className={cn(
+                'w-full flex-1 overflow-y-scroll pt-4 pb-[140px] flex flex-col items-center custom-scrollbar',
+                isScrolling && 'scrollbar-visible'
+              )}
+              onScroll={handleScroll}
+            >
+              <div className="w-[800px] max-w-full flex flex-col px-4">
+                {messages.map((m, index) => renderMsg(m, index))}
+                {pendingUserMessage && pendingUserMessageConvId === currentConversation?.id && (
+                  <div className="w-full my-2 flex flex-col items-end">
+                    <div className="flex flex-col items-start max-w-full">
+                      <div className="max-w-full w-fit px-3 py-2 rounded-[10px] rounded-br-[6px] leading-relaxed bg-primary text-primary-foreground prose prose-sm prose-invert max-w-none [&_p]:m-0">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{pendingUserMessage}</ReactMarkdown>
                       </div>
-                    )}
+                    </div>
                   </div>
-                  {/* 流式输出信息栏 */}
-                  <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
-                    <span>{formatDuration(streamDuration)}</span>
-                    {getStreamStatusText() && (
-                      <span className="text-destructive">{getStreamStatusText()}</span>
-                    )}
+                )}
+                {isStreaming && streamingConversationId === currentConversation?.id && (
+                  <div className="w-full my-2 flex flex-col items-start">
+                    <div className="flex flex-col items-start max-w-full">
+                      <div className="max-w-full w-fit px-3 py-2 rounded-[10px] rounded-bl-[6px] leading-relaxed bg-muted border prose prose-sm max-w-none [&_p]:m-0">
+                        {streamedContent ? (
+                          <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{streamedContent}</ReactMarkdown>
+                        ) : (
+                          <div className="flex items-center gap-2">
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                            <span className="text-sm text-muted-foreground">思考中...</span>
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
+                        <span>{formatDuration(streamDuration)}</span>
+                        {getStreamStatusText() && (
+                          <span className="text-destructive">{getStreamStatusText()}</span>
+                        )}
+                      </div>
+                    </div>
                   </div>
-                </div>
+                )}
+                <div ref={messagesEndRef} />
               </div>
-            )}
-            <div ref={messagesEndRef} />
+            </div>
+            <footer className="absolute bottom-5 left-1/2 -translate-x-1/2 w-[800px] max-w-[calc(100%-48px)] z-10">
+              <ChatInput
+                onSend={handleSend}
+                onStop={abortStreaming}
+                isStreaming={isStreaming}
+                disabled={isStreaming && streamingConversationId === currentConversation?.id}
+                conversationId={currentConversation?.id || null}
+                streamingConversationId={streamingConversationId}
+                editValue={editValue}
+                onEditValueConsumed={() => setEditValue(null)}
+              />
+            </footer>
+          </>
+        )}
+
+        {/* Tree view */}
+        {chatViewMode === 'tree' && (
+          <div className="flex-1 overflow-hidden">
+            <TreeView />
           </div>
-        </div>
-        <footer className="absolute bottom-5 left-1/2 -translate-x-1/2 w-[800px] max-w-[calc(100%-48px)] z-10">
-          <ChatInput
-            onSend={handleSend}
-            onStop={abortStreaming}
-            isStreaming={isStreaming}
-            disabled={isStreaming && streamingConversationId === currentConversation?.id}
-            conversationId={currentConversation?.id || null}
-            streamingConversationId={streamingConversationId}
-            editValue={editValue}
-            onEditValueConsumed={() => setEditValue(null)}
-          />
-        </footer>
+        )}
       </section>
 
-      {/* 右侧大纲（可折叠） */}
-      <aside
-        className="flex flex-col transition-[width] duration-200 overflow-y-auto overflow-x-hidden custom-scrollbar border-l bg-background"
-        style={{ width: outlineCollapsed ? '56px' : '280px' }}
-      >
-        <div className="flex justify-between items-center p-3 sticky top-0 bg-background z-[1] min-h-[56px]">
-          {!outlineCollapsed && <span className="font-semibold">大纲</span>}
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-8 w-8 p-0"
-            onClick={() => setOutlineCollapsed(!outlineCollapsed)}
-          >
-            {outlineCollapsed ? <ChevronLeft className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-          </Button>
-        </div>
-
-        {!outlineCollapsed && outline.map((item, idx) => (
-          <div
-            key={idx}
-            className="flex items-center py-2 px-3 cursor-pointer rounded-md mx-2 my-0.5 transition-colors hover:bg-muted"
-            title={item.text}
-            onClick={() => handleJumpToMessage(item.originalIndex)}
-          >
-            <span className="truncate text-sm">{item.text}</span>
+      {/* Right outline (only in chat mode, collapsible) */}
+      {chatViewMode === 'chat' && (
+        <aside
+          className="flex flex-col transition-[width] duration-200 overflow-y-auto overflow-x-hidden custom-scrollbar border-l bg-background"
+          style={{ width: outlineCollapsed ? '56px' : '280px' }}
+        >
+          <div className="flex justify-between items-center p-3 sticky top-0 bg-background z-[1] min-h-[56px]">
+            {!outlineCollapsed && <span className="font-semibold">大纲</span>}
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8 w-8 p-0"
+              onClick={() => setOutlineCollapsed(!outlineCollapsed)}
+            >
+              {outlineCollapsed ? <ChevronLeft className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+            </Button>
           </div>
-        ))}
-      </aside>
 
-      {/* 重命名对话框 */}
+          {!outlineCollapsed && outline.map((item, idx) => (
+            <div
+              key={idx}
+              className="flex items-center py-2 px-3 cursor-pointer rounded-md mx-2 my-0.5 transition-colors hover:bg-muted"
+              title={item.text}
+              onClick={() => handleJumpToMessage(item.originalIndex)}
+            >
+              <span className="truncate text-sm">{item.text}</span>
+            </div>
+          ))}
+        </aside>
+      )}
+
+      {/* Rename dialog */}
       <Dialog open={renameDialogOpen} onOpenChange={(open) => !open && handleRenameCancel()}>
         <DialogContent>
           <DialogHeader>
@@ -642,3 +678,12 @@ export default function ChatPage() {
     </div>
   );
 }
+
+
+
+
+
+
+
+
+

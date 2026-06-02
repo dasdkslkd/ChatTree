@@ -1,5 +1,23 @@
-import { apiClient } from './client';
+﻿import { apiClient } from './client';
 import type { Conversation, ConversationCreateRequest } from '../types/conversation';
+
+export interface TreeNode {
+  id: string;
+  parent_id: string | null;
+  children_ids: string[];
+  user_content: string;
+  assistant_content: string;
+  model_id: string | null;
+  timestamp: number;
+  is_current: boolean;
+  is_root: boolean;
+}
+
+export interface TreeData {
+  root_node_id: string;
+  current_node_id: string;
+  nodes: TreeNode[];
+}
 
 export const conversationApi = {
   // 获取对话列表
@@ -27,6 +45,12 @@ export const conversationApi = {
   // 获取分支
   getBranches: async (conversationId: string): Promise<any> => {
     const response = await apiClient.get(`/conversations/${conversationId}/branches`);
+    return response.data;
+  },
+
+  // 获取完整树结构
+  getTree: async (conversationId: string): Promise<TreeData> => {
+    const response = await apiClient.get(`/conversations/${conversationId}/tree`);
     return response.data;
   },
 

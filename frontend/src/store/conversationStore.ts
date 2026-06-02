@@ -1,10 +1,10 @@
-import { create } from 'zustand';
+﻿import { create } from 'zustand';
 import { devtools, persist } from 'zustand/middleware';
 import type {
   Conversation,
   ConversationCreateRequest,
 } from '../types/conversation';
-import { conversationApi } from '../api/conversation';
+import { conversationApi, type TreeData } from '../api/conversation';
 import type { Message } from '../types/message';
 import { messageApi } from '../api/message';
 
@@ -13,8 +13,10 @@ interface ConversationState {
   currentConversation: Conversation | null;
   messages: Message[];
   branches: Record<string, any>;
+  treeData: TreeData | null;
   streamingContent: string;
   currentNodeId: string | null;
+  pendingScrollNodeId: string | null;
   isStreaming: boolean;
   loading: boolean;
   error: string | null;
@@ -33,6 +35,8 @@ interface ConversationActions {
   deleteNode: (nodeId: string) => Promise<void>;
   abortStreaming: () => void;
   clearError: () => void;
+  loadTree: (conversationId: string) => Promise<void>;
+  clearPendingScroll: () => void;
 }
 
 const useConversationStoreBase = create<ConversationState & ConversationActions>()(
@@ -43,13 +47,14 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
         currentConversation: null,
         messages: [],
         branches: {},
+        treeData: null,
         streamingContent: '',
         currentNodeId: null,
+        pendingScrollNodeId: null,
         isStreaming: false,
         loading: false,
         error: null,
 
-        // 加载对话列表
         loadConversations: async () => {
           set({ loading: true, error: null });
           try {
@@ -62,18 +67,18 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
           }
         },
 
-        // 创建对话（修复：创建后自动选中）
         createConversation: async (request) => {
           set({ loading: true, error: null });
           try {
             const conversation = await conversationApi.create(request);
             set({
-              currentConversation: conversation, // 恢复自动选中
+              currentConversation: conversation,
               messages: [],
+              treeData: null,
               streamingContent: '',
               currentNodeId: null,
+              pendingScrollNodeId: null,
             });
-            // 重新加载列表
             await get().loadConversations();
             return conversation;
           } catch (err: any) {
@@ -84,7 +89,6 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
           }
         },
 
-        // 选择对话
         selectConversation: async (id) => {
           set({ loading: true, error: null });
           try {
@@ -92,15 +96,15 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
               messageApi.getHistory(id),
               conversationApi.getBranches(id),
             ]);
-
             const conversation = get().conversations.find((c) => c.id === id);
-
             set({
               currentConversation: conversation || null,
               messages: history,
               branches: branches || {},
+              treeData: null,
               streamingContent: '',
               currentNodeId: conversation?.current_node_id || null,
+              pendingScrollNodeId: null,
             });
           } catch (err: any) {
             set({ error: err.message });
@@ -109,20 +113,20 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
           }
         },
 
-        // 删除对话
         deleteConversation: async (id) => {
           try {
             await conversationApi.delete(id);
             set((state) => {
-              const isCurrentConversation = state.currentConversation?.id === id;
+              const isCurrent = state.currentConversation?.id === id;
               return {
                 conversations: state.conversations.filter((c) => c.id !== id),
-                currentConversation: isCurrentConversation ? null : state.currentConversation,
-                // 如果删除的是当前对话，同时清空消息和分支
-                messages: isCurrentConversation ? [] : state.messages,
-                branches: isCurrentConversation ? {} : state.branches,
-                streamingContent: isCurrentConversation ? '' : state.streamingContent,
-                currentNodeId: isCurrentConversation ? null : state.currentNodeId,
+                currentConversation: isCurrent ? null : state.currentConversation,
+                messages: isCurrent ? [] : state.messages,
+                branches: isCurrent ? {} : state.branches,
+                treeData: isCurrent ? null : state.treeData,
+                streamingContent: isCurrent ? '' : state.streamingContent,
+                currentNodeId: isCurrent ? null : state.currentNodeId,
+                pendingScrollNodeId: isCurrent ? null : state.pendingScrollNodeId,
               };
             });
           } catch (err: any) {
@@ -130,7 +134,6 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
           }
         },
 
-        // 更新对话标题
         updateConversationTitle: async (id, title) => {
           try {
             await conversationApi.updateTitle(id, title);
@@ -148,7 +151,6 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
           }
         },
 
-        // 切换节点
         switchNode: async (nodeId) => {
           const { currentConversation } = get();
           if (!currentConversation) return;
@@ -164,6 +166,7 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
               branches: branches || {},
               currentNodeId: nodeId,
               streamingContent: '',
+              pendingScrollNodeId: nodeId,
             });
           } catch (err: any) {
             set({ error: err.message });
@@ -172,7 +175,6 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
           }
         },
 
-        // 发送消息（流式）
         streamMessage: async (content, modelId) => {
           const { currentConversation } = get();
           if (!currentConversation) {
@@ -187,7 +189,6 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
               content,
               model_id: modelId,
             })) {
-              // 只有在有内容时才追加
               if (chunk.content) {
                 set((state) => ({
                   streamingContent: state.streamingContent + chunk.content,
@@ -195,50 +196,29 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
                 }));
               }
 
-              if (chunk.status === 'complete') {
-                break;
-              } else if (chunk.status === 'error') {
-                throw new Error(chunk.error || 'Stream error');
-              }
+              if (chunk.status === 'complete') break;
+              else if (chunk.status === 'error') throw new Error(chunk.error || 'Stream error');
             }
 
             await new Promise((resolve) => setTimeout(resolve, 300));
             const history = await messageApi.getHistory(currentConversation.id);
             const branches = await conversationApi.getBranches(currentConversation.id);
-
-            set({
-              messages: history,
-              branches: branches || {},
-              streamingContent: '',
-              isStreaming: false,
-            });
+            set({ messages: history, branches: branches || {}, streamingContent: '', isStreaming: false });
           } catch (err: any) {
             if (err.name !== 'AbortError') {
-              // Reload history to show saved content
               const history = await messageApi.getHistory(currentConversation.id);
               const branches = await conversationApi.getBranches(currentConversation.id);
-              set({
-                error: err.message,
-                isStreaming: false,
-                streamingContent: '',
-                messages: history,
-                branches: branches || {},
-              });
+              set({ error: err.message, isStreaming: false, streamingContent: '', messages: history, branches: branches || {} });
             }
           }
         },
 
-        // 普通发送（备用）
         sendMessage: async (content, modelId) => {
           const { currentConversation } = get();
           if (!currentConversation) return;
-
           set({ loading: true, error: null });
           try {
-            await messageApi.send(currentConversation.id, {
-              content,
-              model_id: modelId,
-            });
+            await messageApi.send(currentConversation.id, { content, model_id: modelId });
             await get().selectConversation(currentConversation.id);
           } catch (err: any) {
             set({ error: err.message });
@@ -247,42 +227,30 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
           }
         },
 
-        // 中止流式
-        abortStreaming: () => {
-          set({ isStreaming: false, streamingContent: '' });
-        },
-
-        // 清除错误
+        abortStreaming: () => set({ isStreaming: false, streamingContent: '' }),
         clearError: () => set({ error: null }),
+        clearPendingScroll: () => set({ pendingScrollNodeId: null }),
 
-        // 清空当前对话选择
         clearCurrentConversation: () => set({
           currentConversation: null,
           messages: [],
           branches: {},
+          treeData: null,
           streamingContent: '',
           currentNodeId: null,
+          pendingScrollNodeId: null,
         }),
 
-        // 删除节点
         deleteNode: async (nodeId) => {
           const { currentConversation } = get();
           if (!currentConversation) return;
-
           set({ loading: true, error: null });
           try {
             const result = await conversationApi.deleteNode(currentConversation.id, nodeId);
-            // 更新当前节点ID为父节点
-            if (result.new_current_node_id) {
-              set({ currentNodeId: result.new_current_node_id });
-            }
-            // 重新加载消息历史
+            if (result.new_current_node_id) set({ currentNodeId: result.new_current_node_id });
             const history = await messageApi.getHistory(currentConversation.id);
             const branches = await conversationApi.getBranches(currentConversation.id);
-            set({
-              messages: history,
-              branches: branches || {},
-            });
+            set({ messages: history, branches: branches || {} });
           } catch (err: any) {
             set({ error: err.message });
           } finally {
@@ -290,18 +258,21 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
           }
         },
 
+        loadTree: async (conversationId: string) => {
+          try {
+            const data = await conversationApi.getTree(conversationId);
+            set({ treeData: data });
+          } catch (err: any) {
+            set({ error: err.message });
+          }
+        },
+
       }),
       {
         name: 'conversation-storage',
-        // 不持久化currentConversation，刷新后不自动选中
-        partialize: (state) => ({
-          conversations: state.conversations,
-        }),
-        // 恢复后清空选中状态
+        partialize: (state) => ({ conversations: state.conversations }),
         onRehydrateStorage: () => (state) => {
-          if (state) {
-            state.currentConversation = null;
-          }
+          if (state) state.currentConversation = null;
         },
       }
     )
@@ -309,3 +280,5 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
 );
 
 export const useConversationStore = () => useConversationStoreBase();
+export const conversationStore = useConversationStoreBase;
+
