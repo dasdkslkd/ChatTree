@@ -14,14 +14,15 @@ export const messageApi = {
   // 流式发送消息
   stream: async function* (
     conversationId: string,
-    data: SendMessageRequest
+    data: SendMessageRequest,
+    nodeId?: string
   ): AsyncGenerator<StreamChunk, void> {
     const response = await fetch(`/api/conversations/${conversationId}/messages/stream`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(data),
+      body: JSON.stringify({ ...data, node_id: nodeId }),
     });
 
     if (!response.ok) {

@@ -118,6 +118,22 @@ export const useConversation = () => {
     [currentConversation, loadConversation]
   );
 
+  // 删除节点（用于重试功能）
+  const deleteNode = useCallback(
+    async (nodeId: string) => {
+      if (!currentConversation) throw new Error('No conversation selected');
+      try {
+        await conversationApi.deleteNode(currentConversation.id, nodeId);
+        // 重新加载消息历史
+        await loadConversation(currentConversation.id);
+      } catch (err) {
+        setError(err as Error);
+        throw err;
+      }
+    },
+    [currentConversation, loadConversation]
+  );
+
   return {
     conversations,
     currentConversation,
@@ -131,6 +147,7 @@ export const useConversation = () => {
     deleteConversation,
     switchNode,
     sendMessage,
+    deleteNode,
     setCurrentConversation,
   };
 };

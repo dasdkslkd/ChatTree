@@ -34,4 +34,10 @@ export const conversationApi = {
   updateTitle: async (id: string, title: string): Promise<void> => {
     await apiClient.patch(`/conversations/${id}`, { title });
   },
+
+  // 删除节点
+  deleteNode: async (conversationId: string, nodeId: string): Promise<{ deleted_node_id: string; new_current_node_id: string; parent_node_id: string }> => {
+    const response = await apiClient.delete(`/conversations/${conversationId}/nodes/${nodeId}`);
+    return response.data;
+  },
 };

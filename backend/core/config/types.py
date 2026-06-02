@@ -1,7 +1,8 @@
 # types.py - 更新类型定义
-from typing import TypedDict, List, Optional, Dict, Any, Union, Required
+from typing import List, Optional, Dict, Any, Union
 from enum import Enum
 import asyncio
+from typing_extensions import TypedDict, Required
 
 class Role(str, Enum):
     """消息角色枚举"""

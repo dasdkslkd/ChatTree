@@ -14,6 +14,7 @@ router = APIRouter()
 class SendMessageRequest(BaseModel):
     content: str
     model_id: Optional[str] = None
+    node_id: Optional[str] = None
 
 class MessageResponse(BaseModel):
     message: str
@@ -62,7 +63,7 @@ async def stream_message(
             
             assert chat_manager.current_conversation is not None
             
-            async for chunk in chat_manager.send_message_stream(conversation_id, request.content, request.model_id):
+            async for chunk in chat_manager.send_message_stream(conversation_id, request.content, request.model_id, request.node_id):
                 # 将 StreamChunk 转换为 JSON 字符串
                 chunk_data = {
                     "status": chunk.get("status", "content"),

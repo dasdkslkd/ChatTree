@@ -1,8 +1,7 @@
 # model/manager.py - 支持延迟加载的模型管理器
+from importlib import import_module
 from typing import Dict, Optional, Any, List
 from .base import BaseProvider
-from .providers.openai_compatible import OpenAICompatibleProvider
-from .providers.gemini_provider import GeminiProvider
 from ..config.types import ModelProvider
 from ..config.config import cfg
 from ..utils.logger import setup_logger
@@ -12,17 +11,17 @@ logger = setup_logger('ModelManager')
 class ModelManager:
     """支持延迟加载的模型管理器"""
     
-    # 直接映射类，避免字符串导入
+    # 映射到模块和类，只有实际实例化时才导入 provider。
     PROVIDER_MAP = {
-        ModelProvider.OPENAI: OpenAICompatibleProvider,
-        ModelProvider.AZURE: OpenAICompatibleProvider,
-        ModelProvider.OLLAMA: OpenAICompatibleProvider,
-        ModelProvider.DEEPSEEK: OpenAICompatibleProvider,
-        ModelProvider.GEMINI: GeminiProvider,
-        ModelProvider.GROQ: OpenAICompatibleProvider,
-        ModelProvider.ANTHROPIC: OpenAICompatibleProvider,
-        ModelProvider.LOCAL: OpenAICompatibleProvider,
-        ModelProvider.NVIDIA: OpenAICompatibleProvider,
+        ModelProvider.OPENAI: ('.providers.openai_compatible', 'OpenAICompatibleProvider'),
+        ModelProvider.AZURE: ('.providers.openai_compatible', 'OpenAICompatibleProvider'),
+        ModelProvider.OLLAMA: ('.providers.openai_compatible', 'OpenAICompatibleProvider'),
+        ModelProvider.DEEPSEEK: ('.providers.openai_compatible', 'OpenAICompatibleProvider'),
+        ModelProvider.GEMINI: ('.providers.gemini_provider', 'GeminiProvider'),
+        ModelProvider.GROQ: ('.providers.openai_compatible', 'OpenAICompatibleProvider'),
+        ModelProvider.ANTHROPIC: ('.providers.openai_compatible', 'OpenAICompatibleProvider'),
+        ModelProvider.LOCAL: ('.providers.openai_compatible', 'OpenAICompatibleProvider'),
+        ModelProvider.NVIDIA: ('.providers.openai_compatible', 'OpenAICompatibleProvider'),
     }
     
     def __init__(self):
@@ -54,14 +53,23 @@ class ModelManager:
             logger.warning(f"提供商 {provider} 未启用或配置缺失")
             return None
         
-        provider_class = self.PROVIDER_MAP.get(provider)
-        if not provider_class:
+        provider_class = self._get_provider_class(provider)
+        if provider_class is None:
             logger.error(f"未知的提供商类型: {provider}")
             return None
         
         instance = provider_class(provider_config)
         self.provider_instances[provider] = instance
         return instance
+
+    def _get_provider_class(self, provider: ModelProvider) -> Optional[type[BaseProvider]]:
+        provider_entry = self.PROVIDER_MAP.get(provider)
+        if provider_entry is None:
+            return None
+
+        module_path, class_name = provider_entry
+        module = import_module(module_path, package=__package__)
+        return getattr(module, class_name)
     
     def list_available_models(self, provider: ModelProvider) -> List[str]:
         """获取指定提供商的可用模型列表"""
