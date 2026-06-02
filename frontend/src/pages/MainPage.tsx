@@ -22,7 +22,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import {
   Plus, X, MoreHorizontal, ChevronLeft, ChevronRight,
-  Copy, Check, Pencil, Loader2,
+  Copy, Check, Pencil, Loader2, RotateCcw,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -137,7 +137,7 @@ export default function ChatPage() {
   const {
     conversations, currentConversation, messages,
     createConversation, selectConversation, deleteConversation, loadConversations,
-    clearCurrentConversation, updateConversationTitle,
+    clearCurrentConversation, updateConversationTitle, retryMessage,
   } = useConversationStore();
 
   // 重命名对话的状态
@@ -269,6 +269,19 @@ export default function ChatPage() {
     }
   };
 
+  // 处理重试：删除当前助手消息节点，并重新发送对应的用户消息
+  const handleRetry = async (assistantNodeId: string, userContent: string) => {
+    if (!currentConversation || isStreaming) return;
+    
+    // 设置待发送的用户消息（用于UI显示）
+    setPendingUserMessage(userContent);
+    setPendingUserMessageConvId(currentConversation.id);
+    setShouldAutoScroll(true);
+    
+    // 调用 retryMessage：删除节点并重新流式发送
+    await retryMessage(assistantNodeId, userContent);
+  };
+
   const outline = messages
     .map((m, index) => ({ ...m, originalIndex: index }))
     .filter((m) => m.role === 'user')
@@ -304,61 +317,85 @@ export default function ChatPage() {
     }
   };
 
-  const renderMsg = (m: typeof messages[0], index: number) => (
-    <div
-      key={m.id}
-      id={`message-${index}`}
-      className={cn(
-        'w-full my-2 flex flex-col group',
-        m.role === 'user' ? 'items-end' : 'items-start'
-      )}
-    >
-      <div className="flex flex-col items-start max-w-full">
-        <div
-          className={cn(
-            'max-w-full w-fit px-3 py-2 rounded-[10px] leading-relaxed prose prose-sm max-w-none [&_p]:m-0 [&_p:not(:last-child)]:mb-2',
-            m.role === 'user'
-              ? 'bg-primary text-primary-foreground prose-invert rounded-br-[6px]'
-              : 'bg-muted border rounded-bl-[6px]'
-          )}
-        >
-          <ReactMarkdown
-            remarkPlugins={[remarkGfm]}
-            rehypePlugins={[rehypeMermaid as any]}
-            components={markdownComponents}
+  const renderMsg = (m: typeof messages[0], index: number) => {
+    // 找到对应的上一条用户消息（用于重试）
+    const prevUserMessage = index > 0 && messages[index - 1]?.role === 'user' 
+      ? messages[index - 1] 
+      : null;
+
+    return (
+      <div
+        key={m.id}
+        id={`message-${index}`}
+        className={cn(
+          'w-full my-2 flex flex-col group',
+          m.role === 'user' ? 'items-end' : 'items-start'
+        )}
+      >
+        <div className="flex flex-col items-start max-w-full">
+          <div
+            className={cn(
+              'max-w-full w-fit px-3 py-2 rounded-[10px] leading-relaxed prose prose-sm max-w-none [&_p]:m-0 [&_p:not(:last-child)]:mb-2',
+              m.role === 'user'
+                ? 'bg-primary text-primary-foreground prose-invert rounded-br-[6px]'
+                : 'bg-muted border rounded-bl-[6px]'
+            )}
           >
-            {m.content}
-          </ReactMarkdown>
-        </div>
-        {/* 助手消息的生成信息栏 */}
-        {m.role === 'assistant' && m.generation_info && (
-          <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
-            <span>{formatDuration(m.generation_info.duration_ms)}</span>
-            {m.generation_info.status !== 'completed' && (
-              <span className={cn(
-                m.generation_info.status === 'error' ? 'text-destructive' : 'text-amber-500'
-              )}>
-                {m.generation_info.status === 'stopped' ? '已停止' : '生成出错'}
-              </span>
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              rehypePlugins={[rehypeMermaid as any]}
+              components={markdownComponents}
+            >
+              {m.content}
+            </ReactMarkdown>
+          </div>
+          {/* 助手消息的生成信息栏 */}
+          {m.role === 'assistant' && m.generation_info && (
+            <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
+              <span>{formatDuration(m.generation_info.duration_ms)}</span>
+              {m.generation_info.status !== 'completed' && (
+                <span className={cn(
+                  m.generation_info.status === 'error' ? 'text-destructive' : 'text-amber-500'
+                )}>
+                  {m.generation_info.status === 'stopped' ? '已停止' : '生成出错'}
+                </span>
+              )}
+            </div>
+          )}
+          {/* 操作按钮栏 */}
+          <div className="flex items-center gap-1 mt-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="opacity-0 group-hover:opacity-100 transition-opacity h-7 w-7 p-0"
+              onClick={() => handleCopy(m.content, m.id)}
+              aria-label="复制消息"
+            >
+              {copiedMessageId === m.id ? (
+                <Check className="h-4 w-4" />
+              ) : (
+                <Copy className="h-4 w-4" />
+              )}
+            </Button>
+            {/* 助手消息显示重试按钮 */}
+            {m.role === 'assistant' && prevUserMessage && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="opacity-0 group-hover:opacity-100 transition-opacity h-7 w-7 p-0"
+                onClick={() => handleRetry(m.node_id, prevUserMessage.content)}
+                disabled={isStreaming}
+                aria-label="重试"
+                title="重试（删除当前回复并重新生成）"
+              >
+                <RotateCcw className="h-4 w-4" />
+              </Button>
             )}
           </div>
-        )}
-        <Button
-          variant="ghost"
-          size="sm"
-          className="opacity-0 group-hover:opacity-100 transition-opacity h-7 w-7 p-0 mt-1 self-start"
-          onClick={() => handleCopy(m.content, m.id)}
-          aria-label="复制消息"
-        >
-          {copiedMessageId === m.id ? (
-            <Check className="h-4 w-4" />
-          ) : (
-            <Copy className="h-4 w-4" />
-          )}
-        </Button>
+        </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   return (
     <div className="flex h-screen bg-background">

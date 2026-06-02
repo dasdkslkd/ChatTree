@@ -126,3 +126,40 @@ async def update_conversation(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/conversations/{conversation_id}/nodes/{node_id}")
+async def delete_node(
+    conversation_id: str,
+    node_id: str,
+    chat_manager: ChatManager = Depends(get_chat_manager)
+):
+    """删除节点及其子节点"""
+    try:
+        if not chat_manager.load_conversation(conversation_id):
+            raise HTTPException(status_code=404, detail="对话不存在")
+        assert chat_manager.current_conversation is not None
+        
+        # 获取父节点ID（删除前获取）
+        node = chat_manager.current_conversation.nodes.get(node_id)
+        parent_id = node.get("parent_id") if node else None
+        
+        # 删除节点
+        chat_manager.current_conversation.del_node(node_id)
+        
+        # 保存对话
+        chat_manager.save_conversation()
+        
+        # 返回新的当前节点ID（父节点）
+        new_current_node_id = chat_manager.current_conversation.current_node_id
+        
+        return {
+            "message": "节点已删除",
+            "deleted_node_id": node_id,
+            "new_current_node_id": new_current_node_id,
+            "parent_node_id": parent_id
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
