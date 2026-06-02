@@ -12,6 +12,7 @@ export interface Message {
   role: MessageRole;
   content: string;
   node_id: string;
+  parent_node_id?: string;
   parent_id?: string;
   model?: string;
   tokens_used?: number;

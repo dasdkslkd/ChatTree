@@ -88,6 +88,7 @@ export default function ChatPage() {
   const [pendingUserMessage, setPendingUserMessage] = useState<string | null>(null);
   const [pendingUserMessageConvId, setPendingUserMessageConvId] = useState<string | null>(null);
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
+  const [editValue, setEditValue] = useState<string | null>(null);
   const scrollTimeoutRef = useRef<number | null>(null);
   const historyRef = useRef<HTMLDivElement>(null);
   const pendingScrollId = useRef<string | null>(null);
@@ -308,6 +309,23 @@ export default function ChatPage() {
     }
   };
 
+  // 处理编辑用户消息：切换到父节点（开新分支），将消息填入输入框
+  const handleEditUserMessage = async (nodeId: string, parentNodeId: string | undefined, userContent: string) => {
+    if (!currentConversation || isStreaming) return;
+    if (!parentNodeId) return; // root节点无法编辑
+
+    try {
+      // 切换到父节点，后续消息不再渲染
+      await conversationApi.switchNode(currentConversation.id, parentNodeId);
+      // 重新加载对话
+      await selectConversation(currentConversation.id);
+      // 将用户消息填入输入框
+      setEditValue(userContent);
+    } catch (err) {
+      console.error('编辑失败:', err);
+    }
+  };
+
   const outline = messages
     .map((m, index) => ({ ...m, originalIndex: index }))
     .filter((m) => m.role === 'user')
@@ -403,6 +421,20 @@ export default function ChatPage() {
                 <Copy className="h-4 w-4" />
               )}
             </Button>
+            {/* 用户消息显示编辑按钮 */}
+            {m.role === 'user' && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 w-7 p-0"
+                onClick={() => handleEditUserMessage(m.node_id, m.parent_node_id, m.content)}
+                disabled={isStreaming}
+                aria-label="编辑"
+                title="编辑消息（创建新分支）"
+              >
+                <Pencil className="h-4 w-4" />
+              </Button>
+            )}
             {/* 助手消息显示重试按钮 - 仅最后一条助手消息 */}
             {m.role === 'assistant' && prevUserMessage && index === messages.length - 1 && (
               <Button
@@ -554,6 +586,8 @@ export default function ChatPage() {
             disabled={isStreaming && streamingConversationId === currentConversation?.id}
             conversationId={currentConversation?.id || null}
             streamingConversationId={streamingConversationId}
+            editValue={editValue}
+            onEditValueConsumed={() => setEditValue(null)}
           />
         </footer>
       </section>
