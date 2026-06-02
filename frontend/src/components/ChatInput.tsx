@@ -23,9 +23,11 @@ interface Props {
   disabled: boolean;
   conversationId: string | null;
   streamingConversationId?: string | null;
+  editValue?: string | null;
+  onEditValueConsumed?: () => void;
 }
 
-export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationId, streamingConversationId }: Props) {
+export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationId, streamingConversationId, editValue, onEditValueConsumed }: Props) {
   const { setCurrentPage } = useNavigationStore();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [value, setValue] = useState('');
@@ -68,6 +70,18 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationI
       loadModels(currentProvider);
     }
   }, [currentProvider]);
+
+  // 外部编辑值：填入输入框
+  useEffect(() => {
+    if (editValue != null) {
+      setValue(editValue);
+      onEditValueConsumed?.();
+      // Focus textarea after setting value
+      requestAnimationFrame(() => {
+        textareaRef.current?.focus();
+      });
+    }
+  }, [editValue]);
 
   // 切换会话清空输入
   useEffect(() => setValue(''), [conversationId]);

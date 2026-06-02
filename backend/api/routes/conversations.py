@@ -89,6 +89,7 @@ async def switch_node(
             raise HTTPException(status_code=404, detail="对话不存在")
         assert chat_manager.current_conversation is not None
         if chat_manager.current_conversation.switch_to_node(node_id):
+            chat_manager.save_conversation()
             return {"message": "节点切换成功"}
         else:
             raise HTTPException(status_code=400, detail="无效的节点ID")
