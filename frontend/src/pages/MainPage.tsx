@@ -403,8 +403,8 @@ export default function ChatPage() {
                 <Copy className="h-4 w-4" />
               )}
             </Button>
-            {/* 助手消息显示重试按钮 */}
-            {m.role === 'assistant' && prevUserMessage && (
+            {/* 助手消息显示重试按钮 - 仅最后一条助手消息 */}
+            {m.role === 'assistant' && prevUserMessage && index === messages.length - 1 && (
               <Button
                 variant="ghost"
                 size="sm"
