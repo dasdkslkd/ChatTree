@@ -440,7 +440,7 @@ export default function ChatPage() {
               <Button
                 variant="ghost"
                 size="sm"
-                className="h-7 w-7 p-0"
+                className="opacity-0 group-hover:opacity-100 transition-opacity h-7 w-7 p-0"
                 onClick={() => handleRetry(m.node_id, prevUserMessage.content)}
                 disabled={isStreaming}
                 aria-label="重试"
