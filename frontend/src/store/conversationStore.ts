@@ -31,7 +31,6 @@ interface ConversationActions {
   sendMessage: (content: string, modelId?: string) => Promise<void>;
   streamMessage: (content: string, modelId?: string) => Promise<void>;
   deleteNode: (nodeId: string) => Promise<void>;
-  retryMessage: (nodeId: string, userContent: string, modelId?: string) => Promise<void>;
   abortStreaming: () => void;
   clearError: () => void;
 }
@@ -215,7 +214,16 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
             });
           } catch (err: any) {
             if (err.name !== 'AbortError') {
-              set({ error: err.message, isStreaming: false, streamingContent: '' });
+              // Reload history to show saved content
+              const history = await messageApi.getHistory(currentConversation.id);
+              const branches = await conversationApi.getBranches(currentConversation.id);
+              set({
+                error: err.message,
+                isStreaming: false,
+                streamingContent: '',
+                messages: history,
+                branches: branches || {},
+              });
             }
           }
         },
@@ -282,62 +290,6 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
           }
         },
 
-        // 重试消息（删除节点后重新发送用户消息）
-        retryMessage: async (nodeId, userContent, modelId) => {
-          const { currentConversation } = get();
-          if (!currentConversation) return;
-
-          set({ loading: true, error: null });
-          try {
-            // 1. 删除当前节点，获取父节点ID
-            const result = await conversationApi.deleteNode(currentConversation.id, nodeId);
-            const parentNodeId = result.parent_node_id;
-            
-            // 更新当前节点ID为父节点，这样新消息会挂在正确的父节点下
-            if (result.new_current_node_id) {
-              set({ currentNodeId: result.new_current_node_id });
-            }
-            
-            // 2. 重新发送用户消息（流式），使用父节点作为node_id
-            set({ isStreaming: true, streamingContent: '' });
-            
-            for await (const chunk of messageApi.stream(currentConversation.id, {
-              content: userContent,
-              model_id: modelId,
-            }, parentNodeId)) {
-              if (chunk.content) {
-                set((state) => ({
-                  streamingContent: state.streamingContent + chunk.content,
-                  currentNodeId: chunk.node_id || state.currentNodeId,
-                }));
-              }
-
-              if (chunk.status === 'complete') {
-                break;
-              } else if (chunk.status === 'error') {
-                throw new Error(chunk.error || 'Stream error');
-              }
-            }
-
-            // 3. 重新加载消息历史
-            await new Promise((resolve) => setTimeout(resolve, 300));
-            const history = await messageApi.getHistory(currentConversation.id);
-            const branches = await conversationApi.getBranches(currentConversation.id);
-
-            set({
-              messages: history,
-              branches: branches || {},
-              streamingContent: '',
-              isStreaming: false,
-            });
-          } catch (err: any) {
-            if (err.name !== 'AbortError') {
-              set({ error: err.message, isStreaming: false, streamingContent: '' });
-            }
-          } finally {
-            set({ loading: false });
-          }
-        },
       }),
       {
         name: 'conversation-storage',
