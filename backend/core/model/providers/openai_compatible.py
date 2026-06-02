@@ -165,15 +165,35 @@ class OpenAICompatibleProvider(BaseProvider):
                     for msg in messages
                 ]
 
-                stream = await self.client.chat.completions.create(
-                    model=model,
-                    messages=api_messages, # type: ignore
-                    stream=True,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    **kwargs
-                ) # type: ignore
+                # Retry without temperature for third-party providers that reject it
+                request_kwargs: Dict[str, Any] = {
+                    "model": model,
+                    "messages": api_messages,
+                    "stream": True,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    **kwargs,
+                }
+                attempts = [request_kwargs]
+                if self.config.get("base_url") and temperature is not None:
+                    retry_kwargs: Dict[str, Any] = {**request_kwargs}
+                    retry_kwargs.pop("temperature", None)
+                    attempts.append(retry_kwargs)
 
+                stream = None
+                for attempt_index, current_kwargs in enumerate(attempts):
+                    try:
+                        stream = await self.client.chat.completions.create(**current_kwargs)
+                        break
+                    except openai.BadRequestError as exc:
+                        if attempt_index + 1 < len(attempts):
+                            logger.warning(
+                                f"Chat completions rejected temperature, retrying without it: {exc}"
+                            )
+                            continue
+                        raise
+
+                assert stream is not None
                 async for chunk in stream:
                     # 检查是否被终止
                     if stream_controller and await stream_controller.is_stopped():

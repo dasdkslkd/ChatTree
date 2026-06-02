@@ -323,6 +323,13 @@ class ChatManager:
             ): # type: ignore
                 if data := chunk.get("content"):
                     total_content += data
+                # Track generation status from stream chunks
+                chunk_status = chunk.get("status")
+                if chunk_status == StreamStatus.ERROR:
+                    generation_status = "error"
+                    error_message = chunk.get("error")
+                elif chunk_status == StreamStatus.STOPPED:
+                    generation_status = "stopped"
                 # 更新 conversation_id 在 chunk 中
                 chunk["conversation_id"] = conversation_id
                 yield chunk

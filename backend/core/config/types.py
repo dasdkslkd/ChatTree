@@ -36,6 +36,7 @@ class Message(TypedDict, total=False):
     id: Required[str]
     role: Required[Role]
     content: Required[str]
+    node_id: Optional[str]  # 所在对话树节点ID
     name: Optional[str]
     tool_calls: Optional[List[Dict[str, Any]]]
     tool_call_id: Optional[str]

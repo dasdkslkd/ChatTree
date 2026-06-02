@@ -27,6 +27,7 @@ import {
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { rehypeMermaid } from 'react-markdown-mermaid';
+import { conversationApi } from '../api/conversation';
 import { useConversationStore } from '../store/conversationStore';
 import { useStreaming } from '../hooks/useStreaming';
 import { ChatInput } from '../components/ChatInput';
@@ -137,7 +138,7 @@ export default function ChatPage() {
   const {
     conversations, currentConversation, messages,
     createConversation, selectConversation, deleteConversation, loadConversations,
-    clearCurrentConversation, updateConversationTitle, retryMessage,
+    clearCurrentConversation, updateConversationTitle,
   } = useConversationStore();
 
   // 重命名对话的状态
@@ -178,6 +179,15 @@ export default function ChatPage() {
       }
       // 刷新完成流式的对话
       await selectConversation(completedConversationId);
+    },
+    onError: async (_error, errorConversationId) => {
+      reset();
+      if (pendingUserMessageConvId === errorConversationId) {
+        setPendingUserMessage(null);
+        setPendingUserMessageConvId(null);
+      }
+      // 刷新对话以显示已保存的内容（用户消息+部分助手消息）
+      await selectConversation(errorConversationId);
     },
   });
 
@@ -269,17 +279,33 @@ export default function ChatPage() {
     }
   };
 
-  // 处理重试：删除当前助手消息节点，并重新发送对应的用户消息
+  // 处理重试：删除当前AI消息所在的节点，重新发送用户消息
   const handleRetry = async (assistantNodeId: string, userContent: string) => {
     if (!currentConversation || isStreaming) return;
-    
-    // 设置待发送的用户消息（用于UI显示）
-    setPendingUserMessage(userContent);
-    setPendingUserMessageConvId(currentConversation.id);
-    setShouldAutoScroll(true);
-    
-    // 调用 retryMessage：删除节点并重新流式发送
-    await retryMessage(assistantNodeId, userContent);
+
+    try {
+      // 1. 删除节点（包含用户消息和AI消息）
+      await conversationApi.deleteNode(currentConversation.id, assistantNodeId);
+
+      // 2. 重新加载对话，立即更新消息列表（移除已删除节点的消息）
+      await selectConversation(currentConversation.id);
+
+      // 3. 设置待发送的用户消息（用于UI显示）
+      setPendingUserMessage(userContent);
+      setPendingUserMessageConvId(currentConversation.id);
+      setShouldAutoScroll(true);
+
+      // 4. 开始流式发送（onComplete/onError 回调会处理后续清理）
+      await startStreaming(currentConversation.id, { content: userContent });
+    } catch (err) {
+      console.error('重试失败:', err);
+      setPendingUserMessage(null);
+      setPendingUserMessageConvId(null);
+      // 重新加载对话以显示当前状态
+      if (currentConversation) {
+        await selectConversation(currentConversation.id);
+      }
+    }
   };
 
   const outline = messages
@@ -382,7 +408,7 @@ export default function ChatPage() {
               <Button
                 variant="ghost"
                 size="sm"
-                className="opacity-0 group-hover:opacity-100 transition-opacity h-7 w-7 p-0"
+                className="h-7 w-7 p-0"
                 onClick={() => handleRetry(m.node_id, prevUserMessage.content)}
                 disabled={isStreaming}
                 aria-label="重试"
