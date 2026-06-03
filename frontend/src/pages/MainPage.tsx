@@ -22,7 +22,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import {
   Plus, X, MoreHorizontal, ChevronLeft, ChevronRight,
-  Copy, Check, Pencil, Loader2, RotateCcw, Network, MessageSquare, Trash2,
+  Copy, Check, Pencil, Loader2, RotateCcw, Network, MessageSquare, Trash2, FileText, Download,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -89,6 +89,8 @@ export default function ChatPage() {
   const [pendingUserMessageConvId, setPendingUserMessageConvId] = useState<string | null>(null);
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
   const [editValue, setEditValue] = useState<string | null>(null);
+  const [attachedFiles, setAttachedFiles] = useState<string[]>([]);
+  const [previewFile, setPreviewFile] = useState<{ name: string; content: string } | null>(null);
   const scrollTimeoutRef = useRef<number | null>(null);
   const historyRef = useRef<HTMLDivElement>(null);
   const pendingScrollId = useRef<string | null>(null);
@@ -249,6 +251,71 @@ export default function ChatPage() {
     requestAnimationFrame(tryScroll);
   }, [pendingScrollNodeId, messages, chatViewMode, clearPendingScroll]);
 
+  const handleExportMarkdown = () => {
+    if (!messages.length || !currentConversation) return;
+    const title = currentConversation.title || '未命名对话';
+    const lines: string[] = [];
+    lines.push(`# ${title}`);
+    lines.push('');
+    for (const m of messages) {
+      const mention = m.role === 'user' ? parseFileMention(m.content) : null;
+      const displayContent = mention ? mention.cleanContent : m.content;
+      const roleLabel = m.role === 'user' ? '**User**' : '**Assistant**';
+      lines.push(`### ${roleLabel}`);
+      lines.push('');
+      lines.push(displayContent);
+      lines.push('');
+      lines.push('---');
+      lines.push('');
+    }
+    const md = lines.join('\n');
+    const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${title}.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleFilesPicked = async (files: File[]) => {
+    let convId = currentConversation?.id;
+    if (!convId) {
+      const newConv = await createConversation({ title: files[0]?.name?.slice(0, 20) || 'New' });
+      if (!newConv) return;
+      convId = newConv.id;
+    }
+    for (const file of files) {
+      try {
+        const res = await conversationApi.uploadImport(convId, file);
+        setAttachedFiles(prev => prev.includes(res.filename) ? prev : [...prev, res.filename]);
+      } catch (err: any) {
+        console.error('Upload failed:', err?.response?.data?.detail || err.message);
+      }
+    }
+  };
+
+  const handleRemoveFile = async (filename: string) => {
+    if (!currentConversation) return;
+    try {
+      await conversationApi.deleteImport(currentConversation.id, filename);
+    } catch (_) {}
+    setAttachedFiles(prev => prev.filter(f => f !== filename));
+  };
+
+  const handlePreviewFile = async (filename: string) => {
+    if (!currentConversation) return;
+    try {
+      const resp = await fetch(`/api/conversations/${currentConversation.id}/imports/${encodeURIComponent(filename)}`);
+      if (resp.ok) {
+        const text = await resp.text();
+        setPreviewFile({ name: filename, content: text });
+      }
+    } catch (_) {}
+  };
+
   const handleSend = async (val: string, modelId?: string, _systemPrompt?: string) => {
     if (!val.trim()) return;
     setPendingUserMessage(val);
@@ -268,7 +335,24 @@ export default function ChatPage() {
       setPendingUserMessageConvId(conversationId);
     }
 
-    await startStreaming(conversationId, { content: val, model_id: modelId });
+    let finalContent = val;
+    if (attachedFiles.length > 0) {
+      const parts: string[] = [];
+      for (const fname of attachedFiles) {
+        try {
+          const resp = await fetch(`/api/conversations/${conversationId}/imports/${encodeURIComponent(fname)}`);
+          if (resp.ok) {
+            const text = await resp.text();
+            parts.push(`=== FILE: ${fname} ===\n${text}\n=== END FILE: ${fname} ===`);
+          }
+        } catch (_) {}
+      }
+      if (parts.length > 0) {
+        finalContent = "'''USER MENTIONED FILES: " + attachedFiles.join(' ') + " '''\n\n" + parts.join('\n\n') + "\n\n---\n\n" + val;
+      }
+      setAttachedFiles([]);
+    }
+    await startStreaming(conversationId, { content: finalContent, model_id: modelId });
   };
 
   const handleJumpToMessage = (index: number) => {
@@ -330,13 +414,25 @@ export default function ChatPage() {
     }
   };
 
+  const parseFileMention = (content: string): { fileNames: string[]; cleanContent: string } | null => {
+    const match = content.match(/^'''USER MENTIONED FILES:\s+(.*?)\s+'''\n\n[\s\S]*?\n---\n\n/s);
+    if (!match) return null;
+    const fileNames = match[1].split(/\s+/).filter(Boolean);
+    const cleanContent = content.slice(match[0].length);
+    return { fileNames, cleanContent };
+  };
+
   const outline = messages
     .map((m, index) => ({ ...m, originalIndex: index }))
     .filter((m) => m.role === 'user')
-    .map((m) => ({
-      text: m.content.slice(0, 20) + (m.content.length > 20 ? '...' : ''),
-      originalIndex: m.originalIndex,
-    }));
+    .map((m) => {
+      const mention = parseFileMention(m.content);
+      const clean = mention ? mention.cleanContent : m.content;
+      return {
+        text: clean.slice(0, 20) + (clean.length > 20 ? '...' : ''),
+        originalIndex: m.originalIndex,
+      };
+    });
 
   const formatDuration = (ms: number): string => {
     if (ms < 1000) return `${ms}ms`;
@@ -356,10 +452,14 @@ export default function ChatPage() {
     }
   };
 
+  // Parse '''USER MENTIONED FILES: ...''' prefix from message content
+
   const renderMsg = (m: typeof messages[0], index: number) => {
     const prevUserMessage = index > 0 && messages[index - 1]?.role === 'user'
       ? messages[index - 1]
       : null;
+    const fileMention = m.role === 'user' ? parseFileMention(m.content) : null;
+    const displayContent = fileMention ? fileMention.cleanContent : m.content;
 
     return (
       <div
@@ -371,6 +471,14 @@ export default function ChatPage() {
         )}
       >
         <div className="flex flex-col items-start max-w-full">
+          {fileMention && (
+            <div className="max-w-full w-fit mb-1 px-2.5 py-1.5 rounded-lg bg-primary/5 border border-primary/20 text-xs text-muted-foreground flex flex-wrap items-center gap-1.5">
+              <FileText className="h-3.5 w-3.5 text-primary/60 shrink-0" />
+              {fileMention.fileNames.map((fn, fi) => (
+                <span key={fi} className="px-1.5 py-0.5 bg-primary/10 text-primary rounded text-[11px] font-medium cursor-pointer hover:bg-primary/20 transition-colors" onClick={() => handlePreviewFile(fn)}>{fn}</span>
+              ))}
+            </div>
+          )}
           <div
             className={cn(
               'max-w-full w-fit px-3 py-2 rounded-[10px] leading-relaxed prose prose-sm max-w-none [&_p]:m-0 [&_p:not(:last-child)]:mb-2',
@@ -384,7 +492,7 @@ export default function ChatPage() {
               rehypePlugins={[rehypeMermaid as any]}
               components={markdownComponents}
             >
-              {m.content}
+              {displayContent}
             </ReactMarkdown>
           </div>
           {m.role === 'assistant' && m.generation_info && (
@@ -418,7 +526,7 @@ export default function ChatPage() {
                 variant="ghost"
                 size="sm"
                 className="opacity-0 group-hover:opacity-100 transition-opacity h-7 w-7 p-0"
-                onClick={() => handleEditUserMessage(m.node_id, m.parent_node_id, m.content)}
+                onClick={() => handleEditUserMessage(m.node_id, m.parent_node_id, displayContent)}
                 disabled={isStreaming}
                 aria-label="编辑"
                 title="编辑消息（创建新分支）"
@@ -532,28 +640,40 @@ export default function ChatPage() {
       {/* Center: title bar + content (chat or tree) */}
       <section className="flex-1 flex flex-col overflow-hidden relative bg-background">
         {/* Title bar with view toggle */}
-        <div className="flex justify-center items-center p-3 sticky top-0 bg-background z-[1] min-h-[56px] border-b">
-          <span className="font-semibold">{currentConversation?.title || '请选择对话'}</span>
-          {/* View toggle button */}
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-8 w-8 p-0 ml-3"
-                onClick={toggleChatViewMode}
-              >
-                {chatViewMode === 'chat' ? (
-                  <Network className="h-4 w-4" />
-                ) : (
-                  <MessageSquare className="h-4 w-4" />
-                )}
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>
-              {chatViewMode === 'chat' ? '切换到树视图' : '切换到对话视图'}
-            </TooltipContent>
-          </Tooltip>
+        <div className="flex items-center justify-between p-3 sticky top-0 bg-background z-[1] min-h-[56px] border-b">
+          <span className="w-8" />
+          <div className="flex items-center gap-2">
+            <span className="font-semibold">{currentConversation?.title || '请选择对话'}</span>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 w-8 p-0"
+                  onClick={toggleChatViewMode}
+                >
+                  {chatViewMode === 'chat' ? (
+                    <Network className="h-4 w-4" />
+                  ) : (
+                    <MessageSquare className="h-4 w-4" />
+                  )}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>
+                {chatViewMode === 'chat' ? '切换到树视图' : '切换到对话视图'}
+              </TooltipContent>
+            </Tooltip>
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-8 w-8 p-0"
+            onClick={handleExportMarkdown}
+            disabled={!messages.length}
+            title="导出为 Markdown"
+          >
+            <Download className="h-4 w-4" />
+          </Button>
         </div>
 
         {/* Chat view */}
@@ -613,6 +733,9 @@ export default function ChatPage() {
                 streamingConversationId={streamingConversationId}
                 editValue={editValue}
                 onEditValueConsumed={() => setEditValue(null)}
+                attachedFiles={attachedFiles}
+                onFilesPicked={handleFilesPicked}
+                onRemoveFile={handleRemoveFile}
               />
             </footer>
           </>
@@ -673,6 +796,23 @@ export default function ChatPage() {
             <Button variant="outline" onClick={handleRenameCancel}>取消</Button>
             <Button onClick={handleRenameConfirm}>确认</Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* File preview dialog */}
+      <Dialog open={!!previewFile} onOpenChange={(open) => { if (!open) setPreviewFile(null); }}>
+        <DialogContent className="max-w-2xl max-h-[80vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <FileText className="h-4 w-4" />
+              {previewFile?.name}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="flex-1 overflow-auto mt-2 rounded-md bg-muted/50 border p-4">
+            <pre className="text-sm whitespace-pre-wrap break-words font-mono leading-relaxed">
+              {previewFile?.content}
+            </pre>
+          </div>
         </DialogContent>
       </Dialog>
     </div>

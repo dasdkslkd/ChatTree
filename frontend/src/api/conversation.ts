@@ -1,4 +1,4 @@
-ï»¿import { apiClient } from './client';
+import { apiClient } from './client';
 import type { Conversation, ConversationCreateRequest } from '../types/conversation';
 
 export interface TreeNode {
@@ -20,46 +20,67 @@ export interface TreeData {
 }
 
 export const conversationApi = {
-  // è·å–å¯¹è¯åˆ—è¡¨
+  // »ñÈ¡¶Ô»°ÁĞ±í
   list: async (): Promise<Conversation[]> => {
     const response = await apiClient.get('/conversations');
     return response.data;
   },
 
-  // åˆ›å»ºå¯¹è¯
+  // ´´½¨¶Ô»°
   create: async (data: ConversationCreateRequest = {}): Promise<Conversation> => {
     const response = await apiClient.post('/conversations', data);
     return response.data;
   },
 
-  // åˆ é™¤å¯¹è¯
+  // É¾³ı¶Ô»°
   delete: async (id: string): Promise<void> => {
     await apiClient.delete(`/conversations/${id}`);
   },
 
-  // åˆ‡æ¢èŠ‚ç‚¹
+  // ÇĞ»»½Úµã
   switchNode: async (conversationId: string, nodeId: string): Promise<void> => {
     await apiClient.post(`/conversations/${conversationId}/switch/${nodeId}`);
   },
 
-  // è·å–åˆ†æ”¯
+  // »ñÈ¡·ÖÖ§
   getBranches: async (conversationId: string): Promise<any> => {
     const response = await apiClient.get(`/conversations/${conversationId}/branches`);
     return response.data;
   },
 
-  // è·å–å®Œæ•´æ ‘ç»“æ„
+  // »ñÈ¡ÍêÕûÊ÷½á¹¹
   getTree: async (conversationId: string): Promise<TreeData> => {
     const response = await apiClient.get(`/conversations/${conversationId}/tree`);
     return response.data;
   },
 
-  // æ›´æ–°å¯¹è¯æ ‡é¢˜
+  // ¸üĞÂ¶Ô»°±êÌâ
   updateTitle: async (id: string, title: string): Promise<void> => {
     await apiClient.patch(`/conversations/${id}`, { title });
   },
 
-  // åˆ é™¤èŠ‚ç‚¹
+  // É¾³ı½Úµã
+  // ÉÏ´«µ¼ÈëÎÄ¼ş
+  uploadImport: async (conversationId: string, file: File): Promise<{ filename: string; size: number }> => {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await apiClient.post(`/conversations/${conversationId}/imports`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return response.data;
+  },
+
+  // ÁĞ³öµ¼ÈëÎÄ¼ş
+  listImports: async (conversationId: string): Promise<Array<{ filename: string; size: number }>> => {
+    const response = await apiClient.get(`/conversations/${conversationId}/imports`);
+    return response.data;
+  },
+
+  // É¾³ıµ¼ÈëÎÄ¼ş
+  deleteImport: async (conversationId: string, filename: string): Promise<void> => {
+    await apiClient.delete(`/conversations/${conversationId}/imports/${encodeURIComponent(filename)}`);
+  },
+
   deleteNode: async (conversationId: string, nodeId: string): Promise<{ deleted_node_id: string; new_current_node_id: string; parent_node_id: string }> => {
     const response = await apiClient.delete(`/conversations/${conversationId}/nodes/${nodeId}`);
     return response.data;
