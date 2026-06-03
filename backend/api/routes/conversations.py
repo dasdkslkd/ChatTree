@@ -1,5 +1,5 @@
 ﻿# backend/api/routes/conversations.py
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import logging
@@ -199,3 +199,74 @@ async def get_conversation_tree(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# -- Import file management --
+
+@router.post("/conversations/{conversation_id}/imports")
+async def upload_import_file(
+    conversation_id: str,
+    file: UploadFile = File(...),
+    chat_manager: ChatManager = Depends(get_chat_manager)
+):
+    import os as _os
+    allowed_exts = {
+        ".txt", ".md", ".csv", ".html", ".htm", ".py", ".js", ".ts",
+        ".tsx", ".jsx", ".java", ".c", ".cpp", ".h", ".hpp", ".cs",
+        ".go", ".rs", ".rb", ".php", ".swift", ".kt", ".scala",
+        ".json", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg",
+        ".sh", ".bash", ".zsh", ".fish", ".bat", ".cmd", ".ps1",
+        ".sql", ".r", ".lua", ".perl", ".pl", ".ex", ".exs",
+        ".vue", ".svelte", ".css", ".scss", ".less", ".sass",
+        ".env", ".gitignore", ".dockerfile", ".makefile",
+        ".log", ".conf", ".properties",
+    }
+    ext = _os.path.splitext(file.filename or "")[1].lower()
+    content_type = file.content_type or ""
+    is_text_type = content_type.startswith("text/") or content_type in {
+        "application/json", "application/xml",
+        "application/javascript", "application/typescript",
+        "application/x-yaml", "application/yaml",
+    }
+    if not is_text_type and ext not in allowed_exts:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: {content_type or ext}")
+    raw = await file.read()
+    try:
+        raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="File is not valid UTF-8 text.")
+    chat_manager.storage.save_import_file(conversation_id, file.filename or "unnamed", raw)
+    return {"filename": file.filename, "size": len(raw)}
+
+
+@router.get("/conversations/{conversation_id}/imports/{filename:path}")
+async def read_import_file(
+    conversation_id: str,
+    filename: str,
+    chat_manager: ChatManager = Depends(get_chat_manager)
+):
+    from fastapi.responses import PlainTextResponse
+    data = chat_manager.storage.read_import_file(conversation_id, filename)
+    if data is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    return PlainTextResponse(data)
+
+
+@router.get("/conversations/{conversation_id}/imports")
+async def list_import_files(
+    conversation_id: str,
+    chat_manager: ChatManager = Depends(get_chat_manager)
+):
+    return chat_manager.storage.list_import_files(conversation_id)
+
+
+@router.delete("/conversations/{conversation_id}/imports/{filename:path}")
+async def delete_import_file(
+    conversation_id: str,
+    filename: str,
+    chat_manager: ChatManager = Depends(get_chat_manager)
+):
+    ok = chat_manager.storage.delete_import_file(conversation_id, filename)
+    if not ok:
+        raise HTTPException(status_code=404, detail="File not found")
+    return {"message": "File deleted"}

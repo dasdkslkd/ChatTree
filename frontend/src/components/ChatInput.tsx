@@ -9,7 +9,7 @@ import {
   DialogTitle,
   DialogFooter,
 } from '@/components/ui/dialog'
-import { SendHorizontal, Bot, StickyNote, X, Settings, Square } from 'lucide-react'
+import { SendHorizontal, Bot, StickyNote, X, Settings, Square, Plus, FileText } from 'lucide-react'
 import { useState, useEffect, useRef } from 'react'
 import { useModelStore } from '../store/modelStore'
 import { usePromptStore } from '../store/promtStore'
@@ -25,11 +25,15 @@ interface Props {
   streamingConversationId?: string | null;
   editValue?: string | null;
   onEditValueConsumed?: () => void;
+  attachedFiles?: string[];
+  onFilesPicked?: (files: File[]) => void;
+  onRemoveFile?: (filename: string) => void;
 }
 
-export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationId, streamingConversationId, editValue, onEditValueConsumed }: Props) {
+export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationId, streamingConversationId, editValue, onEditValueConsumed, attachedFiles = [], onFilesPicked, onRemoveFile }: Props) {
   const { setCurrentPage } = useNavigationStore();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [value, setValue] = useState('');
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const [promptDialogOpen, setPromptDialogOpen] = useState(false);
@@ -101,6 +105,18 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationI
     await onSend(value, currentModel || undefined, systemPrompt);
   };
 
+  const handleFilePick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (files && files.length > 0) {
+      onFilesPicked?.(Array.from(files));
+    }
+    e.target.value = '';
+  };
+
   const handleProviderChange = (provider: ModelProvider) => {
     setCurrentProvider(provider);
   };
@@ -145,6 +161,25 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationI
   return (
     <div className="w-full">
       <div className="flex flex-col border rounded-xl bg-background overflow-hidden shadow-md">
+        {attachedFiles.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 px-3 pt-2 pb-1">
+            {attachedFiles.map((fname) => (
+              <span
+                key={fname}
+                className="inline-flex items-center gap-1 px-2 py-0.5 bg-primary/10 text-primary rounded-md text-xs"
+              >
+                <FileText className="h-3 w-3" />
+                <span className="max-w-[140px] truncate">{fname}</span>
+                <button
+                  className="ml-0.5 hover:text-destructive cursor-pointer"
+                  onClick={() => onRemoveFile?.(fname)}
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
         <textarea
           ref={textareaRef}
           className="w-full min-h-[60px] max-h-[200px] py-3 px-4 border-none outline-none resize-none text-sm leading-normal bg-transparent placeholder:text-muted-foreground disabled:bg-muted/50"
@@ -162,6 +197,22 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationI
         />
         <div className="flex justify-between items-center px-2 py-1 border-t bg-muted/30">
           <div className="flex gap-1 items-center">
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={handleFileChange}
+            />
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 w-7 p-0"
+              onClick={handleFilePick}
+              title="上传文件"
+            >
+              <Plus className="h-4 w-4" />
+            </Button>
             {/* 模型选择按钮 */}
             <Button
               variant="ghost"

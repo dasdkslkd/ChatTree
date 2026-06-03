@@ -43,6 +43,11 @@ function truncate(text: string, max: number): string {
   return clean.length > max ? clean.slice(0, max) + '...' : clean;
 }
 
+function stripFileMention(content: string): string {
+  const match = content.match(/^'''USER MENTIONED FILES:\s+.*?\s+'''\n\n[\s\S]*?\n---\n\n/s);
+  return match ? content.slice(match[0].length) : content;
+}
+
 export default function TreeView() {
   const containerRef = useRef<HTMLDivElement>(null);
   const { currentConversation, treeData, loadTree } = useConversationStore();
@@ -196,7 +201,7 @@ export default function TreeView() {
     e.stopPropagation();
     if (isRootNode(treeData?.nodes.find(n => n.id === nodeId) as TreeNode)) return;
     const node = treeData?.nodes.find(n => n.id === nodeId);
-    const label = node?.user_content ? truncate(node.user_content, 20) : nodeId.slice(0, 8);
+    const label = node?.user_content ? truncate(stripFileMention(node.user_content), 20) : nodeId.slice(0, 8);
     setContextMenu({ x: e.clientX, y: e.clientY, nodeId, label });
   }, [treeData]);
 
@@ -337,7 +342,7 @@ export default function TreeView() {
                 >
                   {node.data.user_content && (
                     <p className="text-[11px] leading-tight font-medium text-foreground line-clamp-2 mb-1">
-                      {truncate(node.data.user_content, 40)}
+                      {truncate(stripFileMention(node.data.user_content), 40)}
                     </p>
                   )}
                   {node.data.assistant_content && (
