@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MCP SearXNG Test Console</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f1117; color: #e0e0e0; min-height: 100vh; }
+  .container { max-width: 960px; margin: 0 auto; padding: 24px; }
+  h1 { font-size: 20px; font-weight: 600; margin-bottom: 4px; color: #fff; }
+  .subtitle { font-size: 13px; color: #888; margin-bottom: 24px; }
+  .status-bar { display: flex; gap: 12px; margin-bottom: 20px; align-items: center; flex-wrap: wrap; }
+  .badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 6px; font-size: 12px; font-weight: 500; }
+  .badge-ok { background: #1a3a2a; color: #4ade80; border: 1px solid #2a5a3a; }
+  .badge-err { background: #3a1a1a; color: #f87171; border: 1px solid #5a2a2a; }
+  .badge-info { background: #1a2a3a; color: #60a5fa; border: 1px solid #2a3a5a; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; }
+  .dot-ok { background: #4ade80; }
+  .dot-err { background: #f87171; }
+
+  .panel { background: #1a1d27; border: 1px solid #2a2d3a; border-radius: 8px; margin-bottom: 16px; overflow: hidden; }
+  .panel-header { padding: 12px 16px; border-bottom: 1px solid #2a2d3a; display: flex; align-items: center; justify-content: space-between; }
+  .panel-title { font-size: 14px; font-weight: 600; }
+  .panel-body { padding: 16px; }
+
+  .tabs { display: flex; gap: 0; margin-bottom: 0; }
+  .tab { padding: 10px 20px; cursor: pointer; font-size: 13px; font-weight: 500; color: #888; border-bottom: 2px solid transparent; transition: all 0.15s; }
+  .tab:hover { color: #bbb; }
+  .tab.active { color: #60a5fa; border-bottom-color: #60a5fa; }
+
+  label { display: block; font-size: 12px; font-weight: 500; color: #999; margin-bottom: 4px; }
+  input, select, textarea { width: 100%; padding: 8px 12px; background: #0f1117; border: 1px solid #2a2d3a; border-radius: 6px; color: #e0e0e0; font-size: 13px; font-family: inherit; }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: #60a5fa; }
+  textarea { resize: vertical; min-height: 80px; }
+
+  .row { display: flex; gap: 12px; margin-bottom: 12px; }
+  .row > * { flex: 1; }
+  .field { margin-bottom: 12px; }
+
+  button { padding: 8px 20px; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer; border: none; transition: all 0.15s; }
+  .btn-primary { background: #3b82f6; color: #fff; }
+  .btn-primary:hover { background: #2563eb; }
+  .btn-primary:disabled { background: #555; cursor: not-allowed; }
+  .btn-secondary { background: #2a2d3a; color: #e0e0e0; border: 1px solid #3a3d4a; }
+  .btn-secondary:hover { background: #3a3d4a; }
+
+  .result-area { background: #0f1117; border: 1px solid #2a2d3a; border-radius: 6px; padding: 12px; font-size: 13px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; max-height: 500px; overflow-y: auto; font-family: 'Cascadia Code', 'Fira Code', monospace; }
+
+  .tools-list { display: flex; flex-direction: column; gap: 8px; }
+  .tool-card { background: #0f1117; border: 1px solid #2a2d3a; border-radius: 6px; padding: 12px; }
+  .tool-name { font-weight: 600; font-size: 14px; color: #60a5fa; }
+  .tool-desc { font-size: 12px; color: #888; margin-top: 4px; }
+  .tool-params { margin-top: 8px; font-size: 11px; color: #666; }
+  .tool-params code { background: #1a1d27; padding: 1px 4px; border-radius: 3px; color: #aaa; }
+
+  .raw-request { font-family: monospace; font-size: 12px; color: #666; margin-bottom: 8px; }
+
+  .hidden { display: none; }
+  .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #555; border-top-color: #60a5fa; border-radius: 50%; animation: spin 0.6s linear infinite; margin-right: 6px; vertical-align: middle; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>MCP SearXNG Test Console</h1>
+  <p class="subtitle">mcp-searxng v1.0.5 &mdash; HTTP Transport @ localhost:3001</p>
+
+  <div class="status-bar">
+    <span class="badge" id="serverBadge"><span class="dot"></span>Checking...</span>
+    <span class="badge badge-info" id="sessionBadge">No session</span>
+  </div>
+
+  <div class="panel">
+    <div class="tabs">
+      <div class="tab active" data-tab="search">Web Search</div>
+      <div class="tab" data-tab="urlread">URL Reader</div>
+      <div class="tab" data-tab="tools">Tools List</div>
+      <div class="tab" data-tab="raw">Raw JSON-RPC</div>
+    </div>
+
+    <!-- Search Tab -->
+    <div class="panel-body tab-content" id="tab-search">
+      <div class="field">
+        <label>Query</label>
+        <input type="text" id="searchQuery" value="Python 3.14 new features" placeholder="Enter search query...">
+      </div>
+      <div class="row">
+        <div class="field">
+          <label>Language</label>
+          <select id="searchLang">
+            <option value="all">All</option>
+            <option value="zh-CN" selected>Chinese</option>
+            <option value="en">English</option>
+            <option value="ja">Japanese</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Time Range</label>
+          <select id="searchTime">
+            <option value="">Any</option>
+            <option value="day">Day</option>
+            <option value="month">Month</option>
+            <option value="year">Year</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Page</label>
+          <input type="number" id="searchPage" value="1" min="1">
+        </div>
+      </div>
+      <button class="btn-primary" id="btnSearch" onclick="doSearch()">Search</button>
+      <div id="searchLoading" class="hidden" style="margin-top:12px"><span class="spinner"></span> Searching...</div>
+      <div id="searchResult" class="result-area" style="margin-top:12px; display:none"></div>
+    </div>
+
+    <!-- URL Reader Tab -->
+    <div class="panel-body tab-content hidden" id="tab-urlread">
+      <div class="field">
+        <label>URL</label>
+        <input type="text" id="urlInput" value="https://www.python.org/" placeholder="https://...">
+      </div>
+      <div class="row">
+        <div class="field">
+          <label>Max Length</label>
+          <input type="number" id="urlMaxLen" value="2000" min="100">
+        </div>
+        <div class="field">
+          <label>Mode</label>
+          <select id="urlMode">
+            <option value="content">Full Content</option>
+            <option value="headings">Headings Only</option>
+          </select>
+        </div>
+      </div>
+      <button class="btn-primary" id="btnUrlRead" onclick="doUrlRead()">Read URL</button>
+      <div id="urlLoading" class="hidden" style="margin-top:12px"><span class="spinner"></span> Fetching...</div>
+      <div id="urlResult" class="result-area" style="margin-top:12px; display:none"></div>
+    </div>
+
+    <!-- Tools List Tab -->
+    <div class="panel-body tab-content hidden" id="tab-tools">
+      <button class="btn-secondary" onclick="doListTools()">Refresh Tools</button>
+      <div id="toolsLoading" class="hidden" style="margin-top:12px"><span class="spinner"></span> Loading...</div>
+      <div id="toolsList" class="tools-list" style="margin-top:12px"></div>
+    </div>
+
+    <!-- Raw JSON-RPC Tab -->
+    <div class="panel-body tab-content hidden" id="tab-raw">
+      <div class="field">
+        <label>Method</label>
+        <select id="rawMethod">
+          <option value="tools/list">tools/list</option>
+          <option value="tools/call">tools/call</option>
+          <option value="resources/list">resources/list</option>
+          <option value="resources/read">resources/read</option>
+          <option value="initialize">initialize</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Params (JSON)</label>
+        <textarea id="rawParams" rows="4">{"name":"searxng_web_search","arguments":{"query":"hello world"}}</textarea>
+      </div>
+      <button class="btn-primary" onclick="doRawRequest()">Send Request</button>
+      <div id="rawLoading" class="hidden" style="margin-top:12px"><span class="spinner"></span> Sending...</div>
+      <div id="rawResult" class="result-area" style="margin-top:12px; display:none"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const MCP_URL = 'http://localhost:3001/mcp';
+const HEALTH_URL = 'http://localhost:3001/health';
+let sessionId = null;
+let requestId = 0;
+
+// Tab switching
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.add('hidden'));
+    tab.classList.add('active');
+    document.getElementById('tab-' + tab.dataset.tab).classList.remove('hidden');
+  });
+});
+
+async function mcpCall(method, params) {
+  requestId++;
+  const body = { jsonrpc: '2.0', id: requestId, method };
+  if (params) body.params = params;
+
+  const headers = { 'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream' };
+  if (sessionId) headers['Mcp-Session-Id'] = sessionId;
+
+  const resp = await fetch(MCP_URL, { method: 'POST', headers, body: JSON.stringify(body) });
+  const sid = resp.headers.get('mcp-session-id');
+  if (sid) sessionId = sid;
+
+  const text = await resp.text();
+  // Parse SSE
+  for (const line of text.split('\n')) {
+    if (line.startsWith('data: ')) {
+      try { return JSON.parse(line.slice(6)); } catch {}
+    }
+  }
+  try { return JSON.parse(text); } catch { return { raw: text }; }
+}
+
+async function ensureSession() {
+  if (sessionId) return;
+  await mcpCall('initialize', {
+    protocolVersion: '2025-03-26',
+    capabilities: {},
+    clientInfo: { name: 'chattree-test', version: '0.1.0' }
+  });
+  // Send initialized notification (fire-and-forget)
+  fetch(MCP_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream', 'Mcp-Session-Id': sessionId },
+    body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })
+  }).catch(() => {});
+  document.getElementById('sessionBadge').textContent = 'Session: ' + sessionId.slice(0, 8) + '...';
+}
+
+async function checkHealth() {
+  try {
+    const resp = await fetch(HEALTH_URL);
+    const data = await resp.json();
+    const badge = document.getElementById('serverBadge');
+    badge.className = 'badge badge-ok';
+    badge.innerHTML = '<span class="dot dot-ok"></span>' + data.server + ' v' + data.version;
+  } catch {
+    const badge = document.getElementById('serverBadge');
+    badge.className = 'badge badge-err';
+    badge.innerHTML = '<span class="dot dot-err"></span>Server unreachable';
+  }
+}
+
+async function doSearch() {
+  const btn = document.getElementById('btnSearch');
+  const loading = document.getElementById('searchLoading');
+  const result = document.getElementById('searchResult');
+  btn.disabled = true; loading.classList.remove('hidden'); result.style.display = 'none';
+
+  try {
+    await ensureSession();
+    const args = { query: document.getElementById('searchQuery').value };
+    const lang = document.getElementById('searchLang').value;
+    const time = document.getElementById('searchTime').value;
+    const page = parseInt(document.getElementById('searchPage').value);
+    if (lang !== 'all') args.language = lang;
+    if (time) args.time_range = time;
+    if (page > 1) args.pageno = page;
+
+    const resp = await mcpCall('tools/call', { name: 'searxng_web_search', arguments: args });
+    const text = resp.result?.content?.[0]?.text || resp.error?.message || JSON.stringify(resp, null, 2);
+    result.textContent = text;
+    result.style.display = 'block';
+  } catch (e) {
+    result.textContent = 'Error: ' + e.message;
+    result.style.display = 'block';
+  }
+  btn.disabled = false; loading.classList.add('hidden');
+}
+
+async function doUrlRead() {
+  const btn = document.getElementById('btnUrlRead');
+  const loading = document.getElementById('urlLoading');
+  const result = document.getElementById('urlResult');
+  btn.disabled = true; loading.classList.remove('hidden'); result.style.display = 'none';
+
+  try {
+    await ensureSession();
+    const args = { url: document.getElementById('urlInput').value };
+    const maxLen = parseInt(document.getElementById('urlMaxLen').value);
+    if (maxLen) args.maxLength = maxLen;
+    if (document.getElementById('urlMode').value === 'headings') args.readHeadings = true;
+
+    const resp = await mcpCall('tools/call', { name: 'web_url_read', arguments: args });
+    const text = resp.result?.content?.[0]?.text || resp.error?.message || JSON.stringify(resp, null, 2);
+    result.textContent = text;
+    result.style.display = 'block';
+  } catch (e) {
+    result.textContent = 'Error: ' + e.message;
+    result.style.display = 'block';
+  }
+  btn.disabled = false; loading.classList.add('hidden');
+}
+
+async function doListTools() {
+  const loading = document.getElementById('toolsLoading');
+  const list = document.getElementById('toolsList');
+  loading.classList.remove('hidden'); list.innerHTML = '';
+
+  try {
+    await ensureSession();
+    const resp = await mcpCall('tools/list');
+    const tools = resp.result?.tools || [];
+    for (const tool of tools) {
+      const card = document.createElement('div');
+      card.className = 'tool-card';
+      const params = Object.keys(tool.inputSchema?.properties || {});
+      card.innerHTML = '<div class="tool-name">' + tool.name + '</div>'
+        + '<div class="tool-desc">' + (tool.description || '') + '</div>'
+        + '<div class="tool-params">Parameters: ' + params.map(p => '<code>' + p + '</code>').join(', ') + '</div>';
+      list.appendChild(card);
+    }
+  } catch (e) {
+    list.textContent = 'Error: ' + e.message;
+  }
+  loading.classList.add('hidden');
+}
+
+async function doRawRequest() {
+  const btn = event.target;
+  const loading = document.getElementById('rawLoading');
+  const result = document.getElementById('rawResult');
+  btn.disabled = true; loading.classList.remove('hidden'); result.style.display = 'none';
+
+  try {
+    await ensureSession();
+    const method = document.getElementById('rawMethod').value;
+    let params = null;
+    const raw = document.getElementById('rawParams').value.trim();
+    if (raw) params = JSON.parse(raw);
+
+    const resp = await mcpCall(method, params);
+    result.textContent = JSON.stringify(resp, null, 2);
+    result.style.display = 'block';
+  } catch (e) {
+    result.textContent = 'Error: ' + e.message;
+    result.style.display = 'block';
+  }
+  btn.disabled = false; loading.classList.add('hidden');
+}
+
+// Init
+checkHealth();
+</script>
+</body>
+</html>
