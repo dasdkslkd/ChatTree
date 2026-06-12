@@ -5,7 +5,7 @@ import asyncio
 from time import time
 from .conversation import Conversation
 from .node import NodeManager
-from ..config.types import Message, Role, ModelProvider, StreamChunk, StreamStatus, StreamController, GenerationInfo
+from ..config.types import Message, Role, StreamChunk, StreamStatus, StreamController, GenerationInfo
 from ..storage.chat_storage import ChatStorage
 from ..storage.prompt_storage import PromptStorage
 from ..model.model_manager import ModelManager
@@ -250,7 +250,9 @@ class ChatManager:
             if target_model in models:
                 target_provider = provider
                 break
-        
+
+        logger.info(f"Stream: model={target_model}, provider={target_provider}, model_list_keys={list(self.model_manager.model_list.keys())}")
+
         if not target_provider:
             yield StreamChunk(
                 status=StreamStatus.ERROR,
@@ -264,6 +266,7 @@ class ChatManager:
         
         provider = self.model_manager.get_model(target_provider, True)
         if not provider:
+            logger.error(f"无法初始化提供商 {target_provider} (is_async=True)")
             yield StreamChunk(
                 status=StreamStatus.ERROR,
                 content="",
@@ -407,19 +410,23 @@ class ChatManager:
 
         msg_dict = []
         for msg in messages:
+            role = msg["role"]
+            # Role 枚举转为小写字符串值（"user" 而非 "Role.USER"）
+            if not isinstance(role, str) or role.startswith("Role."):
+                role = role.value if hasattr(role, 'value') else str(role).split(".")[-1].lower()
             msg_dict.append({
-                "role": msg["role"],
+                "role": role,
                 "content": msg["content"],
             })
-        
+
         return msg_dict
     
-    def _update_token_stats(self, provider: ModelProvider, tokens: int):
+    def _update_token_stats(self, provider: str, tokens: int):
         """更新token统计"""
         if self.current_conversation:
             self._update_token_stats_for_conversation(self.current_conversation, provider, tokens)
-    
-    def _update_token_stats_for_conversation(self, conversation: Conversation, provider: ModelProvider, tokens: int):
+
+    def _update_token_stats_for_conversation(self, conversation: Conversation, provider: str, tokens: int):
         """更新token统计（使用指定的 conversation）"""
         if provider not in conversation.metadata["total_tokens"]:
             conversation.metadata["total_tokens"][provider] = 0

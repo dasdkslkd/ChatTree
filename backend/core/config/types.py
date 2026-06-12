@@ -11,17 +11,14 @@ class Role(str, Enum):
     ASSISTANT = "assistant"
     TOOL = "tool"
 
-class ModelProvider(str, Enum):
-    """模型提供商枚举"""
-    OPENAI = "openai"
-    AZURE = "azure"
-    GEMINI = "gemini"
-    OLLAMA = "ollama"
-    DEEPSEEK = "deepseek"
+ModelProvider = str  # 自定义提供商ID，不再使用枚举
+
+class APIFormat(str, Enum):
+    """API 格式枚举"""
+    CHAT_COMPLETIONS = "chat_completions"
+    RESPONSES = "responses"
     ANTHROPIC = "anthropic"
-    GROQ = "groq"
-    LOCAL = "local"
-    NVIDIA = "nvidia"
+    GEMINI = "gemini"
 
 class GenerationInfo(TypedDict, total=False):
     """消息生成信息"""
@@ -63,7 +60,7 @@ class ConversationMetadata(TypedDict):
     title: str
     created_at: int
     updated_at: int
-    total_tokens: Dict[ModelProvider, int]
+    total_tokens: Dict[str, int]
 
 class ConversationData(TypedDict):
     """对话数据类型"""
@@ -80,12 +77,8 @@ class ModelProviderConfig(TypedDict, total=False):
     base_url: str
     organization: Optional[str]
     project: Optional[str]
-    # max_tokens: Optional[int]
-    # temperature: Optional[float]
-    # top_p: Optional[float]
-    # frequency_penalty: Optional[float]
-    # presence_penalty: Optional[float]
-    # is_default: bool
+    api_format: str  # APIFormat 值: chat_completions, responses, anthropic, gemini
+    hidden_models: List[str]  # 被隐藏的模型名称列表
     enabled: bool
     default_model: str
 

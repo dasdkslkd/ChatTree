@@ -1,14 +1,8 @@
-// 模型提供商枚举
-export type ModelProvider = 
-  | 'openai' 
-  | 'azure' 
-  | 'gemini' 
-  | 'ollama' 
-  | 'deepseek' 
-  | 'anthropic' 
-  | 'groq' 
-  | 'local'
-  | 'nvidia';
+// API 格式类型
+export type APIFormat = 'chat_completions' | 'responses' | 'anthropic' | 'gemini';
+
+// 提供商 ID（动态字符串，不再使用枚举）
+export type ModelProvider = string;
 
 // 单个提供商配置
 export interface ModelProviderConfig {
@@ -18,32 +12,29 @@ export interface ModelProviderConfig {
   base_url: string;
   organization?: string;
   project?: string;
+  api_format: APIFormat;
+  hidden_models: string[];
   enabled: boolean;
   default_model: string;
-  is_async?: boolean;
 }
 
 // 完整配置数据
 export interface ConfigData {
-  default_provider: ModelProvider;
-  provider: Record<ModelProvider, ModelProviderConfig>;
+  default_provider: string;
+  provider: Record<string, ModelProviderConfig>;
 }
 
 // 配置更新请求
 export interface ConfigUpdateRequest {
-  default_provider?: ModelProvider;
-  provider_configs?: Partial<Record<ModelProvider, Partial<ModelProviderConfig>>>;
+  default_provider?: string;
+  provider_configs?: Record<string, Partial<ModelProviderConfig>>;
 }
 
-// 旧的类型定义（兼容）
-export interface ModelConfig {
-  api_key?: string;
+// 添加提供商请求
+export interface AddProviderRequest {
+  id: string;
+  name: string;
+  api_format: APIFormat;
   base_url?: string;
-  model?: string;
-  [key: string]: any;
-}
-
-export interface ProviderConfig {
-  default: string;
-  models: Record<string, ModelConfig>;
+  api_key?: string;
 }

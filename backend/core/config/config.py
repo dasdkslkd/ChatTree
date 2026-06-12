@@ -1,133 +1,98 @@
-# config.py - 更新配置管理
+# config.py - 配置管理（动态提供商）
 import os
 import json
-from typing import Dict, Any, Optional
-from .types import ModelProviderConfig, ModelProvider
+from typing import Dict, Any, Optional, List
+from .types import ModelProviderConfig, APIFormat
 
-# 多模型默认配置
-DEFAULT_MODELS_CONFIG: Dict[ModelProvider, ModelProviderConfig] = {
-    ModelProvider.OPENAI: {
-        'name': 'openai',
-        'models': [],
-        'api_key': '',
-        'base_url': '',
-        'organization': '',
-        'project': '',
-        'enabled': False,
-        'default_model': 'gpt-3'
-    },
-    ModelProvider.OLLAMA: {
-        'name': 'ollama',
-        'models': [],
-        'api_key': '*',
-        'base_url': 'http://localhost:11434/v1',
-        'organization': '',
-        'project': '',
-        'enabled': False,
-        'default_model': ''
-    },
-    ModelProvider.DEEPSEEK: {
-        'name': 'deepseek',
-        'models': [],
-        'api_key': '',
-        'base_url': '',
-        'organization': '',
-        'project': '',
-        'enabled': False,
-        'default_model': ''
-    },
-    ModelProvider.GEMINI: {
-        'name': 'gemini',
-        'models': [],
-        'api_key': '',
-        'base_url': '',
-        'organization': '',
-        'project': '',
-        'enabled': False,
-        'default_model': ''
-    },
-    ModelProvider.GROQ: {
-        'name': 'groq',
-        'models': [],
-        'api_key': '',
-        'base_url': '',
-        'organization': '',
-        'project': '',
-        'enabled': False,
-        'default_model': ''
-    },
-    ModelProvider.AZURE: {
-        'name': 'azure',
-        'models': [],
-        'api_key': '',
-        'base_url': '',
-        'organization': '',
-        'project': '',
-        'enabled': False,
-        'default_model': ''
-    },
-    ModelProvider.ANTHROPIC: {
-        'name': 'anthropic',
-        'models': [],
-        'api_key': '',
-        'base_url': '',
-        'organization': '',
-        'project': '',
-        'enabled': False,
-        'default_model': ''
-    },
-    ModelProvider.LOCAL: {
-        'name': 'local',
-        'models': [],
-        'api_key': '',
-        'base_url': '',
-        'organization': '',
-        'project': '',
-        'enabled': False,
-        'default_model': ''
-    }
+# 旧的预设提供商ID列表，用于迁移检测
+_LEGACY_PROVIDER_IDS = {
+    'openai', 'azure', 'gemini', 'ollama', 'deepseek',
+    'anthropic', 'groq', 'local', 'nvidia'
+}
+
+# 新提供商的默认配置模板
+_DEFAULT_PROVIDER_TEMPLATE: ModelProviderConfig = {
+    'name': '',
+    'models': [],
+    'api_key': '',
+    'base_url': '',
+    'organization': '',
+    'project': '',
+    'api_format': APIFormat.CHAT_COMPLETIONS,
+    'hidden_models': [],
+    'enabled': False,
+    'default_model': '',
 }
 
 class Config:
     """配置管理器"""
-    
+
     def __init__(self, config_path: str = "data/config.json"):
         self.config_path = config_path
         self.data = self._load_config()
-            
+
     def _load_config(self) -> Dict[str, Any]:
-        """加载配置"""
+        """加载配置，如果检测到旧格式则重置"""
         if os.path.exists(self.config_path):
             with open(self.config_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        return {'provider': DEFAULT_MODELS_CONFIG.copy(), 'default_provider': ModelProvider.OPENAI}
-    
-    def init_provider_configs(self, provider: ModelProvider):
-        """初始化提供商配置"""
-        if provider not in self.data['provider'] and provider in DEFAULT_MODELS_CONFIG:
-            self.data['provider'][provider] = DEFAULT_MODELS_CONFIG[provider]
-            self.save()
-    
-    def save(self):
-        """保存配置"""
-        os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
+                data = json.load(f)
+            # 检测旧格式（含有预设提供商枚举key）并重置
+            if self._is_legacy_config(data):
+                data = self._fresh_config()
+                self._save_data(data)
+            return data
+        return self._fresh_config()
+
+    def _is_legacy_config(self, data: Dict[str, Any]) -> bool:
+        """检测是否为旧的枚举预设格式"""
+        providers = data.get('provider', {})
+        return any(pid in _LEGACY_PROVIDER_IDS for pid in providers.keys())
+
+    @staticmethod
+    def _fresh_config() -> Dict[str, Any]:
+        """返回空白配置"""
+        return {'provider': {}, 'default_provider': ''}
+
+    def _save_data(self, data: Dict[str, Any]):
+        """直接写入指定数据"""
+        os.makedirs(os.path.dirname(self.config_path) or '.', exist_ok=True)
         with open(self.config_path, 'w', encoding='utf-8') as f:
-            json.dump(self.data, f, indent=2, ensure_ascii=False)
-    
-    def get_provider_config(self, provider: ModelProvider) -> ModelProviderConfig:
-        """获取模型配置"""
-        if provider not in self.data['provider']:
-            self.init_provider_configs(provider)
+            json.dump(data, f, indent=2, ensure_ascii=False)
+
+    def save(self):
+        """保存当前配置到磁盘"""
+        self._save_data(self.data)
+
+    def get_provider_config(self, provider: str) -> Optional[ModelProviderConfig]:
+        """获取提供商配置，不存在则返回 None"""
         return self.data['provider'].get(provider)
-    
-    def add_provider_config(self, provider: ModelProvider, config: ModelProviderConfig):
-        """添加模型配置"""
-        self.data['provider'][provider] = config
+
+    def get_all_providers(self) -> Dict[str, ModelProviderConfig]:
+        """获取所有已配置的提供商"""
+        return self.data.get('provider', {})
+
+    def add_provider(self, provider_id: str, config: Dict[str, Any]):
+        """添加新提供商"""
+        # 合并默认模板，确保所有字段存在
+        merged = {**_DEFAULT_PROVIDER_TEMPLATE, **config}
+        self.data['provider'][provider_id] = merged
         self.save()
-    
-    def set_default_model(self, provider: ModelProvider):
-        """设置默认模型ID"""
-        self.data['default_provider'] = provider
+
+    def delete_provider(self, provider_id: str) -> bool:
+        """删除提供商，返回是否成功"""
+        if provider_id not in self.data['provider']:
+            return False
+        del self.data['provider'][provider_id]
+        # 如果删除的是默认提供商，清空默认
+        if self.data.get('default_provider') == provider_id:
+            providers = list(self.data['provider'].keys())
+            self.data['default_provider'] = providers[0] if providers else ''
+        self.save()
+        return True
+
+    def set_default_provider(self, provider_id: str):
+        """设置默认提供商"""
+        self.data['default_provider'] = provider_id
         self.save()
 
 cfg = Config()

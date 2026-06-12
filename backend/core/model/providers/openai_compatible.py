@@ -260,7 +260,7 @@ class OpenAICompatibleProvider(BaseProvider):
             logger.error(f"Stream error: {e} - Conversation: {stream_controller.conversation_id} - Node: {stream_controller.node_id}")
 
     def _use_responses_api(self) -> bool:
-        return self.config.get("name") == "openai"
+        return self.config.get("api_format") == "responses"
 
     def _generate_response_with_responses_api(
         self,

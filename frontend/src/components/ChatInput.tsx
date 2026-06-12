@@ -14,7 +14,6 @@ import { useState, useEffect, useRef } from 'react'
 import { useModelStore } from '../store/modelStore'
 import { usePromptStore } from '../store/promtStore'
 import { useNavigationStore } from '../store/navigationStore'
-import type { ModelProvider } from '../types/model'
 
 interface Props {
   onSend: (value: string, modelId?: string, systemPrompt?: string) => Promise<void>;
@@ -31,7 +30,7 @@ interface Props {
 }
 
 export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationId, streamingConversationId, editValue, onEditValueConsumed, attachedFiles = [], onFilesPicked, onRemoveFile }: Props) {
-  const { setCurrentPage } = useNavigationStore();
+  const { currentPage, setCurrentPage } = useNavigationStore();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [value, setValue] = useState('');
@@ -55,12 +54,21 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationI
 
   const { prompts, currentPrompt, loadPrompts, loadPrompt } = usePromptStore();
 
-  // 加载提供商、模型列表和配置
+  // 初始加载：先加载配置（确定默认提供商），再加载提供商列表
   useEffect(() => {
-    loadProviders();
-    loadConfig();
-    loadPrompts();
+    (async () => {
+      await loadConfig();
+      await loadProviders();
+      loadPrompts();
+    })();
   }, []);
+
+  // 从设置页返回时重新同步配置（hidden_models / default_provider 等可能已变）
+  useEffect(() => {
+    if (currentPage === 'chat') {
+      loadConfig();
+    }
+  }, [currentPage]);
 
   // 过滤已启用的提供商
   const enabledProviders = providers.filter((provider) => {
@@ -117,7 +125,7 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationI
     e.target.value = '';
   };
 
-  const handleProviderChange = (provider: ModelProvider) => {
+  const handleProviderChange = (provider: string) => {
     setCurrentProvider(provider);
   };
 
@@ -141,22 +149,12 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationI
     setSelectedPromptTitle(null);
   };
 
-  const getProviderDisplayName = (provider: ModelProvider): string => {
-    const names: Record<ModelProvider, string> = {
-      openai: 'OpenAI',
-      azure: 'Azure',
-      gemini: 'Gemini',
-      ollama: 'Ollama',
-      deepseek: 'DeepSeek',
-      anthropic: 'Anthropic',
-      groq: 'Groq',
-      local: 'Local',
-      nvidia: 'NVIDIA',
-    };
-    return names[provider] || provider;
+  const getProviderDisplayName = (provider: string): string => {
+    return config?.provider?.[provider]?.name || provider;
   };
 
-  const currentModels = currentProvider ? models[currentProvider] || [] : [];
+  const hiddenModels = currentProvider ? (config?.provider?.[currentProvider]?.hidden_models || []) : [];
+  const currentModels = (currentProvider ? models[currentProvider] || [] : []).filter(m => !hiddenModels.includes(m));
 
   return (
     <div className="w-full">
@@ -290,7 +288,7 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationI
               <span className="font-semibold text-sm text-muted-foreground">提供商</span>
               <RadioGroup
                 value={currentProvider || ''}
-                onValueChange={(v) => handleProviderChange(v as ModelProvider)}
+                onValueChange={(v) => handleProviderChange(v)}
               >
                 {enabledProviders.map((provider) => (
                   <div key={provider} className="flex items-center space-x-2">

@@ -1,14 +1,14 @@
 import { create } from 'zustand';
 import { devtools } from 'zustand/middleware';
-import type { ModelProvider, ConfigData, ConfigUpdateRequest } from '../types/model';
+import type { ConfigData, ConfigUpdateRequest } from '../types/model';
 import { modelApi } from '../api/model';
 import { configApi } from '../api/config';
 
 interface ModelState {
-  providers: ModelProvider[];
-  models: Record<ModelProvider, string[]>;
+  providers: string[];
+  models: Record<string, string[]>;
   config: ConfigData | null;
-  currentProvider: ModelProvider | null;
+  currentProvider: string | null;
   currentModel: string | null;
   loading: boolean;
   error: string | null;
@@ -16,10 +16,10 @@ interface ModelState {
 
 interface ModelActions {
   loadProviders: () => Promise<void>;
-  loadModels: (provider: ModelProvider) => Promise<void>;
+  loadModels: (provider: string) => Promise<void>;
   loadConfig: () => Promise<void>;
   updateConfig: (config: ConfigUpdateRequest) => Promise<void>;
-  setCurrentProvider: (provider: ModelProvider) => void;
+  setCurrentProvider: (provider: string) => void;
   setCurrentModel: (model: string) => void;
   clearError: () => void;
 }
@@ -27,7 +27,7 @@ interface ModelActions {
 export const useModelStore = create<ModelState & ModelActions>()(
   devtools((set, get) => ({
     providers: [],
-    models: {} as Record<ModelProvider, string[]>,
+    models: {} as Record<string, string[]>,
     config: null,
     currentProvider: null,
     currentModel: null,
@@ -39,9 +39,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
       try {
         const providerList = await modelApi.getProviders();
         set({ providers: providerList });
-        if (providerList.length > 0 && !get().currentProvider) {
-          set({ currentProvider: providerList[0] });
-        }
+        // 不再在这里设置 currentProvider，由 loadConfig 负责
       } catch (err: any) {
         set({ error: err.message });
       } finally {
@@ -49,16 +47,19 @@ export const useModelStore = create<ModelState & ModelActions>()(
       }
     },
 
-    loadModels: async (provider) => {
+    loadModels: async (provider: string) => {
       set({ loading: true, error: null });
       try {
         const modelList = await modelApi.list(provider);
-        set((state) => ({
-          models: { ...state.models, [provider]: modelList },
-          currentModel: modelList.includes(state.currentModel || '')
-            ? state.currentModel
-            : modelList[0] || null,
-        }));
+        set((state) => {
+          // 只在 currentModel 为空或不在任何提供商中时才自动选择
+          const currentModel = state.currentModel;
+          const modelIsValid = currentModel && modelList.includes(currentModel);
+          return {
+            models: { ...state.models, [provider]: modelList },
+            currentModel: modelIsValid ? currentModel : modelList[0] || null,
+          };
+        });
       } catch (err: any) {
         set({ error: err.message });
       } finally {
@@ -70,10 +71,11 @@ export const useModelStore = create<ModelState & ModelActions>()(
       set({ loading: true, error: null });
       try {
         const config = await configApi.get();
-        set({
+        set((state) => ({
           config,
-          currentProvider: config.default_provider,
-        });
+          // 只在首次加载（currentProvider 为空）时设置默认提供商
+          currentProvider: state.currentProvider || config.default_provider || null,
+        }));
       } catch (err: any) {
         set({ error: err.message });
       } finally {
