@@ -1,92 +1,188 @@
-/* Markdown content styling */
+/* ============================================================
+   ChatTree · Markdown / prose styling — warm dark theme
+   Matches reference/gui message body + code block styling
+   ============================================================ */
 
-/* ====== 去除 typography 插件为 code 添加的反引号伪元素 ====== */
+/* ====== Remove typography plugin backtick pseudo-elements ====== */
 .prose code::before,
 .prose code::after {
   content: none !important;
 }
 
-/* ====== 代码块包装器 ====== */
-.code-block-wrapper {
-  border: 1px solid #d1d5db;
-  border-radius: 0.5rem;
-  position: relative;
-  /* 不设 overflow，否则会裁剪 sticky 工具栏 */
+/* ====== Message body base (reference: --codex-chat-font-size: 14.5px) ====== */
+.prose {
+  font-size: 14.5px;
+  line-height: 23.5px; /* calc(14.5 + 9) */
+}
+.prose p {
+  margin: 0 0 0.6875rem;
+}
+.prose p:last-child {
+  margin-bottom: 0;
 }
 
-/* 代码块工具栏 — sticky，吸顶到滚动容器顶部 */
-.code-toolbar-wrapper{
+/* ====== Links — warm accent, not blue ====== */
+.prose a {
+  color: var(--fg-link, #e88968);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  transition: color 0.15s;
+}
+.prose a:hover {
+  color: var(--accent-hover, #d97757);
+}
+.prose-invert a {
+  color: #f0a888;
+}
+.prose-invert a:hover {
+  color: #f5c0a8;
+}
+
+/* ====== Strong / Em ====== */
+.prose strong {
+  color: var(--fg-85, rgba(251,247,244,0.88));
+  font-weight: 600;
+}
+.prose em {
+  font-style: italic;
+}
+
+/* ====== Headings ====== */
+.prose h1, .prose h2, .prose h3 {
+  color: var(--fg-85, rgba(251,247,244,0.88));
+  font-weight: 600;
+  line-height: 1.25;
+}
+.prose h1 { font-size: 24px; margin: 20px 0 10px; }
+.prose h2 { font-size: 20px; margin: 20px 0 10px; }
+.prose h3 { font-size: 17px; margin: 20px 0 10px; }
+.prose h4 { font-size: 1.1em; }
+.prose h5 { font-size: 1em; }
+.prose h6 { font-size: 0.95em; }
+
+/* ====== Lists ====== */
+.prose ul, .prose ol {
+  margin: 0;
+  padding-inline-start: 1.3125rem;
+  list-style-position: outside;
+}
+.prose ul { list-style-type: disc; }
+.prose ol { list-style-type: decimal; }
+.prose li + li { margin-top: 0.5rem; }
+
+/* ====== Blockquote ====== */
+.prose blockquote {
+  color: var(--fg-85, rgba(251,247,244,0.88));
+  margin: 0 0 8px;
+  padding: 8px 0 8px 24px;
+  position: relative;
+  border-left: none;
+  font-style: normal;
+}
+.prose blockquote::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 4px;
+  background: var(--border-heavy, rgba(255,247,240,0.17));
+  border-radius: 2px;
+}
+
+/* ====== Horizontal rule ====== */
+.prose hr {
+  border: none;
+  border-top: 0.5px solid var(--border, rgba(255,247,240,0.09));
+  margin: 1em 0;
+}
+
+/* ====== Code block wrapper ====== */
+.code-block-wrapper {
+  border: 0.5px solid var(--border-light, rgba(255,247,240,0.05));
+  border-radius: 10px;
+  position: relative;
+  overflow: hidden;
+  margin: 14px 0;
+  background: color-mix(in srgb, var(--bg-editor, #221f1c) 10%, transparent);
+}
+
+/* Code block toolbar — sticky */
+.code-toolbar-wrapper {
   position: sticky;
   top: -16px;
   z-index: 2;
-  background-color: #f8f8f2;
-  margin-left: -1px;
-  margin-right: -1px;
 }
 .code-toolbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 0.25rem 0.75rem;
-  background-color: #e8e8e0;
-  border: 1px solid #d1d5db;
-  border-top: none;
-  border-radius: calc(0.5rem - 1px) calc(0.5rem - 1px) 0 0;
+  padding: 5px 12px;
+  background: var(--bg-elevated, #2a2723);
+  border-bottom: 0.5px solid var(--border-light, rgba(255,247,240,0.05));
   box-sizing: border-box;
+  font-size: 11.5px;
 }
 
-/* ====== 代码块（``` 包裹） ====== */
+/* ====== Code block (``` wrapped) ====== */
 .prose pre {
   overflow-x: auto;
-  border-radius: 0 0 calc(0.5rem - 1px) calc(0.5rem - 1px);
-  padding: 1rem;
-  background-color: #f8f8f2;
+  border-radius: 0;
+  padding: 8px;
+  background: transparent;
   border: none;
   margin: 0;
 }
 
-/* 代码块内的 code */
+/* Code inside code blocks */
 .prose pre code {
-  font-size: 1.1em;
-  color: #2d2d2d;
-  font-family: 'Fira Mono', 'Consolas', 'Menlo', 'Monaco', monospace;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--fg, #fbf7f4);
+  font-family: var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
   background: none;
   padding: 0;
   white-space: pre;
 }
 
-/* ====== 行内代码（` 包裹） ====== */
+/* ====== Inline code (` wrapped) ====== */
 .prose :not(pre) > code {
-  font-size: 1.05em;
-  color: #2d2d2d;
-  font-family: 'Fira Mono', 'Consolas', 'Menlo', 'Monaco', monospace;
-  background-color: rgba(0, 0, 0, 0.07);
-  padding: 0.15em 0.4em;
-  border-radius: 0.25em;
+  font-size: 0.92em;
+  color: inherit;
+  font-family: var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
+  background: color-mix(in srgb, var(--bg-button-tertiary-hover, rgba(255,247,240,0.075)) 60%, var(--fg, #fbf7f4) 6%);
+  padding: 1px 6px;
+  border-radius: 6px;
   white-space: nowrap;
 }
 
-/* 反色模式（用户消息）行内代码 */
+/* ====== Inverted mode (user messages) ====== */
+.prose-invert a {
+  color: #f0a888;
+}
+.prose-invert a:hover {
+  color: #f5c0a8;
+}
 .prose-invert :not(pre) > code {
-  background-color: rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.12);
   color: inherit;
 }
-
-/* 反色模式代码块 */
 .prose-invert .code-block-wrapper {
-  border-color: rgba(255, 255, 255, 0.15);
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.15);
 }
 .prose-invert .code-toolbar {
-  background-color: rgba(0, 0, 0, 0.35);
-  border-bottom-color: rgba(255, 255, 255, 0.15);
+  background: rgba(0, 0, 0, 0.25);
+  border-bottom-color: rgba(255, 255, 255, 0.08);
 }
 .prose-invert pre {
-  background-color: rgba(0, 0, 0, 0.25);
+  background: transparent;
 }
 .prose-invert pre code {
-  color: #e8e8e8;
+  color: rgba(255, 255, 255, 0.9);
 }
 
+/* ====== Tables ====== */
 .prose table {
   border-collapse: collapse;
   width: 100%;
@@ -94,31 +190,131 @@
 
 .prose th,
 .prose td {
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--border, rgba(255,247,240,0.09));
   padding: 0.5rem 0.75rem;
   text-align: left;
 }
 
 .prose th {
-  background-color: #f9fafb;
+  background: var(--muted, #2a2723);
   font-weight: 600;
 }
 
-.prose h1 {
-  font-size: 1.5em;
+/* ====== Tool call card (reference/gui components.css) ====== */
+.tool-call-card {
+  margin: 2px 0;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 0.5px solid var(--border, rgba(255,247,240,0.09));
+  background: rgba(255,247,240,0.035);
+  transition: border-color 0.15s;
 }
-.prose h2 {
-  font-size: 1.35em;
+.tool-call-card:hover {
+  border-color: var(--border-heavy, rgba(255,247,240,0.17));
 }
-.prose h3 {
-  font-size: 1.2em;
+.tool-call-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+  min-height: 26px;
 }
-.prose h4 {
-  font-size: 1.1em;
+.tool-call-name {
+  font-size: 11.5px;
+  font-weight: 500;
+  font-family: var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
+  color: var(--fg-85, rgba(251,247,244,0.88));
+  flex-shrink: 0;
 }
-.prose h5 {
-  font-size: 1em;
+.tool-call-summary {
+  font-size: 11.5px;
+  color: var(--fg-tertiary, rgba(251,247,244,0.52));
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.prose h6 {
-  font-size: 0.95em;
+.tool-call-duration {
+  font-size: 10px;
+  color: var(--fg-tertiary, rgba(251,247,244,0.52));
+  font-family: var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
+  flex-shrink: 0;
+}
+.tool-call-body {
+  display: none;
+  padding: 0 10px 8px;
+}
+.tool-call-card.expanded .tool-call-body {
+  display: block;
+}
+.tool-call-cmd {
+  background: var(--bg-editor, #221f1c);
+  border-radius: 4px;
+  padding: 5px 8px;
+  margin-bottom: 4px;
+  font-family: var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
+  font-size: 11px;
+  overflow-x: auto;
+  white-space: pre;
+  color: var(--fg-secondary, rgba(251,247,244,0.72));
+}
+.tool-call-output {
+  background: var(--bg-editor, #221f1c);
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-family: var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
+  font-size: 11px;
+  color: var(--fg-secondary, rgba(251,247,244,0.72));
+  max-height: 200px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  line-height: 1.4;
+}
+
+/* ====== Thinking shimmer (reference/gui components.css) ====== */
+.thinking-shimmer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  color: var(--fg-tertiary, rgba(251,247,244,0.52));
+  font-size: 12.5px;
+}
+.shimmer-text {
+  background: linear-gradient(90deg, var(--fg-tertiary) 0%, var(--fg) 50%, var(--fg-tertiary) 100%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: shimmer 2s steps(48) infinite;
+}
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ====== Message animations ====== */
+@keyframes msg-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-msg-in {
+  animation: msg-in 0.4s cubic-bezier(.19, 1, .22, 1) both;
+}
+
+/* ====== Streaming cursor ====== */
+.cursor-blink {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  background: var(--accent, #d97757);
+  margin-left: 2px;
+  animation: blink 0.8s step-end infinite;
+  vertical-align: text-bottom;
+}
+@keyframes blink {
+  50% { opacity: 0; }
 }
