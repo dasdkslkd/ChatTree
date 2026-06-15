@@ -22,6 +22,12 @@ class AddProviderRequest(BaseModel):
     api_key: str = ""
 
 
+@router.get("/health")
+async def health_check():
+    """轻量健康检查端点，仅用于前端心跳检测"""
+    return {"status": "ok"}
+
+
 @router.get("/config", response_model=Dict[str, Any])
 async def get_config(config_manager: Config = Depends(get_config_manager)):
     """获取配置"""

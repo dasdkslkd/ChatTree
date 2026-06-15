@@ -20,11 +20,11 @@ function App() {
     })();
   }, []);
 
-  // Connectivity check
+  // Connectivity check — lightweight health endpoint, not the full config
   useEffect(() => {
     const check = async () => {
       try {
-        const resp = await fetch('/api/config', { method: 'GET', signal: AbortSignal.timeout(5000) });
+        const resp = await fetch('/api/health', { method: 'GET', signal: AbortSignal.timeout(5000) });
         setConnected(resp.ok);
       } catch {
         setConnected(false);
