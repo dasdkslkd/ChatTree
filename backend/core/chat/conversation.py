@@ -37,6 +37,8 @@ class Conversation:
         """设置当前使用的模型"""
         self.current_provider = provider
         self.current_model = model
+        self.metadata["provider_id"] = provider
+        self.metadata["model_id"] = model
     
     def add_node(self, node: ConversationTreeNode, parent_id: Optional[str] = None, is_root: bool = False):
         """添加节点到对话树"""
@@ -229,8 +231,8 @@ class Conversation:
         """从字典创建对话"""
         metadata = data["metadata"]
         conv = cls(
-            provider=None,
-            model=None,
+            provider=metadata.get("provider_id"),
+            model=metadata.get("model_id"),
             conversation_id=metadata["id"],
             title=metadata.get("title", "")
         )

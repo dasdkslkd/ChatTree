@@ -18,6 +18,10 @@ class ConversationCreateRequest(BaseModel):
 class ConversationUpdateRequest(BaseModel):
     title: str
 
+class ConversationModelUpdateRequest(BaseModel):
+    model_id: str
+    provider_id: str
+
 class ConversationResponse(BaseModel):
     id: str
     title: str
@@ -117,6 +121,23 @@ async def update_conversation(
         if not chat_manager.update_conversation_title(conversation_id, request.title):
             raise HTTPException(status_code=404, detail="对话不存在")
         return {"message": "对话标题已更新"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch("/conversations/{conversation_id}/model")
+async def update_conversation_model(
+    conversation_id: str,
+    request: ConversationModelUpdateRequest,
+    chat_manager: ChatManager = Depends(get_chat_manager)
+):
+    """更新对话的默认模型"""
+    try:
+        if not chat_manager.update_conversation_model(conversation_id, request.model_id, request.provider_id):
+            raise HTTPException(status_code=404, detail="对话不存在")
+        return {"message": "对话模型已更新"}
     except HTTPException:
         raise
     except Exception as e:

@@ -82,7 +82,27 @@ class ChatManager:
             self.current_conversation.metadata["updated_at"] = int(time())
         
         return True
-    
+
+    def update_conversation_model(self, conversation_id: str, model_id: str, provider_id: str) -> bool:
+        """更新对话的默认模型"""
+        data = self.storage.load(conversation_id)
+        if not data:
+            return False
+
+        data["metadata"]["model_id"] = model_id
+        data["metadata"]["provider_id"] = provider_id
+        data["metadata"]["updated_at"] = int(time())
+
+        self.storage.save(data)
+
+        if self.current_conversation and self.current_conversation.metadata["id"] == conversation_id:
+            self.current_conversation.metadata["model_id"] = model_id
+            self.current_conversation.metadata["provider_id"] = provider_id
+            self.current_conversation.current_model = model_id
+            self.current_conversation.current_provider = provider_id
+
+        return True
+
     def send_message(
         self,
         content: str,

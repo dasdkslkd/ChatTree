@@ -54,13 +54,15 @@ class ConversationTreeNode(TypedDict):
     model_id: Optional[str]
     total_tokens: int
 
-class ConversationMetadata(TypedDict):
+class ConversationMetadata(TypedDict, total=False):
     """对话元数据"""
     id: str
     title: str
     created_at: int
     updated_at: int
     total_tokens: Dict[str, int]
+    model_id: Optional[str]       # 当前对话使用的模型ID
+    provider_id: Optional[str]    # 当前对话使用的提供商ID
 
 class ConversationData(TypedDict):
     """对话数据类型"""

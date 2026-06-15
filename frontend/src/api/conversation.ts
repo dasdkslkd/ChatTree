@@ -20,47 +20,51 @@ export interface TreeData {
 }
 
 export const conversationApi = {
-  // »ñÈ¡¶Ô»°ÁÐ±í
+  // ï¿½ï¿½È¡ï¿½Ô»ï¿½ï¿½Ð±ï¿½
   list: async (): Promise<Conversation[]> => {
     const response = await apiClient.get('/conversations');
     return response.data;
   },
 
-  // ´´½¨¶Ô»°
+  // ï¿½ï¿½ï¿½ï¿½ï¿½Ô»ï¿½
   create: async (data: ConversationCreateRequest = {}): Promise<Conversation> => {
     const response = await apiClient.post('/conversations', data);
     return response.data;
   },
 
-  // É¾³ý¶Ô»°
+  // É¾ï¿½ï¿½ï¿½Ô»ï¿½
   delete: async (id: string): Promise<void> => {
     await apiClient.delete(`/conversations/${id}`);
   },
 
-  // ÇÐ»»½Úµã
+  // ï¿½Ð»ï¿½ï¿½Úµï¿½
   switchNode: async (conversationId: string, nodeId: string): Promise<void> => {
     await apiClient.post(`/conversations/${conversationId}/switch/${nodeId}`);
   },
 
-  // »ñÈ¡·ÖÖ§
+  // ï¿½ï¿½È¡ï¿½ï¿½Ö§
   getBranches: async (conversationId: string): Promise<any> => {
     const response = await apiClient.get(`/conversations/${conversationId}/branches`);
     return response.data;
   },
 
-  // »ñÈ¡ÍêÕûÊ÷½á¹¹
+  // ï¿½ï¿½È¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½á¹¹
   getTree: async (conversationId: string): Promise<TreeData> => {
     const response = await apiClient.get(`/conversations/${conversationId}/tree`);
     return response.data;
   },
 
-  // ¸üÐÂ¶Ô»°±êÌâ
+  // ï¿½ï¿½ï¿½Â¶Ô»ï¿½ï¿½ï¿½ï¿½ï¿½
   updateTitle: async (id: string, title: string): Promise<void> => {
     await apiClient.patch(`/conversations/${id}`, { title });
   },
 
-  // É¾³ý½Úµã
-  // ÉÏ´«µ¼ÈëÎÄ¼þ
+  updateModel: async (id: string, modelId: string, providerId: string): Promise<void> => {
+    await apiClient.patch(`/conversations/${id}/model`, { model_id: modelId, provider_id: providerId });
+  },
+
+  // É¾ï¿½ï¿½ï¿½Úµï¿½
+  // ï¿½Ï´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä¼ï¿½
   uploadImport: async (conversationId: string, file: File): Promise<{ filename: string; size: number }> => {
     const formData = new FormData();
     formData.append('file', file);
@@ -70,13 +74,13 @@ export const conversationApi = {
     return response.data;
   },
 
-  // ÁÐ³öµ¼ÈëÎÄ¼þ
+  // ï¿½Ð³ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä¼ï¿½
   listImports: async (conversationId: string): Promise<Array<{ filename: string; size: number }>> => {
     const response = await apiClient.get(`/conversations/${conversationId}/imports`);
     return response.data;
   },
 
-  // É¾³ýµ¼ÈëÎÄ¼þ
+  // É¾ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä¼ï¿½
   deleteImport: async (conversationId: string, filename: string): Promise<void> => {
     await apiClient.delete(`/conversations/${conversationId}/imports/${encodeURIComponent(filename)}`);
   },

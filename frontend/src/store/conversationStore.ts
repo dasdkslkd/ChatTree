@@ -7,6 +7,7 @@ import type {
 import { conversationApi, type TreeData } from '../api/conversation';
 import type { Message } from '../types/message';
 import { messageApi } from '../api/message';
+import { useModelStore } from './modelStore';
 
 interface ConversationState {
   conversations: Conversation[];
@@ -80,6 +81,8 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
               pendingScrollNodeId: null,
             });
             await get().loadConversations();
+            // 新建对话：重置为默认模型
+            await useModelStore.getState().resetToDefault();
             return conversation;
           } catch (err: any) {
             set({ error: err.message });
@@ -106,6 +109,11 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
               currentNodeId: conversation?.current_node_id || null,
               pendingScrollNodeId: null,
             });
+            // 同步模型选择到 modelStore
+            await useModelStore.getState().syncFromConversation(
+              conversation?.provider_id || null,
+              conversation?.model_id || null,
+            );
           } catch (err: any) {
             set({ error: err.message });
           } finally {
@@ -115,20 +123,21 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
 
         deleteConversation: async (id) => {
           try {
+            const isCurrent = get().currentConversation?.id === id;
             await conversationApi.delete(id);
-            set((state) => {
-              const isCurrent = state.currentConversation?.id === id;
-              return {
-                conversations: state.conversations.filter((c) => c.id !== id),
-                currentConversation: isCurrent ? null : state.currentConversation,
-                messages: isCurrent ? [] : state.messages,
-                branches: isCurrent ? {} : state.branches,
-                treeData: isCurrent ? null : state.treeData,
-                streamingContent: isCurrent ? '' : state.streamingContent,
-                currentNodeId: isCurrent ? null : state.currentNodeId,
-                pendingScrollNodeId: isCurrent ? null : state.pendingScrollNodeId,
-              };
-            });
+            set((state) => ({
+              conversations: state.conversations.filter((c) => c.id !== id),
+              currentConversation: isCurrent ? null : state.currentConversation,
+              messages: isCurrent ? [] : state.messages,
+              branches: isCurrent ? {} : state.branches,
+              treeData: isCurrent ? null : state.treeData,
+              streamingContent: isCurrent ? '' : state.streamingContent,
+              currentNodeId: isCurrent ? null : state.currentNodeId,
+              pendingScrollNodeId: isCurrent ? null : state.pendingScrollNodeId,
+            }));
+            if (isCurrent) {
+              await useModelStore.getState().resetToDefault();
+            }
           } catch (err: any) {
             set({ error: err.message });
           }
@@ -231,15 +240,19 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
         clearError: () => set({ error: null }),
         clearPendingScroll: () => set({ pendingScrollNodeId: null }),
 
-        clearCurrentConversation: () => set({
-          currentConversation: null,
-          messages: [],
-          branches: {},
-          treeData: null,
-          streamingContent: '',
-          currentNodeId: null,
-          pendingScrollNodeId: null,
-        }),
+        clearCurrentConversation: () => {
+          set({
+            currentConversation: null,
+            messages: [],
+            branches: {},
+            treeData: null,
+            streamingContent: '',
+            currentNodeId: null,
+            pendingScrollNodeId: null,
+          });
+          // 清空对话时重置为默认模型
+          useModelStore.getState().resetToDefault();
+        },
 
         deleteNode: async (nodeId) => {
           const { currentConversation } = get();

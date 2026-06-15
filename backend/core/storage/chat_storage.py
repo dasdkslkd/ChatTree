@@ -94,7 +94,9 @@ class ChatStorage(StorageInterface):
             "id": conversation_id,
             "title": data["metadata"].get("title", ""),
             "updated_at": data["metadata"]["updated_at"],
-            "node_count": len(data["nodes"])
+            "node_count": len(data["nodes"]),
+            "model_id": data["metadata"].get("model_id", ""),
+            "provider_id": data["metadata"].get("provider_id", ""),
         }
         self._save_index()
         
@@ -145,7 +147,9 @@ class ChatStorage(StorageInterface):
                 "id": conv_id,
                 "title": info.get("title", ""),
                 "updated_at": info.get("updated_at", 0),
-                "node_count": str(info.get("node_count", 0))
+                "node_count": str(info.get("node_count", 0)),
+                "model_id": info.get("model_id", ""),
+                "provider_id": info.get("provider_id", ""),
             })
         return result
     

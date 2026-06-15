@@ -4,6 +4,8 @@ export interface Conversation {
   created_at: number;
   updated_at: number;
   model: string;
+  model_id: string;
+  provider_id: string;
   current_node_id: string;
   total_tokens: {
     prompt_tokens: number;
