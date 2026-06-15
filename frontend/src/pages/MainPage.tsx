@@ -22,7 +22,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import {
   Plus, X, MoreHorizontal, ChevronLeft, ChevronRight,
-  Copy, Check, Pencil, Loader2, RotateCcw, Network, MessageSquare, Trash2, FileText, Download,
+  Copy, Check, Pencil, Loader2, RotateCcw, Network, MessageSquare, Trash2, FileText, Download, Settings,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -100,7 +100,7 @@ export default function ChatPage() {
   const scrollEndTimeoutRef = useRef<number | null>(null);
   const programmaticScrollRef = useRef(false);
 
-  const { chatViewMode, toggleChatViewMode } = useNavigationStore();
+  const { chatViewMode, toggleChatViewMode, openSettings } = useNavigationStore();
 
   const isAtBottom = useCallback(() => {
     if (!historyRef.current) return true;
@@ -466,26 +466,47 @@ export default function ChatPage() {
         key={m.id}
         id={`message-${index}`}
         className={cn(
-          'w-full my-2 flex flex-col group',
+          'w-full my-2 flex flex-col group animate-msg-in',
           m.role === 'user' ? 'items-end' : 'items-start'
         )}
       >
         <div className="flex flex-col items-start max-w-full">
           {fileMention && (
-            <div className="max-w-full w-fit mb-1 px-2.5 py-1.5 rounded-lg bg-primary/5 border border-primary/20 text-xs text-muted-foreground flex flex-wrap items-center gap-1.5">
-              <FileText className="h-3.5 w-3.5 text-primary/60 shrink-0" />
+            <div className="max-w-full w-fit mb-1 px-2.5 py-1.5 rounded-lg text-xs flex flex-wrap items-center gap-1.5"
+                 style={{ background: 'var(--accent-soft)', border: '0.5px solid var(--border)', color: 'var(--fg-tertiary)' }}>
+              <FileText className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--icon-accent)' }} />
               {fileMention.fileNames.map((fn, fi) => (
-                <span key={fi} className="px-1.5 py-0.5 bg-primary/10 text-primary rounded text-[11px] font-medium cursor-pointer hover:bg-primary/20 transition-colors" onClick={() => handlePreviewFile(fn)}>{fn}</span>
+                <span key={fi} className="px-1.5 py-0.5 rounded text-[11px] font-medium cursor-pointer transition-colors"
+                      style={{ background: 'var(--accent-soft)', color: 'var(--icon-accent)' }}
+                      onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-active)'; }}
+                      onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--accent-soft)'; }}
+                      onClick={() => handlePreviewFile(fn)}>{fn}</span>
               ))}
             </div>
           )}
           <div
             className={cn(
-              'max-w-full w-fit px-3 py-2 rounded-[10px] leading-relaxed prose prose-sm max-w-none [&_p]:m-0 [&_p:not(:last-child)]:mb-2',
+              'max-w-full w-fit px-3 py-2 rounded-2xl leading-relaxed prose prose-sm max-w-none [&_p]:m-0 [&_p:not(:last-child)]:mb-2',
               m.role === 'user'
-                ? 'bg-primary text-primary-foreground prose-invert rounded-br-[6px]'
-                : 'bg-muted border rounded-bl-[6px]'
+                ? 'prose-invert rounded-br-sm'
+                : ''
             )}
+            style={
+              m.role === 'user'
+                ? {
+                    background: 'linear-gradient(160deg, rgba(217,119,87,0.16), rgba(217,119,87,0.08))',
+                    border: '0.5px solid rgba(217,119,87,0.28)',
+                    boxShadow: 'var(--highlight-top)',
+                    color: 'var(--fg-85)',
+                    fontSize: 'var(--codex-chat-font-size)',
+                    lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
+                  }
+                : {
+                    color: 'var(--fg-secondary)',
+                    fontSize: 'var(--codex-chat-font-size)',
+                    lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
+                  }
+            }
           >
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
@@ -567,15 +588,30 @@ export default function ChatPage() {
   };
 
   return (
-    <div className="flex h-screen bg-background">
+    <div className="flex h-full" style={{ background: 'var(--bg-surface)' }}>
       {/* Left conversation list (collapsible) */}
       <nav
-        className="flex flex-col transition-[width] duration-200 overflow-y-auto overflow-x-hidden custom-scrollbar border-r bg-background"
-        style={{ width: sidebarCollapsed ? '56px' : '260px' }}
+        className="flex flex-col transition-[width] duration-200 overflow-x-hidden"
+        style={{
+          width: sidebarCollapsed ? '56px' : '260px',
+          background: 'var(--bg-surface)',
+          borderRight: '0.5px solid var(--border)',
+        }}
       >
-        <div className="flex justify-between items-center p-3 sticky top-0 bg-background z-[1] min-h-[56px]">
+        {/* Header */}
+        <div className="flex justify-between items-center p-3 flex-shrink-0 min-h-[56px]"
+             style={{ background: 'var(--bg-surface)' }}>
           {!sidebarCollapsed && (
-            <Button size="sm" onClick={() => clearCurrentConversation()}>
+            <Button
+              size="sm"
+              onClick={() => clearCurrentConversation()}
+              className="font-semibold"
+              style={{
+                background: 'var(--accent-soft)',
+                color: 'var(--icon-accent)',
+                border: 'none',
+              }}
+            >
               <Plus className="h-4 w-4 mr-1" />
               新建对话
             </Button>
@@ -590,60 +626,83 @@ export default function ChatPage() {
           </Button>
         </div>
 
-        {!sidebarCollapsed && conversations.map((c) => (
-          <Tooltip key={c.id}>
-            <TooltipTrigger asChild>
-              <div
-                className={cn(
-                  'flex items-center justify-between py-2 px-3 cursor-pointer rounded-md mx-2 my-0.5 transition-colors hover:bg-muted',
-                  c.id === currentConversation?.id && 'bg-accent hover:bg-accent'
-                )}
-                onClick={() => handleSelectConversation(c.id)}
-                onMouseEnter={() => setHoveredId(c.id)}
-                onMouseLeave={() => setHoveredId(null)}
-              >
-                <span className="flex-1 mr-2 truncate text-sm">
-                  {c.title || '未命名'}
-                </span>
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className={cn(
-                        'h-7 w-7 p-0 transition-opacity',
-                        hoveredId === c.id ? 'opacity-100' : 'opacity-0'
-                      )}
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <MoreHorizontal className="h-4 w-4" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent>
-                    <DropdownMenuItem onClick={() => handleRenameClick(c.id, c.title)}>
-                      <Pencil className="h-4 w-4 mr-2" />
-                      重命名
-                    </DropdownMenuItem>
-                    <DropdownMenuItem onClick={() => deleteConversation(c.id)}>
-                      <X className="h-4 w-4 mr-2" />
-                      删除对话
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </div>
-            </TooltipTrigger>
-            <TooltipContent side="right">{c.title || '未命名'}</TooltipContent>
-          </Tooltip>
-        ))}
+        {/* Conversation list — scrollable */}
+        {!sidebarCollapsed && (
+          <div className="flex-1 overflow-y-auto custom-scrollbar min-h-0">
+            {[...conversations]
+              .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0))
+              .map((c) => (
+                <div
+                  key={c.id}
+                  className={cn(
+                    'flex items-center justify-between py-2 px-3 cursor-pointer rounded-lg mx-2 my-0.5 transition-colors',
+                  )}
+                  onClick={() => handleSelectConversation(c.id)}
+                  style={{
+                    ...(c.id === currentConversation?.id
+                      ? { background: 'var(--bg-button-tertiary-active)' }
+                      : {}),
+                  }}
+                  onMouseEnter={(e) => {
+                    if (c.id !== currentConversation?.id) {
+                      (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-hover)';
+                    }
+                    setHoveredId(c.id);
+                  }}
+                  onMouseLeave={(e) => {
+                    if (c.id !== currentConversation?.id) {
+                      (e.currentTarget as HTMLElement).style.background = '';
+                    }
+                    setHoveredId(null);
+                  }}
+                >
+                  <span className="flex-1 mr-2 truncate text-sm">
+                    {c.title || '未命名'}
+                  </span>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className={cn(
+                          'h-7 w-7 p-0 transition-opacity',
+                          hoveredId === c.id ? 'opacity-100' : 'opacity-0'
+                        )}
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <MoreHorizontal className="h-4 w-4" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent>
+                      <DropdownMenuItem onClick={() => handleRenameClick(c.id, c.title)}>
+                        <Pencil className="h-4 w-4 mr-2" />
+                        重命名
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => deleteConversation(c.id)}>
+                        <X className="h-4 w-4 mr-2" />
+                        删除对话
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
+              ))}
+          </div>
+        )}
+
+        {/* Footer spacer — keeps scroll area from reaching the bottom */}
+        <div className="flex-shrink-0 h-2" style={{ borderTop: '0.5px solid var(--border)' }} />
       </nav>
 
       {/* Center: title bar + content (chat or tree) */}
-      <section className="flex-1 flex flex-col overflow-hidden relative bg-background">
+      <section className="flex-1 flex flex-col overflow-hidden relative" style={{ background: 'var(--bg-surface)' }}>
         {/* Title bar with view toggle */}
-        <div className="flex items-center justify-between p-3 sticky top-0 bg-background z-[1] min-h-[56px] border-b">
+        <div
+          className="flex items-center justify-between p-3 sticky top-0 z-[1] min-h-[56px]"
+          style={{ background: 'var(--bg-surface)', borderBottom: '0.5px solid var(--border)' }}
+        >
           <span className="w-8" />
           <div className="flex items-center gap-2">
-            <span className="font-semibold">{currentConversation?.title || '请选择对话'}</span>
+            <span className="font-semibold" style={{ color: 'var(--fg-secondary)' }}>{currentConversation?.title || '请选择对话'}</span>
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -664,16 +723,31 @@ export default function ChatPage() {
               </TooltipContent>
             </Tooltip>
           </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-8 w-8 p-0"
-            onClick={handleExportMarkdown}
-            disabled={!messages.length}
-            title="导出为 Markdown"
-          >
-            <Download className="h-4 w-4" />
-          </Button>
+          <div className="flex items-center gap-1">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 w-8 p-0"
+                  onClick={() => openSettings('providers')}
+                >
+                  <Settings className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>设置</TooltipContent>
+            </Tooltip>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8 w-8 p-0"
+              onClick={handleExportMarkdown}
+              disabled={!messages.length}
+              title="导出为 Markdown"
+            >
+              <Download className="h-4 w-4" />
+            </Button>
+          </div>
         </div>
 
         {/* Chat view */}
@@ -692,7 +766,17 @@ export default function ChatPage() {
                 {pendingUserMessage && pendingUserMessageConvId === currentConversation?.id && (
                   <div className="w-full my-2 flex flex-col items-end">
                     <div className="flex flex-col items-start max-w-full">
-                      <div className="max-w-full w-fit px-3 py-2 rounded-[10px] rounded-br-[6px] leading-relaxed bg-primary text-primary-foreground prose prose-sm prose-invert max-w-none [&_p]:m-0">
+                      <div
+                        className="max-w-full w-fit px-3 py-2 rounded-2xl rounded-br-sm leading-relaxed prose prose-sm prose-invert max-w-none [&_p]:m-0"
+                        style={{
+                          background: 'linear-gradient(160deg, rgba(217,119,87,0.16), rgba(217,119,87,0.08))',
+                          border: '0.5px solid rgba(217,119,87,0.28)',
+                          boxShadow: 'var(--highlight-top)',
+                          color: 'var(--fg-85)',
+                          fontSize: 'var(--codex-chat-font-size)',
+                          lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
+                        }}
+                      >
                         <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{pendingUserMessage}</ReactMarkdown>
                       </div>
                     </div>
@@ -701,13 +785,20 @@ export default function ChatPage() {
                 {isStreaming && streamingConversationId === currentConversation?.id && (
                   <div className="w-full my-2 flex flex-col items-start">
                     <div className="flex flex-col items-start max-w-full">
-                      <div className="max-w-full w-fit px-3 py-2 rounded-[10px] rounded-bl-[6px] leading-relaxed bg-muted border prose prose-sm max-w-none [&_p]:m-0">
+                      <div
+                        className="max-w-full w-fit px-3 py-2 rounded-2xl rounded-bl-sm leading-relaxed prose prose-sm max-w-none [&_p]:m-0"
+                        style={{
+                          color: 'var(--fg-secondary)',
+                          fontSize: 'var(--codex-chat-font-size)',
+                          lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
+                        }}
+                      >
                         {streamedContent ? (
                           <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{streamedContent}</ReactMarkdown>
                         ) : (
                           <div className="flex items-center gap-2">
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                            <span className="text-sm text-muted-foreground">思考中...</span>
+                            <Loader2 className="h-4 w-4 animate-spin" style={{ color: 'var(--icon-accent)' }} />
+                            <span className="text-sm" style={{ color: 'var(--fg-tertiary)' }}>思考中...</span>
                           </div>
                         )}
                       </div>
@@ -723,7 +814,7 @@ export default function ChatPage() {
                 <div ref={messagesEndRef} />
               </div>
             </div>
-            <footer className="absolute bottom-5 left-1/2 -translate-x-1/2 w-[800px] max-w-[calc(100%-48px)] z-10">
+            <footer className="absolute bottom-4 left-1/2 -translate-x-1/2 w-[800px] max-w-[calc(100%-48px)] z-10">
               <ChatInput
                 onSend={handleSend}
                 onStop={abortStreaming}
@@ -752,11 +843,16 @@ export default function ChatPage() {
       {/* Right outline (only in chat mode, collapsible) */}
       {chatViewMode === 'chat' && (
         <aside
-          className="flex flex-col transition-[width] duration-200 overflow-y-auto overflow-x-hidden custom-scrollbar border-l bg-background"
-          style={{ width: outlineCollapsed ? '56px' : '280px' }}
+          className="flex flex-col transition-[width] duration-200 overflow-y-auto overflow-x-hidden custom-scrollbar"
+          style={{
+            width: outlineCollapsed ? '56px' : '280px',
+            background: 'var(--bg-surface)',
+            borderLeft: '0.5px solid var(--border)',
+          }}
         >
-          <div className="flex justify-between items-center p-3 sticky top-0 bg-background z-[1] min-h-[56px]">
-            {!outlineCollapsed && <span className="font-semibold">大纲</span>}
+          <div className="flex justify-between items-center p-3 sticky top-0 z-[1] min-h-[56px]"
+               style={{ background: 'var(--bg-surface)' }}>
+            {!outlineCollapsed && <span className="font-semibold" style={{ color: 'var(--fg-secondary)' }}>大纲</span>}
             <Button
               variant="ghost"
               size="sm"
@@ -770,9 +866,12 @@ export default function ChatPage() {
           {!outlineCollapsed && outline.map((item, idx) => (
             <div
               key={idx}
-              className="flex items-center py-2 px-3 cursor-pointer rounded-md mx-2 my-0.5 transition-colors hover:bg-muted"
+              className="flex items-center py-2 px-3 cursor-pointer rounded-lg mx-2 my-0.5 transition-colors"
+              style={{ color: 'var(--fg-85)' }}
               title={item.text}
               onClick={() => handleJumpToMessage(item.originalIndex)}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-hover)'; }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = ''; }}
             >
               <span className="truncate text-sm">{item.text}</span>
             </div>

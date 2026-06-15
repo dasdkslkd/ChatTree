@@ -14,6 +14,8 @@ import { useState, useEffect, useRef } from 'react'
 import { useModelStore } from '../store/modelStore'
 import { usePromptStore } from '../store/promtStore'
 import { useNavigationStore } from '../store/navigationStore'
+import { useConversationStore } from '../store/conversationStore'
+import { conversationApi } from '../api/conversation'
 
 interface Props {
   onSend: (value: string, modelId?: string, systemPrompt?: string) => Promise<void>;
@@ -30,7 +32,7 @@ interface Props {
 }
 
 export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationId, streamingConversationId, editValue, onEditValueConsumed, attachedFiles = [], onFilesPicked, onRemoveFile }: Props) {
-  const { currentPage, setCurrentPage } = useNavigationStore();
+  const { openSettings } = useNavigationStore();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [value, setValue] = useState('');
@@ -44,54 +46,55 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationI
     models,
     currentProvider,
     currentModel,
+    pendingProvider,
+    pendingModel,
     config,
-    loadProviders,
     loadModels,
     loadConfig,
-    setCurrentProvider,
-    setCurrentModel,
+    setPendingProvider,
+    setPendingModel,
+    confirmModelSelection,
+    cancelModelSelection,
   } = useModelStore();
 
   const { prompts, currentPrompt, loadPrompts, loadPrompt } = usePromptStore();
+  const currentConversation = useConversationStore((s) => s.currentConversation);
 
-  // 初始加载：先加载配置（确定默认提供商），再加载提供商列表
+  // 初始加载（loadConfig/loadProviders 已在 App.tsx 中调用）
   useEffect(() => {
-    (async () => {
-      await loadConfig();
-      await loadProviders();
-      loadPrompts();
-    })();
+    loadPrompts();
   }, []);
 
-  // 从设置页返回时重新同步配置（hidden_models / default_provider 等可能已变）
+  // 窗口焦点同步配置
   useEffect(() => {
-    if (currentPage === 'chat') {
-      loadConfig();
-    }
-  }, [currentPage]);
+    const onFocus = () => loadConfig();
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, []);
 
-  // 过滤已启用的提供商
+  // 已启用的提供商
   const enabledProviders = providers.filter((provider) => {
     if (!config?.provider) return false;
     return config.provider[provider]?.enabled;
   });
 
-  // 当提供商改变时加载模型
-  useEffect(() => {
-    if (currentProvider) {
-      loadModels(currentProvider);
-    }
-  }, [currentProvider]);
+  // 对话框中的活跃提供商和模型（pending 优先，否则 current）
+  const activeDialogProvider = pendingProvider || currentProvider;
+  const activeDialogModel = pendingModel || currentModel;
 
-  // 外部编辑值：填入输入框
+  // 当对话框中提供商改变时加载模型
+  useEffect(() => {
+    if (activeDialogProvider && modelDialogOpen) {
+      loadModels(activeDialogProvider);
+    }
+  }, [activeDialogProvider, modelDialogOpen]);
+
+  // 外部编辑值
   useEffect(() => {
     if (editValue != null) {
       setValue(editValue);
       onEditValueConsumed?.();
-      // Focus textarea after setting value
-      requestAnimationFrame(() => {
-        textareaRef.current?.focus();
-      });
+      requestAnimationFrame(() => { textareaRef.current?.focus(); });
     }
   }, [editValue]);
 
@@ -113,25 +116,64 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationI
     await onSend(value, currentModel || undefined, systemPrompt);
   };
 
-  const handleFilePick = () => {
-    fileInputRef.current?.click();
-  };
+  const handleFilePick = () => { fileInputRef.current?.click(); };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
-    if (files && files.length > 0) {
-      onFilesPicked?.(Array.from(files));
-    }
+    if (files && files.length > 0) onFilesPicked?.(Array.from(files));
     e.target.value = '';
   };
 
-  const handleProviderChange = (provider: string) => {
-    setCurrentProvider(provider);
+  // 打开模型对话框：将当前值复制到 pending
+  const handleOpenModelDialog = () => {
+    setPendingProvider(currentProvider || '');
+    setPendingModel(currentModel || '');
+    setModelDialogOpen(true);
   };
 
-  const handleModelChange = (model: string) => {
-    setCurrentModel(model);
+  // 对话框中切换提供商
+  const handleDialogProviderChange = (provider: string) => {
+    setPendingProvider(provider);
+    setPendingModel(''); // 切换提供商时清空模型选择
   };
+
+  // 对话框中切换模型
+  const handleDialogModelChange = (model: string) => {
+    setPendingModel(model);
+  };
+
+  // 确认模型选择：保存到后端
+  const handleConfirmModel = async () => {
+    const result = confirmModelSelection();
+    if (result && currentConversation) {
+      try {
+        await conversationApi.updateModel(currentConversation.id, result.model, result.provider);
+        // 更新本地 conversation 对象
+        const { conversations } = useConversationStore.getState();
+        const conv = conversations.find(c => c.id === currentConversation.id);
+        if (conv) {
+          conv.model_id = result.model;
+          conv.provider_id = result.provider;
+        }
+      } catch (err) {
+        console.error('保存模型设置失败:', err);
+      }
+    }
+    setModelDialogOpen(false);
+  };
+
+  // 取消模型选择
+  const handleCancelModel = () => {
+    cancelModelSelection();
+    setModelDialogOpen(false);
+  };
+
+  // 对话框中提供商变更时加载模型（首次打开也需要）
+  useEffect(() => {
+    if (modelDialogOpen && activeDialogProvider) {
+      loadModels(activeDialogProvider);
+    }
+  }, [modelDialogOpen]);
 
   const handlePromptSelect = async (promptId: string, promptTitle: string) => {
     if (selectedPromptId === promptId) {
@@ -153,23 +195,48 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationI
     return config?.provider?.[provider]?.name || provider;
   };
 
-  const hiddenModels = currentProvider ? (config?.provider?.[currentProvider]?.hidden_models || []) : [];
-  const currentModels = (currentProvider ? models[currentProvider] || [] : []).filter(m => !hiddenModels.includes(m));
+  const hiddenModels = activeDialogProvider ? (config?.provider?.[activeDialogProvider]?.hidden_models || []) : [];
+  const dialogModels = (activeDialogProvider ? models[activeDialogProvider] || [] : []).filter(m => !hiddenModels.includes(m));
 
   return (
     <div className="w-full">
-      <div className="flex flex-col border rounded-xl bg-background overflow-hidden shadow-md">
+      <div
+        className="flex flex-col overflow-hidden transition-all"
+        style={{
+          border: '0.5px solid var(--border)',
+          background: 'color-mix(in srgb, var(--bg-input) 90%, transparent)',
+          boxShadow: 'var(--shadow-xl), var(--highlight-top)',
+          backdropFilter: 'blur(12px)',
+          borderRadius: '16px',
+        }}
+        onFocus={(e) => {
+          const el = e.currentTarget;
+          el.style.borderColor = 'var(--border-focus)';
+          el.style.boxShadow = 'var(--shadow-xl), 0 0 0 3px var(--accent-soft)';
+        }}
+        onBlur={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+            const el = e.currentTarget;
+            el.style.borderColor = 'var(--border)';
+            el.style.boxShadow = 'var(--shadow-xl), var(--highlight-top)';
+          }
+        }}
+      >
         {attachedFiles.length > 0 && (
           <div className="flex flex-wrap gap-1.5 px-3 pt-2 pb-1">
             {attachedFiles.map((fname) => (
               <span
                 key={fname}
-                className="inline-flex items-center gap-1 px-2 py-0.5 bg-primary/10 text-primary rounded-md text-xs"
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs"
+                style={{ background: 'var(--accent-soft)', color: 'var(--icon-accent)' }}
               >
                 <FileText className="h-3 w-3" />
                 <span className="max-w-[140px] truncate">{fname}</span>
                 <button
-                  className="ml-0.5 hover:text-destructive cursor-pointer"
+                  className="ml-0.5 cursor-pointer bg-transparent border-none p-0"
+                  style={{ color: 'var(--icon-accent)' }}
+                  onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--accent-red)'; }}
+                  onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--icon-accent)'; }}
                   onClick={() => onRemoveFile?.(fname)}
                 >
                   <X className="h-3 w-3" />
@@ -180,7 +247,12 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationI
         )}
         <textarea
           ref={textareaRef}
-          className="w-full min-h-[60px] max-h-[200px] py-3 px-4 border-none outline-none resize-none text-sm leading-normal bg-transparent placeholder:text-muted-foreground disabled:bg-muted/50"
+          className="w-full min-h-[60px] max-h-[200px] py-3 px-4 border-none outline-none resize-none leading-normal bg-transparent"
+          style={{
+            fontSize: 'var(--codex-chat-font-size)',
+            color: 'var(--fg-85)',
+            fontFamily: 'var(--font-sans)',
+          }}
           value={value}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={(e) => {
@@ -193,7 +265,10 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationI
           placeholder="按 Enter 发送，Ctrl+Enter 换行"
           rows={2}
         />
-        <div className="flex justify-between items-center px-2 py-1 border-t bg-muted/30">
+        <div
+          className="flex justify-between items-center px-2 py-1"
+          style={{ borderTop: '0.5px solid var(--border)', background: 'var(--bg-button-tertiary-hover)' }}
+        >
           <div className="flex gap-1 items-center">
             <input
               ref={fileInputRef}
@@ -212,83 +287,106 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationI
               <Plus className="h-4 w-4" />
             </Button>
             {/* 模型选择按钮 */}
-            <Button
-              variant="ghost"
-              size="sm"
-              className="text-xs font-normal h-7 px-2"
-              onClick={() => setModelDialogOpen(true)}
+            <button
+              className="flex items-center gap-1 text-xs font-normal h-7 px-2 rounded-full cursor-pointer transition-colors"
+              style={{ color: 'var(--fg-tertiary)' }}
+              onClick={handleOpenModelDialog}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-hover)'; (e.currentTarget as HTMLElement).style.color = 'var(--fg-secondary)'; }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = ''; (e.currentTarget as HTMLElement).style.color = 'var(--fg-tertiary)'; }}
             >
               <Bot className="h-4 w-4 mr-1" />
               {currentProvider && currentModel
                 ? `${getProviderDisplayName(currentProvider)} / ${currentModel}`
                 : '选择模型'}
-            </Button>
+            </button>
 
             {/* 提示词选择按钮 */}
             {selectedPromptTitle ? (
-              <div className="flex items-center gap-1 px-2 py-0.5 bg-primary/10 rounded-md text-xs">
+              <div className="flex items-center gap-1 px-2 py-0.5 rounded-full text-xs"
+                   style={{ background: 'var(--accent-soft)', color: 'var(--icon-accent)' }}>
                 <StickyNote className="h-3 w-3" />
                 <span>{selectedPromptTitle}</span>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-4 w-4 p-0 hover:bg-transparent"
+                <button
+                  className="ml-0.5 hover:opacity-70 cursor-pointer bg-transparent border-none p-0"
+                  style={{ color: 'var(--icon-accent)' }}
                   onClick={clearSelectedPrompt}
                 >
                   <X className="h-3 w-3" />
-                </Button>
+                </button>
               </div>
             ) : (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="text-xs font-normal h-7 px-2"
+              <button
+                className="flex items-center gap-1 text-xs font-normal h-7 px-2 rounded-full cursor-pointer transition-colors"
+                style={{ color: 'var(--fg-tertiary)' }}
                 onClick={() => setPromptDialogOpen(true)}
+                onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-hover)'; (e.currentTarget as HTMLElement).style.color = 'var(--fg-secondary)'; }}
+                onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = ''; (e.currentTarget as HTMLElement).style.color = 'var(--fg-tertiary)'; }}
               >
                 <StickyNote className="h-4 w-4 mr-1" />
                 提示词
-              </Button>
+              </button>
             )}
           </div>
 
           {/* 发送/终止按钮 */}
           {isStreaming && streamingConversationId === conversationId ? (
-            <Button
-              size="sm"
-              variant="destructive"
-              className="h-7 w-7 p-0"
+            <button
+              className="w-7 h-7 rounded-full flex items-center justify-center cursor-pointer transition-all"
+              style={{
+                background: 'var(--accent-red)',
+                color: '#fff',
+                border: 'none',
+              }}
               onClick={onStop}
               aria-label="终止生成"
             >
               <Square className="h-3 w-3 fill-current" />
-            </Button>
+            </button>
           ) : (
-            <Button
-              size="sm"
-              className="h-7 w-7 p-0"
+            <button
+              className="w-7 h-7 rounded-full flex items-center justify-center cursor-pointer transition-all"
+              style={{
+                background: disabled || !value.trim()
+                  ? 'var(--muted)'
+                  : 'linear-gradient(160deg, var(--accent-hover), var(--accent-active))',
+                color: disabled || !value.trim() ? 'var(--fg-tertiary)' : '#fff5ef',
+                border: 'none',
+                boxShadow: disabled || !value.trim() ? 'none' : 'var(--glow-accent), inset 0 1px 0 rgba(255,255,255,0.25)',
+                opacity: disabled || !value.trim() ? 0.35 : 1,
+              }}
               onClick={handleSend}
               disabled={disabled || !value.trim()}
               aria-label="发送消息"
+              onMouseEnter={(e) => {
+                if (!disabled && value.trim()) {
+                  (e.currentTarget as HTMLElement).style.filter = 'brightness(1.08)';
+                  (e.currentTarget as HTMLElement).style.transform = 'scale(1.06)';
+                }
+              }}
+              onMouseLeave={(e) => {
+                (e.currentTarget as HTMLElement).style.filter = '';
+                (e.currentTarget as HTMLElement).style.transform = '';
+              }}
             >
               <SendHorizontal className="h-4 w-4" />
-            </Button>
+            </button>
           )}
         </div>
       </div>
 
       {/* 模型选择对话框 */}
-      <Dialog open={modelDialogOpen} onOpenChange={setModelDialogOpen}>
-        <DialogContent className="max-w-fit">
+      <Dialog open={modelDialogOpen} onOpenChange={(open) => { if (!open) handleCancelModel(); }}>
+        <DialogContent className="flex flex-col" style={{ width: '480px', height: '420px' }} showCloseButton={false}>
           <DialogHeader>
             <DialogTitle>选择模型</DialogTitle>
           </DialogHeader>
-          <div className="flex gap-6 min-w-[400px]">
+          <div className="flex gap-6 flex-1 min-h-0">
             {/* 提供商选择 - 左侧 */}
-            <div className="flex flex-col gap-2 min-w-[120px] max-h-[300px] overflow-y-auto pr-3 border-r">
-              <span className="font-semibold text-sm text-muted-foreground">提供商</span>
+            <div className="flex flex-col gap-2 min-w-[120px] flex-1 overflow-y-auto pr-3 custom-scrollbar min-h-0" style={{ borderRight: '0.5px solid var(--border)' }}>
+              <span className="font-semibold text-sm" style={{ color: 'var(--fg-tertiary)' }}>提供商</span>
               <RadioGroup
-                value={currentProvider || ''}
-                onValueChange={(v) => handleProviderChange(v)}
+                value={activeDialogProvider || ''}
+                onValueChange={(v) => handleDialogProviderChange(v)}
               >
                 {enabledProviders.map((provider) => (
                   <div key={provider} className="flex items-center space-x-2">
@@ -300,20 +398,20 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationI
                 ))}
               </RadioGroup>
               {enabledProviders.length === 0 && (
-                <span className="text-xs text-muted-foreground">
+                <span className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>
                   暂无已启用的提供商
                 </span>
               )}
             </div>
 
             {/* 模型选择 - 右侧 */}
-            <div className="flex flex-col gap-2 flex-1 max-h-[300px] overflow-y-auto">
-              <span className="font-semibold text-sm text-muted-foreground">模型</span>
+            <div className="flex flex-col gap-2 flex-1 overflow-y-auto custom-scrollbar min-h-0">
+              <span className="font-semibold text-sm" style={{ color: 'var(--fg-tertiary)' }}>模型</span>
               <RadioGroup
-                value={currentModel || ''}
-                onValueChange={handleModelChange}
+                value={activeDialogModel || ''}
+                onValueChange={handleDialogModelChange}
               >
-                {currentModels.map((model) => (
+                {dialogModels.map((model) => (
                   <div key={model} className="flex items-center space-x-2">
                     <RadioGroupItem value={model} id={`model-${model}`} />
                     <Label htmlFor={`model-${model}`} className="cursor-pointer">
@@ -322,8 +420,8 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationI
                   </div>
                 ))}
               </RadioGroup>
-              {currentModels.length === 0 && (
-                <span className="text-xs text-muted-foreground">
+              {dialogModels.length === 0 && (
+                <span className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>
                   请先选择提供商
                 </span>
               )}
@@ -334,17 +432,17 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationI
               variant="ghost"
               size="sm"
               onClick={() => {
-                setModelDialogOpen(false);
-                setCurrentPage('settings');
+                handleCancelModel();
+                openSettings('providers');
               }}
             >
               <Settings className="h-4 w-4 mr-1" />
               设置
             </Button>
-            <Button variant="outline" onClick={() => setModelDialogOpen(false)}>
+            <Button variant="outline" onClick={handleCancelModel}>
               取消
             </Button>
-            <Button onClick={() => setModelDialogOpen(false)}>
+            <Button onClick={handleConfirmModel} disabled={!activeDialogProvider || !activeDialogModel}>
               确定
             </Button>
           </DialogFooter>
@@ -357,20 +455,34 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationI
           <DialogHeader>
             <DialogTitle>选择提示词</DialogTitle>
           </DialogHeader>
-          <div className="flex flex-col gap-1 max-h-[300px] overflow-y-auto">
+          <div className="flex flex-col gap-1 max-h-[300px] overflow-y-auto custom-scrollbar">
             {prompts.length > 0 ? (
               prompts.map((prompt) => (
                 <div
                   key={prompt.id}
                   className={cn(
-                    'flex justify-between items-center p-2 rounded-md cursor-pointer hover:bg-muted transition-colors',
-                    selectedPromptId === prompt.id && 'bg-primary/10'
+                    'flex justify-between items-center p-2 rounded-lg cursor-pointer transition-colors',
                   )}
+                  style={{
+                    ...(selectedPromptId === prompt.id
+                      ? { background: 'var(--accent-soft)' }
+                      : {}),
+                  }}
                   onClick={() => handlePromptSelect(prompt.id, prompt.title)}
+                  onMouseEnter={(e) => {
+                    if (selectedPromptId !== prompt.id) {
+                      (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-hover)';
+                    }
+                  }}
+                  onMouseLeave={(e) => {
+                    if (selectedPromptId !== prompt.id) {
+                      (e.currentTarget as HTMLElement).style.background = '';
+                    }
+                  }}
                 >
                   <span className="text-sm">{prompt.title}</span>
                   {selectedPromptId === prompt.id && (
-                    <span className="text-xs text-primary">已选择</span>
+                    <span className="text-xs" style={{ color: 'var(--icon-accent)' }}>已选择</span>
                   )}
                 </div>
               ))
