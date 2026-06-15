@@ -1,23 +1,26 @@
-﻿import { create } from 'zustand';
+import { create } from 'zustand';
 
-type PageType = 'chat' | 'prompts' | 'settings';
 type ChatViewMode = 'chat' | 'tree';
 
 interface NavigationState {
-  currentPage: PageType;
   chatViewMode: ChatViewMode;
-  setCurrentPage: (page: PageType) => void;
+  settingsOpen: boolean;
+  settingsSection: 'providers' | 'prompts';
   setChatViewMode: (mode: ChatViewMode) => void;
   toggleChatViewMode: () => void;
+  openSettings: (section?: 'providers' | 'prompts') => void;
+  closeSettings: () => void;
 }
 
 export const useNavigationStore = create<NavigationState>((set) => ({
-  currentPage: 'chat',
   chatViewMode: 'chat',
-  setCurrentPage: (page) => set({ currentPage: page }),
+  settingsOpen: false,
+  settingsSection: 'providers',
   setChatViewMode: (mode) => set({ chatViewMode: mode }),
   toggleChatViewMode: () =>
     set((state) => ({
       chatViewMode: state.chatViewMode === 'chat' ? 'tree' : 'chat',
     })),
+  openSettings: (section = 'providers') => set({ settingsOpen: true, settingsSection: section }),
+  closeSettings: () => set({ settingsOpen: false }),
 }));

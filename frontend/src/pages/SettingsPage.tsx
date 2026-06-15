@@ -335,7 +335,7 @@ export default function SettingsPage() {
                               {getApiFormatLabel(pc.api_format)}
                             </Badge>
                             {pc.enabled && (
-                              <Badge variant="secondary" className="bg-green-100 text-green-700 text-xs">
+                              <Badge variant="secondary" className="text-xs" style={{ background: 'rgba(95,185,138,0.15)', color: 'var(--accent-green)' }}>
                                 已启用
                               </Badge>
                             )}
