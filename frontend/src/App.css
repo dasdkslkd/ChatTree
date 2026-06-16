@@ -296,15 +296,6 @@
   100% { background-position: -200% 0; }
 }
 
-/* ====== Message animations ====== */
-@keyframes msg-in {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-.animate-msg-in {
-  animation: msg-in 0.4s cubic-bezier(.19, 1, .22, 1) both;
-}
-
 /* ====== Streaming cursor ====== */
 .cursor-blink {
   display: inline-block;

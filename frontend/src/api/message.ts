@@ -15,7 +15,8 @@ export const messageApi = {
   stream: async function* (
     conversationId: string,
     data: SendMessageRequest,
-    nodeId?: string
+    nodeId?: string,
+    signal?: AbortSignal
   ): AsyncGenerator<StreamChunk, void> {
     const response = await fetch(`/api/conversations/${conversationId}/messages/stream`, {
       method: 'POST',
@@ -23,6 +24,7 @@ export const messageApi = {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ ...data, node_id: nodeId }),
+      signal,
     });
 
     if (!response.ok) {
@@ -38,49 +40,59 @@ export const messageApi = {
 
     let buffer = '';
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      buffer += decoder.decode(value, { stream: true });
-      
-      // 按双换行符分割 SSE 消息
-      const parts = buffer.split('\n\n');
-      // 最后一部分可能不完整，保留到下次处理
-      buffer = parts.pop() || '';
+        buffer += decoder.decode(value, { stream: true });
 
-      for (const part of parts) {
-        const trimmed = part.trim();
-        if (!trimmed) continue;
-        
-        if (trimmed.startsWith('data: ')) {
-          const jsonData = trimmed.slice(6);
-          if (jsonData === '[DONE]') {
-            return;
-          }
-          try {
-            const parsed: StreamChunk = JSON.parse(jsonData);
-            yield parsed;
-          } catch (e) {
-            console.error('Failed to parse stream chunk:', e, jsonData);
+        // 按双换行符分割 SSE 消息
+        const parts = buffer.split('\n\n');
+        // 最后一部分可能不完整，保留到下次处理
+        buffer = parts.pop() || '';
+
+        for (const part of parts) {
+          const trimmed = part.trim();
+          if (!trimmed) continue;
+
+          if (trimmed.startsWith('data: ')) {
+            const jsonData = trimmed.slice(6);
+            if (jsonData === '[DONE]') {
+              return;
+            }
+            try {
+              const parsed: StreamChunk = JSON.parse(jsonData);
+              yield parsed;
+            } catch (e) {
+              console.error('Failed to parse stream chunk:', e, jsonData);
+            }
           }
         }
       }
-    }
-    
-    // 处理剩余的buffer
-    if (buffer.trim()) {
-      const trimmed = buffer.trim();
-      if (trimmed.startsWith('data: ')) {
-        const jsonData = trimmed.slice(6);
-        if (jsonData !== '[DONE]') {
-          try {
-            const parsed: StreamChunk = JSON.parse(jsonData);
-            yield parsed;
-          } catch (e) {
-            console.error('Failed to parse final stream chunk:', e, jsonData);
+
+      // 处理剩余的buffer
+      if (buffer.trim()) {
+        const trimmed = buffer.trim();
+        if (trimmed.startsWith('data: ')) {
+          const jsonData = trimmed.slice(6);
+          if (jsonData !== '[DONE]') {
+            try {
+              const parsed: StreamChunk = JSON.parse(jsonData);
+              yield parsed;
+            } catch (e) {
+              console.error('Failed to parse final stream chunk:', e, jsonData);
+            }
           }
         }
+      }
+    } finally {
+      // 无论正常结束、提前 return（[DONE]）还是因 abort 抛出，
+      // 都要释放底层连接，避免并发时连接泄漏。
+      try {
+        await reader.cancel();
+      } catch (_) {
+        // reader 可能已关闭，忽略
       }
     }
   },

@@ -23,7 +23,6 @@ interface Props {
   isStreaming?: boolean;
   disabled: boolean;
   conversationId: string | null;
-  streamingConversationId?: string | null;
   editValue?: string | null;
   onEditValueConsumed?: () => void;
   attachedFiles?: string[];
@@ -31,7 +30,7 @@ interface Props {
   onRemoveFile?: (filename: string) => void;
 }
 
-export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationId, streamingConversationId, editValue, onEditValueConsumed, attachedFiles = [], onFilesPicked, onRemoveFile }: Props) {
+export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationId, editValue, onEditValueConsumed, attachedFiles = [], onFilesPicked, onRemoveFile }: Props) {
   const { openSettings } = useNavigationStore();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -329,7 +328,7 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationI
           </div>
 
           {/* 发送/终止按钮 */}
-          {isStreaming && streamingConversationId === conversationId ? (
+          {isStreaming ? (
             <button
               className="w-7 h-7 rounded-full flex items-center justify-center cursor-pointer transition-all"
               style={{

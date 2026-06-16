@@ -38,6 +38,7 @@ interface ConversationActions {
   clearError: () => void;
   loadTree: (conversationId: string) => Promise<void>;
   clearPendingScroll: () => void;
+  refreshMessages: (conversationId: string, opts?: { minCount?: number; retries?: number }) => Promise<boolean>;
 }
 
 const useConversationStoreBase = create<ConversationState & ConversationActions>()(
@@ -239,6 +240,62 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
         abortStreaming: () => set({ isStreaming: false, streamingContent: '' }),
         clearError: () => set({ error: null }),
         clearPendingScroll: () => set({ pendingScrollNodeId: null }),
+
+        // 流式结束后，从后端拉取真实消息。
+        // 正常路径：后端在发送 [DONE] 之前已保存，一次即拿到最终结果。
+        // 硬 abort 路径：后端保存由“连接断开”触发，与本次拉取存在竞态，
+        //   因此支持 minCount + 轮询重试，直到消息数增长（保存完成）或重试用尽，
+        //   避免过早用旧数据覆盖、把乐观气泡擦掉。
+        // 仅当用户仍在查看该对话时才更新视图，避免并发流互相覆盖。
+        // 返回值：true 表示已确认拿到“增长后”的消息（可安全清理乐观状态）；
+        //         false 表示未确认（用户已切走 / 出错 / 重试用尽仍未增长），
+        //         调用方应保留乐观气泡并择机再刷新。
+        refreshMessages: async (
+          conversationId: string,
+          opts?: { minCount?: number; retries?: number },
+        ): Promise<boolean> => {
+          if (get().currentConversation?.id !== conversationId) return false;
+          const minCount = opts?.minCount ?? 0;
+          const retries = opts?.retries ?? 0;
+          for (let attempt = 0; attempt <= retries; attempt++) {
+            try {
+              const [history, branches] = await Promise.all([
+                messageApi.getHistory(conversationId),
+                conversationApi.getBranches(conversationId),
+              ]);
+              // 再次校验：await 期间用户可能已切走
+              if (get().currentConversation?.id !== conversationId) return false;
+              const grown = history.length >= minCount;
+              if (grown) {
+                const conv = get().conversations.find((c) => c.id === conversationId);
+                set({
+                  messages: history,
+                  branches: branches || {},
+                  currentNodeId: conv?.current_node_id || get().currentNodeId,
+                });
+                return true;
+              }
+              if (attempt === retries) {
+                // 重试用尽仍未增长（后端保存比预算慢）。仍写入最新拉取结果以保持
+                // 一致，但返回 false：调用方据此保留乐观气泡、择机再刷新，
+                // 避免“用户消息瞬间消失”。
+                const conv = get().conversations.find((c) => c.id === conversationId);
+                set({
+                  messages: history,
+                  branches: branches || {},
+                  currentNodeId: conv?.current_node_id || get().currentNodeId,
+                });
+                return false;
+              }
+              // 后端尚未保存完成，稍候重试（保留乐观气泡）
+              await new Promise((r) => setTimeout(r, 150));
+            } catch (err: any) {
+              set({ error: err.message });
+              return false;
+            }
+          }
+          return false;
+        },
 
         clearCurrentConversation: () => {
           set({

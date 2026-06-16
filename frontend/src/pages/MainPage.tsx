@@ -30,7 +30,8 @@ import { rehypeMermaid } from 'react-markdown-mermaid';
 import { conversationApi } from '../api/conversation';
 import { useConversationStore } from '../store/conversationStore';
 import { useNavigationStore } from '../store/navigationStore';
-import { useStreaming } from '../hooks/useStreaming';
+import { useStreamingManager } from '../hooks/useStreamingManager';
+import { streamManager } from '../services/streamManager';
 import { ChatInput } from '../components/ChatInput';
 import TreeView from './TreeView';
 
@@ -85,8 +86,6 @@ export default function ChatPage() {
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [scrollPositions, setScrollPositions] = useState<Record<string, number>>({});
   const [isScrolling, setIsScrolling] = useState(false);
-  const [pendingUserMessage, setPendingUserMessage] = useState<string | null>(null);
-  const [pendingUserMessageConvId, setPendingUserMessageConvId] = useState<string | null>(null);
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
   const [editValue, setEditValue] = useState<string | null>(null);
   const [attachedFiles, setAttachedFiles] = useState<string[]>([]);
@@ -141,7 +140,7 @@ export default function ChatPage() {
     conversations, currentConversation, messages,
     pendingScrollNodeId, clearPendingScroll,
     createConversation, selectConversation, deleteConversation, loadConversations,
-    clearCurrentConversation, updateConversationTitle,
+    clearCurrentConversation, updateConversationTitle, refreshMessages,
   } = useConversationStore();
 
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
@@ -169,45 +168,83 @@ export default function ChatPage() {
     setRenameTitle('');
   };
 
-  const { streamedContent, startStreaming, reset, isStreaming, abortStreaming, streamingConversationId, streamDuration, streamStatus } = useStreaming({
-    onComplete: async (_fullContent, completedConversationId) => {
-      reset();
-      if (pendingUserMessageConvId === completedConversationId) {
-        setPendingUserMessage(null);
-        setPendingUserMessageConvId(null);
+  const {
+    streamedContent, startStreaming, isStreaming, abortStreaming,
+    streamDuration, streamStatus, pendingUserMessage, currentNodeId: streamNodeId,
+  } = useStreamingManager(currentConversation?.id ?? null);
+
+  // 结构性去重：一旦本轮流式产生的节点已出现在真实消息里（refreshMessages 注入），
+  // 就隐藏对应的乐观叠加层，无论 cleanup 何时执行。这样真实消息与乐观叠加层
+  // 永远不会同时渲染同一轮，杜绝“重复两轮”。
+  // 注意：后端在流式 START 时就已创建节点并保存 user 消息，但 assistant 消息要到
+  // 结束才保存。因此必须按角色分别判断——否则中途重新进入正在流式的对话会
+  // 把 user 消息拉回 messages，误判“整轮已落地”而把正在生成的助手块也隐藏掉。
+  const userMsgLanded =
+    streamNodeId != null && messages.some((m) => m.node_id === streamNodeId && m.role === 'user');
+  const assistantMsgLanded =
+    streamNodeId != null && messages.some((m) => m.node_id === streamNodeId && m.role === 'assistant');
+  // 用户气泡：真实 user 消息已出现即隐藏。
+  const showPendingBubble = !!pendingUserMessage && !userMsgLanded;
+  // 助手流式块：仅当真实 assistant 消息已出现（=本轮已结束并保存）才隐藏，
+  // 保证流式进行中（assistant 尚未保存）始终显示“思考中/流式内容/计时”。
+  const showStreamBlock = streamStatus !== 'idle' && !assistantMsgLanded;
+
+  // 全局注册一次：任意对话的流结束（completed/error/stopped）时，
+  // 从后端刷新真实消息，再清理 StreamManager 中该对话的临时状态。
+  // 不依赖当前查看的是哪个对话，因此切走的对话流完成也能正确落地。
+  useEffect(() => {
+    const unsubscribe = streamManager.onFinish(async ({ conversationId: finishedId, drained, controller }) => {
+      // 期望刷新后至少比当前多 1 条消息（新增的助手/用户节点已保存）。
+      // 注意：store 里不含乐观气泡，气泡只存在于 StreamManager。
+      const base = useConversationStore.getState().currentConversation?.id === finishedId
+        ? useConversationStore.getState().messages.length
+        : 0;
+      // drained=true：后端在 [DONE] 前已保存，一次即可拿到最终结果。
+      // drained=false（硬 abort）：保存由连接断开触发，与刷新竞态，需轮询重试，
+      //   期间保留乐观气泡，避免“用户消息瞬间消失”。
+      const confirmed = await refreshMessages(
+        finishedId,
+        drained ? undefined : { minCount: base + 1, retries: 6 },
+      );
+      // 仅当确认真实消息已落地，才清理临时流状态（移除乐观气泡）。
+      // 身份校验：若 await 期间用户对同一对话发起了新流，controller 已被替换则跳过。
+      if (drained || confirmed) {
+        streamManager.cleanupIfController(finishedId, controller);
+      } else {
+        // 硬 abort 且后端保存超过重试预算：保留乐观气泡，延后再确认一次，
+        // 成功后再清理，彻底避免用户消息闪失。
+        setTimeout(async () => {
+          const base2 = useConversationStore.getState().currentConversation?.id === finishedId
+            ? useConversationStore.getState().messages.length
+            : 0;
+          await refreshMessages(finishedId, { minCount: base2 + 1, retries: 6 });
+          // 无论是否确认，这是最后兜底：清理临时状态，避免气泡永久残留。
+          streamManager.cleanupIfController(finishedId, controller);
+        }, 800);
       }
-      await selectConversation(completedConversationId);
-    },
-    onError: async (_error, errorConversationId) => {
-      reset();
-      if (pendingUserMessageConvId === errorConversationId) {
-        setPendingUserMessage(null);
-        setPendingUserMessageConvId(null);
-      }
-      await selectConversation(errorConversationId);
-    },
-  });
+      // 同步对话列表（更新时间、标题等）
+      await loadConversations();
+    });
+    return unsubscribe;
+  }, [refreshMessages, loadConversations]);
 
   const shouldAutoScrollRef = useRef(shouldAutoScroll);
   shouldAutoScrollRef.current = shouldAutoScroll;
 
   useEffect(() => {
-    if (isStreaming && streamingConversationId === currentConversation?.id && shouldAutoScrollRef.current && !userScrollingRef.current) {
+    if (isStreaming && shouldAutoScrollRef.current && !userScrollingRef.current) {
       requestAnimationFrame(() => scrollToBottom(false));
     }
-  }, [streamedContent, isStreaming, streamingConversationId, currentConversation?.id, scrollToBottom]);
+  }, [streamedContent, isStreaming, scrollToBottom]);
 
   useEffect(() => {
-    if (pendingUserMessage && pendingUserMessageConvId === currentConversation?.id) {
+    if (pendingUserMessage) {
       requestAnimationFrame(() => scrollToBottom(false));
     }
-  }, [pendingUserMessage, pendingUserMessageConvId, currentConversation?.id, scrollToBottom]);
+  }, [pendingUserMessage, scrollToBottom]);
 
   useEffect(() => {
-    (async () => {
-      await reset();
-      await loadConversations();
-    })();
+    loadConversations();
   }, []);
 
   const handleSelectConversation = async (id: string) => {
@@ -318,8 +355,9 @@ export default function ChatPage() {
 
   const handleSend = async (val: string, modelId?: string, _systemPrompt?: string) => {
     if (!val.trim()) return;
-    setPendingUserMessage(val);
-    setPendingUserMessageConvId(currentConversation?.id || null);
+    // 仅阻止向“当前对话”重复发送（它已在流式中）。其他对话的流不受影响，
+    // 因此可以在后台对话流式的同时，向另一对话发送——真正的多并发。
+    if (isStreaming) return;
     setShouldAutoScroll(true);
 
     let conversationId = currentConversation?.id;
@@ -327,12 +365,9 @@ export default function ChatPage() {
       const newConv = await createConversation({ title: val.slice(0, 20) });
       if (!newConv) {
         console.error('Failed to create conversation');
-        setPendingUserMessage(null);
-        setPendingUserMessageConvId(null);
         return;
       }
       conversationId = newConv.id;
-      setPendingUserMessageConvId(conversationId);
     }
 
     let finalContent = val;
@@ -352,7 +387,8 @@ export default function ChatPage() {
       }
       setAttachedFiles([]);
     }
-    await startStreaming(conversationId, { content: finalContent, model_id: modelId });
+    // 第三个参数是乐观渲染的用户气泡文本（显示用户输入的原文）。
+    await startStreaming(conversationId, { content: finalContent, model_id: modelId }, val);
   };
 
   const handleJumpToMessage = (index: number) => {
@@ -385,20 +421,15 @@ export default function ChatPage() {
 
   const handleRetry = async (assistantNodeId: string, userContent: string) => {
     if (!currentConversation || isStreaming) return;
+    const convId = currentConversation.id;
     try {
-      await conversationApi.deleteNode(currentConversation.id, assistantNodeId);
-      await selectConversation(currentConversation.id);
-      setPendingUserMessage(userContent);
-      setPendingUserMessageConvId(currentConversation.id);
+      await conversationApi.deleteNode(convId, assistantNodeId);
+      await selectConversation(convId);
       setShouldAutoScroll(true);
-      await startStreaming(currentConversation.id, { content: userContent });
+      await startStreaming(convId, { content: userContent }, userContent);
     } catch (err) {
       console.error('重试失败:', err);
-      setPendingUserMessage(null);
-      setPendingUserMessageConvId(null);
-      if (currentConversation) {
-        await selectConversation(currentConversation.id);
-      }
+      await selectConversation(convId);
     }
   };
 
@@ -466,8 +497,8 @@ export default function ChatPage() {
         key={m.id}
         id={`message-${index}`}
         className={cn(
-          'w-full my-2 flex flex-col group animate-msg-in',
-          m.role === 'user' ? 'items-end' : 'items-start'
+          'w-full my-2 flex flex-col group',
+          m.role === 'user' ? 'items-end' : 'items-start',
         )}
       >
         <div className="flex flex-col items-start max-w-full">
@@ -763,7 +794,7 @@ export default function ChatPage() {
             >
               <div className="w-[800px] max-w-full flex flex-col px-4">
                 {messages.map((m, index) => renderMsg(m, index))}
-                {pendingUserMessage && pendingUserMessageConvId === currentConversation?.id && (
+                {showPendingBubble && (
                   <div className="w-full my-2 flex flex-col items-end">
                     <div className="flex flex-col items-start max-w-full">
                       <div
@@ -782,7 +813,7 @@ export default function ChatPage() {
                     </div>
                   </div>
                 )}
-                {isStreaming && streamingConversationId === currentConversation?.id && (
+                {showStreamBlock && (
                   <div className="w-full my-2 flex flex-col items-start">
                     <div className="flex flex-col items-start max-w-full">
                       <div
@@ -819,9 +850,8 @@ export default function ChatPage() {
                 onSend={handleSend}
                 onStop={abortStreaming}
                 isStreaming={isStreaming}
-                disabled={isStreaming && streamingConversationId === currentConversation?.id}
+                disabled={isStreaming}
                 conversationId={currentConversation?.id || null}
-                streamingConversationId={streamingConversationId}
                 editValue={editValue}
                 onEditValueConsumed={() => setEditValue(null)}
                 attachedFiles={attachedFiles}
