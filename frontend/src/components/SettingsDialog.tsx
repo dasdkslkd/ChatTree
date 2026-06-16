@@ -20,9 +20,8 @@ import {
   DialogDescription,
 } from '@/components/ui/dialog';
 import { Switch } from '@/components/ui/switch';
-import { Badge } from '@/components/ui/badge';
 import {
-  X, Settings, StickyNote, Plus, Trash2, Eye, EyeOff,
+  Settings, StickyNote, Plus, Trash2, Eye, EyeOff,
   Loader2, Save, Pencil, Server,
 } from 'lucide-react';
 import { toast } from 'sonner';

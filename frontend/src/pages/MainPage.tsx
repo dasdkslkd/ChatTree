@@ -433,7 +433,7 @@ export default function ChatPage() {
     }
   };
 
-  const handleEditUserMessage = async (nodeId: string, parentNodeId: string | undefined, userContent: string) => {
+  const handleEditUserMessage = async (_nodeId: string, parentNodeId: string | undefined, userContent: string) => {
     if (!currentConversation || isStreaming) return;
     if (!parentNodeId) return;
     try {

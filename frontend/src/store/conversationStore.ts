@@ -349,6 +349,10 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
   )
 );
 
-export const useConversationStore = () => useConversationStoreBase();
+// 直接导出 zustand store hook（与 conversationStore 别名、modelStore/navigationStore 一致），
+// 保留 selector 重载 useConversationStore((s) => ...) 与静态 useConversationStore.getState()。
+// 此前用 `() => useConversationStoreBase()` 包装会丢失这两者，导致按 selector 订阅失效
+// 且 .getState() 不存在（ChatInput/TreeView/MainPage 多处调用）。
+export const useConversationStore = useConversationStoreBase;
 export const conversationStore = useConversationStoreBase;
 
