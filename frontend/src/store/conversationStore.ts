@@ -31,14 +31,12 @@ interface ConversationActions {
   updateConversationTitle: (id: string, title: string) => Promise<void>;
   clearCurrentConversation: () => void;
   switchNode: (nodeId: string) => Promise<void>;
-  sendMessage: (content: string, modelId?: string) => Promise<void>;
-  streamMessage: (content: string, modelId?: string) => Promise<void>;
   deleteNode: (nodeId: string) => Promise<void>;
   abortStreaming: () => void;
   clearError: () => void;
   loadTree: (conversationId: string) => Promise<void>;
   clearPendingScroll: () => void;
-  refreshMessages: (conversationId: string, opts?: { minCount?: number; retries?: number }) => Promise<boolean>;
+  refreshMessages: (conversationId: string, opts?: { awaitNodeId?: string; awaitRole?: 'assistant' | 'user'; retries?: number }) => Promise<boolean>;
 }
 
 const useConversationStoreBase = create<ConversationState & ConversationActions>()(
@@ -185,78 +183,26 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
           }
         },
 
-        streamMessage: async (content, modelId) => {
-          const { currentConversation } = get();
-          if (!currentConversation) {
-            set({ error: 'No conversation selected' });
-            return;
-          }
-
-          set({ isStreaming: true, error: null, streamingContent: '' });
-
-          try {
-            for await (const chunk of messageApi.stream(currentConversation.id, {
-              content,
-              model_id: modelId,
-            })) {
-              if (chunk.content) {
-                set((state) => ({
-                  streamingContent: state.streamingContent + chunk.content,
-                  currentNodeId: chunk.node_id || state.currentNodeId,
-                }));
-              }
-
-              if (chunk.status === 'complete') break;
-              else if (chunk.status === 'error') throw new Error(chunk.error || 'Stream error');
-            }
-
-            await new Promise((resolve) => setTimeout(resolve, 300));
-            const history = await messageApi.getHistory(currentConversation.id);
-            const branches = await conversationApi.getBranches(currentConversation.id);
-            set({ messages: history, branches: branches || {}, streamingContent: '', isStreaming: false });
-          } catch (err: any) {
-            if (err.name !== 'AbortError') {
-              const history = await messageApi.getHistory(currentConversation.id);
-              const branches = await conversationApi.getBranches(currentConversation.id);
-              set({ error: err.message, isStreaming: false, streamingContent: '', messages: history, branches: branches || {} });
-            }
-          }
-        },
-
-        sendMessage: async (content, modelId) => {
-          const { currentConversation } = get();
-          if (!currentConversation) return;
-          set({ loading: true, error: null });
-          try {
-            await messageApi.send(currentConversation.id, { content, model_id: modelId });
-            await get().selectConversation(currentConversation.id);
-          } catch (err: any) {
-            set({ error: err.message });
-          } finally {
-            set({ loading: false });
-          }
-        },
-
         abortStreaming: () => set({ isStreaming: false, streamingContent: '' }),
         clearError: () => set({ error: null }),
         clearPendingScroll: () => set({ pendingScrollNodeId: null }),
 
         // 流式结束后，从后端拉取真实消息。
-        // 正常路径：后端在发送 [DONE] 之前已保存，一次即拿到最终结果。
-        // 硬 abort 路径：后端保存由“连接断开”触发，与本次拉取存在竞态，
-        //   因此支持 minCount + 轮询重试，直到消息数增长（保存完成）或重试用尽，
-        //   避免过早用旧数据覆盖、把乐观气泡擦掉。
-        // 仅当用户仍在查看该对话时才更新视图，避免并发流互相覆盖。
-        // 返回值：true 表示已确认拿到“增长后”的消息（可安全清理乐观状态）；
-        //         false 表示未确认（用户已切走 / 出错 / 重试用尽仍未增长），
-        //         调用方应保留乐观气泡并择机再刷新。
+        // 完成判据：等待 **本轮节点的指定角色消息** 落盘，而非“消息数 +1”。
+        // 这样对多消息轮次（未来工具轮次：assistant tool_call + tool_result + final）
+        // 同样稳健——只要本节点的 assistant 消息出现即认定完成。
+        // 与 MainPage 的 assistantMsgLanded 判据（node_id + role）保持一致。
+        // 返回值：true=已确认落地（可清理乐观状态）；false=未确认（已切走/出错/超时）。
         refreshMessages: async (
           conversationId: string,
-          opts?: { minCount?: number; retries?: number },
+          opts?: { awaitNodeId?: string; awaitRole?: 'assistant' | 'user'; retries?: number },
         ): Promise<boolean> => {
           if (get().currentConversation?.id !== conversationId) return false;
-          const minCount = opts?.minCount ?? 0;
+          const awaitNodeId = opts?.awaitNodeId;
+          const awaitRole = opts?.awaitRole ?? 'assistant';
           const retries = opts?.retries ?? 0;
+          const landed = (history: Message[]) =>
+            !awaitNodeId || history.some((m) => m.node_id === awaitNodeId && m.role === awaitRole);
           for (let attempt = 0; attempt <= retries; attempt++) {
             try {
               const [history, branches] = await Promise.all([
@@ -265,27 +211,17 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
               ]);
               // 再次校验：await 期间用户可能已切走
               if (get().currentConversation?.id !== conversationId) return false;
-              const grown = history.length >= minCount;
-              if (grown) {
+              const ok = landed(history);
+              if (ok || attempt === retries) {
+                // 写入最新结果以保持一致。ok=true 时返回 true 让调用方清理乐观气泡；
+                // 重试用尽仍未落地则返回 false，调用方保留气泡、择机再刷新。
                 const conv = get().conversations.find((c) => c.id === conversationId);
                 set({
                   messages: history,
                   branches: branches || {},
                   currentNodeId: conv?.current_node_id || get().currentNodeId,
                 });
-                return true;
-              }
-              if (attempt === retries) {
-                // 重试用尽仍未增长（后端保存比预算慢）。仍写入最新拉取结果以保持
-                // 一致，但返回 false：调用方据此保留乐观气泡、择机再刷新，
-                // 避免“用户消息瞬间消失”。
-                const conv = get().conversations.find((c) => c.id === conversationId);
-                set({
-                  messages: history,
-                  branches: branches || {},
-                  currentNodeId: conv?.current_node_id || get().currentNodeId,
-                });
-                return false;
+                return ok;
               }
               // 后端尚未保存完成，稍候重试（保留乐观气泡）
               await new Promise((r) => setTimeout(r, 150));

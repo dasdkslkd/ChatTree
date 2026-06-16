@@ -2,15 +2,6 @@ import { apiClient } from './client';
 import type { Message, SendMessageRequest, StreamChunk } from '../types/message';
 
 export const messageApi = {
-  // 发送消息（非流式）
-  send: async (
-    conversationId: string,
-    data: SendMessageRequest
-  ): Promise<{ message: string; conversation_id: string; node_id: string }> => {
-    const response = await apiClient.post(`/conversations/${conversationId}/messages`, data);
-    return response.data;
-  },
-
   // 流式发送消息
   stream: async function* (
     conversationId: string,

@@ -3,6 +3,7 @@ import json
 from time import time
 from typing import List, Dict, Any, Optional
 from .base import StorageInterface
+from .atomic import atomic_write_json, atomic_write_text
 from ..utils.logger import setup_logger
 
 logger = setup_logger('PromptStorage')
@@ -26,8 +27,7 @@ class PromptStorage(StorageInterface):
 
     def _save_index(self):
         """保存索引"""
-        with open(self.index_file, 'w', encoding='utf-8') as f:
-            json.dump(self.index, f, indent=2, ensure_ascii=False)
+        atomic_write_json(self.index_file, self.index)
         logger.debug("Prompt索引保存完成")
 
     def save(self, data: Dict[str, Any]):
@@ -35,8 +35,7 @@ class PromptStorage(StorageInterface):
         prompt_id = data["id"]
         file_path = os.path.join(self.storage_dir, f"{prompt_id}.txt")
 
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(data["content"])
+        atomic_write_text(file_path, data["content"])
 
         # 更新索引
         self.index[prompt_id] = {

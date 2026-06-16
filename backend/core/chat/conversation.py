@@ -2,26 +2,36 @@
 import uuid
 from time import time
 from typing import List, Optional, Dict, Any
-from ..config.types import ConversationTreeNode, ConversationMetadata, Message, ModelProvider
+from ..config.types import ConversationTreeNode, ConversationMetadata, Message, ModelProvider, SCHEMA_VERSION
 from ..utils.logger import setup_logger
 
 logger = setup_logger('ConversationTree')
+
+
+class CorruptConversationError(Exception):
+    """对话数据结构性损坏，无法安全加载。"""
+
+
 class Conversation:
     """基于节点的树形对话类"""
-    
+
     def __init__(self, conversation_id: str = '', title: str = '', provider: Optional[ModelProvider] = None, model: Optional[str] = None):
         self.metadata: ConversationMetadata = {
             "id": conversation_id or str(uuid.uuid4()),
             "title": title,
             "created_at": int(time()),
             "updated_at": int(time()),
-            "total_tokens": {}
+            "total_tokens": {},
+            "schema_version": SCHEMA_VERSION,
         }
         self.nodes: Dict[str, ConversationTreeNode] = {}
         self.root_node_id: Optional[str] = None
         self.current_node_id: Optional[str] = None
         self.current_provider: Optional[ModelProvider] = provider
         self.current_model: Optional[str] = model
+        # 本次会话生命周期内被显式删除的节点 id，供 storage.save 定向删除文件。
+        # 保存成功后由调用方 clear()。
+        self._deleted_node_ids: set[str] = set()
     
     def initialize_with_system_message(self, system_prompt: Optional[str] = None, force = False):
         """初始化系统消息作为根节点"""
@@ -64,10 +74,11 @@ class Conversation:
         # 递归删除子节点
         def _delete_recursive(n_id: str):
             node = self.nodes[n_id]
-            for child_id in node["children_ids"]:
+            for child_id in list(node["children_ids"]):
                 _delete_recursive(child_id)
             del self.nodes[n_id]
-        
+            self._deleted_node_ids.add(n_id)
+
         parent_id = self.nodes[node_id].get("parent_id")
         _delete_recursive(node_id)
         
@@ -223,24 +234,86 @@ class Conversation:
             "metadata": self.metadata,
             "nodes": list(self.nodes.values()),
             "current_node_id": self.current_node_id,
-            "root_node_id": self.root_node_id
+            "root_node_id": self.root_node_id,
+            # 仅供 storage.save 消费的定向删除列表（不持久化进 metadata）
+            "deleted_node_ids": list(self._deleted_node_ids),
         }
-    
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Conversation":
-        """从字典创建对话"""
-        metadata = data["metadata"]
+        """从字典创建对话，并做完整性校验（fail-safe）。
+
+        结构性损坏（缺 id / 缺 root / 版本过新）→ raise CorruptConversationError。
+        可恢复问题（缺 id 的节点、悬空 parent、非法 current）→ 跳过/重置并记日志。
+        无旧格式迁移：缺失 schema_version 视为兼容，过新则拒绝。
+        """
+        metadata = data.get("metadata") or {}
+        conv_id = metadata.get("id")
+        if not isinstance(conv_id, str) or not conv_id:
+            raise CorruptConversationError("metadata.id 缺失或非法")
+
+        version = metadata.get("schema_version")
+        if isinstance(version, int) and version > SCHEMA_VERSION:
+            raise CorruptConversationError(
+                f"schema_version {version} 高于本程序支持的 {SCHEMA_VERSION}")
+
         conv = cls(
             provider=metadata.get("provider_id"),
             model=metadata.get("model_id"),
-            conversation_id=metadata["id"],
+            conversation_id=conv_id,
             title=metadata.get("title", "")
         )
         conv.metadata = metadata
-        conv.nodes = {node["id"]: node for node in data["nodes"]}
-        conv.current_node_id = data.get("current_node_id")
-        conv.root_node_id = data.get("root_node_id")
+
+        # 构建节点字典，跳过缺 id 的节点
+        nodes: Dict[str, ConversationTreeNode] = {}
+        for node in data.get("nodes", []):
+            nid = node.get("id")
+            if not isinstance(nid, str) or not nid:
+                logger.error(f"对话 {conv_id}: 跳过缺少 id 的节点")
+                continue
+            nodes[nid] = node
+
+        root_node_id = data.get("root_node_id")
+        if not root_node_id or root_node_id not in nodes:
+            raise CorruptConversationError(f"对话 {conv_id}: 根节点缺失或不存在")
+
+        # 剔除悬空 parent 的节点及其子树（保持可加载）
+        skipped = cls._prune_dangling(nodes, root_node_id, conv_id)
+
+        conv.nodes = nodes
+        conv.root_node_id = root_node_id
+
+        current = data.get("current_node_id")
+        if not current or current not in nodes or current in skipped:
+            if current is not None:
+                logger.warning(f"对话 {conv_id}: current_node_id 非法，重置为根节点")
+            current = root_node_id
+        conv.current_node_id = current
+
         return conv
+
+    @staticmethod
+    def _prune_dangling(nodes: Dict[str, ConversationTreeNode], root_id: str, conv_id: str) -> set:
+        """删除 parent 悬空（不存在且非根）的节点及其子树，返回被删 id 集合。"""
+        skipped: set = set()
+        changed = True
+        while changed:
+            changed = False
+            for nid in list(nodes.keys()):
+                if nid == root_id:
+                    continue
+                parent_id = nodes[nid].get("parent_id")
+                if parent_id != 'None' and parent_id not in nodes:
+                    del nodes[nid]
+                    skipped.add(nid)
+                    changed = True
+        if skipped:
+            logger.error(f"对话 {conv_id}: 剔除 {len(skipped)} 个悬空节点")
+            # 清理仍在 nodes 中的父节点对已删子节点的引用
+            for node in nodes.values():
+                node["children_ids"] = [c for c in node.get("children_ids", []) if c in nodes]
+        return skipped
     
     def clear(self):
         """清空对话"""

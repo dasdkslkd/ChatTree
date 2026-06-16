@@ -39,9 +39,7 @@ async def create_conversation(
     try:
         logger.info(f"收到创建对话请求: {request}")
         conversation = chat_manager.create_conversation(request.title, request.prompt_id)
-        logger.info(f"对话创建成功: {conversation.metadata}")
-        chat_manager.save_conversation()
-        logger.info("对话已保存")
+        logger.info(f"对话创建成功并已保存: {conversation.metadata['id']}")
         return {
             "id": conversation.metadata["id"],
             "title": conversation.metadata["title"],
@@ -83,14 +81,15 @@ async def switch_node(
 ):
     """切换到指定节点"""
     try:
-        if not chat_manager.load_conversation(conversation_id):
-            raise HTTPException(status_code=404, detail="对话不存在")
-        assert chat_manager.current_conversation is not None
-        if chat_manager.current_conversation.switch_to_node(node_id):
-            chat_manager.save_conversation()
-            return {"message": "节点切换成功"}
-        else:
+        result = await chat_manager.switch_node(conversation_id, node_id)
+        if result is None:
+            # 区分对话不存在与节点无效
+            if chat_manager.get_conversation(conversation_id) is None:
+                raise HTTPException(status_code=404, detail="对话不存在")
             raise HTTPException(status_code=400, detail="无效的节点ID")
+        return {"message": "节点切换成功"}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -101,10 +100,10 @@ async def get_branches(
 ):
     """获取对话的所有分支"""
     try:
-        if not chat_manager.load_conversation(conversation_id):
+        conversation = chat_manager.get_conversation(conversation_id)
+        if not conversation:
             raise HTTPException(status_code=404, detail="对话不存在")
-        assert chat_manager.current_conversation is not None
-        return chat_manager.current_conversation.get_available_branches()
+        return conversation.get_available_branches()
     except HTTPException:
         raise
     except Exception as e:
@@ -118,7 +117,7 @@ async def update_conversation(
 ):
     """更新对话标题"""
     try:
-        if not chat_manager.update_conversation_title(conversation_id, request.title):
+        if not await chat_manager.update_conversation_title(conversation_id, request.title):
             raise HTTPException(status_code=404, detail="对话不存在")
         return {"message": "对话标题已更新"}
     except HTTPException:
@@ -135,7 +134,7 @@ async def update_conversation_model(
 ):
     """更新对话的默认模型"""
     try:
-        if not chat_manager.update_conversation_model(conversation_id, request.model_id, request.provider_id):
+        if not await chat_manager.update_conversation_model(conversation_id, request.model_id, request.provider_id):
             raise HTTPException(status_code=404, detail="对话不存在")
         return {"message": "对话模型已更新"}
     except HTTPException:
@@ -152,19 +151,14 @@ async def delete_node(
 ):
     """删除节点及其子节点"""
     try:
-        if not chat_manager.load_conversation(conversation_id):
+        result = await chat_manager.delete_node(conversation_id, node_id)
+        if result is None:
             raise HTTPException(status_code=404, detail="对话不存在")
-        assert chat_manager.current_conversation is not None
-        node = chat_manager.current_conversation.nodes.get(node_id)
-        parent_id = node.get("parent_id") if node else None
-        chat_manager.current_conversation.del_node(node_id)
-        chat_manager.save_conversation()
-        new_current_node_id = chat_manager.current_conversation.current_node_id
         return {
             "message": "节点已删除",
-            "deleted_node_id": node_id,
-            "new_current_node_id": new_current_node_id,
-            "parent_node_id": parent_id
+            "deleted_node_id": result["deleted_node_id"],
+            "new_current_node_id": result["new_current_node_id"],
+            "parent_node_id": result["parent_node_id"],
         }
     except HTTPException:
         raise
@@ -179,11 +173,10 @@ async def get_conversation_tree(
 ):
     """获取对话的完整树结构（节点+边），用于图渲染"""
     try:
-        if not chat_manager.load_conversation(conversation_id):
+        conv = chat_manager.get_conversation(conversation_id)
+        if not conv:
             raise HTTPException(status_code=404, detail="对话不存在")
-        assert chat_manager.current_conversation is not None
 
-        conv = chat_manager.current_conversation
         nodes = []
         for node_id, node in conv.nodes.items():
             user_content = ""

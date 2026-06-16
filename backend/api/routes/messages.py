@@ -1,13 +1,12 @@
 # backend/api/routes/messages.py
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from typing import List, Dict, Any, Optional, AsyncIterator
+from typing import List, Optional
 from pydantic import BaseModel
 import json
 from ...core.chat.chat_manager import ChatManager
-from ...core.chat.conversation import Conversation
 from ..dependencies import get_chat_manager
-from ...core.config.types import Message, StreamChunk, StreamStatus
+from ...core.config.types import Message
 
 router = APIRouter()
 
@@ -16,35 +15,6 @@ class SendMessageRequest(BaseModel):
     model_id: Optional[str] = None
     node_id: Optional[str] = None
 
-class MessageResponse(BaseModel):
-    message: str
-    conversation_id: str
-    node_id: Optional[str] = None
-
-@router.post("/conversations/{conversation_id}/messages", response_model=MessageResponse)
-async def send_message(
-    conversation_id: str,
-    request: SendMessageRequest,
-    chat_manager: ChatManager = Depends(get_chat_manager)
-):
-    """发送消息"""
-    try:
-        # 确保对话已加载
-        if not chat_manager.current_conversation or chat_manager.current_conversation.metadata["id"] != conversation_id:
-            if not chat_manager.load_conversation(conversation_id):
-                # 如果不存在，创建新对话
-                chat_manager.create_conversation()
-        assert chat_manager.current_conversation is not None
-        response = chat_manager.send_message(request.content, request.model_id)
-        
-        return {
-            "message": response,
-            "conversation_id": conversation_id,
-            "node_id": chat_manager.current_conversation.current_node_id
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    
 @router.post("/conversations/{conversation_id}/messages/stream")
 async def stream_message(
     conversation_id: str,
@@ -55,14 +25,6 @@ async def stream_message(
     
     async def event_generator():
         try:
-            # 确保对话已加载
-            if not chat_manager.current_conversation or chat_manager.current_conversation.metadata["id"] != conversation_id:
-                if not chat_manager.load_conversation(conversation_id):
-                    # 如果不存在，创建新对话
-                    chat_manager.create_conversation()
-            
-            assert chat_manager.current_conversation is not None
-            
             async for chunk in chat_manager.send_message_stream(conversation_id, request.content, request.model_id, request.node_id):
                 # 将 StreamChunk 转换为 JSON 字符串
                 chunk_data = {
@@ -73,6 +35,11 @@ async def stream_message(
                     "error": chunk.get("error"),
                     "tokens_used": chunk.get("tokens_used", 0)
                 }
+                # 仅在存在时转发可扩展字段，保持当前文本路径 JSON 形状不变
+                for opt_key in ("event_type", "reasoning", "tool_call"):
+                    val = chunk.get(opt_key)
+                    if val is not None:
+                        chunk_data[opt_key] = val
                 yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n"
             
             yield "data: [DONE]\n\n"
@@ -107,7 +74,7 @@ async def stop_stream_message(
     try:
         if not chat_manager.storage.index.get(conversation_id):
             raise HTTPException(status_code=404, detail="对话不存在")
-        chat_manager.stop_stream(node_id)
+        await chat_manager.stop_stream(node_id)
         return {"detail": "流式消息已停止"}
     except HTTPException:
         raise
@@ -122,15 +89,15 @@ async def get_messages(
 ):
     """获取消息历史"""
     try:
-        if not chat_manager.load_conversation(conversation_id):
+        conversation = chat_manager.get_conversation(conversation_id)
+        if not conversation:
             raise HTTPException(status_code=404, detail="对话不存在")
-        assert chat_manager.current_conversation is not None
-        return chat_manager.current_conversation.get_message_chain_from_node(node_id)
+        return conversation.get_message_chain_from_node(node_id)
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
+
 @router.get("/conversations/{conversation_id}/messages", response_model=List[Message])
 async def get_all_messages(
     conversation_id: str,
@@ -138,10 +105,10 @@ async def get_all_messages(
 ):
     """获取对话中所有消息"""
     try:
-        if not chat_manager.load_conversation(conversation_id):
+        conversation = chat_manager.get_conversation(conversation_id)
+        if not conversation:
             raise HTTPException(status_code=404, detail="对话不存在")
-        assert chat_manager.current_conversation is not None
-        return chat_manager.current_conversation.get_message_chain_from_node()
+        return conversation.get_message_chain_from_node()
     except HTTPException:
         raise
     except Exception as e:

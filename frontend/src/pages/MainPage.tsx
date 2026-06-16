@@ -193,18 +193,18 @@ export default function ChatPage() {
   // 从后端刷新真实消息，再清理 StreamManager 中该对话的临时状态。
   // 不依赖当前查看的是哪个对话，因此切走的对话流完成也能正确落地。
   useEffect(() => {
-    const unsubscribe = streamManager.onFinish(async ({ conversationId: finishedId, drained, controller }) => {
-      // 期望刷新后至少比当前多 1 条消息（新增的助手/用户节点已保存）。
-      // 注意：store 里不含乐观气泡，气泡只存在于 StreamManager。
-      const base = useConversationStore.getState().currentConversation?.id === finishedId
-        ? useConversationStore.getState().messages.length
-        : 0;
+    const unsubscribe = streamManager.onFinish(async ({ conversationId: finishedId, drained, nodeId, controller }) => {
+      // 完成判据：等待本轮节点(nodeId)的 assistant 消息落盘，而非“消息数 +1”。
+      // 对多消息轮次（未来工具轮次）同样稳健。nodeId 为空（停得太早还没拿到）时
+      // refreshMessages 退化为单次拉取。
       // drained=true：后端在 [DONE] 前已保存，一次即可拿到最终结果。
       // drained=false（硬 abort）：保存由连接断开触发，与刷新竞态，需轮询重试，
       //   期间保留乐观气泡，避免“用户消息瞬间消失”。
       const confirmed = await refreshMessages(
         finishedId,
-        drained ? undefined : { minCount: base + 1, retries: 6 },
+        drained
+          ? (nodeId ? { awaitNodeId: nodeId, retries: 0 } : undefined)
+          : { awaitNodeId: nodeId ?? undefined, retries: 6 },
       );
       // 仅当确认真实消息已落地，才清理临时流状态（移除乐观气泡）。
       // 身份校验：若 await 期间用户对同一对话发起了新流，controller 已被替换则跳过。
@@ -214,10 +214,7 @@ export default function ChatPage() {
         // 硬 abort 且后端保存超过重试预算：保留乐观气泡，延后再确认一次，
         // 成功后再清理，彻底避免用户消息闪失。
         setTimeout(async () => {
-          const base2 = useConversationStore.getState().currentConversation?.id === finishedId
-            ? useConversationStore.getState().messages.length
-            : 0;
-          await refreshMessages(finishedId, { minCount: base2 + 1, retries: 6 });
+          await refreshMessages(finishedId, { awaitNodeId: nodeId ?? undefined, retries: 6 });
           // 无论是否确认，这是最后兜底：清理临时状态，避免气泡永久残留。
           streamManager.cleanupIfController(finishedId, controller);
         }, 800);

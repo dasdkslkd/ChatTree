@@ -4,6 +4,10 @@ from enum import Enum
 import asyncio
 from typing_extensions import TypedDict, Required
 
+# 持久化 schema 版本。新写入打此版本；加载时若数据版本高于此值则拒绝。
+SCHEMA_VERSION = 1
+
+
 class Role(str, Enum):
     """消息角色枚举"""
     SYSTEM = "system"
@@ -38,6 +42,8 @@ class Message(TypedDict, total=False):
     name: Optional[str]
     tool_calls: Optional[List[Dict[str, Any]]]
     tool_call_id: Optional[str]
+    tool_results: Optional[List[Dict[str, Any]]]  # 本消息触发的工具调用结果（未来工具轮次填充）
+    reasoning: Optional[str]  # 推理/思考轨迹（未来推理模型填充）
     timestamp: Required[int]
     generation_info: Optional[GenerationInfo]  # 生成信息（仅助手消息有，可选）
 
@@ -63,6 +69,7 @@ class ConversationMetadata(TypedDict, total=False):
     total_tokens: Dict[str, int]
     model_id: Optional[str]       # 当前对话使用的模型ID
     provider_id: Optional[str]    # 当前对话使用的提供商ID
+    schema_version: Optional[int] # 持久化 schema 版本
 
 class ConversationData(TypedDict):
     """对话数据类型"""
@@ -118,14 +125,22 @@ class StreamController:
             return self._is_stopped
 
 # 扩展StreamChunk，添加token统计
-class StreamChunk(TypedDict):
-    """流式数据块"""
+class StreamChunk(TypedDict, total=False):
+    """流式数据块
+
+    total=False：新增字段均为可选，保持向后兼容。当前文本路径只填写
+    status/content/node_id/conversation_id/error/tokens_used；event_type/
+    reasoning/tool_call 留给未来的推理与工具事件，缺省时读取方按文本处理。
+    """
     status: StreamStatus
     content: Optional[str]
     node_id: Optional[str]
     conversation_id: Optional[str]
     error: Optional[str]
-    tokens_used: int  # 新增：当前chunk的token数
+    tokens_used: int  # 当前chunk的token数
+    event_type: Optional[str]            # "text" | "reasoning" | "tool_call" | "tool_result"，缺省按 text
+    reasoning: Optional[str]             # 推理增量
+    tool_call: Optional[Dict[str, Any]]  # 工具调用增量/完整载荷
 
 class StreamResult(TypedDict):
     """流最终结果"""
