@@ -33,6 +33,8 @@ class BaseProvider(ABC):
         stream_controller: Optional['StreamController'] = None,  # 前向引用
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
+        reasoning_effort: Optional[str] = None,   # 统一推理强度档位（provider 各自翻译）
+        thinking_enabled: Optional[bool] = None,  # 统一思考开关（provider 各自翻译）
         **kwargs
     ) -> AsyncIterator[StreamChunk]:
         """异步流式生成回复"""

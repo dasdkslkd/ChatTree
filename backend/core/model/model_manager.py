@@ -2,6 +2,7 @@
 from importlib import import_module
 from typing import Dict, Optional, Any, List
 from .base import BaseProvider
+from .model_metadata import ModelMetadata, resolve_metadata, resolve_provider_metadata
 from ..config.types import APIFormat
 from ..config.config import cfg
 from ..utils.logger import setup_logger
@@ -25,6 +26,28 @@ class ModelManager:
         for provider_id, provider_config in cfg.get_all_providers().items():
             if provider_config.get('enabled', False):
                 self.model_list[provider_id] = provider_config.get('models', [])
+
+    def get_model_metadata(self, provider_id: str, model_name: str) -> ModelMetadata:
+        """解析单个模型的元数据（按 provider 的 api_format + 模型名 + 用户覆盖）。"""
+        provider_config = cfg.get_provider_config(provider_id) or {}
+        api_format = provider_config.get('api_format', APIFormat.CHAT_COMPLETIONS)
+        if hasattr(api_format, 'value'):
+            api_format = api_format.value
+        overrides = cfg.data.get('model_metadata') if isinstance(cfg.data, dict) else None
+        return resolve_metadata(model_name, api_format, overrides)
+
+    def get_provider_metadata(self, provider_id: str) -> Dict[str, ModelMetadata]:
+        """批量解析一个 provider 下所有模型的元数据，返回 model_name -> 元数据。
+
+        模型列表优先取已配置的 models；为空时回退到运行时缓存的 model_list。
+        """
+        provider_config = cfg.get_provider_config(provider_id) or {}
+        api_format = provider_config.get('api_format', APIFormat.CHAT_COMPLETIONS)
+        if hasattr(api_format, 'value'):
+            api_format = api_format.value
+        models = provider_config.get('models') or self.model_list.get(provider_id, [])
+        overrides = cfg.data.get('model_metadata') if isinstance(cfg.data, dict) else None
+        return resolve_provider_metadata(models, api_format, overrides)
 
     def get_model(self, provider: str, is_async: bool = False) -> Optional[BaseProvider]:
         """获取模型实例（延迟加载）"""

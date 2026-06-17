@@ -21,6 +21,8 @@ class ConversationUpdateRequest(BaseModel):
 class ConversationModelUpdateRequest(BaseModel):
     model_id: str
     provider_id: str
+    reasoning_effort: Optional[str] = None
+    thinking_enabled: Optional[bool] = None
 
 class ConversationResponse(BaseModel):
     id: str
@@ -134,7 +136,13 @@ async def update_conversation_model(
 ):
     """更新对话的默认模型"""
     try:
-        if not await chat_manager.update_conversation_model(conversation_id, request.model_id, request.provider_id):
+        if not await chat_manager.update_conversation_model(
+            conversation_id,
+            request.model_id,
+            request.provider_id,
+            reasoning_effort=request.reasoning_effort,
+            thinking_enabled=request.thinking_enabled,
+        ):
             raise HTTPException(status_code=404, detail="对话不存在")
         return {"message": "对话模型已更新"}
     except HTTPException:

@@ -23,12 +23,14 @@ import {
 import {
   Plus, X, MoreHorizontal, ChevronLeft, ChevronRight,
   Copy, Check, Pencil, Loader2, RotateCcw, Network, MessageSquare, Trash2, FileText, Download, Settings,
+  ChevronDown, Brain,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { rehypeMermaid } from 'react-markdown-mermaid';
 import { conversationApi } from '../api/conversation';
 import { useConversationStore } from '../store/conversationStore';
+import { useModelStore } from '../store/modelStore';
 import { useNavigationStore } from '../store/navigationStore';
 import { useStreamingManager } from '../hooks/useStreamingManager';
 import { streamManager } from '../services/streamManager';
@@ -77,6 +79,39 @@ function CodeBlockWrapper({ children, ...props }: React.HTMLAttributes<HTMLPreEl
 const markdownComponents = {
   pre: CodeBlockWrapper,
 };
+
+/* ---------- Collapsible thinking (reasoning) block ---------- */
+
+function ThinkingBlock({ reasoning, streaming }: { reasoning: string; streaming?: boolean }) {
+  // 默认折叠；流式进行中也保持折叠（用户可手动展开看实时思考）。
+  const [expanded, setExpanded] = useState(false);
+  if (!reasoning) return null;
+  return (
+    <div className="w-fit max-w-full mb-1.5 rounded-lg overflow-hidden" style={{ border: '0.5px solid var(--border)', background: 'var(--bg-button-tertiary-hover)' }}>
+      <button
+        className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs cursor-pointer bg-transparent border-none w-full"
+        style={{ color: 'var(--fg-tertiary)' }}
+        onClick={() => setExpanded((v) => !v)}
+      >
+        <Brain className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--icon-accent)' }} />
+        <span>{streaming ? '思考中…' : '思考过程'}</span>
+        {streaming && <Loader2 className="h-3 w-3 animate-spin" style={{ color: 'var(--icon-accent)' }} />}
+        <ChevronDown
+          className="h-3.5 w-3.5 ml-auto transition-transform"
+          style={{ transform: expanded ? 'rotate(180deg)' : 'none' }}
+        />
+      </button>
+      {expanded && (
+        <div
+          className="px-3 py-2 text-xs whitespace-pre-wrap break-words"
+          style={{ borderTop: '0.5px solid var(--border)', color: 'var(--fg-tertiary)', maxHeight: '320px', overflowY: 'auto', fontFamily: 'var(--font-mono)', lineHeight: 1.6 }}
+        >
+          {reasoning}
+        </div>
+      )}
+    </div>
+  );
+}
 
 /* ---------- Component ---------- */
 export default function ChatPage() {
@@ -169,7 +204,7 @@ export default function ChatPage() {
   };
 
   const {
-    streamedContent, startStreaming, isStreaming, abortStreaming,
+    streamedContent, streamedReasoning, startStreaming, isStreaming, abortStreaming,
     streamDuration, streamStatus, pendingUserMessage, currentNodeId: streamNodeId,
   } = useStreamingManager(currentConversation?.id ?? null);
 
@@ -385,7 +420,18 @@ export default function ChatPage() {
       setAttachedFiles([]);
     }
     // 第三个参数是乐观渲染的用户气泡文本（显示用户输入的原文）。
-    await startStreaming(conversationId, { content: finalContent, model_id: modelId }, val);
+    // 推理设置从 modelStore 的当前值读取（已确认值），随请求透传。
+    const { currentReasoningEffort, currentThinkingEnabled } = useModelStore.getState();
+    await startStreaming(
+      conversationId,
+      {
+        content: finalContent,
+        model_id: modelId,
+        reasoning_effort: currentReasoningEffort,
+        thinking_enabled: currentThinkingEnabled,
+      },
+      val,
+    );
   };
 
   const handleJumpToMessage = (index: number) => {
@@ -423,7 +469,16 @@ export default function ChatPage() {
       await conversationApi.deleteNode(convId, assistantNodeId);
       await selectConversation(convId);
       setShouldAutoScroll(true);
-      await startStreaming(convId, { content: userContent }, userContent);
+      const { currentReasoningEffort, currentThinkingEnabled } = useModelStore.getState();
+      await startStreaming(
+        convId,
+        {
+          content: userContent,
+          reasoning_effort: currentReasoningEffort,
+          thinking_enabled: currentThinkingEnabled,
+        },
+        userContent,
+      );
     } catch (err) {
       console.error('重试失败:', err);
       await selectConversation(convId);
@@ -511,6 +566,9 @@ export default function ChatPage() {
                       onClick={() => handlePreviewFile(fn)}>{fn}</span>
               ))}
             </div>
+          )}
+          {m.role === 'assistant' && m.reasoning && (
+            <ThinkingBlock reasoning={m.reasoning} />
           )}
           <div
             className={cn(
@@ -813,6 +871,9 @@ export default function ChatPage() {
                 {showStreamBlock && (
                   <div className="w-full my-2 flex flex-col items-start">
                     <div className="flex flex-col items-start max-w-full">
+                      {streamedReasoning && (
+                        <ThinkingBlock reasoning={streamedReasoning} streaming={streamStatus === 'streaming'} />
+                      )}
                       <div
                         className="max-w-full w-fit px-3 py-2 rounded-2xl rounded-bl-sm leading-relaxed prose prose-sm max-w-none [&_p]:m-0"
                         style={{

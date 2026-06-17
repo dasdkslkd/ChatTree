@@ -59,8 +59,19 @@ export const conversationApi = {
     await apiClient.patch(`/conversations/${id}`, { title });
   },
 
-  updateModel: async (id: string, modelId: string, providerId: string): Promise<void> => {
-    await apiClient.patch(`/conversations/${id}/model`, { model_id: modelId, provider_id: providerId });
+  updateModel: async (
+    id: string,
+    modelId: string,
+    providerId: string,
+    reasoningEffort?: string | null,
+    thinkingEnabled?: boolean | null,
+  ): Promise<void> => {
+    await apiClient.patch(`/conversations/${id}/model`, {
+      model_id: modelId,
+      provider_id: providerId,
+      reasoning_effort: reasoningEffort ?? null,
+      thinking_enabled: thinkingEnabled ?? null,
+    });
   },
 
   // ɾ���ڵ�

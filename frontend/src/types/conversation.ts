@@ -6,6 +6,8 @@ export interface Conversation {
   model: string;
   model_id: string;
   provider_id: string;
+  reasoning_effort?: string | null;
+  thinking_enabled?: boolean | null;
   current_node_id: string;
   total_tokens: {
     prompt_tokens: number;

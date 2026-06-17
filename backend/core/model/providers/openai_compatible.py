@@ -77,12 +77,14 @@ class OpenAICompatibleProvider(BaseProvider):
         stream_controller: Optional[StreamController] = None,
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = 0.7,
+        reasoning_effort: Optional[str] = None,
+        thinking_enabled: Optional[bool] = None,
         **kwargs
     ) -> AsyncIterator[StreamChunk]:
         """流式生成实现"""
         total_content = ""
         total_tokens: int = 0
-        
+
         try:
             # 发送初始状态
             yield StreamChunk(
@@ -102,6 +104,7 @@ class OpenAICompatibleProvider(BaseProvider):
                     max_tokens=max_tokens,
                     temperature=temperature,
                     top_p=None,
+                    reasoning_effort=reasoning_effort,
                     extra_kwargs=kwargs,
                 )
 
@@ -129,6 +132,17 @@ class OpenAICompatibleProvider(BaseProvider):
                                     return
 
                                 if event.type != "response.output_text.delta" or not event.delta:
+                                    # 推理摘要增量：Responses API 的 reasoning_summary_text.delta
+                                    if getattr(event, "type", "") == "response.reasoning_summary_text.delta":
+                                        rdelta = getattr(event, "delta", "") or ""
+                                        if rdelta:
+                                            yield StreamChunk(
+                                                status=StreamStatus.CONTENT, content=None,
+                                                node_id=stream_controller.node_id if stream_controller else None,
+                                                conversation_id=stream_controller.conversation_id if stream_controller else None,
+                                                error=None, tokens_used=0,
+                                                event_type="reasoning", reasoning=rdelta,
+                                            )
                                     continue
 
                                 content = event.delta
@@ -174,11 +188,29 @@ class OpenAICompatibleProvider(BaseProvider):
                     "temperature": temperature,
                     **kwargs,
                 }
+                # chat_completions 推理强度：顶层 reasoning_effort
+                if reasoning_effort:
+                    request_kwargs["reasoning_effort"] = reasoning_effort
+                # 思考开关：deepseek/qwen 等通过 enable_thinking 切换（非 OpenAI 标准参数，
+                # 必须走 extra_body）。DashScope 用顶层 enable_thinking；vLLM/SGLang 用
+                # chat_template_kwargs.enable_thinking——两种形式都带上以覆盖常见网关。
+                if thinking_enabled is not None:
+                    request_kwargs["extra_body"] = {
+                        "enable_thinking": thinking_enabled,
+                        "chat_template_kwargs": {"enable_thinking": thinking_enabled},
+                    }
+                # 防御性重试阶梯：先原样；再去掉 temperature；最后再去掉推理相关参数。
+                # 保护 temperature 挑剔的第三方端点，以及元数据把推理能力判断错的模型。
                 attempts = [request_kwargs]
                 if self.config.get("base_url") and temperature is not None:
                     retry_kwargs: Dict[str, Any] = {**request_kwargs}
                     retry_kwargs.pop("temperature", None)
                     attempts.append(retry_kwargs)
+                if reasoning_effort or thinking_enabled is not None:
+                    no_reasoning: Dict[str, Any] = {**attempts[-1]}
+                    no_reasoning.pop("reasoning_effort", None)
+                    no_reasoning.pop("extra_body", None)
+                    attempts.append(no_reasoning)
 
                 stream = None
                 for attempt_index, current_kwargs in enumerate(attempts):
@@ -188,7 +220,7 @@ class OpenAICompatibleProvider(BaseProvider):
                     except openai.BadRequestError as exc:
                         if attempt_index + 1 < len(attempts):
                             logger.warning(
-                                f"Chat completions rejected temperature, retrying without it: {exc}"
+                                f"Chat completions request rejected, retrying with fewer params: {exc}"
                             )
                             continue
                         raise
@@ -208,6 +240,18 @@ class OpenAICompatibleProvider(BaseProvider):
                         logger.warning(f"Stream stopped by user: {stream_controller.conversation_id} - {stream_controller.node_id}")
                         return
                     assert stream_controller is not None, "stream_controller不能为空"
+                    delta = chunk.choices[0].delta if chunk.choices else None
+                    # 推理增量：兼容网关在 delta.reasoning_content / delta.reasoning 上回传思考。
+                    if delta is not None:
+                        rdelta = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
+                        if rdelta:
+                            yield StreamChunk(
+                                status=StreamStatus.CONTENT, content=None,
+                                node_id=stream_controller.node_id,
+                                conversation_id=stream_controller.conversation_id,
+                                error=None, tokens_used=0,
+                                event_type="reasoning", reasoning=rdelta,
+                            )
                     if chunk.choices and chunk.choices[0].delta.content:
                         content = chunk.choices[0].delta.content
                         total_content += content
@@ -294,6 +338,7 @@ class OpenAICompatibleProvider(BaseProvider):
         temperature: Optional[float],
         top_p: Optional[float],
         extra_kwargs: Dict[str, Any],
+        reasoning_effort: Optional[str] = None,
     ) -> Dict[str, Any]:
         request_kwargs: Dict[str, Any] = {
             "input": response_input,
@@ -308,6 +353,9 @@ class OpenAICompatibleProvider(BaseProvider):
             request_kwargs["temperature"] = temperature
         if top_p is not None:
             request_kwargs["top_p"] = top_p
+        # Responses API 推理强度：嵌套 reasoning.effort
+        if reasoning_effort:
+            request_kwargs["reasoning"] = {"effort": reasoning_effort}
 
         return request_kwargs
 

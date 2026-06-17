@@ -51,7 +51,9 @@ class AnthropicProvider(BaseProvider):
 
     def _build_body(self, model: str, messages: List[Dict[str, Any]],
                     system: Optional[str], max_tokens: int,
-                    temperature: Optional[float], stream: bool) -> Dict[str, Any]:
+                    temperature: Optional[float], stream: bool,
+                    reasoning_effort: Optional[str] = None,
+                    thinking_enabled: Optional[bool] = None) -> Dict[str, Any]:
         body: Dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,
@@ -62,6 +64,18 @@ class AnthropicProvider(BaseProvider):
             body["system"] = system
         if temperature is not None:
             body["temperature"] = temperature
+        # 思考模式：开启 → adaptive 且请求可见摘要（display=summarized）。
+        # Opus 4.7/4.8 默认 display=omitted——思考照常进行但 thinking 字段为空，
+        # 流里收不到 thinking_delta，UI 的“思考过程”块就空着。必须显式要 summarized
+        # 才能拿到可见思考文本（Claude Code 正是这样请求的）。关闭 → disabled；
+        # None → 不发送（用 API 默认）。
+        if thinking_enabled is True:
+            body["thinking"] = {"type": "adaptive", "display": "summarized"}
+        elif thinking_enabled is False:
+            body["thinking"] = {"type": "disabled"}
+        # 推理强度：Anthropic 走 output_config.effort（low/medium/high/xhigh/max）。
+        if reasoning_effort:
+            body["output_config"] = {"effort": reasoning_effort}
         return body
 
     def _http_post(self, path: str, body: Dict[str, Any]) -> Dict[str, Any]:
@@ -92,6 +106,8 @@ class AnthropicProvider(BaseProvider):
                                        stream_controller: Optional[StreamController] = None,
                                        max_tokens: Optional[int] = None,
                                        temperature: Optional[float] = 0.7,
+                                       reasoning_effort: Optional[str] = None,
+                                       thinking_enabled: Optional[bool] = None,
                                        **kwargs) -> AsyncIterator[StreamChunk]:
         total_content = ""
         total_tokens = 0
@@ -104,7 +120,8 @@ class AnthropicProvider(BaseProvider):
             )
 
             system_text, api_messages = self._convert_messages(messages)
-            body = self._build_body(model, api_messages, system_text, max_tokens or 4096, temperature, stream=True)
+            body = self._build_body(model, api_messages, system_text, max_tokens or 4096, temperature, stream=True,
+                                    reasoning_effort=reasoning_effort, thinking_enabled=thinking_enabled)
 
             # 用 asyncio.Queue 实现真流式：线程读 HTTP → 放入队列 → 异步取出并 yield
             queue: asyncio.Queue = asyncio.Queue()
@@ -132,6 +149,26 @@ class AnthropicProvider(BaseProvider):
                 etype = event.get("type", "")
                 if etype == "content_block_delta":
                     delta = event.get("delta", {})
+                    # 思考增量：Anthropic 的 thinking_delta（携带 thinking 文本）
+                    if delta.get("type") == "thinking_delta" or "thinking" in delta:
+                        thinking = delta.get("thinking", "")
+                        if thinking:
+                            if stream_controller and await stream_controller.is_stopped():
+                                yield StreamChunk(
+                                    status=StreamStatus.STOPPED, content=None,
+                                    node_id=stream_controller.node_id,
+                                    conversation_id=stream_controller.conversation_id,
+                                    error="用户手动终止", tokens_used=total_tokens,
+                                )
+                                return
+                            yield StreamChunk(
+                                status=StreamStatus.CONTENT, content=None,
+                                node_id=stream_controller.node_id if stream_controller else None,
+                                conversation_id=stream_controller.conversation_id if stream_controller else None,
+                                error=None, tokens_used=0,
+                                event_type="reasoning", reasoning=thinking,
+                            )
+                        continue
                     text = delta.get("text", "")
                     if text:
                         total_content += text

@@ -30,6 +30,7 @@ export function useStreamingManager(conversationId: string | null) {
 
   const isStreaming = state?.status === 'streaming';
   const streamedContent = state?.content ?? '';
+  const streamedReasoning = state?.reasoning ?? '';
   const currentNodeId = state?.nodeId ?? null;
   const streamDuration = state?.duration ?? 0;
   const streamStatus = state?.status ?? 'idle';
@@ -63,6 +64,7 @@ export function useStreamingManager(conversationId: string | null) {
   return {
     isStreaming,
     streamedContent,
+    streamedReasoning,
     currentNodeId,
     streamDuration,
     streamStatus,

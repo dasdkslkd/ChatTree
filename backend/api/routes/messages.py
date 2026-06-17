@@ -14,6 +14,8 @@ class SendMessageRequest(BaseModel):
     content: str
     model_id: Optional[str] = None
     node_id: Optional[str] = None
+    reasoning_effort: Optional[str] = None
+    thinking_enabled: Optional[bool] = None
 
 @router.post("/conversations/{conversation_id}/messages/stream")
 async def stream_message(
@@ -22,10 +24,17 @@ async def stream_message(
     chat_manager: ChatManager = Depends(get_chat_manager)
 ):
     """流式发送消息 - 返回 SSE 格式"""
-    
+
     async def event_generator():
         try:
-            async for chunk in chat_manager.send_message_stream(conversation_id, request.content, request.model_id, request.node_id):
+            async for chunk in chat_manager.send_message_stream(
+                conversation_id,
+                request.content,
+                request.model_id,
+                request.node_id,
+                reasoning_effort=request.reasoning_effort,
+                thinking_enabled=request.thinking_enabled,
+            ):
                 # 将 StreamChunk 转换为 JSON 字符串
                 chunk_data = {
                     "status": chunk.get("status", "content"),

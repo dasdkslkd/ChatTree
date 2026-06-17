@@ -33,6 +33,34 @@ class GeminiProvider(BaseProvider):
 
         return system_prompt.strip() or None, gemini_messages
 
+    # 抽象推理档位 -> Gemini thinking_budget 整数预算。
+    # dynamic=-1 让模型自动决定；thinking_enabled False 时强制 0（关闭思考）。
+    _EFFORT_BUDGET = {
+        "dynamic": -1,
+        "low": 1024,
+        "medium": 8192,
+        "high": 24576,
+    }
+
+    def _build_thinking_config(self, reasoning_effort, thinking_enabled):
+        """构造 Gemini ThinkingConfig；SDK 版本不支持时返回 None（守护降级）。"""
+        # 关闭思考优先：thinking_enabled False -> budget 0。
+        if thinking_enabled is False:
+            budget = 0
+        elif reasoning_effort:
+            budget = self._EFFORT_BUDGET.get(reasoning_effort)
+        elif thinking_enabled is True:
+            budget = -1  # 开启但未指定档位 -> 动态预算
+        else:
+            return None
+        if budget is None:
+            return None
+        try:
+            return genai.types.ThinkingConfig(thinking_budget=budget)
+        except Exception as e:  # SDK 版本无 ThinkingConfig / 参数名不符
+            logger.warning(f"Gemini ThinkingConfig 不可用，忽略推理参数: {e}")
+            return None
+
     def generate_response(
         self,
         model: str,
@@ -40,16 +68,22 @@ class GeminiProvider(BaseProvider):
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
+        reasoning_effort: Optional[str] = None,
+        thinking_enabled: Optional[bool] = None,
         **kwargs
     ) -> tuple[str, int]:
         """同步生成回复"""
         system_prompt, gemini_messages = self._convert_messages(messages)
 
-        generation_config = genai.types.GenerationConfig(
-            max_output_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-        )
+        gen_kwargs: Dict[str, Any] = {
+            "max_output_tokens": max_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+        }
+        thinking_config = self._build_thinking_config(reasoning_effort, thinking_enabled)
+        if thinking_config is not None:
+            gen_kwargs["thinking_config"] = thinking_config
+        generation_config = genai.types.GenerationConfig(**gen_kwargs)
 
         genai_model = self._genai.GenerativeModel(
             model_name=model,
@@ -69,6 +103,8 @@ class GeminiProvider(BaseProvider):
         stream_controller: Optional[StreamController] = None,
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = 0.7,
+        reasoning_effort: Optional[str] = None,
+        thinking_enabled: Optional[bool] = None,
         **kwargs
     ) -> AsyncIterator[StreamChunk]:
         """流式生成回复"""
@@ -87,10 +123,14 @@ class GeminiProvider(BaseProvider):
 
             system_prompt, gemini_messages = self._convert_messages(messages)
 
-            generation_config = genai.types.GenerationConfig(
-                max_output_tokens=max_tokens,
-                temperature=temperature,
-            )
+            gen_kwargs: Dict[str, Any] = {
+                "max_output_tokens": max_tokens,
+                "temperature": temperature,
+            }
+            thinking_config = self._build_thinking_config(reasoning_effort, thinking_enabled)
+            if thinking_config is not None:
+                gen_kwargs["thinking_config"] = thinking_config
+            generation_config = genai.types.GenerationConfig(**gen_kwargs)
 
             genai_model = self._genai.GenerativeModel(
                 model_name=model,

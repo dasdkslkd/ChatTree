@@ -2,6 +2,7 @@ import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
+import { Switch } from '@/components/ui/switch'
 import {
   Dialog,
   DialogContent,
@@ -45,13 +46,21 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationI
     models,
     currentProvider,
     currentModel,
+    currentReasoningEffort,
+    currentThinkingEnabled,
     pendingProvider,
     pendingModel,
+    pendingReasoningEffort,
+    pendingThinkingEnabled,
     config,
     loadModels,
     loadConfig,
+    loadMetadata,
+    getMetadata,
     setPendingProvider,
     setPendingModel,
+    setPendingReasoningEffort,
+    setPendingThinkingEnabled,
     confirmModelSelection,
     cancelModelSelection,
   } = useModelStore();
@@ -123,36 +132,62 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationI
     e.target.value = '';
   };
 
-  // 打开模型对话框：将当前值复制到 pending
+  // 打开模型对话框：将当前值复制到 pending（含推理设置）
   const handleOpenModelDialog = () => {
     setPendingProvider(currentProvider || '');
     setPendingModel(currentModel || '');
+    setPendingReasoningEffort(currentReasoningEffort);
+    setPendingThinkingEnabled(currentThinkingEnabled);
+    if (currentProvider) loadMetadata(currentProvider);
     setModelDialogOpen(true);
+  };
+
+  // 按所选模型的元数据推导默认推理设置
+  const applyDefaultsForModel = (provider: string, model: string) => {
+    const meta = getMetadata(provider, model);
+    const effortDefault = meta?.reasoning_effort?.default ?? null;
+    const thinkingDefault = meta?.thinking?.toggleable
+      ? (meta.thinking.default_enabled ?? false)
+      : null;
+    setPendingReasoningEffort(effortDefault);
+    setPendingThinkingEnabled(thinkingDefault);
   };
 
   // 对话框中切换提供商
   const handleDialogProviderChange = (provider: string) => {
     setPendingProvider(provider);
     setPendingModel(''); // 切换提供商时清空模型选择
+    setPendingReasoningEffort(null);
+    setPendingThinkingEnabled(null);
+    loadMetadata(provider);
   };
 
-  // 对话框中切换模型
+  // 对话框中切换模型：按新模型重置 pending 推理选择
   const handleDialogModelChange = (model: string) => {
     setPendingModel(model);
+    if (activeDialogProvider) applyDefaultsForModel(activeDialogProvider, model);
   };
 
-  // 确认模型选择：保存到后端
+  // 确认模型选择：保存到后端（含推理设置）
   const handleConfirmModel = async () => {
     const result = confirmModelSelection();
     if (result && currentConversation) {
       try {
-        await conversationApi.updateModel(currentConversation.id, result.model, result.provider);
+        await conversationApi.updateModel(
+          currentConversation.id,
+          result.model,
+          result.provider,
+          result.reasoningEffort,
+          result.thinkingEnabled,
+        );
         // 更新本地 conversation 对象
         const { conversations } = useConversationStore.getState();
         const conv = conversations.find(c => c.id === currentConversation.id);
         if (conv) {
           conv.model_id = result.model;
           conv.provider_id = result.provider;
+          conv.reasoning_effort = result.reasoningEffort;
+          conv.thinking_enabled = result.thinkingEnabled;
         }
       } catch (err) {
         console.error('保存模型设置失败:', err);
@@ -196,6 +231,11 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationI
 
   const hiddenModels = activeDialogProvider ? (config?.provider?.[activeDialogProvider]?.hidden_models || []) : [];
   const dialogModels = (activeDialogProvider ? models[activeDialogProvider] || [] : []).filter(m => !hiddenModels.includes(m));
+
+  // 所选模型的元数据 → 决定是否渲染推理强度/思考开关控件
+  const activeMeta = getMetadata(activeDialogProvider, activeDialogModel);
+  const effortSpec = activeMeta?.reasoning_effort;
+  const thinkingSpec = activeMeta?.thinking;
 
   return (
     <div className="w-full">
@@ -426,6 +466,49 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationI
               )}
             </div>
           </div>
+
+          {/* 推理设置：仅当所选模型元数据声明支持时渲染 */}
+          {(effortSpec || thinkingSpec?.toggleable) && (
+            <div className="flex flex-col gap-3 pt-3" style={{ borderTop: '0.5px solid var(--border)' }}>
+              {thinkingSpec?.toggleable && (
+                <div className="flex items-center justify-between">
+                  <Label htmlFor="thinking-switch" className="text-sm cursor-pointer" style={{ color: 'var(--fg-secondary)' }}>
+                    思考模式
+                  </Label>
+                  <Switch
+                    id="thinking-switch"
+                    checked={!!pendingThinkingEnabled}
+                    onCheckedChange={(checked) => setPendingThinkingEnabled(checked)}
+                  />
+                </div>
+              )}
+              {effortSpec && effortSpec.levels?.length > 0 && (
+                <div className="flex flex-col gap-2">
+                  <span className="text-sm" style={{ color: 'var(--fg-secondary)' }}>推理强度</span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {effortSpec.levels.map((level) => {
+                      const active = pendingReasoningEffort === level;
+                      return (
+                        <button
+                          key={level}
+                          className="px-2.5 py-1 rounded-full text-xs cursor-pointer transition-colors"
+                          style={{
+                            background: active ? 'var(--accent-soft)' : 'transparent',
+                            color: active ? 'var(--icon-accent)' : 'var(--fg-tertiary)',
+                            border: `0.5px solid ${active ? 'var(--icon-accent)' : 'var(--border)'}`,
+                          }}
+                          onClick={() => setPendingReasoningEffort(active ? null : level)}
+                        >
+                          {level}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           <DialogFooter>
             <Button
               variant="ghost"

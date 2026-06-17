@@ -1,11 +1,23 @@
 # backend/api/routes/models.py
 from fastapi import APIRouter, Depends, HTTPException
-from typing import List
+from typing import List, Dict, Any
 from ...core.model.model_manager import ModelManager
 from ...core.config.config import cfg
 from ..dependencies import get_model_manager
 
 router = APIRouter()
+
+
+@router.get("/models/{provider}/metadata", response_model=Dict[str, Any])
+async def get_models_metadata(
+    provider: str,
+    model_manager: ModelManager = Depends(get_model_manager)
+):
+    """获取指定提供商下所有模型的元数据（上下文长度/视觉/推理强度/思考开关）。"""
+    try:
+        return model_manager.get_provider_metadata(provider)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/models/{provider}", response_model=List[str])

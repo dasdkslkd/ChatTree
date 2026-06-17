@@ -4,6 +4,7 @@ import { messageApi } from '../api/message';
 interface StreamState {
   status: 'idle' | 'streaming' | 'completed' | 'error' | 'stopped';
   content: string;
+  reasoning: string;  // 累积的思考过程增量（event_type==="reasoning"）
   nodeId: string | null;
   tokensUsed: number;
   duration: number;
@@ -91,6 +92,7 @@ export class StreamManager {
     let state: StreamState = {
       status: 'streaming',
       content: '',
+      reasoning: '',
       nodeId: null,
       tokensUsed: 0,
       duration: 0,
@@ -101,6 +103,7 @@ export class StreamManager {
     this.notify(conversationId);
 
     let fullContent = '';
+    let fullReasoning = '';
     const startTime = Date.now();
     // 终止状态：默认 completed，被显式 stop / error 时改写。
     let finishStatus: 'completed' | 'error' | 'stopped' = 'completed';
@@ -148,6 +151,10 @@ export class StreamManager {
         if (chunk.content) {
           fullContent += chunk.content;
           state = { ...state, content: fullContent };
+        }
+        if (chunk.reasoning) {
+          fullReasoning += chunk.reasoning;
+          state = { ...state, reasoning: fullReasoning };
         }
         if (chunk.node_id) {
           state = { ...state, nodeId: chunk.node_id };

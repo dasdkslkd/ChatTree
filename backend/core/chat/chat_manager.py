@@ -98,14 +98,27 @@ class ChatManager:
             self.storage.save(data)
         return True
 
-    async def update_conversation_model(self, conversation_id: str, model_id: str, provider_id: str) -> bool:
-        """更新对话的默认模型（锁内 load-modify-save）"""
+    async def update_conversation_model(
+        self,
+        conversation_id: str,
+        model_id: str,
+        provider_id: str,
+        reasoning_effort: Optional[str] = None,
+        thinking_enabled: Optional[bool] = None,
+    ) -> bool:
+        """更新对话的默认模型及推理设置（锁内 load-modify-save）。
+
+        reasoning_effort / thinking_enabled 显式传入时写入（None 也会写入，
+        表示"清除/不发送"），与 model_id 一起按对话持久化。
+        """
         async with self._lock_for(conversation_id):
             data = self.storage.load(conversation_id)
             if not data:
                 return False
             data["metadata"]["model_id"] = model_id
             data["metadata"]["provider_id"] = provider_id
+            data["metadata"]["reasoning_effort"] = reasoning_effort
+            data["metadata"]["thinking_enabled"] = thinking_enabled
             data["metadata"]["updated_at"] = int(time())
             self.storage.save(data)
         return True
@@ -147,7 +160,9 @@ class ChatManager:
         conversation_id: str,
         content: str,
         model_id: Optional[str] = None,
-        node_id: Optional[str] = None
+        node_id: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
+        thinking_enabled: Optional[bool] = None,
     ) -> AsyncIterator[StreamChunk]:
         """
         异步流式发送消息
@@ -223,6 +238,31 @@ class ChatManager:
             )
             return
         
+        # 解析有效推理参数：请求传入 > 对话 metadata > 模型默认；再按模型元数据校验。
+        # metadata 不支持的档位/开关会被规范化为 None（不发送），保护配错的第三方模型。
+        from ..model.model_metadata import normalize_effort, normalize_thinking
+        meta = self.model_manager.get_model_metadata(target_provider, target_model)
+        conv_meta = preview.metadata
+        effort_spec = meta.get("reasoning_effort") or {}
+        thinking_spec = meta.get("thinking") or {}
+        eff_effort = (
+            reasoning_effort
+            if reasoning_effort is not None
+            else conv_meta.get("reasoning_effort")
+            if conv_meta.get("reasoning_effort") is not None
+            else effort_spec.get("default")
+        )
+        eff_thinking = (
+            thinking_enabled
+            if thinking_enabled is not None
+            else conv_meta.get("thinking_enabled")
+            if conv_meta.get("thinking_enabled") is not None
+            else (thinking_spec.get("default_enabled") if thinking_spec.get("toggleable") else None)
+        )
+        eff_effort = normalize_effort(eff_effort, meta)
+        eff_thinking = normalize_thinking(eff_thinking, meta)
+        logger.info(f"Stream reasoning: effort={eff_effort}, thinking={eff_thinking}")
+
         # 创建用户消息
         user_msg = Message({
             "id": str(uuid.uuid4()),
@@ -266,6 +306,7 @@ class ChatManager:
         messages = self._prepare_messages_for_api_with_conversation(conversation)
 
         total_content = ""
+        total_reasoning = ""
         tokens_used = 0
         start_time = time()  # 记录开始时间
         generation_status = "completed"  # 默认状态
@@ -278,8 +319,13 @@ class ChatManager:
             async for chunk in provider.generate_response_stream(
                 model=target_model,
                 messages=messages,
-                stream_controller=controller
+                stream_controller=controller,
+                reasoning_effort=eff_effort,
+                thinking_enabled=eff_thinking,
             ): # type: ignore
+                # 思考增量：累积到 total_reasoning（event_type=="reasoning" 时 content 为空）
+                if r := chunk.get("reasoning"):
+                    total_reasoning += r
                 if data := chunk.get("content"):
                     total_content += data
                 # Track generation status from stream chunks
@@ -325,6 +371,7 @@ class ChatManager:
                 "name": None,
                 "tool_calls": None,
                 "tool_call_id": None,
+                "reasoning": total_reasoning or None,
                 "timestamp": int(time()),
                 "generation_info": generation_info
             })

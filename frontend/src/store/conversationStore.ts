@@ -80,8 +80,30 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
               pendingScrollNodeId: null,
             });
             await get().loadConversations();
-            // 新建对话：重置为默认模型
-            await useModelStore.getState().resetToDefault();
+            // 保留用户已选模型：新建对话前若用户已在模型框里选过模型（store 里有
+            // current 值），把它持久化到新对话，并保持 store 不变——否则
+            // resetToDefault() 会把按钮显示回退到默认模型（请求仍用已选模型，但
+            // 显示串掉）。仅当 store 没有任何选择时才回退默认作为初始化。
+            const ms = useModelStore.getState();
+            if (ms.currentProvider && ms.currentModel) {
+              try {
+                await conversationApi.updateModel(
+                  conversation.id,
+                  ms.currentModel,
+                  ms.currentProvider,
+                  ms.currentReasoningEffort,
+                  ms.currentThinkingEnabled,
+                );
+                conversation.model_id = ms.currentModel;
+                conversation.provider_id = ms.currentProvider;
+                conversation.reasoning_effort = ms.currentReasoningEffort;
+                conversation.thinking_enabled = ms.currentThinkingEnabled;
+              } catch (_) {
+                // 持久化失败不阻断创建；store 选择仍保留，显示不会串
+              }
+            } else {
+              await ms.resetToDefault();
+            }
             return conversation;
           } catch (err: any) {
             set({ error: err.message });

@@ -1,6 +1,27 @@
 // API 格式类型
 export type APIFormat = 'chat_completions' | 'responses' | 'anthropic' | 'gemini';
 
+// 推理强度声明（levels 既是 UI 选项，也是合法档位）
+export interface ReasoningEffortSpec {
+  levels: string[];
+  default?: string | null;
+}
+
+// 思考模式开关声明
+export interface ThinkingSpec {
+  toggleable: boolean;
+  default_enabled: boolean;
+}
+
+// 单个模型的统一能力声明（reasoning_effort/thinking 为 null = 不显示对应控件）
+export interface ModelMetadata {
+  model_id: string;
+  context_length?: number | null;
+  supports_vision?: boolean;
+  reasoning_effort?: ReasoningEffortSpec | null;
+  thinking?: ThinkingSpec | null;
+}
+
 // 提供商 ID（动态字符串，不再使用枚举）
 export type ModelProvider = string;
 

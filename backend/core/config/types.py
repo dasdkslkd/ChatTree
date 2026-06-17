@@ -69,6 +69,8 @@ class ConversationMetadata(TypedDict, total=False):
     total_tokens: Dict[str, int]
     model_id: Optional[str]       # 当前对话使用的模型ID
     provider_id: Optional[str]    # 当前对话使用的提供商ID
+    reasoning_effort: Optional[str]   # 当前对话的推理强度档位（None=不发送）
+    thinking_enabled: Optional[bool]  # 当前对话的思考模式开关（None=不发送）
     schema_version: Optional[int] # 持久化 schema 版本
 
 class ConversationData(TypedDict):
