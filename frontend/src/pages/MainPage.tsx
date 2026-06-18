@@ -23,7 +23,6 @@ import {
 import {
   Plus, X, MoreHorizontal, ChevronLeft, ChevronRight,
   Copy, Check, Pencil, Loader2, RotateCcw, Network, MessageSquare, Trash2, FileText, Download, Settings,
-  ChevronDown, Brain,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -87,28 +86,24 @@ function ThinkingBlock({ reasoning, streaming }: { reasoning: string; streaming?
   const [expanded, setExpanded] = useState(false);
   if (!reasoning) return null;
   return (
-    <div className="w-fit max-w-full mb-1.5 rounded-lg overflow-hidden" style={{ border: '0.5px solid var(--border)', background: 'var(--bg-button-tertiary-hover)' }}>
+    <div className={cn('thought', expanded && 'expanded')}>
       <button
-        className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs cursor-pointer bg-transparent border-none w-full"
-        style={{ color: 'var(--fg-tertiary)' }}
+        type="button"
+        className="thought-head"
+        aria-expanded={expanded}
         onClick={() => setExpanded((v) => !v)}
       >
-        <Brain className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--icon-accent)' }} />
-        <span>{streaming ? '思考中…' : '思考过程'}</span>
-        {streaming && <Loader2 className="h-3 w-3 animate-spin" style={{ color: 'var(--icon-accent)' }} />}
-        <ChevronDown
-          className="h-3.5 w-3.5 ml-auto transition-transform"
-          style={{ transform: expanded ? 'rotate(180deg)' : 'none' }}
-        />
+        <ChevronRight className="thought-chevron" />
+        <span className={streaming ? 'shimmer-text' : undefined}>{streaming ? '思考中…' : '思考过程'}</span>
+        {streaming && <Loader2 className="thought-spinner animate-spin" />}
       </button>
-      {expanded && (
-        <div
-          className="px-3 py-2 text-xs whitespace-pre-wrap break-words"
-          style={{ borderTop: '0.5px solid var(--border)', color: 'var(--fg-tertiary)', maxHeight: '320px', overflowY: 'auto', fontFamily: 'var(--font-mono)', lineHeight: 1.6 }}
-        >
-          {reasoning}
+      <div className="thought-body-shell" aria-hidden={!expanded}>
+        <div className="thought-body-clip">
+          <div className="thought-body custom-scrollbar">
+            {reasoning}
+          </div>
         </div>
-      )}
+      </div>
     </div>
   );
 }

@@ -296,6 +296,90 @@
   100% { background-position: -200% 0; }
 }
 
+/* ====== Collapsed thinking summary (reference/gui, compact line height) ====== */
+.thought {
+  width: fit-content;
+  max-width: 100%;
+  margin: 4px 0 6px;
+  padding: 2px 0 2px 12px;
+  border-left: 2px solid var(--border-heavy, rgba(255,247,240,0.17));
+}
+
+.thought-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 20px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--fg-tertiary, rgba(251,247,244,0.52));
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.thought-head:hover {
+  color: var(--fg-secondary, rgba(251,247,244,0.72));
+}
+
+.thought-chevron {
+  width: 12px;
+  height: 12px;
+  color: var(--icon-tertiary, rgba(251,247,244,0.52));
+  transition: transform var(--transition-basic, 0.15s);
+  flex-shrink: 0;
+}
+
+.thought.expanded .thought-chevron {
+  transform: rotate(90deg);
+}
+
+.thought-spinner {
+  width: 12px;
+  height: 12px;
+  color: var(--icon-accent, #d97757);
+  flex-shrink: 0;
+}
+
+.thought-body-shell {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transform: translateY(-2px);
+  transition:
+    grid-template-rows 0.18s var(--ease-enter, ease),
+    opacity 0.14s ease,
+    transform 0.18s var(--ease-enter, ease);
+}
+
+.thought.expanded .thought-body-shell {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.thought-body-clip {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.thought-body {
+  display: block;
+  max-height: 320px;
+  overflow-y: auto;
+  margin-top: 4px;
+  color: var(--fg-tertiary, rgba(251,247,244,0.52));
+  font-family: var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 18px;
+  font-style: italic;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* ====== Streaming cursor ====== */
 .cursor-blink {
   display: inline-block;
