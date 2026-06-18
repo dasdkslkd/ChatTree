@@ -1,7 +1,8 @@
 # chat/chat_manager.py - 适配延迟加载
-from typing import List, Optional, Dict, AsyncIterator
+from typing import Any, List, Optional, Dict, AsyncIterator
 import uuid
 import asyncio  
+import json
 from time import time
 from .conversation import Conversation
 from .node import NodeManager
@@ -18,10 +19,11 @@ logger = setup_logger('ChatManager')
 class ChatManager:
     """延迟加载模型的聊天管理器"""
     
-    def __init__(self, model_manager: ModelManager, storage: ChatStorage, prompts: PromptStorage):
+    def __init__(self, model_manager: ModelManager, storage: ChatStorage, prompts: PromptStorage, tool_manager=None):
         self.model_manager = model_manager
         self.storage = storage
         self.prompts = prompts
+        self.tool_manager = tool_manager
         self.current_conversation: Optional[Conversation] = None
         self._active_controllers: Dict[str, StreamController] = {}  # node_id -> controller
         # 每对话异步锁，串行化同一对话的 load-modify-save 临界区。
@@ -309,6 +311,10 @@ class ChatManager:
         # 准备消息链（使用锁内加载的最新 conversation）
         messages = self._prepare_messages_for_api_with_conversation(conversation)
 
+        tools = self.tool_manager.get_openai_tools() if self.tool_manager else []
+        tools = tools or None
+        max_tool_rounds = int(cfg.data.get("tools", {}).get("max_rounds", 5)) if isinstance(cfg.data, dict) else 5
+
         total_content = ""
         total_reasoning = ""
         tokens_used = 0
@@ -318,36 +324,128 @@ class ChatManager:
         error_message = None
 
         try:
-            # provider 引用已在循环前捕获（见上方 get_model）。即便此刻 config 变更
-            # 重建了 model_manager，在途流仍用这个局部 provider，不受影响。
-            # 不要在循环内重新读取 self.model_manager。
-            async for chunk in provider.generate_response_stream(
-                model=target_model,
-                messages=messages,
-                stream_controller=controller,
-                reasoning_effort=eff_effort,
-                thinking_enabled=eff_thinking,
-            ): # type: ignore
-                # 思考增量：累积到 total_reasoning（event_type=="reasoning" 时 content 为空）
-                if r := chunk.get("reasoning"):
-                    total_reasoning += r
-                if data := chunk.get("content"):
-                    total_content += data
-                # Track generation status from stream chunks
-                chunk_status = chunk.get("status")
-                if chunk_status == StreamStatus.ERROR:
+            all_tool_calls: List[Dict[str, Any]] = []
+            all_tool_messages: List[Message] = []
+            tool_interactions: List[Dict[str, Any]] = []
+            tool_round = 0
+
+            while True:
+                round_content = ""
+                round_reasoning = ""
+                round_status = "completed"
+                complete_chunk = None
+                round_tool_calls: List[Dict[str, Any]] = []
+
+                # provider 引用已在循环前捕获（见上方 get_model）。即便此刻 config 变更
+                # 重建了 model_manager，在途流仍用这个局部 provider，不受影响。
+                # 不要在循环内重新读取 self.model_manager。
+                async for chunk in provider.generate_response_stream(
+                    model=target_model,
+                    messages=messages,
+                    stream_controller=controller,
+                    tools=tools,
+                    tool_choice="auto" if tools else None,
+                    reasoning_effort=eff_effort,
+                    thinking_enabled=eff_thinking,
+                ): # type: ignore
+                    if r := chunk.get("reasoning"):
+                        total_reasoning += r
+                        round_reasoning += r
+                    if data := chunk.get("content"):
+                        total_content += data
+                        round_content += data
+                    if chunk.get("tool_calls"):
+                        round_tool_calls = self._merge_tool_call_lists(round_tool_calls, chunk.get("tool_calls") or [])
+                    elif chunk.get("tool_call"):
+                        embedded = chunk.get("tool_call") or {}
+                        if embedded.get("tool_calls"):
+                            round_tool_calls = self._merge_tool_call_lists(round_tool_calls, embedded.get("tool_calls") or [])
+
+                    chunk_status = chunk.get("status")
+                    if chunk_status == StreamStatus.ERROR:
+                        generation_status = "error"
+                        error_message = chunk.get("error")
+                        round_status = "error"
+                    elif chunk_status == StreamStatus.STOPPED:
+                        generation_status = "stopped"
+                        round_status = "stopped"
+                    if chunk_status == StreamStatus.COMPLETE:
+                        tokens_used = chunk.get("tokens_used", tokens_used) or tokens_used
+                        usage_info = chunk.get("usage_info") or usage_info
+                        tokens_used = usage_total(usage_info, tokens_used)
+                        complete_chunk = chunk
+                        continue
+
+                    chunk["conversation_id"] = conversation_id
+                    yield chunk
+
+                if round_status != "completed":
+                    if complete_chunk:
+                        complete_chunk["conversation_id"] = conversation_id
+                        yield complete_chunk
+                    break
+
+                if not round_tool_calls:
+                    if complete_chunk:
+                        complete_chunk["conversation_id"] = conversation_id
+                        yield complete_chunk
+                    break
+
+                if not self.tool_manager:
+                    logger.warning("Model requested tools but no ToolManager is configured")
+                    if complete_chunk:
+                        complete_chunk["conversation_id"] = conversation_id
+                        yield complete_chunk
+                    break
+
+                if tool_round >= max_tool_rounds:
+                    error_message = f"工具调用轮数超过上限 {max_tool_rounds}"
                     generation_status = "error"
-                    error_message = chunk.get("error")
-                elif chunk_status == StreamStatus.STOPPED:
-                    generation_status = "stopped"
-                # 在 COMPLETE chunk 上捕获最终 token 总量（三家 provider 都在此带最终值）
-                if chunk_status == StreamStatus.COMPLETE:
-                    tokens_used = chunk.get("tokens_used", tokens_used) or tokens_used
-                    usage_info = chunk.get("usage_info") or usage_info
-                    tokens_used = usage_total(usage_info, tokens_used)
-                # 更新 conversation_id 在 chunk 中
-                chunk["conversation_id"] = conversation_id
-                yield chunk
+                    yield StreamChunk(
+                        status=StreamStatus.ERROR,
+                        content="",
+                        node_id=new_node["id"],
+                        conversation_id=conversation_id,
+                        error=error_message,
+                        tokens_used=tokens_used,
+                    )
+                    break
+
+                tool_round += 1
+                assistant_tool_message = {
+                    "role": "assistant",
+                    "content": round_content,
+                    "tool_calls": round_tool_calls,
+                }
+                messages.append(assistant_tool_message)
+                tool_messages = await self._execute_tool_calls(
+                    round_tool_calls,
+                    node_id=new_node["id"],
+                )
+                messages.extend(tool_messages)
+                all_tool_calls.extend(round_tool_calls)
+                all_tool_messages.extend(tool_messages)
+                tool_interactions.append({
+                    "assistant": assistant_tool_message,
+                    "tools": tool_messages,
+                    "reasoning": round_reasoning or None,
+                })
+
+                for tool_msg in tool_messages:
+                    yield StreamChunk(
+                        status=StreamStatus.CONTENT,
+                        content=None,
+                        node_id=new_node["id"],
+                        conversation_id=conversation_id,
+                        error=None,
+                        tokens_used=0,
+                        event_type="tool_result",
+                        tool_call={
+                            "tool_call_id": tool_msg.get("tool_call_id"),
+                            "name": tool_msg.get("name"),
+                            "content": tool_msg.get("content"),
+                        },
+                    )
 
             # 检查是否被手动停止
             if await controller.is_stopped():
@@ -380,8 +478,10 @@ class ChatManager:
                 "role": Role.ASSISTANT,
                 "content": total_content,
                 "name": None,
-                "tool_calls": None,
+                "tool_calls": all_tool_calls or None,
                 "tool_call_id": None,
+                "tool_results": all_tool_messages or None,
+                "tool_interactions": tool_interactions or None,
                 "reasoning": total_reasoning or None,
                 "timestamp": int(time()),
                 "generation_info": generation_info
@@ -395,12 +495,16 @@ class ChatManager:
                 latest = self.get_conversation(conversation_id)
                 if latest is not None and new_node["id"] in latest.nodes:
                     NodeManager.add_assistant_message(latest.nodes[new_node["id"]], assistant_msg)
+                    if all_tool_messages:
+                        NodeManager.add_tool_messages(latest.nodes[new_node["id"]], all_tool_messages)
                     self._update_token_stats_for_conversation(latest, target_provider, tokens_used)
                     self._update_branch_usage_for_node(latest, new_node["id"])
                     self._save(latest)
                 else:
                     # 极端情况：节点已被并发删除——退回到只保存本节点，避免丢消息
                     NodeManager.add_assistant_message(new_node, assistant_msg)
+                    if all_tool_messages:
+                        NodeManager.add_tool_messages(new_node, all_tool_messages)
                     new_node["total_tokens"] = usage_total(usage_info, tokens_used)
                     new_node["branch_usage_info"] = usage_info
                     self.storage.save({
@@ -434,17 +538,17 @@ class ChatManager:
         工具轮次接缝：除 role/content 外，**存在即保留** tool_calls / tool_call_id /
         name，使未来的工具调用消息能完整流到 provider，而当前纯文本路径形状不变。
         """
-        messages = conversation.get_message_chain_from_node(conversation.current_node_id)
-
         msg_dict = []
-        for msg in messages:
+
+        def append_message(msg: Optional[Message]):
+            if not msg:
+                return
             role = msg["role"]
-            # Role 枚举转为小写字符串值（"user" 而非 "Role.USER"）
             if not isinstance(role, str) or role.startswith("Role."):
                 role = role.value if hasattr(role, 'value') else str(role).split(".")[-1].lower()
             out: Dict[str, Any] = {
                 "role": role,
-                "content": msg["content"],
+                "content": msg.get("content") or "",
             }
             if msg.get("tool_calls"):
                 out["tool_calls"] = msg["tool_calls"]
@@ -454,7 +558,79 @@ class ChatManager:
                 out["name"] = msg["name"]
             msg_dict.append(out)
 
+        for node in conversation.get_node_chain(conversation.current_node_id):
+            append_message(node.get("system_message"))
+            append_message(node.get("user_message"))
+            assistant = node.get("assistant_message")
+            if assistant and assistant.get("tool_interactions"):
+                for interaction in assistant.get("tool_interactions") or []:
+                    append_message(interaction.get("assistant"))
+                    for tool_msg in interaction.get("tools") or []:
+                        append_message(tool_msg)
+                final_assistant = dict(assistant)
+                final_assistant.pop("tool_calls", None)
+                final_assistant.pop("tool_results", None)
+                final_assistant.pop("tool_interactions", None)
+                append_message(final_assistant)
+            else:
+                append_message(assistant)
+                for tool_msg in node.get("tool_messages", []):
+                    append_message(tool_msg)
+
         return msg_dict
+
+    def _merge_tool_call_lists(
+        self,
+        current: List[Dict[str, Any]],
+        incoming: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        by_id = {call.get("id") or str(index): call for index, call in enumerate(current)}
+        for index, call in enumerate(incoming):
+            key = call.get("id") or str(index)
+            by_id[key] = call
+        return list(by_id.values())
+
+    async def _execute_tool_calls(
+        self,
+        tool_calls: List[Dict[str, Any]],
+        node_id: str,
+    ) -> List[Message]:
+        results: List[Message] = []
+        for tool_call in tool_calls:
+            fn = tool_call.get("function") or {}
+            name = fn.get("name", "")
+            arguments = self._parse_tool_arguments(fn.get("arguments"))
+            result = await self.tool_manager.execute_tool(name, arguments) if self.tool_manager else json.dumps(
+                {"error": "Tool manager is not configured"}, ensure_ascii=False
+            )
+            results.append(Message({
+                "id": str(uuid.uuid4()),
+                "role": Role.TOOL,
+                "content": result,
+                "name": name,
+                "tool_calls": None,
+                "tool_call_id": tool_call.get("id"),
+                "node_id": node_id,
+                "timestamp": int(time()),
+            }))
+        return results
+
+    def _parse_tool_arguments(self, raw_arguments: Any) -> Dict[str, Any]:
+        if isinstance(raw_arguments, dict):
+            return raw_arguments
+        if raw_arguments is None or raw_arguments == "":
+            return {}
+        if isinstance(raw_arguments, str):
+            try:
+                parsed = json.loads(raw_arguments)
+                return parsed if isinstance(parsed, dict) else {"value": parsed}
+            except json.JSONDecodeError:
+                return {"arguments": raw_arguments}
+        return {"arguments": raw_arguments}
+
+    def _format_messages_for_api(self, messages: List[Message]) -> List[Message]:
+        """兼容旧调试脚本：消息在当前实现中已是 provider 可接收格式。"""
+        return messages
 
     def _update_token_stats_for_conversation(self, conversation: Conversation, provider: str, tokens: int):
         """更新token统计（使用指定的 conversation）"""

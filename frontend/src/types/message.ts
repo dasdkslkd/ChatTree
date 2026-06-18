@@ -23,6 +23,7 @@ export interface Message {
   tool_calls?: any[];
   tool_call_id?: string;
   tool_results?: any[];
+  tool_interactions?: any[];
   reasoning?: string;
 }
 
@@ -46,4 +47,5 @@ export interface StreamChunk {
   event_type?: 'text' | 'reasoning' | 'tool_call' | 'tool_result';
   reasoning?: string | null;
   tool_call?: any;
+  tool_calls?: any[];
 }

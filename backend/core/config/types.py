@@ -57,6 +57,7 @@ class Message(TypedDict, total=False):
     tool_calls: Optional[List[Dict[str, Any]]]
     tool_call_id: Optional[str]
     tool_results: Optional[List[Dict[str, Any]]]  # 本消息触发的工具调用结果（未来工具轮次填充）
+    tool_interactions: Optional[List[Dict[str, Any]]]  # 工具轮次序列：assistant tool_call + tool result
     reasoning: Optional[str]  # 推理/思考轨迹（未来推理模型填充）
     timestamp: Required[int]
     generation_info: Optional[GenerationInfo]  # 生成信息（仅助手消息有，可选）
@@ -159,6 +160,7 @@ class StreamChunk(TypedDict, total=False):
     event_type: Optional[str]            # "text" | "reasoning" | "tool_call" | "tool_result"，缺省按 text
     reasoning: Optional[str]             # 推理增量
     tool_call: Optional[Dict[str, Any]]  # 工具调用增量/完整载荷
+    tool_calls: Optional[List[Dict[str, Any]]]  # 完整工具调用列表（provider 聚合后填充）
 
     usage_info: UsageInfo
 

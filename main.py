@@ -12,6 +12,7 @@ from backend.core.model.model_manager import ModelManager
 from backend.core.config.config import Config
 from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
+from backend.core.tools.tool_manager import ToolManager
 
 app = FastAPI(
     title="AI 对话树后端",
@@ -34,11 +35,20 @@ async def startup_event():
     model_manager = ModelManager()
     chat_storage = ChatStorage()
     prompt_storage = PromptStorage()
-    chat_manager = ChatManager(model_manager,chat_storage,prompt_storage)
+    tool_manager = ToolManager(config_manager.data)
+    await tool_manager.init()
+    chat_manager = ChatManager(model_manager, chat_storage, prompt_storage, tool_manager)
 
     app.state.config_manager = config_manager
     app.state.model_manager = model_manager
+    app.state.tool_manager = tool_manager
     app.state.chat_manager = chat_manager
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    tool_manager = getattr(app.state, "tool_manager", None)
+    if tool_manager:
+        await tool_manager.close()
 
 # ---------- 注册路由 ----------
 app.include_router(config.router,        prefix="",        tags=["配置"])

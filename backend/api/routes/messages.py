@@ -46,7 +46,7 @@ async def stream_message(
                     "usage_info": chunk.get("usage_info")
                 }
                 # 仅在存在时转发可扩展字段，保持当前文本路径 JSON 形状不变
-                for opt_key in ("event_type", "reasoning", "tool_call"):
+                for opt_key in ("event_type", "reasoning", "tool_call", "tool_calls"):
                     val = chunk.get(opt_key)
                     if val is not None:
                         chunk_data[opt_key] = val

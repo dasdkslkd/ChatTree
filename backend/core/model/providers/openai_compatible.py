@@ -99,6 +99,8 @@ class OpenAICompatibleProvider(BaseProvider):
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[str] = None,
         **kwargs
     ) -> tuple[str, int]:
         if self._use_responses_api():
@@ -108,6 +110,8 @@ class OpenAICompatibleProvider(BaseProvider):
                 max_tokens=max_tokens,
                 temperature=temperature,
                 top_p=top_p,
+                tools=tools,
+                tool_choice=tool_choice,
                 **kwargs,
             )
 
@@ -119,10 +123,13 @@ class OpenAICompatibleProvider(BaseProvider):
             temperature=temperature,
             top_p=top_p,
             extra_kwargs=kwargs,
+            tools=tools,
+            tool_choice=tool_choice,
         )
         response = self._request_json("/chat/completions", body)
         choice = (response.get("choices") or [{}])[0]
-        content = ((choice.get("message") or {}).get("content")) or ""
+        message = choice.get("message") or {}
+        content = message.get("content") or ""
         usage = response.get("usage")
         usage_info = usage_from_openai(usage)
         return content, usage_total(usage_info, 0)
@@ -134,6 +141,8 @@ class OpenAICompatibleProvider(BaseProvider):
         stream_controller: Optional[StreamController] = None,
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = 0.7,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
         thinking_enabled: Optional[bool] = None,
         **kwargs
@@ -159,6 +168,8 @@ class OpenAICompatibleProvider(BaseProvider):
                     stream_controller=stream_controller,
                     max_tokens=max_tokens,
                     temperature=temperature,
+                    tools=tools,
+                    tool_choice=tool_choice,
                     reasoning_effort=reasoning_effort,
                     extra_kwargs=kwargs,
                 ):
@@ -180,9 +191,11 @@ class OpenAICompatibleProvider(BaseProvider):
                 top_p=None,
                 extra_kwargs=kwargs,
                 reasoning_effort=reasoning_effort,
+                tools=tools,
+                tool_choice=tool_choice,
             )
             request_kwargs["stream_options"] = {"include_usage": True}
-            if thinking_enabled is not None:
+            if thinking_enabled is not None and self._supports_enable_thinking(model):
                 request_kwargs["extra_body"] = {
                     "enable_thinking": thinking_enabled,
                     "chat_template_kwargs": {"enable_thinking": thinking_enabled},
@@ -196,13 +209,16 @@ class OpenAICompatibleProvider(BaseProvider):
             no_stream_usage = dict(attempts[-1])
             no_stream_usage.pop("stream_options", None)
             attempts.append(no_stream_usage)
-            if reasoning_effort or thinking_enabled is not None:
+            if reasoning_effort or (
+                thinking_enabled is not None and self._supports_enable_thinking(model)
+            ):
                 no_reasoning = dict(attempts[-1])
                 no_reasoning.pop("reasoning_effort", None)
                 no_reasoning.pop("extra_body", None)
                 attempts.append(no_reasoning)
 
             last_error: Optional[Exception] = None
+            tool_call_accumulator: Dict[int, Dict[str, Any]] = {}
             for attempt_index, current_kwargs in enumerate(attempts):
                 try:
                     async for event in self._iter_sse_events("/chat/completions", current_kwargs):
@@ -223,6 +239,8 @@ class OpenAICompatibleProvider(BaseProvider):
 
                         choice = (event.get("choices") or [{}])[0]
                         delta = choice.get("delta") or {}
+                        for tool_call in delta.get("tool_calls") or []:
+                            self._merge_openai_tool_call_delta(tool_call_accumulator, tool_call)
                         reasoning = delta.get("reasoning_content") or delta.get("reasoning")
                         if reasoning:
                             yield StreamChunk(
@@ -248,6 +266,20 @@ class OpenAICompatibleProvider(BaseProvider):
                                 conversation_id=stream_controller.conversation_id if stream_controller else None,
                                 error=None,
                                 tokens_used=token_delta,
+                            )
+                        finish_reason = choice.get("finish_reason")
+                        if finish_reason == "tool_calls" and tool_call_accumulator:
+                            tool_calls = self._finalize_openai_tool_calls(tool_call_accumulator)
+                            yield StreamChunk(
+                                status=StreamStatus.CONTENT,
+                                content=None,
+                                node_id=stream_controller.node_id if stream_controller else None,
+                                conversation_id=stream_controller.conversation_id if stream_controller else None,
+                                error=None,
+                                tokens_used=0,
+                                event_type="tool_call",
+                                tool_call={"tool_calls": tool_calls},
+                                tool_calls=tool_calls,
                             )
                     break
                 except ProviderHTTPError as exc:
@@ -303,6 +335,8 @@ class OpenAICompatibleProvider(BaseProvider):
         stream_controller: Optional[StreamController],
         max_tokens: Optional[int],
         temperature: Optional[float],
+        tools: Optional[List[Dict[str, Any]]],
+        tool_choice: Optional[str],
         reasoning_effort: Optional[str],
         extra_kwargs: Dict[str, Any],
     ) -> AsyncIterator[StreamChunk]:
@@ -317,6 +351,8 @@ class OpenAICompatibleProvider(BaseProvider):
             top_p=None,
             reasoning_effort=reasoning_effort,
             extra_kwargs=extra_kwargs,
+            tools=tools,
+            tool_choice=tool_choice,
         )
         request_kwargs["model"] = model
         request_kwargs["stream"] = True
@@ -329,6 +365,7 @@ class OpenAICompatibleProvider(BaseProvider):
 
         for attempt_index, current_kwargs in enumerate(attempts):
             total_content = ""
+            function_calls: Dict[str, Dict[str, Any]] = {}
             try:
                 async for event in self._iter_sse_events("/responses", current_kwargs):
                     if stream_controller and await stream_controller.is_stopped():
@@ -348,6 +385,57 @@ class OpenAICompatibleProvider(BaseProvider):
                         if usage := response.get("usage"):
                             usage_info = usage_from_openai(usage)
                             total_tokens = usage_total(usage_info, total_tokens)
+                        completed_tool_calls = self._extract_responses_tool_calls(response)
+                        if completed_tool_calls:
+                            function_calls.clear()
+                            yield StreamChunk(
+                                status=StreamStatus.CONTENT,
+                                content=None,
+                                node_id=stream_controller.node_id if stream_controller else None,
+                                conversation_id=stream_controller.conversation_id if stream_controller else None,
+                                error=None,
+                                tokens_used=0,
+                                event_type="tool_call",
+                                tool_call={"tool_calls": completed_tool_calls},
+                                tool_calls=completed_tool_calls,
+                            )
+                        continue
+
+                    if event_type == "response.output_item.added":
+                        item = event.get("item") or {}
+                        if item.get("type") == "function_call":
+                            key = str(event.get("output_index", item.get("id") or item.get("call_id") or len(function_calls)))
+                            function_calls[key] = {
+                                "id": item.get("call_id") or item.get("id") or key,
+                                "type": "function",
+                                "function": {
+                                    "name": item.get("name", ""),
+                                    "arguments": item.get("arguments", "") or "",
+                                },
+                            }
+                        continue
+
+                    if event_type == "response.function_call_arguments.delta":
+                        key = str(event.get("output_index", "0"))
+                        call = function_calls.setdefault(
+                            key,
+                            {"id": key, "type": "function", "function": {"name": "", "arguments": ""}},
+                        )
+                        call["function"]["arguments"] += event.get("delta") or ""
+                        continue
+
+                    if event_type == "response.output_item.done":
+                        item = event.get("item") or {}
+                        if item.get("type") == "function_call":
+                            key = str(event.get("output_index", item.get("id") or item.get("call_id") or "0"))
+                            function_calls[key] = {
+                                "id": item.get("call_id") or item.get("id") or key,
+                                "type": "function",
+                                "function": {
+                                    "name": item.get("name", ""),
+                                    "arguments": item.get("arguments", "") or "",
+                                },
+                            }
                         continue
 
                     if event_type == "response.reasoning_summary_text.delta":
@@ -394,6 +482,24 @@ class OpenAICompatibleProvider(BaseProvider):
                     continue
                 raise
 
+        if function_calls:
+            tool_calls = [
+                call for _, call in sorted(function_calls.items(), key=lambda item: item[0])
+                if call.get("function", {}).get("name")
+            ]
+            if tool_calls:
+                yield StreamChunk(
+                    status=StreamStatus.CONTENT,
+                    content=None,
+                    node_id=stream_controller.node_id if stream_controller else None,
+                    conversation_id=stream_controller.conversation_id if stream_controller else None,
+                    error=None,
+                    tokens_used=0,
+                    event_type="tool_call",
+                    tool_call={"tool_calls": tool_calls},
+                    tool_calls=tool_calls,
+                )
+
         if usage_info is None:
             usage_info = estimated_usage(total_tokens)
         yield StreamChunk(
@@ -438,6 +544,8 @@ class OpenAICompatibleProvider(BaseProvider):
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[str] = None,
         **kwargs
     ) -> tuple[str, int]:
         instructions, response_input = self._convert_messages_to_responses_input(messages)
@@ -448,6 +556,8 @@ class OpenAICompatibleProvider(BaseProvider):
             temperature=temperature,
             top_p=top_p,
             extra_kwargs=kwargs,
+            tools=tools,
+            tool_choice=tool_choice,
         )
         request_kwargs["model"] = model
         response = self._request_json("/responses", request_kwargs)
@@ -465,6 +575,8 @@ class OpenAICompatibleProvider(BaseProvider):
         top_p: Optional[float],
         extra_kwargs: Dict[str, Any],
         reasoning_effort: Optional[str] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[str] = None,
     ) -> Dict[str, Any]:
         body: Dict[str, Any] = {
             "model": model,
@@ -480,6 +592,9 @@ class OpenAICompatibleProvider(BaseProvider):
             body["top_p"] = top_p
         if reasoning_effort:
             body["reasoning_effort"] = reasoning_effort
+        if tools:
+            body["tools"] = tools
+            body["tool_choice"] = tool_choice or "auto"
         return body
 
     def _build_responses_request_kwargs(
@@ -491,6 +606,8 @@ class OpenAICompatibleProvider(BaseProvider):
         top_p: Optional[float],
         extra_kwargs: Dict[str, Any],
         reasoning_effort: Optional[str] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[str] = None,
     ) -> Dict[str, Any]:
         request_kwargs: Dict[str, Any] = {
             "input": response_input,
@@ -506,10 +623,18 @@ class OpenAICompatibleProvider(BaseProvider):
             request_kwargs["top_p"] = top_p
         if reasoning_effort:
             request_kwargs["reasoning"] = {"effort": reasoning_effort}
+        if tools:
+            request_kwargs["tools"] = [self._openai_tool_to_responses_tool(tool) for tool in tools]
+            if tool_choice and tool_choice != "auto":
+                request_kwargs["tool_choice"] = tool_choice
         return request_kwargs
 
     def _should_retry_responses_without_temperature(self, request_kwargs: Dict[str, Any]) -> bool:
         return bool(self.config.get("base_url") and "temperature" in request_kwargs)
+
+    def _supports_enable_thinking(self, model: str) -> bool:
+        lowered = model.lower()
+        return any(marker in lowered for marker in ("qwen", "qwq"))
 
     def _convert_messages_to_responses_input(self, messages: List[Message]) -> Tuple[Optional[str], List[Dict[str, Any]]]:
         response_input: List[Dict[str, Any]] = []
@@ -520,10 +645,29 @@ class OpenAICompatibleProvider(BaseProvider):
 
             if role == "system":
                 role = "developer"
+            if role == "assistant" and msg.get("tool_calls"):
+                for tool_call in msg.get("tool_calls") or []:
+                    fn = tool_call.get("function") or {}
+                    response_input.append({
+                        "type": "function_call",
+                        "call_id": tool_call.get("id"),
+                        "name": fn.get("name"),
+                        "arguments": fn.get("arguments") or "{}",
+                    })
+                if content:
+                    response_input.append({
+                        "type": "message",
+                        "role": "assistant",
+                        "content": content,
+                    })
+                continue
             if role == "tool":
-                tool_name = msg.get("name") or msg.get("tool_call_id") or "tool"
-                role = "assistant"
-                content = f"[{tool_name}]\n{content}"
+                response_input.append({
+                    "type": "function_call_output",
+                    "call_id": msg.get("tool_call_id") or msg.get("name") or "tool",
+                    "output": content,
+                })
+                continue
             if role not in {"user", "assistant", "developer"}:
                 role = "user"
 
@@ -534,6 +678,57 @@ class OpenAICompatibleProvider(BaseProvider):
             })
 
         return None, response_input
+
+    def _merge_openai_tool_call_delta(
+        self,
+        accumulator: Dict[int, Dict[str, Any]],
+        tool_call: Dict[str, Any],
+    ):
+        index = int(tool_call.get("index", 0))
+        current = accumulator.setdefault(
+            index,
+            {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+        )
+        if tool_call.get("id"):
+            current["id"] = tool_call["id"]
+        if tool_call.get("type"):
+            current["type"] = tool_call["type"]
+        function = tool_call.get("function") or {}
+        if function.get("name"):
+            current["function"]["name"] = function["name"]
+        if function.get("arguments"):
+            current["function"]["arguments"] += function["arguments"]
+
+    def _finalize_openai_tool_calls(self, accumulator: Dict[int, Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return [
+            call for _, call in sorted(accumulator.items(), key=lambda item: item[0])
+            if call.get("function", {}).get("name")
+        ]
+
+    def _openai_tool_to_responses_tool(self, tool: Dict[str, Any]) -> Dict[str, Any]:
+        fn = tool.get("function") or {}
+        return {
+            "type": "function",
+            "name": fn.get("name", ""),
+            "description": fn.get("description", ""),
+            "parameters": fn.get("parameters", {"type": "object", "properties": {}}),
+        }
+
+    def _extract_responses_tool_calls(self, response: Dict[str, Any]) -> List[Dict[str, Any]]:
+        tool_calls: List[Dict[str, Any]] = []
+        for item in response.get("output") or []:
+            if item.get("type") != "function_call":
+                continue
+            call_id = item.get("call_id") or item.get("id") or f"call_{len(tool_calls)}"
+            tool_calls.append({
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": item.get("name", ""),
+                    "arguments": item.get("arguments", "") or "{}",
+                },
+            })
+        return tool_calls
 
     def _extract_responses_text(self, response: Dict[str, Any]) -> str:
         if output_text := response.get("output_text"):

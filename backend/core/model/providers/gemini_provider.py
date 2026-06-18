@@ -210,6 +210,8 @@ class GeminiProvider(BaseProvider):
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
         thinking_enabled: Optional[bool] = None,
         **kwargs
@@ -234,6 +236,8 @@ class GeminiProvider(BaseProvider):
         stream_controller: Optional[StreamController] = None,
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = 0.7,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
         thinking_enabled: Optional[bool] = None,
         **kwargs

@@ -144,7 +144,7 @@ def test_tool_manager_mcp_config():
     print(f"  PASSED: OpenAI schemas correct for {len(openai_tools)} tools")
 
 
-async def test_mcp_client_jsonrpc_format():
+async def _test_mcp_client_jsonrpc_format_async():
     """Test that MCPClient builds correct JSON-RPC 2.0 requests."""
     print("\n=== Test: MCPClient JSON-RPC request format ===")
 
@@ -166,6 +166,10 @@ async def test_mcp_client_jsonrpc_format():
 
     await client.close()
     print("  PASSED: Client cleanup")
+
+
+def test_mcp_client_jsonrpc_format():
+    asyncio.run(_test_mcp_client_jsonrpc_format_async())
 
 
 def test_tool_manager_fallback():
@@ -197,7 +201,7 @@ if __name__ == "__main__":
     test_mcp_tool_default_schema()
     test_mcp_tool_schema_update()
     test_tool_manager_mcp_config()
-    asyncio.run(test_mcp_client_jsonrpc_format())
+    test_mcp_client_jsonrpc_format()
     test_tool_manager_fallback()
     test_mcp_search_tool_param_mapping()
     print("\n=== ALL TESTS PASSED ===")

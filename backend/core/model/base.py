@@ -20,6 +20,8 @@ class BaseProvider(ABC):
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[str] = None,
         **kwargs
     ) -> tuple[str, int]:
         """同步生成回复，返回(内容, token使用量)"""
@@ -33,6 +35,8 @@ class BaseProvider(ABC):
         stream_controller: Optional['StreamController'] = None,  # 前向引用
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[str] = None,
         reasoning_effort: Optional[str] = None,   # 统一推理强度档位（provider 各自翻译）
         thinking_enabled: Optional[bool] = None,  # 统一思考开关（provider 各自翻译）
         **kwargs

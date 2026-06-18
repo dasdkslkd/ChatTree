@@ -1,6 +1,6 @@
-﻿# tools/mcp_client.py - MCP HTTP client (JSON-RPC 2.0 over Streamable HTTP)
-import json
+# tools/mcp_client.py - MCP client (JSON-RPC 2.0 over Streamable HTTP or stdio)
 import asyncio
+import json
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -11,21 +11,27 @@ logger = setup_logger("MCPClient")
 
 
 class MCPClientError(Exception):
-    """MCP client error"""
+    """MCP client error."""
 
 
 class MCPClient:
-    """Lightweight MCP HTTP client communicating via JSON-RPC 2.0.
+    """Lightweight MCP client communicating via JSON-RPC 2.0."""
 
-    Supports MCP servers using Streamable HTTP transport (e.g. mcp-searxng).
-    """
-
-    def __init__(self, endpoint: str, timeout: float = 30.0):
-        self.endpoint = endpoint.rstrip("/")
+    def __init__(
+        self,
+        endpoint: Optional[str] = None,
+        timeout: float = 30.0,
+        transport: str = "streamable_http",
+        process: Optional[asyncio.subprocess.Process] = None,
+    ):
+        self.endpoint = (endpoint or "").rstrip("/")
         self.timeout = timeout
+        self.transport = transport
+        self._process = process
         self._session_id: Optional[str] = None
         self._request_id: int = 0
         self._client: Optional[httpx.AsyncClient] = None
+        self._stdio_lock = asyncio.Lock()
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -46,9 +52,7 @@ class MCPClient:
         self, method: str, params: Optional[Dict[str, Any]] = None
     ) -> Any:
         """Send a JSON-RPC 2.0 request and return the result."""
-        client = await self._get_client()
         request_id = self._next_id()
-
         body: Dict[str, Any] = {
             "jsonrpc": "2.0",
             "id": request_id,
@@ -57,12 +61,40 @@ class MCPClient:
         if params is not None:
             body["params"] = params
 
+        if self.transport == "stdio":
+            return await self._send_stdio_message(body, request_id)
+        return await self._send_http_message(body, request_id)
+
+    async def _send_notification(
+        self, method: str, params: Optional[Dict[str, Any]] = None
+    ):
+        """Send a JSON-RPC notification."""
+        body: Dict[str, Any] = {
+            "jsonrpc": "2.0",
+            "method": method,
+        }
+        if params is not None:
+            body["params"] = params
+
+        if self.transport == "stdio":
+            async with self._stdio_lock:
+                await self._write_stdio_json(body)
+            return
+
+        client = await self._get_client()
+        headers: Dict[str, str] = {}
+        if self._session_id:
+            headers["Mcp-Session-Id"] = self._session_id
+        await client.post(f"{self.endpoint}/mcp", json=body, headers=headers)
+
+    async def _send_http_message(self, body: Dict[str, Any], request_id: int) -> Any:
+        client = await self._get_client()
         headers: Dict[str, str] = {}
         if self._session_id:
             headers["Mcp-Session-Id"] = self._session_id
 
         mcp_url = f"{self.endpoint}/mcp"
-        logger.info(f"MCP request #{request_id}: {method} -> {mcp_url}")
+        logger.info(f"MCP request #{request_id}: {body.get('method')} -> {mcp_url}")
         logger.debug(f"MCP request body: {json.dumps(body, ensure_ascii=False)[:500]}")
 
         try:
@@ -70,55 +102,114 @@ class MCPClient:
         except httpx.RequestError as e:
             raise MCPClientError(f"MCP HTTP request failed: {e}") from e
 
-        # Save session id if returned by server
         if "mcp-session-id" in resp.headers:
             self._session_id = resp.headers["mcp-session-id"]
 
         if resp.status_code == 204:
             return None
-
         if resp.status_code >= 400:
-            error_text = resp.text[:500]
-            raise MCPClientError(f"MCP HTTP error {resp.status_code}: {error_text}")
+            raise MCPClientError(f"MCP HTTP error {resp.status_code}: {resp.text[:500]}")
 
-        # Parse response (JSON or SSE)
         content_type = resp.headers.get("content-type", "")
         if "text/event-stream" in content_type:
             return self._parse_sse_response(resp.text)
 
         try:
             data = resp.json()
-        except Exception:
-            raise MCPClientError(f"MCP response is not valid JSON: {resp.text[:300]}")
+        except Exception as e:
+            raise MCPClientError(f"MCP response is not valid JSON: {resp.text[:300]}") from e
 
         if "error" in data:
             err = data["error"]
             raise MCPClientError(
                 f"MCP JSON-RPC error {err.get('code')}: {err.get('message', '')}"
             )
-
         return data.get("result")
+
+    async def _send_stdio_message(self, body: Dict[str, Any], request_id: int) -> Any:
+        async with self._stdio_lock:
+            await self._write_stdio_json(body)
+            while True:
+                data = await self._read_stdio_json()
+                if not isinstance(data, dict):
+                    continue
+                if data.get("id") != request_id:
+                    continue
+                if "error" in data:
+                    err = data["error"]
+                    raise MCPClientError(
+                        f"MCP JSON-RPC error {err.get('code')}: {err.get('message', '')}"
+                    )
+                return data.get("result")
+
+    async def _write_stdio_json(self, body: Dict[str, Any]):
+        if not self._process or not self._process.stdin:
+            raise MCPClientError("MCP stdio process is not available")
+        payload = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        header = f"Content-Length: {len(payload)}\r\n\r\n".encode("ascii")
+        self._process.stdin.write(header + payload)
+        await self._process.stdin.drain()
+
+    async def _read_stdio_json(self) -> Any:
+        if not self._process or not self._process.stdout:
+            raise MCPClientError("MCP stdio process is not available")
+
+        first = await self._process.stdout.readline()
+        if not first:
+            raise MCPClientError("MCP stdio stream closed")
+
+        stripped = first.strip()
+        if stripped.startswith(b"{"):
+            try:
+                return json.loads(stripped.decode("utf-8"))
+            except json.JSONDecodeError as e:
+                raise MCPClientError(f"MCP stdio response is not valid JSON: {stripped[:200]!r}") from e
+
+        header_lines = [first]
+        while True:
+            line = await self._process.stdout.readline()
+            if not line:
+                raise MCPClientError("MCP stdio stream closed while reading headers")
+            if line in (b"\r\n", b"\n"):
+                break
+            header_lines.append(line)
+
+        content_length: Optional[int] = None
+        for line in header_lines:
+            text = line.decode("ascii", errors="ignore").strip()
+            if text.lower().startswith("content-length:"):
+                content_length = int(text.split(":", 1)[1].strip())
+                break
+        if content_length is None:
+            raise MCPClientError("MCP stdio response missing Content-Length")
+
+        payload = await self._process.stdout.readexactly(content_length)
+        try:
+            return json.loads(payload.decode("utf-8"))
+        except json.JSONDecodeError as e:
+            raise MCPClientError(f"MCP stdio response is not valid JSON: {payload[:200]!r}") from e
 
     def _parse_sse_response(self, text: str) -> Any:
         """Extract the last JSON-RPC result from an SSE stream."""
         result = None
         for line in text.splitlines():
             line = line.strip()
-            if line.startswith("data:"):
-                payload = line[5:].strip()
-                if not payload:
-                    continue
-                try:
-                    msg = json.loads(payload)
-                    if "result" in msg:
-                        result = msg["result"]
-                    elif "error" in msg:
-                        err = msg["error"]
-                        raise MCPClientError(
-                            f"MCP SSE error {err.get('code')}: {err.get('message', '')}"
-                        )
-                except json.JSONDecodeError:
-                    continue
+            if not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if not payload:
+                continue
+            try:
+                msg = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            if "result" in msg:
+                result = msg["result"]
+            elif "error" in msg:
+                err = msg["error"]
+                raise MCPClientError(
+                    f"MCP SSE error {err.get('code')}: {err.get('message', '')}"
+                )
         return result
 
     async def initialize(self) -> Dict[str, Any]:
@@ -131,6 +222,10 @@ class MCPClient:
                 "clientInfo": {"name": "chattree", "version": "0.1.0"},
             },
         )
+        try:
+            await self._send_notification("notifications/initialized")
+        except Exception as e:
+            logger.debug(f"MCP initialized notification failed or unsupported: {e}")
         logger.info(f"MCP session initialized: {result}")
         return result
 
@@ -169,6 +264,8 @@ class MCPClient:
 
     async def health_check(self) -> bool:
         """Check if MCP server is reachable."""
+        if self.transport == "stdio":
+            return bool(self._process and self._process.returncode is None)
         try:
             client = await self._get_client()
             resp = await client.get(f"{self.endpoint}/health")
@@ -178,7 +275,7 @@ class MCPClient:
             return False
 
     async def close(self):
-        """Close HTTP client."""
+        """Close client resources."""
         if self._client and not self._client.is_closed:
             await self._client.aclose()
             self._client = None
@@ -186,11 +283,7 @@ class MCPClient:
 
     @staticmethod
     def mcp_tool_to_openai(tool_def: Dict[str, Any]) -> Dict[str, Any]:
-        """Convert MCP tool definition to OpenAI function calling format.
-
-        MCP format:  { name, description, inputSchema, annotations? }
-        OpenAI format: { type: "function", function: { name, description, parameters } }
-        """
+        """Convert MCP tool definition to OpenAI function calling format."""
         return {
             "type": "function",
             "function": {

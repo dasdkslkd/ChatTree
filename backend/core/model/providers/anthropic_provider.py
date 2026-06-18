@@ -37,24 +37,54 @@ class AnthropicProvider(BaseProvider):
             content = msg.get("content") or ""
             if role == "system":
                 system_text += content + "\n"
+            elif role == "assistant" and msg.get("tool_calls"):
+                blocks: List[Dict[str, Any]] = []
+                if content:
+                    blocks.append({"type": "text", "text": content})
+                for tool_call in msg.get("tool_calls") or []:
+                    fn = tool_call.get("function") or {}
+                    try:
+                        tool_input = json.loads(fn.get("arguments") or "{}")
+                    except json.JSONDecodeError:
+                        tool_input = {"arguments": fn.get("arguments") or ""}
+                    blocks.append({
+                        "type": "tool_use",
+                        "id": tool_call.get("id") or fn.get("name") or "tool_call",
+                        "name": fn.get("name", ""),
+                        "input": tool_input,
+                    })
+                anthropic_messages.append({"role": "assistant", "content": blocks})
             elif role == "tool":
-                tool_name = msg.get("name") or "tool"
-                anthropic_messages.append({"role": "user", "content": f"[{tool_name}]\n{content}"})
+                anthropic_messages.append({
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": msg.get("tool_call_id") or msg.get("name") or "tool",
+                        "content": content,
+                    }],
+                })
             else:
                 anthropic_messages.append({"role": role, "content": content})
         merged: List[Dict[str, Any]] = []
         for m in anthropic_messages:
             if merged and merged[-1]["role"] == m["role"]:
-                merged[-1]["content"] += "\n\n" + m["content"]
+                merged[-1]["content"] = self._merge_content_blocks(merged[-1]["content"], m["content"])
             else:
                 merged.append(dict(m))
         return system_text.strip() or None, merged
+
+    def _merge_content_blocks(self, left: Any, right: Any) -> Any:
+        left_blocks = left if isinstance(left, list) else [{"type": "text", "text": str(left)}]
+        right_blocks = right if isinstance(right, list) else [{"type": "text", "text": str(right)}]
+        return left_blocks + right_blocks
 
     def _build_body(self, model: str, messages: List[Dict[str, Any]],
                     system: Optional[str], max_tokens: int,
                     temperature: Optional[float], stream: bool,
                     reasoning_effort: Optional[str] = None,
-                    thinking_enabled: Optional[bool] = None) -> Dict[str, Any]:
+                    thinking_enabled: Optional[bool] = None,
+                    tools: Optional[List[Dict[str, Any]]] = None,
+                    tool_choice: Optional[str] = None) -> Dict[str, Any]:
         body: Dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,
@@ -77,6 +107,10 @@ class AnthropicProvider(BaseProvider):
         # 推理强度：Anthropic 走 output_config.effort（low/medium/high/xhigh/max）。
         if reasoning_effort:
             body["output_config"] = {"effort": reasoning_effort}
+        if tools:
+            body["tools"] = [self._openai_tool_to_anthropic_tool(tool) for tool in tools]
+            if tool_choice and tool_choice != "auto":
+                body["tool_choice"] = {"type": "tool", "name": tool_choice}
         return body
 
     def _http_post(self, path: str, body: Dict[str, Any]) -> Dict[str, Any]:
@@ -90,9 +124,15 @@ class AnthropicProvider(BaseProvider):
     def generate_response(self, model: str, messages: List[Message],
                           max_tokens: Optional[int] = None,
                           temperature: Optional[float] = None,
-                          top_p: Optional[float] = None, **kwargs) -> tuple[str, int]:
+                          top_p: Optional[float] = None,
+                          tools: Optional[List[Dict[str, Any]]] = None,
+                          tool_choice: Optional[str] = None,
+                          **kwargs) -> tuple[str, int]:
         system_text, api_messages = self._convert_messages(messages)
-        body = self._build_body(model, api_messages, system_text, max_tokens or 4096, temperature, stream=False)
+        body = self._build_body(
+            model, api_messages, system_text, max_tokens or 4096, temperature,
+            stream=False, tools=tools, tool_choice=tool_choice
+        )
         result = self._http_post("/v1/messages", body)
         content = ""
         for block in result.get("content", []):
@@ -107,6 +147,8 @@ class AnthropicProvider(BaseProvider):
                                        stream_controller: Optional[StreamController] = None,
                                        max_tokens: Optional[int] = None,
                                        temperature: Optional[float] = 0.7,
+                                       tools: Optional[List[Dict[str, Any]]] = None,
+                                       tool_choice: Optional[str] = None,
                                        reasoning_effort: Optional[str] = None,
                                        thinking_enabled: Optional[bool] = None,
                                        **kwargs) -> AsyncIterator[StreamChunk]:
@@ -123,12 +165,14 @@ class AnthropicProvider(BaseProvider):
 
             system_text, api_messages = self._convert_messages(messages)
             body = self._build_body(model, api_messages, system_text, max_tokens or 4096, temperature, stream=True,
-                                    reasoning_effort=reasoning_effort, thinking_enabled=thinking_enabled)
+                                    reasoning_effort=reasoning_effort, thinking_enabled=thinking_enabled,
+                                    tools=tools, tool_choice=tool_choice)
 
             # 用 asyncio.Queue 实现真流式：线程读 HTTP → 放入队列 → 异步取出并 yield
             queue: asyncio.Queue = asyncio.Queue()
             loop = asyncio.get_event_loop()
             loop.run_in_executor(None, self._stream_to_queue, body, queue, loop)
+            tool_blocks: Dict[int, Dict[str, Any]] = {}
 
             while True:
                 item = await queue.get()
@@ -155,8 +199,30 @@ class AnthropicProvider(BaseProvider):
                 if message_usage := event.get("message", {}).get("usage"):
                     usage_info = usage_from_anthropic(message_usage)
                     total_tokens = usage_total(usage_info, total_tokens)
+                if etype == "content_block_start":
+                    block = event.get("content_block") or {}
+                    if block.get("type") == "tool_use":
+                        index = int(event.get("index", len(tool_blocks)))
+                        tool_blocks[index] = {
+                            "id": block.get("id", f"toolu_{index}"),
+                            "type": "function",
+                            "function": {
+                                "name": block.get("name", ""),
+                                "arguments": json.dumps(block.get("input") or {}, ensure_ascii=False)
+                                if block.get("input") else "",
+                            },
+                        }
+                    continue
                 if etype == "content_block_delta":
                     delta = event.get("delta", {})
+                    index = int(event.get("index", 0))
+                    if delta.get("type") == "input_json_delta":
+                        tool_call = tool_blocks.setdefault(
+                            index,
+                            {"id": f"toolu_{index}", "type": "function", "function": {"name": "", "arguments": ""}},
+                        )
+                        tool_call["function"]["arguments"] += delta.get("partial_json") or ""
+                        continue
                     # 思考增量：Anthropic 的 thinking_delta（携带 thinking 文本）
                     if delta.get("type") == "thinking_delta" or "thinking" in delta:
                         thinking = delta.get("thinking", "")
@@ -196,6 +262,22 @@ class AnthropicProvider(BaseProvider):
                             conversation_id=stream_controller.conversation_id if stream_controller else None,
                             error=None, tokens_used=token_delta,
                         )
+                elif etype == "content_block_stop":
+                    index = int(event.get("index", 0))
+                    tool_call = tool_blocks.get(index)
+                    if tool_call and tool_call.get("function", {}).get("name"):
+                        if not tool_call["function"]["arguments"]:
+                            tool_call["function"]["arguments"] = "{}"
+                        tool_calls = [tool_call]
+                        yield StreamChunk(
+                            status=StreamStatus.CONTENT, content=None,
+                            node_id=stream_controller.node_id if stream_controller else None,
+                            conversation_id=stream_controller.conversation_id if stream_controller else None,
+                            error=None, tokens_used=0,
+                            event_type="tool_call",
+                            tool_call={"tool_calls": tool_calls},
+                            tool_calls=tool_calls,
+                        )
                 elif etype == "message_delta":
                     usage = event.get("usage", {})
                     if usage.get("output_tokens"):
@@ -226,6 +308,14 @@ class AnthropicProvider(BaseProvider):
                 conversation_id=stream_controller.conversation_id if stream_controller else None,
                 error=str(e), tokens_used=total_tokens,
             )
+
+    def _openai_tool_to_anthropic_tool(self, tool: Dict[str, Any]) -> Dict[str, Any]:
+        fn = tool.get("function") or {}
+        return {
+            "name": fn.get("name", ""),
+            "description": fn.get("description", ""),
+            "input_schema": fn.get("parameters", {"type": "object", "properties": {}}),
+        }
 
     def _stream_to_queue(self, body: Dict[str, Any], queue: asyncio.Queue, loop: asyncio.AbstractEventLoop):
         """线程池中执行：逐行读取 SSE 并放入 asyncio Queue"""

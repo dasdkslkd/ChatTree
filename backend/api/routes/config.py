@@ -4,6 +4,7 @@ from typing import Dict, Any, Optional, List
 from pydantic import BaseModel
 from ...core.config.config import Config, cfg
 from ...core.model.model_manager import ModelManager
+from ...core.tools.tool_manager import ToolManager
 from ..dependencies import get_config_manager
 
 router = APIRouter()
@@ -59,9 +60,16 @@ async def update_config(
         cfg.data = config_manager.data
 
         model_manager = ModelManager()
+        old_tool_manager = getattr(http_request.app.state, 'tool_manager', None)
+        if old_tool_manager:
+            await old_tool_manager.close()
+        tool_manager = ToolManager(config_manager.data)
+        await tool_manager.init()
         http_request.app.state.model_manager = model_manager
+        http_request.app.state.tool_manager = tool_manager
         if hasattr(http_request.app.state, 'chat_manager'):
             http_request.app.state.chat_manager.model_manager = model_manager
+            http_request.app.state.chat_manager.tool_manager = tool_manager
 
         return {"message": "配置已更新"}
     except Exception as e:
@@ -96,9 +104,16 @@ async def add_provider(
         cfg.data = config_manager.data
 
         model_manager = ModelManager()
+        old_tool_manager = getattr(http_request.app.state, 'tool_manager', None)
+        if old_tool_manager:
+            await old_tool_manager.close()
+        tool_manager = ToolManager(config_manager.data)
+        await tool_manager.init()
         http_request.app.state.model_manager = model_manager
+        http_request.app.state.tool_manager = tool_manager
         if hasattr(http_request.app.state, 'chat_manager'):
             http_request.app.state.chat_manager.model_manager = model_manager
+            http_request.app.state.chat_manager.tool_manager = tool_manager
 
         return {"message": f"提供商 {provider_id} 已添加"}
     except HTTPException:
@@ -123,9 +138,16 @@ async def delete_provider(
         cfg.data = config_manager.data
 
         model_manager = ModelManager()
+        old_tool_manager = getattr(http_request.app.state, 'tool_manager', None)
+        if old_tool_manager:
+            await old_tool_manager.close()
+        tool_manager = ToolManager(config_manager.data)
+        await tool_manager.init()
         http_request.app.state.model_manager = model_manager
+        http_request.app.state.tool_manager = tool_manager
         if hasattr(http_request.app.state, 'chat_manager'):
             http_request.app.state.chat_manager.model_manager = model_manager
+            http_request.app.state.chat_manager.tool_manager = tool_manager
 
         return {"message": f"提供商 {provider_id} 已删除"}
     except HTTPException:

@@ -4,6 +4,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
 def get_chat_manager(request: Request):
     """获取聊天管理器"""
     try:
@@ -19,6 +20,7 @@ def get_chat_manager(request: Request):
         logger.error(f"❌ 获取 chat_manager 失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"依赖注入错误: {str(e)}")
 
+
 def get_model_manager(request: Request):
     """获取模型管理器"""
     try:
@@ -29,6 +31,21 @@ def get_model_manager(request: Request):
     except Exception as e:
         logger.error(f"❌ 获取 model_manager 失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"依赖注入错误: {str(e)}")
+
+
+def get_tool_manager(request: Request):
+    """获取工具管理器"""
+    try:
+        if not hasattr(request.app.state, 'tool_manager'):
+            logger.error("❌ tool_manager 未在 app.state 中初始化")
+            raise HTTPException(status_code=500, detail="工具管理器未初始化")
+        return request.app.state.tool_manager
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ 获取 tool_manager 失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"依赖注入错误: {str(e)}")
+
 
 def get_config_manager(request: Request):
     """获取配置管理器"""
