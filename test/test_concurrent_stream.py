@@ -36,7 +36,14 @@ class FakeProvider:
         yield StreamChunk(status=StreamStatus.COMPLETE, content=None,
                           node_id=stream_controller.node_id,
                           conversation_id=stream_controller.conversation_id,
-                          error=None, tokens_used=self._total)
+                          error=None, tokens_used=self._total,
+                          usage_info={
+                              "input_tokens": 10,
+                              "output_tokens": self._total - 10,
+                              "total_tokens": self._total,
+                              "source": "api",
+                              "raw": {"total_tokens": self._total},
+                          })
 
 
 class FakeModelManager:
@@ -95,6 +102,16 @@ async def main():
             assert gi["tokens_used"] == 42, f"节点 token 应为 42，实际 {gi['tokens_used']}"
 
         print("PASS: 并发不丢节点，树连通，token 统计正确")
+        for nid in non_root:
+            gi = reloaded.nodes[nid]["assistant_message"]["generation_info"]
+            assert gi["usage_info"]["total_tokens"] == 42, "usage_info should preserve turn usage"
+            expected_branch_total = 42 * sum(
+                1 for n in reloaded.get_node_chain(nid) if n.get("assistant_message")
+            )
+            if not reloaded.nodes[nid]["children_ids"]:
+                assert reloaded.nodes[nid]["total_tokens"] == expected_branch_total, "leaf should preserve branch total tokens"
+                assert reloaded.nodes[nid]["branch_usage_info"]["total_tokens"] == expected_branch_total, "leaf should preserve branch usage"
+
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

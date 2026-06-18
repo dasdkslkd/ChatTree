@@ -42,7 +42,8 @@ async def stream_message(
                     "node_id": chunk.get("node_id"),
                     "conversation_id": chunk.get("conversation_id", conversation_id),
                     "error": chunk.get("error"),
-                    "tokens_used": chunk.get("tokens_used", 0)
+                    "tokens_used": chunk.get("tokens_used", 0),
+                    "usage_info": chunk.get("usage_info")
                 }
                 # 仅在存在时转发可扩展字段，保持当前文本路径 JSON 形状不变
                 for opt_key in ("event_type", "reasoning", "tool_call"):

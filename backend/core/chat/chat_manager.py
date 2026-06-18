@@ -9,6 +9,7 @@ from ..config.types import Message, Role, StreamChunk, StreamStatus, StreamContr
 from ..storage.chat_storage import ChatStorage
 from ..storage.prompt_storage import PromptStorage
 from ..model.model_manager import ModelManager
+from ..model.usage import add_usage, estimated_usage, usage_total
 from ..utils.logger import setup_logger
 from ..config.config import cfg
 
@@ -241,7 +242,10 @@ class ChatManager:
         # 解析有效推理参数：请求传入 > 对话 metadata > 模型默认；再按模型元数据校验。
         # metadata 不支持的档位/开关会被规范化为 None（不发送），保护配错的第三方模型。
         from ..model.model_metadata import normalize_effort, normalize_thinking
-        meta = self.model_manager.get_model_metadata(target_provider, target_model)
+        if hasattr(self.model_manager, "get_model_metadata"):
+            meta = self.model_manager.get_model_metadata(target_provider, target_model)
+        else:
+            meta = {}
         conv_meta = preview.metadata
         effort_spec = meta.get("reasoning_effort") or {}
         thinking_spec = meta.get("thinking") or {}
@@ -308,6 +312,7 @@ class ChatManager:
         total_content = ""
         total_reasoning = ""
         tokens_used = 0
+        usage_info = None
         start_time = time()  # 记录开始时间
         generation_status = "completed"  # 默认状态
         error_message = None
@@ -338,6 +343,8 @@ class ChatManager:
                 # 在 COMPLETE chunk 上捕获最终 token 总量（三家 provider 都在此带最终值）
                 if chunk_status == StreamStatus.COMPLETE:
                     tokens_used = chunk.get("tokens_used", tokens_used) or tokens_used
+                    usage_info = chunk.get("usage_info") or usage_info
+                    tokens_used = usage_total(usage_info, tokens_used)
                 # 更新 conversation_id 在 chunk 中
                 chunk["conversation_id"] = conversation_id
                 yield chunk
@@ -354,13 +361,17 @@ class ChatManager:
         finally:
             # 计算用时
             duration_ms = int((time() - start_time) * 1000)
+            if usage_info is None:
+                usage_info = estimated_usage(tokens_used)
+            tokens_used = usage_total(usage_info, tokens_used)
 
             # 创建生成信息（tokens_used 来自流中捕获的最终值）
             generation_info: GenerationInfo = {
                 "duration_ms": duration_ms,
                 "status": generation_status,
                 "error_message": error_message,
-                "tokens_used": tokens_used
+                "tokens_used": tokens_used,
+                "usage_info": usage_info
             }
 
             # 助手消息（包含生成信息）
@@ -385,10 +396,13 @@ class ChatManager:
                 if latest is not None and new_node["id"] in latest.nodes:
                     NodeManager.add_assistant_message(latest.nodes[new_node["id"]], assistant_msg)
                     self._update_token_stats_for_conversation(latest, target_provider, tokens_used)
+                    self._update_branch_usage_for_node(latest, new_node["id"])
                     self._save(latest)
                 else:
                     # 极端情况：节点已被并发删除——退回到只保存本节点，避免丢消息
                     NodeManager.add_assistant_message(new_node, assistant_msg)
+                    new_node["total_tokens"] = usage_total(usage_info, tokens_used)
+                    new_node["branch_usage_info"] = usage_info
                     self.storage.save({
                         "metadata": conversation.metadata,
                         "nodes": [new_node],
@@ -447,6 +461,32 @@ class ChatManager:
         if provider not in conversation.metadata["total_tokens"]:
             conversation.metadata["total_tokens"][provider] = 0
         conversation.metadata["total_tokens"][provider] += tokens
+
+    def _usage_from_message(self, msg: Optional[Message]):
+        if not msg:
+            return None
+        generation_info = msg.get("generation_info") or {}
+        usage_info = generation_info.get("usage_info")
+        if usage_info:
+            return usage_info
+        tokens = generation_info.get("tokens_used")
+        if tokens:
+            return estimated_usage(tokens)
+        return None
+
+    def _branch_usage_for_node(self, conversation: Conversation, node_id: str):
+        usage = None
+        for node in conversation.get_node_chain(node_id):
+            usage = add_usage(usage, self._usage_from_message(node.get("assistant_message")))
+        return usage or estimated_usage(0)
+
+    def _update_branch_usage_for_node(self, conversation: Conversation, node_id: str):
+        node = conversation.nodes.get(node_id)
+        if not node:
+            return
+        branch_usage = self._branch_usage_for_node(conversation, node_id)
+        node["branch_usage_info"] = branch_usage
+        node["total_tokens"] = usage_total(branch_usage)
 
     def get_conversation_history(self) -> List[Message]:
         """获取对话历史"""

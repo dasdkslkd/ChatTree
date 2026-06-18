@@ -24,6 +24,18 @@ class APIFormat(str, Enum):
     ANTHROPIC = "anthropic"
     GEMINI = "gemini"
 
+class UsageInfo(TypedDict, total=False):
+    """Unified token usage; raw keeps provider-specific fields."""
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    cached_tokens: int
+    reasoning_tokens: int
+    cache_creation_input_tokens: int
+    cache_read_input_tokens: int
+    source: str
+    raw: Dict[str, Any]
+
 class GenerationInfo(TypedDict, total=False):
     """消息生成信息"""
     duration_ms: int  # 生成用时（毫秒）
@@ -31,6 +43,8 @@ class GenerationInfo(TypedDict, total=False):
     error_message: Optional[str]  # 错误信息
     tokens_used: int  # 使用的token数
 
+
+    usage_info: UsageInfo
 
 class Message(TypedDict, total=False):
     """基础消息类型"""
@@ -59,6 +73,8 @@ class ConversationTreeNode(TypedDict):
     timestamp: int
     model_id: Optional[str]
     total_tokens: int
+
+    branch_usage_info: UsageInfo
 
 class ConversationMetadata(TypedDict, total=False):
     """对话元数据"""
@@ -143,6 +159,8 @@ class StreamChunk(TypedDict, total=False):
     event_type: Optional[str]            # "text" | "reasoning" | "tool_call" | "tool_result"，缺省按 text
     reasoning: Optional[str]             # 推理增量
     tool_call: Optional[Dict[str, Any]]  # 工具调用增量/完整载荷
+
+    usage_info: UsageInfo
 
 class StreamResult(TypedDict):
     """流最终结果"""

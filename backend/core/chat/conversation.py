@@ -121,37 +121,35 @@ class Conversation:
         """
         node_chain = self.get_node_chain(node_id)
         messages = []
+
+        def attach_node_metadata(msg: Message, node: ConversationTreeNode) -> Message:
+            msg["node_id"] = node["id"]
+            msg["parent_node_id"] = node.get("parent_id")
+            msg["branch_total_tokens"] = node.get("total_tokens", 0)
+            if node.get("branch_usage_info") is not None:
+                msg["branch_usage_info"] = node.get("branch_usage_info")
+            return msg
         
         for node in node_chain:
-            nid = node["id"]
-            pid = node.get("parent_id")
             # 根节点可能有system消息
             if node["system_message"]:
                 msg = dict(node["system_message"])
-                msg["node_id"] = nid
-                msg["parent_node_id"] = pid
-                messages.append(msg)
+                messages.append(attach_node_metadata(msg, node))
             
             # 添加用户消息
             if node["user_message"]:
                 msg = dict(node["user_message"])
-                msg["node_id"] = nid
-                msg["parent_node_id"] = pid
-                messages.append(msg)
+                messages.append(attach_node_metadata(msg, node))
             
             # 添加助手消息（如果存在）
             if node["assistant_message"]:
                 msg = dict(node["assistant_message"])
-                msg["node_id"] = nid
-                msg["parent_node_id"] = pid
-                messages.append(msg)
+                messages.append(attach_node_metadata(msg, node))
             
             # 添加工具消息（如果有）
             for tool_msg in node["tool_messages"]:
                 msg = dict(tool_msg)
-                msg["node_id"] = nid
-                msg["parent_node_id"] = pid
-                messages.append(msg)
+                messages.append(attach_node_metadata(msg, node))
         
         return messages
     

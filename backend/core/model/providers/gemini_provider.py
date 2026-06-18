@@ -3,6 +3,7 @@ import asyncio
 from typing import List, Dict, Any, Optional, AsyncIterator
 import google.generativeai as genai
 from ..base import BaseProvider, logger
+from ..usage import estimated_usage, usage_from_gemini, usage_total
 from ...config.types import Message, StreamChunk, StreamStatus, StreamController
 
 
@@ -110,6 +111,7 @@ class GeminiProvider(BaseProvider):
         """流式生成回复"""
         total_content = ""
         total_tokens = 0
+        usage_info = None
 
         try:
             yield StreamChunk(
@@ -148,6 +150,9 @@ class GeminiProvider(BaseProvider):
             )
 
             for chunk in response_iter:
+                if getattr(chunk, "usage_metadata", None):
+                    usage_info = usage_from_gemini(chunk.usage_metadata)
+                    total_tokens = usage_total(usage_info, total_tokens)
                 if stream_controller and await stream_controller.is_stopped():
                     yield StreamChunk(
                         status=StreamStatus.STOPPED,
@@ -175,6 +180,11 @@ class GeminiProvider(BaseProvider):
                     tokens_used=token_delta,
                 )
 
+            if getattr(response_iter, "usage_metadata", None):
+                usage_info = usage_from_gemini(response_iter.usage_metadata)
+                total_tokens = usage_total(usage_info, total_tokens)
+            if usage_info is None:
+                usage_info = estimated_usage(total_tokens)
             assert stream_controller is not None
             yield StreamChunk(
                 status=StreamStatus.COMPLETE,
@@ -183,6 +193,7 @@ class GeminiProvider(BaseProvider):
                 conversation_id=stream_controller.conversation_id,
                 error=None,
                 tokens_used=total_tokens,
+                usage_info=usage_info,
             )
 
         except asyncio.CancelledError:

@@ -3,6 +3,7 @@ from typing import List, Dict, Any, Optional, AsyncIterator, Tuple
 import openai
 import asyncio
 from ..base import BaseProvider, logger
+from ..usage import estimated_usage, usage_from_openai, usage_total
 from ...config.types import Message, StreamChunk, StreamStatus, StreamController
 
 class OpenAICompatibleProvider(BaseProvider):
@@ -84,6 +85,7 @@ class OpenAICompatibleProvider(BaseProvider):
         """流式生成实现"""
         total_content = ""
         total_tokens: int = 0
+        usage_info = None
 
         try:
             # 发送初始状态
@@ -172,7 +174,8 @@ class OpenAICompatibleProvider(BaseProvider):
                         raise
 
                 if response is not None and response.usage:
-                    total_tokens = response.usage.total_tokens
+                    usage_info = usage_from_openai(response.usage)
+                    total_tokens = usage_total(usage_info, response.usage.total_tokens)
             else:
                 api_messages = [
                     {"role": msg["role"], "content": msg["content"]}
@@ -184,6 +187,7 @@ class OpenAICompatibleProvider(BaseProvider):
                     "model": model,
                     "messages": api_messages,
                     "stream": True,
+                    "stream_options": {"include_usage": True},
                     "max_tokens": max_tokens,
                     "temperature": temperature,
                     **kwargs,
@@ -206,6 +210,9 @@ class OpenAICompatibleProvider(BaseProvider):
                     retry_kwargs: Dict[str, Any] = {**request_kwargs}
                     retry_kwargs.pop("temperature", None)
                     attempts.append(retry_kwargs)
+                no_stream_usage: Dict[str, Any] = {**attempts[-1]}
+                no_stream_usage.pop("stream_options", None)
+                attempts.append(no_stream_usage)
                 if reasoning_effort or thinking_enabled is not None:
                     no_reasoning: Dict[str, Any] = {**attempts[-1]}
                     no_reasoning.pop("reasoning_effort", None)
@@ -240,6 +247,9 @@ class OpenAICompatibleProvider(BaseProvider):
                         logger.warning(f"Stream stopped by user: {stream_controller.conversation_id} - {stream_controller.node_id}")
                         return
                     assert stream_controller is not None, "stream_controller不能为空"
+                    if getattr(chunk, "usage", None):
+                        usage_info = usage_from_openai(chunk.usage)
+                        total_tokens = usage_total(usage_info, total_tokens)
                     delta = chunk.choices[0].delta if chunk.choices else None
                     # 推理增量：兼容网关在 delta.reasoning_content / delta.reasoning 上回传思考。
                     if delta is not None:
@@ -270,13 +280,16 @@ class OpenAICompatibleProvider(BaseProvider):
             
             # 完成
             assert stream_controller is not None, "stream_controller不能为空"
+            if usage_info is None:
+                usage_info = estimated_usage(total_tokens)
             yield StreamChunk(
                 status=StreamStatus.COMPLETE,
                 content=None,  # 完成时不再发送内容，避免重复
                 node_id=stream_controller.node_id,
                 conversation_id=stream_controller.conversation_id,
                 error=None,
-                tokens_used=total_tokens
+                tokens_used=total_tokens,
+                usage_info=usage_info
             )
             
         except asyncio.CancelledError:

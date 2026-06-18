@@ -4,6 +4,7 @@ import json
 import urllib.request
 from typing import List, Dict, Any, Optional, AsyncIterator
 from ..base import BaseProvider, logger
+from ..usage import estimated_usage, usage_from_anthropic, usage_total
 from ...config.types import Message, StreamChunk, StreamStatus, StreamController
 
 _SENTINEL = object()  # 队列结束标记
@@ -111,6 +112,7 @@ class AnthropicProvider(BaseProvider):
                                        **kwargs) -> AsyncIterator[StreamChunk]:
         total_content = ""
         total_tokens = 0
+        usage_info = None
         try:
             yield StreamChunk(
                 status=StreamStatus.START, content=None,
@@ -147,6 +149,12 @@ class AnthropicProvider(BaseProvider):
                     continue
 
                 etype = event.get("type", "")
+                if usage := event.get("usage"):
+                    usage_info = usage_from_anthropic(usage)
+                    total_tokens = usage_total(usage_info, total_tokens)
+                if message_usage := event.get("message", {}).get("usage"):
+                    usage_info = usage_from_anthropic(message_usage)
+                    total_tokens = usage_total(usage_info, total_tokens)
                 if etype == "content_block_delta":
                     delta = event.get("delta", {})
                     # 思考增量：Anthropic 的 thinking_delta（携带 thinking 文本）
@@ -191,13 +199,16 @@ class AnthropicProvider(BaseProvider):
                 elif etype == "message_delta":
                     usage = event.get("usage", {})
                     if usage.get("output_tokens"):
-                        total_tokens = usage["output_tokens"]
+                        usage_info = usage_from_anthropic(usage)
+                        total_tokens = usage_total(usage_info, total_tokens)
 
+            if usage_info is None:
+                usage_info = estimated_usage(total_tokens)
             yield StreamChunk(
                 status=StreamStatus.COMPLETE, content=None,
                 node_id=stream_controller.node_id if stream_controller else None,
                 conversation_id=stream_controller.conversation_id if stream_controller else None,
-                error=None, tokens_used=total_tokens,
+                error=None, tokens_used=total_tokens, usage_info=usage_info,
             )
 
         except asyncio.CancelledError:
