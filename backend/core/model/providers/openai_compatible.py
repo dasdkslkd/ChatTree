@@ -1,40 +1,97 @@
-# model/providers/openai_compatible.py - OpenAI兼容提供商
-from typing import List, Dict, Any, Optional, AsyncIterator, Tuple
-import openai
+# model/providers/openai_compatible.py - OpenAI compatible provider over raw HTTP
 import asyncio
+import json
+import urllib.error
+import urllib.request
+from typing import List, Dict, Any, Optional, AsyncIterator, Tuple
+
 from ..base import BaseProvider, logger
 from ..usage import estimated_usage, usage_from_openai, usage_total
 from ...config.types import Message, StreamChunk, StreamStatus, StreamController
 
+_SENTINEL = object()
+
+
+class ProviderHTTPError(RuntimeError):
+    def __init__(self, status: int, body: str):
+        self.status = status
+        self.body = body
+        super().__init__(f"HTTP {status}: {body}")
+
+
 class OpenAICompatibleProvider(BaseProvider):
-    """兼容OpenAI格式的提供商"""
-    
+    """OpenAI-compatible API provider implemented with urllib."""
+
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        if self.config.get("is_async", False):
-            self.client = self._create_client_async()
-        else:
-            self.client = self._create_client()
-    
-    def _create_client_async(self) -> openai.AsyncOpenAI:
-        """创建OpenAI兼容客户端"""
-        kwargs = {"api_key": self.config.get("api_key", "ollama")}
-        
-        if base_url := self.config.get("base_url"):
-            kwargs["base_url"] = base_url
-        
-        logger.info(f"Creating async OpenAI client with kwargs: {kwargs}")
-        return openai.AsyncOpenAI(timeout=5, **kwargs)
-    
-    def _create_client(self) -> openai.OpenAI:
-        """创建OpenAI兼容客户端"""
-        kwargs = {"api_key": self.config.get("api_key", "ollama")}
 
-        if base_url := self.config.get("base_url"):
-            kwargs["base_url"] = base_url
-        logger.info(f"Creating OpenAI client with kwargs: {kwargs}")
-        return openai.OpenAI(timeout=5, **kwargs)
-    
+    def _api_base(self) -> str:
+        return (self.config.get("base_url") or "https://api.openai.com/v1").rstrip("/")
+
+    def _headers(self, *, stream: bool = False) -> Dict[str, str]:
+        headers = {
+            "Authorization": f"Bearer {self.config.get('api_key', 'ollama')}",
+            "Content-Type": "application/json",
+        }
+        if stream:
+            headers["Accept"] = "text/event-stream"
+        if organization := self.config.get("organization"):
+            headers["OpenAI-Organization"] = organization
+        if project := self.config.get("project"):
+            headers["OpenAI-Project"] = project
+        return headers
+
+    def _url(self, path: str) -> str:
+        return self._api_base() + path
+
+    def _request_json(self, path: str, body: Dict[str, Any], timeout: int = 120) -> Dict[str, Any]:
+        req = urllib.request.Request(
+            self._url(path),
+            data=json.dumps(self._clean_payload(body)).encode("utf-8"),
+            headers=self._headers(),
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            error_body = exc.read().decode("utf-8", errors="replace")
+            raise ProviderHTTPError(exc.code, error_body) from exc
+
+    def _stream_to_queue(
+        self,
+        path: str,
+        body: Dict[str, Any],
+        queue: asyncio.Queue,
+        loop: asyncio.AbstractEventLoop,
+    ):
+        req = urllib.request.Request(
+            self._url(path),
+            data=json.dumps(self._clean_payload(body)).encode("utf-8"),
+            headers=self._headers(stream=True),
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                buffer = ""
+                while True:
+                    chunk = resp.read(1024)
+                    if not chunk:
+                        break
+                    buffer += chunk.decode("utf-8", errors="replace")
+                    while "\n" in buffer:
+                        line, buffer = buffer.split("\n", 1)
+                        line = line.rstrip("\r")
+                        if line:
+                            loop.call_soon_threadsafe(queue.put_nowait, line)
+        except urllib.error.HTTPError as exc:
+            error_body = exc.read().decode("utf-8", errors="replace")
+            loop.call_soon_threadsafe(queue.put_nowait, ProviderHTTPError(exc.code, error_body))
+        except Exception as exc:
+            loop.call_soon_threadsafe(queue.put_nowait, exc)
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, _SENTINEL)
+
     def generate_response(
         self,
         model: str,
@@ -44,7 +101,6 @@ class OpenAICompatibleProvider(BaseProvider):
         top_p: Optional[float] = None,
         **kwargs
     ) -> tuple[str, int]:
-        """同步生成回复"""
         if self._use_responses_api():
             return self._generate_response_with_responses_api(
                 model=model,
@@ -55,23 +111,23 @@ class OpenAICompatibleProvider(BaseProvider):
                 **kwargs,
             )
 
-        api_messages = self._convert_messages(messages)
-        
-        response = self.client.chat.completions.create(
-            model=model,# type: ignore
-            messages=api_messages,# type: ignore
+        body = self._build_chat_request_kwargs(
+            model=model,
+            messages=self._convert_messages(messages),
+            stream=False,
             max_tokens=max_tokens,
             temperature=temperature,
             top_p=top_p,
-            stream=False,
-            **kwargs
+            extra_kwargs=kwargs,
         )
-        
-        content = response.choices[0].message.content or ""
-        tokens = response.usage.total_tokens if response.usage else 0
-        return content, tokens
-    
-    async def generate_response_stream( # type: ignore
+        response = self._request_json("/chat/completions", body)
+        choice = (response.get("choices") or [{}])[0]
+        content = ((choice.get("message") or {}).get("content")) or ""
+        usage = response.get("usage")
+        usage_info = usage_from_openai(usage)
+        return content, usage_total(usage_info, 0)
+
+    async def generate_response_stream(
         self,
         model: str,
         messages: List[Message],
@@ -82,159 +138,199 @@ class OpenAICompatibleProvider(BaseProvider):
         thinking_enabled: Optional[bool] = None,
         **kwargs
     ) -> AsyncIterator[StreamChunk]:
-        """流式生成实现"""
         total_content = ""
-        total_tokens: int = 0
+        total_tokens = 0
         usage_info = None
 
         try:
-            # 发送初始状态
             yield StreamChunk(
                 status=StreamStatus.START,
                 content=None,
                 node_id=stream_controller.node_id if stream_controller else None,
                 conversation_id=stream_controller.conversation_id if stream_controller else None,
                 error=None,
-                tokens_used=0
+                tokens_used=0,
             )
 
             if self._use_responses_api():
-                instructions, response_input = self._convert_messages_to_responses_input(messages)
-                request_kwargs = self._build_responses_request_kwargs(
-                    instructions=instructions,
-                    response_input=response_input,
+                async for chunk in self._stream_responses_api(
+                    model=model,
+                    messages=messages,
+                    stream_controller=stream_controller,
                     max_tokens=max_tokens,
                     temperature=temperature,
-                    top_p=None,
                     reasoning_effort=reasoning_effort,
                     extra_kwargs=kwargs,
-                )
+                ):
+                    if chunk["status"] == StreamStatus.CONTENT and chunk.get("content"):
+                        total_content += chunk["content"] or ""
+                    if chunk["status"] == StreamStatus.COMPLETE:
+                        usage_info = chunk.get("usage_info")
+                        total_tokens = chunk.get("tokens_used", total_tokens)
+                    yield chunk
+                return
 
-                request_attempts = [request_kwargs]
-                if self._should_retry_responses_without_temperature(request_kwargs):
-                    retry_kwargs = dict(request_kwargs)
-                    retry_kwargs.pop("temperature", None)
-                    request_attempts.append(retry_kwargs)
-
-                response = None
-                for attempt_index, current_kwargs in enumerate(request_attempts):
-                    try:
-                        async with self.client.responses.stream(model=model, **current_kwargs) as stream:  # type: ignore[attr-defined]
-                            async for event in stream:
-                                if stream_controller and await stream_controller.is_stopped():
-                                    yield StreamChunk(
-                                        status=StreamStatus.STOPPED,
-                                        content=None,
-                                        node_id=stream_controller.node_id,
-                                        conversation_id=stream_controller.conversation_id,
-                                        error="用户手动终止",
-                                        tokens_used=total_tokens
-                                    )
-                                    logger.warning(f"Stream stopped by user: {stream_controller.conversation_id} - {stream_controller.node_id}")
-                                    return
-
-                                if event.type != "response.output_text.delta" or not event.delta:
-                                    # 推理摘要增量：Responses API 的 reasoning_summary_text.delta
-                                    if getattr(event, "type", "") == "response.reasoning_summary_text.delta":
-                                        rdelta = getattr(event, "delta", "") or ""
-                                        if rdelta:
-                                            yield StreamChunk(
-                                                status=StreamStatus.CONTENT, content=None,
-                                                node_id=stream_controller.node_id if stream_controller else None,
-                                                conversation_id=stream_controller.conversation_id if stream_controller else None,
-                                                error=None, tokens_used=0,
-                                                event_type="reasoning", reasoning=rdelta,
-                                            )
-                                    continue
-
-                                content = event.delta
-                                total_content += content
-                                token_delta = int(len(content.split()) * 1.3)
-                                total_tokens += token_delta
-
-                                yield StreamChunk(
-                                    status=StreamStatus.CONTENT,
-                                    content=content,
-                                    node_id=stream_controller.node_id if stream_controller else None,
-                                    conversation_id=stream_controller.conversation_id if stream_controller else None,
-                                    error=None,
-                                    tokens_used=token_delta,
-                                )
-
-                            response = await stream.get_final_response()
-                        break
-                    except openai.BadRequestError as exc:
-                        if (
-                            attempt_index + 1 < len(request_attempts)
-                            and not total_content
-                            and "temperature" in current_kwargs
-                        ):
-                            logger.warning(f"Responses stream rejected temperature, retrying without it: {exc}")
-                            continue
-                        raise
-
-                if response is not None and response.usage:
-                    usage_info = usage_from_openai(response.usage)
-                    total_tokens = usage_total(usage_info, response.usage.total_tokens)
-            else:
-                api_messages = [
-                    {"role": msg["role"], "content": msg["content"]}
-                    for msg in messages
-                ]
-
-                # Retry without temperature for third-party providers that reject it
-                request_kwargs: Dict[str, Any] = {
-                    "model": model,
-                    "messages": api_messages,
-                    "stream": True,
-                    "stream_options": {"include_usage": True},
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                    **kwargs,
+            api_messages = self._convert_messages(messages)
+            request_kwargs = self._build_chat_request_kwargs(
+                model=model,
+                messages=api_messages,
+                stream=True,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=None,
+                extra_kwargs=kwargs,
+                reasoning_effort=reasoning_effort,
+            )
+            request_kwargs["stream_options"] = {"include_usage": True}
+            if thinking_enabled is not None:
+                request_kwargs["extra_body"] = {
+                    "enable_thinking": thinking_enabled,
+                    "chat_template_kwargs": {"enable_thinking": thinking_enabled},
                 }
-                # chat_completions 推理强度：顶层 reasoning_effort
-                if reasoning_effort:
-                    request_kwargs["reasoning_effort"] = reasoning_effort
-                # 思考开关：deepseek/qwen 等通过 enable_thinking 切换（非 OpenAI 标准参数，
-                # 必须走 extra_body）。DashScope 用顶层 enable_thinking；vLLM/SGLang 用
-                # chat_template_kwargs.enable_thinking——两种形式都带上以覆盖常见网关。
-                if thinking_enabled is not None:
-                    request_kwargs["extra_body"] = {
-                        "enable_thinking": thinking_enabled,
-                        "chat_template_kwargs": {"enable_thinking": thinking_enabled},
-                    }
-                # 防御性重试阶梯：先原样；再去掉 temperature；最后再去掉推理相关参数。
-                # 保护 temperature 挑剔的第三方端点，以及元数据把推理能力判断错的模型。
-                attempts = [request_kwargs]
-                if self.config.get("base_url") and temperature is not None:
-                    retry_kwargs: Dict[str, Any] = {**request_kwargs}
-                    retry_kwargs.pop("temperature", None)
-                    attempts.append(retry_kwargs)
-                no_stream_usage: Dict[str, Any] = {**attempts[-1]}
-                no_stream_usage.pop("stream_options", None)
-                attempts.append(no_stream_usage)
-                if reasoning_effort or thinking_enabled is not None:
-                    no_reasoning: Dict[str, Any] = {**attempts[-1]}
-                    no_reasoning.pop("reasoning_effort", None)
-                    no_reasoning.pop("extra_body", None)
-                    attempts.append(no_reasoning)
 
-                stream = None
-                for attempt_index, current_kwargs in enumerate(attempts):
-                    try:
-                        stream = await self.client.chat.completions.create(**current_kwargs)
-                        break
-                    except openai.BadRequestError as exc:
-                        if attempt_index + 1 < len(attempts):
-                            logger.warning(
-                                f"Chat completions request rejected, retrying with fewer params: {exc}"
+            attempts = [request_kwargs]
+            if self.config.get("base_url") and temperature is not None:
+                retry_kwargs = dict(request_kwargs)
+                retry_kwargs.pop("temperature", None)
+                attempts.append(retry_kwargs)
+            no_stream_usage = dict(attempts[-1])
+            no_stream_usage.pop("stream_options", None)
+            attempts.append(no_stream_usage)
+            if reasoning_effort or thinking_enabled is not None:
+                no_reasoning = dict(attempts[-1])
+                no_reasoning.pop("reasoning_effort", None)
+                no_reasoning.pop("extra_body", None)
+                attempts.append(no_reasoning)
+
+            last_error: Optional[Exception] = None
+            for attempt_index, current_kwargs in enumerate(attempts):
+                try:
+                    async for event in self._iter_sse_events("/chat/completions", current_kwargs):
+                        if stream_controller and await stream_controller.is_stopped():
+                            yield StreamChunk(
+                                status=StreamStatus.STOPPED,
+                                content=None,
+                                node_id=stream_controller.node_id,
+                                conversation_id=stream_controller.conversation_id,
+                                error="用户手动终止",
+                                tokens_used=total_tokens,
                             )
-                            continue
-                        raise
+                            return
 
-                assert stream is not None
-                async for chunk in stream:
-                    # 检查是否被终止
+                        if usage := event.get("usage"):
+                            usage_info = usage_from_openai(usage)
+                            total_tokens = usage_total(usage_info, total_tokens)
+
+                        choice = (event.get("choices") or [{}])[0]
+                        delta = choice.get("delta") or {}
+                        reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+                        if reasoning:
+                            yield StreamChunk(
+                                status=StreamStatus.CONTENT,
+                                content=None,
+                                node_id=stream_controller.node_id if stream_controller else None,
+                                conversation_id=stream_controller.conversation_id if stream_controller else None,
+                                error=None,
+                                tokens_used=0,
+                                event_type="reasoning",
+                                reasoning=reasoning,
+                            )
+
+                        content = delta.get("content") or ""
+                        if content:
+                            total_content += content
+                            token_delta = int(len(content.split()) * 1.3)
+                            total_tokens += token_delta
+                            yield StreamChunk(
+                                status=StreamStatus.CONTENT,
+                                content=content,
+                                node_id=stream_controller.node_id if stream_controller else None,
+                                conversation_id=stream_controller.conversation_id if stream_controller else None,
+                                error=None,
+                                tokens_used=token_delta,
+                            )
+                    break
+                except ProviderHTTPError as exc:
+                    last_error = exc
+                    if attempt_index + 1 < len(attempts) and exc.status == 400:
+                        logger.warning(f"Chat completions request rejected, retrying with fewer params: {exc}")
+                        continue
+                    raise
+
+            if last_error and not total_content and usage_info is None and not attempts:
+                raise last_error
+
+            if usage_info is None:
+                usage_info = estimated_usage(total_tokens)
+            yield StreamChunk(
+                status=StreamStatus.COMPLETE,
+                content=None,
+                node_id=stream_controller.node_id if stream_controller else None,
+                conversation_id=stream_controller.conversation_id if stream_controller else None,
+                error=None,
+                tokens_used=total_tokens,
+                usage_info=usage_info,
+            )
+
+        except asyncio.CancelledError:
+            yield StreamChunk(
+                status=StreamStatus.STOPPED,
+                content=None,
+                node_id=stream_controller.node_id if stream_controller else None,
+                conversation_id=stream_controller.conversation_id if stream_controller else None,
+                error="任务被取消",
+                tokens_used=total_tokens,
+            )
+        except Exception as e:
+            logger.error(
+                f"Stream error: {e} - Conversation: "
+                f"{stream_controller.conversation_id if stream_controller else None} - "
+                f"Node: {stream_controller.node_id if stream_controller else None}"
+            )
+            yield StreamChunk(
+                status=StreamStatus.ERROR,
+                content=None,
+                node_id=stream_controller.node_id if stream_controller else None,
+                conversation_id=stream_controller.conversation_id if stream_controller else None,
+                error=str(e),
+                tokens_used=total_tokens,
+            )
+
+    async def _stream_responses_api(
+        self,
+        model: str,
+        messages: List[Message],
+        stream_controller: Optional[StreamController],
+        max_tokens: Optional[int],
+        temperature: Optional[float],
+        reasoning_effort: Optional[str],
+        extra_kwargs: Dict[str, Any],
+    ) -> AsyncIterator[StreamChunk]:
+        total_tokens = 0
+        usage_info = None
+        instructions, response_input = self._convert_messages_to_responses_input(messages)
+        request_kwargs = self._build_responses_request_kwargs(
+            instructions=instructions,
+            response_input=response_input,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=None,
+            reasoning_effort=reasoning_effort,
+            extra_kwargs=extra_kwargs,
+        )
+        request_kwargs["model"] = model
+        request_kwargs["stream"] = True
+
+        attempts = [request_kwargs]
+        if self._should_retry_responses_without_temperature(request_kwargs):
+            retry_kwargs = dict(request_kwargs)
+            retry_kwargs.pop("temperature", None)
+            attempts.append(retry_kwargs)
+
+        for attempt_index, current_kwargs in enumerate(attempts):
+            total_content = ""
+            try:
+                async for event in self._iter_sse_events("/responses", current_kwargs):
                     if stream_controller and await stream_controller.is_stopped():
                         yield StreamChunk(
                             status=StreamStatus.STOPPED,
@@ -242,79 +338,95 @@ class OpenAICompatibleProvider(BaseProvider):
                             node_id=stream_controller.node_id,
                             conversation_id=stream_controller.conversation_id,
                             error="用户手动终止",
-                            tokens_used=total_tokens
+                            tokens_used=total_tokens,
                         )
-                        logger.warning(f"Stream stopped by user: {stream_controller.conversation_id} - {stream_controller.node_id}")
                         return
-                    assert stream_controller is not None, "stream_controller不能为空"
-                    if getattr(chunk, "usage", None):
-                        usage_info = usage_from_openai(chunk.usage)
-                        total_tokens = usage_total(usage_info, total_tokens)
-                    delta = chunk.choices[0].delta if chunk.choices else None
-                    # 推理增量：兼容网关在 delta.reasoning_content / delta.reasoning 上回传思考。
-                    if delta is not None:
-                        rdelta = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
-                        if rdelta:
+
+                    event_type = event.get("type", "")
+                    if event_type == "response.completed":
+                        response = event.get("response") or {}
+                        if usage := response.get("usage"):
+                            usage_info = usage_from_openai(usage)
+                            total_tokens = usage_total(usage_info, total_tokens)
+                        continue
+
+                    if event_type == "response.reasoning_summary_text.delta":
+                        reasoning = event.get("delta") or ""
+                        if reasoning:
                             yield StreamChunk(
-                                status=StreamStatus.CONTENT, content=None,
-                                node_id=stream_controller.node_id,
-                                conversation_id=stream_controller.conversation_id,
-                                error=None, tokens_used=0,
-                                event_type="reasoning", reasoning=rdelta,
+                                status=StreamStatus.CONTENT,
+                                content=None,
+                                node_id=stream_controller.node_id if stream_controller else None,
+                                conversation_id=stream_controller.conversation_id if stream_controller else None,
+                                error=None,
+                                tokens_used=0,
+                                event_type="reasoning",
+                                reasoning=reasoning,
                             )
-                    if chunk.choices and chunk.choices[0].delta.content:
-                        content = chunk.choices[0].delta.content
-                        total_content += content
+                        continue
 
-                        token_delta = int(len(content.split()) * 1.3)
-                        total_tokens += token_delta
+                    if event_type != "response.output_text.delta":
+                        continue
 
-                        yield StreamChunk(
-                            status=StreamStatus.CONTENT,
-                            content=content,
-                            node_id=stream_controller.node_id,
-                            conversation_id=stream_controller.conversation_id,
-                            error=None,
-                            tokens_used=token_delta
-                        )
-            
-            # 完成
-            assert stream_controller is not None, "stream_controller不能为空"
-            if usage_info is None:
-                usage_info = estimated_usage(total_tokens)
-            yield StreamChunk(
-                status=StreamStatus.COMPLETE,
-                content=None,  # 完成时不再发送内容，避免重复
-                node_id=stream_controller.node_id,
-                conversation_id=stream_controller.conversation_id,
-                error=None,
-                tokens_used=total_tokens,
-                usage_info=usage_info
-            )
-            
-        except asyncio.CancelledError:
-            # 任务被取消
-            assert stream_controller is not None, "stream_controller不能为空"
-            yield StreamChunk(
-                status=StreamStatus.STOPPED,
-                content=None,  # 取消时不再发送内容，避免重复
-                node_id=stream_controller.node_id,
-                conversation_id=stream_controller.conversation_id,
-                error="任务被取消",
-                tokens_used=total_tokens
-            )
-            logger.warning(f"Stream cancelled: {stream_controller.conversation_id} - {stream_controller.node_id}")
-        except Exception as e:
-            assert stream_controller is not None, "stream_controller不能为空"
-            yield StreamChunk(
-                status=StreamStatus.ERROR,
-                content=None,  # 错误时不再发送内容，避免重复
-                node_id=stream_controller.node_id,
-                conversation_id=stream_controller.conversation_id,
-                error=str(e),
-                tokens_used=total_tokens
-            )
-            logger.error(f"Stream error: {e} - Conversation: {stream_controller.conversation_id} - Node: {stream_controller.node_id}")
+                    content = event.get("delta") or ""
+                    if not content:
+                        continue
+                    total_content += content
+                    token_delta = int(len(content.split()) * 1.3)
+                    total_tokens += token_delta
+                    yield StreamChunk(
+                        status=StreamStatus.CONTENT,
+                        content=content,
+                        node_id=stream_controller.node_id if stream_controller else None,
+                        conversation_id=stream_controller.conversation_id if stream_controller else None,
+                        error=None,
+                        tokens_used=token_delta,
+                    )
+                break
+            except ProviderHTTPError as exc:
+                if (
+                    attempt_index + 1 < len(attempts)
+                    and exc.status == 400
+                    and not total_content
+                    and "temperature" in current_kwargs
+                ):
+                    logger.warning(f"Responses stream rejected temperature, retrying without it: {exc}")
+                    continue
+                raise
+
+        if usage_info is None:
+            usage_info = estimated_usage(total_tokens)
+        yield StreamChunk(
+            status=StreamStatus.COMPLETE,
+            content=None,
+            node_id=stream_controller.node_id if stream_controller else None,
+            conversation_id=stream_controller.conversation_id if stream_controller else None,
+            error=None,
+            tokens_used=total_tokens,
+            usage_info=usage_info,
+        )
+
+    async def _iter_sse_events(self, path: str, body: Dict[str, Any]) -> AsyncIterator[Dict[str, Any]]:
+        queue: asyncio.Queue = asyncio.Queue()
+        loop = asyncio.get_event_loop()
+        loop.run_in_executor(None, self._stream_to_queue, path, body, queue, loop)
+
+        while True:
+            item = await queue.get()
+            if item is _SENTINEL:
+                break
+            if isinstance(item, Exception):
+                raise item
+            line = str(item)
+            if not line.startswith("data: "):
+                continue
+            payload = line[6:].strip()
+            if not payload or payload == "[DONE]":
+                continue
+            try:
+                yield json.loads(payload)
+            except json.JSONDecodeError:
+                logger.warning(f"Invalid SSE payload ignored: {payload[:200]}")
 
     def _use_responses_api(self) -> bool:
         return self.config.get("api_format") == "responses"
@@ -337,11 +449,38 @@ class OpenAICompatibleProvider(BaseProvider):
             top_p=top_p,
             extra_kwargs=kwargs,
         )
-
-        response = self.client.responses.create(model=model, **request_kwargs)
+        request_kwargs["model"] = model
+        response = self._request_json("/responses", request_kwargs)
         content = self._extract_responses_text(response)
-        tokens = response.usage.total_tokens if response.usage else 0
-        return content, tokens
+        usage_info = usage_from_openai(response.get("usage"))
+        return content, usage_total(usage_info, 0)
+
+    def _build_chat_request_kwargs(
+        self,
+        model: str,
+        messages: List[Dict[str, Any]],
+        stream: bool,
+        max_tokens: Optional[int],
+        temperature: Optional[float],
+        top_p: Optional[float],
+        extra_kwargs: Dict[str, Any],
+        reasoning_effort: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        body: Dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "stream": stream,
+            **extra_kwargs,
+        }
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
+        if temperature is not None:
+            body["temperature"] = temperature
+        if top_p is not None:
+            body["top_p"] = top_p
+        if reasoning_effort:
+            body["reasoning_effort"] = reasoning_effort
+        return body
 
     def _build_responses_request_kwargs(
         self,
@@ -357,7 +496,6 @@ class OpenAICompatibleProvider(BaseProvider):
             "input": response_input,
             **extra_kwargs,
         }
-
         if instructions:
             request_kwargs["instructions"] = instructions
         if max_tokens is not None:
@@ -366,10 +504,8 @@ class OpenAICompatibleProvider(BaseProvider):
             request_kwargs["temperature"] = temperature
         if top_p is not None:
             request_kwargs["top_p"] = top_p
-        # Responses API 推理强度：嵌套 reasoning.effort
         if reasoning_effort:
             request_kwargs["reasoning"] = {"effort": reasoning_effort}
-
         return request_kwargs
 
     def _should_retry_responses_without_temperature(self, request_kwargs: Dict[str, Any]) -> bool:
@@ -384,12 +520,10 @@ class OpenAICompatibleProvider(BaseProvider):
 
             if role == "system":
                 role = "developer"
-
             if role == "tool":
                 tool_name = msg.get("name") or msg.get("tool_call_id") or "tool"
                 role = "assistant"
                 content = f"[{tool_name}]\n{content}"
-
             if role not in {"user", "assistant", "developer"}:
                 role = "user"
 
@@ -401,54 +535,61 @@ class OpenAICompatibleProvider(BaseProvider):
 
         return None, response_input
 
-    def _extract_responses_text(self, response: Any) -> str:
-        if output_text := getattr(response, "output_text", None):
+    def _extract_responses_text(self, response: Dict[str, Any]) -> str:
+        if output_text := response.get("output_text"):
             return output_text
 
         text_parts: List[str] = []
-        for item in getattr(response, "output", []) or []:
-            if getattr(item, "type", None) != "message":
+        for item in response.get("output") or []:
+            if item.get("type") != "message":
                 continue
-            for content in getattr(item, "content", []) or []:
-                if getattr(content, "type", None) != "output_text":
+            for content in item.get("content") or []:
+                if content.get("type") != "output_text":
                     continue
-                if text := getattr(content, "text", None):
+                if text := content.get("text"):
                     text_parts.append(text)
-
         return "".join(text_parts)
-    
+
     def _convert_messages(self, messages: List[Message]) -> List[Dict[str, Any]]:
-        """转换消息格式到OpenAI格式"""
-        return [
-            {
+        converted: List[Dict[str, Any]] = []
+        for msg in messages:
+            item = {
                 "role": msg["role"],
                 "content": msg["content"],
                 "name": msg.get("name"),
                 "tool_calls": msg.get("tool_calls"),
                 "tool_call_id": msg.get("tool_call_id"),
             }
-            for msg in messages
-        ]
-    
-    # def get_model_info(self) -> Dict[str, Any]:
-    #     """获取模型信息"""
-    #     return {
-    #         "provider": self.config.get("provider"),
-    #         "model": self.model,
-    #         "name": self.config.get("name", self.model),
-    #         "type": "openai-compatible"
-    #     }
-    
+            converted.append(self._clean_payload(item))
+        return converted
+
+    def _clean_payload(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            cleaned: Dict[str, Any] = {}
+            extra_body = value.get("extra_body")
+            for key, child in value.items():
+                if key == "extra_body":
+                    continue
+                if child is None:
+                    continue
+                cleaned[key] = self._clean_payload(child)
+            if isinstance(extra_body, dict):
+                cleaned.update(self._clean_payload(extra_body))
+            return cleaned
+        if isinstance(value, list):
+            return [self._clean_payload(item) for item in value]
+        return value
+
     def list_models(self) -> List[str]:
-        """获取可用模型列表"""
         try:
-            tmp_client = self._create_client()
-            models = tmp_client.models.list()
-            return [model.id for model in models.data]
+            req = urllib.request.Request(
+                self._url("/models"),
+                headers=self._headers(),
+                method="GET",
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            return [model["id"] for model in data.get("data", []) if model.get("id")]
         except Exception as e:
             logger.error(f"获取模型列表失败: {e}")
             raise RuntimeError(f"获取模型列表失败: {e}")
-    
-    # def validate_config(self) -> bool:
-    #     """验证配置"""
-    #     return super().validate_config() and bool(self.config.get("api_key") or self.config.get("base_url"))
