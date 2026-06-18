@@ -1,4 +1,4 @@
-﻿import { useEffect, useState, useRef, useLayoutEffect, useCallback } from 'react';
+import { lazy, Suspense, useEffect, useState, useRef, useLayoutEffect, useCallback } from 'react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -24,9 +24,6 @@ import {
   Plus, X, MoreHorizontal, ChevronLeft, ChevronRight,
   Copy, Check, Pencil, Loader2, RotateCcw, Network, MessageSquare, Trash2, FileText, Download, Settings,
 } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import { rehypeMermaid } from 'react-markdown-mermaid';
 import { conversationApi } from '../api/conversation';
 import { useConversationStore } from '../store/conversationStore';
 import { useModelStore } from '../store/modelStore';
@@ -35,6 +32,8 @@ import { useStreamingManager } from '../hooks/useStreamingManager';
 import { streamManager } from '../services/streamManager';
 import { ChatInput } from '../components/ChatInput';
 import TreeView from './TreeView';
+
+const MarkdownContent = lazy(() => import('../components/MarkdownContent'));
 
 /* ---------- Markdown custom code blocks ---------- */
 
@@ -78,6 +77,20 @@ function CodeBlockWrapper({ children, ...props }: React.HTMLAttributes<HTMLPreEl
 const markdownComponents = {
   pre: CodeBlockWrapper,
 };
+
+function MarkdownFallback({ content }: { content: string }) {
+  return <span className="whitespace-pre-wrap break-words">{content}</span>;
+}
+
+function MarkdownView({ content, enableMermaid = false }: { content: string; enableMermaid?: boolean }) {
+  return (
+    <Suspense fallback={<MarkdownFallback content={content} />}>
+      <MarkdownContent components={markdownComponents} enableMermaid={enableMermaid}>
+        {content}
+      </MarkdownContent>
+    </Suspense>
+  );
+}
 
 /* ---------- Collapsible thinking (reasoning) block ---------- */
 
@@ -589,13 +602,7 @@ export default function ChatPage() {
                   }
             }
           >
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
-              rehypePlugins={[rehypeMermaid as any]}
-              components={markdownComponents}
-            >
-              {displayContent}
-            </ReactMarkdown>
+            <MarkdownView content={displayContent} enableMermaid />
           </div>
           {m.role === 'assistant' && m.generation_info && (
             <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
@@ -858,7 +865,7 @@ export default function ChatPage() {
                           lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
                         }}
                       >
-                        <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{pendingUserMessage}</ReactMarkdown>
+                        <MarkdownView content={pendingUserMessage} />
                       </div>
                     </div>
                   </div>
@@ -878,7 +885,7 @@ export default function ChatPage() {
                         }}
                       >
                         {streamedContent ? (
-                          <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{streamedContent}</ReactMarkdown>
+                          <MarkdownView content={streamedContent} />
                         ) : (
                           <div className="flex items-center gap-2">
                             <Loader2 className="h-4 w-4 animate-spin" style={{ color: 'var(--icon-accent)' }} />

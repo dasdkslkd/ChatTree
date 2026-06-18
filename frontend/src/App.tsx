@@ -2,12 +2,13 @@ import './App.css'
 import { Toaster } from '@/components/ui/sonner'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { Wifi, WifiOff } from 'lucide-react'
-import ChatPage from './pages/MainPage'
 import { SettingsDialog } from './components/SettingsDialog'
 import { useNavigationStore } from './store/navigationStore'
 import { useModelStore } from './store/modelStore'
 import { useConversationStore } from './store/conversationStore'
-import { useEffect, useMemo, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
+
+const ChatPage = lazy(() => import('./pages/MainPage'));
 
 type UsageInfo = {
   input_tokens?: number;
@@ -149,7 +150,9 @@ function App() {
         >
           {/* Page content */}
           <div className="flex-1 overflow-hidden">
-            <ChatPage />
+            <Suspense fallback={null}>
+              <ChatPage />
+            </Suspense>
           </div>
 
           {/* Status bar — inside main surface, below content */}
