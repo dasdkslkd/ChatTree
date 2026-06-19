@@ -98,6 +98,7 @@ function ThinkingBlock({ reasoning, streaming }: { reasoning: string; streaming?
   // 默认折叠；流式进行中也保持折叠（用户可手动展开看实时思考）。
   const [expanded, setExpanded] = useState(false);
   if (!reasoning) return null;
+  const label = streaming ? '思考中' : '思考完成';
   return (
     <div className={cn('thought', expanded && 'expanded')}>
       <button
@@ -107,8 +108,7 @@ function ThinkingBlock({ reasoning, streaming }: { reasoning: string; streaming?
         onClick={() => setExpanded((v) => !v)}
       >
         <ChevronRight className="thought-chevron" />
-        <span className={streaming ? 'shimmer-text' : undefined}>{streaming ? '思考中…' : '思考过程'}</span>
-        {streaming && <Loader2 className="thought-spinner animate-spin" />}
+        <span>{label}</span>
       </button>
       <div className="thought-body-shell" aria-hidden={!expanded}>
         <div className="thought-body-clip">
@@ -116,6 +116,297 @@ function ThinkingBlock({ reasoning, streaming }: { reasoning: string; streaming?
             {reasoning}
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+type ToolCallLike = {
+  id?: string;
+  name?: string;
+  arguments?: unknown;
+  args?: unknown;
+  input?: unknown;
+  function?: {
+    name?: string;
+    arguments?: unknown;
+  };
+};
+
+type ToolMessageLike = {
+  name?: string;
+  content?: unknown;
+  output?: unknown;
+  result?: unknown;
+  error?: unknown;
+  tool_call_id?: string;
+};
+
+type ToolRenderItem = {
+  key: string;
+  name: string;
+  summary: string;
+  argsText: string;
+  outputText: string;
+  status: 'done' | 'error' | 'running';
+};
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function toDisplayString(value: unknown): string {
+  if (value == null) return '';
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return value;
+    try {
+      return JSON.stringify(JSON.parse(trimmed), null, 2);
+    } catch {
+      return value;
+    }
+  }
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function getToolName(toolCall: ToolCallLike | null, toolMessage?: ToolMessageLike | null): string {
+  return toolCall?.function?.name || toolCall?.name || toolMessage?.name || 'tool';
+}
+
+function getToolArgs(toolCall: ToolCallLike | null): string {
+  if (!toolCall) return '';
+  const rawArgs = toolCall.function?.arguments ?? toolCall.arguments ?? toolCall.args ?? toolCall.input;
+  return toDisplayString(rawArgs);
+}
+
+function getToolOutput(toolMessage?: ToolMessageLike | null): string {
+  if (!toolMessage) return '';
+  return toDisplayString(toolMessage.content ?? toolMessage.output ?? toolMessage.result ?? toolMessage.error);
+}
+
+function isToolError(toolMessage?: ToolMessageLike | null): boolean {
+  if (!toolMessage) return false;
+  if (toolMessage.error) return true;
+  const content = toolMessage.content;
+  const parsed = typeof content === 'string'
+    ? (() => {
+        try { return JSON.parse(content); } catch { return null; }
+      })()
+    : content;
+  const record = asRecord(parsed);
+  return Boolean(record?.error || record?.exception || record?.traceback || record?.success === false);
+}
+
+function makeToolItem(
+  toolCall: ToolCallLike | null,
+  toolMessage: ToolMessageLike | null,
+  fallbackKey: string,
+): ToolRenderItem {
+  const name = getToolName(toolCall, toolMessage);
+  const argsText = getToolArgs(toolCall);
+  const outputText = getToolOutput(toolMessage);
+  return {
+    key: toolCall?.id || toolMessage?.tool_call_id || fallbackKey,
+    name,
+    summary: argsText || outputText || '等待工具结果',
+    argsText,
+    outputText,
+    status: toolMessage ? (isToolError(toolMessage) ? 'error' : 'done') : 'running',
+  };
+}
+
+function findToolMessage(toolMessages: ToolMessageLike[], toolCall: ToolCallLike, index: number): ToolMessageLike | null {
+  if (toolCall.id) {
+    const matched = toolMessages.find((message) => message.tool_call_id === toolCall.id);
+    if (matched) return matched;
+  }
+  return toolMessages[index] ?? null;
+}
+
+function getInteractionToolItems(interaction: unknown, interactionIndex: number): ToolRenderItem[] {
+  const record = asRecord(interaction);
+  const assistant = asRecord(record?.assistant);
+  const toolCalls = Array.isArray(assistant?.tool_calls) ? assistant.tool_calls as ToolCallLike[] : [];
+  const toolMessages = Array.isArray(record?.tools) ? record.tools as ToolMessageLike[] : [];
+  const items: ToolRenderItem[] = [];
+
+  toolCalls.forEach((toolCall, callIndex) => {
+    items.push(makeToolItem(
+      toolCall,
+      findToolMessage(toolMessages, toolCall, callIndex),
+      `interaction-${interactionIndex}-${callIndex}`,
+    ));
+  });
+
+  if (toolCalls.length === 0) {
+    toolMessages.forEach((toolMessage, toolIndex) => {
+      items.push(makeToolItem(null, toolMessage, `interaction-${interactionIndex}-tool-${toolIndex}`));
+    });
+  }
+
+  return items;
+}
+
+function getAssistantToolItems(message: {
+  tool_interactions?: unknown[];
+  tool_calls?: unknown[];
+  tool_results?: unknown[];
+}): ToolRenderItem[] {
+  const items: ToolRenderItem[] = [];
+
+  if (Array.isArray(message.tool_interactions)) {
+    message.tool_interactions.forEach((interaction, interactionIndex) => {
+      items.push(...getInteractionToolItems(interaction, interactionIndex));
+    });
+  }
+
+  if (items.length > 0) return items;
+
+  const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls as ToolCallLike[] : [];
+  const toolResults = Array.isArray(message.tool_results) ? message.tool_results as ToolMessageLike[] : [];
+  toolCalls.forEach((toolCall, callIndex) => {
+    items.push(makeToolItem(
+      toolCall,
+      findToolMessage(toolResults, toolCall, callIndex),
+      `call-${callIndex}`,
+    ));
+  });
+  return items;
+}
+
+type AssistantTimelineBlock =
+  | { type: 'reasoning'; key: string; reasoning: string }
+  | { type: 'content'; key: string; content: string }
+  | { type: 'tools'; key: string; items: ToolRenderItem[] };
+
+function stripChronologicalPrefix(raw: unknown, snippets: string[]): string {
+  if (typeof raw !== 'string' || raw.length === 0) return '';
+  let remaining = raw;
+  for (const snippet of snippets) {
+    if (snippet && remaining.startsWith(snippet)) {
+      remaining = remaining.slice(snippet.length);
+    }
+  }
+  return remaining;
+}
+
+function getAssistantTimeline(message: {
+  content?: unknown;
+  reasoning?: unknown;
+  tool_interactions?: unknown[];
+  tool_calls?: unknown[];
+  tool_results?: unknown[];
+}): AssistantTimelineBlock[] {
+  const blocks: AssistantTimelineBlock[] = [];
+  const interactions = Array.isArray(message.tool_interactions) ? message.tool_interactions : [];
+
+  if (interactions.length > 0) {
+    const interactionReasoning: string[] = [];
+    const interactionContent: string[] = [];
+
+    interactions.forEach((interaction, interactionIndex) => {
+      const record = asRecord(interaction);
+      const assistant = asRecord(record?.assistant);
+      const reasoning = typeof record?.reasoning === 'string' ? record.reasoning : '';
+      const content = typeof assistant?.content === 'string' ? assistant.content : '';
+      const toolItems = getInteractionToolItems(interaction, interactionIndex);
+
+      if (reasoning) {
+        interactionReasoning.push(reasoning);
+        blocks.push({ type: 'reasoning', key: `reasoning-${interactionIndex}`, reasoning });
+      }
+      if (content.trim()) {
+        interactionContent.push(content);
+        blocks.push({ type: 'content', key: `content-${interactionIndex}`, content });
+      }
+      if (toolItems.length > 0) {
+        blocks.push({ type: 'tools', key: `tools-${interactionIndex}`, items: toolItems });
+      }
+    });
+
+    const finalReasoning = stripChronologicalPrefix(message.reasoning, interactionReasoning);
+    const finalContent = stripChronologicalPrefix(message.content, interactionContent);
+    if (finalReasoning.trim()) {
+      blocks.push({ type: 'reasoning', key: 'reasoning-final', reasoning: finalReasoning });
+    }
+    if (finalContent.trim()) {
+      blocks.push({ type: 'content', key: 'content-final', content: finalContent });
+    }
+    return blocks;
+  }
+
+  const reasoning = typeof message.reasoning === 'string' ? message.reasoning : '';
+  const content = typeof message.content === 'string' ? message.content : '';
+  const toolItems = getAssistantToolItems(message);
+  if (reasoning) blocks.push({ type: 'reasoning', key: 'reasoning', reasoning });
+  if (toolItems.length > 0) blocks.push({ type: 'tools', key: 'tools', items: toolItems });
+  if (content.trim()) blocks.push({ type: 'content', key: 'content', content });
+  return blocks;
+}
+
+function isToolMessageCovered(
+  toolMessage: ToolMessageLike,
+  previousMessages: Array<{ role?: string; tool_interactions?: unknown[]; tool_calls?: unknown[]; tool_results?: unknown[] }>,
+): boolean {
+  return previousMessages.some((message) => {
+    if (message.role !== 'assistant') return false;
+    const items = getAssistantToolItems(message);
+    if (toolMessage.tool_call_id && items.some((item) => item.key === toolMessage.tool_call_id)) return true;
+    return !toolMessage.tool_call_id && items.some((item) => item.name === (toolMessage.name || 'tool'));
+  });
+}
+
+function ToolCallCard({ item }: { item: ToolRenderItem }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className={cn('tool-call', expanded && 'expanded')}>
+      <button
+        type="button"
+        className="tc-header"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((value) => !value)}
+      >
+        <span className="tc-name">{item.name}</span>
+        <span className="tc-summary">{item.summary}</span>
+        <span className="tc-status" aria-label={item.status === 'done' ? '工具调用完成' : item.status === 'error' ? '工具调用失败' : '工具调用中'}>
+          {item.status === 'done' && <Check className="h-3 w-3" style={{ color: 'var(--icon-accent)' }} />}
+          {item.status === 'error' && <X className="h-3 w-3" style={{ color: 'var(--destructive, #ef4444)' }} />}
+          {item.status === 'running' && <span className="pulsing-dot" />}
+        </span>
+        <ChevronRight className="tc-chevron" />
+      </button>
+      <div className="tc-body">
+        {item.argsText && <pre className="tc-cmd custom-scrollbar">{item.argsText}</pre>}
+        {item.outputText && <pre className="tc-output custom-scrollbar">{item.outputText}</pre>}
+      </div>
+    </div>
+  );
+}
+
+function ToolCallGroup({ items }: { items: ToolRenderItem[] }) {
+  const [collapsed, setCollapsed] = useState(false);
+  if (items.length === 0) return null;
+  if (items.length === 1) return <ToolCallCard item={items[0]} />;
+  return (
+    <div className={cn('tool-group', collapsed && 'collapsed')}>
+      <button
+        type="button"
+        className="tool-group-header"
+        aria-expanded={!collapsed}
+        onClick={() => setCollapsed((value) => !value)}
+      >
+        <ChevronRight className="tg-chevron" />
+        <span>工具调用</span>
+        <span className="tg-count">{items.length} 个</span>
+      </button>
+      <div className="tool-group-body">
+        {items.map((item) => <ToolCallCard key={item.key} item={item} />)}
       </div>
     </div>
   );
@@ -213,7 +504,7 @@ export default function ChatPage() {
 
   const {
     streamedContent, streamedReasoning, startStreaming, isStreaming, abortStreaming,
-    streamDuration, streamStatus, pendingUserMessage, currentNodeId: streamNodeId,
+    streamedReasoningActive, streamedToolInteractions, streamDuration, streamStatus, pendingUserMessage, currentNodeId: streamNodeId,
   } = useStreamingManager(currentConversation?.id ?? null);
 
   // 结构性去重：一旦本轮流式产生的节点已出现在真实消息里（refreshMessages 注入），
@@ -231,6 +522,21 @@ export default function ChatPage() {
   // 助手流式块：仅当真实 assistant 消息已出现（=本轮已结束并保存）才隐藏，
   // 保证流式进行中（assistant 尚未保存）始终显示“思考中/流式内容/计时”。
   const showStreamBlock = streamStatus !== 'idle' && !assistantMsgLanded;
+  const streamedTimeline = getAssistantTimeline({
+    content: streamedContent,
+    reasoning: streamedReasoning,
+    tool_interactions: streamedToolInteractions,
+  });
+  const streamedActiveReasoningIndex = (() => {
+    if (streamStatus !== 'streaming') return -1;
+    for (let i = streamedTimeline.length - 1; i >= 0; i -= 1) {
+      if (streamedTimeline[i].type === 'reasoning') {
+        const hasLaterBlock = streamedTimeline.slice(i + 1).some((block) => block.type !== 'reasoning');
+        return streamedReasoningActive || !hasLaterBlock ? i : -1;
+      }
+    }
+    return -1;
+  })();
 
   // 全局注册一次：任意对话的流结束（completed/error/stopped）时，
   // 从后端刷新真实消息，再清理 StreamManager 中该对话的临时状态。
@@ -546,11 +852,28 @@ export default function ChatPage() {
   // Parse '''USER MENTIONED FILES: ...''' prefix from message content
 
   const renderMsg = (m: typeof messages[0], index: number) => {
+    if (m.role === 'tool') {
+      if (isToolMessageCovered(m, messages.slice(0, index))) return null;
+      return (
+        <div
+          key={m.id}
+          id={`message-${index}`}
+          className="w-full my-2 flex flex-col group items-start"
+        >
+          <div className="flex flex-col items-start max-w-full">
+            <ToolCallGroup items={[makeToolItem(null, m, `standalone-${m.id}`)]} />
+          </div>
+        </div>
+      );
+    }
+
     const prevUserMessage = index > 0 && messages[index - 1]?.role === 'user'
       ? messages[index - 1]
       : null;
     const fileMention = m.role === 'user' ? parseFileMention(m.content) : null;
     const displayContent = fileMention ? fileMention.cleanContent : m.content;
+    const assistantTimeline = m.role === 'assistant' ? getAssistantTimeline(m) : [];
+    const hasDisplayContent = displayContent.trim().length > 0;
 
     return (
       <div
@@ -575,35 +898,55 @@ export default function ChatPage() {
               ))}
             </div>
           )}
-          {m.role === 'assistant' && m.reasoning && (
-            <ThinkingBlock reasoning={m.reasoning} />
-          )}
-          <div
-            className={cn(
-              'max-w-full w-fit px-3 py-2 rounded-2xl leading-relaxed prose prose-sm max-w-none [&_p]:m-0 [&_p:not(:last-child)]:mb-2',
-              m.role === 'user'
-                ? 'prose-invert rounded-br-sm'
-                : ''
-            )}
-            style={
-              m.role === 'user'
-                ? {
-                    background: 'linear-gradient(160deg, rgba(217,119,87,0.16), rgba(217,119,87,0.08))',
-                    border: '0.5px solid rgba(217,119,87,0.28)',
-                    boxShadow: 'var(--highlight-top)',
-                    color: 'var(--fg-85)',
-                    fontSize: 'var(--codex-chat-font-size)',
-                    lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
-                  }
-                : {
-                    color: 'var(--fg-secondary)',
-                    fontSize: 'var(--codex-chat-font-size)',
-                    lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
-                  }
+          {m.role === 'assistant' && assistantTimeline.map((block) => {
+            if (block.type === 'reasoning') {
+              return <ThinkingBlock key={block.key} reasoning={block.reasoning} />;
             }
-          >
-            <MarkdownView content={displayContent} enableMermaid />
-          </div>
+            if (block.type === 'tools') {
+              return <ToolCallGroup key={block.key} items={block.items} />;
+            }
+            return (
+              <div
+                key={block.key}
+                className="max-w-full w-fit px-3 py-2 rounded-2xl leading-relaxed prose prose-sm max-w-none [&_p]:m-0 [&_p:not(:last-child)]:mb-2"
+                style={{
+                  color: 'var(--fg-secondary)',
+                  fontSize: 'var(--codex-chat-font-size)',
+                  lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
+                }}
+              >
+                <MarkdownView content={block.content} enableMermaid />
+              </div>
+            );
+          })}
+          {m.role !== 'assistant' && hasDisplayContent && (
+            <div
+              className={cn(
+                'max-w-full w-fit px-3 py-2 rounded-2xl leading-relaxed prose prose-sm max-w-none [&_p]:m-0 [&_p:not(:last-child)]:mb-2',
+                m.role === 'user'
+                  ? 'prose-invert rounded-br-sm'
+                  : ''
+              )}
+              style={
+                m.role === 'user'
+                  ? {
+                      background: 'linear-gradient(160deg, rgba(217,119,87,0.16), rgba(217,119,87,0.08))',
+                      border: '0.5px solid rgba(217,119,87,0.28)',
+                      boxShadow: 'var(--highlight-top)',
+                      color: 'var(--fg-85)',
+                      fontSize: 'var(--codex-chat-font-size)',
+                      lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
+                    }
+                  : {
+                      color: 'var(--fg-secondary)',
+                      fontSize: 'var(--codex-chat-font-size)',
+                      lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
+                    }
+              }
+            >
+              <MarkdownView content={displayContent} enableMermaid />
+            </div>
+          )}
           {m.role === 'assistant' && m.generation_info && (
             <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
               <span>{formatDuration(m.generation_info.duration_ms)}</span>
@@ -873,26 +1216,43 @@ export default function ChatPage() {
                 {showStreamBlock && (
                   <div className="w-full my-2 flex flex-col items-start">
                     <div className="flex flex-col items-start max-w-full">
-                      {streamedReasoning && (
-                        <ThinkingBlock reasoning={streamedReasoning} streaming={streamStatus === 'streaming'} />
-                      )}
-                      <div
-                        className="max-w-full w-fit px-3 py-2 rounded-2xl rounded-bl-sm leading-relaxed prose prose-sm max-w-none [&_p]:m-0"
-                        style={{
-                          color: 'var(--fg-secondary)',
-                          fontSize: 'var(--codex-chat-font-size)',
-                          lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
-                        }}
-                      >
-                        {streamedContent ? (
-                          <MarkdownView content={streamedContent} />
-                        ) : (
+                      {streamedTimeline.map((block, blockIndex) => {
+                        if (block.type === 'reasoning') {
+                          const reasoningStillOpen = blockIndex === streamedActiveReasoningIndex;
+                          return <ThinkingBlock key={block.key} reasoning={block.reasoning} streaming={reasoningStillOpen} />;
+                        }
+                        if (block.type === 'tools') {
+                          return <ToolCallGroup key={block.key} items={block.items} />;
+                        }
+                        return (
+                          <div
+                            key={block.key}
+                            className="max-w-full w-fit px-3 py-2 rounded-2xl rounded-bl-sm leading-relaxed prose prose-sm max-w-none [&_p]:m-0"
+                            style={{
+                              color: 'var(--fg-secondary)',
+                              fontSize: 'var(--codex-chat-font-size)',
+                              lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
+                            }}
+                          >
+                            <MarkdownView content={block.content} />
+                          </div>
+                        );
+                      })}
+                      {streamedTimeline.length === 0 && (
+                        <div
+                          className="max-w-full w-fit px-3 py-2 rounded-2xl rounded-bl-sm leading-relaxed prose prose-sm max-w-none [&_p]:m-0"
+                          style={{
+                            color: 'var(--fg-secondary)',
+                            fontSize: 'var(--codex-chat-font-size)',
+                            lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
+                          }}
+                        >
                           <div className="flex items-center gap-2">
                             <Loader2 className="h-4 w-4 animate-spin" style={{ color: 'var(--icon-accent)' }} />
                             <span className="text-sm" style={{ color: 'var(--fg-tertiary)' }}>思考中...</span>
                           </div>
-                        )}
-                      </div>
+                        </div>
+                      )}
                       <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
                         <span>{formatDuration(streamDuration)}</span>
                         {getStreamStatusText() && (

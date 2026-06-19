@@ -5,6 +5,8 @@ interface StreamState {
   status: 'idle' | 'streaming' | 'completed' | 'error' | 'stopped';
   content: string;
   reasoning: string;  // 累积的思考过程增量（event_type==="reasoning"）
+  reasoningActive: boolean;
+  toolInteractions: any[];
   nodeId: string | null;
   tokensUsed: number;
   duration: number;
@@ -27,6 +29,79 @@ interface FinishInfo {
   controller: AbortController;
 }
 type FinishListener = (info: FinishInfo) => void;
+
+function mergeToolCalls(existing: any[], incoming: any[]): any[] {
+  const merged = [...existing];
+  for (const toolCall of incoming) {
+    const key = toolCall?.id ?? toolCall?.index;
+    const idx = key == null ? -1 : merged.findIndex((item) => (item?.id ?? item?.index) === key);
+    if (idx >= 0) {
+      merged[idx] = { ...merged[idx], ...toolCall };
+    } else {
+      merged.push(toolCall);
+    }
+  }
+  return merged;
+}
+
+function appendToolCalls(toolInteractions: any[], toolCalls: any[], content: string, reasoning: string): any[] {
+  if (toolCalls.length === 0) return toolInteractions;
+  const next = [...toolInteractions];
+  const last = next[next.length - 1];
+  if (last && Array.isArray(last?.assistant?.tool_calls) && (!Array.isArray(last.tools) || last.tools.length === 0)) {
+    next[next.length - 1] = {
+      ...last,
+      assistant: {
+        ...last.assistant,
+        content,
+        tool_calls: mergeToolCalls(last.assistant.tool_calls, toolCalls),
+      },
+      reasoning: reasoning || last.reasoning || null,
+    };
+    return next;
+  }
+  next.push({
+    assistant: {
+      role: 'assistant',
+      content,
+      tool_calls: toolCalls,
+    },
+    tools: [],
+    reasoning: reasoning || null,
+  });
+  return next;
+}
+
+function appendToolResult(toolInteractions: any[], toolResult: any): any[] {
+  if (!toolResult) return toolInteractions;
+  const next = toolInteractions.length > 0
+    ? toolInteractions.map((interaction) => ({
+        ...interaction,
+        tools: Array.isArray(interaction.tools) ? [...interaction.tools] : [],
+      }))
+    : [{
+        assistant: { role: 'assistant', content: '', tool_calls: [] },
+        tools: [],
+        reasoning: null,
+      }];
+
+  const targetId = toolResult.tool_call_id;
+  const targetIndex = targetId
+    ? next.findIndex((interaction) => (interaction.assistant?.tool_calls || []).some((call: any) => call?.id === targetId))
+    : -1;
+  const index = targetIndex >= 0 ? targetIndex : next.length - 1;
+  const tools = next[index].tools;
+  const existingIndex = targetId ? tools.findIndex((tool: any) => tool?.tool_call_id === targetId) : -1;
+  if (existingIndex >= 0) {
+    tools[existingIndex] = { ...tools[existingIndex], ...toolResult };
+  } else {
+    tools.push({
+      role: 'tool',
+      ...toolResult,
+    });
+  }
+  return next;
+}
 
 export class StreamManager {
   private streams = new Map<string, StreamState>();
@@ -93,6 +168,8 @@ export class StreamManager {
       status: 'streaming',
       content: '',
       reasoning: '',
+      reasoningActive: false,
+      toolInteractions: [],
       nodeId: null,
       tokensUsed: 0,
       duration: 0,
@@ -102,8 +179,8 @@ export class StreamManager {
     this.streams.set(conversationId, state);
     this.notify(conversationId);
 
-    let fullContent = '';
-    let fullReasoning = '';
+    let currentContent = '';
+    let currentReasoning = '';
     const startTime = Date.now();
     // 终止状态：默认 completed，被显式 stop / error 时改写。
     let finishStatus: 'completed' | 'error' | 'stopped' = 'completed';
@@ -149,12 +226,30 @@ export class StreamManager {
         state = current;
 
         if (chunk.content) {
-          fullContent += chunk.content;
-          state = { ...state, content: fullContent };
+          currentContent += chunk.content;
+          state = { ...state, content: currentContent, reasoningActive: false };
         }
         if (chunk.reasoning) {
-          fullReasoning += chunk.reasoning;
-          state = { ...state, reasoning: fullReasoning };
+          currentReasoning += chunk.reasoning;
+          state = { ...state, reasoning: currentReasoning, reasoningActive: true };
+        }
+        if (chunk.event_type === 'tool_call') {
+          const toolCalls = chunk.tool_calls ?? chunk.tool_call?.tool_calls ?? [];
+          state = {
+            ...state,
+            toolInteractions: appendToolCalls(state.toolInteractions, toolCalls, currentContent, currentReasoning),
+          };
+          if (toolCalls.length > 0) {
+            currentContent = '';
+            currentReasoning = '';
+            state = { ...state, content: '', reasoning: '', reasoningActive: false };
+          }
+        } else if (chunk.event_type === 'tool_result') {
+          state = {
+            ...state,
+            toolInteractions: appendToolResult(state.toolInteractions, chunk.tool_call),
+            reasoningActive: false,
+          };
         }
         if (chunk.node_id) {
           state = { ...state, nodeId: chunk.node_id };
@@ -169,13 +264,13 @@ export class StreamManager {
         // refreshMessages 拉到的是旧数据。
         if (chunk.status === 'complete') {
           finishStatus = 'completed';
-          state = { ...state, duration: Date.now() - startTime, status: 'completed' as const };
+          state = { ...state, duration: Date.now() - startTime, status: 'completed' as const, reasoningActive: false };
         } else if (chunk.status === 'stopped') {
           finishStatus = 'stopped';
-          state = { ...state, duration: Date.now() - startTime, status: 'stopped' as const };
+          state = { ...state, duration: Date.now() - startTime, status: 'stopped' as const, reasoningActive: false };
         } else if (chunk.status === 'error') {
           finishStatus = 'error';
-          state = { ...state, duration: Date.now() - startTime, status: 'error' as const };
+          state = { ...state, duration: Date.now() - startTime, status: 'error' as const, reasoningActive: false };
         }
 
         this.streams.set(conversationId, state);
@@ -201,6 +296,7 @@ export class StreamManager {
         this.streams.set(conversationId, {
           ...finalState, status: finishStatus === 'error' ? 'error' : 'stopped',
           duration: Date.now() - startTime,
+          reasoningActive: false,
         });
         this.notify(conversationId);
       }

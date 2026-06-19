@@ -322,6 +322,8 @@ class ChatManager:
         start_time = time()  # 记录开始时间
         generation_status = "completed"  # 默认状态
         error_message = None
+        final_content = ""
+        final_reasoning = ""
 
         try:
             all_tool_calls: List[Dict[str, Any]] = []
@@ -380,12 +382,16 @@ class ChatManager:
                     yield chunk
 
                 if round_status != "completed":
+                    final_content = round_content
+                    final_reasoning = round_reasoning
                     if complete_chunk:
                         complete_chunk["conversation_id"] = conversation_id
                         yield complete_chunk
                     break
 
                 if not round_tool_calls:
+                    final_content = round_content
+                    final_reasoning = round_reasoning
                     if complete_chunk:
                         complete_chunk["conversation_id"] = conversation_id
                         yield complete_chunk
@@ -393,6 +399,8 @@ class ChatManager:
 
                 if not self.tool_manager:
                     logger.warning("Model requested tools but no ToolManager is configured")
+                    final_content = round_content
+                    final_reasoning = round_reasoning
                     if complete_chunk:
                         complete_chunk["conversation_id"] = conversation_id
                         yield complete_chunk
@@ -476,13 +484,13 @@ class ChatManager:
             assistant_msg = Message({
                 "id": str(uuid.uuid4()),
                 "role": Role.ASSISTANT,
-                "content": total_content,
+                "content": final_content if tool_interactions else total_content,
                 "name": None,
                 "tool_calls": all_tool_calls or None,
                 "tool_call_id": None,
                 "tool_results": all_tool_messages or None,
                 "tool_interactions": tool_interactions or None,
-                "reasoning": total_reasoning or None,
+                "reasoning": (final_reasoning if tool_interactions else total_reasoning) or None,
                 "timestamp": int(time()),
                 "generation_info": generation_info
             })
