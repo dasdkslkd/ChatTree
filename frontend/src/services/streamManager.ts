@@ -119,6 +119,7 @@ export class StreamManager {
   private abortControllers = new Map<string, AbortController>();
   private durationTimers = new Map<string, number>();
   private displayPumps = new Map<string, DisplayPump>();
+  private immediateDisplayConversations = new Set<string>();
 
   /** Get state for a given conversation */
   getState(conversationId: string): Readonly<StreamState> | undefined {
@@ -157,10 +158,19 @@ export class StreamManager {
     this.finishListeners.forEach((l) => l(info));
   }
 
+  private getDisplayBatchSize(remaining: number): number {
+    if (remaining > 4000) return 240;
+    if (remaining > 2000) return 120;
+    if (remaining > 1000) return 64;
+    if (remaining > 480) return 32;
+    if (remaining > 160) return 16;
+    if (remaining > 60) return 8;
+    if (remaining > 20) return 3;
+    return 1;
+  }
+
   private getDisplayDelay(remaining: number): number {
-    if (remaining > 2000) return 1;
-    if (remaining > 1000) return 2;
-    if (remaining > 480) return 4;
+    if (remaining > 480) return 0;
     if (remaining > 160) return 8;
     if (remaining > 60) return 14;
     if (remaining > 20) return 22;
@@ -171,7 +181,9 @@ export class StreamManager {
     if (!target.startsWith(current)) return target;
     const remaining = target.length - current.length;
     if (remaining <= 0) return current;
-    const nextPart = Array.from(target.slice(current.length))[0] ?? '';
+    const nextPart = Array.from(target.slice(current.length))
+      .slice(0, this.getDisplayBatchSize(remaining))
+      .join('');
     return target.slice(0, current.length) + nextPart;
   }
 
@@ -209,6 +221,10 @@ export class StreamManager {
     const pump = this.ensureDisplayPump(conversationId, controller);
     if (targets.contentTarget !== undefined) pump.contentTarget = targets.contentTarget;
     if (targets.reasoningTarget !== undefined) pump.reasoningTarget = targets.reasoningTarget;
+    if (this.immediateDisplayConversations.has(conversationId)) {
+      this.flushDisplayPump(conversationId, controller, true);
+      return;
+    }
     if (pump.timer == null) {
       pump.timer = window.setTimeout(() => {
         this.flushDisplayPump(conversationId, controller, false);
@@ -286,6 +302,14 @@ export class StreamManager {
     });
   }
 
+  private flushDisplayImmediately(conversationId: string): void {
+    this.immediateDisplayConversations.add(conversationId);
+    const controller = this.abortControllers.get(conversationId);
+    if (controller) {
+      this.flushDisplayPump(conversationId, controller, true);
+    }
+  }
+
   /** Start a new stream for a conversation */
   async startStream(
     conversationId: string,
@@ -299,6 +323,7 @@ export class StreamManager {
       existingController.abort();
       this.clearDisplayPump(conversationId);
     }
+    this.immediateDisplayConversations.delete(conversationId);
 
     const abortController = new AbortController();
     this.abortControllers.set(conversationId, abortController);
@@ -374,6 +399,10 @@ export class StreamManager {
           currentReasoning += chunk.reasoning;
           this.setDisplayTargets(conversationId, abortController, { reasoningTarget: currentReasoning });
           state = { ...state, reasoningActive: true };
+        }
+        const displayedState = this.streams.get(conversationId);
+        if (displayedState) {
+          state = { ...state, content: displayedState.content, reasoning: displayedState.reasoning };
         }
         if (chunk.event_type === 'tool_call') {
           const toolCalls = chunk.tool_calls ?? chunk.tool_call?.tool_calls ?? [];
@@ -471,6 +500,10 @@ export class StreamManager {
   async stopStream(conversationId: string): Promise<void> {
     const state = this.streams.get(conversationId);
     if (!state || state.status !== 'streaming') return;
+    this.flushDisplayImmediately(conversationId);
+    const displayedState = this.streams.get(conversationId) ?? state;
+    this.streams.set(conversationId, { ...displayedState, status: 'stopped', reasoningActive: false });
+    this.notify(conversationId);
 
     // 请求后端停止生成。后端会发出 STOPPED chunk → 保存对话 → 发送 [DONE]，
     // 客户端的 startStream 循环会把这些读完后在 finally 里触发 notifyFinish。
@@ -493,6 +526,7 @@ export class StreamManager {
   /** Clean up state for a conversation */
   cleanup(conversationId: string): void {
     this.clearDisplayPump(conversationId);
+    this.immediateDisplayConversations.delete(conversationId);
     const timerId = this.durationTimers.get(conversationId);
     if (timerId !== undefined) {
       clearInterval(timerId);
@@ -533,6 +567,7 @@ export class StreamManager {
     this.finishListeners.clear();
     this.abortControllers.clear();
     this.durationTimers.clear();
+    this.immediateDisplayConversations.clear();
     for (const pump of this.displayPumps.values()) {
       if (pump.timer != null) clearTimeout(pump.timer);
     }
