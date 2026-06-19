@@ -8,6 +8,7 @@ from typing import List, Dict, Any, Optional, AsyncIterator, Tuple
 from ..base import BaseProvider, logger
 from ..usage import estimated_usage, usage_from_openai, usage_total
 from ...config.types import Message, StreamChunk, StreamStatus, StreamController
+from .sse import iter_decoded_sse_lines
 
 _SENTINEL = object()
 
@@ -73,17 +74,9 @@ class OpenAICompatibleProvider(BaseProvider):
         )
         try:
             with urllib.request.urlopen(req, timeout=300) as resp:
-                buffer = ""
-                while True:
-                    chunk = resp.read(1024)
-                    if not chunk:
-                        break
-                    buffer += chunk.decode("utf-8", errors="replace")
-                    while "\n" in buffer:
-                        line, buffer = buffer.split("\n", 1)
-                        line = line.rstrip("\r")
-                        if line:
-                            loop.call_soon_threadsafe(queue.put_nowait, line)
+                for line in iter_decoded_sse_lines(resp):
+                    if line:
+                        loop.call_soon_threadsafe(queue.put_nowait, line)
         except urllib.error.HTTPError as exc:
             error_body = exc.read().decode("utf-8", errors="replace")
             loop.call_soon_threadsafe(queue.put_nowait, ProviderHTTPError(exc.code, error_body))
