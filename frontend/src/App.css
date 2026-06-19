@@ -196,6 +196,7 @@
 }
 
 .prose th {
+  color: var(--fg-85, rgba(251,247,244,0.88));
   background: var(--muted, #2a2723);
   font-weight: 600;
 }

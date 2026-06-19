@@ -30,6 +30,15 @@ interface FinishInfo {
 }
 type FinishListener = (info: FinishInfo) => void;
 
+interface DisplayPump {
+  contentTarget: string;
+  reasoningTarget: string;
+  contentShown: string;
+  reasoningShown: string;
+  timer: number | null;
+  controller: AbortController;
+}
+
 function mergeToolCalls(existing: any[], incoming: any[]): any[] {
   const merged = [...existing];
   for (const toolCall of incoming) {
@@ -109,6 +118,7 @@ export class StreamManager {
   private finishListeners = new Set<FinishListener>();
   private abortControllers = new Map<string, AbortController>();
   private durationTimers = new Map<string, number>();
+  private displayPumps = new Map<string, DisplayPump>();
 
   /** Get state for a given conversation */
   getState(conversationId: string): Readonly<StreamState> | undefined {
@@ -147,6 +157,135 @@ export class StreamManager {
     this.finishListeners.forEach((l) => l(info));
   }
 
+  private getDisplayDelay(remaining: number): number {
+    if (remaining > 2000) return 1;
+    if (remaining > 1000) return 2;
+    if (remaining > 480) return 4;
+    if (remaining > 160) return 8;
+    if (remaining > 60) return 14;
+    if (remaining > 20) return 22;
+    return 34;
+  }
+
+  private advanceText(current: string, target: string): string {
+    if (!target.startsWith(current)) return target;
+    const remaining = target.length - current.length;
+    if (remaining <= 0) return current;
+    const nextPart = Array.from(target.slice(current.length))[0] ?? '';
+    return target.slice(0, current.length) + nextPart;
+  }
+
+  private clearDisplayPump(conversationId: string): void {
+    const pump = this.displayPumps.get(conversationId);
+    if (pump?.timer != null) {
+      clearTimeout(pump.timer);
+    }
+    this.displayPumps.delete(conversationId);
+  }
+
+  private ensureDisplayPump(conversationId: string, controller: AbortController): DisplayPump {
+    let pump = this.displayPumps.get(conversationId);
+    const state = this.streams.get(conversationId);
+    if (!pump || pump.controller !== controller) {
+      if (pump?.timer != null) clearTimeout(pump.timer);
+      pump = {
+        contentTarget: state?.content ?? '',
+        reasoningTarget: state?.reasoning ?? '',
+        contentShown: state?.content ?? '',
+        reasoningShown: state?.reasoning ?? '',
+        timer: null,
+        controller,
+      };
+      this.displayPumps.set(conversationId, pump);
+    }
+    return pump;
+  }
+
+  private setDisplayTargets(
+    conversationId: string,
+    controller: AbortController,
+    targets: Partial<Pick<DisplayPump, 'contentTarget' | 'reasoningTarget'>>,
+  ): void {
+    const pump = this.ensureDisplayPump(conversationId, controller);
+    if (targets.contentTarget !== undefined) pump.contentTarget = targets.contentTarget;
+    if (targets.reasoningTarget !== undefined) pump.reasoningTarget = targets.reasoningTarget;
+    if (pump.timer == null) {
+      pump.timer = window.setTimeout(() => {
+        this.flushDisplayPump(conversationId, controller, false);
+      }, 0);
+    }
+  }
+
+  private flushDisplayPump(conversationId: string, controller: AbortController, force: boolean): void {
+    const pump = this.displayPumps.get(conversationId);
+    if (!pump || pump.controller !== controller) return;
+    pump.timer = null;
+
+    const current = this.streams.get(conversationId);
+    if (!current || this.abortControllers.get(conversationId) !== controller) {
+      this.clearDisplayPump(conversationId);
+      return;
+    }
+
+    const nextContent = force ? pump.contentTarget : this.advanceText(pump.contentShown, pump.contentTarget);
+    const nextReasoning = force ? pump.reasoningTarget : this.advanceText(pump.reasoningShown, pump.reasoningTarget);
+    const changed = nextContent !== pump.contentShown || nextReasoning !== pump.reasoningShown;
+
+    pump.contentShown = nextContent;
+    pump.reasoningShown = nextReasoning;
+
+    if (changed || current.content !== nextContent || current.reasoning !== nextReasoning) {
+      this.streams.set(conversationId, {
+        ...current,
+        content: nextContent,
+        reasoning: nextReasoning,
+      });
+      this.notify(conversationId);
+    }
+
+    const remaining = Math.max(
+      pump.contentTarget.length - pump.contentShown.length,
+      pump.reasoningTarget.length - pump.reasoningShown.length,
+    );
+
+    if (!force && remaining > 0) {
+      pump.timer = window.setTimeout(() => {
+        this.flushDisplayPump(conversationId, controller, false);
+      }, this.getDisplayDelay(remaining));
+    } else if (force) {
+      this.clearDisplayPump(conversationId);
+    }
+  }
+
+  private waitForDisplayDrain(
+    conversationId: string,
+    controller: AbortController,
+    maxWaitMs = 10000,
+  ): Promise<void> {
+    const startedAt = Date.now();
+    return new Promise((resolve) => {
+      const check = () => {
+        const pump = this.displayPumps.get(conversationId);
+        const replaced = this.abortControllers.get(conversationId) !== controller;
+        const drained =
+          !pump ||
+          (pump.contentShown === pump.contentTarget && pump.reasoningShown === pump.reasoningTarget);
+        if (replaced || drained || Date.now() - startedAt >= maxWaitMs) {
+          resolve();
+          return;
+        }
+        const remaining = pump
+          ? Math.max(
+              pump.contentTarget.length - pump.contentShown.length,
+              pump.reasoningTarget.length - pump.reasoningShown.length,
+            )
+          : 0;
+        window.setTimeout(check, this.getDisplayDelay(remaining));
+      };
+      check();
+    });
+  }
+
   /** Start a new stream for a conversation */
   async startStream(
     conversationId: string,
@@ -158,6 +297,7 @@ export class StreamManager {
     const existingController = this.abortControllers.get(conversationId);
     if (existingController) {
       existingController.abort();
+      this.clearDisplayPump(conversationId);
     }
 
     const abortController = new AbortController();
@@ -227,11 +367,13 @@ export class StreamManager {
 
         if (chunk.content) {
           currentContent += chunk.content;
-          state = { ...state, content: currentContent, reasoningActive: false };
+          this.setDisplayTargets(conversationId, abortController, { contentTarget: currentContent });
+          state = { ...state, reasoningActive: false };
         }
         if (chunk.reasoning) {
           currentReasoning += chunk.reasoning;
-          state = { ...state, reasoning: currentReasoning, reasoningActive: true };
+          this.setDisplayTargets(conversationId, abortController, { reasoningTarget: currentReasoning });
+          state = { ...state, reasoningActive: true };
         }
         if (chunk.event_type === 'tool_call') {
           const toolCalls = chunk.tool_calls ?? chunk.tool_call?.tool_calls ?? [];
@@ -242,6 +384,7 @@ export class StreamManager {
           if (toolCalls.length > 0) {
             currentContent = '';
             currentReasoning = '';
+            this.clearDisplayPump(conversationId);
             state = { ...state, content: '', reasoning: '', reasoningActive: false };
           }
         } else if (chunk.event_type === 'tool_result') {
@@ -308,6 +451,10 @@ export class StreamManager {
       }
       // 仅当本流仍是该对话的活跃流（未被新流取代、未被 cleanup）时才通知结束。
       if (this.abortControllers.get(conversationId) === abortController) {
+        await this.waitForDisplayDrain(conversationId, abortController);
+        if (this.abortControllers.get(conversationId) !== abortController) {
+          return;
+        }
         const finalState = this.streams.get(conversationId);
         this.notifyFinish({
           conversationId,
@@ -345,6 +492,7 @@ export class StreamManager {
 
   /** Clean up state for a conversation */
   cleanup(conversationId: string): void {
+    this.clearDisplayPump(conversationId);
     const timerId = this.durationTimers.get(conversationId);
     if (timerId !== undefined) {
       clearInterval(timerId);
@@ -385,6 +533,10 @@ export class StreamManager {
     this.finishListeners.clear();
     this.abortControllers.clear();
     this.durationTimers.clear();
+    for (const pump of this.displayPumps.values()) {
+      if (pump.timer != null) clearTimeout(pump.timer);
+    }
+    this.displayPumps.clear();
   }
 }
 
