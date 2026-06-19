@@ -351,7 +351,7 @@ export default function TreeView() {
                     </p>
                   )}
                   {node.data.model_id && (
-                    <span className="absolute top-1 right-2 text-[9px] text-muted-foreground/60 font-mono">
+                    <span className="absolute top-1 right-2 text-[9px] text-muted-foreground/60">
                       {node.data.model_id}
                     </span>
                   )}

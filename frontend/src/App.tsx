@@ -186,7 +186,6 @@ function App() {
                 gap: '5px',
                 padding: '2px 7px',
                 borderRadius: 'var(--radius-sm)',
-                fontFamily: 'var(--font-mono)',
                 whiteSpace: 'nowrap',
                 position: 'relative',
                 transition: 'background var(--transition-basic), color var(--transition-basic)',
@@ -292,7 +291,7 @@ function App() {
                     >
                       {formatTokens(contextUsed)}
                     </span>
-                    <span style={{ color: 'var(--fg-tertiary)', fontFamily: 'var(--font-mono)', fontSize: 'var(--text-xs)' }}>
+                    <span style={{ color: 'var(--fg-tertiary)', fontSize: 'var(--text-xs)' }}>
                       / {formatTokens(contextLimit)} · {contextLimit ? `${contextPercent.toFixed(1)}%` : '—'}
                     </span>
                   </div>
@@ -335,7 +334,7 @@ function App() {
                       >
                         <span style={{ width: '9px', height: '9px', borderRadius: '2px', background: segment.color }} />
                         <span style={{ color: 'var(--fg-secondary)' }}>{segment.label}</span>
-                        <span style={{ color: 'var(--fg-tertiary)', fontFamily: 'var(--font-mono)' }}>
+                        <span style={{ color: 'var(--fg-tertiary)' }}>
                           {formatTokens(segment.tokens)}
                           {contextLimit ? ` · ${((segment.tokens / contextLimit) * 100).toFixed(1)}%` : ''}
                         </span>
@@ -360,7 +359,7 @@ function App() {
                         }}
                       />
                       <span style={{ color: 'var(--fg-secondary)' }}>可用空间</span>
-                      <span style={{ color: 'var(--fg-tertiary)', fontFamily: 'var(--font-mono)' }}>
+                      <span style={{ color: 'var(--fg-tertiary)' }}>
                         {contextLimit ? formatTokens(contextFree) : '—'}
                         {contextLimit ? ` · ${((contextFree / contextLimit) * 100).toFixed(1)}%` : ''}
                       </span>
@@ -375,7 +374,7 @@ function App() {
             {/* Current model — click to open settings */}
             <div
               className="flex items-center gap-1.5 px-1.5 py-0.5 rounded cursor-pointer transition-opacity"
-              style={{ borderRadius: '6px', fontFamily: 'var(--font-mono)' }}
+              style={{ borderRadius: '6px' }}
               onClick={() => openSettings('providers')}
               title="点击打开设置"
               onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-hover)'; }}

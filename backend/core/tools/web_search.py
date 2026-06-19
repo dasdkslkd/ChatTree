@@ -339,7 +339,6 @@ class FetchUrlTool(BaseTool):
             title = ""
             content = raw_text
 
-        content = self._truncate(content)
         return {
             "url": str(resp.url),
             "title": title,
@@ -361,7 +360,7 @@ class FetchUrlTool(BaseTool):
         return {
             "url": url,
             "title": getattr(result, "title", "") or "",
-            "content": self._truncate(content),
+            "content": content,
             "success": result.success if hasattr(result, "success") else True,
             "source": "crawl4ai",
         }

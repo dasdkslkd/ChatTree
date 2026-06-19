@@ -182,7 +182,7 @@ export default function PromptsPage() {
                     value={editingPrompt.content}
                     onChange={(e) => setEditingPrompt({ ...editingPrompt, content: e.target.value })}
                     placeholder="输入系统提示词内容..."
-                    className="min-h-[300px] resize-y font-mono text-sm leading-relaxed"
+                    className="min-h-[300px] resize-y text-sm leading-relaxed"
                   />
                 </div>
 

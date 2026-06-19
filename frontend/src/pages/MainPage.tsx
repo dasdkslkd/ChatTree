@@ -151,6 +151,13 @@ type ToolRenderItem = {
   status: 'done' | 'error' | 'running';
 };
 
+const TOOL_DISPLAY_LIMIT = 100;
+
+function limitToolDisplayText(text: string): string {
+  if (text.length <= TOOL_DISPLAY_LIMIT) return text;
+  return `${text.slice(0, TOOL_DISPLAY_LIMIT - 3)}...`;
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -175,6 +182,17 @@ function toDisplayString(value: unknown): string {
   }
 }
 
+function parseJsonString(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  const trimmed = value.trim();
+  if (!trimmed) return value;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return value;
+  }
+}
+
 function getToolName(toolCall: ToolCallLike | null, toolMessage?: ToolMessageLike | null): string {
   return toolCall?.function?.name || toolCall?.name || toolMessage?.name || 'tool';
 }
@@ -187,7 +205,16 @@ function getToolArgs(toolCall: ToolCallLike | null): string {
 
 function getToolOutput(toolMessage?: ToolMessageLike | null): string {
   if (!toolMessage) return '';
-  return toDisplayString(toolMessage.content ?? toolMessage.output ?? toolMessage.result ?? toolMessage.error);
+  const rawOutput = toolMessage.content ?? toolMessage.output ?? toolMessage.result ?? toolMessage.error;
+  const parsed = parseJsonString(rawOutput);
+  const record = asRecord(parsed);
+  if (record && Object.prototype.hasOwnProperty.call(record, 'preview')) {
+    return toDisplayString(record.preview);
+  }
+  if (record && Object.prototype.hasOwnProperty.call(record, 'content')) {
+    return toDisplayString(record.content);
+  }
+  return toDisplayString(rawOutput);
 }
 
 function isToolError(toolMessage?: ToolMessageLike | null): boolean {
@@ -209,12 +236,13 @@ function makeToolItem(
   fallbackKey: string,
 ): ToolRenderItem {
   const name = getToolName(toolCall, toolMessage);
-  const argsText = getToolArgs(toolCall);
-  const outputText = getToolOutput(toolMessage);
+  const argsText = limitToolDisplayText(getToolArgs(toolCall));
+  const outputText = limitToolDisplayText(getToolOutput(toolMessage));
+  const summary = limitToolDisplayText(outputText || argsText || '等待工具结果');
   return {
     key: toolCall?.id || toolMessage?.tool_call_id || fallbackKey,
     name,
-    summary: argsText || outputText || '等待工具结果',
+    summary,
     argsText,
     outputText,
     status: toolMessage ? (isToolError(toolMessage) ? 'error' : 'done') : 'running',
@@ -1358,7 +1386,7 @@ export default function ChatPage() {
             </DialogTitle>
           </DialogHeader>
           <div className="flex-1 overflow-auto mt-2 rounded-md bg-muted/50 border p-4">
-            <pre className="text-sm whitespace-pre-wrap break-words font-mono leading-relaxed">
+            <pre className="text-sm whitespace-pre-wrap break-words leading-relaxed">
               {previewFile?.content}
             </pre>
           </div>

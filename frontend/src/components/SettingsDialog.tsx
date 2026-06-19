@@ -1235,7 +1235,7 @@ function McpSection() {
                         value={argsDraft}
                         onChange={(e) => setArgsDraft(e.target.value)}
                         onBlur={() => setServerField('args', textToArgs(argsDraft))}
-                        className="min-h-[92px] font-mono text-sm"
+                        className="min-h-[92px] text-sm"
                         placeholder={'-y\n@modelcontextprotocol/server-filesystem\nD:\\Workspace'}
                       />
                     </div>
@@ -1245,7 +1245,7 @@ function McpSection() {
                         value={envDraft}
                         onChange={(e) => setEnvDraft(e.target.value)}
                         onBlur={() => setServerField('env', textToRecord(envDraft))}
-                        className="min-h-[86px] font-mono text-sm"
+                        className="min-h-[86px] text-sm"
                         placeholder={'TOKEN=xxx\nDEBUG=true'}
                       />
                     </div>
@@ -1278,7 +1278,7 @@ function McpSection() {
                         value={headersDraft}
                         onChange={(e) => setHeadersDraft(e.target.value)}
                         onBlur={() => setServerField('headers', textToRecord(headersDraft))}
-                        className="min-h-[86px] font-mono text-sm"
+                        className="min-h-[86px] text-sm"
                         placeholder={'X-Api-Key=xxx\nX-Client=ChatTree'}
                       />
                     </div>
@@ -1344,7 +1344,7 @@ function McpSection() {
                         const list = textToList(e.target.value);
                         setServerField('enabled_tools', list.length > 0 ? list : null);
                       }}
-                      className="min-h-[80px] font-mono text-sm"
+                      className="min-h-[80px] text-sm"
                     />
                   </div>
                   <div className="space-y-2">
@@ -1352,7 +1352,7 @@ function McpSection() {
                     <Textarea
                       value={listToText(selectedServer.disabled_tools)}
                       onChange={(e) => setServerField('disabled_tools', textToList(e.target.value))}
-                      className="min-h-[80px] font-mono text-sm"
+                      className="min-h-[80px] text-sm"
                     />
                   </div>
                 </div>
@@ -1568,7 +1568,6 @@ function PromptsSection() {
                   onChange={(e) => setEditingPrompt({ ...editingPrompt, content: e.target.value })}
                   placeholder="输入系统提示词内容..."
                   className="min-h-[250px] resize-y text-sm leading-relaxed"
-                  style={{ fontFamily: 'var(--font-mono)' }}
                 />
               </div>
               <p className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>

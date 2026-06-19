@@ -8,25 +8,19 @@ from .mcp_client import MCPClient, MCPClientError
 from .mcp_tools import MCPSearchTool, MCPUrlReadTool
 from .tool_filter import ToolFilter
 from .web_search import FetchUrlTool, WebSearchTool
+from ..storage.tool_result_storage import ToolResultStorage
 from ..utils.logger import setup_logger
 
 logger = setup_logger("ToolManager")
-
-MAX_TOOL_RESULT_LENGTH = 8000
-
-
-def truncate_tool_result(result: str, max_length: int = MAX_TOOL_RESULT_LENGTH) -> str:
-    if len(result) <= max_length:
-        return result
-    return result[:max_length] + f"\n\n[结果已截断，共 {len(result)} 字符]"
 
 
 class ToolManager:
     """Tool manager supporting built-in tools and MCP servers."""
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], tool_result_store: Optional[ToolResultStorage] = None):
         self._tools: Dict[str, BaseTool] = {}
         self._config = config
+        self.tool_result_store = tool_result_store or ToolResultStorage()
         self._mcp_client: Optional[MCPClient] = None
         self._mcp_tools: Dict[str, BaseTool] = {}
         self._connection_manager = ConnectionManager()
@@ -34,13 +28,13 @@ class ToolManager:
         self._mcp_init_errors: Dict[str, str] = {}
         tools_config = config.get("tools", {})
         self._enabled = tools_config.get("enabled", True)
-        self._max_result_length = int(tools_config.get("max_result_length", MAX_TOOL_RESULT_LENGTH))
         self._filter = ToolFilter(
             enabled=tools_config.get("enabled_tools"),
             disabled=tools_config.get("disabled_tools"),
         )
         if self._enabled:
             self._register_tools(config)
+            self.register(ReadToolResultTool(self.tool_result_store, tools_config))
             self.register(ToolInventoryTool(self))
 
     def _register_tools(self, config: Dict[str, Any]):
@@ -191,7 +185,7 @@ class ToolManager:
             if self._connection_manager.has_tool(name):
                 logger.info(f"Executing MCP tool route: {name}")
                 result = await self._connection_manager.call_tool(name, arguments)
-                return truncate_tool_result(result, self._max_result_length)
+                return result
 
             tool = self._tools.get(name)
             if not tool:
@@ -201,7 +195,7 @@ class ToolManager:
             logger.info(f"Executing tool: {name} with args: {json.dumps(arguments, ensure_ascii=False)[:200]}")
             result = await tool.execute(**arguments)
             logger.info(f"Tool {name} returned {len(result)} chars")
-            return truncate_tool_result(result, self._max_result_length)
+            return result
         except Exception as e:
             logger.error(f"Tool {name} execution failed: {e}")
             return json.dumps({"error": str(e)}, ensure_ascii=False)
@@ -280,6 +274,70 @@ class ToolManager:
             await self._mcp_client.close()
             self._mcp_client = None
         await self._connection_manager.close()
+
+
+class ReadToolResultTool(BaseTool):
+    """Read a slice from a persisted full tool result."""
+
+    def __init__(self, store: ToolResultStorage, tools_config: Dict[str, Any]):
+        self._store = store
+        self._max_limit = int(tools_config.get("read_tool_result_max_chars", 16000))
+
+    @property
+    def name(self) -> str:
+        return "read_tool_result"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Read a slice of a full persisted tool result by tool_result_id. "
+            "Use this when a previous tool result preview says more content is available."
+        )
+
+    def parameters_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "tool_result_id": {
+                    "type": "string",
+                    "description": "ID of the persisted tool result to read.",
+                },
+                "offset": {
+                    "type": "integer",
+                    "description": "Zero-based character offset. Defaults to 0.",
+                    "minimum": 0,
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": f"Maximum characters to read. Capped at {self._max_limit}.",
+                    "minimum": 1,
+                },
+            },
+            "required": ["tool_result_id"],
+        }
+
+    async def execute(self, **kwargs) -> str:
+        tool_result_id = kwargs.get("tool_result_id") or ""
+        if not tool_result_id:
+            return json.dumps({"error": "tool_result_id is required"}, ensure_ascii=False)
+        offset = int(kwargs.get("offset") or 0)
+        requested_limit = int(kwargs.get("limit") or self._max_limit)
+        limit = min(max(1, requested_limit), self._max_limit)
+        result = self._store.read_slice(tool_result_id, offset=offset, limit=limit)
+        if result is None:
+            return json.dumps({
+                "error": "tool result not found",
+                "tool_result_id": tool_result_id,
+            }, ensure_ascii=False)
+        payload = {"content": result.get("content", "")}
+        next_offset = result.get("next_offset")
+        if next_offset is not None:
+            payload["read_more"] = (
+                f'read_tool_result({{"tool_result_id":"{tool_result_id}",'
+                f'"offset":{next_offset}}})'
+            )
+        return json.dumps(payload, ensure_ascii=False)
 
 
 class ToolInventoryTool(BaseTool):

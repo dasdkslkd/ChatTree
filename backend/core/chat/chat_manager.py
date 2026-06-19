@@ -429,6 +429,7 @@ class ChatManager:
                 tool_messages = await self._execute_tool_calls(
                     round_tool_calls,
                     node_id=new_node["id"],
+                    conversation_id=conversation_id,
                 )
                 messages.extend(tool_messages)
                 all_tool_calls.extend(round_tool_calls)
@@ -598,19 +599,66 @@ class ChatManager:
             by_id[key] = call
         return list(by_id.values())
 
+    def _tool_result_preview_chars(self) -> int:
+        tools_config = cfg.data.get("tools", {}) if isinstance(cfg.data, dict) else {}
+        return int(tools_config.get("max_result_length", 8000))
+
+    def _build_model_visible_tool_result(
+        self,
+        *,
+        raw_result: str,
+        name: str,
+        conversation_id: str,
+        node_id: str,
+        tool_call_id: Optional[str],
+    ) -> str:
+        store = getattr(self.tool_manager, "tool_result_store", None)
+        if store is None:
+            return raw_result
+
+        record = store.save_result(
+            content=raw_result,
+            tool_name=name,
+            conversation_id=conversation_id,
+            node_id=node_id,
+            tool_call_id=tool_call_id,
+        )
+        preview_chars = self._tool_result_preview_chars()
+        preview = raw_result[:preview_chars]
+        has_more = len(raw_result) > len(preview)
+        payload = {
+            "preview": preview,
+        }
+        if has_more:
+            payload["read_more"] = (
+                f'read_tool_result({{"tool_result_id":"{record["id"]}",'
+                f'"offset":{len(preview)}}})'
+            )
+        return json.dumps(payload, ensure_ascii=False)
+
     async def _execute_tool_calls(
         self,
         tool_calls: List[Dict[str, Any]],
         node_id: str,
+        conversation_id: Optional[str] = None,
     ) -> List[Message]:
         results: List[Message] = []
         for tool_call in tool_calls:
             fn = tool_call.get("function") or {}
             name = fn.get("name", "")
             arguments = self._parse_tool_arguments(fn.get("arguments"))
-            result = await self.tool_manager.execute_tool(name, arguments) if self.tool_manager else json.dumps(
+            raw_result = await self.tool_manager.execute_tool(name, arguments) if self.tool_manager else json.dumps(
                 {"error": "Tool manager is not configured"}, ensure_ascii=False
             )
+            result = raw_result
+            if conversation_id and name != "read_tool_result":
+                result = self._build_model_visible_tool_result(
+                    raw_result=raw_result,
+                    name=name,
+                    conversation_id=conversation_id,
+                    node_id=node_id,
+                    tool_call_id=tool_call.get("id"),
+                )
             results.append(Message({
                 "id": str(uuid.uuid4()),
                 "role": Role.TOOL,
