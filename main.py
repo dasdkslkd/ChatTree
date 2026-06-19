@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
+import asyncio
+import sys
+
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 # ---------- 导入路由 ----------
 from backend.api.routes import config, conversations, messages, models, prompts

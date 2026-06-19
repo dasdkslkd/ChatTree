@@ -31,6 +31,7 @@ class ToolManager:
         self._mcp_tools: Dict[str, BaseTool] = {}
         self._connection_manager = ConnectionManager()
         self._mcp_servers_config: Dict[str, Dict[str, Any]] = {}
+        self._mcp_init_errors: Dict[str, str] = {}
         tools_config = config.get("tools", {})
         self._enabled = tools_config.get("enabled", True)
         self._max_result_length = int(tools_config.get("max_result_length", MAX_TOOL_RESULT_LENGTH))
@@ -40,6 +41,7 @@ class ToolManager:
         )
         if self._enabled:
             self._register_tools(config)
+            self.register(ToolInventoryTool(self))
 
     def _register_tools(self, config: Dict[str, Any]):
         """Register tools based on legacy or redesigned configuration."""
@@ -48,8 +50,8 @@ class ToolManager:
         servers = mcp_config.get("servers") or {}
 
         if mcp_config.get("enabled", False) and servers:
-            builtin_config = tools_config.get("builtin", {})
-            if builtin_config.get("enabled", False) or builtin_config.get("web_search", {}).get("enabled", False):
+            builtin_config = tools_config.get("builtin", tools_config)
+            if builtin_config.get("enabled", True) is not False:
                 self._register_builtin_tools(builtin_config)
             self._mcp_servers_config = servers
             return
@@ -64,10 +66,19 @@ class ToolManager:
         """Register compatibility adapters for the old single-server MCP config."""
         endpoint = mcp_config.get("endpoint", "http://localhost:3001")
         timeout = mcp_config.get("timeout", 30.0)
+        http_retries = mcp_config.get("http_retries", mcp_config.get("retry_attempts", 2))
+        http_retry_backoff = mcp_config.get("http_retry_backoff", mcp_config.get("retry_backoff", 0.5))
         search_tool_name = mcp_config.get("search_tool", "searxng_web_search")
         url_read_tool_name = mcp_config.get("url_read_tool", "web_url_read")
 
-        self._mcp_client = MCPClient(endpoint=endpoint, timeout=timeout)
+        self._mcp_client = MCPClient(
+            endpoint=endpoint,
+            timeout=timeout,
+            http_retries=http_retries,
+            http_retry_backoff=http_retry_backoff,
+            bearer_token=mcp_config.get("bearer_token", mcp_config.get("token", "")),
+            headers=mcp_config.get("headers", mcp_config.get("http_headers", {})),
+        )
 
         search_tool = MCPSearchTool(self._mcp_client, tool_name=search_tool_name)
         url_read_tool = MCPUrlReadTool(self._mcp_client, tool_name=url_read_tool_name)
@@ -102,8 +113,11 @@ class ToolManager:
                 continue
             try:
                 await self._connection_manager.add_server(name, server_cfg)
+                self._mcp_init_errors.pop(name, None)
             except Exception as e:
-                logger.error(f"MCP server '{name}' initialization failed: {e}")
+                error = str(e) or type(e).__name__
+                self._mcp_init_errors[name] = error
+                logger.error(f"MCP server '{name}' initialization failed: {error}")
 
     async def init_mcp(self):
         """Initialize legacy MCP session and discover schemas."""
@@ -192,6 +206,71 @@ class ToolManager:
             logger.error(f"Tool {name} execution failed: {e}")
             return json.dumps({"error": str(e)}, ensure_ascii=False)
 
+    def describe_inventory(self) -> Dict[str, Any]:
+        mcp_tools = self._connection_manager.list_all_tools()
+        configured_servers = sorted(self._mcp_servers_config.keys())
+        connected_servers = set(self._connection_manager.list_server_names())
+        return {
+            "tools_enabled": self._enabled,
+            "model_visible_tools": [
+                tool.get("function", {}).get("name")
+                for tool in self.get_openai_tools()
+            ],
+            "local_tools": [
+                name for name in self._tools
+                if self._filter.is_allowed(name)
+            ],
+            "mcp_servers": [
+                {
+                    "name": name,
+                    "enabled": self._mcp_servers_config.get(name, {}).get("enabled", True) is not False,
+                    "connected": name in connected_servers,
+                    "error": self._mcp_init_errors.get(name),
+                }
+                for name in configured_servers
+            ],
+            "mcp_tools": [
+                {
+                    "server": info["server"],
+                    "name": info["tool"].get("name", ""),
+                    "callable_name": info["callable_name"],
+                }
+                for info in mcp_tools
+            ],
+        }
+
+    async def describe_inventory_async(self) -> Dict[str, Any]:
+        inventory = self.describe_inventory()
+        runtime_statuses = await self._connection_manager.list_server_statuses()
+        for server in inventory["mcp_servers"]:
+            runtime = runtime_statuses.get(server["name"])
+            if not runtime:
+                continue
+            server.update({
+                "transport": runtime.get("transport"),
+                "connected": runtime.get("connected", False),
+                "tools_count": runtime.get("tools_count", 0),
+                "error": runtime.get("error"),
+            })
+        return inventory
+
+    async def connect_mcp_server(self, name: str) -> Dict[str, Any]:
+        server_cfg = self._mcp_servers_config.get(name)
+        if server_cfg is None:
+            raise KeyError(name)
+        if server_cfg.get("enabled", True) is False:
+            self._mcp_init_errors[name] = "MCP server is disabled"
+            await self._connection_manager.remove_server(name)
+            return await self.describe_inventory_async()
+        try:
+            await self._connection_manager.add_server(name, server_cfg)
+            self._mcp_init_errors.pop(name, None)
+        except Exception as e:
+            error = str(e) or type(e).__name__
+            self._mcp_init_errors[name] = error
+            logger.error(f"MCP server '{name}' connection failed: {error}")
+        return await self.describe_inventory_async()
+
     async def close(self):
         """Clean up resources."""
         for tool in self._tools.values():
@@ -201,3 +280,30 @@ class ToolManager:
             await self._mcp_client.close()
             self._mcp_client = None
         await self._connection_manager.close()
+
+
+class ToolInventoryTool(BaseTool):
+    """Expose the current tool inventory to the model."""
+
+    def __init__(self, manager: ToolManager):
+        self._manager = manager
+
+    @property
+    def name(self) -> str:
+        return "list_available_tools"
+
+    @property
+    def description(self) -> str:
+        return (
+            "List the tools and MCP servers currently available in ChatTree, "
+            "including MCP connection status and callable tool names."
+        )
+
+    def parameters_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {},
+        }
+
+    async def execute(self, **kwargs) -> str:
+        return json.dumps(self._manager.describe_inventory(), ensure_ascii=False, indent=2)

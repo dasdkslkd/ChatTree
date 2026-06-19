@@ -23,9 +23,21 @@ class ConnectionManager:
         self._routes: Dict[str, Dict[str, str]] = {}
 
     async def add_server(self, name: str, config: Dict[str, Any]):
+        if name in self._servers:
+            await self.remove_server(name)
         server = McpServerManager(name, config)
-        await server.start()
-        self._servers[name] = server
+        try:
+            await server.start()
+            self._servers[name] = server
+            self._rebuild_routes()
+        except Exception:
+            await server.stop()
+            raise
+
+    async def remove_server(self, name: str):
+        server = self._servers.pop(name, None)
+        if server:
+            await server.stop()
         self._rebuild_routes()
 
     def _rebuild_routes(self):
@@ -79,6 +91,15 @@ class ConnectionManager:
 
     def has_tool(self, callable_name: str) -> bool:
         return callable_name in self._routes
+
+    def list_server_names(self) -> List[str]:
+        return list(self._servers.keys())
+
+    async def list_server_statuses(self) -> Dict[str, Dict[str, Any]]:
+        statuses: Dict[str, Dict[str, Any]] = {}
+        for name, server in list(self._servers.items()):
+            statuses[name] = await server.status()
+        return statuses
 
     async def close(self):
         for server in list(self._servers.values()):

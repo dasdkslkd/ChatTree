@@ -6,6 +6,8 @@ from backend.core.chat.node import NodeManager
 from backend.core.chat.conversation import Conversation
 from backend.core.config.types import Message, Role
 from backend.core.model.providers.openai_compatible import OpenAICompatibleProvider
+from backend.core.tools.mcp_server import McpServerManager
+from backend.core.tools.tool_manager import ToolManager
 from backend.core.tools.tool_filter import ToolFilter
 from backend.core.tools.web_search import WebSearchTool
 from backend.core.tools.web_search import FetchUrlTool
@@ -17,6 +19,42 @@ def test_tool_filter_allows_aliases_and_denies_disabled():
     assert tool_filter.is_allowed("server__tool", aliases=["server.tool"])
     assert not tool_filter.is_allowed("other_tool")
     assert not tool_filter.is_allowed("blocked_tool")
+
+
+def test_tool_manager_keeps_builtin_inventory_when_mcp_servers_configured():
+    manager = ToolManager({
+        "tools": {
+            "enabled": True,
+            "mcp": {
+                "enabled": True,
+                "servers": {
+                    "demo": {
+                        "enabled": True,
+                        "transport": "stdio",
+                        "command": "missing-mcp-server",
+                    }
+                },
+            },
+        }
+    })
+
+    names = [tool["function"]["name"] for tool in manager.get_openai_tools()]
+
+    assert "web_search" in names
+    assert "fetch_url" in names
+    assert "list_available_tools" in names
+
+
+def test_stdio_command_splits_line_arguments():
+    server = McpServerManager("demo", {
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y mcp-searxng"],
+    })
+
+    command = server._build_stdio_command()
+
+    assert command[-2:] == ["-y", "mcp-searxng"]
 
 
 def test_prepare_messages_reconstructs_tool_interaction_order():

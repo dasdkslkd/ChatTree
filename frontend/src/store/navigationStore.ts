@@ -1,14 +1,15 @@
 import { create } from 'zustand';
 
 type ChatViewMode = 'chat' | 'tree';
+type SettingsSection = 'providers' | 'prompts' | 'mcp';
 
 interface NavigationState {
   chatViewMode: ChatViewMode;
   settingsOpen: boolean;
-  settingsSection: 'providers' | 'prompts';
+  settingsSection: SettingsSection;
   setChatViewMode: (mode: ChatViewMode) => void;
   toggleChatViewMode: () => void;
-  openSettings: (section?: 'providers' | 'prompts') => void;
+  openSettings: (section?: SettingsSection) => void;
   closeSettings: () => void;
 }
 

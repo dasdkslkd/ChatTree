@@ -1,5 +1,5 @@
 import { apiClient } from './client';
-import type { ConfigData, ConfigUpdateRequest, AddProviderRequest } from '../types/model';
+import type { ConfigData, ConfigUpdateRequest, AddProviderRequest, ToolInventoryStatus } from '../types/model';
 
 export const configApi = {
   // 获取配置
@@ -23,6 +23,16 @@ export const configApi = {
   // 删除提供商
   deleteProvider: async (providerId: string): Promise<{ message: string }> => {
     const response = await apiClient.delete(`/config/providers/${providerId}`);
+    return response.data;
+  },
+
+  getMcpStatus: async (): Promise<ToolInventoryStatus> => {
+    const response = await apiClient.get('/tools/mcp/status');
+    return response.data;
+  },
+
+  connectMcpServer: async (serverName: string): Promise<ToolInventoryStatus> => {
+    const response = await apiClient.post(`/tools/mcp/servers/${encodeURIComponent(serverName)}/connect`);
     return response.data;
   },
 };

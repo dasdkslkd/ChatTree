@@ -39,16 +39,81 @@ export interface ModelProviderConfig {
   default_model: string;
 }
 
+export type McpTransport = 'streamable_http' | 'stdio';
+
+export interface McpServerConfig {
+  enabled: boolean;
+  transport: McpTransport;
+  url?: string;
+  endpoint?: string;
+  bearer_token?: string;
+  headers?: Record<string, string>;
+  command?: string | string[];
+  args?: string[];
+  stdio_framing?: 'content_length' | 'jsonl';
+  env?: Record<string, string>;
+  cwd?: string;
+  timeout?: number;
+  startup_timeout?: number;
+  tool_call_timeout?: number;
+  heartbeat_enabled?: boolean;
+  heartbeat_interval?: number;
+  auto_reconnect?: boolean;
+  max_reconnect_attempts?: number;
+  http_retries?: number;
+  http_retry_backoff?: number;
+  enabled_tools?: string[] | null;
+  disabled_tools?: string[];
+}
+
+export interface ToolsConfig {
+  enabled?: boolean;
+  max_rounds?: number;
+  max_result_length?: number;
+  enabled_tools?: string[] | null;
+  disabled_tools?: string[];
+  builtin?: Record<string, unknown>;
+  mcp?: {
+    enabled?: boolean;
+    servers?: Record<string, McpServerConfig>;
+  };
+}
+
+export interface McpServerStatus {
+  name: string;
+  enabled: boolean;
+  transport?: McpTransport;
+  connected: boolean;
+  tools_count?: number;
+  error?: string | null;
+}
+
+export interface McpToolStatus {
+  server: string;
+  name: string;
+  callable_name: string;
+}
+
+export interface ToolInventoryStatus {
+  tools_enabled: boolean;
+  model_visible_tools: string[];
+  local_tools: string[];
+  mcp_servers: McpServerStatus[];
+  mcp_tools: McpToolStatus[];
+}
+
 // 完整配置数据
 export interface ConfigData {
   default_provider: string;
   provider: Record<string, ModelProviderConfig>;
+  tools?: ToolsConfig;
 }
 
 // 配置更新请求
 export interface ConfigUpdateRequest {
   default_provider?: string;
   provider_configs?: Record<string, Partial<ModelProviderConfig>>;
+  tools?: ToolsConfig;
 }
 
 // 添加提供商请求

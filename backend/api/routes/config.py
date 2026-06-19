@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from ...core.config.config import Config, cfg
 from ...core.model.model_manager import ModelManager
 from ...core.tools.tool_manager import ToolManager
-from ..dependencies import get_config_manager
+from ..dependencies import get_config_manager, get_tool_manager
 
 router = APIRouter()
 
@@ -13,6 +13,7 @@ router = APIRouter()
 class ConfigUpdateRequest(BaseModel):
     default_provider: Optional[str] = None
     provider_configs: Optional[Dict[str, Dict[str, Any]]] = None
+    tools: Optional[Dict[str, Any]] = None
 
 
 class AddProviderRequest(BaseModel):
@@ -40,6 +41,29 @@ async def get_config(config_manager: Config = Depends(get_config_manager)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/tools/mcp/status", response_model=Dict[str, Any])
+async def get_mcp_status(tool_manager: ToolManager = Depends(get_tool_manager)):
+    """获取 MCP 运行时状态"""
+    try:
+        return await tool_manager.describe_inventory_async()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/tools/mcp/servers/{server_name}/connect", response_model=Dict[str, Any])
+async def connect_mcp_server(
+    server_name: str,
+    tool_manager: ToolManager = Depends(get_tool_manager),
+):
+    """连接或重连指定 MCP Server"""
+    try:
+        return await tool_manager.connect_mcp_server(server_name)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"MCP Server {server_name} 不存在")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.put("/config", response_model=Dict[str, str])
 async def update_config(
     request: ConfigUpdateRequest,
@@ -51,6 +75,8 @@ async def update_config(
         if request.provider_configs:
             for provider, conf in request.provider_configs.items():
                 config_manager.data['provider'][provider] = conf
+        if request.tools is not None:
+            config_manager.data['tools'] = request.tools
         if request.default_provider is not None:
             config_manager.data['default_provider'] = request.default_provider
         config_manager.save()

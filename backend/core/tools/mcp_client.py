@@ -23,15 +23,32 @@ class MCPClient:
         timeout: float = 30.0,
         transport: str = "streamable_http",
         process: Optional[asyncio.subprocess.Process] = None,
+        http_retries: int = 0,
+        http_retry_backoff: float = 0.5,
+        bearer_token: Optional[str] = None,
+        headers: Optional[Dict[str, str]] = None,
+        stdio_framing: str = "jsonl",
     ):
         self.endpoint = (endpoint or "").rstrip("/")
         self.timeout = timeout
         self.transport = transport
+        self.http_retries = max(0, int(http_retries))
+        self.http_retry_backoff = max(0.0, float(http_retry_backoff))
+        self.bearer_token = bearer_token or ""
+        self.extra_headers = dict(headers or {})
+        self.stdio_framing = stdio_framing
         self._process = process
         self._session_id: Optional[str] = None
         self._request_id: int = 0
         self._client: Optional[httpx.AsyncClient] = None
         self._stdio_lock = asyncio.Lock()
+        self._stdio_stdout_tail: List[str] = []
+
+    def _headers(self) -> Dict[str, str]:
+        headers = dict(self.extra_headers)
+        if self.bearer_token:
+            headers["Authorization"] = f"Bearer {self.bearer_token}"
+        return headers
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -40,6 +57,7 @@ class MCPClient:
                 headers={
                     "Content-Type": "application/json",
                     "Accept": "application/json, text/event-stream",
+                    **self._headers(),
                 },
             )
         return self._client
@@ -82,14 +100,14 @@ class MCPClient:
             return
 
         client = await self._get_client()
-        headers: Dict[str, str] = {}
+        headers: Dict[str, str] = self._headers()
         if self._session_id:
             headers["Mcp-Session-Id"] = self._session_id
         await client.post(f"{self.endpoint}/mcp", json=body, headers=headers)
 
     async def _send_http_message(self, body: Dict[str, Any], request_id: int) -> Any:
         client = await self._get_client()
-        headers: Dict[str, str] = {}
+        headers: Dict[str, str] = self._headers()
         if self._session_id:
             headers["Mcp-Session-Id"] = self._session_id
 
@@ -97,10 +115,22 @@ class MCPClient:
         logger.info(f"MCP request #{request_id}: {body.get('method')} -> {mcp_url}")
         logger.debug(f"MCP request body: {json.dumps(body, ensure_ascii=False)[:500]}")
 
-        try:
-            resp = await client.post(mcp_url, json=body, headers=headers)
-        except httpx.RequestError as e:
-            raise MCPClientError(f"MCP HTTP request failed: {e}") from e
+        resp: Optional[httpx.Response] = None
+        last_error: Optional[Exception] = None
+        for attempt in range(self.http_retries + 1):
+            try:
+                resp = await client.post(mcp_url, json=body, headers=headers)
+                if resp.status_code < 500:
+                    break
+                last_error = MCPClientError(f"MCP HTTP error {resp.status_code}: {resp.text[:500]}")
+            except httpx.RequestError as e:
+                last_error = e
+
+            if attempt < self.http_retries:
+                await asyncio.sleep(self.http_retry_backoff * (2 ** attempt))
+
+        if resp is None:
+            raise MCPClientError(f"MCP HTTP request failed: {last_error}") from last_error
 
         if "mcp-session-id" in resp.headers:
             self._session_id = resp.headers["mcp-session-id"]
@@ -146,8 +176,11 @@ class MCPClient:
         if not self._process or not self._process.stdin:
             raise MCPClientError("MCP stdio process is not available")
         payload = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        header = f"Content-Length: {len(payload)}\r\n\r\n".encode("ascii")
-        self._process.stdin.write(header + payload)
+        if self.stdio_framing == "jsonl":
+            payload = payload + b"\n"
+        else:
+            payload = f"Content-Length: {len(payload)}\r\n\r\n".encode("ascii") + payload
+        self._process.stdin.write(payload)
         await self._process.stdin.drain()
 
     async def _read_stdio_json(self) -> Any:
@@ -164,6 +197,13 @@ class MCPClient:
                 return json.loads(stripped.decode("utf-8"))
             except json.JSONDecodeError as e:
                 raise MCPClientError(f"MCP stdio response is not valid JSON: {stripped[:200]!r}") from e
+
+        if self.stdio_framing == "jsonl":
+            text = stripped.decode("utf-8", errors="replace")
+            if text:
+                self._stdio_stdout_tail.append(text)
+                self._stdio_stdout_tail = self._stdio_stdout_tail[-20:]
+            return None
 
         header_lines = [first]
         while True:
@@ -268,8 +308,13 @@ class MCPClient:
             return bool(self._process and self._process.returncode is None)
         try:
             client = await self._get_client()
-            resp = await client.get(f"{self.endpoint}/health")
-            return resp.status_code == 200
+            resp = await client.get(f"{self.endpoint}/health", headers=self._headers())
+            if resp.status_code == 200:
+                return True
+            if self._session_id:
+                await self.list_tools()
+                return True
+            return False
         except Exception as e:
             logger.warning(f"MCP health check failed: {e}")
             return False
