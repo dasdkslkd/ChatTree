@@ -156,6 +156,49 @@ class McpServerManager:
             command[0] = shutil.which(command[0]) or command[0]
         return command
 
+    def _should_use_popen_stdio(self) -> bool:
+        """Windows selector loops cannot spawn asyncio subprocesses."""
+        return os.name == "nt"
+
+    async def _start_stdio_process(
+        self,
+        command: List[str],
+        cwd: Optional[str],
+        env: Dict[str, str],
+    ):
+        if self._should_use_popen_stdio():
+            return self._start_popen_stdio_process(command, cwd, env)
+        try:
+            return await asyncio.create_subprocess_exec(
+                *command,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd,
+                env=env,
+            )
+        except NotImplementedError:
+            logger.warning(
+                "asyncio subprocess is unavailable on this event loop; "
+                "falling back to subprocess.Popen for MCP stdio"
+            )
+            return self._start_popen_stdio_process(command, cwd, env)
+
+    def _start_popen_stdio_process(
+        self,
+        command: List[str],
+        cwd: Optional[str],
+        env: Dict[str, str],
+    ) -> _PopenProcess:
+        return _PopenProcess(subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=cwd,
+            env=env,
+        ))
+
     async def start(self):
         try:
             await self._connect()
@@ -177,28 +220,7 @@ class McpServerManager:
             env = os.environ.copy()
             env.update(self.env)
             cwd = self.config.get("cwd") or None
-            try:
-                self._process = await asyncio.create_subprocess_exec(
-                    *command,
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    cwd=cwd,
-                    env=env,
-                )
-            except NotImplementedError:
-                logger.warning(
-                    "asyncio subprocess is unavailable on this event loop; "
-                    "falling back to subprocess.Popen for MCP stdio"
-                )
-                self._process = _PopenProcess(subprocess.Popen(
-                    command,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    cwd=cwd,
-                    env=env,
-                ))
+            self._process = await self._start_stdio_process(command, cwd, env)
             if self._process.stderr:
                 self._stderr_task = asyncio.create_task(self._capture_stderr())
             self._client = MCPClient(

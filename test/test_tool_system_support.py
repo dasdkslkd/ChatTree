@@ -6,6 +6,7 @@ from backend.core.chat.node import NodeManager
 from backend.core.chat.conversation import Conversation
 from backend.core.config.types import Message, Role
 from backend.core.model.providers.openai_compatible import OpenAICompatibleProvider
+from backend.core.tools import mcp_server as mcp_server_module
 from backend.core.tools.mcp_server import McpServerManager
 from backend.core.tools.tool_manager import ToolManager
 from backend.core.tools.tool_filter import ToolFilter
@@ -77,6 +78,57 @@ def test_stdio_command_splits_line_arguments():
     command = server._build_stdio_command()
 
     assert command[-2:] == ["-y", "mcp-searxng"]
+
+
+def test_stdio_process_prefers_popen_on_windows(monkeypatch):
+    class DummyProcess:
+        stdin = None
+        stdout = None
+        stderr = None
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            return None
+
+        def kill(self):
+            return None
+
+        def wait(self):
+            return 0
+
+    async def fail_if_asyncio_subprocess_is_used(*args, **kwargs):
+        raise AssertionError("asyncio subprocess should not be used")
+
+    popen_calls = []
+
+    def fake_popen(command, **kwargs):
+        popen_calls.append((command, kwargs))
+        return DummyProcess()
+
+    monkeypatch.setattr(mcp_server_module.os, "name", "nt")
+    monkeypatch.setattr(
+        mcp_server_module.asyncio,
+        "create_subprocess_exec",
+        fail_if_asyncio_subprocess_is_used,
+    )
+    monkeypatch.setattr(mcp_server_module.subprocess, "Popen", fake_popen)
+
+    server = McpServerManager("demo", {
+        "transport": "stdio",
+        "command": "demo-mcp",
+    })
+    process = asyncio.run(server._start_stdio_process(["demo-mcp"], None, {"A": "B"}))
+
+    assert isinstance(process, mcp_server_module._PopenProcess)
+    assert popen_calls == [(["demo-mcp"], {
+        "stdin": mcp_server_module.subprocess.PIPE,
+        "stdout": mcp_server_module.subprocess.PIPE,
+        "stderr": mcp_server_module.subprocess.PIPE,
+        "cwd": None,
+        "env": {"A": "B"},
+    })]
 
 
 def test_prepare_messages_reconstructs_tool_interaction_order():
