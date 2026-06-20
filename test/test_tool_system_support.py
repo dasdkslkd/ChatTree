@@ -45,6 +45,28 @@ def test_tool_manager_keeps_builtin_inventory_when_mcp_servers_configured():
     assert "list_available_tools" in names
 
 
+def test_tool_manager_registers_builtin_code_tools():
+    manager = ToolManager({
+        "tools": {
+            "enabled": True,
+            "builtin": {
+                "code": {
+                    "enabled": True,
+                    "workspace_roots": ["D:\\Workspace\\ChatTree\\tmp"],
+                }
+            },
+        }
+    })
+
+    names = [tool["function"]["name"] for tool in manager.get_openai_tools()]
+
+    assert "list_files" in names
+    assert "read_file" in names
+    assert "run_command" in names
+    assert "write_file" in names
+    assert "apply_patch" in names
+
+
 def test_stdio_command_splits_line_arguments():
     server = McpServerManager("demo", {
         "transport": "stdio",
