@@ -1,5 +1,11 @@
 import { apiClient } from './client';
-import type { Message, SendMessageRequest, StreamChunk } from '../types/message';
+import type {
+  Message,
+  SendMessageRequest,
+  StreamChunk,
+  ToolApprovalDecision,
+  ToolApprovalScope,
+} from '../types/message';
 
 export const messageApi = {
   // 流式发送消息
@@ -97,5 +103,18 @@ export const messageApi = {
   // 停止流式消息生成
   stopStream: async (conversationId: string, nodeId: string): Promise<void> => {
     await apiClient.post(`/conversations/${conversationId}/messages/${nodeId}/stream/stop`);
+  },
+
+  // 决定工具审批请求
+  decideApproval: async (
+    approvalId: string,
+    decision: ToolApprovalDecision,
+    scope: ToolApprovalScope = 'once',
+  ): Promise<void> => {
+    await apiClient.post(`/tool-approvals/${encodeURIComponent(approvalId)}/decide`, {
+      decision,
+      scope,
+      remember_rule: false,
+    });
   },
 };

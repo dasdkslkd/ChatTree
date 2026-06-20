@@ -3,6 +3,14 @@ import json
 from typing import Any, Dict, List, Optional
 
 from .base import BaseTool
+from .code_tools import (
+    ApplyPatchTool,
+    CodeToolConfig,
+    ListFilesTool,
+    ReadFileTool,
+    RunCommandTool,
+    WriteFileTool,
+)
 from .connection_manager import ConnectionManager
 from .mcp_client import MCPClient, MCPClientError
 from .mcp_tools import MCPSearchTool, MCPUrlReadTool
@@ -95,6 +103,23 @@ class ToolManager:
             self.register(WebSearchTool(searxng_cfg))
             self.register(FetchUrlTool(crawl_cfg))
             logger.info("Registered built-in web_search and fetch_url tools")
+
+        code_config = tools_config.get("code", {})
+        if code_config.get("enabled", True):
+            self._register_code_tools(code_config)
+
+    def _register_code_tools(self, code_config: Dict[str, Any]):
+        """Register built-in code browsing and modification tools."""
+        code_tool_config = CodeToolConfig.from_dict(code_config)
+        for tool in (
+            ListFilesTool(code_tool_config),
+            ReadFileTool(code_tool_config),
+            RunCommandTool(code_tool_config),
+            WriteFileTool(code_tool_config),
+            ApplyPatchTool(code_tool_config),
+        ):
+            self.register(tool)
+        logger.info("Registered built-in code tools")
 
     async def init(self):
         """Initialize all configured MCP connections."""

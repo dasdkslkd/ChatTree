@@ -1,4 +1,4 @@
-import type { SendMessageRequest } from '../types/message';
+import type { SendMessageRequest, ToolApprovalPayload } from '../types/message';
 import { messageApi } from '../api/message';
 
 interface StreamState {
@@ -7,6 +7,7 @@ interface StreamState {
   reasoning: string;  // 累积的思考过程增量（event_type==="reasoning"）
   reasoningActive: boolean;
   toolInteractions: any[];
+  pendingApprovals: Record<string, ToolApprovalPayload>;
   nodeId: string | null;
   tokensUsed: number;
   duration: number;
@@ -110,6 +111,23 @@ function appendToolResult(toolInteractions: any[], toolResult: any): any[] {
     });
   }
   return next;
+}
+
+function mergeApproval(
+  pendingApprovals: Record<string, ToolApprovalPayload>,
+  approval: ToolApprovalPayload | undefined,
+  status?: ToolApprovalPayload['status'],
+): Record<string, ToolApprovalPayload> {
+  if (!approval?.id) return pendingApprovals;
+  const existing = pendingApprovals[approval.id];
+  return {
+    ...pendingApprovals,
+    [approval.id]: {
+      ...existing,
+      ...approval,
+      status: status ?? approval.status ?? existing?.status,
+    },
+  };
 }
 
 export class StreamManager {
@@ -335,6 +353,7 @@ export class StreamManager {
       reasoning: '',
       reasoningActive: false,
       toolInteractions: [],
+      pendingApprovals: {},
       nodeId: null,
       tokensUsed: 0,
       duration: 0,
@@ -421,6 +440,17 @@ export class StreamManager {
             ...state,
             toolInteractions: appendToolResult(state.toolInteractions, chunk.tool_call),
             reasoningActive: false,
+          };
+        }
+        if (chunk.event_type === 'tool_approval_request') {
+          state = {
+            ...state,
+            pendingApprovals: mergeApproval(state.pendingApprovals, chunk.approval, 'pending'),
+          };
+        } else if (chunk.event_type === 'tool_approval_result') {
+          state = {
+            ...state,
+            pendingApprovals: mergeApproval(state.pendingApprovals, chunk.approval),
           };
         }
         if (chunk.node_id) {

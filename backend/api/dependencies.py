@@ -47,6 +47,20 @@ def get_tool_manager(request: Request):
         raise HTTPException(status_code=500, detail=f"依赖注入错误: {str(e)}")
 
 
+def get_approval_manager(request: Request):
+    """获取工具审批管理器"""
+    try:
+        if not hasattr(request.app.state, 'approval_manager'):
+            logger.error("❌ approval_manager 未在 app.state 中初始化")
+            raise HTTPException(status_code=500, detail="工具审批管理器未初始化")
+        return request.app.state.approval_manager
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ 获取 approval_manager 失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"依赖注入错误: {str(e)}")
+
+
 def get_config_manager(request: Request):
     """获取配置管理器"""
     try:

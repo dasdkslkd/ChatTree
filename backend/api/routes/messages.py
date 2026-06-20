@@ -1,12 +1,12 @@
 # backend/api/routes/messages.py
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel
 import json
 from ...core.chat.chat_manager import ChatManager
 from ..dependencies import get_chat_manager
-from ...core.config.types import Message
+from ...core.config.types import Message, StreamChunk
 
 router = APIRouter()
 
@@ -16,6 +16,25 @@ class SendMessageRequest(BaseModel):
     node_id: Optional[str] = None
     reasoning_effort: Optional[str] = None
     thinking_enabled: Optional[bool] = None
+
+
+def build_stream_chunk_data(chunk: StreamChunk, conversation_id: str) -> Dict[str, Any]:
+    """将内部 StreamChunk 转成 SSE JSON payload。"""
+    chunk_data: Dict[str, Any] = {
+        "status": chunk.get("status", "content"),
+        "content": chunk.get("content", ""),
+        "node_id": chunk.get("node_id"),
+        "conversation_id": chunk.get("conversation_id", conversation_id),
+        "error": chunk.get("error"),
+        "tokens_used": chunk.get("tokens_used", 0),
+        "usage_info": chunk.get("usage_info")
+    }
+    # 仅在存在时转发可扩展字段，保持当前文本路径 JSON 形状不变
+    for opt_key in ("event_type", "reasoning", "tool_call", "tool_calls", "approval"):
+        val = chunk.get(opt_key)
+        if val is not None:
+            chunk_data[opt_key] = val
+    return chunk_data
 
 @router.post("/conversations/{conversation_id}/messages/stream")
 async def stream_message(
@@ -36,20 +55,7 @@ async def stream_message(
                 thinking_enabled=request.thinking_enabled,
             ):
                 # 将 StreamChunk 转换为 JSON 字符串
-                chunk_data = {
-                    "status": chunk.get("status", "content"),
-                    "content": chunk.get("content", ""),
-                    "node_id": chunk.get("node_id"),
-                    "conversation_id": chunk.get("conversation_id", conversation_id),
-                    "error": chunk.get("error"),
-                    "tokens_used": chunk.get("tokens_used", 0),
-                    "usage_info": chunk.get("usage_info")
-                }
-                # 仅在存在时转发可扩展字段，保持当前文本路径 JSON 形状不变
-                for opt_key in ("event_type", "reasoning", "tool_call", "tool_calls"):
-                    val = chunk.get(opt_key)
-                    if val is not None:
-                        chunk_data[opt_key] = val
+                chunk_data = build_stream_chunk_data(chunk, conversation_id)
                 yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n"
             
             yield "data: [DONE]\n\n"

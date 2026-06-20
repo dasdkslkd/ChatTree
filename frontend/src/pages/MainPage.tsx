@@ -25,6 +25,8 @@ import {
   Copy, Check, Pencil, Loader2, RotateCcw, Network, MessageSquare, Trash2, FileText, Download, Settings,
 } from 'lucide-react';
 import { conversationApi } from '../api/conversation';
+import { messageApi } from '../api/message';
+import type { ToolApprovalDecision, ToolApprovalPayload, ToolApprovalScope } from '../types/message';
 import { useConversationStore } from '../store/conversationStore';
 import { useModelStore } from '../store/modelStore';
 import { useNavigationStore } from '../store/navigationStore';
@@ -440,6 +442,89 @@ function ToolCallGroup({ items }: { items: ToolRenderItem[] }) {
   );
 }
 
+function ToolApprovalCard({ approval }: { approval: ToolApprovalPayload }) {
+  const [submittingAction, setSubmittingAction] = useState<string | null>(null);
+  const toolName = approval.tool_name || 'tool';
+  const risk = approval.risk || approval.risk_level || 'unknown';
+  const reason = approval.reason || '';
+  const argsPreview = approval.arguments_preview || '';
+
+  const handleDecision = async (
+    decision: ToolApprovalDecision,
+    scope: ToolApprovalScope,
+    action: string,
+  ) => {
+    setSubmittingAction(action);
+    try {
+      await messageApi.decideApproval(approval.id, decision, scope);
+    } catch (error) {
+      console.error('Failed to decide tool approval:', error);
+      setSubmittingAction(null);
+    }
+  };
+
+  return (
+    <div className="tool-call tool-approval-call">
+      <div className="tc-header tool-approval-header">
+        <span className="tc-name">{toolName}</span>
+        <span className="tc-summary">{reason || argsPreview || '等待审批'}</span>
+        <span className="tool-approval-risk">{risk}</span>
+      </div>
+      <div className="tool-approval-body">
+        {reason && <div className="tool-approval-reason">{reason}</div>}
+        {argsPreview && <pre className="tc-cmd custom-scrollbar">{argsPreview}</pre>}
+        <div className="tool-approval-actions">
+          <Button
+            type="button"
+            size="xs"
+            variant="secondary"
+            disabled={submittingAction !== null}
+            onClick={() => handleDecision('approve', 'once', 'approve-once')}
+          >
+            允许一次
+          </Button>
+          <Button
+            type="button"
+            size="xs"
+            variant="secondary"
+            disabled={submittingAction !== null}
+            onClick={() => handleDecision('approve', 'session', 'approve-session')}
+          >
+            允许本会话
+          </Button>
+          <Button
+            type="button"
+            size="xs"
+            variant="ghost"
+            disabled={submittingAction !== null}
+            onClick={() => handleDecision('deny', 'once', 'deny')}
+          >
+            拒绝
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ToolApprovalGroup({ approvals }: { approvals: ToolApprovalPayload[] }) {
+  if (approvals.length === 0) return null;
+  return (
+    <div className="tool-group tool-approval-group">
+      <div className="tool-group-header tool-approval-group-header">
+        <ChevronRight className="tg-chevron" />
+        <span>工具审批</span>
+        <span className="tg-count">{approvals.length} 个</span>
+      </div>
+      <div className="tool-group-body">
+        {approvals.map((approval) => (
+          <ToolApprovalCard key={approval.id} approval={approval} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /* ---------- Component ---------- */
 export default function ChatPage() {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
@@ -532,7 +617,7 @@ export default function ChatPage() {
 
   const {
     streamedContent, streamedReasoning, startStreaming, isStreaming, abortStreaming,
-    streamedReasoningActive, streamedToolInteractions, streamDuration, streamStatus, pendingUserMessage, currentNodeId: streamNodeId,
+    streamedReasoningActive, streamedToolInteractions, pendingApprovals, streamDuration, streamStatus, pendingUserMessage, currentNodeId: streamNodeId,
   } = useStreamingManager(currentConversation?.id ?? null);
 
   // 结构性去重：一旦本轮流式产生的节点已出现在真实消息里（refreshMessages 注入），
@@ -555,6 +640,8 @@ export default function ChatPage() {
     reasoning: streamedReasoning,
     tool_interactions: streamedToolInteractions,
   });
+  const pendingApprovalList = Object.values(pendingApprovals).filter((approval) => approval.status === 'pending');
+  const pendingApprovalCount = pendingApprovalList.length;
   const streamedActiveReasoningIndex = (() => {
     if (streamStatus !== 'streaming') return -1;
     for (let i = streamedTimeline.length - 1; i >= 0; i -= 1) {
@@ -616,6 +703,12 @@ export default function ChatPage() {
       requestAnimationFrame(() => scrollToBottom(false));
     }
   }, [pendingUserMessage, scrollToBottom]);
+
+  useEffect(() => {
+    if (pendingApprovalCount > 0) {
+      requestAnimationFrame(() => scrollToBottom(false));
+    }
+  }, [pendingApprovalCount, scrollToBottom]);
 
   useEffect(() => {
     loadConversations();
@@ -1266,7 +1359,8 @@ export default function ChatPage() {
                           </div>
                         );
                       })}
-                      {streamedTimeline.length === 0 && (
+                      <ToolApprovalGroup approvals={pendingApprovalList} />
+                      {streamedTimeline.length === 0 && pendingApprovalList.length === 0 && (
                         <div
                           className="max-w-full w-fit px-3 py-2 rounded-2xl rounded-bl-sm leading-relaxed prose prose-sm max-w-none [&_p]:m-0"
                           style={{

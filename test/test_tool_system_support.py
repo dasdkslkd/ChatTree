@@ -45,6 +45,28 @@ def test_tool_manager_keeps_builtin_inventory_when_mcp_servers_configured():
     assert "list_available_tools" in names
 
 
+def test_tool_manager_registers_builtin_code_tools():
+    manager = ToolManager({
+        "tools": {
+            "enabled": True,
+            "builtin": {
+                "code": {
+                    "enabled": True,
+                    "workspace_roots": ["D:\\Workspace\\ChatTree\\tmp"],
+                }
+            },
+        }
+    })
+
+    names = [tool["function"]["name"] for tool in manager.get_openai_tools()]
+
+    assert "list_files" in names
+    assert "read_file" in names
+    assert "run_command" in names
+    assert "write_file" in names
+    assert "apply_patch" in names
+
+
 def test_stdio_command_splits_line_arguments():
     server = McpServerManager("demo", {
         "transport": "stdio",
@@ -111,11 +133,16 @@ def test_prepare_messages_reconstructs_tool_interaction_order():
 
 def test_execute_tool_calls_returns_tool_messages():
     class FakeToolManager:
+        def __init__(self):
+            self.calls = []
+
         async def execute_tool(self, name, arguments):
+            self.calls.append((name, arguments))
             return json.dumps({"name": name, "arguments": arguments}, ensure_ascii=False)
 
     manager = ChatManager.__new__(ChatManager)
-    manager.tool_manager = FakeToolManager()
+    tool_manager = FakeToolManager()
+    manager.tool_manager = tool_manager
 
     tool_calls = [{
         "id": "call-1",
@@ -128,6 +155,7 @@ def test_execute_tool_calls_returns_tool_messages():
     assert results[0]["role"] == Role.TOOL
     assert results[0]["name"] == "web_search"
     assert results[0]["tool_call_id"] == "call-1"
+    assert tool_manager.calls == [("web_search", {"query": "ChatTree"})]
     assert json.loads(results[0]["content"])["arguments"] == {"query": "ChatTree"}
 
 
