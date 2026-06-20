@@ -1,9 +1,13 @@
+from .approval import ApprovalDecision, ApprovalManager, ApprovalRequest
 from .capabilities import ToolCapability, capabilities_for_tool
 from .command_policy import CommandDecision, CommandPolicy, CommandRule
 from .logical_sandbox import LogicalSandbox, SandboxViolation
 from .permissions import PermissionContext, PermissionDecision, PermissionEngine, PermissionRule
 
 __all__ = [
+    "ApprovalDecision",
+    "ApprovalManager",
+    "ApprovalRequest",
     "CommandDecision",
     "CommandPolicy",
     "CommandRule",
