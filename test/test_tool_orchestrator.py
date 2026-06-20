@@ -496,3 +496,131 @@ async def _ask_approval_session_scope_bypasses_second_prompt(tmp_path):
 
 def test_ask_approval_session_scope_bypasses_second_prompt(tmp_path):
     asyncio.run(_ask_approval_session_scope_bypasses_second_prompt(tmp_path))
+
+
+async def _session_scope_does_not_bypass_explicit_ask_rule(tmp_path):
+    approval_manager = ApprovalManager(timeout_seconds=1)
+    orchestrator, tool_manager = make_orchestrator(
+        PermissionEngine(
+            rules=[
+                PermissionRule(
+                    id="ask-read-file-explicitly",
+                    behavior="ask",
+                    target_type="mcp_tool",
+                    pattern="filesystem__read_file",
+                    source="user",
+                )
+            ]
+        ),
+        LogicalSandbox(workspace_roots=[tmp_path], protected_paths=[".git"]),
+        approval_manager=approval_manager,
+    )
+    events = []
+
+    async def emit_event(event):
+        events.append(event)
+        if event["event_type"] == "tool_approval_request":
+            asyncio.get_running_loop().call_soon(
+                approval_manager.decide,
+                event["approval"]["id"],
+                "approve",
+                "session",
+            )
+
+    await orchestrator.execute_tool_call(
+        make_tool_call("filesystem__read_file", {"path": "one.txt"}),
+        conversation_id="conv-1",
+        node_id="node-1",
+        emit_event=emit_event,
+    )
+    await orchestrator.execute_tool_call(
+        make_tool_call("filesystem__read_file", {"path": "two.txt"}),
+        conversation_id="conv-1",
+        node_id="node-2",
+        emit_event=emit_event,
+    )
+
+    assert [event["event_type"] for event in events] == [
+        "tool_approval_request",
+        "tool_approval_result",
+        "tool_approval_request",
+        "tool_approval_result",
+    ]
+    assert tool_manager.calls == [
+        ("filesystem__read_file", {"path": "one.txt"}),
+        ("filesystem__read_file", {"path": "two.txt"}),
+    ]
+
+
+def test_session_scope_does_not_bypass_explicit_ask_rule(tmp_path):
+    asyncio.run(_session_scope_does_not_bypass_explicit_ask_rule(tmp_path))
+
+
+async def _command_policy_denies_destructive_command_before_execution(tmp_path, command):
+    orchestrator, tool_manager = make_orchestrator(
+        PermissionEngine(
+            rules=[
+                PermissionRule(
+                    id="allow-shell-tool",
+                    behavior="allow",
+                    target_type="tool",
+                    pattern="shell_exec",
+                    source="user",
+                )
+            ]
+        ),
+        LogicalSandbox(workspace_roots=[tmp_path], protected_paths=[".git"]),
+    )
+
+    message = await orchestrator.execute_tool_call(
+        make_tool_call("shell_exec", {"command": command}),
+        conversation_id="conv-1",
+        node_id="node-1",
+    )
+
+    assert tool_manager.calls == []
+    error = json.loads(message["content"])["error"]
+    assert error["type"] == "permission_denied"
+    assert error["tool_name"] == "shell_exec"
+    assert "destructive recursive deletion" in error["reason"]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm -rf /",
+        "Remove-Item . -Recurse -Force",
+    ],
+)
+def test_command_policy_denies_destructive_command_before_execution(tmp_path, command):
+    asyncio.run(_command_policy_denies_destructive_command_before_execution(tmp_path, command))
+
+
+async def _command_policy_allows_common_read_command_to_continue(tmp_path):
+    orchestrator, tool_manager = make_orchestrator(
+        PermissionEngine(
+            rules=[
+                PermissionRule(
+                    id="allow-shell-tool",
+                    behavior="allow",
+                    target_type="tool",
+                    pattern="shell_exec",
+                    source="user",
+                )
+            ]
+        ),
+        LogicalSandbox(workspace_roots=[tmp_path], protected_paths=[".git"]),
+    )
+
+    message = await orchestrator.execute_tool_call(
+        make_tool_call("shell_exec", {"command": "git status --short"}),
+        conversation_id="conv-1",
+        node_id="node-1",
+    )
+
+    assert tool_manager.calls == [("shell_exec", {"command": "git status --short"})]
+    assert json.loads(message["content"]) == {"ok": True, "name": "shell_exec"}
+
+
+def test_command_policy_allows_common_read_command_to_continue(tmp_path):
+    asyncio.run(_command_policy_allows_common_read_command_to_continue(tmp_path))

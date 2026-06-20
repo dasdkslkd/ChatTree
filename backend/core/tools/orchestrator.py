@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 import uuid
 from contextlib import suppress
@@ -10,8 +11,9 @@ from typing import Any, Callable, Dict, Optional
 
 from backend.core.config.types import Message, Role
 from backend.core.tools.security.approval import ApprovalManager, ApprovalRequest
+from backend.core.tools.security.command_policy import CommandPolicy
 from backend.core.tools.security.logical_sandbox import LogicalSandbox, SandboxViolation
-from backend.core.tools.security.permissions import PermissionContext, PermissionEngine
+from backend.core.tools.security.permissions import PermissionContext, PermissionDecision, PermissionEngine
 
 
 MUTATING_TOOL_NAME_TOKENS = (
@@ -40,6 +42,22 @@ PATH_ARGUMENT_KEYS = {
     "source",
     "paths",
     "files",
+}
+
+COMMAND_TOOL_NAME_TOKENS = {
+    "command",
+    "shell",
+    "bash",
+    "powershell",
+    "terminal",
+    "exec",
+    "run",
+}
+
+COMMAND_ARGUMENT_KEYS = {
+    "command",
+    "cmd",
+    "script",
 }
 
 
@@ -75,6 +93,18 @@ class ToolOrchestrator:
             arguments=arguments,
             source="model",
         )
+        command_decision = _command_policy_decision(name, arguments)
+        if command_decision and command_decision.behavior == "deny":
+            return _tool_message(
+                name=name,
+                tool_call_id=tool_call_id,
+                content=_permission_denied_content(
+                    tool_name=name,
+                    reason=command_decision.reason,
+                    message="Tool execution requires permission.",
+                ),
+            )
+
         decision = self.permission_engine.evaluate(context)
         if decision.behavior == "deny":
             return _tool_message(
@@ -87,7 +117,16 @@ class ToolOrchestrator:
                 ),
             )
 
-        if decision.behavior == "ask" and not self.approval_manager.is_session_allowed(
+        if command_decision and command_decision.behavior == "ask":
+            decision = PermissionDecision(
+                "ask",
+                f"Command approval required: {command_decision.reason}",
+                [],
+            )
+
+        if decision.behavior == "ask" and not _session_allow_applies(
+            decision,
+            self.approval_manager,
             conversation_id,
             name,
         ):
@@ -225,6 +264,44 @@ def _path_values(value: Any) -> list[Any]:
     if isinstance(value, (list, tuple, set)):
         return [item for item in value if item is not None]
     return [value]
+
+
+def _command_policy_decision(tool_name: str, arguments: Dict[str, Any]):
+    if not _is_command_like_tool(tool_name):
+        return None
+
+    command = _command_from_arguments(arguments)
+    if command is None:
+        return None
+
+    return CommandPolicy.default().classify(command)
+
+
+def _is_command_like_tool(tool_name: str) -> bool:
+    lowered = tool_name.lower()
+    parts = [part for part in re.split(r"[^a-z0-9]+", lowered) if part]
+    return any(part in COMMAND_TOOL_NAME_TOKENS for part in parts)
+
+
+def _command_from_arguments(arguments: Dict[str, Any]) -> Optional[str]:
+    for key, value in arguments.items():
+        if key.lower() in COMMAND_ARGUMENT_KEYS and isinstance(value, str):
+            return value
+    return None
+
+
+def _session_allow_applies(
+    decision: PermissionDecision,
+    approval_manager: ApprovalManager,
+    conversation_id: str,
+    tool_name: str,
+) -> bool:
+    if not approval_manager.is_session_allowed(conversation_id, tool_name):
+        return False
+    return any(
+        rule.behavior == "ask" and rule.source == "default"
+        for rule in decision.matched_rules
+    )
 
 
 def _permission_denied_content(tool_name: str, reason: str, message: str) -> str:

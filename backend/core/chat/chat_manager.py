@@ -432,6 +432,17 @@ class ChatManager:
 
                 async def emit_tool_event(event: Dict[str, Any]):
                     await approval_events.put(event)
+                    if (
+                        event.get("event_type") == "tool_approval_request"
+                        and await controller.is_stopped()
+                    ):
+                        approval_manager = getattr(
+                            getattr(self, "tool_orchestrator", None),
+                            "approval_manager",
+                            None,
+                        )
+                        if approval_manager is not None:
+                            approval_manager.cancel_for_node(new_node["id"])
 
                 execute_task = asyncio.create_task(
                     self._execute_tool_calls(
@@ -583,6 +594,13 @@ class ChatManager:
         controller = self._active_controllers.get(node_id)
         if controller:
             await controller.stop()
+            approval_manager = getattr(
+                getattr(self, "tool_orchestrator", None),
+                "approval_manager",
+                None,
+            )
+            if approval_manager is not None:
+                approval_manager.cancel_for_node(node_id)
             logger.info(f"已请求终止节点 {node_id} 的流")
             return True
         return False

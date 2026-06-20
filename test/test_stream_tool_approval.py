@@ -13,6 +13,10 @@ from backend.core.chat.chat_manager import ChatManager
 from backend.core.config.types import Role, StreamChunk, StreamController, StreamStatus
 from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
+from backend.core.tools.orchestrator import ToolOrchestrator
+from backend.core.tools.security.approval import ApprovalManager
+from backend.core.tools.security.logical_sandbox import LogicalSandbox
+from backend.core.tools.security.permissions import PermissionEngine
 
 
 def make_tool_call(name="web_search", arguments=None):
@@ -112,9 +116,9 @@ class FakeProvider:
 
 
 class FakeModelManager:
-    def __init__(self):
+    def __init__(self, provider=None):
         self.model_list = {"fake-provider": ["fake-model"]}
-        self.provider = FakeProvider()
+        self.provider = provider or FakeProvider()
 
     def get_model(self, provider, is_async=False):
         return self.provider
@@ -132,6 +136,65 @@ class FakeStreamingToolManager:
                 },
             }
         ]
+
+    async def execute_tool(self, name, arguments):
+        return "streaming-tool-result"
+
+
+class StopAwareApprovalProvider:
+    def __init__(self):
+        self.calls = 0
+
+    async def generate_response_stream(
+        self,
+        model,
+        messages,
+        stream_controller: StreamController = None,
+        **kwargs,
+    ):
+        self.calls += 1
+        if await stream_controller.is_stopped():
+            yield StreamChunk(
+                status=StreamStatus.STOPPED,
+                content="",
+                node_id=stream_controller.node_id,
+                conversation_id=stream_controller.conversation_id,
+                error=None,
+                tokens_used=0,
+            )
+            return
+
+        yield StreamChunk(
+            status=StreamStatus.START,
+            content=None,
+            node_id=stream_controller.node_id,
+            conversation_id=stream_controller.conversation_id,
+            error=None,
+            tokens_used=0,
+        )
+        yield StreamChunk(
+            status=StreamStatus.CONTENT,
+            content="",
+            node_id=stream_controller.node_id,
+            conversation_id=stream_controller.conversation_id,
+            error=None,
+            tokens_used=0,
+            tool_calls=[make_tool_call("filesystem__read_file", {"path": "notes.txt"})],
+        )
+        yield StreamChunk(
+            status=StreamStatus.COMPLETE,
+            content=None,
+            node_id=stream_controller.node_id,
+            conversation_id=stream_controller.conversation_id,
+            error=None,
+            tokens_used=1,
+            usage_info={
+                "input_tokens": 1,
+                "output_tokens": 0,
+                "total_tokens": 1,
+                "source": "test",
+            },
+        )
 
 
 class BlockingOrchestrator:
@@ -245,3 +308,69 @@ async def _closing_stream_cancels_pending_tool_execution(tmp_path):
 
 def test_closing_stream_cancels_pending_tool_execution(tmp_path):
     asyncio.run(_closing_stream_cancels_pending_tool_execution(tmp_path))
+
+
+async def _stop_stream_cancels_pending_approval_and_stream_finishes(tmp_path):
+    tool_manager = FakeStreamingToolManager()
+    approval_manager = ApprovalManager(timeout_seconds=60)
+    chat_manager = ChatManager(
+        FakeModelManager(provider=StopAwareApprovalProvider()),
+        ChatStorage(storage_dir=str(tmp_path / "conversations")),
+        PromptStorage(storage_dir=str(tmp_path / "prompts")),
+        tool_manager=tool_manager,
+    )
+    chat_manager.tool_orchestrator = ToolOrchestrator(
+        tool_manager=tool_manager,
+        permission_engine=PermissionEngine.default(),
+        approval_manager=approval_manager,
+        logical_sandbox=LogicalSandbox(workspace_roots=[tmp_path], protected_paths=[".git"]),
+    )
+    conversation = chat_manager.create_conversation("stop pending approval")
+    stream = chat_manager.send_message_stream(
+        conversation.metadata["id"],
+        "read notes",
+        model_id="fake-model",
+    )
+
+    approval_id = None
+    node_id = None
+    tail = []
+
+    try:
+        while True:
+            chunk = await asyncio.wait_for(stream.__anext__(), timeout=1)
+            if chunk.get("event_type") == "tool_approval_request":
+                approval_id = chunk["approval"]["id"]
+                node_id = chunk["node_id"]
+                break
+
+        assert approval_id is not None
+        assert node_id is not None
+        assert await chat_manager.stop_stream(node_id)
+
+        for _ in range(8):
+            try:
+                chunk = await asyncio.wait_for(stream.__anext__(), timeout=1)
+            except StopAsyncIteration:
+                break
+            tail.append(chunk)
+            if chunk.get("status") in {
+                StreamStatus.STOPPED,
+                StreamStatus.ERROR,
+                StreamStatus.COMPLETE,
+            }:
+                break
+    finally:
+        await stream.aclose()
+
+    assert approval_manager.get(approval_id) is None
+    assert any(
+        chunk.get("event_type") == "tool_approval_result"
+        and chunk.get("approval", {}).get("status") == "cancelled"
+        for chunk in tail
+    )
+    assert any(chunk.get("status") == StreamStatus.STOPPED for chunk in tail)
+
+
+def test_stop_stream_cancels_pending_approval_and_stream_finishes(tmp_path):
+    asyncio.run(_stop_stream_cancels_pending_approval_and_stream_finishes(tmp_path))
