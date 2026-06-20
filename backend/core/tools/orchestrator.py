@@ -7,6 +7,7 @@ import time
 import uuid
 from contextlib import suppress
 from inspect import isawaitable
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from backend.core.config.types import Message, Role
@@ -43,6 +44,11 @@ PATH_ARGUMENT_KEYS = {
     "paths",
     "files",
     "cwd",
+}
+
+BUILTIN_CODE_WRITE_TOOLS = {
+    "write_file",
+    "apply_patch",
 }
 
 COMMAND_TOOL_NAME_TOKENS = {
@@ -118,19 +124,41 @@ class ToolOrchestrator:
                 ),
             )
 
-        if command_decision and command_decision.behavior == "ask":
+        command_policy_ask = bool(
+            command_decision and command_decision.behavior == "ask"
+        )
+        if command_policy_ask:
             decision = PermissionDecision(
                 "ask",
                 f"Command approval required: {command_decision.reason}",
-                [],
+                decision.matched_rules,
             )
 
-        if decision.behavior == "ask" and not _session_allow_applies(
+        session_allow_applies = decision.behavior == "ask" and _session_allow_applies(
             decision,
             self.approval_manager,
             conversation_id,
             name,
-        ):
+            command_policy_ask=command_policy_ask,
+        )
+        if session_allow_applies and emit_event is not None:
+            await _maybe_await(
+                emit_event(
+                    {
+                        "event_type": "tool_approval_reused",
+                        "approval": {
+                            "conversation_id": conversation_id,
+                            "node_id": node_id,
+                            "tool_call_id": tool_call_id,
+                            "tool_name": name,
+                            "grant_scope": "session",
+                            "reason": "Session approval grant reused.",
+                        },
+                    }
+                )
+            )
+
+        if decision.behavior == "ask" and not session_allow_applies:
             if emit_event is None:
                 return _tool_message(
                     name=name,
@@ -179,6 +207,10 @@ class ToolOrchestrator:
                             "id": approval_request.id,
                             "status": approval.status,
                             "grant_scope": approval.scope,
+                            "tool_name": approval_request.tool_name,
+                            "tool_call_id": approval_request.tool_call_id,
+                            "conversation_id": approval_request.conversation_id,
+                            "node_id": approval_request.node_id,
                         },
                     }
                 )
@@ -251,11 +283,15 @@ def _filesystem_write_targets(tool_name: str, arguments: Dict[str, Any]) -> list
     if not _is_write_like_tool(tool_name):
         return []
 
+    skip_relative_paths = tool_name in BUILTIN_CODE_WRITE_TOOLS
     targets: list[Any] = []
     for key, value in arguments.items():
         if key.lower() not in PATH_ARGUMENT_KEYS:
             continue
-        targets.extend(_path_values(value))
+        for path_value in _path_values(value):
+            if skip_relative_paths and _is_relative_path_value(path_value):
+                continue
+            targets.append(path_value)
     return targets
 
 
@@ -265,6 +301,20 @@ def _path_values(value: Any) -> list[Any]:
     if isinstance(value, (list, tuple, set)):
         return [item for item in value if item is not None]
     return [value]
+
+
+def _is_relative_path_value(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    return not _is_absolute_path_value(value)
+
+
+def _is_absolute_path_value(value: str) -> bool:
+    if re.match(r"^[a-zA-Z]:[\\/]", value):
+        return True
+    if value.startswith("\\\\"):
+        return True
+    return Path(value).expanduser().is_absolute()
 
 
 def _command_policy_decision(tool_name: str, arguments: Dict[str, Any]):
@@ -296,9 +346,17 @@ def _session_allow_applies(
     approval_manager: ApprovalManager,
     conversation_id: str,
     tool_name: str,
+    command_policy_ask: bool = False,
 ) -> bool:
     if not approval_manager.is_session_allowed(conversation_id, tool_name):
         return False
+    if any(
+        rule.behavior == "ask" and rule.source in ("user", "project")
+        for rule in decision.matched_rules
+    ):
+        return False
+    if command_policy_ask:
+        return True
     return any(
         rule.behavior == "ask" and rule.source == "default"
         for rule in decision.matched_rules

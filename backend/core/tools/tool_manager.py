@@ -22,6 +22,14 @@ from ..utils.logger import setup_logger
 logger = setup_logger("ToolManager")
 
 
+def _tool_exception_error(tool_name: str, exc: Exception) -> Dict[str, str]:
+    return {
+        "type": type(exc).__name__,
+        "message": str(exc),
+        "tool_name": tool_name,
+    }
+
+
 class ToolManager:
     """Tool manager supporting built-in tools and MCP servers."""
 
@@ -222,8 +230,9 @@ class ToolManager:
             logger.info(f"Tool {name} returned {len(result)} chars")
             return result
         except Exception as e:
-            logger.error(f"Tool {name} execution failed: {e}")
-            return json.dumps({"error": str(e)}, ensure_ascii=False)
+            error = _tool_exception_error(name, e)
+            logger.error(f"Tool {name} execution failed: {error['type']}: {error['message']}")
+            return json.dumps({"error": error}, ensure_ascii=False)
 
     def describe_inventory(self) -> Dict[str, Any]:
         mcp_tools = self._connection_manager.list_all_tools()

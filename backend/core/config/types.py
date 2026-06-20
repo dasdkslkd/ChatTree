@@ -58,6 +58,7 @@ class Message(TypedDict, total=False):
     tool_call_id: Optional[str]
     tool_results: Optional[List[Dict[str, Any]]]  # 本消息触发的工具调用结果（未来工具轮次填充）
     tool_interactions: Optional[List[Dict[str, Any]]]  # 工具轮次序列：assistant tool_call + tool result
+    approval_events: Optional[List[Dict[str, Any]]]  # 本消息触发的工具审批请求/结果事件
     reasoning: Optional[str]  # 推理/思考轨迹（未来推理模型填充）
     timestamp: Required[int]
     generation_info: Optional[GenerationInfo]  # 生成信息（仅助手消息有，可选）

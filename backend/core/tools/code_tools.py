@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import locale
 import os
 import re
+import shlex
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -27,6 +30,73 @@ def _json(payload: Dict[str, Any]) -> str:
 
 def _error(error_type: str, message: str, **extra: Any) -> str:
     return _json({"error": {"type": error_type, "message": message, **extra}})
+
+
+def _decode_output(value: bytes | str | None, max_chars: int) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return _decode_output_bytes(value)[:max_chars]
+    return value[:max_chars]
+
+
+def _decode_output_bytes(value: bytes) -> str:
+    try:
+        decoded = value.decode("utf-8")
+        if "\ufffd" not in decoded:
+            return decoded
+    except UnicodeDecodeError:
+        pass
+
+    detected_encoding = _detect_output_encoding(value)
+    if detected_encoding:
+        try:
+            return value.decode(detected_encoding)
+        except (LookupError, UnicodeDecodeError):
+            pass
+
+    preferred_encoding = locale.getpreferredencoding(False)
+    if preferred_encoding:
+        try:
+            return value.decode(preferred_encoding)
+        except (LookupError, UnicodeDecodeError):
+            pass
+
+    return value.decode("utf-8", errors="replace")
+
+
+def _detect_output_encoding(value: bytes) -> Optional[str]:
+    try:
+        import chardet  # type: ignore[import-not-found]
+    except ImportError:
+        return None
+    result = chardet.detect(value) or {}
+    encoding = result.get("encoding")
+    return str(encoding) if encoding else None
+
+
+def _run_command_env() -> Dict[str, str]:
+    env = os.environ.copy()
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("PYTHONUTF8", "1")
+    return env
+
+
+def _windows_multiline_python_c_args(command: str) -> Optional[List[str]]:
+    if os.name != "nt" or "\n" not in command:
+        return None
+    try:
+        parts = shlex.split(command, posix=True)
+    except ValueError:
+        return None
+    if len(parts) != 3 or parts[1] != "-c" or "\n" not in parts[2]:
+        return None
+    executable_name = parts[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
+    if executable_name.endswith(".exe"):
+        executable_name = executable_name[:-4]
+    if executable_name not in {"python", "python3", "py"}:
+        return None
+    return [parts[0], "-c", parts[2]]
 
 
 @dataclass(frozen=True)
@@ -296,28 +366,41 @@ class RunCommandTool(_CodeTool):
                 self.config.command_timeout_seconds,
             ),
         )
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            cwd=str(cwd),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        python_c_args = _windows_multiline_python_c_args(command)
         try:
-            stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            timed_out = False
-        except asyncio.TimeoutError:
-            proc.kill()
-            stdout_b, stderr_b = await proc.communicate()
-            timed_out = True
-        stdout = stdout_b.decode("utf-8", errors="replace")[:self.config.max_output_chars]
-        stderr = stderr_b.decode("utf-8", errors="replace")[:self.config.max_output_chars]
+            proc = await asyncio.to_thread(
+                subprocess.run,
+                args=python_c_args or command,
+                shell=python_c_args is None,
+                cwd=str(cwd),
+                env=_run_command_env(),
+                capture_output=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            return _json({
+                "command": command,
+                "cwd": self.workspace.relative(cwd),
+                "exit_code": None,
+                "stdout": _decode_output(exc.output, self.config.max_output_chars),
+                "stderr": _decode_output(exc.stderr, self.config.max_output_chars),
+                "timed_out": True,
+            })
+        except Exception as exc:
+            return _error(
+                type(exc).__name__,
+                str(exc),
+                tool_name=self.name,
+                command=command,
+                cwd=self.workspace.relative(cwd),
+            )
         return _json({
             "command": command,
             "cwd": self.workspace.relative(cwd),
             "exit_code": proc.returncode,
-            "stdout": stdout,
-            "stderr": stderr,
-            "timed_out": timed_out,
+            "stdout": _decode_output(proc.stdout, self.config.max_output_chars),
+            "stderr": _decode_output(proc.stderr, self.config.max_output_chars),
+            "timed_out": False,
         })
 
 

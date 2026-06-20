@@ -1,9 +1,14 @@
 # backend/api/routes/config.py
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pathlib import Path
 from typing import Dict, Any, Optional, List
 from pydantic import BaseModel
 from ...core.config.config import Config, cfg
 from ...core.model.model_manager import ModelManager
+from ...core.tools.orchestrator import ToolOrchestrator
+from ...core.tools.security.approval import ApprovalManager
+from ...core.tools.security.logical_sandbox import LogicalSandbox
+from ...core.tools.security.permissions import PermissionEngine
 from ...core.tools.tool_manager import ToolManager
 from ..dependencies import get_config_manager, get_tool_manager
 
@@ -22,6 +27,42 @@ class AddProviderRequest(BaseModel):
     api_format: str = "chat_completions"
     base_url: str = ""
     api_key: str = ""
+
+
+def _sync_runtime_managers(app, config_data: Dict[str, Any], model_manager, tool_manager: ToolManager) -> None:
+    app.state.model_manager = model_manager
+    app.state.tool_manager = tool_manager
+
+    old_orchestrator = getattr(app.state, 'tool_orchestrator', None)
+    approval_manager = getattr(app.state, 'approval_manager', None) or getattr(
+        old_orchestrator,
+        'approval_manager',
+        None,
+    )
+    if approval_manager is None:
+        approval_manager = ApprovalManager()
+    app.state.approval_manager = approval_manager
+
+    logical_sandbox = LogicalSandbox.for_config(config_data, Path.cwd())
+    if old_orchestrator:
+        old_orchestrator.tool_manager = tool_manager
+        old_orchestrator.permission_engine = PermissionEngine.default()
+        old_orchestrator.approval_manager = approval_manager
+        old_orchestrator.logical_sandbox = logical_sandbox
+        tool_orchestrator = old_orchestrator
+    else:
+        tool_orchestrator = ToolOrchestrator(
+            tool_manager=tool_manager,
+            permission_engine=PermissionEngine.default(),
+            approval_manager=approval_manager,
+            logical_sandbox=logical_sandbox,
+        )
+        app.state.tool_orchestrator = tool_orchestrator
+
+    if hasattr(app.state, 'chat_manager'):
+        app.state.chat_manager.model_manager = model_manager
+        app.state.chat_manager.tool_manager = tool_manager
+        app.state.chat_manager.tool_orchestrator = tool_orchestrator
 
 
 @router.get("/health")
@@ -91,11 +132,7 @@ async def update_config(
             await old_tool_manager.close()
         tool_manager = ToolManager(config_manager.data)
         await tool_manager.init()
-        http_request.app.state.model_manager = model_manager
-        http_request.app.state.tool_manager = tool_manager
-        if hasattr(http_request.app.state, 'chat_manager'):
-            http_request.app.state.chat_manager.model_manager = model_manager
-            http_request.app.state.chat_manager.tool_manager = tool_manager
+        _sync_runtime_managers(http_request.app, config_manager.data, model_manager, tool_manager)
 
         return {"message": "配置已更新"}
     except Exception as e:
@@ -135,11 +172,7 @@ async def add_provider(
             await old_tool_manager.close()
         tool_manager = ToolManager(config_manager.data)
         await tool_manager.init()
-        http_request.app.state.model_manager = model_manager
-        http_request.app.state.tool_manager = tool_manager
-        if hasattr(http_request.app.state, 'chat_manager'):
-            http_request.app.state.chat_manager.model_manager = model_manager
-            http_request.app.state.chat_manager.tool_manager = tool_manager
+        _sync_runtime_managers(http_request.app, config_manager.data, model_manager, tool_manager)
 
         return {"message": f"提供商 {provider_id} 已添加"}
     except HTTPException:
@@ -169,11 +202,7 @@ async def delete_provider(
             await old_tool_manager.close()
         tool_manager = ToolManager(config_manager.data)
         await tool_manager.init()
-        http_request.app.state.model_manager = model_manager
-        http_request.app.state.tool_manager = tool_manager
-        if hasattr(http_request.app.state, 'chat_manager'):
-            http_request.app.state.chat_manager.model_manager = model_manager
-            http_request.app.state.chat_manager.tool_manager = tool_manager
+        _sync_runtime_managers(http_request.app, config_manager.data, model_manager, tool_manager)
 
         return {"message": f"提供商 {provider_id} 已删除"}
     except HTTPException:

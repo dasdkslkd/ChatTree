@@ -3,6 +3,7 @@ from typing import Any, Callable, List, Optional, Dict, AsyncIterator
 import uuid
 import asyncio  
 import json
+from copy import deepcopy
 from contextlib import suppress
 from time import time
 from .conversation import Conversation
@@ -159,6 +160,12 @@ class ChatManager:
         """保存一个 Conversation 并清空其待删集合。"""
         self.storage.save(conversation.to_dict())
         conversation._deleted_node_ids.clear()
+
+    def _mark_conversation_updated_at(self, conversation: Conversation, updated_at: int):
+        conversation.metadata["updated_at"] = max(
+            int(conversation.metadata.get("updated_at") or 0),
+            updated_at,
+        )
 
     async def send_message_stream(
         self,
@@ -331,6 +338,7 @@ class ChatManager:
             all_tool_calls: List[Dict[str, Any]] = []
             all_tool_messages: List[Message] = []
             tool_interactions: List[Dict[str, Any]] = []
+            all_approval_events: List[Dict[str, Any]] = []
             tool_round = 0
 
             while True:
@@ -461,6 +469,8 @@ class ChatManager:
                         )
                         if event_get_task in done:
                             event = event_get_task.result()
+                            if str(event.get("event_type", "")).startswith("tool_approval_"):
+                                all_approval_events.append(deepcopy(event))
                             yield self._tool_event_stream_chunk(
                                 event,
                                 node_id=new_node["id"],
@@ -470,6 +480,8 @@ class ChatManager:
                         if execute_task in done:
                             if event_get_task.done():
                                 event = event_get_task.result()
+                                if str(event.get("event_type", "")).startswith("tool_approval_"):
+                                    all_approval_events.append(deepcopy(event))
                                 yield self._tool_event_stream_chunk(
                                     event,
                                     node_id=new_node["id"],
@@ -477,8 +489,11 @@ class ChatManager:
                                 )
                                 event_get_task = asyncio.create_task(approval_events.get())
                             while not approval_events.empty():
+                                event = approval_events.get_nowait()
+                                if str(event.get("event_type", "")).startswith("tool_approval_"):
+                                    all_approval_events.append(deepcopy(event))
                                 yield self._tool_event_stream_chunk(
-                                    approval_events.get_nowait(),
+                                    event,
                                     node_id=new_node["id"],
                                     conversation_id=conversation_id,
                                 )
@@ -533,6 +548,7 @@ class ChatManager:
             if usage_info is None:
                 usage_info = estimated_usage(tokens_used)
             tokens_used = usage_total(usage_info, tokens_used)
+            completion_timestamp = int(time())
 
             # 创建生成信息（tokens_used 来自流中捕获的最终值）
             generation_info: GenerationInfo = {
@@ -553,8 +569,9 @@ class ChatManager:
                 "tool_call_id": None,
                 "tool_results": all_tool_messages or None,
                 "tool_interactions": tool_interactions or None,
+                "approval_events": all_approval_events or None,
                 "reasoning": (final_reasoning if tool_interactions else total_reasoning) or None,
-                "timestamp": int(time()),
+                "timestamp": completion_timestamp,
                 "generation_info": generation_info
             })
 
@@ -570,6 +587,7 @@ class ChatManager:
                         NodeManager.add_tool_messages(latest.nodes[new_node["id"]], all_tool_messages)
                     self._update_token_stats_for_conversation(latest, target_provider, tokens_used)
                     self._update_branch_usage_for_node(latest, new_node["id"])
+                    self._mark_conversation_updated_at(latest, completion_timestamp)
                     self._save(latest)
                 else:
                     # 极端情况：节点已被并发删除——退回到只保存本节点，避免丢消息
@@ -578,6 +596,7 @@ class ChatManager:
                         NodeManager.add_tool_messages(new_node, all_tool_messages)
                     new_node["total_tokens"] = usage_total(usage_info, tokens_used)
                     new_node["branch_usage_info"] = usage_info
+                    self._mark_conversation_updated_at(conversation, completion_timestamp)
                     self.storage.save({
                         "metadata": conversation.metadata,
                         "nodes": [new_node],

@@ -115,6 +115,101 @@ class FakeProvider:
         )
 
 
+class ApprovalPersistenceProvider:
+    def __init__(self):
+        self.calls = 0
+
+    async def generate_response_stream(
+        self,
+        model,
+        messages,
+        stream_controller: StreamController = None,
+        **kwargs,
+    ):
+        self.calls += 1
+        yield StreamChunk(
+            status=StreamStatus.START,
+            content=None,
+            node_id=stream_controller.node_id,
+            conversation_id=stream_controller.conversation_id,
+            error=None,
+            tokens_used=0,
+        )
+        if self.calls == 1:
+            yield StreamChunk(
+                status=StreamStatus.CONTENT,
+                content="",
+                node_id=stream_controller.node_id,
+                conversation_id=stream_controller.conversation_id,
+                error=None,
+                tokens_used=0,
+                tool_calls=[make_tool_call("filesystem__write_file", {"path": "notes.txt"})],
+            )
+        else:
+            yield StreamChunk(
+                status=StreamStatus.CONTENT,
+                content="done",
+                node_id=stream_controller.node_id,
+                conversation_id=stream_controller.conversation_id,
+                error=None,
+                tokens_used=0,
+            )
+        yield StreamChunk(
+            status=StreamStatus.COMPLETE,
+            content=None,
+            node_id=stream_controller.node_id,
+            conversation_id=stream_controller.conversation_id,
+            error=None,
+            tokens_used=1,
+            usage_info={
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "total_tokens": 2,
+                "source": "test",
+            },
+        )
+
+
+class PlainAssistantProvider:
+    async def generate_response_stream(
+        self,
+        model,
+        messages,
+        stream_controller: StreamController = None,
+        **kwargs,
+    ):
+        yield StreamChunk(
+            status=StreamStatus.START,
+            content=None,
+            node_id=stream_controller.node_id,
+            conversation_id=stream_controller.conversation_id,
+            error=None,
+            tokens_used=0,
+        )
+        yield StreamChunk(
+            status=StreamStatus.CONTENT,
+            content="plain response",
+            node_id=stream_controller.node_id,
+            conversation_id=stream_controller.conversation_id,
+            error=None,
+            tokens_used=0,
+        )
+        yield StreamChunk(
+            status=StreamStatus.COMPLETE,
+            content=None,
+            node_id=stream_controller.node_id,
+            conversation_id=stream_controller.conversation_id,
+            error=None,
+            tokens_used=1,
+            usage_info={
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "total_tokens": 2,
+                "source": "test",
+            },
+        )
+
+
 class FakeModelManager:
     def __init__(self, provider=None):
         self.model_list = {"fake-provider": ["fake-model"]}
@@ -217,6 +312,59 @@ class BlockingOrchestrator:
             raise
 
 
+class ApprovalPersistenceOrchestrator:
+    async def execute_tool_call(self, tool_call, conversation_id, node_id, emit_event=None):
+        events = [
+            {
+                "event_type": "tool_approval_request",
+                "approval": {
+                    "id": "approval-42",
+                    "status": "pending",
+                    "grant_scope": "once",
+                    "tool_name": tool_call["function"]["name"],
+                    "tool_call_id": tool_call["id"],
+                    "conversation_id": conversation_id,
+                    "node_id": node_id,
+                },
+            },
+            {
+                "event_type": "tool_approval_result",
+                "approval": {
+                    "id": "approval-42",
+                    "status": "approved",
+                    "grant_scope": "once",
+                    "tool_name": tool_call["function"]["name"],
+                    "tool_call_id": tool_call["id"],
+                    "conversation_id": conversation_id,
+                    "node_id": node_id,
+                },
+            },
+            {
+                "event_type": "tool_approval_reused",
+                "approval": {
+                    "conversation_id": conversation_id,
+                    "node_id": node_id,
+                    "tool_call_id": tool_call["id"],
+                    "tool_name": tool_call["function"]["name"],
+                    "grant_scope": "session",
+                    "reason": "Session approval grant reused.",
+                },
+            },
+        ]
+        for event in events:
+            result = emit_event(event)
+            if inspect.isawaitable(result):
+                await result
+        return {
+            "id": str(uuid.uuid4()),
+            "role": Role.TOOL,
+            "content": "write ok",
+            "name": tool_call["function"]["name"],
+            "tool_calls": None,
+            "tool_call_id": tool_call["id"],
+        }
+
+
 def test_build_stream_chunk_data_preserves_tool_approval_request():
     data = build_stream_chunk_data(
         StreamChunk(
@@ -308,6 +456,154 @@ async def _closing_stream_cancels_pending_tool_execution(tmp_path):
 
 def test_closing_stream_cancels_pending_tool_execution(tmp_path):
     asyncio.run(_closing_stream_cancels_pending_tool_execution(tmp_path))
+
+
+async def _stream_persists_tool_approval_events_on_assistant_node(tmp_path):
+    chat_manager = ChatManager(
+        FakeModelManager(provider=ApprovalPersistenceProvider()),
+        ChatStorage(storage_dir=str(tmp_path / "conversations")),
+        PromptStorage(storage_dir=str(tmp_path / "prompts")),
+        tool_manager=FakeStreamingToolManager(),
+    )
+    chat_manager.tool_orchestrator = ApprovalPersistenceOrchestrator()
+    conversation = chat_manager.create_conversation("approval persistence")
+
+    chunks = []
+    async for chunk in chat_manager.send_message_stream(
+        conversation.metadata["id"],
+        "write notes",
+        model_id="fake-model",
+    ):
+        chunks.append(chunk)
+
+    streamed_approval_events = [
+        chunk for chunk in chunks if chunk.get("event_type", "").startswith("tool_approval_")
+    ]
+    assert [event["event_type"] for event in streamed_approval_events] == [
+        "tool_approval_request",
+        "tool_approval_result",
+        "tool_approval_reused",
+    ]
+
+    saved = chat_manager.get_conversation(conversation.metadata["id"])
+    assert saved is not None
+    node_id = streamed_approval_events[0]["node_id"]
+    assistant_message = saved.nodes[node_id]["assistant_message"]
+    assert assistant_message is not None
+    assert assistant_message["approval_events"] == [
+        {
+            "event_type": "tool_approval_request",
+            "approval": {
+                "id": "approval-42",
+                "status": "pending",
+                "grant_scope": "once",
+                "tool_name": "filesystem__write_file",
+                "tool_call_id": "call-1",
+                "conversation_id": conversation.metadata["id"],
+                "node_id": node_id,
+            },
+        },
+        {
+            "event_type": "tool_approval_result",
+            "approval": {
+                "id": "approval-42",
+                "status": "approved",
+                "grant_scope": "once",
+                "tool_name": "filesystem__write_file",
+                "tool_call_id": "call-1",
+                "conversation_id": conversation.metadata["id"],
+                "node_id": node_id,
+            },
+        },
+        {
+            "event_type": "tool_approval_reused",
+            "approval": {
+                "conversation_id": conversation.metadata["id"],
+                "node_id": node_id,
+                "tool_call_id": "call-1",
+                "tool_name": "filesystem__write_file",
+                "grant_scope": "session",
+                "reason": "Session approval grant reused.",
+            },
+        },
+    ]
+
+
+def test_stream_persists_tool_approval_events_on_assistant_node(tmp_path):
+    asyncio.run(_stream_persists_tool_approval_events_on_assistant_node(tmp_path))
+
+
+async def _stream_updates_metadata_updated_at_after_tool_completion(tmp_path, monkeypatch):
+    from backend.core.chat import chat_manager as chat_manager_module
+    from backend.core.chat import conversation as conversation_module
+
+    monkeypatch.setattr(conversation_module, "time", lambda: 1000)
+    monkeypatch.setattr(chat_manager_module, "time", lambda: 2000)
+
+    chat_manager = ChatManager(
+        FakeModelManager(provider=ApprovalPersistenceProvider()),
+        ChatStorage(storage_dir=str(tmp_path / "conversations")),
+        PromptStorage(storage_dir=str(tmp_path / "prompts")),
+        tool_manager=FakeStreamingToolManager(),
+    )
+    chat_manager.tool_orchestrator = ApprovalPersistenceOrchestrator()
+    conversation = chat_manager.create_conversation("metadata tool completion")
+
+    chunks = [
+        chunk
+        async for chunk in chat_manager.send_message_stream(
+            conversation.metadata["id"],
+            "write notes",
+            model_id="fake-model",
+        )
+    ]
+
+    tool_event = next(chunk for chunk in chunks if chunk.get("event_type") == "tool_approval_result")
+    saved = chat_manager.get_conversation(conversation.metadata["id"])
+    assert saved is not None
+    assistant_message = saved.nodes[tool_event["node_id"]]["assistant_message"]
+    assert assistant_message is not None
+    assert saved.metadata["updated_at"] >= assistant_message["timestamp"]
+
+
+def test_stream_updates_metadata_updated_at_after_tool_completion(tmp_path, monkeypatch):
+    asyncio.run(_stream_updates_metadata_updated_at_after_tool_completion(tmp_path, monkeypatch))
+
+
+async def _stream_updates_metadata_updated_at_after_plain_assistant_completion(tmp_path, monkeypatch):
+    from backend.core.chat import chat_manager as chat_manager_module
+    from backend.core.chat import conversation as conversation_module
+
+    monkeypatch.setattr(conversation_module, "time", lambda: 1000)
+    monkeypatch.setattr(chat_manager_module, "time", lambda: 2000)
+
+    chat_manager = ChatManager(
+        FakeModelManager(provider=PlainAssistantProvider()),
+        ChatStorage(storage_dir=str(tmp_path / "conversations")),
+        PromptStorage(storage_dir=str(tmp_path / "prompts")),
+        tool_manager=None,
+    )
+    conversation = chat_manager.create_conversation("metadata plain completion")
+
+    chunks = [
+        chunk
+        async for chunk in chat_manager.send_message_stream(
+            conversation.metadata["id"],
+            "hello",
+            model_id="fake-model",
+        )
+    ]
+
+    content_chunk = next(chunk for chunk in chunks if chunk.get("content") == "plain response")
+    saved = chat_manager.get_conversation(conversation.metadata["id"])
+    assert saved is not None
+    assistant_message = saved.nodes[content_chunk["node_id"]]["assistant_message"]
+    assert assistant_message is not None
+    assert saved.metadata["updated_at"] >= assistant_message["timestamp"]
+
+
+def test_stream_updates_metadata_updated_at_after_plain_assistant_completion(tmp_path, monkeypatch):
+    asyncio.run(_stream_updates_metadata_updated_at_after_plain_assistant_completion(tmp_path, monkeypatch))
 
 
 async def _stop_stream_cancels_pending_approval_and_stream_finishes(tmp_path):

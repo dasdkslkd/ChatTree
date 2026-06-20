@@ -314,6 +314,15 @@ async def _ask_approval_approve_once_executes_manager(tmp_path):
         "tool_approval_result",
     ]
     result_event = events[1]["approval"]
+    assert result_event == {
+        "id": events[0]["approval"]["id"],
+        "status": "approved",
+        "grant_scope": "once",
+        "tool_name": "filesystem__read_file",
+        "tool_call_id": "call-1",
+        "conversation_id": "conv-1",
+        "node_id": "node-1",
+    }
     assert result_event["status"] == "approved"
     assert result_event["grant_scope"] == "once"
     assert tool_manager.calls == [("filesystem__read_file", {"path": "notes.txt"})]
@@ -483,9 +492,18 @@ async def _ask_approval_session_scope_bypasses_second_prompt(tmp_path):
     assert [event["event_type"] for event in events] == [
         "tool_approval_request",
         "tool_approval_result",
+        "tool_approval_reused",
     ]
     assert events[1]["approval"]["status"] == "approved"
     assert events[1]["approval"]["grant_scope"] == "session"
+    assert events[2]["approval"] == {
+        "conversation_id": "conv-1",
+        "node_id": "node-2",
+        "tool_call_id": "call-1",
+        "tool_name": "filesystem__read_file",
+        "grant_scope": "session",
+        "reason": "Session approval grant reused.",
+    }
     assert tool_manager.calls == [
         ("filesystem__read_file", {"path": "one.txt"}),
         ("filesystem__read_file", {"path": "two.txt"}),
@@ -626,6 +644,32 @@ def test_command_policy_allows_common_read_command_to_continue(tmp_path):
     asyncio.run(_command_policy_allows_common_read_command_to_continue(tmp_path))
 
 
+async def _builtin_write_file_relative_path_reaches_manager(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    orchestrator, tool_manager = make_orchestrator(
+        PermissionEngine(rules=[
+            PermissionRule("allow-write", "allow", "tool", "write_file")
+        ]),
+        LogicalSandbox(workspace_roots=[workspace], protected_paths=[".git"]),
+    )
+
+    message = await orchestrator.execute_tool_call(
+        make_tool_call("write_file", {"path": "sample.txt", "content": "x"}),
+        conversation_id="conv-1",
+        node_id="node-1",
+    )
+
+    assert tool_manager.calls == [
+        ("write_file", {"path": "sample.txt", "content": "x"})
+    ]
+    assert json.loads(message["content"]) == {"ok": True, "name": "write_file"}
+
+
+def test_builtin_write_file_relative_path_reaches_manager(tmp_path):
+    asyncio.run(_builtin_write_file_relative_path_reaches_manager(tmp_path))
+
+
 async def _builtin_write_file_outside_workspace_denied(tmp_path):
     outside = tmp_path.parent / "outside.txt"
     orchestrator, tool_manager = make_orchestrator(
@@ -647,6 +691,30 @@ async def _builtin_write_file_outside_workspace_denied(tmp_path):
 
 def test_builtin_write_file_outside_workspace_denied(tmp_path):
     asyncio.run(_builtin_write_file_outside_workspace_denied(tmp_path))
+
+
+async def _builtin_apply_patch_relative_cwd_reaches_manager(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    orchestrator, tool_manager = make_orchestrator(
+        PermissionEngine(rules=[
+            PermissionRule("allow-patch", "allow", "tool", "apply_patch")
+        ]),
+        LogicalSandbox(workspace_roots=[workspace], protected_paths=[".git"]),
+    )
+
+    message = await orchestrator.execute_tool_call(
+        make_tool_call("apply_patch", {"cwd": ".", "patch": ""}),
+        conversation_id="conv-1",
+        node_id="node-1",
+    )
+
+    assert tool_manager.calls == [("apply_patch", {"cwd": ".", "patch": ""})]
+    assert json.loads(message["content"]) == {"ok": True, "name": "apply_patch"}
+
+
+def test_builtin_apply_patch_relative_cwd_reaches_manager(tmp_path):
+    asyncio.run(_builtin_apply_patch_relative_cwd_reaches_manager(tmp_path))
 
 
 async def _builtin_apply_patch_cwd_outside_workspace_denied(tmp_path):
@@ -729,3 +797,59 @@ async def _run_command_unknown_command_requests_approval(tmp_path):
 
 def test_run_command_unknown_command_requests_approval(tmp_path):
     asyncio.run(_run_command_unknown_command_requests_approval(tmp_path))
+
+
+async def _run_command_session_scope_bypasses_second_command_policy_prompt(tmp_path):
+    approval_manager = ApprovalManager(timeout_seconds=1)
+    orchestrator, tool_manager = make_orchestrator(
+        PermissionEngine(rules=[
+            PermissionRule("allow-command", "allow", "tool", "run_command")
+        ]),
+        LogicalSandbox(workspace_roots=[tmp_path], protected_paths=[".git"]),
+        approval_manager=approval_manager,
+    )
+    events = []
+
+    async def emit_event(event):
+        events.append(event)
+        if event["event_type"] == "tool_approval_request":
+            approval_manager.decide(event["approval"]["id"], "approve", "session")
+
+    first_message = await orchestrator.execute_tool_call(
+        make_tool_call("run_command", {"command": "python custom_script.py"}),
+        conversation_id="conv-1",
+        node_id="node-1",
+        emit_event=emit_event,
+    )
+    second_message = await orchestrator.execute_tool_call(
+        make_tool_call("run_command", {"command": "python another_script.py"}),
+        conversation_id="conv-1",
+        node_id="node-2",
+        emit_event=emit_event,
+    )
+
+    assert [event["event_type"] for event in events] == [
+        "tool_approval_request",
+        "tool_approval_result",
+        "tool_approval_reused",
+    ]
+    assert events[1]["approval"]["status"] == "approved"
+    assert events[1]["approval"]["grant_scope"] == "session"
+    assert events[2]["approval"] == {
+        "conversation_id": "conv-1",
+        "node_id": "node-2",
+        "tool_call_id": "call-1",
+        "tool_name": "run_command",
+        "grant_scope": "session",
+        "reason": "Session approval grant reused.",
+    }
+    assert tool_manager.calls == [
+        ("run_command", {"command": "python custom_script.py"}),
+        ("run_command", {"command": "python another_script.py"}),
+    ]
+    assert json.loads(first_message["content"])["ok"] is True
+    assert json.loads(second_message["content"])["ok"] is True
+
+
+def test_run_command_session_scope_bypasses_second_command_policy_prompt(tmp_path):
+    asyncio.run(_run_command_session_scope_bypasses_second_command_policy_prompt(tmp_path))
