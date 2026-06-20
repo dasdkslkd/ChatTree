@@ -36,20 +36,22 @@ class LogicalSandbox:
 
     def check_filesystem_write(self, target: str | Path) -> None:
         resolved_target = _resolve_path(target)
-        workspace_root = self._workspace_root_for(resolved_target)
-        if workspace_root is None:
+        workspace_roots = self._workspace_roots_for(resolved_target)
+        if not workspace_roots:
             raise SandboxViolation(f"write target is outside workspace roots: {resolved_target}")
 
-        for protected_path in self.protected_paths:
-            resolved_protected = self._resolve_protected_path(workspace_root, protected_path)
-            if _is_relative_to(resolved_target, resolved_protected):
-                raise SandboxViolation(f"write target is within protected path: {protected_path}")
+        for workspace_root in workspace_roots:
+            for protected_path in self.protected_paths:
+                resolved_protected = self._resolve_protected_path(workspace_root, protected_path)
+                if _is_relative_to(resolved_target, resolved_protected):
+                    raise SandboxViolation(f"write target is within protected path: {protected_path}")
 
-    def _workspace_root_for(self, target: Path) -> Path | None:
-        for workspace_root in self.workspace_roots:
-            if _is_relative_to(target, workspace_root):
-                return workspace_root
-        return None
+    def _workspace_roots_for(self, target: Path) -> list[Path]:
+        return [
+            workspace_root
+            for workspace_root in self.workspace_roots
+            if _is_relative_to(target, workspace_root)
+        ]
 
     def _resolve_protected_path(self, workspace_root: Path, protected_path: Path) -> Path:
         if protected_path.is_absolute():

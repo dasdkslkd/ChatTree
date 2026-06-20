@@ -27,6 +27,7 @@ class CommandRule:
 class CommandPolicy:
     _COMPOUND_OR_REDIRECT_RE = re.compile(r"&&|\|\||[;|<>]")
     _SEGMENT_SPLIT_RE = re.compile(r"&&|\|\||[;|<>]")
+    _SHELL_SUBSTITUTION_RE = re.compile(r"\$\(|`")
 
     def __init__(self, rules: list[CommandRule]):
         self._rules = list(rules)
@@ -54,6 +55,9 @@ class CommandPolicy:
         deny = self._first_matching_rule(normalized, "deny", include_segments=True)
         if deny:
             return CommandDecision("deny", deny.reason, deny)
+
+        if self._SHELL_SUBSTITUTION_RE.search(normalized):
+            return CommandDecision("ask", "shell command substitution requires approval")
 
         if self._COMPOUND_OR_REDIRECT_RE.search(normalized):
             return CommandDecision("ask", "compound, piped, or redirected command requires approval")

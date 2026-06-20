@@ -261,11 +261,32 @@ def test_command_policy_asks_for_mutating_developer_commands(command):
     assert decision.behavior == "ask"
 
 
-@pytest.mark.parametrize("command", ["rm -rf /", "Remove-Item . -Recurse -Force"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm -rf /",
+        "Remove-Item . -Recurse -Force",
+        "Remove-Item . -Force -Recurse",
+        "git status && rm -rf /",
+    ],
+)
 def test_command_policy_denies_destructive_commands(command):
     decision = CommandPolicy.default().classify(command)
 
     assert decision.behavior == "deny"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git status $(rm -rf /)",
+        "git diff `Remove-Item . -Recurse -Force`",
+    ],
+)
+def test_command_policy_asks_for_shell_substitutions(command):
+    decision = CommandPolicy.default().classify(command)
+
+    assert decision.behavior == "ask"
 
 
 @pytest.mark.parametrize("command", ["git status && rm file.txt", "rg key > out.txt", "Get-Content a | Set-Content b"])
@@ -308,3 +329,15 @@ def test_logical_sandbox_blocks_writes_outside_workspace(tmp_path):
         sandbox.check_filesystem_write(outside / "file.txt")
 
     assert "workspace" in str(exc.value)
+
+
+def test_logical_sandbox_blocks_protected_write_in_nested_workspace_root(tmp_path):
+    repo = tmp_path / "repo"
+    nested = repo / "data"
+    nested.mkdir(parents=True)
+    sandbox = LogicalSandbox(workspace_roots=[repo, nested], protected_paths=[".git"])
+
+    with pytest.raises(SandboxViolation) as exc:
+        sandbox.check_filesystem_write(nested / ".git" / "config")
+
+    assert "protected path" in str(exc.value)
