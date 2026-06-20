@@ -12,7 +12,11 @@ from backend.core.config.types import Role
 from backend.core.tools.orchestrator import ToolOrchestrator
 from backend.core.tools.security.approval import ApprovalManager
 from backend.core.tools.security.logical_sandbox import LogicalSandbox
-from backend.core.tools.security.permissions import PermissionEngine, PermissionRule
+from backend.core.tools.security.permissions import (
+    PermissionContext,
+    PermissionEngine,
+    PermissionRule,
+)
 
 
 class FakeToolManager:
@@ -46,16 +50,27 @@ def make_raw_tool_call(name="web_search", raw_arguments=""):
     }
 
 
-def make_orchestrator(permission_engine, logical_sandbox):
+def make_orchestrator(permission_engine, logical_sandbox, approval_manager=None):
     tool_manager = FakeToolManager()
     return (
         ToolOrchestrator(
             tool_manager=tool_manager,
             permission_engine=permission_engine,
-            approval_manager=ApprovalManager(),
+            approval_manager=approval_manager or ApprovalManager(),
             logical_sandbox=logical_sandbox,
         ),
         tool_manager,
+    )
+
+
+def make_permission_context(tool_name="filesystem__read_file", arguments=None):
+    return PermissionContext(
+        conversation_id="conv-1",
+        node_id="node-1",
+        tool_call_id="call-1",
+        tool_name=tool_name,
+        arguments=arguments or {},
+        source="model",
     )
 
 
@@ -249,3 +264,158 @@ async def _invalid_json_arguments_are_preserved_for_tool_manager(tmp_path):
 
 def test_invalid_json_arguments_are_preserved_for_tool_manager(tmp_path):
     asyncio.run(_invalid_json_arguments_are_preserved_for_tool_manager(tmp_path))
+
+
+async def _ask_approval_approve_once_executes_manager(tmp_path):
+    decision = PermissionEngine.default().evaluate(
+        make_permission_context("filesystem__read_file", {"path": "notes.txt"})
+    )
+    assert decision.behavior == "ask"
+
+    approval_manager = ApprovalManager(timeout_seconds=1)
+    orchestrator, tool_manager = make_orchestrator(
+        PermissionEngine.default(),
+        LogicalSandbox(workspace_roots=[tmp_path], protected_paths=[".git"]),
+        approval_manager=approval_manager,
+    )
+    events = []
+
+    async def emit_event(event):
+        events.append(event)
+        if event["event_type"] == "tool_approval_request":
+            approval = event["approval"]
+            assert approval["conversation_id"] == "conv-1"
+            assert approval["node_id"] == "node-1"
+            assert approval["tool_call_id"] == "call-1"
+            assert approval["tool_name"] == "filesystem__read_file"
+            assert approval["arguments_preview"] == '{"path": "notes.txt"}'
+            assert approval["risk_level"] == "medium"
+            assert approval["suggested_actions"] == [
+                "allow_once",
+                "allow_session",
+                "deny",
+            ]
+            asyncio.get_running_loop().call_soon(
+                approval_manager.decide,
+                approval["id"],
+                "approve",
+                "once",
+            )
+
+    message = await orchestrator.execute_tool_call(
+        make_tool_call("filesystem__read_file", {"path": "notes.txt"}),
+        conversation_id="conv-1",
+        node_id="node-1",
+        emit_event=emit_event,
+    )
+
+    assert [event["event_type"] for event in events] == [
+        "tool_approval_request",
+        "tool_approval_result",
+    ]
+    result_event = events[1]["approval"]
+    assert result_event["status"] == "approved"
+    assert result_event["grant_scope"] == "once"
+    assert tool_manager.calls == [("filesystem__read_file", {"path": "notes.txt"})]
+    assert json.loads(message["content"]) == {
+        "ok": True,
+        "name": "filesystem__read_file",
+    }
+
+
+def test_ask_approval_approve_once_executes_manager(tmp_path):
+    asyncio.run(_ask_approval_approve_once_executes_manager(tmp_path))
+
+
+async def _ask_approval_deny_returns_permission_denied(tmp_path):
+    approval_manager = ApprovalManager(timeout_seconds=1)
+    orchestrator, tool_manager = make_orchestrator(
+        PermissionEngine.default(),
+        LogicalSandbox(workspace_roots=[tmp_path], protected_paths=[".git"]),
+        approval_manager=approval_manager,
+    )
+    events = []
+
+    async def emit_event(event):
+        events.append(event)
+        if event["event_type"] == "tool_approval_request":
+            approval = event["approval"]
+            asyncio.get_running_loop().call_soon(
+                approval_manager.decide,
+                approval["id"],
+                "deny",
+                "once",
+            )
+
+    message = await orchestrator.execute_tool_call(
+        make_tool_call("filesystem__read_file", {"path": "notes.txt"}),
+        conversation_id="conv-1",
+        node_id="node-1",
+        emit_event=emit_event,
+    )
+
+    assert [event["event_type"] for event in events] == [
+        "tool_approval_request",
+        "tool_approval_result",
+    ]
+    assert events[1]["approval"]["status"] == "denied"
+    assert tool_manager.calls == []
+    error = json.loads(message["content"])["error"]
+    assert error["type"] == "permission_denied"
+    assert error["tool_name"] == "filesystem__read_file"
+    assert "denied" in error["reason"]
+
+
+def test_ask_approval_deny_returns_permission_denied(tmp_path):
+    asyncio.run(_ask_approval_deny_returns_permission_denied(tmp_path))
+
+
+async def _ask_approval_session_scope_bypasses_second_prompt(tmp_path):
+    approval_manager = ApprovalManager(timeout_seconds=1)
+    orchestrator, tool_manager = make_orchestrator(
+        PermissionEngine.default(),
+        LogicalSandbox(workspace_roots=[tmp_path], protected_paths=[".git"]),
+        approval_manager=approval_manager,
+    )
+    events = []
+
+    async def emit_event(event):
+        events.append(event)
+        if event["event_type"] == "tool_approval_request":
+            approval = event["approval"]
+            asyncio.get_running_loop().call_soon(
+                approval_manager.decide,
+                approval["id"],
+                "approve",
+                "session",
+            )
+
+    first_message = await orchestrator.execute_tool_call(
+        make_tool_call("filesystem__read_file", {"path": "one.txt"}),
+        conversation_id="conv-1",
+        node_id="node-1",
+        emit_event=emit_event,
+    )
+    second_message = await orchestrator.execute_tool_call(
+        make_tool_call("filesystem__read_file", {"path": "two.txt"}),
+        conversation_id="conv-1",
+        node_id="node-2",
+        emit_event=emit_event,
+    )
+
+    assert [event["event_type"] for event in events] == [
+        "tool_approval_request",
+        "tool_approval_result",
+    ]
+    assert events[1]["approval"]["status"] == "approved"
+    assert events[1]["approval"]["grant_scope"] == "session"
+    assert tool_manager.calls == [
+        ("filesystem__read_file", {"path": "one.txt"}),
+        ("filesystem__read_file", {"path": "two.txt"}),
+    ]
+    assert json.loads(first_message["content"])["ok"] is True
+    assert json.loads(second_message["content"])["ok"] is True
+
+
+def test_ask_approval_session_scope_bypasses_second_prompt(tmp_path):
+    asyncio.run(_ask_approval_session_scope_bypasses_second_prompt(tmp_path))

@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from inspect import isawaitable
 from typing import Any, Callable, Dict, Optional
 
 from backend.core.config.types import Message, Role
-from backend.core.tools.security.approval import ApprovalManager
+from backend.core.tools.security.approval import ApprovalManager, ApprovalRequest
 from backend.core.tools.security.logical_sandbox import LogicalSandbox, SandboxViolation
 from backend.core.tools.security.permissions import PermissionContext, PermissionEngine
 
@@ -60,8 +61,6 @@ class ToolOrchestrator:
         node_id: str,
         emit_event: Optional[Callable[[Dict[str, Any]], Any]] = None,
     ) -> Message:
-        del emit_event
-
         name = _tool_name(tool_call)
         arguments = _parse_arguments(tool_call.get("function", {}).get("arguments"))
         tool_call_id = str(tool_call.get("id") or "")
@@ -75,7 +74,7 @@ class ToolOrchestrator:
             source="model",
         )
         decision = self.permission_engine.evaluate(context)
-        if decision.behavior in ("deny", "ask"):
+        if decision.behavior == "deny":
             return _tool_message(
                 name=name,
                 tool_call_id=tool_call_id,
@@ -85,6 +84,66 @@ class ToolOrchestrator:
                     message="Tool execution requires permission.",
                 ),
             )
+
+        if decision.behavior == "ask" and not self.approval_manager.is_session_allowed(
+            conversation_id,
+            name,
+        ):
+            if emit_event is None:
+                return _tool_message(
+                    name=name,
+                    tool_call_id=tool_call_id,
+                    content=_permission_denied_content(
+                        tool_name=name,
+                        reason=f"{decision.reason}; approval UI unavailable",
+                        message="Tool execution requires permission.",
+                    ),
+                )
+
+            approval_request = ApprovalRequest(
+                id=str(uuid.uuid4()),
+                conversation_id=conversation_id,
+                node_id=node_id,
+                tool_call_id=tool_call_id,
+                tool_name=name,
+                arguments_preview=_arguments_preview(arguments),
+                risk_level="medium",
+                reason=decision.reason,
+                suggested_actions=["allow_once", "allow_session", "deny"],
+            )
+
+            await _maybe_await(
+                emit_event(
+                    {
+                        "event_type": "tool_approval_request",
+                        "approval": approval_request.to_payload(),
+                    }
+                )
+            )
+            approval = await self.approval_manager.request_and_wait(approval_request)
+            await _maybe_await(
+                emit_event(
+                    {
+                        "event_type": "tool_approval_result",
+                        "approval": {
+                            "id": approval_request.id,
+                            "status": approval.status,
+                            "grant_scope": approval.scope,
+                        },
+                    }
+                )
+            )
+
+            if approval.status != "approved":
+                return _tool_message(
+                    name=name,
+                    tool_call_id=tool_call_id,
+                    content=_permission_denied_content(
+                        tool_name=name,
+                        reason=f"Tool approval status: {approval.status}",
+                        message="Tool approval was not granted.",
+                    ),
+                )
 
         try:
             for target in _filesystem_write_targets(name, arguments):
@@ -122,6 +181,15 @@ def _parse_arguments(raw_arguments: Any) -> Dict[str, Any]:
             return parsed
         return {}
     return {}
+
+
+def _arguments_preview(arguments: Dict[str, Any]) -> str:
+    return json.dumps(arguments, ensure_ascii=False, default=str)[:1000]
+
+
+async def _maybe_await(result: Any) -> None:
+    if isawaitable(result):
+        await result
 
 
 def _is_write_like_tool(tool_name: str) -> bool:
