@@ -52,8 +52,17 @@ def test_explicit_deny_wins_over_allow():
     assert decision.matched_rules[0].id == "deny-write"
 
 
-def test_builtin_read_tools_are_allowed_by_default():
-    decision = PermissionEngine.default().evaluate(make_context(tool_name="web_search"))
+@pytest.mark.parametrize(
+    "tool_name",
+    [
+        "web_search",
+        "fetch_url",
+        "read_tool_result",
+        "list_available_tools",
+    ],
+)
+def test_builtin_read_tools_are_allowed_by_default(tool_name):
+    decision = PermissionEngine.default().evaluate(make_context(tool_name=tool_name))
 
     assert decision.behavior == "allow"
     assert "built-in read" in decision.reason
