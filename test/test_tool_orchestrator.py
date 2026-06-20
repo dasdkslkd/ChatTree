@@ -35,6 +35,17 @@ def make_tool_call(name="web_search", args=None):
     }
 
 
+def make_raw_tool_call(name="web_search", raw_arguments=""):
+    return {
+        "id": "call-1",
+        "type": "function",
+        "function": {
+            "name": name,
+            "arguments": raw_arguments,
+        },
+    }
+
+
 def make_orchestrator(permission_engine, logical_sandbox):
     tool_manager = FakeToolManager()
     return (
@@ -138,3 +149,103 @@ async def _sandbox_violation_does_not_execute_manager(tmp_path):
 
 def test_sandbox_protected_write_violation_returns_permission_denied(tmp_path):
     asyncio.run(_sandbox_violation_does_not_execute_manager(tmp_path))
+
+
+async def _sandbox_violation_for_edit_file_path_like_args(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    protected_target = workspace / ".git" / "config"
+    orchestrator, tool_manager = make_orchestrator(
+        PermissionEngine(
+            rules=[
+                PermissionRule(
+                    id="allow-edit",
+                    behavior="allow",
+                    target_type="tool",
+                    pattern="mcp__filesystem__edit_file",
+                )
+            ]
+        ),
+        LogicalSandbox(workspace_roots=[workspace], protected_paths=[".git"]),
+    )
+
+    message = await orchestrator.execute_tool_call(
+        make_tool_call(
+            "mcp__filesystem__edit_file",
+            {"file_path": str(protected_target), "edits": []},
+        ),
+        conversation_id="conv-1",
+        node_id="node-1",
+    )
+
+    assert tool_manager.calls == []
+    error = json.loads(message["content"])["error"]
+    assert error["type"] == "permission_denied"
+    assert error["tool_name"] == "mcp__filesystem__edit_file"
+    assert "protected path" in error["reason"]
+
+
+def test_sandbox_protected_write_violation_for_edit_file_path_like_args(tmp_path):
+    asyncio.run(_sandbox_violation_for_edit_file_path_like_args(tmp_path))
+
+
+async def _sandbox_violation_for_destination_arg(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    protected_target = workspace / ".git" / "config"
+    orchestrator, tool_manager = make_orchestrator(
+        PermissionEngine(
+            rules=[
+                PermissionRule(
+                    id="allow-copy",
+                    behavior="allow",
+                    target_type="tool",
+                    pattern="copy_file",
+                )
+            ]
+        ),
+        LogicalSandbox(workspace_roots=[workspace], protected_paths=[".git"]),
+    )
+
+    message = await orchestrator.execute_tool_call(
+        make_tool_call(
+            "copy_file",
+            {
+                "source": str(workspace / "notes.txt"),
+                "destination": str(protected_target),
+            },
+        ),
+        conversation_id="conv-1",
+        node_id="node-1",
+    )
+
+    assert tool_manager.calls == []
+    error = json.loads(message["content"])["error"]
+    assert error["type"] == "permission_denied"
+    assert error["tool_name"] == "copy_file"
+    assert "protected path" in error["reason"]
+
+
+def test_sandbox_protected_write_violation_for_destination_arg(tmp_path):
+    asyncio.run(_sandbox_violation_for_destination_arg(tmp_path))
+
+
+async def _invalid_json_arguments_are_preserved_for_tool_manager(tmp_path):
+    raw_arguments = '{"query": "ChatTree"'
+    orchestrator, tool_manager = make_orchestrator(
+        PermissionEngine.default(),
+        LogicalSandbox(workspace_roots=[tmp_path], protected_paths=[".git"]),
+    )
+
+    message = await orchestrator.execute_tool_call(
+        make_raw_tool_call("web_search", raw_arguments),
+        conversation_id="conv-1",
+        node_id="node-1",
+    )
+
+    assert tool_manager.calls == [("web_search", {"arguments": raw_arguments})]
+    assert json.loads(message["content"]) == {"ok": True, "name": "web_search"}
+
+
+def test_invalid_json_arguments_are_preserved_for_tool_manager(tmp_path):
+    asyncio.run(_invalid_json_arguments_are_preserved_for_tool_manager(tmp_path))

@@ -11,6 +11,35 @@ from backend.core.tools.security.logical_sandbox import LogicalSandbox, SandboxV
 from backend.core.tools.security.permissions import PermissionContext, PermissionEngine
 
 
+MUTATING_TOOL_NAME_TOKENS = (
+    "write",
+    "delete",
+    "move",
+    "remove",
+    "edit",
+    "create",
+    "mkdir",
+    "append",
+    "patch",
+    "rename",
+    "copy",
+)
+
+PATH_ARGUMENT_KEYS = {
+    "path",
+    "file",
+    "filepath",
+    "file_path",
+    "target",
+    "destination",
+    "dest",
+    "output",
+    "source",
+    "paths",
+    "files",
+}
+
+
 class ToolOrchestrator:
     def __init__(
         self,
@@ -57,19 +86,19 @@ class ToolOrchestrator:
                 ),
             )
 
-        if _is_write_like_tool(name) and "path" in arguments:
-            try:
-                self.logical_sandbox.check_filesystem_write(arguments["path"])
-            except SandboxViolation as exc:
-                return _tool_message(
-                    name=name,
-                    tool_call_id=tool_call_id,
-                    content=_permission_denied_content(
-                        tool_name=name,
-                        reason=str(exc),
-                        message="Tool execution violates logical sandbox.",
-                    ),
-                )
+        try:
+            for target in _filesystem_write_targets(name, arguments):
+                self.logical_sandbox.check_filesystem_write(target)
+        except SandboxViolation as exc:
+            return _tool_message(
+                name=name,
+                tool_call_id=tool_call_id,
+                content=_permission_denied_content(
+                    tool_name=name,
+                    reason=str(exc),
+                    message="Tool execution violates logical sandbox.",
+                ),
+            )
 
         content = await self.tool_manager.execute_tool(name, arguments)
         return _tool_message(name=name, tool_call_id=tool_call_id, content=content)
@@ -88,7 +117,7 @@ def _parse_arguments(raw_arguments: Any) -> Dict[str, Any]:
         try:
             parsed = json.loads(raw_arguments)
         except json.JSONDecodeError:
-            return {}
+            return {"arguments": raw_arguments}
         if isinstance(parsed, dict):
             return parsed
         return {}
@@ -97,7 +126,27 @@ def _parse_arguments(raw_arguments: Any) -> Dict[str, Any]:
 
 def _is_write_like_tool(tool_name: str) -> bool:
     lowered = tool_name.lower()
-    return any(token in lowered for token in ("write", "delete", "move", "remove"))
+    return any(token in lowered for token in MUTATING_TOOL_NAME_TOKENS)
+
+
+def _filesystem_write_targets(tool_name: str, arguments: Dict[str, Any]) -> list[Any]:
+    if not _is_write_like_tool(tool_name):
+        return []
+
+    targets: list[Any] = []
+    for key, value in arguments.items():
+        if key.lower() not in PATH_ARGUMENT_KEYS:
+            continue
+        targets.extend(_path_values(value))
+    return targets
+
+
+def _path_values(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [item for item in value if item is not None]
+    return [value]
 
 
 def _permission_denied_content(tool_name: str, reason: str, message: str) -> str:
