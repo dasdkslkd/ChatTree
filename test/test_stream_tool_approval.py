@@ -10,7 +10,9 @@ sys.path.insert(0, ROOT)
 
 from backend.api.routes.messages import build_stream_chunk_data
 from backend.core.chat.chat_manager import ChatManager
-from backend.core.config.types import Role, StreamChunk, StreamStatus
+from backend.core.config.types import Role, StreamChunk, StreamController, StreamStatus
+from backend.core.storage.chat_storage import ChatStorage
+from backend.core.storage.prompt_storage import PromptStorage
 
 
 def make_tool_call(name="web_search", arguments=None):
@@ -68,6 +70,90 @@ class FakeOrchestrator:
         }
 
 
+class FakeProvider:
+    async def generate_response_stream(
+        self,
+        model,
+        messages,
+        stream_controller: StreamController = None,
+        **kwargs,
+    ):
+        yield StreamChunk(
+            status=StreamStatus.START,
+            content=None,
+            node_id=stream_controller.node_id,
+            conversation_id=stream_controller.conversation_id,
+            error=None,
+            tokens_used=0,
+        )
+        yield StreamChunk(
+            status=StreamStatus.CONTENT,
+            content="",
+            node_id=stream_controller.node_id,
+            conversation_id=stream_controller.conversation_id,
+            error=None,
+            tokens_used=0,
+            tool_calls=[make_tool_call("filesystem__read_file", {"path": "notes.txt"})],
+        )
+        yield StreamChunk(
+            status=StreamStatus.COMPLETE,
+            content=None,
+            node_id=stream_controller.node_id,
+            conversation_id=stream_controller.conversation_id,
+            error=None,
+            tokens_used=1,
+            usage_info={
+                "input_tokens": 1,
+                "output_tokens": 0,
+                "total_tokens": 1,
+                "source": "test",
+            },
+        )
+
+
+class FakeModelManager:
+    def __init__(self):
+        self.model_list = {"fake-provider": ["fake-model"]}
+        self.provider = FakeProvider()
+
+    def get_model(self, provider, is_async=False):
+        return self.provider
+
+
+class FakeStreamingToolManager:
+    def get_openai_tools(self):
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "filesystem__read_file",
+                    "description": "read a file",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+
+
+class BlockingOrchestrator:
+    def __init__(self):
+        self.cancelled = asyncio.Event()
+        self.task = None
+
+    async def execute_tool_call(self, tool_call, conversation_id, node_id, emit_event=None):
+        self.task = asyncio.current_task()
+        try:
+            await emit_event(
+                {
+                    "event_type": "tool_approval_request",
+                    "approval": {"id": "approval-blocking", "status": "pending"},
+                }
+            )
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+
+
 def test_build_stream_chunk_data_preserves_tool_approval_request():
     data = build_stream_chunk_data(
         StreamChunk(
@@ -123,3 +209,39 @@ async def _execute_tool_calls_uses_orchestrator_and_keeps_events_separate():
 
 def test_execute_tool_calls_uses_orchestrator_and_keeps_events_separate():
     asyncio.run(_execute_tool_calls_uses_orchestrator_and_keeps_events_separate())
+
+
+async def _closing_stream_cancels_pending_tool_execution(tmp_path):
+    chat_manager = ChatManager(
+        FakeModelManager(),
+        ChatStorage(storage_dir=str(tmp_path / "conversations")),
+        PromptStorage(storage_dir=str(tmp_path / "prompts")),
+        tool_manager=FakeStreamingToolManager(),
+    )
+    orchestrator = BlockingOrchestrator()
+    chat_manager.tool_orchestrator = orchestrator
+    conversation = chat_manager.create_conversation("tool approval cancellation")
+    stream = chat_manager.send_message_stream(
+        conversation.metadata["id"],
+        "read notes",
+        model_id="fake-model",
+    )
+
+    try:
+        while True:
+            chunk = await stream.__anext__()
+            if chunk.get("event_type") == "tool_approval_request":
+                assert chunk["approval"]["id"] == "approval-blocking"
+                break
+
+        await stream.aclose()
+        await asyncio.wait_for(orchestrator.cancelled.wait(), timeout=1)
+
+        assert orchestrator.task is not None
+        assert orchestrator.task.done()
+    finally:
+        await stream.aclose()
+
+
+def test_closing_stream_cancels_pending_tool_execution(tmp_path):
+    asyncio.run(_closing_stream_cancels_pending_tool_execution(tmp_path))

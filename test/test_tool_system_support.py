@@ -111,11 +111,16 @@ def test_prepare_messages_reconstructs_tool_interaction_order():
 
 def test_execute_tool_calls_returns_tool_messages():
     class FakeToolManager:
+        def __init__(self):
+            self.calls = []
+
         async def execute_tool(self, name, arguments):
+            self.calls.append((name, arguments))
             return json.dumps({"name": name, "arguments": arguments}, ensure_ascii=False)
 
     manager = ChatManager.__new__(ChatManager)
-    manager.tool_manager = FakeToolManager()
+    tool_manager = FakeToolManager()
+    manager.tool_manager = tool_manager
 
     tool_calls = [{
         "id": "call-1",
@@ -128,6 +133,7 @@ def test_execute_tool_calls_returns_tool_messages():
     assert results[0]["role"] == Role.TOOL
     assert results[0]["name"] == "web_search"
     assert results[0]["tool_call_id"] == "call-1"
+    assert tool_manager.calls == [("web_search", {"query": "ChatTree"})]
     assert json.loads(results[0]["content"])["arguments"] == {"query": "ChatTree"}
 
 

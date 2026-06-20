@@ -478,6 +478,10 @@ class ChatManager:
                         event_get_task.cancel()
                         with suppress(asyncio.CancelledError):
                             await event_get_task
+                    if not execute_task.done():
+                        execute_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await execute_task
                 messages.extend(tool_messages)
                 all_tool_calls.extend(round_tool_calls)
                 all_tool_messages.extend(tool_messages)
@@ -742,8 +746,9 @@ class ChatManager:
             fn = tool_call.get("function") or {}
             name = fn.get("name", "")
             arguments = self._parse_tool_arguments(fn.get("arguments"))
-            if self.tool_orchestrator:
-                message = await self.tool_orchestrator.execute_tool_call(
+            tool_orchestrator = getattr(self, "tool_orchestrator", None)
+            if tool_orchestrator:
+                message = await tool_orchestrator.execute_tool_call(
                     tool_call,
                     conversation_id or "",
                     node_id,
