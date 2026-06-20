@@ -63,19 +63,31 @@ class PermissionEngine:
         if deny:
             return PermissionDecision("deny", f"Denied by rule {deny.id}", [deny])
 
-        ask = self._first_behavior(matched, "ask")
+        explicit_ask = self._first_behavior(
+            [rule for rule in matched if not self._is_default_ask(rule)],
+            "ask",
+        )
         allow = self._first_behavior(matched, "allow")
+        default_ask = self._first_behavior(
+            [rule for rule in matched if self._is_default_ask(rule)],
+            "ask",
+        )
 
-        if context.mode == "bypass_permissions" and not ask:
-            return PermissionDecision("allow", "bypass_permissions mode allows non-denied tool calls", matched)
-
-        if ask:
+        if explicit_ask:
             if context.mode == "dont_ask":
-                return PermissionDecision("deny", f"dont_ask mode converted ask rule {ask.id} to deny", [ask])
-            return PermissionDecision("ask", self._ask_reason(ask), [ask])
+                return PermissionDecision("deny", f"dont_ask mode converted ask rule {explicit_ask.id} to deny", [explicit_ask])
+            return PermissionDecision("ask", self._ask_reason(explicit_ask), [explicit_ask])
+
+        if context.mode == "bypass_permissions":
+            return PermissionDecision("allow", "bypass_permissions mode allows non-denied tool calls", matched)
 
         if allow:
             return PermissionDecision("allow", self._allow_reason(allow), [allow])
+
+        if default_ask:
+            if context.mode == "dont_ask":
+                return PermissionDecision("deny", f"dont_ask mode converted ask rule {default_ask.id} to deny", [default_ask])
+            return PermissionDecision("ask", self._ask_reason(default_ask), [default_ask])
 
         fallback = PermissionDecision("ask", "No matching allow rule; approval required", matched)
         if context.mode == "dont_ask":
@@ -88,9 +100,12 @@ class PermissionEngine:
         if rule.target_type == "tool":
             return fnmatch(context.tool_name, rule.pattern)
         if rule.target_type == "mcp_tool":
-            return context.tool_name.startswith("mcp__") and fnmatch(context.tool_name, rule.pattern)
+            return any(fnmatch(variant, rule.pattern) for variant in self._mcp_tool_name_variants(context.tool_name))
         if rule.target_type == "mcp_server":
-            return context.tool_name.startswith(f"mcp__{rule.pattern}__")
+            parts = self._mcp_parts(context.tool_name)
+            return bool(parts and fnmatch(parts[0], rule.pattern))
+        if rule.target_type in ("filesystem", "network"):
+            return False
         if rule.target_type == "command":
             command = str(context.arguments.get("command") or "")
             return fnmatch(command, rule.pattern)
@@ -101,6 +116,30 @@ class PermissionEngine:
             if rule.behavior == behavior:
                 return rule
         return None
+
+    def _is_default_ask(self, rule: PermissionRule) -> bool:
+        return rule.behavior == "ask" and rule.source == "default"
+
+    def _mcp_tool_name_variants(self, tool_name: str) -> List[str]:
+        parts = self._mcp_parts(tool_name)
+        if not parts:
+            return []
+
+        _, _, route_name = parts
+        alias_name = f"mcp__{route_name}"
+        if tool_name.startswith("mcp__"):
+            return [tool_name, route_name]
+        return [tool_name, alias_name]
+
+    def _mcp_parts(self, tool_name: str) -> Optional[tuple[str, str, str]]:
+        route_name = tool_name[5:] if tool_name.startswith("mcp__") else tool_name
+        if "__" not in route_name:
+            return None
+
+        server_name, tool_part = route_name.split("__", 1)
+        if not server_name or not tool_part:
+            return None
+        return server_name, tool_part, route_name
 
     def _ask_reason(self, rule: PermissionRule) -> str:
         if rule.target_type == "mcp_tool":
@@ -119,5 +158,5 @@ def default_permission_rules() -> List[PermissionRule]:
         PermissionRule("default-allow-fetch-url", "allow", "tool", "fetch_url", source="default"),
         PermissionRule("default-allow-read-tool-result", "allow", "tool", "read_tool_result", source="default"),
         PermissionRule("default-allow-list-tools", "allow", "tool", "list_available_tools", source="default"),
-        PermissionRule("default-ask-mcp", "ask", "mcp_tool", "mcp__*", source="default"),
+        PermissionRule("default-ask-mcp", "ask", "mcp_tool", "*", source="default"),
     ]
