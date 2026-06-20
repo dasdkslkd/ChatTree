@@ -1,5 +1,6 @@
 from dataclasses import replace
 import os
+from pathlib import Path
 import sys
 
 import pytest
@@ -13,6 +14,9 @@ from backend.core.tools.security.permissions import (
     PermissionEngine,
     PermissionRule,
 )
+from backend.core.tools.security.capabilities import ToolCapability, capabilities_for_tool
+from backend.core.tools.security.command_policy import CommandPolicy
+from backend.core.tools.security.logical_sandbox import LogicalSandbox, SandboxViolation
 
 
 def make_context(tool_name="mcp__filesystem__write_file", arguments=None, mode="default"):
@@ -224,3 +228,83 @@ def test_bypass_does_not_skip_explicit_deny():
 
     assert decision.behavior == "deny"
     assert decision.matched_rules[0].id == "deny-specific-tool"
+
+
+def test_capabilities_for_builtin_read_tool():
+    assert capabilities_for_tool("web_search") == {ToolCapability.NETWORK_READ}
+    assert capabilities_for_tool("list_available_tools") == {ToolCapability.READ_ONLY}
+
+
+def test_mcp_tool_defaults_to_dynamic_capability():
+    assert capabilities_for_tool("filesystem__read_file") == {ToolCapability.MCP_DYNAMIC}
+    assert capabilities_for_tool("mcp__unknown__tool") == {ToolCapability.MCP_DYNAMIC}
+
+
+def test_capability_overrides_replace_defaults():
+    assert capabilities_for_tool(
+        "filesystem__write_file",
+        {"filesystem__write_file": ["FILESYSTEM_WRITE"]},
+    ) == {ToolCapability.FILESYSTEM_WRITE}
+
+
+@pytest.mark.parametrize("command", ["git status", "git diff -- backend", "rg ToolManager", "pytest test/test_tool.py -v"])
+def test_command_policy_allows_common_read_and_test_commands(command):
+    decision = CommandPolicy.default().classify(command)
+
+    assert decision.behavior == "allow"
+
+
+@pytest.mark.parametrize("command", ["git commit -m hi", "npm install", "pip install requests"])
+def test_command_policy_asks_for_mutating_developer_commands(command):
+    decision = CommandPolicy.default().classify(command)
+
+    assert decision.behavior == "ask"
+
+
+@pytest.mark.parametrize("command", ["rm -rf /", "Remove-Item . -Recurse -Force"])
+def test_command_policy_denies_destructive_commands(command):
+    decision = CommandPolicy.default().classify(command)
+
+    assert decision.behavior == "deny"
+
+
+@pytest.mark.parametrize("command", ["git status && rm file.txt", "rg key > out.txt", "Get-Content a | Set-Content b"])
+def test_command_policy_asks_for_compound_or_redirected_commands(command):
+    decision = CommandPolicy.default().classify(command)
+
+    assert decision.behavior == "ask"
+
+
+def test_logical_sandbox_blocks_protected_write(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    sandbox = LogicalSandbox(
+        workspace_roots=[workspace],
+        protected_paths=[".git", "data/config.json"],
+    )
+
+    with pytest.raises(SandboxViolation) as exc:
+        sandbox.check_filesystem_write(workspace / ".git" / "config")
+
+    assert "protected path" in str(exc.value)
+
+
+def test_logical_sandbox_allows_workspace_write(tmp_path):
+    workspace = Path(tmp_path) / "workspace"
+    workspace.mkdir()
+    sandbox = LogicalSandbox(workspace_roots=[workspace], protected_paths=[".git"])
+
+    sandbox.check_filesystem_write(workspace / "notes" / "file.txt")
+
+
+def test_logical_sandbox_blocks_writes_outside_workspace(tmp_path):
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    sandbox = LogicalSandbox(workspace_roots=[workspace], protected_paths=[".git"])
+
+    with pytest.raises(SandboxViolation) as exc:
+        sandbox.check_filesystem_write(outside / "file.txt")
+
+    assert "workspace" in str(exc.value)
