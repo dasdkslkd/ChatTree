@@ -158,5 +158,10 @@ def default_permission_rules() -> List[PermissionRule]:
         PermissionRule("default-allow-fetch-url", "allow", "tool", "fetch_url", source="default"),
         PermissionRule("default-allow-read-tool-result", "allow", "tool", "read_tool_result", source="default"),
         PermissionRule("default-allow-list-tools", "allow", "tool", "list_available_tools", source="default"),
+        PermissionRule("default-allow-list-files", "allow", "tool", "list_files", source="default"),
+        PermissionRule("default-allow-read-file", "allow", "tool", "read_file", source="default"),
+        PermissionRule("default-ask-run-command", "ask", "tool", "run_command", source="default"),
+        PermissionRule("default-ask-write-file", "ask", "tool", "write_file", source="default"),
+        PermissionRule("default-ask-apply-patch", "ask", "tool", "apply_patch", source="default"),
         PermissionRule("default-ask-mcp", "ask", "mcp_tool", "*", source="default"),
     ]

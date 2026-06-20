@@ -19,6 +19,11 @@ DEFAULT_TOOL_CAPABILITIES: Mapping[str, Set[ToolCapability]] = {
     "fetch_url": {ToolCapability.NETWORK_READ},
     "read_tool_result": {ToolCapability.READ_ONLY},
     "list_available_tools": {ToolCapability.READ_ONLY},
+    "list_files": {ToolCapability.FILESYSTEM_READ},
+    "read_file": {ToolCapability.FILESYSTEM_READ},
+    "run_command": {ToolCapability.COMMAND_EXEC},
+    "write_file": {ToolCapability.FILESYSTEM_WRITE},
+    "apply_patch": {ToolCapability.FILESYSTEM_WRITE},
 }
 
 

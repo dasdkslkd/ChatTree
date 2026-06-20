@@ -73,6 +73,20 @@ def test_builtin_read_tools_are_allowed_by_default(tool_name):
     assert "built-in read" in decision.reason
 
 
+@pytest.mark.parametrize("tool_name", ["list_files", "read_file"])
+def test_builtin_code_read_tools_are_allowed_by_default(tool_name):
+    decision = PermissionEngine.default().evaluate(make_context(tool_name=tool_name))
+
+    assert decision.behavior == "allow"
+
+
+@pytest.mark.parametrize("tool_name", ["write_file", "apply_patch", "run_command"])
+def test_builtin_code_mutating_tools_ask_by_default(tool_name):
+    decision = PermissionEngine.default().evaluate(make_context(tool_name=tool_name))
+
+    assert decision.behavior == "ask"
+
+
 def test_mcp_tools_ask_by_default():
     decision = PermissionEngine.default().evaluate(make_context())
 
@@ -233,6 +247,14 @@ def test_bypass_does_not_skip_explicit_deny():
 def test_capabilities_for_builtin_read_tool():
     assert capabilities_for_tool("web_search") == {ToolCapability.NETWORK_READ}
     assert capabilities_for_tool("list_available_tools") == {ToolCapability.READ_ONLY}
+
+
+def test_capabilities_for_builtin_code_tools():
+    assert capabilities_for_tool("list_files") == {ToolCapability.FILESYSTEM_READ}
+    assert capabilities_for_tool("read_file") == {ToolCapability.FILESYSTEM_READ}
+    assert capabilities_for_tool("write_file") == {ToolCapability.FILESYSTEM_WRITE}
+    assert capabilities_for_tool("apply_patch") == {ToolCapability.FILESYSTEM_WRITE}
+    assert capabilities_for_tool("run_command") == {ToolCapability.COMMAND_EXEC}
 
 
 def test_mcp_tool_defaults_to_dynamic_capability():
