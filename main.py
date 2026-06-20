@@ -25,6 +25,20 @@ from backend.core.tools.security.logical_sandbox import LogicalSandbox
 from backend.core.tools.security.permissions import PermissionEngine
 from backend.core.tools.tool_manager import ToolManager
 
+PROJECT_ROOT = Path(__file__).resolve().parent
+
+
+def uvicorn_reload_options() -> dict:
+    """限制开发热重载范围，避免工具工作区文件变化重启后端。"""
+    return {
+        "reload_dirs": [str(PROJECT_ROOT / "backend")],
+        "reload_includes": ["*.py"],
+        "reload_excludes": [
+            "**/__pycache__/**",
+        ],
+    }
+
+
 app = FastAPI(
     title="AI 对话树后端",
     version="0.1.0",
@@ -81,4 +95,10 @@ app.include_router(prompts.router,        prefix="",               tags=["提示
 app.include_router(tool_approvals.router, prefix="", tags=["工具审批"])
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8001, reload=True)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8001,
+        reload=True,
+        **uvicorn_reload_options(),
+    )

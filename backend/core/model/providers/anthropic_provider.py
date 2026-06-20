@@ -174,6 +174,7 @@ class AnthropicProvider(BaseProvider):
             loop = asyncio.get_event_loop()
             loop.run_in_executor(None, self._stream_to_queue, body, queue, loop)
             tool_blocks: Dict[int, Dict[str, Any]] = {}
+            tool_call_started = False
 
             while True:
                 item = await queue.get()
@@ -203,6 +204,15 @@ class AnthropicProvider(BaseProvider):
                 if etype == "content_block_start":
                     block = event.get("content_block") or {}
                     if block.get("type") == "tool_use":
+                        if not tool_call_started:
+                            tool_call_started = True
+                            yield StreamChunk(
+                                status=StreamStatus.CONTENT, content=None,
+                                node_id=stream_controller.node_id if stream_controller else None,
+                                conversation_id=stream_controller.conversation_id if stream_controller else None,
+                                error=None, tokens_used=0,
+                                event_type="tool_call_start",
+                            )
                         index = int(event.get("index", len(tool_blocks)))
                         tool_blocks[index] = {
                             "id": block.get("id", f"toolu_{index}"),

@@ -32,6 +32,7 @@ import { useModelStore } from '../store/modelStore';
 import { useNavigationStore } from '../store/navigationStore';
 import { useStreamingManager } from '../hooks/useStreamingManager';
 import { streamManager } from '../services/streamManager';
+import { formatToolOutput, isToolResultError } from '../utils/toolDisplay';
 import { ChatInput } from '../components/ChatInput';
 import TreeView from './TreeView';
 
@@ -184,17 +185,6 @@ function toDisplayString(value: unknown): string {
   }
 }
 
-function parseJsonString(value: unknown): unknown {
-  if (typeof value !== 'string') return value;
-  const trimmed = value.trim();
-  if (!trimmed) return value;
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    return value;
-  }
-}
-
 function getToolName(toolCall: ToolCallLike | null, toolMessage?: ToolMessageLike | null): string {
   return toolCall?.function?.name || toolCall?.name || toolMessage?.name || 'tool';
 }
@@ -206,30 +196,11 @@ function getToolArgs(toolCall: ToolCallLike | null): string {
 }
 
 function getToolOutput(toolMessage?: ToolMessageLike | null): string {
-  if (!toolMessage) return '';
-  const rawOutput = toolMessage.content ?? toolMessage.output ?? toolMessage.result ?? toolMessage.error;
-  const parsed = parseJsonString(rawOutput);
-  const record = asRecord(parsed);
-  if (record && Object.prototype.hasOwnProperty.call(record, 'preview')) {
-    return toDisplayString(record.preview);
-  }
-  if (record && Object.prototype.hasOwnProperty.call(record, 'content')) {
-    return toDisplayString(record.content);
-  }
-  return toDisplayString(rawOutput);
+  return formatToolOutput(toolMessage);
 }
 
 function isToolError(toolMessage?: ToolMessageLike | null): boolean {
-  if (!toolMessage) return false;
-  if (toolMessage.error) return true;
-  const content = toolMessage.content;
-  const parsed = typeof content === 'string'
-    ? (() => {
-        try { return JSON.parse(content); } catch { return null; }
-      })()
-    : content;
-  const record = asRecord(parsed);
-  return Boolean(record?.error || record?.exception || record?.traceback || record?.success === false);
+  return isToolResultError(toolMessage);
 }
 
 function makeToolItem(

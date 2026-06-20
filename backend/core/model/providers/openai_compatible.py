@@ -214,6 +214,7 @@ class OpenAICompatibleProvider(BaseProvider):
             tool_call_accumulator: Dict[int, Dict[str, Any]] = {}
             for attempt_index, current_kwargs in enumerate(attempts):
                 try:
+                    tool_call_started = False
                     async for event in self._iter_sse_events("/chat/completions", current_kwargs):
                         if stream_controller and await stream_controller.is_stopped():
                             yield StreamChunk(
@@ -232,7 +233,19 @@ class OpenAICompatibleProvider(BaseProvider):
 
                         choice = (event.get("choices") or [{}])[0]
                         delta = choice.get("delta") or {}
-                        for tool_call in delta.get("tool_calls") or []:
+                        delta_tool_calls = delta.get("tool_calls") or []
+                        if delta_tool_calls and not tool_call_started:
+                            tool_call_started = True
+                            yield StreamChunk(
+                                status=StreamStatus.CONTENT,
+                                content=None,
+                                node_id=stream_controller.node_id if stream_controller else None,
+                                conversation_id=stream_controller.conversation_id if stream_controller else None,
+                                error=None,
+                                tokens_used=0,
+                                event_type="tool_call_start",
+                            )
+                        for tool_call in delta_tool_calls:
                             self._merge_openai_tool_call_delta(tool_call_accumulator, tool_call)
                         reasoning = delta.get("reasoning_content") or delta.get("reasoning")
                         if reasoning:
@@ -359,6 +372,7 @@ class OpenAICompatibleProvider(BaseProvider):
         for attempt_index, current_kwargs in enumerate(attempts):
             total_content = ""
             function_calls: Dict[str, Dict[str, Any]] = {}
+            tool_call_started = False
             try:
                 async for event in self._iter_sse_events("/responses", current_kwargs):
                     if stream_controller and await stream_controller.is_stopped():
@@ -397,6 +411,17 @@ class OpenAICompatibleProvider(BaseProvider):
                     if event_type == "response.output_item.added":
                         item = event.get("item") or {}
                         if item.get("type") == "function_call":
+                            if not tool_call_started:
+                                tool_call_started = True
+                                yield StreamChunk(
+                                    status=StreamStatus.CONTENT,
+                                    content=None,
+                                    node_id=stream_controller.node_id if stream_controller else None,
+                                    conversation_id=stream_controller.conversation_id if stream_controller else None,
+                                    error=None,
+                                    tokens_used=0,
+                                    event_type="tool_call_start",
+                                )
                             key = str(event.get("output_index", item.get("id") or item.get("call_id") or len(function_calls)))
                             function_calls[key] = {
                                 "id": item.get("call_id") or item.get("id") or key,
@@ -409,6 +434,17 @@ class OpenAICompatibleProvider(BaseProvider):
                         continue
 
                     if event_type == "response.function_call_arguments.delta":
+                        if not tool_call_started:
+                            tool_call_started = True
+                            yield StreamChunk(
+                                status=StreamStatus.CONTENT,
+                                content=None,
+                                node_id=stream_controller.node_id if stream_controller else None,
+                                conversation_id=stream_controller.conversation_id if stream_controller else None,
+                                error=None,
+                                tokens_used=0,
+                                event_type="tool_call_start",
+                            )
                         key = str(event.get("output_index", "0"))
                         call = function_calls.setdefault(
                             key,

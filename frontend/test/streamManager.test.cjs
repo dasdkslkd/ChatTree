@@ -1,0 +1,262 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const ts = require('typescript');
+
+require.extensions['.ts'] = function loadTs(module, filename) {
+  const source = fs.readFileSync(filename, 'utf8');
+  const output = ts.transpileModule(source, {
+    compilerOptions: {
+      module: ts.ModuleKind.CommonJS,
+      target: ts.ScriptTarget.ES2022,
+      esModuleInterop: true,
+      importsNotUsedAsValues: ts.ImportsNotUsedAsValues.Remove,
+    },
+    fileName: filename,
+  }).outputText;
+  module._compile(output, filename);
+};
+
+let nextTimerId = 1;
+let timers = new Map();
+let intervals = new Map();
+
+function resetTimers() {
+  nextTimerId = 1;
+  timers = new Map();
+  intervals = new Map();
+}
+
+function installWindowTimers() {
+  global.window = {
+    setTimeout(callback) {
+      const id = nextTimerId++;
+      timers.set(id, callback);
+      return id;
+    },
+    clearTimeout(id) {
+      timers.delete(id);
+    },
+    setInterval(callback) {
+      const id = nextTimerId++;
+      intervals.set(id, callback);
+      return id;
+    },
+    clearInterval(id) {
+      intervals.delete(id);
+    },
+  };
+}
+
+async function tick() {
+  await new Promise((resolve) => setImmediate(resolve));
+}
+
+async function runTimersUntil(promise, maxSteps = 500) {
+  let settled = false;
+  promise.finally(() => {
+    settled = true;
+  });
+  for (let step = 0; step < maxSteps && !settled; step += 1) {
+    const pending = [...timers.entries()];
+    timers.clear();
+    for (const [, callback] of pending) {
+      callback();
+    }
+    await tick();
+  }
+  if (!settled) {
+    throw new Error('timed out waiting for stream to finish');
+  }
+  await promise;
+}
+
+function createControlledStream() {
+  const queue = [];
+  let wake = null;
+
+  const stream = async function* stream() {
+    while (true) {
+      if (queue.length === 0) {
+        await new Promise((resolve) => {
+          wake = resolve;
+        });
+      }
+      const item = queue.shift();
+      if (!item) continue;
+      if (item.done) return;
+      yield item.chunk;
+    }
+  };
+
+  async function push(chunk) {
+    queue.push({ chunk });
+    if (wake) {
+      const resolve = wake;
+      wake = null;
+      resolve();
+    }
+    await tick();
+    await tick();
+  }
+
+  async function close() {
+    queue.push({ done: true });
+    if (wake) {
+      const resolve = wake;
+      wake = null;
+      resolve();
+    }
+    await tick();
+  }
+
+  return { stream, push, close };
+}
+
+function chunk(overrides) {
+  return {
+    status: 'content',
+    content: null,
+    node_id: 'node-1',
+    conversation_id: 'conv-1',
+    tokens_used: 0,
+    ...overrides,
+  };
+}
+
+const { StreamManager } = require(path.join(__dirname, '../src/services/streamManager.ts'));
+const { messageApi } = require(path.join(__dirname, '../src/api/message.ts'));
+
+async function withManager(run) {
+  resetTimers();
+  installWindowTimers();
+  const originalStream = messageApi.stream;
+  const manager = new StreamManager();
+  try {
+    await run(manager);
+  } finally {
+    messageApi.stream = originalStream;
+    manager.resetAll();
+  }
+}
+
+async function testFlushesReasoningBeforeContentStarts() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    messageApi.stream = controlled.stream;
+    const reasoning = '思考缓冲'.repeat(120);
+    const running = manager.startStream('conv-1', { content: 'hello' });
+
+    await controlled.push(chunk({ event_type: 'reasoning', reasoning }));
+    await controlled.push(chunk({ event_type: 'text', content: '主回复' }));
+
+    try {
+      const state = manager.getState('conv-1');
+      assert.equal(state.reasoning, reasoning);
+      assert.equal(state.reasoningActive, false);
+    } finally {
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
+async function testFlushesBufferedTextIntoSingleToolCall() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    messageApi.stream = controlled.stream;
+    const content = '工具前说明'.repeat(80);
+    const toolCall = {
+      id: 'call-1',
+      type: 'function',
+      function: { name: 'read_file', arguments: '{"path":"notes.txt"}' },
+    };
+    const running = manager.startStream('conv-1', { content: 'hello' });
+
+    await controlled.push(chunk({ event_type: 'text', content }));
+    await controlled.push(chunk({ event_type: 'tool_call', tool_call: toolCall }));
+
+    try {
+      const state = manager.getState('conv-1');
+      assert.equal(state.content, '');
+      assert.equal(state.toolInteractions.length, 1);
+      assert.equal(state.toolInteractions[0].assistant.content, content);
+      assert.deepEqual(state.toolInteractions[0].assistant.tool_calls, [toolCall]);
+    } finally {
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
+async function testMergesToolResultIntoExistingInteraction() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    messageApi.stream = controlled.stream;
+    const toolCall = {
+      id: 'call-1',
+      type: 'function',
+      function: { name: 'run_command', arguments: '{"command":"echo hello"}' },
+    };
+    const toolResult = {
+      tool_call_id: 'call-1',
+      name: 'run_command',
+      content: JSON.stringify({
+        stdout: 'hello\n',
+        stderr: '',
+        exit_code: 0,
+      }),
+    };
+    const running = manager.startStream('conv-1', { content: 'hello' });
+
+    await controlled.push(chunk({ event_type: 'tool_call', tool_calls: [toolCall] }));
+    await controlled.push(chunk({ event_type: 'tool_result', tool_call: toolResult }));
+
+    try {
+      const state = manager.getState('conv-1');
+      assert.equal(state.toolInteractions.length, 1);
+      assert.equal(state.toolInteractions[0].tools.length, 1);
+      assert.deepEqual(state.toolInteractions[0].tools[0], {
+        role: 'tool',
+        ...toolResult,
+      });
+    } finally {
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
+async function testToolCallStartFlushesBufferedTextBeforeToolCallCompletes() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    messageApi.stream = controlled.stream;
+    const content = '工具调用前的说明'.repeat(80);
+    const running = manager.startStream('conv-1', { content: 'hello' });
+
+    await controlled.push(chunk({ event_type: 'text', content }));
+    await controlled.push(chunk({ event_type: 'tool_call_start' }));
+
+    try {
+      const state = manager.getState('conv-1');
+      assert.equal(state.content, content);
+      assert.equal(state.toolInteractions.length, 0);
+    } finally {
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
+async function main() {
+  await testFlushesReasoningBeforeContentStarts();
+  await testFlushesBufferedTextIntoSingleToolCall();
+  await testMergesToolResultIntoExistingInteraction();
+  await testToolCallStartFlushesBufferedTextBeforeToolCallCompletes();
+  console.log('streamManager tests passed');
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

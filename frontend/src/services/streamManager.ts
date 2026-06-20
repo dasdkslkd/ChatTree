@@ -54,6 +54,13 @@ function mergeToolCalls(existing: any[], incoming: any[]): any[] {
   return merged;
 }
 
+function getChunkToolCalls(chunk: any): any[] {
+  if (Array.isArray(chunk.tool_calls)) return chunk.tool_calls;
+  if (Array.isArray(chunk.tool_call?.tool_calls)) return chunk.tool_call.tool_calls;
+  if (chunk.tool_call && typeof chunk.tool_call === 'object') return [chunk.tool_call];
+  return [];
+}
+
 function appendToolCalls(toolInteractions: any[], toolCalls: any[], content: string, reasoning: string): any[] {
   if (toolCalls.length === 0) return toolInteractions;
   const next = [...toolInteractions];
@@ -410,6 +417,12 @@ export class StreamManager {
         state = current;
 
         if (chunk.content) {
+          if (currentReasoning && state.reasoning !== currentReasoning) {
+            this.flushDisplayPump(conversationId, abortController, true);
+            const flushedState = this.streams.get(conversationId);
+            if (!flushedState) { brokeEarly = true; break; }
+            state = flushedState;
+          }
           currentContent += chunk.content;
           this.setDisplayTargets(conversationId, abortController, { contentTarget: currentContent });
           state = { ...state, reasoningActive: false };
@@ -423,8 +436,19 @@ export class StreamManager {
         if (displayedState) {
           state = { ...state, content: displayedState.content, reasoning: displayedState.reasoning };
         }
-        if (chunk.event_type === 'tool_call') {
-          const toolCalls = chunk.tool_calls ?? chunk.tool_call?.tool_calls ?? [];
+        if (chunk.event_type === 'tool_call_start') {
+          this.flushDisplayPump(conversationId, abortController, true);
+          const flushedState = this.streams.get(conversationId);
+          if (!flushedState) { brokeEarly = true; break; }
+          state = { ...flushedState, reasoningActive: false };
+        } else if (chunk.event_type === 'tool_call') {
+          const toolCalls = getChunkToolCalls(chunk);
+          if (toolCalls.length > 0) {
+            this.flushDisplayPump(conversationId, abortController, true);
+            const flushedState = this.streams.get(conversationId);
+            if (!flushedState) { brokeEarly = true; break; }
+            state = flushedState;
+          }
           state = {
             ...state,
             toolInteractions: appendToolCalls(state.toolInteractions, toolCalls, currentContent, currentReasoning),

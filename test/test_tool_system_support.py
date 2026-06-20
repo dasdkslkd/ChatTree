@@ -236,6 +236,106 @@ def test_openai_tool_call_delta_aggregation():
     }]
 
 
+def test_openai_stream_emits_tool_call_start_before_final_tool_call():
+    async def run_case():
+        provider = OpenAICompatibleProvider({"api_key": "test"})
+
+        async def fake_iter_sse_events(_path, _body):
+            yield {
+                "choices": [{
+                    "delta": {"content": "准备调用工具。"},
+                    "finish_reason": None,
+                }],
+            }
+            yield {
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "web_search"},
+                        }],
+                    },
+                    "finish_reason": None,
+                }],
+            }
+            yield {
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {"arguments": "{\"query\":\"ChatTree\"}"},
+                        }],
+                    },
+                    "finish_reason": "tool_calls",
+                }],
+            }
+
+        provider._iter_sse_events = fake_iter_sse_events
+        chunks = []
+        async for chunk in provider.generate_response_stream(
+            model="gpt-test",
+            messages=[],
+            tools=[{"type": "function", "function": {"name": "web_search", "parameters": {}}}],
+            tool_choice="auto",
+        ):
+            chunks.append(dict(chunk))
+
+        event_types = [chunk.get("event_type") for chunk in chunks if chunk.get("event_type")]
+        assert event_types == ["tool_call_start", "tool_call"]
+        tool_call_index = next(i for i, chunk in enumerate(chunks) if chunk.get("event_type") == "tool_call")
+        start_index = next(i for i, chunk in enumerate(chunks) if chunk.get("event_type") == "tool_call_start")
+        assert start_index < tool_call_index
+
+    asyncio.run(run_case())
+
+
+def test_openai_responses_stream_emits_tool_call_start_before_final_tool_call():
+    async def run_case():
+        provider = OpenAICompatibleProvider({"api_key": "test"})
+
+        async def fake_iter_sse_events(_path, _body):
+            yield {
+                "type": "response.output_text.delta",
+                "delta": "准备调用工具。",
+            }
+            yield {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "web_search",
+                },
+            }
+            yield {
+                "type": "response.function_call_arguments.delta",
+                "output_index": 0,
+                "delta": "{\"query\":\"ChatTree\"}",
+            }
+
+        provider._iter_sse_events = fake_iter_sse_events
+        chunks = []
+        async for chunk in provider._stream_responses_api(
+            model="gpt-test",
+            messages=[],
+            stream_controller=None,
+            max_tokens=None,
+            temperature=0.7,
+            tools=[{"type": "function", "name": "web_search", "parameters": {}}],
+            tool_choice="auto",
+            reasoning_effort=None,
+            extra_kwargs={},
+        ):
+            chunks.append(dict(chunk))
+
+        event_types = [chunk.get("event_type") for chunk in chunks if chunk.get("event_type")]
+        assert event_types == ["tool_call_start", "tool_call"]
+
+    asyncio.run(run_case())
+
+
 def test_searxng_html_result_parser():
     tool = WebSearchTool({"searxng_url": "http://localhost:8888"})
     html = """

@@ -158,7 +158,7 @@ class StreamChunk(TypedDict, total=False):
     conversation_id: Optional[str]
     error: Optional[str]
     tokens_used: int  # 当前chunk的token数
-    event_type: Optional[str]            # "text" | "reasoning" | "tool_call" | "tool_result" | "tool_approval_request" | "tool_approval_result"，缺省按 text
+    event_type: Optional[str]            # "text" | "reasoning" | "tool_call_start" | "tool_call" | "tool_result" | "tool_approval_request" | "tool_approval_result"，缺省按 text
     reasoning: Optional[str]             # 推理增量
     tool_call: Optional[Dict[str, Any]]  # 工具调用增量/完整载荷
     tool_calls: Optional[List[Dict[str, Any]]]  # 完整工具调用列表（provider 聚合后填充）
