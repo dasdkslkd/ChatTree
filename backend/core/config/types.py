@@ -149,7 +149,7 @@ class StreamChunk(TypedDict, total=False):
 
     total=False：新增字段均为可选，保持向后兼容。当前文本路径只填写
     status/content/node_id/conversation_id/error/tokens_used；event_type/
-    reasoning/tool_call 留给未来的推理与工具事件，缺省时读取方按文本处理。
+    reasoning/tool_call/approval 留给推理、工具与审批事件，缺省时读取方按文本处理。
     """
     status: StreamStatus
     content: Optional[str]
@@ -157,10 +157,11 @@ class StreamChunk(TypedDict, total=False):
     conversation_id: Optional[str]
     error: Optional[str]
     tokens_used: int  # 当前chunk的token数
-    event_type: Optional[str]            # "text" | "reasoning" | "tool_call" | "tool_result"，缺省按 text
+    event_type: Optional[str]            # "text" | "reasoning" | "tool_call" | "tool_result" | "tool_approval_request" | "tool_approval_result"，缺省按 text
     reasoning: Optional[str]             # 推理增量
     tool_call: Optional[Dict[str, Any]]  # 工具调用增量/完整载荷
     tool_calls: Optional[List[Dict[str, Any]]]  # 完整工具调用列表（provider 聚合后填充）
+    approval: Optional[Dict[str, Any]]   # 工具审批请求/结果载荷
 
     usage_info: UsageInfo
 

@@ -1,8 +1,9 @@
 # chat/chat_manager.py - 适配延迟加载
-from typing import Any, List, Optional, Dict, AsyncIterator
+from typing import Any, Callable, List, Optional, Dict, AsyncIterator
 import uuid
 import asyncio  
 import json
+from contextlib import suppress
 from time import time
 from .conversation import Conversation
 from .node import NodeManager
@@ -24,6 +25,7 @@ class ChatManager:
         self.storage = storage
         self.prompts = prompts
         self.tool_manager = tool_manager
+        self.tool_orchestrator = None
         self.current_conversation: Optional[Conversation] = None
         self._active_controllers: Dict[str, StreamController] = {}  # node_id -> controller
         # 每对话异步锁，串行化同一对话的 load-modify-save 临界区。
@@ -426,11 +428,56 @@ class ChatManager:
                     "tool_calls": round_tool_calls,
                 }
                 messages.append(assistant_tool_message)
-                tool_messages = await self._execute_tool_calls(
-                    round_tool_calls,
-                    node_id=new_node["id"],
-                    conversation_id=conversation_id,
+                approval_events: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
+
+                async def emit_tool_event(event: Dict[str, Any]):
+                    await approval_events.put(event)
+
+                execute_task = asyncio.create_task(
+                    self._execute_tool_calls(
+                        round_tool_calls,
+                        node_id=new_node["id"],
+                        conversation_id=conversation_id,
+                        emit_event=emit_tool_event,
+                    )
                 )
+                event_get_task = asyncio.create_task(approval_events.get())
+                try:
+                    while True:
+                        done, _ = await asyncio.wait(
+                            {execute_task, event_get_task},
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if event_get_task in done:
+                            event = event_get_task.result()
+                            yield self._tool_event_stream_chunk(
+                                event,
+                                node_id=new_node["id"],
+                                conversation_id=conversation_id,
+                            )
+                            event_get_task = asyncio.create_task(approval_events.get())
+                        if execute_task in done:
+                            if event_get_task.done():
+                                event = event_get_task.result()
+                                yield self._tool_event_stream_chunk(
+                                    event,
+                                    node_id=new_node["id"],
+                                    conversation_id=conversation_id,
+                                )
+                                event_get_task = asyncio.create_task(approval_events.get())
+                            while not approval_events.empty():
+                                yield self._tool_event_stream_chunk(
+                                    approval_events.get_nowait(),
+                                    node_id=new_node["id"],
+                                    conversation_id=conversation_id,
+                                )
+                            tool_messages = await execute_task
+                            break
+                finally:
+                    if not event_get_task.done():
+                        event_get_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await event_get_task
                 messages.extend(tool_messages)
                 all_tool_calls.extend(round_tool_calls)
                 all_tool_messages.extend(tool_messages)
@@ -636,39 +683,104 @@ class ChatManager:
             )
         return json.dumps(payload, ensure_ascii=False)
 
+    def _tool_event_stream_chunk(
+        self,
+        event: Dict[str, Any],
+        *,
+        node_id: str,
+        conversation_id: str,
+    ) -> StreamChunk:
+        return StreamChunk(
+            status=StreamStatus.CONTENT,
+            content=None,
+            node_id=node_id,
+            conversation_id=conversation_id,
+            error=None,
+            tokens_used=0,
+            event_type=event.get("event_type"),
+            approval=event.get("approval"),
+        )
+
+    def _model_visible_tool_message(
+        self,
+        message: Message,
+        *,
+        name: str,
+        conversation_id: Optional[str],
+        node_id: str,
+        tool_call_id: Optional[str],
+    ) -> Message:
+        result = str(message.get("content") or "")
+        if conversation_id and name != "read_tool_result":
+            result = self._build_model_visible_tool_result(
+                raw_result=result,
+                name=name,
+                conversation_id=conversation_id,
+                node_id=node_id,
+                tool_call_id=tool_call_id,
+            )
+        out = Message(dict(message))
+        out["content"] = result
+        out["name"] = out.get("name") or name
+        out["tool_call_id"] = out.get("tool_call_id") or tool_call_id
+        out["node_id"] = node_id
+        if not out.get("id"):
+            out["id"] = str(uuid.uuid4())
+        if not out.get("timestamp"):
+            out["timestamp"] = int(time())
+        return out
+
     async def _execute_tool_calls(
         self,
         tool_calls: List[Dict[str, Any]],
         node_id: str,
         conversation_id: Optional[str] = None,
+        emit_event: Optional[Callable[[Dict[str, Any]], Any]] = None,
     ) -> List[Message]:
         results: List[Message] = []
         for tool_call in tool_calls:
             fn = tool_call.get("function") or {}
             name = fn.get("name", "")
             arguments = self._parse_tool_arguments(fn.get("arguments"))
+            if self.tool_orchestrator:
+                message = await self.tool_orchestrator.execute_tool_call(
+                    tool_call,
+                    conversation_id or "",
+                    node_id,
+                    emit_event=emit_event,
+                )
+                results.append(
+                    self._model_visible_tool_message(
+                        message,
+                        name=name,
+                        conversation_id=conversation_id,
+                        node_id=node_id,
+                        tool_call_id=tool_call.get("id"),
+                    )
+                )
+                continue
+
             raw_result = await self.tool_manager.execute_tool(name, arguments) if self.tool_manager else json.dumps(
                 {"error": "Tool manager is not configured"}, ensure_ascii=False
             )
-            result = raw_result
-            if conversation_id and name != "read_tool_result":
-                result = self._build_model_visible_tool_result(
-                    raw_result=raw_result,
+            results.append(
+                self._model_visible_tool_message(
+                    Message({
+                        "id": str(uuid.uuid4()),
+                        "role": Role.TOOL,
+                        "content": raw_result,
+                        "name": name,
+                        "tool_calls": None,
+                        "tool_call_id": tool_call.get("id"),
+                        "node_id": node_id,
+                        "timestamp": int(time()),
+                    }),
                     name=name,
                     conversation_id=conversation_id,
                     node_id=node_id,
                     tool_call_id=tool_call.get("id"),
                 )
-            results.append(Message({
-                "id": str(uuid.uuid4()),
-                "role": Role.TOOL,
-                "content": result,
-                "name": name,
-                "tool_calls": None,
-                "tool_call_id": tool_call.get("id"),
-                "node_id": node_id,
-                "timestamp": int(time()),
-            }))
+            )
         return results
 
     def _parse_tool_arguments(self, raw_arguments: Any) -> Dict[str, Any]:
