@@ -59,24 +59,32 @@ class ApprovalManager:
     def is_session_allowed(self, conversation_id: str, tool_name: str) -> bool:
         return tool_name in self._session_allowed_tools.get(conversation_id, set())
 
-    async def request_and_wait(self, request: ApprovalRequest) -> ApprovalDecision:
-        request.expires_at = int(time.time()) + self.timeout_seconds
+    def begin_request(self, request: ApprovalRequest) -> asyncio.Task[ApprovalDecision]:
+        if request.id in self._pending:
+            raise ValueError(f"Approval request already pending: {request.id}")
+
+        request.expires_at = int(time.time() + self.timeout_seconds)
         self._pending[request.id] = request
         self._futures[request.id] = asyncio.get_running_loop().create_future()
+        return asyncio.create_task(self._wait_for_decision(request.id))
 
+    async def request_and_wait(self, request: ApprovalRequest) -> ApprovalDecision:
+        return await self.begin_request(request)
+
+    async def _wait_for_decision(self, approval_id: str) -> ApprovalDecision:
         try:
             return await asyncio.wait_for(
-                asyncio.shield(self._futures[request.id]),
+                asyncio.shield(self._futures[approval_id]),
                 timeout=self.timeout_seconds,
             )
         except asyncio.TimeoutError:
-            return self._resolve(request.id, ApprovalDecision("expired"))
+            return self._resolve(approval_id, ApprovalDecision("expired"))
         except asyncio.CancelledError:
-            self._resolve(request.id, ApprovalDecision("cancelled"))
+            self._resolve(approval_id, ApprovalDecision("cancelled"))
             raise
         finally:
-            self._pending.pop(request.id, None)
-            self._futures.pop(request.id, None)
+            self._pending.pop(approval_id, None)
+            self._futures.pop(approval_id, None)
 
     def decide(
         self,

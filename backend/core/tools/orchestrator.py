@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
+from contextlib import suppress
 from inspect import isawaitable
 from typing import Any, Callable, Dict, Optional
 
@@ -112,15 +114,23 @@ class ToolOrchestrator:
                 suggested_actions=["allow_once", "allow_session", "deny"],
             )
 
-            await _maybe_await(
-                emit_event(
-                    {
-                        "event_type": "tool_approval_request",
-                        "approval": approval_request.to_payload(),
-                    }
+            approval_wait_task = self.approval_manager.begin_request(approval_request)
+            try:
+                await _maybe_await(
+                    emit_event(
+                        {
+                            "event_type": "tool_approval_request",
+                            "approval": approval_request.to_payload(),
+                        }
+                    )
                 )
-            )
-            approval = await self.approval_manager.request_and_wait(approval_request)
+                approval = await approval_wait_task
+            except BaseException:
+                if not approval_wait_task.done():
+                    approval_wait_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await approval_wait_task
+                raise
             await _maybe_await(
                 emit_event(
                     {

@@ -50,6 +50,24 @@ def test_approval_manager_resolves_approved_request():
     asyncio.run(_approved_case())
 
 
+async def _begin_request_registers_before_waiting_case():
+    manager = ApprovalManager(timeout_seconds=5)
+    request = make_request()
+
+    wait_task = manager.begin_request(request)
+    decision = manager.decide("approval-1", decision="approve", scope="once")
+    result = await wait_task
+
+    assert decision.status == "approved"
+    assert result.status == "approved"
+    assert result.scope == "once"
+    assert manager.get("approval-1") is None
+
+
+def test_begin_request_registers_before_waiting():
+    asyncio.run(_begin_request_registers_before_waiting_case())
+
+
 async def _denied_case():
     manager = ApprovalManager(timeout_seconds=5)
     request = make_request()
