@@ -624,3 +624,108 @@ async def _command_policy_allows_common_read_command_to_continue(tmp_path):
 
 def test_command_policy_allows_common_read_command_to_continue(tmp_path):
     asyncio.run(_command_policy_allows_common_read_command_to_continue(tmp_path))
+
+
+async def _builtin_write_file_outside_workspace_denied(tmp_path):
+    outside = tmp_path.parent / "outside.txt"
+    orchestrator, tool_manager = make_orchestrator(
+        PermissionEngine(rules=[
+            PermissionRule("allow-write", "allow", "tool", "write_file")
+        ]),
+        LogicalSandbox(workspace_roots=[tmp_path], protected_paths=[".git"]),
+    )
+
+    message = await orchestrator.execute_tool_call(
+        make_tool_call("write_file", {"path": str(outside), "content": "x"}),
+        conversation_id="conv-1",
+        node_id="node-1",
+    )
+
+    assert tool_manager.calls == []
+    assert json.loads(message["content"])["error"]["type"] == "permission_denied"
+
+
+def test_builtin_write_file_outside_workspace_denied(tmp_path):
+    asyncio.run(_builtin_write_file_outside_workspace_denied(tmp_path))
+
+
+async def _builtin_apply_patch_cwd_outside_workspace_denied(tmp_path):
+    outside = tmp_path.parent / "outside"
+    outside.mkdir()
+    orchestrator, tool_manager = make_orchestrator(
+        PermissionEngine(rules=[
+            PermissionRule("allow-patch", "allow", "tool", "apply_patch")
+        ]),
+        LogicalSandbox(workspace_roots=[tmp_path], protected_paths=[".git"]),
+    )
+
+    message = await orchestrator.execute_tool_call(
+        make_tool_call("apply_patch", {"cwd": str(outside), "patch": ""}),
+        conversation_id="conv-1",
+        node_id="node-1",
+    )
+
+    assert tool_manager.calls == []
+    assert json.loads(message["content"])["error"]["type"] == "permission_denied"
+
+
+def test_builtin_apply_patch_cwd_outside_workspace_denied(tmp_path):
+    asyncio.run(_builtin_apply_patch_cwd_outside_workspace_denied(tmp_path))
+
+
+async def _run_command_destructive_command_denied(tmp_path):
+    orchestrator, tool_manager = make_orchestrator(
+        PermissionEngine(rules=[
+            PermissionRule("allow-command", "allow", "tool", "run_command")
+        ]),
+        LogicalSandbox(workspace_roots=[tmp_path], protected_paths=[".git"]),
+    )
+
+    message = await orchestrator.execute_tool_call(
+        make_tool_call("run_command", {"command": "rm -rf /"}),
+        conversation_id="conv-1",
+        node_id="node-1",
+    )
+
+    assert tool_manager.calls == []
+    error = json.loads(message["content"])["error"]
+    assert error["type"] == "permission_denied"
+    assert "destructive" in error["reason"]
+
+
+def test_run_command_destructive_command_denied(tmp_path):
+    asyncio.run(_run_command_destructive_command_denied(tmp_path))
+
+
+async def _run_command_unknown_command_requests_approval(tmp_path):
+    approval_manager = ApprovalManager(timeout_seconds=1)
+    orchestrator, tool_manager = make_orchestrator(
+        PermissionEngine(rules=[
+            PermissionRule("allow-command", "allow", "tool", "run_command")
+        ]),
+        LogicalSandbox(workspace_roots=[tmp_path], protected_paths=[".git"]),
+        approval_manager=approval_manager,
+    )
+    events = []
+
+    async def emit_event(event):
+        events.append(event)
+        if event["event_type"] == "tool_approval_request":
+            approval_manager.decide(event["approval"]["id"], "approve", "once")
+
+    await orchestrator.execute_tool_call(
+        make_tool_call("run_command", {"command": "python custom_script.py"}),
+        conversation_id="conv-1",
+        node_id="node-1",
+        emit_event=emit_event,
+    )
+
+    assert [event["event_type"] for event in events] == [
+        "tool_approval_request",
+        "tool_approval_result",
+    ]
+    assert tool_manager.calls == [("run_command", {"command": "python custom_script.py"})]
+
+
+def test_run_command_unknown_command_requests_approval(tmp_path):
+    asyncio.run(_run_command_unknown_command_requests_approval(tmp_path))

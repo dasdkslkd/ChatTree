@@ -42,6 +42,7 @@ PATH_ARGUMENT_KEYS = {
     "source",
     "paths",
     "files",
+    "cwd",
 }
 
 COMMAND_TOOL_NAME_TOKENS = {
