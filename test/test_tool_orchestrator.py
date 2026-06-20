@@ -411,6 +411,42 @@ def test_ask_approval_deny_returns_permission_denied(tmp_path):
     asyncio.run(_ask_approval_deny_returns_permission_denied(tmp_path))
 
 
+async def _ask_approval_timeout_returns_permission_denied(tmp_path):
+    approval_manager = ApprovalManager(timeout_seconds=0.01)
+    orchestrator, tool_manager = make_orchestrator(
+        PermissionEngine.default(),
+        LogicalSandbox(workspace_roots=[tmp_path], protected_paths=[".git"]),
+        approval_manager=approval_manager,
+    )
+    events = []
+
+    async def emit_event(event):
+        events.append(event)
+
+    message = await orchestrator.execute_tool_call(
+        make_tool_call("filesystem__read_file", {"path": "notes.txt"}),
+        conversation_id="conv-1",
+        node_id="node-1",
+        emit_event=emit_event,
+    )
+
+    assert [event["event_type"] for event in events] == [
+        "tool_approval_request",
+        "tool_approval_result",
+    ]
+    assert events[1]["approval"]["status"] == "expired"
+    assert events[1]["approval"]["grant_scope"] is None
+    assert tool_manager.calls == []
+    error = json.loads(message["content"])["error"]
+    assert error["type"] == "permission_denied"
+    assert error["tool_name"] == "filesystem__read_file"
+    assert "expired" in error["reason"] or "timeout" in error["reason"].lower()
+
+
+def test_ask_approval_timeout_returns_permission_denied(tmp_path):
+    asyncio.run(_ask_approval_timeout_returns_permission_denied(tmp_path))
+
+
 async def _ask_approval_session_scope_bypasses_second_prompt(tmp_path):
     approval_manager = ApprovalManager(timeout_seconds=1)
     orchestrator, tool_manager = make_orchestrator(
