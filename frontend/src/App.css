@@ -401,6 +401,42 @@
   border-bottom: none;
 }
 
+.tool-approval-header {
+  cursor: default;
+}
+
+.tool-approval-risk {
+  flex-shrink: 0;
+  border-radius: var(--radius-xs, 4px);
+  border: 0.5px solid var(--border, rgba(255,247,240,0.09));
+  padding: 1px 6px;
+  color: var(--fg-tertiary, rgba(251,247,244,0.52));
+  font-size: 10px;
+  line-height: 16px;
+}
+
+.tool-approval-body {
+  padding: 0 10px 8px;
+}
+
+.tool-approval-reason {
+  margin-bottom: 5px;
+  color: var(--fg-secondary, rgba(251,247,244,0.72));
+  font-size: var(--text-xs, 11.5px);
+  line-height: 1.45;
+}
+
+.tool-approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.tool-approval-group .tg-chevron {
+  transform: rotate(90deg);
+}
+
 .pulsing-dot {
   width: 6px;
   height: 6px;

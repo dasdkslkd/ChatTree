@@ -36,6 +36,27 @@ export interface SendMessageRequest {
 
 export type StreamStatus = 'start' | 'content' | 'complete' | 'error' | 'stopped';
 
+export type ToolApprovalStatus = 'pending' | 'approved' | 'denied' | 'expired' | 'cancelled';
+export type ToolApprovalDecision = 'approve' | 'deny';
+export type ToolApprovalScope = 'once' | 'session';
+
+export interface ToolApprovalPayload {
+  id: string;
+  conversation_id?: string;
+  node_id?: string;
+  tool_call_id?: string;
+  tool_name?: string;
+  arguments_preview?: string;
+  risk?: string;
+  risk_level?: string;
+  reason?: string;
+  suggested_actions?: string[];
+  created_at?: number;
+  expires_at?: number | null;
+  status?: ToolApprovalStatus;
+  grant_scope?: ToolApprovalScope | null;
+}
+
 export interface StreamChunk {
   status: StreamStatus;
   content: string | null;
@@ -44,8 +65,9 @@ export interface StreamChunk {
   error?: string | null;
   tokens_used: number;
   // 可扩展字段（未来推理/工具事件；缺省按文本处理）
-  event_type?: 'text' | 'reasoning' | 'tool_call' | 'tool_result';
+  event_type?: 'text' | 'reasoning' | 'tool_call' | 'tool_result' | 'tool_approval_request' | 'tool_approval_result';
   reasoning?: string | null;
   tool_call?: any;
   tool_calls?: any[];
+  approval?: ToolApprovalPayload;
 }
