@@ -1,0 +1,126 @@
+from __future__ import annotations
+
+import json
+import time
+import uuid
+from typing import Any, Callable, Dict, Optional
+
+from backend.core.config.types import Message, Role
+from backend.core.tools.security.approval import ApprovalManager
+from backend.core.tools.security.logical_sandbox import LogicalSandbox, SandboxViolation
+from backend.core.tools.security.permissions import PermissionContext, PermissionEngine
+
+
+class ToolOrchestrator:
+    def __init__(
+        self,
+        tool_manager: Any,
+        permission_engine: PermissionEngine,
+        approval_manager: ApprovalManager,
+        logical_sandbox: LogicalSandbox,
+    ):
+        self.tool_manager = tool_manager
+        self.permission_engine = permission_engine
+        self.approval_manager = approval_manager
+        self.logical_sandbox = logical_sandbox
+
+    async def execute_tool_call(
+        self,
+        tool_call: Dict[str, Any],
+        conversation_id: str,
+        node_id: str,
+        emit_event: Optional[Callable[[Dict[str, Any]], Any]] = None,
+    ) -> Message:
+        del emit_event
+
+        name = _tool_name(tool_call)
+        arguments = _parse_arguments(tool_call.get("function", {}).get("arguments"))
+        tool_call_id = str(tool_call.get("id") or "")
+
+        context = PermissionContext(
+            conversation_id=conversation_id,
+            node_id=node_id,
+            tool_call_id=tool_call_id,
+            tool_name=name,
+            arguments=arguments,
+            source="model",
+        )
+        decision = self.permission_engine.evaluate(context)
+        if decision.behavior in ("deny", "ask"):
+            return _tool_message(
+                name=name,
+                tool_call_id=tool_call_id,
+                content=_permission_denied_content(
+                    tool_name=name,
+                    reason=decision.reason,
+                    message="Tool execution requires permission.",
+                ),
+            )
+
+        if _is_write_like_tool(name) and "path" in arguments:
+            try:
+                self.logical_sandbox.check_filesystem_write(arguments["path"])
+            except SandboxViolation as exc:
+                return _tool_message(
+                    name=name,
+                    tool_call_id=tool_call_id,
+                    content=_permission_denied_content(
+                        tool_name=name,
+                        reason=str(exc),
+                        message="Tool execution violates logical sandbox.",
+                    ),
+                )
+
+        content = await self.tool_manager.execute_tool(name, arguments)
+        return _tool_message(name=name, tool_call_id=tool_call_id, content=content)
+
+
+def _tool_name(tool_call: Dict[str, Any]) -> str:
+    return str(tool_call.get("function", {}).get("name") or "")
+
+
+def _parse_arguments(raw_arguments: Any) -> Dict[str, Any]:
+    if raw_arguments is None or raw_arguments == "":
+        return {}
+    if isinstance(raw_arguments, dict):
+        return raw_arguments
+    if isinstance(raw_arguments, str):
+        try:
+            parsed = json.loads(raw_arguments)
+        except json.JSONDecodeError:
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+        return {}
+    return {}
+
+
+def _is_write_like_tool(tool_name: str) -> bool:
+    lowered = tool_name.lower()
+    return any(token in lowered for token in ("write", "delete", "move", "remove"))
+
+
+def _permission_denied_content(tool_name: str, reason: str, message: str) -> str:
+    return json.dumps(
+        {
+            "error": {
+                "type": "permission_denied",
+                "message": message,
+                "reason": reason,
+                "tool_name": tool_name,
+            }
+        },
+        ensure_ascii=False,
+    )
+
+
+def _tool_message(name: str, tool_call_id: str, content: str) -> Message:
+    return {
+        "id": str(uuid.uuid4()),
+        "role": Role.TOOL,
+        "content": content,
+        "name": name,
+        "tool_calls": None,
+        "tool_call_id": tool_call_id,
+        "timestamp": int(time.time()),
+    }
