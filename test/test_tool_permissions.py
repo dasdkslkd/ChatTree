@@ -127,6 +127,30 @@ def test_session_allow_overrides_default_mcp_ask():
     assert decision.matched_rules[0].id == "allow-read-file"
 
 
+def test_turn_allow_overrides_default_mcp_ask():
+    context = make_context(
+        tool_name="filesystem__read_file",
+        arguments={},
+    )
+    context = replace(
+        context,
+        turn_grants=[
+            PermissionRule(
+                id="turn-allow",
+                behavior="allow",
+                target_type="mcp_tool",
+                pattern="filesystem__read_file",
+                source="session",
+            )
+        ],
+    )
+
+    decision = PermissionEngine.default().evaluate(context)
+
+    assert decision.behavior == "allow"
+    assert decision.matched_rules[0].id == "turn-allow"
+
+
 def test_explicit_ask_overrides_session_allow():
     engine = PermissionEngine(rules=[
         PermissionRule(
