@@ -41,6 +41,8 @@ class ToolResultStorage:
         conversation_id: str,
         node_id: str,
         tool_call_id: Optional[str],
+        structured_metadata: Optional[Dict[str, Any]] = None,
+        raw_metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         tool_result_id = str(uuid.uuid4())
         path = self._path_for(tool_result_id)
@@ -54,6 +56,10 @@ class ToolResultStorage:
             "created_at": int(time()),
             "total_chars": len(content),
         }
+        if structured_metadata is not None:
+            record["structured_metadata"] = structured_metadata
+        if raw_metadata is not None:
+            record["raw_metadata"] = raw_metadata
         atomic_write_json(path, record)
         self.index[tool_result_id] = {
             "id": tool_result_id,
@@ -82,13 +88,13 @@ class ToolResultStorage:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
 
-    def read_slice(self, tool_result_id: str, offset: int = 0, limit: int = 8000) -> Optional[Dict[str, Any]]:
+    def read_slice(self, tool_result_id: str, offset: int = 0, limit: int = 16000) -> Optional[Dict[str, Any]]:
         record = self.read_result(tool_result_id)
         if not record:
             return None
         content = record.get("content") or ""
         offset = max(0, int(offset or 0))
-        limit = max(1, int(limit or 8000))
+        limit = max(1, int(limit or 16000))
         chunk = content[offset:offset + limit]
         next_offset = offset + len(chunk)
         total_chars = len(content)

@@ -508,7 +508,8 @@ class ChatManager:
                         execute_task.cancel()
                         with suppress(asyncio.CancelledError):
                             await execute_task
-                messages.extend(tool_messages)
+                model_tool_messages = self._apply_round_tool_result_budget(tool_messages)
+                messages.extend(model_tool_messages)
                 all_tool_calls.extend(round_tool_calls)
                 all_tool_messages.extend(tool_messages)
                 tool_interactions.append({
@@ -530,6 +531,9 @@ class ChatManager:
                             "tool_call_id": tool_msg.get("tool_call_id"),
                             "name": tool_msg.get("name"),
                             "content": tool_msg.get("content"),
+                            "raw_content": tool_msg.get("raw_content"),
+                            "model_visible_content": tool_msg.get("model_visible_content"),
+                            "tool_result_id": tool_msg.get("tool_result_id"),
                         },
                     )
 
@@ -643,9 +647,12 @@ class ChatManager:
             role = msg["role"]
             if not isinstance(role, str) or role.startswith("Role."):
                 role = role.value if hasattr(role, 'value') else str(role).split(".")[-1].lower()
+            content = msg.get("content") or ""
+            if role == "tool" and msg.get("model_visible_content") is not None:
+                content = str(msg.get("model_visible_content") or "")
             out: Dict[str, Any] = {
                 "role": role,
-                "content": msg.get("content") or "",
+                "content": content,
             }
             if msg.get("tool_calls"):
                 out["tool_calls"] = msg["tool_calls"]
@@ -661,8 +668,13 @@ class ChatManager:
             assistant = node.get("assistant_message")
             if assistant and assistant.get("tool_interactions"):
                 for interaction in assistant.get("tool_interactions") or []:
-                    append_message(interaction.get("assistant"))
-                    for tool_msg in interaction.get("tools") or []:
+                    interaction_assistant = interaction.get("assistant")
+                    append_message(interaction_assistant)
+                    paired_tools = self._paired_tool_messages_for_context(
+                        interaction_assistant,
+                        interaction.get("tools") or [],
+                    )
+                    for tool_msg in self._apply_round_tool_result_budget(paired_tools):
                         append_message(tool_msg)
                 final_assistant = dict(assistant)
                 final_assistant.pop("tool_calls", None)
@@ -671,10 +683,54 @@ class ChatManager:
                 append_message(final_assistant)
             else:
                 append_message(assistant)
-                for tool_msg in node.get("tool_messages", []):
-                    append_message(tool_msg)
+                if assistant and assistant.get("tool_calls"):
+                    paired_tools = self._paired_tool_messages_for_context(
+                        assistant,
+                        node.get("tool_messages", []),
+                    )
+                    for tool_msg in self._apply_round_tool_result_budget(paired_tools):
+                        append_message(tool_msg)
 
         return msg_dict
+
+    def _paired_tool_messages_for_context(
+        self,
+        assistant_message: Optional[Message],
+        tool_messages: List[Message],
+    ) -> List[Message]:
+        if not assistant_message:
+            return []
+        tool_calls = assistant_message.get("tool_calls") or []
+        if not tool_calls:
+            return []
+
+        by_call_id: Dict[str, Message] = {}
+        for message in tool_messages:
+            call_id = message.get("tool_call_id")
+            if call_id and call_id not in by_call_id:
+                by_call_id[call_id] = message
+
+        paired: List[Message] = []
+        for call in tool_calls:
+            call_id = call.get("id")
+            if not call_id:
+                continue
+            message = by_call_id.get(call_id)
+            if message:
+                paired.append(Message(dict(message)))
+                continue
+            fn = call.get("function") or {}
+            paired.append(
+                Message({
+                    "id": str(uuid.uuid4()),
+                    "role": Role.TOOL,
+                    "content": f"Tool result missing for tool_call_id {call_id}.",
+                    "name": fn.get("name") or "",
+                    "tool_call_id": call_id,
+                    "timestamp": int(time()),
+                })
+            )
+        return paired
 
     def _merge_tool_call_lists(
         self,
@@ -691,6 +747,121 @@ class ChatManager:
         tools_config = cfg.data.get("tools", {}) if isinstance(cfg.data, dict) else {}
         return int(tools_config.get("max_result_length", 8000))
 
+    def _round_tool_result_budget_chars(self) -> int:
+        tools_config = cfg.data.get("tools", {}) if isinstance(cfg.data, dict) else {}
+        default_budget = self._tool_result_preview_chars() * 4
+        return int(tools_config.get("max_round_result_length", default_budget))
+
+    def _read_tool_result_hint(self, tool_result_id: str, offset: int = 0) -> str:
+        args = json.dumps(
+            {"tool_result_id": tool_result_id, "offset": offset},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return f"read_tool_result({args})"
+
+    def _parse_command_tool_result(self, raw_result: str) -> Optional[Dict[str, Any]]:
+        try:
+            parsed = json.loads(raw_result)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        command_keys = {"command", "cwd", "exit_code", "stdout", "stderr", "timed_out"}
+        if not command_keys.issubset(parsed.keys()):
+            return None
+        return parsed
+
+    def _format_command_tool_result(
+        self,
+        *,
+        raw_result: str,
+        tool_result_id: str,
+    ) -> str:
+        parsed = self._parse_command_tool_result(raw_result)
+        if parsed is None:
+            return raw_result
+        timed_out = parsed.get("timed_out")
+        if isinstance(timed_out, bool):
+            timed_out_text = str(timed_out).lower()
+        else:
+            timed_out_text = str(timed_out)
+        stdout = str(parsed.get("stdout") or "")
+        stderr = str(parsed.get("stderr") or "")
+        return "\n".join(
+            [
+                f"Command: {parsed.get('command', '')}",
+                f"Cwd: {parsed.get('cwd', '')}",
+                f"Exit code: {parsed.get('exit_code', '')}",
+                f"Timed out: {timed_out_text}",
+                f"tool_result_id: {tool_result_id}",
+                f"read_more: {self._read_tool_result_hint(tool_result_id, 0)}",
+                "",
+                "Stdout:",
+                stdout if stdout else "(empty)",
+                "",
+                "Stderr:",
+                stderr if stderr else "(empty)",
+            ]
+        )
+
+    def _format_persisted_tool_result(
+        self,
+        *,
+        raw_result: str,
+        name: str,
+        tool_result_id: str,
+    ) -> str:
+        command_result = self._parse_command_tool_result(raw_result)
+        if command_result is not None:
+            return self._format_command_tool_result(
+                raw_result=raw_result,
+                tool_result_id=tool_result_id,
+            )
+
+        preview_chars = self._tool_result_preview_chars()
+        preview = raw_result[:preview_chars]
+        has_more = len(raw_result) > len(preview)
+        payload: Dict[str, Any] = {
+            "tool_result_id": tool_result_id,
+            "total_chars": len(raw_result),
+            "truncated": has_more,
+            "preview": preview,
+        }
+        if has_more:
+            payload["read_more"] = self._read_tool_result_hint(tool_result_id, len(preview))
+        return json.dumps(payload, ensure_ascii=False)
+
+    def _persist_model_visible_tool_result(
+        self,
+        *,
+        raw_result: str,
+        name: str,
+        conversation_id: str,
+        node_id: str,
+        tool_call_id: Optional[str],
+    ) -> Dict[str, Optional[str]]:
+        store = getattr(self.tool_manager, "tool_result_store", None)
+        if store is None:
+            return {"content": raw_result, "tool_result_id": None}
+
+        record = store.save_result(
+            content=raw_result,
+            tool_name=name,
+            conversation_id=conversation_id,
+            node_id=node_id,
+            tool_call_id=tool_call_id,
+        )
+        tool_result_id = str(record["id"])
+        return {
+            "content": self._format_persisted_tool_result(
+                raw_result=raw_result,
+                name=name,
+                tool_result_id=tool_result_id,
+            ),
+            "tool_result_id": tool_result_id,
+        }
+
     def _build_model_visible_tool_result(
         self,
         *,
@@ -700,29 +871,64 @@ class ChatManager:
         node_id: str,
         tool_call_id: Optional[str],
     ) -> str:
-        store = getattr(self.tool_manager, "tool_result_store", None)
-        if store is None:
-            return raw_result
-
-        record = store.save_result(
-            content=raw_result,
-            tool_name=name,
-            conversation_id=conversation_id,
-            node_id=node_id,
-            tool_call_id=tool_call_id,
+        return str(
+            self._persist_model_visible_tool_result(
+                raw_result=raw_result,
+                name=name,
+                conversation_id=conversation_id,
+                node_id=node_id,
+                tool_call_id=tool_call_id,
+            )["content"]
         )
-        preview_chars = self._tool_result_preview_chars()
-        preview = raw_result[:preview_chars]
-        has_more = len(raw_result) > len(preview)
-        payload = {
-            "preview": preview,
-        }
-        if has_more:
-            payload["read_more"] = (
-                f'read_tool_result({{"tool_result_id":"{record["id"]}",'
-                f'"offset":{len(preview)}}})'
-            )
-        return json.dumps(payload, ensure_ascii=False)
+
+    def _summarize_persisted_tool_result(self, message: Message) -> str:
+        tool_result_id = message.get("tool_result_id")
+        if not tool_result_id:
+            return str(message.get("content") or "")
+        return "\n".join([
+            f"persisted: {tool_result_id}",
+            f"read_more: {self._read_tool_result_hint(str(tool_result_id), 0)}",
+        ])
+
+    def _apply_round_tool_result_budget(self, tool_messages: List[Message]) -> List[Message]:
+        budget = self._round_tool_result_budget_chars()
+        if budget <= 0:
+            return [Message(dict(message)) for message in tool_messages]
+
+        out = [Message(dict(message)) for message in tool_messages]
+
+        def visible_len(message: Message) -> int:
+            return len(str(message.get("model_visible_content") or message.get("content") or ""))
+
+        total = sum(visible_len(message) for message in out)
+        while total > budget:
+            candidates = [
+                (visible_len(message), index)
+                for index, message in enumerate(out)
+                if (
+                    message.get("tool_result_id")
+                    and not message.get("_round_budget_shortened")
+                    and len(self._summarize_persisted_tool_result(message)) < visible_len(message)
+                )
+            ]
+            if not candidates:
+                break
+            _, index = max(candidates)
+            if "raw_content" not in out[index]:
+                out[index]["raw_content"] = str(
+                    out[index].get("model_visible_content") or out[index].get("content") or ""
+                )
+            shortened = self._summarize_persisted_tool_result(out[index])
+            out[index]["content"] = shortened
+            out[index]["model_visible_content"] = shortened
+            out[index]["_round_budget_shortened"] = True
+            new_total = sum(visible_len(message) for message in out)
+            if new_total >= total:
+                break
+            total = new_total
+        for message in out:
+            message.pop("_round_budget_shortened", None)
+        return out
 
     def _tool_event_stream_chunk(
         self,
@@ -752,16 +958,24 @@ class ChatManager:
         tool_call_id: Optional[str],
     ) -> Message:
         result = str(message.get("content") or "")
+        raw_result = result
+        tool_result_id = None
         if conversation_id and name != "read_tool_result":
-            result = self._build_model_visible_tool_result(
+            persisted = self._persist_model_visible_tool_result(
                 raw_result=result,
                 name=name,
                 conversation_id=conversation_id,
                 node_id=node_id,
                 tool_call_id=tool_call_id,
             )
+            result = str(persisted["content"] or "")
+            tool_result_id = persisted.get("tool_result_id")
         out = Message(dict(message))
         out["content"] = result
+        out["raw_content"] = raw_result
+        out["model_visible_content"] = result
+        if tool_result_id:
+            out["tool_result_id"] = tool_result_id
         out["name"] = out.get("name") or name
         out["tool_call_id"] = out.get("tool_call_id") or tool_call_id
         out["node_id"] = node_id

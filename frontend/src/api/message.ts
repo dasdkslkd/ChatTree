@@ -7,6 +7,17 @@ import type {
   ToolApprovalScope,
 } from '../types/message';
 
+export type ToolResultSlice = {
+  tool_result_id: string;
+  tool_name?: string | null;
+  offset: number;
+  limit: number;
+  next_offset?: number | null;
+  total_chars: number;
+  has_more: boolean;
+  content: string;
+};
+
 export const messageApi = {
   // 流式发送消息
   stream: async function* (
@@ -103,6 +114,18 @@ export const messageApi = {
   // 停止流式消息生成
   stopStream: async (conversationId: string, nodeId: string): Promise<void> => {
     await apiClient.post(`/conversations/${conversationId}/messages/${nodeId}/stream/stop`);
+  },
+
+  // 读取持久化工具结果切片
+  getToolResult: async (
+    toolResultId: string,
+    offset = 0,
+    limit = 16000,
+  ): Promise<ToolResultSlice> => {
+    const response = await apiClient.get(`/tool-results/${encodeURIComponent(toolResultId)}`, {
+      params: { offset, limit },
+    });
+    return response.data;
   },
 
   // 决定工具审批请求

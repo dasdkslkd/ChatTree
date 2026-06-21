@@ -11,7 +11,7 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 # ---------- 导入路由 ----------
-from backend.api.routes import config, conversations, messages, models, prompts, tool_approvals
+from backend.api.routes import config, conversations, messages, models, prompts, tool_approvals, tool_results
 
 # ---------- 导入核心 ----------
 from backend.core.chat.chat_manager import ChatManager
@@ -93,6 +93,7 @@ app.include_router(messages.router,      prefix="", tags=["消息"])
 app.include_router(models.router,        prefix="",               tags=["模型"])
 app.include_router(prompts.router,        prefix="",               tags=["提示词"])
 app.include_router(tool_approvals.router, prefix="", tags=["工具审批"])
+app.include_router(tool_results.router, prefix="", tags=["工具结果"])
 
 if __name__ == "__main__":
     uvicorn.run(

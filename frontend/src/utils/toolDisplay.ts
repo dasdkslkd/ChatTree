@@ -1,8 +1,20 @@
 type ToolMessageLike = {
   content?: unknown;
+  raw_content?: unknown;
+  model_visible_content?: unknown;
   output?: unknown;
   result?: unknown;
   error?: unknown;
+  envelope?: unknown;
+  tool_result_id?: unknown;
+};
+
+export type ToolResultEnvelope = {
+  toolResultId: string;
+  readMore: unknown;
+  preview: unknown;
+  totalChars: number | undefined;
+  truncated: boolean | undefined;
 };
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -34,7 +46,55 @@ function stringifyDisplay(value: unknown): string {
 
 function rawToolPayload(toolMessage?: ToolMessageLike | null): unknown {
   if (!toolMessage) return null;
-  return toolMessage.content ?? toolMessage.output ?? toolMessage.result ?? toolMessage.error;
+  return toolMessage.raw_content ?? toolMessage.output ?? toolMessage.result ?? toolMessage.content ?? toolMessage.error;
+}
+
+function modelVisiblePayload(toolMessage?: ToolMessageLike | null): unknown {
+  if (!toolMessage) return null;
+  return toolMessage.model_visible_content ?? toolMessage.content;
+}
+
+function readMoreToolResultId(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const jsonStyle = value.match(/["']tool_result_id["']\s*:\s*["']([^"']+)["']/);
+  if (jsonStyle?.[1]) return jsonStyle[1];
+  const namedStyle = value.match(/tool_result_id\s*=\s*["']([^"']+)["']/);
+  return namedStyle?.[1] ?? null;
+}
+
+function normalizeEnvelope(record: Record<string, unknown>): ToolResultEnvelope | null {
+  const readMore = record.read_more;
+  const toolResultId =
+    (typeof record.tool_result_id === 'string' && record.tool_result_id) ||
+    (typeof record.toolResultId === 'string' && record.toolResultId) ||
+    readMoreToolResultId(readMore);
+  const hasEnvelopeShape =
+    Object.prototype.hasOwnProperty.call(record, 'preview') ||
+    Object.prototype.hasOwnProperty.call(record, 'read_more') ||
+    Object.prototype.hasOwnProperty.call(record, 'tool_result_id') ||
+    Object.prototype.hasOwnProperty.call(record, 'total_chars') ||
+    Object.prototype.hasOwnProperty.call(record, 'truncated');
+  if (!hasEnvelopeShape || !toolResultId) return null;
+
+  return {
+    toolResultId,
+    readMore,
+    preview: record.preview,
+    totalChars: typeof record.total_chars === 'number' ? record.total_chars : undefined,
+    truncated: typeof record.truncated === 'boolean' ? record.truncated : Boolean(readMore) || undefined,
+  };
+}
+
+function findToolResultEnvelope(value: unknown): ToolResultEnvelope | null {
+  const parsed = parseJsonString(value);
+  const record = asRecord(parsed);
+  if (!record) return null;
+
+  const direct = normalizeEnvelope(record);
+  if (direct) return direct;
+
+  const nested = asRecord(parseJsonString(record.envelope));
+  return nested ? normalizeEnvelope(nested) : null;
 }
 
 function formatStructuredError(error: unknown): string {
@@ -80,6 +140,10 @@ function formatParsedPayload(payload: unknown, depth = 0): string {
     return formatStructuredError(record.error);
   }
 
+  if (Object.prototype.hasOwnProperty.call(record, 'envelope')) {
+    return formatParsedPayload(record.envelope, depth + 1);
+  }
+
   const commandOutput = formatCommandRecord(record);
   if (commandOutput !== null) return commandOutput;
 
@@ -101,6 +165,16 @@ function formatParsedPayload(payload: unknown, depth = 0): string {
 
 export function formatToolOutput(toolMessage?: ToolMessageLike | null): string {
   return formatParsedPayload(rawToolPayload(toolMessage));
+}
+
+export function extractToolResultEnvelope(toolMessage?: ToolMessageLike | null): ToolResultEnvelope | null {
+  if (!toolMessage) return null;
+  return (
+    findToolResultEnvelope(toolMessage.envelope) ||
+    findToolResultEnvelope(modelVisiblePayload(toolMessage)) ||
+    findToolResultEnvelope(rawToolPayload(toolMessage)) ||
+    findToolResultEnvelope(toolMessage)
+  );
 }
 
 export function isToolResultError(toolMessage?: ToolMessageLike | null): boolean {

@@ -25,14 +25,14 @@ import {
   Copy, Check, Pencil, Loader2, RotateCcw, Network, MessageSquare, Trash2, FileText, Download, Settings,
 } from 'lucide-react';
 import { conversationApi } from '../api/conversation';
-import { messageApi } from '../api/message';
+import { messageApi, type ToolResultSlice } from '../api/message';
 import type { ToolApprovalDecision, ToolApprovalPayload, ToolApprovalScope } from '../types/message';
 import { useConversationStore } from '../store/conversationStore';
 import { useModelStore } from '../store/modelStore';
 import { useNavigationStore } from '../store/navigationStore';
 import { useStreamingManager } from '../hooks/useStreamingManager';
 import { streamManager } from '../services/streamManager';
-import { formatToolOutput, isToolResultError } from '../utils/toolDisplay';
+import { extractToolResultEnvelope, formatToolOutput, isToolResultError, type ToolResultEnvelope } from '../utils/toolDisplay';
 import { ChatInput } from '../components/ChatInput';
 import TreeView from './TreeView';
 
@@ -152,6 +152,7 @@ type ToolRenderItem = {
   argsText: string;
   outputText: string;
   status: 'done' | 'error' | 'running';
+  resultEnvelope: ToolResultEnvelope | null;
 };
 
 const TOOL_DISPLAY_LIMIT = 100;
@@ -212,6 +213,7 @@ function makeToolItem(
   const argsText = limitToolDisplayText(getToolArgs(toolCall));
   const outputText = limitToolDisplayText(getToolOutput(toolMessage));
   const summary = limitToolDisplayText(outputText || argsText || '等待工具结果');
+  const resultEnvelope = extractToolResultEnvelope(toolMessage);
   return {
     key: toolCall?.id || toolMessage?.tool_call_id || fallbackKey,
     name,
@@ -219,6 +221,7 @@ function makeToolItem(
     argsText,
     outputText,
     status: toolMessage ? (isToolError(toolMessage) ? 'error' : 'done') : 'running',
+    resultEnvelope,
   };
 }
 
@@ -365,6 +368,36 @@ function isToolMessageCovered(
 
 function ToolCallCard({ item }: { item: ToolRenderItem }) {
   const [expanded, setExpanded] = useState(false);
+  const [fullResult, setFullResult] = useState<ToolResultSlice | null>(null);
+  const [loadingFullResult, setLoadingFullResult] = useState(false);
+  const [fullResultError, setFullResultError] = useState<string | null>(null);
+  const fullResultText = fullResult ? formatToolOutput({ content: fullResult.content }) : '';
+  const outputText = fullResult ? fullResultText : item.outputText;
+  const canLoadFullResult = Boolean(item.resultEnvelope?.toolResultId && !fullResult);
+  const resultStatus = fullResult
+    ? fullResult.has_more
+      ? `已读取 ${fullResult.content.length}/${fullResult.total_chars} 字，已截断/可继续读取`
+      : `已读取完整结果（${fullResult.total_chars} 字）`
+    : item.resultEnvelope?.truncated
+      ? '预览已截断'
+      : null;
+
+  const handleLoadFullResult = async () => {
+    const toolResultId = item.resultEnvelope?.toolResultId;
+    if (!toolResultId || loadingFullResult) return;
+    setLoadingFullResult(true);
+    setFullResultError(null);
+    try {
+      const result = await messageApi.getToolResult(toolResultId, 0, 16000);
+      setFullResult(result);
+    } catch (error) {
+      console.error('Failed to load tool result:', error);
+      setFullResultError('读取完整结果失败');
+    } finally {
+      setLoadingFullResult(false);
+    }
+  };
+
   return (
     <div className={cn('tool-call', expanded && 'expanded')}>
       <button
@@ -384,7 +417,32 @@ function ToolCallCard({ item }: { item: ToolRenderItem }) {
       </button>
       <div className="tc-body">
         {item.argsText && <pre className="tc-cmd custom-scrollbar">{item.argsText}</pre>}
-        {item.outputText && <pre className="tc-output custom-scrollbar">{item.outputText}</pre>}
+        {outputText && <pre className="tc-output custom-scrollbar">{outputText}</pre>}
+        {(canLoadFullResult || resultStatus || fullResultError) && (
+          <div className="tool-approval-actions">
+            {canLoadFullResult && (
+              <Button
+                type="button"
+                size="xs"
+                variant="secondary"
+                disabled={loadingFullResult}
+                onClick={handleLoadFullResult}
+              >
+                {loadingFullResult ? (
+                  <><Loader2 className="h-3 w-3 animate-spin" /> 读取中</>
+                ) : (
+                  '读取完整结果'
+                )}
+              </Button>
+            )}
+            {resultStatus && (
+              <span className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>{resultStatus}</span>
+            )}
+            {fullResultError && (
+              <span className="text-xs text-destructive">{fullResultError}</span>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
