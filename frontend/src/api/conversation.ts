@@ -88,6 +88,14 @@ export const conversationApi = {
     });
   },
 
+  compact: async (
+    id: string,
+    data: { custom_instructions?: string | null; model_id?: string | null; provider_id?: string | null; messages_to_keep?: number | null } = {},
+  ): Promise<{ conversation_id: string; node_id: string; pre_tokens?: number; tokens_used?: number; trigger?: string }> => {
+    const response = await apiClient.post(`/conversations/${id}/compact`, data);
+    return response.data;
+  },
+
   // ɾ���ڵ�
   // �ϴ������ļ�
   uploadImport: async (conversationId: string, file: File): Promise<{ filename: string; size: number }> => {

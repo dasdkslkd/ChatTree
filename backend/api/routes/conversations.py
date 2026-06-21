@@ -31,6 +31,12 @@ class ConversationModelUpdateRequest(BaseModel):
     reasoning_effort: Optional[str] = None
     thinking_enabled: Optional[bool] = None
 
+class ConversationCompactRequest(BaseModel):
+    custom_instructions: Optional[str] = None
+    model_id: Optional[str] = None
+    provider_id: Optional[str] = None
+    messages_to_keep: Optional[int] = None
+
 class ConversationResponse(BaseModel):
     id: str
     title: str
@@ -212,6 +218,33 @@ async def update_conversation_model(
         ):
             raise HTTPException(status_code=404, detail="对话不存在")
         return {"message": "对话模型已更新"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/conversations/{conversation_id}/compact")
+async def compact_conversation(
+    conversation_id: str,
+    request: ConversationCompactRequest,
+    chat_manager: ChatManager = Depends(get_chat_manager)
+):
+    """手动压缩当前分支上下文。"""
+    try:
+        return await chat_manager.compact_conversation(
+            conversation_id,
+            custom_instructions=request.custom_instructions,
+            model_id=request.model_id,
+            provider_id=request.provider_id,
+            trigger="manual",
+            messages_to_keep=request.messages_to_keep if request.messages_to_keep is not None else 1,
+        )
+    except ValueError as e:
+        detail = str(e)
+        if detail == "对话不存在":
+            raise HTTPException(status_code=404, detail=detail)
+        raise HTTPException(status_code=400, detail=detail)
     except HTTPException:
         raise
     except Exception as e:

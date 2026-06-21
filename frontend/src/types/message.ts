@@ -31,6 +31,7 @@ export interface Message {
   id: string;
   role: MessageRole;
   content: string;
+  subtype?: string | null;
   node_id: string;
   parent_node_id?: string;
   parent_id?: string;
@@ -48,6 +49,14 @@ export interface Message {
   tool_results?: any[];
   tool_interactions?: any[];
   reasoning?: string;
+  compact_metadata?: {
+    trigger?: 'manual' | 'auto' | string;
+    pre_tokens?: number;
+    messages_to_keep?: number;
+    last_pre_compact_message_id?: string;
+  } | null;
+  is_compact_summary?: boolean;
+  is_visible_in_transcript_only?: boolean;
 }
 
 export interface SendMessageRequest {

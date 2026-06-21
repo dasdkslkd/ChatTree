@@ -58,6 +58,7 @@ class Message(TypedDict, total=False):
     id: Required[str]
     role: Required[Role]
     content: Required[str]
+    subtype: Optional[str]  # 系统事件子类型，例如 compact_boundary
     node_id: Optional[str]  # 所在对话树节点ID
     parent_node_id: Optional[str]  # 父节点ID
     name: Optional[str]
@@ -70,6 +71,9 @@ class Message(TypedDict, total=False):
     timestamp: Required[int]
     generation_info: Optional[GenerationInfo]  # 生成信息（仅助手消息有，可选）
     context_usage: Optional[NodeUsage]  # 所在节点的分层上下文 usage 快照
+    compact_metadata: Optional[Dict[str, Any]]  # compact boundary 元数据
+    is_compact_summary: Optional[bool]  # Claude Code 风格 compact summary 标记
+    is_visible_in_transcript_only: Optional[bool]  # UI/transcript 可见，语义上是恢复上下文
 
 class ConversationTreeNode(TypedDict):
     """对话树节点 - 一轮完整交互"""

@@ -23,7 +23,7 @@ import {
 import {
   Plus, X, MoreHorizontal, ChevronRight,
   Copy, Check, Pencil, Loader2, RotateCcw, Network, MessageSquare, Trash2, FileText, Download, FolderOpen, FolderPlus, Search, Settings,
-  PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen,
+  PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Archive,
 } from 'lucide-react';
 import { conversationApi } from '../api/conversation';
 import { messageApi, type ToolResultSlice } from '../api/message';
@@ -1239,9 +1239,27 @@ export default function ChatPage() {
     return { fileNames, cleanContent };
   };
 
+  const isCompactBoundaryMessage = (message: typeof messages[0]) =>
+    message.role === 'system' && message.subtype === 'compact_boundary';
+
+  const isCompactSummaryMessage = (message: typeof messages[0]) =>
+    message.is_compact_summary === true;
+
+  const formatCompactTokens = (tokens?: number) => {
+    if (!tokens || tokens <= 0) return null;
+    if (tokens >= 1000) return `${Math.round(tokens / 1000)}k tokens`;
+    return `${tokens} tokens`;
+  };
+
+  const formatCompactTrigger = (trigger?: string) => {
+    if (trigger === 'auto') return '自动压缩';
+    if (trigger === 'manual') return '手动压缩';
+    return '上下文压缩';
+  };
+
   const outline = messages
     .map((m, index) => ({ ...m, originalIndex: index }))
-    .filter((m) => m.role === 'user')
+    .filter((m) => m.role === 'user' && !isCompactSummaryMessage(m))
     .map((m) => {
       const mention = parseFileMention(m.content);
       const clean = mention ? mention.cleanContent : m.content;
@@ -1268,6 +1286,57 @@ export default function ChatPage() {
   // Parse '''USER MENTIONED FILES: ...''' prefix from message content
 
   const renderMsg = (m: typeof messages[0], index: number) => {
+    if (isCompactBoundaryMessage(m)) {
+      const trigger = formatCompactTrigger(m.compact_metadata?.trigger);
+      const tokens = formatCompactTokens(m.compact_metadata?.pre_tokens);
+      return (
+        <div
+          key={m.id}
+          id={`message-${index}`}
+          className="w-full my-4 flex items-center justify-center"
+        >
+          <div
+            className="flex items-center gap-2 px-3 py-1.5 rounded-full text-xs"
+            style={{
+              color: 'var(--fg-tertiary)',
+              border: '0.5px solid var(--border)',
+              background: 'var(--bg-button-tertiary-hover)',
+            }}
+          >
+            <Archive className="h-3.5 w-3.5" />
+            <span>{trigger}</span>
+            {tokens && <span style={{ color: 'var(--fg-tertiary)' }}>{tokens}</span>}
+          </div>
+        </div>
+      );
+    }
+
+    if (isCompactSummaryMessage(m)) {
+      return (
+        <div
+          key={m.id}
+          id={`message-${index}`}
+          className="w-full my-2 flex flex-col items-center"
+        >
+          <details
+            className="w-full max-w-[720px] rounded-lg px-3 py-2 text-sm"
+            style={{
+              border: '0.5px solid var(--border)',
+              background: 'var(--bg-secondary)',
+              color: 'var(--fg-secondary)',
+            }}
+          >
+            <summary className="cursor-pointer text-xs font-medium" style={{ color: 'var(--fg-tertiary)' }}>
+              压缩摘要（transcript）
+            </summary>
+            <div className="mt-2 prose prose-sm max-w-none [&_p]:m-0 [&_p:not(:last-child)]:mb-2">
+              <MarkdownView content={m.content} enableMermaid />
+            </div>
+          </details>
+        </div>
+      );
+    }
+
     if (m.role === 'tool') {
       if (isToolMessageCovered(m, messages.slice(0, index))) return null;
       return (

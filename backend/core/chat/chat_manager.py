@@ -8,6 +8,7 @@ from contextlib import suppress
 from time import time
 from .conversation import Conversation
 from .node import NodeManager
+from .compact import COMPACT_MAX_OUTPUT_TOKENS, get_auto_compact_threshold, get_compact_prompt, microcompact_messages
 from ..config.types import Message, Role, StreamChunk, StreamStatus, StreamController, GenerationInfo
 from ..storage.chat_storage import ChatStorage
 from ..storage.prompt_storage import PromptStorage
@@ -271,6 +272,19 @@ class ChatManager:
             meta = self.model_manager.get_model_metadata(target_provider, target_model)
         else:
             meta = {}
+
+        if not node_id:
+            auto_result = await self._auto_compact_if_needed(
+                conversation_id,
+                target_model=target_model,
+                target_provider=target_provider,
+                model_context_window=meta.get("context_length"),
+            )
+            if auto_result.get("was_compacted"):
+                latest_preview = self.get_conversation(conversation_id)
+                if latest_preview is not None:
+                    preview = latest_preview
+
         conv_meta = preview.metadata
         effort_spec = meta.get("reasoning_effort") or {}
         thinking_spec = meta.get("thinking") or {}
@@ -674,7 +688,203 @@ class ChatManager:
         for node_id in list(self._active_controllers.keys()):
             await self.stop_stream(node_id)
 
-    def _prepare_messages_for_api_with_conversation(self, conversation: Conversation) -> List[Message]:
+    def _is_compact_boundary_node(self, node: Dict[str, Any]) -> bool:
+        system_message = node.get("system_message") or {}
+        return (
+            system_message.get("role") in (Role.SYSTEM, "system")
+            and system_message.get("subtype") == "compact_boundary"
+        )
+
+    def _model_node_chain(
+        self,
+        conversation: Conversation,
+        *,
+        include_messages_to_keep: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """返回发给模型的节点链：root system + 最新 compact 后的有效上下文。"""
+        chain = conversation.get_node_chain(conversation.current_node_id)
+        if not chain:
+            return []
+
+        latest_boundary_index = None
+        for index, node in enumerate(chain):
+            if self._is_compact_boundary_node(node):
+                latest_boundary_index = index
+
+        if latest_boundary_index is None:
+            return chain
+
+        root = chain[0]
+        compact_node = chain[latest_boundary_index]
+        compact_meta = (compact_node.get("system_message") or {}).get("compact_metadata") or {}
+        keep_count = max(int(compact_meta.get("messages_to_keep") or 0), 0) if include_messages_to_keep else 0
+        kept_nodes = [
+            node for node in chain[1:latest_boundary_index]
+            if not self._is_compact_boundary_node(node)
+        ][-keep_count:] if keep_count else []
+        compact_tail = [compact_node, *kept_nodes, *chain[latest_boundary_index + 1:]]
+        if root["id"] == compact_node["id"]:
+            return compact_tail
+        return [root, *compact_tail]
+
+    def _resolve_model_for_conversation(
+        self,
+        conversation: Conversation,
+        model_id: Optional[str] = None,
+        provider_id: Optional[str] = None,
+    ) -> tuple[Optional[str], Optional[str]]:
+        target_model = model_id or conversation.metadata.get("model_id") or conversation.current_model
+        if not target_model:
+            for _, models in self.model_manager.model_list.items():
+                if models:
+                    target_model = models[0]
+                    break
+
+        target_provider = provider_id or conversation.metadata.get("provider_id") or conversation.current_provider
+        if not target_provider and target_model:
+            for provider, models in self.model_manager.model_list.items():
+                if target_model in models:
+                    target_provider = provider
+                    break
+
+        return target_model, target_provider
+
+    def _rough_token_count_for_messages(self, messages: List[Dict[str, Any]]) -> int:
+        total_chars = 0
+        for message in messages:
+            total_chars += len(str(message.get("content") or ""))
+        return max(total_chars // 4, len(messages))
+
+    def _current_context_tokens(self, conversation: Conversation) -> int:
+        current = conversation.nodes.get(conversation.current_node_id or "")
+        usage = current.get("usage") if current else None
+        if usage:
+            active = usage.get("active_context_usage") or usage.get("branch_usage")
+            if active and active.get("total_tokens"):
+                return int(active.get("total_tokens") or 0)
+        return self._rough_token_count_for_messages(self._prepare_messages_for_api_with_conversation(conversation))
+
+    async def _auto_compact_if_needed(
+        self,
+        conversation_id: str,
+        *,
+        target_model: str,
+        target_provider: str,
+        model_context_window: Optional[int],
+    ) -> Dict[str, Any]:
+        if not model_context_window:
+            return {"was_compacted": False}
+        conversation = self.get_conversation(conversation_id)
+        if conversation is None:
+            return {"was_compacted": False}
+        current_node = conversation.nodes.get(conversation.current_node_id or "")
+        if current_node and self._is_compact_boundary_node(current_node):
+            return {"was_compacted": False}
+
+        token_usage = self._current_context_tokens(conversation)
+        threshold = get_auto_compact_threshold(model_context_window)
+        if token_usage < threshold:
+            return {"was_compacted": False, "token_usage": token_usage, "threshold": threshold}
+
+        result = await self.compact_conversation(
+            conversation_id,
+            model_id=target_model,
+            provider_id=target_provider,
+            trigger="auto",
+        )
+        return {
+            "was_compacted": True,
+            "token_usage": token_usage,
+            "threshold": threshold,
+            "result": result,
+        }
+
+    async def compact_conversation(
+        self,
+        conversation_id: str,
+        custom_instructions: Optional[str] = None,
+        model_id: Optional[str] = None,
+        provider_id: Optional[str] = None,
+        trigger: str = "manual",
+        suppress_follow_up_questions: bool = True,
+        messages_to_keep: int = 1,
+    ) -> Dict[str, Any]:
+        """手动执行 Claude Code 风格上下文压缩，并把结果追加为当前分支节点。"""
+        conversation = self.get_conversation(conversation_id)
+        if conversation is None:
+            raise ValueError("对话不存在")
+
+        target_model, target_provider = self._resolve_model_for_conversation(
+            conversation,
+            model_id=model_id,
+            provider_id=provider_id,
+        )
+        if not target_model:
+            raise ValueError("未指定模型ID")
+        if not target_provider:
+            raise ValueError(f"无法找到模型 {target_model} 对应的提供商")
+
+        provider = self.model_manager.get_model(target_provider, False)
+        if not provider:
+            raise ValueError(f"无法初始化提供商 {target_provider}")
+
+        messages_to_summarize = self._prepare_messages_for_api_with_conversation(
+            conversation,
+            include_messages_to_keep=False,
+        )
+        summary_request = {
+            "role": "user",
+            "content": get_compact_prompt(custom_instructions),
+        }
+        compact_messages = [*messages_to_summarize, summary_request]
+        summary, tokens_used = provider.generate_response(
+            target_model,
+            compact_messages,
+            max_tokens=COMPACT_MAX_OUTPUT_TOKENS,
+            temperature=0,
+            tools=None,
+            tool_choice=None,
+        )
+        pre_tokens = self._rough_token_count_for_messages(messages_to_summarize)
+
+        async with self._lock_for(conversation_id):
+            latest = self.get_conversation(conversation_id)
+            if latest is None:
+                raise ValueError("对话不存在")
+            parent_id = latest.current_node_id
+            compact_node = NodeManager.create_compact_node(
+                parent_id=parent_id,
+                summary=summary,
+                trigger="auto" if trigger == "auto" else "manual",
+                pre_tokens=pre_tokens,
+                model_id=target_model,
+                last_pre_compact_message_id=parent_id,
+                messages_to_keep=messages_to_keep,
+                suppress_follow_up_questions=suppress_follow_up_questions,
+            )
+            compact_node["usage"] = self._node_usage_snapshot(
+                turn_usage=estimated_usage(tokens_used),
+                branch_usage=estimated_usage(0),
+                model_context_window=self._model_context_window(target_provider, target_model),
+            )
+            latest.add_node(compact_node, parent_id=parent_id)
+            self._mark_conversation_updated_at(latest, int(time()))
+            self._save(latest)
+
+        return {
+            "conversation_id": conversation_id,
+            "node_id": compact_node["id"],
+            "pre_tokens": pre_tokens,
+            "tokens_used": tokens_used,
+            "trigger": compact_node["system_message"]["compact_metadata"]["trigger"],
+        }
+
+    def _prepare_messages_for_api_with_conversation(
+        self,
+        conversation: Conversation,
+        *,
+        include_messages_to_keep: bool = True,
+    ) -> List[Message]:
         """准备API调用的消息列表（使用指定的 conversation）。
 
         工具轮次接缝：除 role/content 外，**存在即保留** tool_calls / tool_call_id /
@@ -684,6 +894,8 @@ class ChatManager:
 
         def append_message(msg: Optional[Message]):
             if not msg:
+                return
+            if msg.get("subtype") == "compact_boundary":
                 return
             role = msg["role"]
             if not isinstance(role, str) or role.startswith("Role."):
@@ -703,7 +915,11 @@ class ChatManager:
                 out["name"] = msg["name"]
             msg_dict.append(out)
 
-        for node in conversation.get_node_chain(conversation.current_node_id):
+        node_chain = self._model_node_chain(
+            conversation,
+            include_messages_to_keep=include_messages_to_keep,
+        )
+        for node in node_chain:
             append_message(node.get("system_message"))
             append_message(node.get("user_message"))
             assistant = node.get("assistant_message")
@@ -732,7 +948,7 @@ class ChatManager:
                     for tool_msg in self._apply_round_tool_result_budget(paired_tools):
                         append_message(tool_msg)
 
-        return msg_dict
+        return microcompact_messages(msg_dict)
 
     def _paired_tool_messages_for_context(
         self,
@@ -1146,6 +1362,15 @@ class ChatManager:
             "active_context_usage": branch_usage or estimated_usage(0),
             "model_context_window": model_context_window,
         }
+
+    def _model_context_window(self, provider_id: Optional[str], model_id: Optional[str]) -> Optional[int]:
+        if not provider_id or not model_id or not hasattr(self.model_manager, "get_model_metadata"):
+            return None
+        try:
+            meta = self.model_manager.get_model_metadata(provider_id, model_id)
+        except Exception:
+            return None
+        return meta.get("context_length") if isinstance(meta, dict) else None
 
     def _branch_usage_for_node(self, conversation: Conversation, node_id: str):
         usage = None

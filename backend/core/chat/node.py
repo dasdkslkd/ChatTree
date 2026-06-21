@@ -1,8 +1,9 @@
 # chat/node.py - 节点管理器
 import uuid
 from time import time
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from ..config.types import Message, Role, ConversationTreeNode
+from .compact import get_compact_user_summary_message
 from ..model.usage import estimated_usage
 
 
@@ -68,6 +69,63 @@ class NodeManager:
             "tool_messages": [],
             "system_message": None,
             "timestamp": int(time()),
+            "model_id": model_id,
+            "total_tokens": 0,
+            "branch_usage_info": estimated_usage(0),
+            "usage": _empty_node_usage(),
+        }
+
+    @staticmethod
+    def create_compact_node(
+        parent_id: Optional[str],
+        summary: str,
+        trigger: Literal["manual", "auto"] = "manual",
+        pre_tokens: int = 0,
+        model_id: Optional[str] = None,
+        last_pre_compact_message_id: Optional[str] = None,
+        messages_to_keep: int = 1,
+        suppress_follow_up_questions: bool = True,
+    ) -> ConversationTreeNode:
+        """创建 Claude Code 风格 compact boundary + summary 节点。"""
+        node_id = str(uuid.uuid4())
+        now = int(time())
+        compact_metadata: Dict[str, Any] = {
+            "trigger": trigger,
+            "pre_tokens": int(pre_tokens or 0),
+            "messages_to_keep": max(int(messages_to_keep or 0), 0),
+        }
+        if last_pre_compact_message_id:
+            compact_metadata["last_pre_compact_message_id"] = last_pre_compact_message_id
+
+        boundary_msg = Message({
+            "id": str(uuid.uuid4()),
+            "role": Role.SYSTEM,
+            "subtype": "compact_boundary",
+            "content": "Conversation compacted",
+            "compact_metadata": compact_metadata,
+            "timestamp": now,
+        })
+        summary_msg = Message({
+            "id": str(uuid.uuid4()),
+            "role": Role.USER,
+            "content": get_compact_user_summary_message(
+                summary,
+                suppress_follow_up_questions=suppress_follow_up_questions,
+            ),
+            "is_compact_summary": True,
+            "is_visible_in_transcript_only": True,
+            "timestamp": now,
+        })
+
+        return {
+            "id": node_id,
+            "parent_id": parent_id,
+            "children_ids": [],
+            "user_message": summary_msg,
+            "assistant_message": None,
+            "tool_messages": [],
+            "system_message": boundary_msg,
+            "timestamp": now,
             "model_id": model_id,
             "total_tokens": 0,
             "branch_usage_info": estimated_usage(0),
