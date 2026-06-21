@@ -126,6 +126,7 @@ function chunk(overrides) {
 
 const { StreamManager } = require(path.join(__dirname, '../src/services/streamManager.ts'));
 const { messageApi } = require(path.join(__dirname, '../src/api/message.ts'));
+const { getGenerationStatusText, getStreamStatusText } = require(path.join(__dirname, '../src/utils/generationStatus.ts'));
 
 async function withManager(run) {
   resetTimers();
@@ -239,8 +240,9 @@ async function testToolCallStartFlushesBufferedTextBeforeToolCallCompletes() {
 
     try {
       const state = manager.getState('conv-1');
-      assert.equal(state.content, content);
-      assert.equal(state.toolInteractions.length, 0);
+      assert.equal(state.content, '');
+      assert.equal(state.toolInteractions.length, 1);
+      assert.equal(state.toolInteractions[0].assistant.content, content);
     } finally {
       await controlled.close();
       await runTimersUntil(running);
@@ -248,11 +250,101 @@ async function testToolCallStartFlushesBufferedTextBeforeToolCallCompletes() {
   });
 }
 
+async function testToolCallStartCreatesRunningPlaceholder() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    messageApi.stream = controlled.stream;
+    const content = '准备调用文件工具。';
+    const running = manager.startStream('conv-1', { content: 'hello' });
+
+    await controlled.push(chunk({ event_type: 'text', content }));
+    await controlled.push(chunk({ event_type: 'tool_call_start' }));
+
+    try {
+      const state = manager.getState('conv-1');
+      assert.equal(state.content, '');
+      assert.equal(state.toolInteractions.length, 1);
+      assert.equal(state.toolInteractions[0].assistant.content, content);
+      assert.equal(state.toolInteractions[0].assistant.tool_calls.length, 1);
+      assert.equal(state.toolInteractions[0].assistant.tool_calls[0].pending, true);
+    } finally {
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
+async function testToolCallDeltaUpdatesRunningPlaceholder() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    messageApi.stream = controlled.stream;
+    const partialToolCall = {
+      id: 'call-1',
+      type: 'function',
+      function: { name: 'write_file', arguments: '{"path":"test_tools.py","content":"' },
+    };
+    const running = manager.startStream('conv-1', { content: 'hello' });
+
+    await controlled.push(chunk({ event_type: 'tool_call_start' }));
+    await controlled.push(chunk({
+      event_type: 'tool_call',
+      tool_call: { tool_calls: [partialToolCall] },
+      tool_calls: [partialToolCall],
+    }));
+
+    try {
+      const state = manager.getState('conv-1');
+      assert.equal(state.toolInteractions.length, 1);
+      assert.equal(state.toolInteractions[0].assistant.tool_calls.length, 1);
+      assert.equal(state.toolInteractions[0].assistant.tool_calls[0].id, 'call-1');
+      assert.equal(state.toolInteractions[0].assistant.tool_calls[0].function.name, 'write_file');
+      assert.equal(state.toolInteractions[0].assistant.tool_calls[0].function.arguments, '{"path":"test_tools.py","content":"');
+    } finally {
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
+async function testStreamErrorStatePreservesRealMessage() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    messageApi.stream = controlled.stream;
+    const running = manager.startStream('conv-1', { content: 'hello' });
+
+    await controlled.push(chunk({ status: 'error', error: 'upstream quota exceeded' }));
+
+    try {
+      const state = manager.getState('conv-1');
+      assert.equal(state.status, 'error');
+      assert.equal(state.errorMessage, 'upstream quota exceeded');
+      assert.equal(getStreamStatusText(state.status, state.errorMessage), 'upstream quota exceeded');
+    } finally {
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
+function testGenerationStatusUsesPersistedErrorMessage() {
+  assert.equal(
+    getGenerationStatusText({ status: 'error', error_message: 'provider authentication failed' }),
+    'provider authentication failed',
+  );
+  assert.equal(getGenerationStatusText({ status: 'error', error_message: '' }), '生成出错');
+  assert.equal(getGenerationStatusText({ status: 'stopped', error_message: null }), '已停止');
+  assert.equal(getGenerationStatusText({ status: 'completed', error_message: 'ignored' }), null);
+}
+
 async function main() {
   await testFlushesReasoningBeforeContentStarts();
   await testFlushesBufferedTextIntoSingleToolCall();
   await testMergesToolResultIntoExistingInteraction();
   await testToolCallStartFlushesBufferedTextBeforeToolCallCompletes();
+  await testToolCallStartCreatesRunningPlaceholder();
+  await testToolCallDeltaUpdatesRunningPlaceholder();
+  await testStreamErrorStatePreservesRealMessage();
+  testGenerationStatusUsesPersistedErrorMessage();
   console.log('streamManager tests passed');
 }
 

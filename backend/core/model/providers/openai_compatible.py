@@ -3,6 +3,7 @@ import asyncio
 import json
 import urllib.error
 import urllib.request
+from copy import deepcopy
 from typing import List, Dict, Any, Optional, AsyncIterator, Tuple
 
 from ..base import BaseProvider, logger
@@ -212,6 +213,7 @@ class OpenAICompatibleProvider(BaseProvider):
 
             last_error: Optional[Exception] = None
             tool_call_accumulator: Dict[int, Dict[str, Any]] = {}
+            last_emitted_tool_calls = ""
             for attempt_index, current_kwargs in enumerate(attempts):
                 try:
                     tool_call_started = False
@@ -247,6 +249,23 @@ class OpenAICompatibleProvider(BaseProvider):
                             )
                         for tool_call in delta_tool_calls:
                             self._merge_openai_tool_call_delta(tool_call_accumulator, tool_call)
+                        if delta_tool_calls:
+                            tool_calls = self._finalize_openai_tool_calls(tool_call_accumulator)
+                            if tool_calls:
+                                serialized_tool_calls = json.dumps(tool_calls, ensure_ascii=False, sort_keys=True)
+                                if serialized_tool_calls != last_emitted_tool_calls:
+                                    last_emitted_tool_calls = serialized_tool_calls
+                                    yield StreamChunk(
+                                        status=StreamStatus.CONTENT,
+                                        content=None,
+                                        node_id=stream_controller.node_id if stream_controller else None,
+                                        conversation_id=stream_controller.conversation_id if stream_controller else None,
+                                        error=None,
+                                        tokens_used=0,
+                                        event_type="tool_call",
+                                        tool_call={"tool_calls": tool_calls},
+                                        tool_calls=tool_calls,
+                                    )
                         reasoning = delta.get("reasoning_content") or delta.get("reasoning")
                         if reasoning:
                             yield StreamChunk(
@@ -276,17 +295,20 @@ class OpenAICompatibleProvider(BaseProvider):
                         finish_reason = choice.get("finish_reason")
                         if finish_reason == "tool_calls" and tool_call_accumulator:
                             tool_calls = self._finalize_openai_tool_calls(tool_call_accumulator)
-                            yield StreamChunk(
-                                status=StreamStatus.CONTENT,
-                                content=None,
-                                node_id=stream_controller.node_id if stream_controller else None,
-                                conversation_id=stream_controller.conversation_id if stream_controller else None,
-                                error=None,
-                                tokens_used=0,
-                                event_type="tool_call",
-                                tool_call={"tool_calls": tool_calls},
-                                tool_calls=tool_calls,
-                            )
+                            serialized_tool_calls = json.dumps(tool_calls, ensure_ascii=False, sort_keys=True)
+                            if serialized_tool_calls != last_emitted_tool_calls:
+                                last_emitted_tool_calls = serialized_tool_calls
+                                yield StreamChunk(
+                                    status=StreamStatus.CONTENT,
+                                    content=None,
+                                    node_id=stream_controller.node_id if stream_controller else None,
+                                    conversation_id=stream_controller.conversation_id if stream_controller else None,
+                                    error=None,
+                                    tokens_used=0,
+                                    event_type="tool_call",
+                                    tool_call={"tool_calls": tool_calls},
+                                    tool_calls=tool_calls,
+                                )
                     break
                 except ProviderHTTPError as exc:
                     last_error = exc
@@ -373,6 +395,7 @@ class OpenAICompatibleProvider(BaseProvider):
             total_content = ""
             function_calls: Dict[str, Dict[str, Any]] = {}
             tool_call_started = False
+            last_emitted_tool_calls = ""
             try:
                 async for event in self._iter_sse_events("/responses", current_kwargs):
                     if stream_controller and await stream_controller.is_stopped():
@@ -395,17 +418,20 @@ class OpenAICompatibleProvider(BaseProvider):
                         completed_tool_calls = self._extract_responses_tool_calls(response)
                         if completed_tool_calls:
                             function_calls.clear()
-                            yield StreamChunk(
-                                status=StreamStatus.CONTENT,
-                                content=None,
-                                node_id=stream_controller.node_id if stream_controller else None,
-                                conversation_id=stream_controller.conversation_id if stream_controller else None,
-                                error=None,
-                                tokens_used=0,
-                                event_type="tool_call",
-                                tool_call={"tool_calls": completed_tool_calls},
-                                tool_calls=completed_tool_calls,
-                            )
+                            serialized_tool_calls = json.dumps(completed_tool_calls, ensure_ascii=False, sort_keys=True)
+                            if serialized_tool_calls != last_emitted_tool_calls:
+                                last_emitted_tool_calls = serialized_tool_calls
+                                yield StreamChunk(
+                                    status=StreamStatus.CONTENT,
+                                    content=None,
+                                    node_id=stream_controller.node_id if stream_controller else None,
+                                    conversation_id=stream_controller.conversation_id if stream_controller else None,
+                                    error=None,
+                                    tokens_used=0,
+                                    event_type="tool_call",
+                                    tool_call={"tool_calls": completed_tool_calls},
+                                    tool_calls=completed_tool_calls,
+                                )
                         continue
 
                     if event_type == "response.output_item.added":
@@ -431,6 +457,22 @@ class OpenAICompatibleProvider(BaseProvider):
                                     "arguments": item.get("arguments", "") or "",
                                 },
                             }
+                            tool_calls = self._finalize_response_function_calls(function_calls)
+                            if tool_calls:
+                                serialized_tool_calls = json.dumps(tool_calls, ensure_ascii=False, sort_keys=True)
+                                if serialized_tool_calls != last_emitted_tool_calls:
+                                    last_emitted_tool_calls = serialized_tool_calls
+                                    yield StreamChunk(
+                                        status=StreamStatus.CONTENT,
+                                        content=None,
+                                        node_id=stream_controller.node_id if stream_controller else None,
+                                        conversation_id=stream_controller.conversation_id if stream_controller else None,
+                                        error=None,
+                                        tokens_used=0,
+                                        event_type="tool_call",
+                                        tool_call={"tool_calls": tool_calls},
+                                        tool_calls=tool_calls,
+                                    )
                         continue
 
                     if event_type == "response.function_call_arguments.delta":
@@ -451,6 +493,22 @@ class OpenAICompatibleProvider(BaseProvider):
                             {"id": key, "type": "function", "function": {"name": "", "arguments": ""}},
                         )
                         call["function"]["arguments"] += event.get("delta") or ""
+                        tool_calls = self._finalize_response_function_calls(function_calls)
+                        if tool_calls:
+                            serialized_tool_calls = json.dumps(tool_calls, ensure_ascii=False, sort_keys=True)
+                            if serialized_tool_calls != last_emitted_tool_calls:
+                                last_emitted_tool_calls = serialized_tool_calls
+                                yield StreamChunk(
+                                    status=StreamStatus.CONTENT,
+                                    content=None,
+                                    node_id=stream_controller.node_id if stream_controller else None,
+                                    conversation_id=stream_controller.conversation_id if stream_controller else None,
+                                    error=None,
+                                    tokens_used=0,
+                                    event_type="tool_call",
+                                    tool_call={"tool_calls": tool_calls},
+                                    tool_calls=tool_calls,
+                                )
                         continue
 
                     if event_type == "response.output_item.done":
@@ -512,22 +570,21 @@ class OpenAICompatibleProvider(BaseProvider):
                 raise
 
         if function_calls:
-            tool_calls = [
-                call for _, call in sorted(function_calls.items(), key=lambda item: item[0])
-                if call.get("function", {}).get("name")
-            ]
+            tool_calls = self._finalize_response_function_calls(function_calls)
             if tool_calls:
-                yield StreamChunk(
-                    status=StreamStatus.CONTENT,
-                    content=None,
-                    node_id=stream_controller.node_id if stream_controller else None,
-                    conversation_id=stream_controller.conversation_id if stream_controller else None,
-                    error=None,
-                    tokens_used=0,
-                    event_type="tool_call",
-                    tool_call={"tool_calls": tool_calls},
-                    tool_calls=tool_calls,
-                )
+                serialized_tool_calls = json.dumps(tool_calls, ensure_ascii=False, sort_keys=True)
+                if serialized_tool_calls != last_emitted_tool_calls:
+                    yield StreamChunk(
+                        status=StreamStatus.CONTENT,
+                        content=None,
+                        node_id=stream_controller.node_id if stream_controller else None,
+                        conversation_id=stream_controller.conversation_id if stream_controller else None,
+                        error=None,
+                        tokens_used=0,
+                        event_type="tool_call",
+                        tool_call={"tool_calls": tool_calls},
+                        tool_calls=tool_calls,
+                    )
 
         if usage_info is None:
             usage_info = estimated_usage(total_tokens)
@@ -730,7 +787,13 @@ class OpenAICompatibleProvider(BaseProvider):
 
     def _finalize_openai_tool_calls(self, accumulator: Dict[int, Dict[str, Any]]) -> List[Dict[str, Any]]:
         return [
-            call for _, call in sorted(accumulator.items(), key=lambda item: item[0])
+            deepcopy(call) for _, call in sorted(accumulator.items(), key=lambda item: item[0])
+            if call.get("function", {}).get("name")
+        ]
+
+    def _finalize_response_function_calls(self, function_calls: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return [
+            deepcopy(call) for _, call in sorted(function_calls.items(), key=lambda item: item[0])
             if call.get("function", {}).get("name")
         ]
 

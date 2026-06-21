@@ -283,7 +283,11 @@ def test_openai_stream_emits_tool_call_start_before_final_tool_call():
             chunks.append(dict(chunk))
 
         event_types = [chunk.get("event_type") for chunk in chunks if chunk.get("event_type")]
-        assert event_types == ["tool_call_start", "tool_call"]
+        assert event_types == ["tool_call_start", "tool_call", "tool_call"]
+        tool_call_chunks = [chunk for chunk in chunks if chunk.get("event_type") == "tool_call"]
+        assert tool_call_chunks[0]["tool_calls"][0]["function"]["name"] == "web_search"
+        assert tool_call_chunks[0]["tool_calls"][0]["function"]["arguments"] == ""
+        assert tool_call_chunks[-1]["tool_calls"][0]["function"]["arguments"] == "{\"query\":\"ChatTree\"}"
         tool_call_index = next(i for i, chunk in enumerate(chunks) if chunk.get("event_type") == "tool_call")
         start_index = next(i for i, chunk in enumerate(chunks) if chunk.get("event_type") == "tool_call_start")
         assert start_index < tool_call_index
@@ -331,7 +335,11 @@ def test_openai_responses_stream_emits_tool_call_start_before_final_tool_call():
             chunks.append(dict(chunk))
 
         event_types = [chunk.get("event_type") for chunk in chunks if chunk.get("event_type")]
-        assert event_types == ["tool_call_start", "tool_call"]
+        assert event_types == ["tool_call_start", "tool_call", "tool_call"]
+        tool_call_chunks = [chunk for chunk in chunks if chunk.get("event_type") == "tool_call"]
+        assert tool_call_chunks[0]["tool_calls"][0]["function"]["name"] == "web_search"
+        assert tool_call_chunks[0]["tool_calls"][0]["function"]["arguments"] == ""
+        assert tool_call_chunks[-1]["tool_calls"][0]["function"]["arguments"] == "{\"query\":\"ChatTree\"}"
 
     asyncio.run(run_case())
 

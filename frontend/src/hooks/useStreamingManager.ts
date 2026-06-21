@@ -37,6 +37,7 @@ export function useStreamingManager(conversationId: string | null) {
   const currentNodeId = state?.nodeId ?? null;
   const streamDuration = state?.duration ?? 0;
   const streamStatus = state?.status ?? 'idle';
+  const streamErrorMessage = state?.errorMessage ?? null;
   const pendingUserMessage = state?.pendingUserMessage ?? null;
 
   const startStreaming = useCallback(
@@ -74,6 +75,7 @@ export function useStreamingManager(conversationId: string | null) {
     currentNodeId,
     streamDuration,
     streamStatus,
+    streamErrorMessage,
     pendingUserMessage,
     startStreaming,
     abortStreaming,

@@ -543,9 +543,16 @@ class ChatManager:
 
         except Exception as e:
             generation_status = "error"
-            error_message = str(e)
-            logger.error(f"流式生成出错: {e}")
-            raise
+            error_message = str(e) or e.__class__.__name__
+            logger.exception(f"流式生成出错: {error_message}")
+            yield StreamChunk(
+                status=StreamStatus.ERROR,
+                content="",
+                node_id=new_node["id"],
+                conversation_id=conversation_id,
+                error=error_message,
+                tokens_used=tokens_used,
+            )
         finally:
             # 计算用时
             duration_ms = int((time() - start_time) * 1000)

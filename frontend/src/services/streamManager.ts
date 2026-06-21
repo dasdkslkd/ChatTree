@@ -11,6 +11,7 @@ interface StreamState {
   nodeId: string | null;
   tokensUsed: number;
   duration: number;
+  errorMessage: string | null;
   abortController: AbortController | null;
   // 乐观渲染的用户消息（按对话隔离，并发时互不干扰）
   pendingUserMessage: string | null;
@@ -41,7 +42,9 @@ interface DisplayPump {
 }
 
 function mergeToolCalls(existing: any[], incoming: any[]): any[] {
-  const merged = [...existing];
+  const merged = incoming.length > 0
+    ? existing.filter((toolCall) => !toolCall?.pending)
+    : [...existing];
   for (const toolCall of incoming) {
     const key = toolCall?.id ?? toolCall?.index;
     const idx = key == null ? -1 : merged.findIndex((item) => (item?.id ?? item?.index) === key);
@@ -61,6 +64,49 @@ function getChunkToolCalls(chunk: any): any[] {
   return [];
 }
 
+function createPendingToolCall() {
+  return {
+    id: '__pending_tool_call__',
+    type: 'function',
+    pending: true,
+    function: {
+      name: '准备工具调用',
+      arguments: '',
+    },
+  };
+}
+
+function appendToolCallStart(toolInteractions: any[], content: string, reasoning: string): any[] {
+  const next = [...toolInteractions];
+  const last = next[next.length - 1];
+  if (
+    last &&
+    Array.isArray(last?.assistant?.tool_calls) &&
+    last.assistant.tool_calls.some((toolCall: any) => toolCall?.pending) &&
+    (!Array.isArray(last.tools) || last.tools.length === 0)
+  ) {
+    next[next.length - 1] = {
+      ...last,
+      assistant: {
+        ...last.assistant,
+        content: content || last.assistant?.content || '',
+      },
+      reasoning: reasoning || last.reasoning || null,
+    };
+    return next;
+  }
+  next.push({
+    assistant: {
+      role: 'assistant',
+      content,
+      tool_calls: [createPendingToolCall()],
+    },
+    tools: [],
+    reasoning: reasoning || null,
+  });
+  return next;
+}
+
 function appendToolCalls(toolInteractions: any[], toolCalls: any[], content: string, reasoning: string): any[] {
   if (toolCalls.length === 0) return toolInteractions;
   const next = [...toolInteractions];
@@ -70,7 +116,7 @@ function appendToolCalls(toolInteractions: any[], toolCalls: any[], content: str
       ...last,
       assistant: {
         ...last.assistant,
-        content,
+        content: content || last.assistant?.content || '',
         tool_calls: mergeToolCalls(last.assistant.tool_calls, toolCalls),
       },
       reasoning: reasoning || last.reasoning || null,
@@ -364,6 +410,7 @@ export class StreamManager {
       nodeId: null,
       tokensUsed: 0,
       duration: 0,
+      errorMessage: null,
       abortController,
       pendingUserMessage,
     };
@@ -440,7 +487,16 @@ export class StreamManager {
           this.flushDisplayPump(conversationId, abortController, true);
           const flushedState = this.streams.get(conversationId);
           if (!flushedState) { brokeEarly = true; break; }
-          state = { ...flushedState, reasoningActive: false };
+          state = {
+            ...flushedState,
+            content: '',
+            reasoning: '',
+            reasoningActive: false,
+            toolInteractions: appendToolCallStart(flushedState.toolInteractions, currentContent, currentReasoning),
+          };
+          currentContent = '';
+          currentReasoning = '';
+          this.clearDisplayPump(conversationId);
         } else if (chunk.event_type === 'tool_call') {
           const toolCalls = getChunkToolCalls(chunk);
           if (toolCalls.length > 0) {
@@ -496,7 +552,16 @@ export class StreamManager {
           state = { ...state, duration: Date.now() - startTime, status: 'stopped' as const, reasoningActive: false };
         } else if (chunk.status === 'error') {
           finishStatus = 'error';
-          state = { ...state, duration: Date.now() - startTime, status: 'error' as const, reasoningActive: false };
+          const chunkError = typeof chunk.error === 'string' && chunk.error.trim()
+            ? chunk.error
+            : state.errorMessage;
+          state = {
+            ...state,
+            duration: Date.now() - startTime,
+            status: 'error' as const,
+            errorMessage: chunkError,
+            reasoningActive: false,
+          };
         }
 
         this.streams.set(conversationId, state);
@@ -511,6 +576,7 @@ export class StreamManager {
       } else {
         finishStatus = 'error';
       }
+      const errorMessage = err instanceof Error ? err.message : String(err);
       // 仅当本流仍是活跃流时才写回状态。被新流取代时，map 里已是新流的
       // state，不能覆盖（否则把进行中的新流标记为 stopped/error）。
       const finalState = this.streams.get(conversationId);
@@ -521,6 +587,7 @@ export class StreamManager {
       ) {
         this.streams.set(conversationId, {
           ...finalState, status: finishStatus === 'error' ? 'error' : 'stopped',
+          errorMessage: finishStatus === 'error' ? errorMessage : finalState.errorMessage,
           duration: Date.now() - startTime,
           reasoningActive: false,
         });

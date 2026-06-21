@@ -32,6 +32,7 @@ import { useModelStore } from '../store/modelStore';
 import { useNavigationStore } from '../store/navigationStore';
 import { useStreamingManager } from '../hooks/useStreamingManager';
 import { streamManager } from '../services/streamManager';
+import { getGenerationStatusText, getStreamStatusText as getStreamStatusLabel } from '../utils/generationStatus';
 import { extractToolResultEnvelope, formatToolOutput, isToolResultError, type ToolResultEnvelope } from '../utils/toolDisplay';
 import { ChatInput } from '../components/ChatInput';
 import TreeView from './TreeView';
@@ -646,7 +647,7 @@ export default function ChatPage() {
 
   const {
     streamedContent, streamedReasoning, startStreaming, isStreaming, abortStreaming,
-    streamedReasoningActive, streamedToolInteractions, pendingApprovals, streamDuration, streamStatus, pendingUserMessage, currentNodeId: streamNodeId,
+    streamedReasoningActive, streamedToolInteractions, pendingApprovals, streamDuration, streamStatus, streamErrorMessage, pendingUserMessage, currentNodeId: streamNodeId,
   } = useStreamingManager(currentConversation?.id ?? null);
 
   // 结构性去重：一旦本轮流式产生的节点已出现在真实消息里（refreshMessages 注入），
@@ -992,11 +993,7 @@ export default function ChatPage() {
   };
 
   const getStreamStatusText = (): string | null => {
-    switch (streamStatus) {
-      case 'error': return '生成出错';
-      case 'stopped': return '已停止';
-      default: return null;
-    }
+    return getStreamStatusLabel(streamStatus, streamErrorMessage);
   };
 
   // Parse '''USER MENTIONED FILES: ...''' prefix from message content
@@ -1104,7 +1101,7 @@ export default function ChatPage() {
                 <span className={cn(
                   m.generation_info.status === 'error' ? 'text-destructive' : 'text-amber-500'
                 )}>
-                  {m.generation_info.status === 'stopped' ? '已停止' : '生成出错'}
+                  {getGenerationStatusText(m.generation_info)}
                 </span>
               )}
             </div>
@@ -1389,7 +1386,7 @@ export default function ChatPage() {
                         );
                       })}
                       <ToolApprovalGroup approvals={pendingApprovalList} />
-                      {streamedTimeline.length === 0 && pendingApprovalList.length === 0 && (
+                      {streamedTimeline.length === 0 && pendingApprovalList.length === 0 && streamStatus === 'streaming' && (
                         <div
                           className="max-w-full w-fit px-3 py-2 rounded-2xl rounded-bl-sm leading-relaxed prose prose-sm max-w-none [&_p]:m-0"
                           style={{
