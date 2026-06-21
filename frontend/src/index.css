@@ -265,3 +265,409 @@
 .light .scrollbar-visible {
   scrollbar-color: rgba(60,40,30,0.10) transparent;
 }
+
+/* App sidebar — neutral-first navigation with warm accent emphasis. */
+.app-sidebar {
+  flex: 0 0 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--icon-accent) 6%, var(--bg-surface) 94%),
+      color-mix(in srgb, var(--icon-accent) 3%, var(--bg-surface) 97%)
+    );
+  border-right: 0.5px solid color-mix(in srgb, var(--icon-accent) 10%, var(--border) 90%);
+  transition: width var(--transition-relaxed) var(--ease-enter);
+}
+
+.app-sidebar-collapsed {
+  align-items: center;
+}
+
+.app-sidebar-topbar {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 8px;
+  color: var(--fg-tertiary);
+}
+
+.app-sidebar-collapsed .app-sidebar-topbar {
+  justify-content: center;
+  width: 100%;
+  padding: 7px 0;
+}
+
+.app-new-chat-action {
+  flex: 1;
+  min-width: 0;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--icon-accent);
+  color: var(--primary-foreground);
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: 0;
+  cursor: pointer;
+  box-shadow: var(--glow-accent), var(--highlight-top);
+  transition: background-color var(--transition-basic), transform var(--transition-basic), box-shadow var(--transition-basic);
+}
+
+.app-new-chat-action:hover {
+  background: var(--accent-hover);
+}
+
+.app-new-chat-action.is-active {
+  background: var(--accent-active);
+}
+
+.app-panel-toggle {
+  height: 34px;
+  width: 34px;
+  padding: 0;
+  flex: 0 0 auto;
+  color: var(--fg-secondary);
+  border-radius: 8px;
+}
+
+.app-panel-toggle:hover {
+  color: var(--fg-85);
+  background: color-mix(in srgb, var(--accent-soft) 50%, transparent);
+}
+
+.app-panel-toggle svg {
+  stroke-width: 2.35;
+}
+
+.app-sidebar-action {
+  width: 100%;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--fg-secondary);
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--transition-basic), color var(--transition-basic);
+}
+
+.app-sidebar-action:hover {
+  background: var(--bg-button-tertiary-hover);
+  color: var(--fg-85);
+}
+
+.app-sidebar-action.is-active {
+  background: color-mix(in srgb, var(--accent-soft) 72%, transparent);
+  color: var(--icon-accent);
+}
+
+.app-sidebar-collapsed .app-sidebar-action {
+  width: 38px;
+  justify-content: center;
+  padding: 0;
+}
+
+.app-sidebar-project-heading {
+  padding: 8px 10px 6px;
+  color: var(--fg-tertiary);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.app-sidebar-search {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 8px 10px;
+  padding: 0 8px;
+  border: 0.5px solid color-mix(in srgb, var(--icon-accent) 8%, var(--border-light) 92%);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-input) 94%, var(--accent-soft) 6%);
+  color: var(--fg-tertiary);
+}
+
+.app-sidebar-projects {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 8px 10px;
+}
+
+.app-project-group {
+  margin-bottom: 4px;
+}
+
+.app-project-row {
+  position: relative;
+  width: 100%;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--fg-secondary);
+  cursor: pointer;
+  transition: background-color var(--transition-basic), color var(--transition-basic);
+}
+
+.app-project-row:hover {
+  background: color-mix(in srgb, var(--bg-elevated) 72%, transparent);
+  color: var(--fg-85);
+}
+
+.app-project-row.is-active {
+  background: color-mix(in srgb, var(--bg-elevated) 78%, var(--accent-soft) 22%);
+  color: var(--fg-85);
+}
+
+.app-project-row.is-active::before,
+.app-session-row.is-active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--icon-accent);
+}
+
+.app-project-row svg {
+  color: var(--fg-tertiary);
+}
+
+.app-project-row.is-active svg {
+  color: var(--icon-accent);
+}
+
+.app-project-name {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.app-project-count {
+  min-width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg-button-tertiary-hover) 85%, transparent);
+  color: var(--fg-tertiary);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.app-project-row.is-active .app-project-count {
+  background: color-mix(in srgb, var(--bg-input) 82%, var(--accent-soft) 18%);
+  color: var(--icon-accent);
+}
+
+.app-session-list {
+  padding: 2px 0 5px 28px;
+}
+
+.app-session-row {
+  position: relative;
+  min-height: 30px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px 0 9px;
+  border-radius: 7px;
+  color: var(--fg-secondary);
+  cursor: pointer;
+  transition: background-color var(--transition-basic), color var(--transition-basic);
+}
+
+.app-session-row:hover {
+  background: color-mix(in srgb, var(--bg-elevated) 66%, transparent);
+  color: var(--fg-85);
+}
+
+.app-session-row.is-active {
+  background: color-mix(in srgb, var(--bg-elevated) 84%, var(--accent-soft) 16%);
+  color: var(--fg-85);
+}
+
+.app-session-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.app-session-time {
+  color: var(--fg-tertiary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.app-session-more {
+  height: 24px;
+  width: 24px;
+  padding: 0;
+  transition: opacity var(--transition-basic), background-color var(--transition-basic);
+}
+
+.app-sidebar-inline-action {
+  width: 100%;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--fg-tertiary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.app-sidebar-inline-action:hover {
+  background: var(--bg-button-tertiary-hover);
+  color: var(--fg-secondary);
+}
+
+.app-sidebar-footer {
+  flex: 0 0 auto;
+  padding: 8px;
+  border-top: 0.5px solid var(--border-light);
+}
+
+/* New conversation composer — desktop creation-page layout using ChatTree tokens. */
+.new-chat-stage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 32px 120px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--bg-surface) 92%, transparent), var(--bg-surface)),
+    var(--bg-surface);
+}
+
+.new-chat-center {
+  width: min(860px, 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 28px;
+}
+
+.new-chat-title {
+  margin: 0;
+  max-width: 100%;
+  text-align: center;
+  color: var(--fg-85);
+  font-size: 34px;
+  line-height: 1.2;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+@media (max-width: 640px) {
+  .new-chat-title {
+    font-size: 26px;
+  }
+}
+
+.new-chat-composer-wrap {
+  width: min(880px, 100%);
+}
+
+.new-chat-composer-shell {
+  background: color-mix(in srgb, var(--bg-input) 86%, var(--bg-elevated) 14%) !important;
+  border-color: var(--border-light) !important;
+}
+
+.new-chat-composer-toolbar {
+  min-height: 52px;
+  padding: 8px 10px !important;
+  background: color-mix(in srgb, var(--bg-elevated) 72%, transparent) !important;
+}
+
+.new-chat-setting-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 190px;
+  height: 30px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent-soft) 70%, transparent);
+  color: var(--icon-accent);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color var(--transition-basic), color var(--transition-basic);
+}
+
+.new-chat-setting-chip:hover {
+  background: color-mix(in srgb, var(--accent-soft) 88%, var(--fg-85) 4%);
+  color: var(--accent-hover);
+}
+
+.new-chat-project-menu {
+  width: 320px;
+  padding: 0;
+  border-color: var(--border);
+  background: var(--popover);
+  color: var(--popover-foreground);
+}
+
+.new-chat-project-option {
+  width: 100%;
+  min-height: 46px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg-secondary);
+  cursor: pointer;
+  transition: background-color var(--transition-basic), color var(--transition-basic);
+}
+
+.new-chat-project-option:hover {
+  background: var(--bg-button-tertiary-hover);
+  color: var(--fg-85);
+}
+
+.new-chat-project-option svg:last-child {
+  color: var(--icon-accent);
+}

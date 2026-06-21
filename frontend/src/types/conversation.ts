@@ -1,3 +1,10 @@
+export interface WorkspaceContext {
+  cwd: string;
+  workspace_roots: string[];
+  protected_paths?: string[];
+  label?: string;
+}
+
 export interface Conversation {
   id: string;
   title: string;
@@ -9,6 +16,7 @@ export interface Conversation {
   reasoning_effort?: string | null;
   thinking_enabled?: boolean | null;
   current_node_id: string;
+  workspace?: WorkspaceContext;
   total_tokens: {
     prompt_tokens: number;
     completion_tokens: number;
@@ -19,4 +27,5 @@ export interface Conversation {
 export interface ConversationCreateRequest {
   title?: string;
   prompt_id?: string;
+  workspace?: WorkspaceContext;
 }

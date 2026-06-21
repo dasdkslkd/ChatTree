@@ -90,6 +90,7 @@ class ConversationMetadata(TypedDict, total=False):
     reasoning_effort: Optional[str]   # 当前对话的推理强度档位（None=不发送）
     thinking_enabled: Optional[bool]  # 当前对话的思考模式开关（None=不发送）
     schema_version: Optional[int] # 持久化 schema 版本
+    workspace: Dict[str, Any] # 对话绑定的工作区快照
 
 class ConversationData(TypedDict):
     """对话数据类型"""

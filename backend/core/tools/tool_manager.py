@@ -39,6 +39,15 @@ BUILTIN_LOCAL_TOOL_NAMES = (
     | BUILTIN_WEB_TOOLS
     | set().union(*BUILTIN_CODE_TOOL_GROUPS.values())
 )
+BUILTIN_CODE_TOOL_CLASSES = {
+    "list_files": ListFilesTool,
+    "read_file": ReadFileTool,
+    "search_files": SearchFilesTool,
+    "edit_file": EditFileTool,
+    "run_command": RunCommandTool,
+    "write_file": WriteFileTool,
+    "apply_patch": ApplyPatchTool,
+}
 BUILTIN_EXPOSURE_PROFILES = {
     "minimal": BUILTIN_UTILITY_TOOLS | BUILTIN_WEB_TOOLS,
     "coding": (
@@ -80,6 +89,7 @@ class ToolManager:
             disabled=tools_config.get("disabled_tools"),
         )
         self._model_visible_builtin_tools = self._resolve_model_visible_builtin_tools(tools_config)
+        self._code_tools_config: Dict[str, Any] = {}
         if self._enabled:
             self._register_tools(config)
             self.register(ReadToolResultTool(self.tool_result_store, tools_config))
@@ -152,6 +162,7 @@ class ToolManager:
 
     def _register_code_tools(self, code_config: Dict[str, Any]):
         """Register built-in code browsing and modification tools."""
+        self._code_tools_config = dict(code_config)
         code_tool_config = CodeToolConfig.from_dict(code_config)
         for tool in (
             ListFilesTool(code_tool_config),
@@ -245,7 +256,12 @@ class ToolManager:
                 tools.append(info["openai_schema"])
         return tools
 
-    async def execute_tool(self, name: str, arguments: Dict[str, Any]) -> str:
+    async def execute_tool(
+        self,
+        name: str,
+        arguments: Dict[str, Any],
+        workspace: Optional[Dict[str, Any]] = None,
+    ) -> str:
         """Execute a tool by exposed name."""
         if not self._filter.is_allowed(name):
             return json.dumps({"error": f"Tool '{name}' is disabled"}, ensure_ascii=False)
@@ -257,7 +273,7 @@ class ToolManager:
                 result = await self._connection_manager.call_tool(name, arguments)
                 return result
 
-            tool = self._tools.get(name)
+            tool = self._tool_for_execution(name, workspace)
             if not tool:
                 logger.error(f"Tool not found: {name}")
                 return json.dumps({"error": f"Tool '{name}' not found"}, ensure_ascii=False)
@@ -270,6 +286,12 @@ class ToolManager:
             error = _tool_exception_error(name, e)
             logger.error(f"Tool {name} execution failed: {error['type']}: {error['message']}")
             return json.dumps({"error": error}, ensure_ascii=False)
+
+    def _tool_for_execution(self, name: str, workspace: Optional[Dict[str, Any]]) -> Optional[BaseTool]:
+        if workspace and name in BUILTIN_CODE_TOOL_CLASSES:
+            config = CodeToolConfig.for_workspace(self._code_tools_config, workspace)
+            return BUILTIN_CODE_TOOL_CLASSES[name](config)
+        return self._tools.get(name)
 
     def describe_inventory(self) -> Dict[str, Any]:
         mcp_tools = self._connection_manager.list_all_tools()

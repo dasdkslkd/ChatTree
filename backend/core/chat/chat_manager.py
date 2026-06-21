@@ -15,6 +15,7 @@ from ..model.model_manager import ModelManager
 from ..model.usage import add_usage, estimated_usage, usage_total
 from ..utils.logger import setup_logger
 from ..config.config import cfg
+from ..workspace import build_default_workspace, normalize_workspace
 
 logger = setup_logger('ChatManager')
 
@@ -53,12 +54,21 @@ class ChatManager:
             return None
         return Conversation.from_dict(data)
     
-    def create_conversation(self, title: str = '', prompt_id: Optional[str] = None) -> Conversation:
+    def create_conversation(
+        self,
+        title: str = '',
+        prompt_id: Optional[str] = None,
+        workspace: Optional[Dict[str, Any]] = None,
+    ) -> Conversation:
         """
         创建新对话（不实例化模型，只保存配置ID）
         """
         # 创建对话，只保存model_id字符串引用
-        conversation = Conversation(title=title)
+        workspace_context = normalize_workspace(
+            workspace,
+            build_default_workspace(cfg.data if isinstance(cfg.data, dict) else None),
+        )
+        conversation = Conversation(title=title, workspace=workspace_context)
         
         # 初始化系统消息
         system_prompt = None if not prompt_id else self.prompts.load(prompt_id)
@@ -83,9 +93,13 @@ class ChatManager:
         if self.current_conversation:
             self.storage.save(self.current_conversation.to_dict())
     
-    def list_conversations(self) -> List[Dict[str, str]]:
+    def list_conversations(self) -> List[Dict[str, Any]]:
         """列出所有对话"""
-        return self.storage.list()
+        default_workspace = build_default_workspace(cfg.data if isinstance(cfg.data, dict) else None)
+        conversations = self.storage.list()
+        for item in conversations:
+            item["workspace"] = normalize_workspace(item.get("workspace"), default_workspace)
+        return conversations
     
     def delete_conversation(self, conversation_id: str):
         """删除对话"""
@@ -320,6 +334,11 @@ class ChatManager:
         # 准备消息链（使用锁内加载的最新 conversation）
         messages = self._prepare_messages_for_api_with_conversation(conversation)
 
+        workspace_context = normalize_workspace(
+            preview.metadata.get("workspace"),
+            build_default_workspace(cfg.data if isinstance(cfg.data, dict) else None),
+        )
+
         tools = self.tool_manager.get_openai_tools() if self.tool_manager else []
         tools = tools or None
         max_tool_rounds = int(cfg.data.get("tools", {}).get("max_rounds", 5)) if isinstance(cfg.data, dict) else 5
@@ -458,6 +477,7 @@ class ChatManager:
                         node_id=new_node["id"],
                         conversation_id=conversation_id,
                         emit_event=emit_tool_event,
+                        workspace=workspace_context,
                     )
                 )
                 event_get_task = asyncio.create_task(approval_events.get())
@@ -998,6 +1018,7 @@ class ChatManager:
         node_id: str,
         conversation_id: Optional[str] = None,
         emit_event: Optional[Callable[[Dict[str, Any]], Any]] = None,
+        workspace: Optional[Dict[str, Any]] = None,
     ) -> List[Message]:
         results: List[Message] = []
         for tool_call in tool_calls:
@@ -1006,12 +1027,23 @@ class ChatManager:
             arguments = self._parse_tool_arguments(fn.get("arguments"))
             tool_orchestrator = getattr(self, "tool_orchestrator", None)
             if tool_orchestrator:
-                message = await tool_orchestrator.execute_tool_call(
-                    tool_call,
-                    conversation_id or "",
-                    node_id,
-                    emit_event=emit_event,
-                )
+                try:
+                    message = await tool_orchestrator.execute_tool_call(
+                        tool_call,
+                        conversation_id or "",
+                        node_id,
+                        emit_event=emit_event,
+                        workspace=workspace,
+                    )
+                except TypeError as exc:
+                    if "unexpected keyword argument 'workspace'" not in str(exc):
+                        raise
+                    message = await tool_orchestrator.execute_tool_call(
+                        tool_call,
+                        conversation_id or "",
+                        node_id,
+                        emit_event=emit_event,
+                    )
                 results.append(
                     self._model_visible_tool_message(
                         message,
@@ -1023,9 +1055,15 @@ class ChatManager:
                 )
                 continue
 
-            raw_result = await self.tool_manager.execute_tool(name, arguments) if self.tool_manager else json.dumps(
-                {"error": "Tool manager is not configured"}, ensure_ascii=False
-            )
+            if not self.tool_manager:
+                raw_result = json.dumps({"error": "Tool manager is not configured"}, ensure_ascii=False)
+            else:
+                try:
+                    raw_result = await self.tool_manager.execute_tool(name, arguments, workspace=workspace)
+                except TypeError as exc:
+                    if "unexpected keyword argument 'workspace'" not in str(exc):
+                        raise
+                    raw_result = await self.tool_manager.execute_tool(name, arguments)
             results.append(
                 self._model_visible_tool_message(
                     Message({

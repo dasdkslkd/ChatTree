@@ -3,9 +3,11 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import logging
+from pathlib import Path
 
 from backend.api.dependencies import get_chat_manager
 from backend.core.chat.chat_manager import ChatManager
+from backend.core.workspace import normalize_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +16,11 @@ router = APIRouter()
 class ConversationCreateRequest(BaseModel):
     title: str = ""
     prompt_id: Optional[str] = None
+    workspace: Optional[Dict[str, Any]] = None
+
+class ProjectFolderRequest(BaseModel):
+    path: str
+    label: Optional[str] = None
 
 class ConversationUpdateRequest(BaseModel):
     title: str
@@ -30,9 +37,73 @@ class ConversationResponse(BaseModel):
     created_at: int
     updated_at: int
     model: str
+    model_id: str = ""
+    provider_id: str = ""
+    current_node_id: Optional[str] = None
+    workspace: Optional[Dict[str, Any]] = None
     total_tokens: Dict[str, int]
 
-@router.post("/conversations", response_model=Dict[str, str])
+def _conversation_response(conversation) -> Dict[str, Any]:
+    return {
+        "id": conversation.metadata["id"],
+        "title": conversation.metadata.get("title", ""),
+        "created_at": conversation.metadata.get("created_at", 0),
+        "updated_at": conversation.metadata.get("updated_at", 0),
+        "model": conversation.metadata.get("model_id", "") or "",
+        "model_id": conversation.metadata.get("model_id", "") or "",
+        "provider_id": conversation.metadata.get("provider_id", "") or "",
+        "reasoning_effort": conversation.metadata.get("reasoning_effort"),
+        "thinking_enabled": conversation.metadata.get("thinking_enabled"),
+        "current_node_id": conversation.current_node_id,
+        "workspace": conversation.metadata.get("workspace"),
+        "total_tokens": conversation.metadata.get("total_tokens", {}),
+    }
+
+
+def _workspace_from_project_path(path_value: str, label: Optional[str], create: bool) -> Dict[str, Any]:
+    path_text = (path_value or "").strip()
+    if not path_text:
+        raise HTTPException(status_code=400, detail="Project path is required")
+
+    target = Path(path_text).expanduser()
+    try:
+        resolved = target.resolve(strict=False)
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid project path: {exc}") from exc
+
+    if create:
+        if resolved.exists():
+            raise HTTPException(status_code=400, detail="Project folder already exists")
+        parent = resolved.parent
+        if not parent.exists() or not parent.is_dir():
+            raise HTTPException(status_code=400, detail="Parent folder does not exist")
+        try:
+            resolved.mkdir()
+        except OSError as exc:
+            raise HTTPException(status_code=400, detail=f"Failed to create project folder: {exc}") from exc
+    elif not resolved.exists() or not resolved.is_dir():
+        raise HTTPException(status_code=400, detail="Project folder does not exist")
+
+    return normalize_workspace({
+        "cwd": str(resolved),
+        "workspace_roots": [str(resolved)],
+        "label": label,
+    })
+
+
+@router.post("/projects/folders", response_model=Dict[str, Any])
+async def create_project_folder(request: ProjectFolderRequest):
+    """新建项目文件夹并返回对话 workspace 快照。"""
+    return _workspace_from_project_path(request.path, request.label, create=True)
+
+
+@router.post("/projects/folders/resolve", response_model=Dict[str, Any])
+async def resolve_project_folder(request: ProjectFolderRequest):
+    """使用现有项目文件夹并返回对话 workspace 快照。"""
+    return _workspace_from_project_path(request.path, request.label, create=False)
+
+
+@router.post("/conversations", response_model=Dict[str, Any])
 async def create_conversation(
     request: ConversationCreateRequest,
     chat_manager: ChatManager = Depends(get_chat_manager)
@@ -40,13 +111,9 @@ async def create_conversation(
     """创建新对话"""
     try:
         logger.info(f"收到创建对话请求: {request}")
-        conversation = chat_manager.create_conversation(request.title, request.prompt_id)
+        conversation = chat_manager.create_conversation(request.title, request.prompt_id, workspace=request.workspace)
         logger.info(f"对话创建成功并已保存: {conversation.metadata['id']}")
-        return {
-            "id": conversation.metadata["id"],
-            "title": conversation.metadata["title"],
-            "message": "对话创建成功"
-        }
+        return _conversation_response(conversation)
     except Exception as e:
         logger.error(f"创建对话失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"创建对话失败: {str(e)}")

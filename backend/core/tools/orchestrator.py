@@ -89,6 +89,7 @@ class ToolOrchestrator:
         conversation_id: str,
         node_id: str,
         emit_event: Optional[Callable[[Dict[str, Any]], Any]] = None,
+        workspace: Optional[Dict[str, Any]] = None,
     ) -> Message:
         name = _tool_name(tool_call)
         arguments = normalize_tool_arguments(
@@ -232,9 +233,14 @@ class ToolOrchestrator:
                     ),
                 )
 
+        sandbox = self._sandbox_for_workspace(workspace)
         try:
-            for target in _filesystem_write_targets(name, arguments):
-                self.logical_sandbox.check_filesystem_write(target)
+            for target in _filesystem_write_targets(
+                name,
+                arguments,
+                include_builtin_relative=workspace is not None,
+            ):
+                sandbox.check_filesystem_write(_resolve_workspace_target(target, workspace))
         except SandboxViolation as exc:
             return _tool_message(
                 name=name,
@@ -246,8 +252,19 @@ class ToolOrchestrator:
                 ),
             )
 
-        content = await self.tool_manager.execute_tool(name, arguments)
+        if workspace is None:
+            content = await self.tool_manager.execute_tool(name, arguments)
+        else:
+            content = await self.tool_manager.execute_tool(name, arguments, workspace=workspace)
         return _tool_message(name=name, tool_call_id=tool_call_id, content=content)
+
+    def _sandbox_for_workspace(self, workspace: Optional[Dict[str, Any]]) -> LogicalSandbox:
+        if not workspace:
+            return self.logical_sandbox
+        return LogicalSandbox(
+            workspace_roots=workspace.get("workspace_roots") or [workspace.get("cwd")],
+            protected_paths=workspace.get("protected_paths") or [],
+        )
 
 
 def _tool_name(tool_call: Dict[str, Any]) -> str:
@@ -274,6 +291,14 @@ def _arguments_preview(arguments: Dict[str, Any]) -> str:
     return json.dumps(arguments, ensure_ascii=False, default=str)[:1000]
 
 
+def _resolve_workspace_target(target: str | Path, workspace: Optional[Dict[str, Any]]) -> str | Path:
+    path = Path(str(target)).expanduser()
+    if path.is_absolute() or not workspace:
+        return path
+    cwd = workspace.get("cwd") or "."
+    return Path(str(cwd)).expanduser() / path
+
+
 async def _maybe_await(result: Any) -> None:
     if isawaitable(result):
         await result
@@ -284,11 +309,16 @@ def _is_write_like_tool(tool_name: str) -> bool:
     return any(token in lowered for token in MUTATING_TOOL_NAME_TOKENS)
 
 
-def _filesystem_write_targets(tool_name: str, arguments: Dict[str, Any]) -> list[Any]:
+def _filesystem_write_targets(
+    tool_name: str,
+    arguments: Dict[str, Any],
+    *,
+    include_builtin_relative: bool = False,
+) -> list[Any]:
     if not _is_write_like_tool(tool_name):
         return []
 
-    skip_relative_paths = tool_name in BUILTIN_CODE_WRITE_TOOLS
+    skip_relative_paths = tool_name in BUILTIN_CODE_WRITE_TOOLS and not include_builtin_relative
     targets: list[Any] = []
     for key, value in arguments.items():
         if key.lower() not in PATH_ARGUMENT_KEYS:

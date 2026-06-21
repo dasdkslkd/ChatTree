@@ -11,7 +11,7 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog'
 import { SendHorizontal, Bot, StickyNote, X, Settings, Square, Plus, FileText } from 'lucide-react'
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, type ReactNode } from 'react'
 import { useModelStore } from '../store/modelStore'
 import { usePromptStore } from '../store/promtStore'
 import { useNavigationStore } from '../store/navigationStore'
@@ -29,9 +29,24 @@ interface Props {
   attachedFiles?: string[];
   onFilesPicked?: (files: File[]) => void;
   onRemoveFile?: (filename: string) => void;
+  settingsSlot?: ReactNode;
+  variant?: 'dock' | 'composer';
 }
 
-export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationId, editValue, onEditValueConsumed, attachedFiles = [], onFilesPicked, onRemoveFile }: Props) {
+export function ChatInput({
+  onSend,
+  onStop,
+  isStreaming,
+  disabled,
+  conversationId,
+  editValue,
+  onEditValueConsumed,
+  attachedFiles = [],
+  onFilesPicked,
+  onRemoveFile,
+  settingsSlot,
+  variant = 'dock',
+}: Props) {
   const { openSettings } = useNavigationStore();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -240,13 +255,16 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationI
   return (
     <div className="w-full">
       <div
-        className="flex flex-col overflow-hidden transition-all"
+        className={cn(
+          'flex flex-col overflow-hidden transition-all',
+          variant === 'composer' && 'new-chat-composer-shell',
+        )}
         style={{
           border: '0.5px solid var(--border)',
           background: 'color-mix(in srgb, var(--bg-input) 90%, transparent)',
           boxShadow: 'var(--shadow-xl), var(--highlight-top)',
           backdropFilter: 'blur(12px)',
-          borderRadius: '16px',
+          borderRadius: variant === 'composer' ? '20px' : '16px',
         }}
         onFocus={(e) => {
           const el = e.currentTarget;
@@ -286,7 +304,10 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationI
         )}
         <textarea
           ref={textareaRef}
-          className="w-full min-h-[60px] max-h-[200px] py-3 px-4 border-none outline-none resize-none leading-normal bg-transparent"
+          className={cn(
+            'w-full max-h-[200px] border-none outline-none resize-none leading-normal bg-transparent',
+            variant === 'composer' ? 'min-h-[86px] px-5 pt-4 pb-2' : 'min-h-[60px] py-3 px-4',
+          )}
           style={{
             fontSize: 'var(--codex-chat-font-size)',
             color: 'var(--fg-85)',
@@ -301,14 +322,17 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationI
             }
           }}
           disabled={disabled}
-          placeholder="按 Enter 发送，Ctrl+Enter 换行"
+          placeholder={variant === 'composer' ? '随心输入' : '按 Enter 发送，Ctrl+Enter 换行'}
           rows={2}
         />
         <div
-          className="flex justify-between items-center px-2 py-1"
+          className={cn(
+            'flex justify-between items-center px-2 py-1',
+            variant === 'composer' && 'new-chat-composer-toolbar',
+          )}
           style={{ borderTop: '0.5px solid var(--border)', background: 'var(--bg-button-tertiary-hover)' }}
         >
-          <div className="flex gap-1 items-center">
+          <div className="flex gap-1 items-center min-w-0">
             <input
               ref={fileInputRef}
               type="file"
@@ -325,9 +349,10 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationI
             >
               <Plus className="h-4 w-4" />
             </Button>
+            {settingsSlot}
             {/* 模型选择按钮 */}
             <button
-              className="flex items-center gap-1 text-xs font-normal h-7 px-2 rounded-full cursor-pointer transition-colors"
+              className="flex items-center gap-1 text-xs font-normal h-7 px-2 rounded-full cursor-pointer transition-colors max-w-[210px]"
               style={{ color: 'var(--fg-tertiary)' }}
               onClick={handleOpenModelDialog}
               onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-hover)'; (e.currentTarget as HTMLElement).style.color = 'var(--fg-secondary)'; }}
@@ -335,7 +360,7 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, conversationI
             >
               <Bot className="h-4 w-4 mr-1" />
               {currentProvider && currentModel
-                ? `${getProviderDisplayName(currentProvider)} / ${currentModel}`
+                ? <span className="truncate">{`${getProviderDisplayName(currentProvider)} / ${currentModel}`}</span>
                 : '选择模型'}
             </button>
 

@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState, useRef, useLayoutEffect, useCallback } from 'react';
+import { lazy, Suspense, useEffect, useState, useRef, useLayoutEffect, useCallback, useMemo } from 'react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -21,12 +21,14 @@ import {
   DropdownMenuItem,
 } from '@/components/ui/dropdown-menu';
 import {
-  Plus, X, MoreHorizontal, ChevronLeft, ChevronRight,
-  Copy, Check, Pencil, Loader2, RotateCcw, Network, MessageSquare, Trash2, FileText, Download, Settings,
+  Plus, X, MoreHorizontal, ChevronRight,
+  Copy, Check, Pencil, Loader2, RotateCcw, Network, MessageSquare, Trash2, FileText, Download, FolderOpen, FolderPlus, Search, Settings,
+  PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen,
 } from 'lucide-react';
 import { conversationApi } from '../api/conversation';
 import { messageApi, type ToolResultSlice } from '../api/message';
 import type { ToolApprovalDecision, ToolApprovalPayload, ToolApprovalScope } from '../types/message';
+import type { WorkspaceContext } from '../types/conversation';
 import { useConversationStore } from '../store/conversationStore';
 import { useModelStore } from '../store/modelStore';
 import { useNavigationStore } from '../store/navigationStore';
@@ -43,8 +45,50 @@ import {
 } from '../utils/toolDisplay';
 import { ChatInput } from '../components/ChatInput';
 import TreeView from './TreeView';
+import {
+  getVisibleProjectConversations,
+  getWorkspaceForNewConversation,
+  groupConversationsByProject,
+  encodeProjectId,
+} from '../utils/projectGroups';
 
 const MarkdownContent = lazy(() => import('../components/MarkdownContent'));
+const MANUAL_PROJECTS_STORAGE_KEY = 'chattree.manualProjectWorkspaces';
+
+function loadManualProjectWorkspaces(): WorkspaceContext[] {
+  try {
+    const raw = window.localStorage.getItem(MANUAL_PROJECTS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item): item is WorkspaceContext =>
+      !!item && typeof item.cwd === 'string' && Array.isArray(item.workspace_roots)
+    );
+  } catch {
+    return [];
+  }
+}
+
+function saveManualProjectWorkspaces(workspaces: WorkspaceContext[]) {
+  window.localStorage.setItem(MANUAL_PROJECTS_STORAGE_KEY, JSON.stringify(workspaces));
+}
+
+function mergeManualProjectWorkspace(workspaces: WorkspaceContext[], workspace: WorkspaceContext): WorkspaceContext[] {
+  const existing = workspaces.filter((item) => item.cwd !== workspace.cwd);
+  return [workspace, ...existing];
+}
+
+function formatConversationTime(timestamp: number | undefined): string {
+  if (!timestamp) return '';
+  const timeMs = timestamp > 1_000_000_000_000 ? timestamp : timestamp * 1000;
+  const diffMinutes = Math.max(0, Math.floor((Date.now() - timeMs) / 60000));
+  if (diffMinutes < 1) return '刚刚';
+  if (diffMinutes < 60) return `${diffMinutes} 分`;
+  const diffHours = Math.floor(diffMinutes / 60);
+  if (diffHours < 24) return `${diffHours} 小时`;
+  const diffDays = Math.floor(diffHours / 24);
+  return `${diffDays} 天`;
+}
 
 /* ---------- Markdown custom code blocks ---------- */
 
@@ -564,8 +608,20 @@ export default function ChatPage() {
   const [editValue, setEditValue] = useState<string | null>(null);
   const [attachedFiles, setAttachedFiles] = useState<string[]>([]);
   const [previewFile, setPreviewFile] = useState<{ name: string; content: string } | null>(null);
+  const [conversationSearch, setConversationSearch] = useState('');
+  const [projectPickerSearch, setProjectPickerSearch] = useState('');
+  const [collapsedProjectIds, setCollapsedProjectIds] = useState<Set<string>>(() => new Set());
+  const [expandedHistoryProjectIds, setExpandedHistoryProjectIds] = useState<Set<string>>(() => new Set());
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [manualProjectWorkspaces, setManualProjectWorkspaces] = useState<WorkspaceContext[]>(() => loadManualProjectWorkspaces());
+  const [projectFolderDialogMode, setProjectFolderDialogMode] = useState<'create' | 'existing' | null>(null);
+  const [projectFolderPath, setProjectFolderPath] = useState('');
+  const [projectFolderLabel, setProjectFolderLabel] = useState('');
+  const [projectFolderError, setProjectFolderError] = useState('');
+  const [projectFolderSubmitting, setProjectFolderSubmitting] = useState(false);
   const scrollTimeoutRef = useRef<number | null>(null);
   const historyRef = useRef<HTMLDivElement>(null);
+  const conversationSearchInputRef = useRef<HTMLInputElement>(null);
   const pendingScrollId = useRef<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -669,6 +725,212 @@ export default function ChatPage() {
   });
   const pendingApprovalList = Object.values(pendingApprovals).filter((approval) => approval.status === 'pending');
   const pendingApprovalCount = pendingApprovalList.length;
+  const defaultWorkspace = useMemo(
+    () => conversations.find((conversation) => conversation.workspace?.cwd)?.workspace || null,
+    [conversations],
+  );
+  const projectGroups = useMemo(
+    () => groupConversationsByProject(conversations, {
+      defaultWorkspace,
+      extraWorkspaces: manualProjectWorkspaces,
+      collapsedProjectIds,
+      expandedHistoryProjectIds,
+      searchQuery: conversationSearch,
+    }),
+    [conversations, defaultWorkspace, manualProjectWorkspaces, collapsedProjectIds, expandedHistoryProjectIds, conversationSearch],
+  );
+  const allProjectGroups = useMemo(
+    () => groupConversationsByProject(conversations, {
+      defaultWorkspace,
+      extraWorkspaces: manualProjectWorkspaces,
+      collapsedProjectIds,
+      expandedHistoryProjectIds,
+    }),
+    [conversations, defaultWorkspace, manualProjectWorkspaces, collapsedProjectIds, expandedHistoryProjectIds],
+  );
+  const selectedNewConversationWorkspace = useMemo(
+    () => getWorkspaceForNewConversation(allProjectGroups, selectedProjectId, defaultWorkspace),
+    [allProjectGroups, selectedProjectId, defaultWorkspace],
+  );
+
+  useEffect(() => {
+    if (!allProjectGroups.length) return;
+    if (!selectedProjectId || !allProjectGroups.some((group) => group.id === selectedProjectId)) {
+      setSelectedProjectId(allProjectGroups[0].id);
+    }
+  }, [allProjectGroups, selectedProjectId]);
+
+  useEffect(() => {
+    if (!currentConversation?.workspace?.cwd) return;
+    const group = allProjectGroups.find((item) => item.path === currentConversation.workspace?.cwd);
+    if (group && group.id !== selectedProjectId) {
+      setSelectedProjectId(group.id);
+    }
+  }, [currentConversation?.workspace?.cwd, allProjectGroups, selectedProjectId]);
+
+  const toggleProjectCollapsed = (projectId: string) => {
+    setCollapsedProjectIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(projectId)) next.delete(projectId);
+      else next.add(projectId);
+      return next;
+    });
+  };
+
+  const toggleHistoryExpanded = (projectId: string) => {
+    setExpandedHistoryProjectIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(projectId)) next.delete(projectId);
+      else next.add(projectId);
+      return next;
+    });
+  };
+
+  const workspaceForCreateRequest = () => (
+    selectedNewConversationWorkspace.cwd ? selectedNewConversationWorkspace : undefined
+  );
+
+  const rememberProjectWorkspace = (workspace: WorkspaceContext) => {
+    const next = mergeManualProjectWorkspace(manualProjectWorkspaces, workspace);
+    setManualProjectWorkspaces(next);
+    saveManualProjectWorkspaces(next);
+    setSelectedProjectId(encodeProjectId(workspace.cwd));
+  };
+
+  const openProjectFolderDialog = (mode: 'create' | 'existing') => {
+    setProjectFolderDialogMode(mode);
+    setProjectFolderPath('');
+    setProjectFolderLabel('');
+    setProjectFolderError('');
+  };
+
+  const closeProjectFolderDialog = () => {
+    if (projectFolderSubmitting) return;
+    setProjectFolderDialogMode(null);
+    setProjectFolderPath('');
+    setProjectFolderLabel('');
+    setProjectFolderError('');
+  };
+
+  const handleProjectFolderSubmit = async () => {
+    const path = projectFolderPath.trim();
+    if (!projectFolderDialogMode || !path) {
+      setProjectFolderError('请输入文件夹路径');
+      return;
+    }
+    setProjectFolderSubmitting(true);
+    setProjectFolderError('');
+    try {
+      const label = projectFolderLabel.trim() || undefined;
+      const workspace = projectFolderDialogMode === 'create'
+        ? await conversationApi.createProjectFolder(path, label)
+        : await conversationApi.resolveProjectFolder(path, label);
+      rememberProjectWorkspace(workspace);
+      setProjectPickerSearch('');
+      setProjectFolderDialogMode(null);
+      setProjectFolderPath('');
+      setProjectFolderLabel('');
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || err?.message || '项目文件夹处理失败';
+      setProjectFolderError(String(detail));
+    } finally {
+      setProjectFolderSubmitting(false);
+    }
+  };
+
+  const selectedProjectGroup = allProjectGroups.find((group) => group.id === selectedProjectId) || allProjectGroups[0] || null;
+  const filteredProjectGroups = projectPickerSearch.trim()
+    ? allProjectGroups.filter((group) => {
+        const query = projectPickerSearch.trim().toLowerCase();
+        return `${group.label} ${group.path}`.toLowerCase().includes(query);
+      })
+    : allProjectGroups;
+
+  const projectSettingsSlot = (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          className="new-chat-setting-chip"
+          title={selectedProjectGroup?.path || selectedNewConversationWorkspace.cwd || '默认项目'}
+        >
+          <FolderOpen className="h-4 w-4" />
+          <span className="truncate">{selectedProjectGroup?.label || selectedNewConversationWorkspace.label || '默认项目'}</span>
+          <ChevronRight className="h-3.5 w-3.5 rotate-90 opacity-70" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="new-chat-project-menu">
+        <div className="p-2">
+          <Input
+            value={projectPickerSearch}
+            onChange={(event) => setProjectPickerSearch(event.target.value)}
+            placeholder="搜索项目"
+            className="h-8 text-xs"
+          />
+        </div>
+        <div className="max-h-[260px] overflow-y-auto custom-scrollbar px-1 pb-1">
+          {filteredProjectGroups.map((group) => (
+            <button
+              type="button"
+              key={group.id}
+              className="new-chat-project-option"
+              onClick={() => {
+                setSelectedProjectId(group.id);
+                setProjectPickerSearch('');
+              }}
+              title={group.path}
+            >
+              <FolderOpen className="h-4 w-4 shrink-0" />
+              <span className="min-w-0 flex-1 text-left">
+                <span className="block truncate text-sm">{group.label}</span>
+                <span className="block truncate text-[11px]" style={{ color: 'var(--fg-tertiary)' }}>
+                  {group.path}
+                </span>
+              </span>
+              {selectedProjectId === group.id && <Check className="h-4 w-4 shrink-0" />}
+            </button>
+          ))}
+          {filteredProjectGroups.length === 0 && (
+            <div className="px-3 py-3 text-xs" style={{ color: 'var(--fg-tertiary)' }}>
+              没有匹配的项目
+            </div>
+          )}
+        </div>
+        <div className="border-t px-1 py-1" style={{ borderColor: 'var(--border)' }}>
+          <button
+            type="button"
+            className="new-chat-project-option"
+            onClick={() => openProjectFolderDialog('create')}
+          >
+            <FolderPlus className="h-4 w-4 shrink-0" />
+            <span className="min-w-0 flex-1 text-left">
+              <span className="block truncate text-sm">新建文件夹</span>
+              <span className="block truncate text-[11px]" style={{ color: 'var(--fg-tertiary)' }}>
+                创建空项目
+              </span>
+            </span>
+          </button>
+          <button
+            type="button"
+            className="new-chat-project-option"
+            onClick={() => openProjectFolderDialog('existing')}
+          >
+            <FolderOpen className="h-4 w-4 shrink-0" />
+            <span className="min-w-0 flex-1 text-left">
+              <span className="block truncate text-sm">使用现有文件夹</span>
+              <span className="block truncate text-[11px]" style={{ color: 'var(--fg-tertiary)' }}>
+                添加为项目
+              </span>
+            </span>
+          </button>
+        </div>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+
+  const handleNewConversation = () => {
+    clearCurrentConversation();
+  };
   const streamedActiveReasoningIndex = (() => {
     if (streamStatus !== 'streaming') return -1;
     for (let i = streamedTimeline.length - 1; i >= 0; i -= 1) {
@@ -749,6 +1011,11 @@ export default function ChatPage() {
       }));
     }
     pendingScrollId.current = id;
+    const selected = conversations.find((conversation) => conversation.id === id);
+    if (selected?.workspace?.cwd) {
+      const group = allProjectGroups.find((item) => item.path === selected.workspace?.cwd);
+      if (group) setSelectedProjectId(group.id);
+    }
     await selectConversation(id);
   };
 
@@ -814,7 +1081,10 @@ export default function ChatPage() {
   const handleFilesPicked = async (files: File[]) => {
     let convId = currentConversation?.id;
     if (!convId) {
-      const newConv = await createConversation({ title: files[0]?.name?.slice(0, 20) || 'New' });
+      const newConv = await createConversation({
+        title: files[0]?.name?.slice(0, 20) || 'New',
+        workspace: workspaceForCreateRequest(),
+      });
       if (!newConv) return;
       convId = newConv.id;
     }
@@ -856,7 +1126,10 @@ export default function ChatPage() {
 
     let conversationId = currentConversation?.id;
     if (!conversationId) {
-      const newConv = await createConversation({ title: val.slice(0, 20) });
+      const newConv = await createConversation({
+        title: val.slice(0, 20),
+        workspace: workspaceForCreateRequest(),
+      });
       if (!newConv) {
         console.error('Failed to create conversation');
         return;
@@ -1166,106 +1439,148 @@ export default function ChatPage() {
     <div className="flex h-full" style={{ background: 'var(--bg-surface)' }}>
       {/* Left conversation list (collapsible) */}
       <nav
-        className="flex flex-col transition-[width] duration-200 overflow-x-hidden"
-        style={{
-          width: sidebarCollapsed ? '56px' : '260px',
-          background: 'var(--bg-surface)',
-          borderRight: '0.5px solid var(--border)',
-        }}
+        className={cn('app-sidebar', sidebarCollapsed && 'app-sidebar-collapsed')}
+        style={{ width: sidebarCollapsed ? '56px' : '300px' }}
       >
-        {/* Header */}
-        <div className="flex justify-between items-center p-3 flex-shrink-0 min-h-[56px]"
-             style={{ background: 'var(--bg-surface)' }}>
+        <div className="app-sidebar-topbar">
           {!sidebarCollapsed && (
-            <Button
-              size="sm"
-              onClick={() => clearCurrentConversation()}
-              className="font-semibold"
-              style={{
-                background: 'var(--accent-soft)',
-                color: 'var(--icon-accent)',
-                border: 'none',
-              }}
+            <button
+              type="button"
+              className={cn('app-new-chat-action', !currentConversation && 'is-active')}
+              onClick={handleNewConversation}
+              title="新对话"
             >
-              <Plus className="h-4 w-4 mr-1" />
-              新建对话
-            </Button>
+              <Plus className="h-4 w-4 shrink-0" />
+              <span>新对话</span>
+            </button>
           )}
           <Button
             variant="ghost"
             size="sm"
-            className="h-8 w-8 p-0"
+            className="app-panel-toggle"
             onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+            title={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
           >
-            {sidebarCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
+            {sidebarCollapsed ? <PanelLeftOpen className="h-5 w-5" /> : <PanelLeftClose className="h-5 w-5" />}
           </Button>
         </div>
 
-        {/* Conversation list — scrollable */}
         {!sidebarCollapsed && (
-          <div className="flex-1 overflow-y-auto custom-scrollbar min-h-0">
-            {[...conversations]
-              .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0))
-              .map((c) => (
-                <div
-                  key={c.id}
-                  className={cn(
-                    'flex items-center justify-between py-2 px-3 cursor-pointer rounded-lg mx-2 my-0.5 transition-colors',
-                  )}
-                  onClick={() => handleSelectConversation(c.id)}
-                  style={{
-                    ...(c.id === currentConversation?.id
-                      ? { background: 'var(--bg-button-tertiary-active)' }
-                      : {}),
-                  }}
-                  onMouseEnter={(e) => {
-                    if (c.id !== currentConversation?.id) {
-                      (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-hover)';
-                    }
-                    setHoveredId(c.id);
-                  }}
-                  onMouseLeave={(e) => {
-                    if (c.id !== currentConversation?.id) {
-                      (e.currentTarget as HTMLElement).style.background = '';
-                    }
-                    setHoveredId(null);
-                  }}
-                >
-                  <span className="flex-1 mr-2 truncate text-sm">
-                    {c.title || '未命名'}
-                  </span>
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className={cn(
-                          'h-7 w-7 p-0 transition-opacity',
-                          hoveredId === c.id ? 'opacity-100' : 'opacity-0'
+          <>
+            <div className="app-sidebar-search">
+              <Search className="h-3.5 w-3.5 shrink-0" />
+              <Input
+                ref={conversationSearchInputRef}
+                value={conversationSearch}
+                onChange={(event) => setConversationSearch(event.target.value)}
+                placeholder="搜索项目或对话"
+                className="h-8 border-0 bg-transparent px-1 text-xs shadow-none focus-visible:ring-0"
+              />
+            </div>
+            <div className="app-sidebar-project-heading">项目</div>
+            <div className="app-sidebar-projects custom-scrollbar">
+              {projectGroups.map((group) => {
+                const visible = getVisibleProjectConversations(group);
+                const selectedProject = selectedProjectId === group.id && !currentConversation;
+                return (
+                  <div key={group.id} className="app-project-group">
+                    <button
+                      type="button"
+                      className={cn('app-project-row', selectedProject && 'is-active')}
+                      onClick={() => {
+                        setSelectedProjectId(group.id);
+                        toggleProjectCollapsed(group.id);
+                      }}
+                      title={group.path}
+                    >
+                      <ChevronRight
+                        className={cn('h-3.5 w-3.5 shrink-0 transition-transform', !group.isCollapsed && 'rotate-90')}
+                      />
+                      <FolderOpen className="h-4 w-4 shrink-0" />
+                      <span className="app-project-name">{group.label}</span>
+                      <span className="app-project-count">{group.conversations.length}</span>
+                    </button>
+                    {!group.isCollapsed && (
+                      <div className="app-session-list">
+                        {visible.items.map((c) => {
+                          const isSelected = c.id === currentConversation?.id;
+                          return (
+                            <div
+                              key={c.id}
+                              className={cn('app-session-row', isSelected && 'is-active')}
+                              onClick={() => handleSelectConversation(c.id)}
+                              onMouseEnter={() => setHoveredId(c.id)}
+                              onMouseLeave={() => setHoveredId(null)}
+                              title={c.title || '未命名'}
+                            >
+                              <span className="app-session-title">{c.title || '未命名'}</span>
+                              <span className="app-session-time">{formatConversationTime(c.updated_at)}</span>
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className={cn(
+                                      'app-session-more',
+                                      hoveredId === c.id || isSelected ? 'opacity-100' : 'opacity-0'
+                                    )}
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    <MoreHorizontal className="h-4 w-4" />
+                                  </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent>
+                                  <DropdownMenuItem onClick={() => handleRenameClick(c.id, c.title)}>
+                                    <Pencil className="h-4 w-4 mr-2" />
+                                    重命名
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem onClick={() => deleteConversation(c.id)}>
+                                    <X className="h-4 w-4 mr-2" />
+                                    删除对话
+                                  </DropdownMenuItem>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                            </div>
+                          );
+                        })}
+                        {visible.canExpand && (
+                          <button
+                            type="button"
+                            className="app-sidebar-inline-action"
+                            onClick={() => toggleHistoryExpanded(group.id)}
+                          >
+                            展开 {visible.hiddenCount} 个更多会话
+                          </button>
                         )}
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <MoreHorizontal className="h-4 w-4" />
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent>
-                      <DropdownMenuItem onClick={() => handleRenameClick(c.id, c.title)}>
-                        <Pencil className="h-4 w-4 mr-2" />
-                        重命名
-                      </DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => deleteConversation(c.id)}>
-                        <X className="h-4 w-4 mr-2" />
-                        删除对话
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                </div>
-              ))}
-          </div>
+                        {visible.canCollapse && (
+                          <button
+                            type="button"
+                            className="app-sidebar-inline-action"
+                            onClick={() => toggleHistoryExpanded(group.id)}
+                          >
+                            收起
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </>
         )}
 
-        {/* Footer spacer — keeps scroll area from reaching the bottom */}
-        <div className="flex-shrink-0 h-2" style={{ borderTop: '0.5px solid var(--border)' }} />
+        <div className="app-sidebar-footer">
+          <button
+            type="button"
+            className="app-sidebar-action"
+            onClick={() => openSettings('providers')}
+            title="设置"
+          >
+            <Settings className="h-4 w-4 shrink-0" />
+            {!sidebarCollapsed && <span>设置</span>}
+          </button>
+        </div>
       </nav>
 
       {/* Center: title bar + content (chat or tree) */}
@@ -1299,19 +1614,6 @@ export default function ChatPage() {
             </Tooltip>
           </div>
           <div className="flex items-center gap-1">
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-8 w-8 p-0"
-                  onClick={() => openSettings('providers')}
-                >
-                  <Settings className="h-4 w-4" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>设置</TooltipContent>
-            </Tooltip>
             <Button
               variant="ghost"
               size="sm"
@@ -1327,50 +1629,87 @@ export default function ChatPage() {
 
         {/* Chat view */}
         {chatViewMode === 'chat' && (
-          <>
-            <div
-              ref={historyRef}
-              className={cn(
-                'w-full flex-1 overflow-y-scroll pt-4 pb-[140px] flex flex-col items-center custom-scrollbar',
-                isScrolling && 'scrollbar-visible'
-              )}
-              onScroll={handleScroll}
-            >
-              <div className="w-[800px] max-w-full flex flex-col px-4">
-                {messages.map((m, index) => renderMsg(m, index))}
-                {showPendingBubble && (
-                  <div className="w-full my-2 flex flex-col items-end">
-                    <div className="flex flex-col items-start max-w-full">
-                      <div
-                        className="max-w-full w-fit px-3 py-2 rounded-2xl rounded-br-sm leading-relaxed prose prose-sm prose-invert max-w-none [&_p]:m-0"
-                        style={{
-                          background: 'linear-gradient(160deg, rgba(217,119,87,0.16), rgba(217,119,87,0.08))',
-                          border: '0.5px solid rgba(217,119,87,0.28)',
-                          boxShadow: 'var(--highlight-top)',
-                          color: 'var(--fg-85)',
-                          fontSize: 'var(--codex-chat-font-size)',
-                          lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
-                        }}
-                      >
-                        <MarkdownView content={pendingUserMessage} />
+          !currentConversation && messages.length === 0 ? (
+            <div className="new-chat-stage">
+              <div className="new-chat-center">
+                <h1 className="new-chat-title">我们应该在 ChatTree 中构建什么？</h1>
+                <div className="new-chat-composer-wrap">
+                  <ChatInput
+                    variant="composer"
+                    settingsSlot={projectSettingsSlot}
+                    onSend={handleSend}
+                    onStop={abortStreaming}
+                    isStreaming={isStreaming}
+                    disabled={isStreaming}
+                    conversationId={null}
+                    editValue={editValue}
+                    onEditValueConsumed={() => setEditValue(null)}
+                    attachedFiles={attachedFiles}
+                    onFilesPicked={handleFilesPicked}
+                    onRemoveFile={handleRemoveFile}
+                  />
+                </div>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div
+                ref={historyRef}
+                className={cn(
+                  'w-full flex-1 overflow-y-scroll pt-4 pb-[140px] flex flex-col items-center custom-scrollbar',
+                  isScrolling && 'scrollbar-visible'
+                )}
+                onScroll={handleScroll}
+              >
+                <div className="w-[800px] max-w-full flex flex-col px-4">
+                  {messages.map((m, index) => renderMsg(m, index))}
+                  {showPendingBubble && (
+                    <div className="w-full my-2 flex flex-col items-end">
+                      <div className="flex flex-col items-start max-w-full">
+                        <div
+                          className="max-w-full w-fit px-3 py-2 rounded-2xl rounded-br-sm leading-relaxed prose prose-sm prose-invert max-w-none [&_p]:m-0"
+                          style={{
+                            background: 'linear-gradient(160deg, rgba(217,119,87,0.16), rgba(217,119,87,0.08))',
+                            border: '0.5px solid rgba(217,119,87,0.28)',
+                            boxShadow: 'var(--highlight-top)',
+                            color: 'var(--fg-85)',
+                            fontSize: 'var(--codex-chat-font-size)',
+                            lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
+                          }}
+                        >
+                          <MarkdownView content={pendingUserMessage} />
+                        </div>
                       </div>
                     </div>
-                  </div>
-                )}
-                {showStreamBlock && (
-                  <div className="w-full my-2 flex flex-col items-start">
-                    <div className="flex flex-col items-start max-w-full">
-                      {streamedTimeline.map((block, blockIndex) => {
-                        if (block.type === 'reasoning') {
-                          const reasoningStillOpen = blockIndex === streamedActiveReasoningIndex;
-                          return <ThinkingBlock key={block.key} reasoning={block.reasoning} streaming={reasoningStillOpen} />;
-                        }
-                        if (block.type === 'tools') {
-                          return <ToolCallGroup key={block.key} items={block.items} />;
-                        }
-                        return (
+                  )}
+                  {showStreamBlock && (
+                    <div className="w-full my-2 flex flex-col items-start">
+                      <div className="flex flex-col items-start max-w-full">
+                        {streamedTimeline.map((block, blockIndex) => {
+                          if (block.type === 'reasoning') {
+                            const reasoningStillOpen = blockIndex === streamedActiveReasoningIndex;
+                            return <ThinkingBlock key={block.key} reasoning={block.reasoning} streaming={reasoningStillOpen} />;
+                          }
+                          if (block.type === 'tools') {
+                            return <ToolCallGroup key={block.key} items={block.items} />;
+                          }
+                          return (
+                            <div
+                              key={block.key}
+                              className="max-w-full w-fit px-3 py-2 rounded-2xl rounded-bl-sm leading-relaxed prose prose-sm max-w-none [&_p]:m-0"
+                              style={{
+                                color: 'var(--fg-secondary)',
+                                fontSize: 'var(--codex-chat-font-size)',
+                                lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
+                              }}
+                            >
+                              <MarkdownView content={block.content} />
+                            </div>
+                          );
+                        })}
+                        <ToolApprovalGroup approvals={pendingApprovalList} />
+                        {streamedTimeline.length === 0 && pendingApprovalList.length === 0 && streamStatus === 'streaming' && (
                           <div
-                            key={block.key}
                             className="max-w-full w-fit px-3 py-2 rounded-2xl rounded-bl-sm leading-relaxed prose prose-sm max-w-none [&_p]:m-0"
                             style={{
                               color: 'var(--fg-secondary)',
@@ -1378,53 +1717,40 @@ export default function ChatPage() {
                               lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
                             }}
                           >
-                            <MarkdownView content={block.content} />
+                            <div className="flex items-center gap-2">
+                              <Loader2 className="h-4 w-4 animate-spin" style={{ color: 'var(--icon-accent)' }} />
+                              <span className="text-sm" style={{ color: 'var(--fg-tertiary)' }}>思考中...</span>
+                            </div>
                           </div>
-                        );
-                      })}
-                      <ToolApprovalGroup approvals={pendingApprovalList} />
-                      {streamedTimeline.length === 0 && pendingApprovalList.length === 0 && streamStatus === 'streaming' && (
-                        <div
-                          className="max-w-full w-fit px-3 py-2 rounded-2xl rounded-bl-sm leading-relaxed prose prose-sm max-w-none [&_p]:m-0"
-                          style={{
-                            color: 'var(--fg-secondary)',
-                            fontSize: 'var(--codex-chat-font-size)',
-                            lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
-                          }}
-                        >
-                          <div className="flex items-center gap-2">
-                            <Loader2 className="h-4 w-4 animate-spin" style={{ color: 'var(--icon-accent)' }} />
-                            <span className="text-sm" style={{ color: 'var(--fg-tertiary)' }}>思考中...</span>
-                          </div>
-                        </div>
-                      )}
-                      <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
-                        <span>{formatDuration(streamDuration)}</span>
-                        {getStreamStatusText() && (
-                          <span className="text-destructive">{getStreamStatusText()}</span>
                         )}
+                        <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
+                          <span>{formatDuration(streamDuration)}</span>
+                          {getStreamStatusText() && (
+                            <span className="text-destructive">{getStreamStatusText()}</span>
+                          )}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                )}
-                <div ref={messagesEndRef} />
+                  )}
+                  <div ref={messagesEndRef} />
+                </div>
               </div>
-            </div>
-            <footer className="absolute bottom-4 left-1/2 -translate-x-1/2 w-[800px] max-w-[calc(100%-48px)] z-10">
-              <ChatInput
-                onSend={handleSend}
-                onStop={abortStreaming}
-                isStreaming={isStreaming}
-                disabled={isStreaming}
-                conversationId={currentConversation?.id || null}
-                editValue={editValue}
-                onEditValueConsumed={() => setEditValue(null)}
-                attachedFiles={attachedFiles}
-                onFilesPicked={handleFilesPicked}
-                onRemoveFile={handleRemoveFile}
-              />
-            </footer>
-          </>
+              <footer className="absolute bottom-4 left-1/2 -translate-x-1/2 w-[800px] max-w-[calc(100%-48px)] z-10">
+                <ChatInput
+                  onSend={handleSend}
+                  onStop={abortStreaming}
+                  isStreaming={isStreaming}
+                  disabled={isStreaming}
+                  conversationId={currentConversation?.id || null}
+                  editValue={editValue}
+                  onEditValueConsumed={() => setEditValue(null)}
+                  attachedFiles={attachedFiles}
+                  onFilesPicked={handleFilesPicked}
+                  onRemoveFile={handleRemoveFile}
+                />
+              </footer>
+            </>
+          )
         )}
 
         {/* Tree view */}
@@ -1451,10 +1777,11 @@ export default function ChatPage() {
             <Button
               variant="ghost"
               size="sm"
-              className="h-8 w-8 p-0"
+              className="app-panel-toggle"
               onClick={() => setOutlineCollapsed(!outlineCollapsed)}
+              title={outlineCollapsed ? '展开大纲' : '收起大纲'}
             >
-              {outlineCollapsed ? <ChevronLeft className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+              {outlineCollapsed ? <PanelRightOpen className="h-5 w-5" /> : <PanelRightClose className="h-5 w-5" />}
             </Button>
           </div>
 
@@ -1489,6 +1816,63 @@ export default function ChatPage() {
           <DialogFooter>
             <Button variant="outline" onClick={handleRenameCancel}>取消</Button>
             <Button onClick={handleRenameConfirm}>确认</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Project folder dialog */}
+      <Dialog open={projectFolderDialogMode !== null} onOpenChange={(open) => { if (!open) closeProjectFolderDialog(); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {projectFolderDialogMode === 'create' ? '新建文件夹' : '使用现有文件夹'}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium" style={{ color: 'var(--fg-tertiary)' }}>
+                文件夹路径
+              </label>
+              <Input
+                value={projectFolderPath}
+                onChange={(event) => setProjectFolderPath(event.target.value)}
+                placeholder="D:\\Projects\\ChatTree"
+                disabled={projectFolderSubmitting}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') handleProjectFolderSubmit();
+                }}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium" style={{ color: 'var(--fg-tertiary)' }}>
+                项目名称
+              </label>
+              <Input
+                value={projectFolderLabel}
+                onChange={(event) => setProjectFolderLabel(event.target.value)}
+                placeholder="留空则使用文件夹名"
+                disabled={projectFolderSubmitting}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') handleProjectFolderSubmit();
+                }}
+              />
+            </div>
+            {projectFolderError && (
+              <div className="rounded-md px-3 py-2 text-xs" style={{
+                color: 'var(--destructive)',
+                background: 'color-mix(in srgb, var(--destructive) 10%, transparent)',
+                border: '0.5px solid color-mix(in srgb, var(--destructive) 28%, transparent)',
+              }}>
+                {projectFolderError}
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={closeProjectFolderDialog} disabled={projectFolderSubmitting}>取消</Button>
+            <Button onClick={handleProjectFolderSubmit} disabled={projectFolderSubmitting}>
+              {projectFolderSubmitting && <Loader2 className="h-4 w-4 animate-spin" />}
+              确认
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

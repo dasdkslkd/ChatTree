@@ -123,6 +123,17 @@ class CodeToolConfig:
             allow_parent_dir_creation=bool(cfg.get("allow_parent_dir_creation", False)),
         )
 
+    @classmethod
+    def for_workspace(
+        cls,
+        raw: Optional[Dict[str, Any]],
+        workspace: Dict[str, Any],
+    ) -> "CodeToolConfig":
+        cfg = dict(raw or {})
+        cfg["workspace_roots"] = workspace.get("workspace_roots") or [workspace.get("cwd")]
+        cfg["protected_paths"] = workspace.get("protected_paths") or cfg.get("protected_paths") or DEFAULT_PROTECTED_PATHS
+        return cls.from_dict(cfg)
+
 
 class CodeWorkspace:
     def __init__(self, config: CodeToolConfig):

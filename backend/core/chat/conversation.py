@@ -15,7 +15,14 @@ class CorruptConversationError(Exception):
 class Conversation:
     """基于节点的树形对话类"""
 
-    def __init__(self, conversation_id: str = '', title: str = '', provider: Optional[ModelProvider] = None, model: Optional[str] = None):
+    def __init__(
+        self,
+        conversation_id: str = '',
+        title: str = '',
+        provider: Optional[ModelProvider] = None,
+        model: Optional[str] = None,
+        workspace: Optional[Dict[str, Any]] = None,
+    ):
         self.metadata: ConversationMetadata = {
             "id": conversation_id or str(uuid.uuid4()),
             "title": title,
@@ -24,6 +31,8 @@ class Conversation:
             "total_tokens": {},
             "schema_version": SCHEMA_VERSION,
         }
+        if workspace is not None:
+            self.metadata["workspace"] = workspace
         self.nodes: Dict[str, ConversationTreeNode] = {}
         self.root_node_id: Optional[str] = None
         self.current_node_id: Optional[str] = None

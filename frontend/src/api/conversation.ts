@@ -1,5 +1,5 @@
 import { apiClient } from './client';
-import type { Conversation, ConversationCreateRequest } from '../types/conversation';
+import type { Conversation, ConversationCreateRequest, WorkspaceContext } from '../types/conversation';
 
 export interface TreeNode {
   id: string;
@@ -29,6 +29,16 @@ export const conversationApi = {
   // �����Ի�
   create: async (data: ConversationCreateRequest = {}): Promise<Conversation> => {
     const response = await apiClient.post('/conversations', data);
+    return response.data;
+  },
+
+  createProjectFolder: async (path: string, label?: string): Promise<WorkspaceContext> => {
+    const response = await apiClient.post('/projects/folders', { path, label: label || null });
+    return response.data;
+  },
+
+  resolveProjectFolder: async (path: string, label?: string): Promise<WorkspaceContext> => {
+    const response = await apiClient.post('/projects/folders/resolve', { path, label: label || null });
     return response.data;
   },
 
