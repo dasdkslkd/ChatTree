@@ -670,7 +670,7 @@ export default function ChatPage() {
     conversations, currentConversation, messages,
     pendingScrollNodeId, clearPendingScroll,
     createConversation, selectConversation, deleteConversation, loadConversations,
-    clearCurrentConversation, updateConversationTitle, refreshMessages,
+    clearCurrentConversation, updateConversationTitle, refreshMessages, deleteNode,
   } = useConversationStore();
 
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
@@ -1190,8 +1190,7 @@ export default function ChatPage() {
     if (!currentConversation || isStreaming) return;
     if (!confirm('确定删除该消息及其所有后续分支？')) return;
     try {
-      await conversationApi.deleteNode(currentConversation.id, nodeId);
-      await selectConversation(currentConversation.id);
+      await deleteNode(nodeId);
     } catch (err) {
       console.error('删除失败:', err);
     }

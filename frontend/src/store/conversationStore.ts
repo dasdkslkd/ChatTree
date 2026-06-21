@@ -275,10 +275,28 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
           set({ loading: true, error: null });
           try {
             const result = await conversationApi.deleteNode(currentConversation.id, nodeId);
-            if (result.new_current_node_id) set({ currentNodeId: result.new_current_node_id });
-            const history = await messageApi.getHistory(currentConversation.id);
-            const branches = await conversationApi.getBranches(currentConversation.id);
-            set({ messages: history, branches: branches || {} });
+            const [history, branches, treeData] = await Promise.all([
+              messageApi.getHistory(currentConversation.id),
+              conversationApi.getBranches(currentConversation.id),
+              conversationApi.getTree(currentConversation.id),
+            ]);
+            // await 期间用户可能已切走，避免把旧对话的删除结果写入新对话。
+            if (get().currentConversation?.id !== currentConversation.id) return;
+            const newCurrentNodeId = treeData.current_node_id || result.new_current_node_id;
+            set((state) => ({
+              messages: history,
+              branches: branches || {},
+              treeData,
+              currentNodeId: newCurrentNodeId,
+              currentConversation: state.currentConversation
+                ? { ...state.currentConversation, current_node_id: newCurrentNodeId }
+                : state.currentConversation,
+              conversations: state.conversations.map((conversation) =>
+                conversation.id === currentConversation.id
+                  ? { ...conversation, current_node_id: newCurrentNodeId }
+                  : conversation
+              ),
+            }));
           } catch (err: any) {
             set({ error: err.message });
           } finally {
@@ -313,4 +331,3 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
 // 且 .getState() 不存在（ChatInput/TreeView/MainPage 多处调用）。
 export const useConversationStore = useConversationStoreBase;
 export const conversationStore = useConversationStoreBase;
-

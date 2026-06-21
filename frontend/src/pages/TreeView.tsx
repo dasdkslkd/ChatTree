@@ -5,7 +5,6 @@ import { useNavigationStore } from '../store/navigationStore';
 import { Button } from '@/components/ui/button';
 import { ZoomIn, ZoomOut, Maximize2, ArrowDown, ArrowRight, Trash2 } from 'lucide-react';
 import type { TreeNode } from '../api/conversation';
-import { conversationApi } from '../api/conversation';
 
 interface LayoutNode {
   id: string;
@@ -50,7 +49,7 @@ function stripFileMention(content: string): string {
 
 export default function TreeView() {
   const containerRef = useRef<HTMLDivElement>(null);
-  const { currentConversation, treeData, loadTree } = useConversationStore();
+  const { currentConversation, treeData, loadTree, deleteNode } = useConversationStore();
   const { setChatViewMode } = useNavigationStore();
 
   const [transform, setTransform] = useState({ x: 0, y: 0, scale: 1 });
@@ -209,15 +208,12 @@ export default function TreeView() {
     if (!contextMenu || !currentConversation) return;
     if (!confirm(`确定删除「${contextMenu.label}」及其所有后续分支？`)) return;
     try {
-      await conversationApi.deleteNode(currentConversation.id, contextMenu.nodeId);
-      await loadTree(currentConversation.id);
-      const { selectConversation } = useConversationStore.getState();
-      await selectConversation(currentConversation.id);
+      await deleteNode(contextMenu.nodeId);
     } catch (err) {
       console.error('删除失败:', err);
     }
     setContextMenu(null);
-  }, [contextMenu, currentConversation, loadTree]);
+  }, [contextMenu, currentConversation, deleteNode]);
 
   const buildEdgePath = useCallback((edge: LayoutEdge): string => {
     if (!edge.points || edge.points.length < 2) return '';
