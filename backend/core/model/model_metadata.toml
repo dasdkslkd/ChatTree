@@ -138,6 +138,14 @@ supports_vision = false
 thinking = { toggleable = true, default_enabled = true }
 
 [[rules]]
+id = "deepseek-open-models"
+name_patterns = ["^deepseek-(?:v\\d+(?:\\.\\d+)?|r\\d+)(?:-.+)?$"]
+api_formats = ["chat_completions"]
+context_length = 131072
+supports_vision = false
+thinking = { toggleable = true, default_enabled = true }
+
+[[rules]]
 id = "qwen3-vl"
 name_patterns = ["^qwen3-vl-(?:plus|flash)(?:-.+)?$"]
 api_formats = ["chat_completions"]
@@ -148,7 +156,7 @@ thinking = { toggleable = true, default_enabled = true }
 
 [[rules]]
 id = "qwen3-coder"
-name_patterns = ["^qwen3-coder-(?:plus|flash)(?:-.+)?$"]
+name_patterns = ["^qwen3-coder-(?:plus|flash|\\d+b)(?:-.+)?$"]
 api_formats = ["chat_completions"]
 context_length = 1000000
 supports_vision = false

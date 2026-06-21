@@ -24,6 +24,20 @@ def test_model_metadata_rule_matching_is_case_insensitive():
     assert _matches("anything", "RESPONSES", [], ["responses"])
 
 
+def test_siliconflow_namespaced_models_resolve_from_short_model_name():
+    deepseek = resolve_metadata("deepseek-ai/DeepSeek-V3", "chat_completions")
+    assert deepseek["supports_vision"] is False
+    assert deepseek["thinking"] == {"toggleable": True, "default_enabled": True}
+
+    qwen_coder = resolve_metadata("Qwen/Qwen3-Coder-480B-A35B-Instruct", "chat_completions")
+    assert qwen_coder["supports_vision"] is False
+    assert qwen_coder["thinking"] == {"toggleable": True, "default_enabled": True}
+
+    glm = resolve_metadata("THUDM/GLM-4.5-Air", "chat_completions")
+    assert glm["supports_vision"] is False
+    assert glm["thinking"] == {"toggleable": True, "default_enabled": True}
+
+
 def test_claude_models_resolve_from_metadata_file():
     meta = resolve_metadata("claude-opus-4-8", "anthropic")
     assert meta["context_length"] == 1_000_000

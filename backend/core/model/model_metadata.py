@@ -65,8 +65,11 @@ def _as_string_list(value: Any) -> List[str]:
 def _matches(model_name: str, api_format: str, name_patterns: List[str],
              api_formats: List[str]) -> bool:
     """命中条件：模型名匹配；未给模型名规则时可只按 api_format 匹配。"""
+    candidate_names = {model_name, model_name.rsplit("/", 1)[-1]}
     name_match = bool(name_patterns) and any(
-        re.search(p, model_name, flags=re.IGNORECASE) for p in name_patterns
+        re.search(p, candidate, flags=re.IGNORECASE)
+        for candidate in candidate_names
+        for p in name_patterns
     )
     lowered_format = api_format.lower()
     format_match = bool(api_formats) and lowered_format in {
