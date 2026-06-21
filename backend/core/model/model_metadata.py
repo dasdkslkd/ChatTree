@@ -1,17 +1,23 @@
-# model/model_metadata.py - 模型元数据注册表
 """模型名 -> 元数据 的解析层。
 
 按 (模型名, api_format) 解析出统一的应用层能力声明：上下文长度、图像支持、
 推理强度档位、思考模式开关。前端据此显示/隐藏控件，provider 据此把统一的
 规范参数（reasoning_effort / thinking_enabled）翻译成各自 API 的原生形状。
 
-规则是有序的：第一条匹配的规则生效，再与该规则的基础值合并。用户可在
-config.json 的顶层 model_metadata 字段下提供覆盖（model_name -> 部分覆盖），
-合并在内置解析之上——用于兜底未知第三方模型。
+内置模型数据放在同目录的 model_metadata.toml。规则是有序的：第一条匹配的
+规则生效，再与兜底值合并。用户可在 config.json 的顶层 model_metadata 字段
+下提供覆盖（model_name -> 部分覆盖），合并在内置解析之上。
 """
+from functools import lru_cache
+from pathlib import Path
 import re
 from typing import List, Optional, Dict, Any
 from typing_extensions import TypedDict
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback
+    import tomli as tomllib  # type: ignore[no-redef]
 
 
 class ReasoningEffortSpec(TypedDict, total=False):
@@ -47,106 +53,72 @@ _FALLBACK: ModelMetadata = {
 }
 
 
+_METADATA_FILE = Path(__file__).with_name("model_metadata.toml")
+
+
+def _as_string_list(value: Any) -> List[str]:
+    if isinstance(value, list):
+        return [str(v) for v in value]
+    return []
+
+
 def _matches(model_name: str, api_format: str, name_patterns: List[str],
              api_formats: List[str]) -> bool:
-    """命中条件：api_format 在列表中，或模型名（小写）匹配任一子串/正则。"""
-    if api_format in api_formats:
-        return True
-    lowered = model_name.lower()
-    return any(re.search(p, lowered) for p in name_patterns)
+    """命中条件：模型名匹配；未给模型名规则时可只按 api_format 匹配。"""
+    name_match = bool(name_patterns) and any(
+        re.search(p, model_name, flags=re.IGNORECASE) for p in name_patterns
+    )
+    lowered_format = api_format.lower()
+    format_match = bool(api_formats) and lowered_format in {
+        f.lower() for f in api_formats
+    }
+    return name_match or (not name_patterns and format_match)
 
 
-# 有序规则表。每条：(匹配条件, 该规则的元数据)。第一条命中的生效。
-# 顺序很重要——更具体的规则排在更宽泛的前面。
-_RULES = [
-    # ── Anthropic / Claude ──
-    # thinking 可切换 + effort 档位。名含 opus-4-7/4-8/fable/mythos 追加 xhigh/max。
-    {
-        "name_patterns": [r"claude", r"\bfable\b", r"\bmythos\b"],
-        "api_formats": ["anthropic"],
-        "meta": lambda name: {
-            "context_length": 1_000_000,
-            "supports_vision": True,
-            "reasoning_effort": {
-                # xhigh 仅 Opus 4.7/4.8/Fable/Mythos；4.6/4.5 有 max 无 xhigh；
-                # 更早或未知 claude 给保守的 low/medium/high。
-                "levels": (
-                    ["low", "medium", "high", "xhigh", "max"]
-                    if re.search(r"opus-4-[78]|fable|mythos", name.lower())
-                    else ["low", "medium", "high", "max"]
-                    if re.search(r"opus-4-[56]|sonnet-4-6", name.lower())
-                    else ["low", "medium", "high"]
-                ),
-                "default": None,
-            },
-            "thinking": {"toggleable": True, "default_enabled": False},
-        },
-    },
-    # ── OpenAI Responses / 推理系模型（gpt-5, o1, o3, o4）──
-    # 仅推理强度档位（含 minimal）；思考不单独切换。
-    {
-        "name_patterns": [r"gpt-5", r"\bo1\b", r"\bo3\b", r"\bo4\b", r"o1-", r"o3-", r"o4-"],
-        "api_formats": ["responses"],
-        "meta": lambda name: {
-            "context_length": None,
-            "supports_vision": True,
-            "reasoning_effort": {
-                "levels": ["minimal", "low", "medium", "high"],
-                "default": None,
-            },
-            "thinking": None,
-        },
-    },
-    # ── Gemini 2.5 / 3（思考型）──
-    # thinking 可切换 + 抽象档位（provider 内映射为 thinking_budget 整数）。
-    {
-        "name_patterns": [r"gemini-2\.5", r"gemini-3", r"gemini-2-5"],
-        "api_formats": [],
-        "meta": lambda name: {
-            "context_length": 1_000_000,
-            "supports_vision": True,
-            "reasoning_effort": {
-                "levels": ["dynamic", "low", "medium", "high"],
-                "default": None,
-            },
-            "thinking": {"toggleable": True, "default_enabled": False},
-        },
-    },
-    # ── 其他 Gemini（无显式思考控件，但支持视觉）──
-    {
-        "name_patterns": [r"gemini"],
-        "api_formats": ["gemini"],
-        "meta": lambda name: {
-            "context_length": 1_000_000,
-            "supports_vision": True,
-            "reasoning_effort": None,
-            "thinking": None,
-        },
-    },
-    # ── DeepSeek / Qwen 等 chat_completions 推理模型 ──
-    # 这些模型通过 enable_thinking 切换思考（网关惯例：DashScope 顶层 enable_thinking，
-    # vLLM/SGLang 用 chat_template_kwargs.enable_thinking）。它们默认开启思考，
-    # 这里给出可切换开关，默认开启；不走 OpenAI 的 reasoning_effort。
-    {
-        "name_patterns": [r"deepseek", r"qwen", r"qwq", r"\bglm\b", r"glm-", r"minimax", r"\bkimi\b", r"ernie", r"hunyuan", r"think", r"reason"],
-        "api_formats": [],
-        "meta": lambda name: {
-            "context_length": None,
-            "supports_vision": False,
-            "reasoning_effort": None,
-            "thinking": {"toggleable": True, "default_enabled": True},
-        },
-    },
-]
+@lru_cache(maxsize=1)
+def _load_rules() -> List[Dict[str, Any]]:
+    """读取 TOML 规则表。TOML 规范固定 UTF-8，tomllib 使用二进制读取。"""
+    with _METADATA_FILE.open("rb") as f:
+        data = tomllib.load(f)
+    rules = data.get("rules", [])
+    return rules if isinstance(rules, list) else []
+
+
+def _metadata_from_rule(rule: Dict[str, Any]) -> ModelMetadata:
+    meta = dict(_FALLBACK)
+    for key in ("context_length", "supports_vision"):
+        if key in rule:
+            meta[key] = rule[key]
+
+    reasoning = rule.get("reasoning_effort")
+    if isinstance(reasoning, dict):
+        spec: ReasoningEffortSpec = {
+            "levels": _as_string_list(reasoning.get("levels")),
+            "default": reasoning.get("default"),
+        }
+        meta["reasoning_effort"] = spec
+    elif "reasoning_effort" in rule:
+        meta["reasoning_effort"] = None
+
+    thinking = rule.get("thinking")
+    if isinstance(thinking, dict):
+        meta["thinking"] = {
+            "toggleable": bool(thinking.get("toggleable", False)),
+            "default_enabled": bool(thinking.get("default_enabled", False)),
+        }
+    elif "thinking" in rule:
+        meta["thinking"] = None
+
+    return meta  # type: ignore[return-value]
 
 
 def _builtin_metadata(model_name: str, api_format: str) -> ModelMetadata:
     """按规则表解析内置元数据；无命中返回兜底。"""
-    for rule in _RULES:
-        if _matches(model_name, api_format, rule["name_patterns"], rule["api_formats"]):
-            meta = dict(_FALLBACK)
-            meta.update(rule["meta"](model_name))
-            return meta  # type: ignore[return-value]
+    for rule in _load_rules():
+        name_patterns = _as_string_list(rule.get("name_patterns"))
+        api_formats = _as_string_list(rule.get("api_formats"))
+        if _matches(model_name, api_format, name_patterns, api_formats):
+            return _metadata_from_rule(rule)
     return dict(_FALLBACK)  # type: ignore[return-value]
 
 
