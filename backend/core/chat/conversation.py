@@ -3,6 +3,7 @@ import uuid
 from time import time
 from typing import List, Optional, Dict, Any
 from ..config.types import ConversationTreeNode, ConversationMetadata, Message, ModelProvider, SCHEMA_VERSION
+from ..model.usage import estimated_usage, usage_total
 from ..utils.logger import setup_logger
 
 logger = setup_logger('ConversationTree')
@@ -137,6 +138,8 @@ class Conversation:
             msg["branch_total_tokens"] = node.get("total_tokens", 0)
             if node.get("branch_usage_info") is not None:
                 msg["branch_usage_info"] = node.get("branch_usage_info")
+            if node.get("usage") is not None:
+                msg["context_usage"] = node.get("usage")
             return msg
         
         for node in node_chain:
@@ -279,6 +282,7 @@ class Conversation:
             if not isinstance(nid, str) or not nid:
                 logger.error(f"对话 {conv_id}: 跳过缺少 id 的节点")
                 continue
+            cls._ensure_node_usage(node)
             nodes[nid] = node
 
         root_node_id = data.get("root_node_id")
@@ -299,6 +303,29 @@ class Conversation:
         conv.current_node_id = current
 
         return conv
+
+    @staticmethod
+    def _ensure_node_usage(node: ConversationTreeNode):
+        """Backfill layered usage fields for old persisted nodes."""
+        total = int(node.get("total_tokens") or 0)
+        branch_usage = node.get("branch_usage_info") or estimated_usage(total)
+        if not branch_usage.get("total_tokens") and total:
+            branch_usage = estimated_usage(total)
+        node["branch_usage_info"] = branch_usage
+        node["total_tokens"] = usage_total(branch_usage, total)
+
+        assistant = node.get("assistant_message") or {}
+        generation_info = assistant.get("generation_info") or {}
+        turn_usage = generation_info.get("usage_info")
+        if not turn_usage:
+            turn_usage = estimated_usage(int(generation_info.get("tokens_used") or 0))
+
+        usage = node.get("usage") or {}
+        usage["turn_usage"] = usage.get("turn_usage") or turn_usage
+        usage["branch_usage"] = usage.get("branch_usage") or branch_usage
+        usage["active_context_usage"] = usage.get("active_context_usage") or branch_usage
+        usage["model_context_window"] = usage.get("model_context_window")
+        node["usage"] = usage
 
     @staticmethod
     def _prune_dangling(nodes: Dict[str, ConversationTreeNode], root_id: str, conv_id: str) -> set:

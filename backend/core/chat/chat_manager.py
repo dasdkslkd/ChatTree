@@ -322,6 +322,11 @@ class ChatManager:
                 model_id=target_model
             )
             conversation.add_node(new_node, parent_id=current_node_id)
+            self._update_branch_usage_for_node(
+                conversation,
+                new_node["id"],
+                model_context_window=meta.get("context_length"),
+            )
             self._save(conversation)
 
         # 创建流控制器（在锁外，避免把网络流式包进锁里阻塞同对话其他分支）
@@ -617,7 +622,11 @@ class ChatManager:
                     if all_tool_messages:
                         NodeManager.add_tool_messages(latest.nodes[new_node["id"]], all_tool_messages)
                     self._update_token_stats_for_conversation(latest, target_provider, tokens_used)
-                    self._update_branch_usage_for_node(latest, new_node["id"])
+                    self._update_branch_usage_for_node(
+                        latest,
+                        new_node["id"],
+                        model_context_window=meta.get("context_length"),
+                    )
                     self._mark_conversation_updated_at(latest, completion_timestamp)
                     self._save(latest)
                 else:
@@ -627,6 +636,11 @@ class ChatManager:
                         NodeManager.add_tool_messages(new_node, all_tool_messages)
                     new_node["total_tokens"] = usage_total(usage_info, tokens_used)
                     new_node["branch_usage_info"] = usage_info
+                    new_node["usage"] = self._node_usage_snapshot(
+                        turn_usage=usage_info,
+                        branch_usage=usage_info,
+                        model_context_window=meta.get("context_length"),
+                    )
                     self._mark_conversation_updated_at(conversation, completion_timestamp)
                     self.storage.save({
                         "metadata": conversation.metadata,
@@ -1119,19 +1133,44 @@ class ChatManager:
             return estimated_usage(tokens)
         return None
 
+    def _node_usage_snapshot(
+        self,
+        *,
+        turn_usage,
+        branch_usage,
+        model_context_window: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        return {
+            "turn_usage": turn_usage or estimated_usage(0),
+            "branch_usage": branch_usage or estimated_usage(0),
+            "active_context_usage": branch_usage or estimated_usage(0),
+            "model_context_window": model_context_window,
+        }
+
     def _branch_usage_for_node(self, conversation: Conversation, node_id: str):
         usage = None
         for node in conversation.get_node_chain(node_id):
             usage = add_usage(usage, self._usage_from_message(node.get("assistant_message")))
         return usage or estimated_usage(0)
 
-    def _update_branch_usage_for_node(self, conversation: Conversation, node_id: str):
+    def _update_branch_usage_for_node(
+        self,
+        conversation: Conversation,
+        node_id: str,
+        model_context_window: Optional[int] = None,
+    ):
         node = conversation.nodes.get(node_id)
         if not node:
             return
+        turn_usage = self._usage_from_message(node.get("assistant_message")) or estimated_usage(0)
         branch_usage = self._branch_usage_for_node(conversation, node_id)
         node["branch_usage_info"] = branch_usage
         node["total_tokens"] = usage_total(branch_usage)
+        node["usage"] = self._node_usage_snapshot(
+            turn_usage=turn_usage,
+            branch_usage=branch_usage,
+            model_context_window=model_context_window,
+        )
 
     def get_conversation_history(self) -> List[Message]:
         """获取对话历史"""

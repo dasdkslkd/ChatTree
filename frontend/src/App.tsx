@@ -25,6 +25,12 @@ type MessageWithUsage = {
   tokens_used?: number;
   branch_total_tokens?: number;
   branch_usage_info?: UsageInfo | null;
+  context_usage?: {
+    turn_usage?: UsageInfo | null;
+    branch_usage?: UsageInfo | null;
+    active_context_usage?: UsageInfo | null;
+    model_context_window?: number | null;
+  } | null;
   generation_info?: {
     tokens_used?: number;
     usage_info?: UsageInfo | null;
@@ -82,16 +88,25 @@ function App() {
     return '未选择模型';
   };
 
-  const contextLimit = getMetadata(currentProvider, currentModel)?.context_length ?? null;
+  const metadataContextLimit = getMetadata(currentProvider, currentModel)?.context_length ?? null;
   const contextUsage = useMemo(() => {
     const typedMessages = messages as MessageWithUsage[];
 
     for (let i = typedMessages.length - 1; i >= 0; i -= 1) {
       const message = typedMessages[i];
+      const activeUsage = message.context_usage?.active_context_usage ?? message.context_usage?.branch_usage ?? null;
+      const activeTotal = usageTotal(activeUsage);
+      if (activeTotal > 0) {
+        return {
+          used: activeTotal,
+          usage: activeUsage,
+          contextWindow: message.context_usage?.model_context_window ?? null,
+        };
+      }
       const branchTotal = usageTotal(message.branch_usage_info);
-      if (branchTotal > 0) return { used: branchTotal, usage: message.branch_usage_info ?? null };
+      if (branchTotal > 0) return { used: branchTotal, usage: message.branch_usage_info ?? null, contextWindow: null };
       if ((message.branch_total_tokens ?? 0) > 0) {
-        return { used: message.branch_total_tokens ?? 0, usage: message.branch_usage_info ?? null };
+        return { used: message.branch_total_tokens ?? 0, usage: message.branch_usage_info ?? null, contextWindow: null };
       }
     }
 
@@ -101,8 +116,9 @@ function App() {
         return sum + usageTotal(message.generation_info?.usage_info) + (message.generation_info?.usage_info ? 0 : (message.generation_info?.tokens_used ?? message.tokens_used ?? 0));
       }, 0);
 
-    return { used, usage: null as UsageInfo | null };
+    return { used, usage: null as UsageInfo | null, contextWindow: null as number | null };
   }, [messages]);
+  const contextLimit = metadataContextLimit ?? contextUsage.contextWindow ?? null;
   const contextUsed = contextUsage.used;
   const contextPercent = contextLimit ? Math.min(100, Math.max(0, (contextUsed / contextLimit) * 100)) : 0;
   const contextBarColor = contextPercent >= 90

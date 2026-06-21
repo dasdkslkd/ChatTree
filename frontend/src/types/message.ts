@@ -5,6 +5,26 @@ export interface GenerationInfo {
   status: 'completed' | 'error' | 'stopped';  // 生成状态
   error_message?: string | null;  // 错误信息
   tokens_used?: number;  // 使用的token数
+  usage_info?: UsageInfo | null;
+}
+
+export interface UsageInfo {
+  input_tokens?: number;
+  output_tokens?: number;
+  total_tokens?: number;
+  cached_tokens?: number;
+  reasoning_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cache_read_input_tokens?: number;
+  source?: string;
+  raw?: Record<string, unknown>;
+}
+
+export interface NodeUsage {
+  turn_usage?: UsageInfo;
+  branch_usage?: UsageInfo;
+  active_context_usage?: UsageInfo;
+  model_context_window?: number | null;
 }
 
 export interface Message {
@@ -16,6 +36,9 @@ export interface Message {
   parent_id?: string;
   model?: string;
   tokens_used?: number;
+  branch_total_tokens?: number;
+  branch_usage_info?: UsageInfo | null;
+  context_usage?: NodeUsage | null;
   timestamp: number;
   generation_info?: GenerationInfo | null;  // 生成信息（仅助手消息有）
   // 可扩展字段（未来工具调用/推理；当前文本路径不填写）

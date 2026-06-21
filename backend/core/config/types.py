@@ -36,6 +36,13 @@ class UsageInfo(TypedDict, total=False):
     source: str
     raw: Dict[str, Any]
 
+class NodeUsage(TypedDict, total=False):
+    """Layered usage snapshot stored on each conversation node."""
+    turn_usage: UsageInfo
+    branch_usage: UsageInfo
+    active_context_usage: UsageInfo
+    model_context_window: Optional[int]
+
 class GenerationInfo(TypedDict, total=False):
     """消息生成信息"""
     duration_ms: int  # 生成用时（毫秒）
@@ -62,6 +69,7 @@ class Message(TypedDict, total=False):
     reasoning: Optional[str]  # 推理/思考轨迹（未来推理模型填充）
     timestamp: Required[int]
     generation_info: Optional[GenerationInfo]  # 生成信息（仅助手消息有，可选）
+    context_usage: Optional[NodeUsage]  # 所在节点的分层上下文 usage 快照
 
 class ConversationTreeNode(TypedDict):
     """对话树节点 - 一轮完整交互"""
@@ -77,6 +85,7 @@ class ConversationTreeNode(TypedDict):
     total_tokens: int
 
     branch_usage_info: UsageInfo
+    usage: NodeUsage
 
 class ConversationMetadata(TypedDict, total=False):
     """对话元数据"""

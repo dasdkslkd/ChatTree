@@ -1,5 +1,6 @@
 import { apiClient } from './client';
 import type { Conversation, ConversationCreateRequest, WorkspaceContext } from '../types/conversation';
+import type { NodeUsage, UsageInfo } from '../types/message';
 
 export interface TreeNode {
   id: string;
@@ -11,6 +12,9 @@ export interface TreeNode {
   timestamp: number;
   is_current: boolean;
   is_root: boolean;
+  total_tokens?: number;
+  branch_usage_info?: UsageInfo | null;
+  usage?: NodeUsage | null;
 }
 
 export interface TreeData {

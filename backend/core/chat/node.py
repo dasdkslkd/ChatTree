@@ -3,6 +3,17 @@ import uuid
 from time import time
 from typing import Optional, List, Dict, Any
 from ..config.types import Message, Role, ConversationTreeNode
+from ..model.usage import estimated_usage
+
+
+def _empty_node_usage() -> Dict[str, Any]:
+    usage = estimated_usage(0)
+    return {
+        "turn_usage": dict(usage),
+        "branch_usage": dict(usage),
+        "active_context_usage": dict(usage),
+        "model_context_window": None,
+    }
 
 class NodeManager:
     """对话树节点管理器"""
@@ -35,7 +46,8 @@ class NodeManager:
             "timestamp": int(time()),
             "model_id": None,
             "total_tokens": 0,
-            "branch_usage_info": {}
+            "branch_usage_info": estimated_usage(0),
+            "usage": _empty_node_usage(),
         }
 
     @staticmethod
@@ -58,7 +70,8 @@ class NodeManager:
             "timestamp": int(time()),
             "model_id": model_id,
             "total_tokens": 0,
-            "branch_usage_info": {}
+            "branch_usage_info": estimated_usage(0),
+            "usage": _empty_node_usage(),
         }
 
     @staticmethod

@@ -277,6 +277,9 @@ async def get_conversation_tree(
                 "timestamp": node.get("timestamp"),
                 "is_current": node_id == conv.current_node_id,
                 "is_root": node_id == conv.root_node_id,
+                "total_tokens": node.get("total_tokens", 0),
+                "branch_usage_info": node.get("branch_usage_info"),
+                "usage": node.get("usage"),
             })
 
         return {
