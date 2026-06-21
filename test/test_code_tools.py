@@ -11,9 +11,11 @@ from backend.core.tools.base import BaseTool
 from backend.core.tools.code_tools import (
     ApplyPatchTool,
     CodeToolConfig,
+    EditFileTool,
     ListFilesTool,
     ReadFileTool,
     RunCommandTool,
+    SearchFilesTool,
     WriteFileTool,
 )
 from backend.core.tools.tool_manager import ToolManager
@@ -86,6 +88,42 @@ def test_read_file_rejects_non_utf8(tmp_path):
     assert result["error"]["type"] == "not_utf8"
 
 
+def test_search_files_returns_matching_lines_and_skips_non_utf8(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("alpha\nneedle here\n", encoding="utf-8")
+    (tmp_path / "src" / "other.txt").write_text("no match\n", encoding="utf-8")
+    (tmp_path / "src" / "bad.py").write_bytes(b"\xff\xfe")
+    tool = SearchFilesTool(make_config(tmp_path))
+
+    result = load(run(tool.execute(query="needle", path="src", glob="*.py", max_results=10)))
+
+    assert result["matches"] == [{
+        "path": "src/app.py",
+        "line": 2,
+        "preview": "needle here",
+    }]
+    assert result["skipped_non_utf8"] == ["src/bad.py"]
+    assert result["truncated"] is False
+
+
+def test_edit_file_replaces_unique_match_and_rejects_ambiguous_edit(tmp_path):
+    (tmp_path / "app.py").write_text("old\nkeep\nold\n", encoding="utf-8")
+    tool = EditFileTool(make_config(tmp_path))
+
+    ambiguous = load(run(tool.execute(path="app.py", old_string="old", new_string="new")))
+    assert ambiguous["error"]["type"] == "edit_not_unique"
+
+    ok = load(run(tool.execute(
+        path="app.py",
+        old_string="old\nkeep\n",
+        new_string="new\nkeep\n",
+    )))
+
+    assert ok["path"] == "app.py"
+    assert ok["replacements"] == 1
+    assert (tmp_path / "app.py").read_text(encoding="utf-8") == "new\nkeep\nold\n"
+
+
 def test_write_file_writes_utf8_and_rejects_parent_creation_by_default(tmp_path):
     tool = WriteFileTool(make_config(tmp_path))
 
@@ -122,6 +160,52 @@ def test_apply_patch_updates_existing_file(tmp_path):
     assert result["applied"] is True
     assert result["files_changed"] == ["app.py"]
     assert (tmp_path / "app.py").read_text(encoding="utf-8") == "print('new')\n"
+
+
+def test_apply_patch_offsets_hunk_when_context_matches_uniquely(tmp_path):
+    (tmp_path / "notes.md").write_text(
+        "# Title\n\nIntro\n\n## Tasks\n- [ ] Search\n- [ ] Run\n",
+        encoding="utf-8",
+    )
+    tool = ApplyPatchTool(make_config(tmp_path))
+    patch = """--- a/notes.md
++++ b/notes.md
+@@ -3,5 +3,5 @@
+ ## Tasks
+-- [ ] Search
+-- [ ] Run
++- [x] Search
++- [x] Run
+"""
+
+    result = load(run(tool.execute(patch=patch)))
+
+    assert result["applied"] is True
+    assert (tmp_path / "notes.md").read_text(encoding="utf-8") == (
+        "# Title\n\nIntro\n\n## Tasks\n- [x] Search\n- [x] Run\n"
+    )
+
+
+def test_apply_patch_rejects_ambiguous_offset_match(tmp_path):
+    (tmp_path / "notes.md").write_text(
+        "## Tasks\n- [ ] Search\n- [ ] Run\n\n## Tasks\n- [ ] Search\n- [ ] Run\n",
+        encoding="utf-8",
+    )
+    tool = ApplyPatchTool(make_config(tmp_path))
+    patch = """--- a/notes.md
++++ b/notes.md
+@@ -99,3 +99,3 @@
+ ## Tasks
+-- [ ] Search
+-- [ ] Run
++- [x] Search
++- [x] Run
+"""
+
+    result = load(run(tool.execute(patch=patch)))
+
+    assert result["error"]["type"] == "patch_failed"
+    assert "multiple matching locations" in result["error"]["message"]
 
 
 def test_apply_patch_rejects_delete_file_patch(tmp_path):
@@ -288,6 +372,70 @@ def test_tool_manager_returns_structured_error_when_tool_raises_not_implemented(
         "message": "",
         "tool_name": "run_command",
     }
+
+
+def test_tool_manager_coding_exposure_hides_raw_write_file_but_keeps_it_executable(tmp_path):
+    manager = ToolManager({
+        "tools": {
+            "enabled": True,
+            "builtin": {
+                "web_search": {"enabled": False},
+                "code": {
+                    "enabled": True,
+                    "workspace_roots": [str(tmp_path)],
+                },
+            },
+        }
+    })
+
+    names = [tool["function"]["name"] for tool in manager.get_openai_tools()]
+
+    assert "search_files" in names
+    assert "edit_file" in names
+    assert "apply_patch" in names
+    assert "write_file" not in names
+    result = load(run(manager.execute_tool("write_file", {"path": "notes.txt", "content": "ok"})))
+    assert result["path"] == "notes.txt"
+
+
+def test_tool_manager_full_exposure_can_show_write_file(tmp_path):
+    manager = ToolManager({
+        "tools": {
+            "enabled": True,
+            "builtin": {
+                "exposure": "full",
+                "web_search": {"enabled": False},
+                "code": {
+                    "enabled": True,
+                    "workspace_roots": [str(tmp_path)],
+                },
+            },
+        }
+    })
+
+    names = [tool["function"]["name"] for tool in manager.get_openai_tools()]
+
+    assert "write_file" in names
+
+
+def test_tool_manager_normalizes_compact_run_command_arguments(tmp_path):
+    manager = ToolManager({
+        "tools": {
+            "enabled": True,
+            "builtin": {
+                "web_search": {"enabled": False},
+                "code": {
+                    "enabled": True,
+                    "workspace_roots": [str(tmp_path)],
+                },
+            },
+        }
+    })
+
+    result = load(run(manager.execute_tool("run_command", {"arguments": "python -c \"print('compact')\""})))
+
+    assert result["exit_code"] == 0
+    assert result["stdout"].strip() == "compact"
 
 
 def test_run_command_does_not_use_event_loop_subprocess(tmp_path, monkeypatch):

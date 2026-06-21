@@ -33,7 +33,14 @@ import { useNavigationStore } from '../store/navigationStore';
 import { useStreamingManager } from '../hooks/useStreamingManager';
 import { streamManager } from '../services/streamManager';
 import { getGenerationStatusText, getStreamStatusText as getStreamStatusLabel } from '../utils/generationStatus';
-import { extractToolResultEnvelope, formatToolOutput, isToolResultError, type ToolResultEnvelope } from '../utils/toolDisplay';
+import {
+  extractToolResultEnvelope,
+  formatToolArguments,
+  formatToolOutput,
+  isToolResultError,
+  summarizeToolCall,
+  type ToolResultEnvelope,
+} from '../utils/toolDisplay';
 import { ChatInput } from '../components/ChatInput';
 import TreeView from './TreeView';
 
@@ -169,32 +176,17 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function toDisplayString(value: unknown): string {
-  if (value == null) return '';
-  if (typeof value === 'string') {
-    const trimmed = value.trim();
-    if (!trimmed) return value;
-    try {
-      return JSON.stringify(JSON.parse(trimmed), null, 2);
-    } catch {
-      return value;
-    }
-  }
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-}
-
 function getToolName(toolCall: ToolCallLike | null, toolMessage?: ToolMessageLike | null): string {
   return toolCall?.function?.name || toolCall?.name || toolMessage?.name || 'tool';
 }
 
+function getToolRawArgs(toolCall: ToolCallLike | null): unknown {
+  return toolCall?.function?.arguments ?? toolCall?.arguments ?? toolCall?.args ?? toolCall?.input;
+}
+
 function getToolArgs(toolCall: ToolCallLike | null): string {
   if (!toolCall) return '';
-  const rawArgs = toolCall.function?.arguments ?? toolCall.arguments ?? toolCall.args ?? toolCall.input;
-  return toDisplayString(rawArgs);
+  return formatToolArguments(getToolRawArgs(toolCall));
 }
 
 function getToolOutput(toolMessage?: ToolMessageLike | null): string {
@@ -211,9 +203,12 @@ function makeToolItem(
   fallbackKey: string,
 ): ToolRenderItem {
   const name = getToolName(toolCall, toolMessage);
-  const argsText = limitToolDisplayText(getToolArgs(toolCall));
+  const rawArgs = getToolRawArgs(toolCall);
+  const argsText = getToolArgs(toolCall);
   const outputText = limitToolDisplayText(getToolOutput(toolMessage));
-  const summary = limitToolDisplayText(outputText || argsText || '等待工具结果');
+  const summary = limitToolDisplayText(
+    toolCall ? summarizeToolCall(name, rawArgs) : outputText || '工具结果',
+  );
   const resultEnvelope = extractToolResultEnvelope(toolMessage);
   return {
     key: toolCall?.id || toolMessage?.tool_call_id || fallbackKey,
@@ -478,6 +473,8 @@ function ToolApprovalCard({ approval }: { approval: ToolApprovalPayload }) {
   const risk = approval.risk || approval.risk_level || 'unknown';
   const reason = approval.reason || '';
   const argsPreview = approval.arguments_preview || '';
+  const approvalSummary = summarizeToolCall(toolName, argsPreview);
+  const approvalArgs = argsPreview ? formatToolArguments(argsPreview) : '';
 
   const handleDecision = async (
     decision: ToolApprovalDecision,
@@ -497,12 +494,12 @@ function ToolApprovalCard({ approval }: { approval: ToolApprovalPayload }) {
     <div className="tool-call tool-approval-call">
       <div className="tc-header tool-approval-header">
         <span className="tc-name">{toolName}</span>
-        <span className="tc-summary">{reason || argsPreview || '等待审批'}</span>
+        <span className="tc-summary">{approvalSummary || reason || '等待审批'}</span>
         <span className="tool-approval-risk">{risk}</span>
       </div>
       <div className="tool-approval-body">
         {reason && <div className="tool-approval-reason">{reason}</div>}
-        {argsPreview && <pre className="tc-cmd custom-scrollbar">{argsPreview}</pre>}
+        {approvalArgs && <pre className="tc-cmd custom-scrollbar">{approvalArgs}</pre>}
         <div className="tool-approval-actions">
           <Button
             type="button"

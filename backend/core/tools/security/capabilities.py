@@ -21,6 +21,8 @@ DEFAULT_TOOL_CAPABILITIES: Mapping[str, Set[ToolCapability]] = {
     "list_available_tools": {ToolCapability.READ_ONLY},
     "list_files": {ToolCapability.FILESYSTEM_READ},
     "read_file": {ToolCapability.FILESYSTEM_READ},
+    "search_files": {ToolCapability.FILESYSTEM_READ},
+    "edit_file": {ToolCapability.FILESYSTEM_WRITE},
     "run_command": {ToolCapability.COMMAND_EXEC},
     "write_file": {ToolCapability.FILESYSTEM_WRITE},
     "apply_patch": {ToolCapability.FILESYSTEM_WRITE},

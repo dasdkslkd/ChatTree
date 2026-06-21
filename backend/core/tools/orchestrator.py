@@ -15,6 +15,7 @@ from backend.core.tools.security.approval import ApprovalManager, ApprovalReques
 from backend.core.tools.security.command_policy import CommandPolicy
 from backend.core.tools.security.logical_sandbox import LogicalSandbox, SandboxViolation
 from backend.core.tools.security.permissions import PermissionContext, PermissionDecision, PermissionEngine
+from backend.core.tools.tool_arguments import normalize_tool_arguments
 
 
 MUTATING_TOOL_NAME_TOKENS = (
@@ -47,6 +48,7 @@ PATH_ARGUMENT_KEYS = {
 }
 
 BUILTIN_CODE_WRITE_TOOLS = {
+    "edit_file",
     "write_file",
     "apply_patch",
 }
@@ -89,7 +91,10 @@ class ToolOrchestrator:
         emit_event: Optional[Callable[[Dict[str, Any]], Any]] = None,
     ) -> Message:
         name = _tool_name(tool_call)
-        arguments = _parse_arguments(tool_call.get("function", {}).get("arguments"))
+        arguments = normalize_tool_arguments(
+            name,
+            _parse_arguments(tool_call.get("function", {}).get("arguments")),
+        )
         tool_call_id = str(tool_call.get("id") or "")
 
         context = PermissionContext(

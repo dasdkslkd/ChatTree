@@ -8,6 +8,7 @@ import re
 import shlex
 import subprocess
 from dataclasses import dataclass
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -291,6 +292,141 @@ class ReadFileTool(_CodeTool):
         return _json(payload)
 
 
+class SearchFilesTool(_CodeTool):
+    @property
+    def name(self) -> str:
+        return "search_files"
+
+    @property
+    def description(self) -> str:
+        return "Search UTF-8 text files in the code workspace and return matching file lines."
+
+    def parameters_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "query": {"type": "string"},
+                "path": {"type": "string", "default": "."},
+                "glob": {"type": "string", "default": "*"},
+                "max_results": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+            },
+            "required": ["query"],
+        }
+
+    async def execute(self, **kwargs) -> str:
+        query = str(kwargs.get("query") or "")
+        if not query:
+            return _error("invalid_query", "query is required")
+        try:
+            root = self.workspace.check_read(kwargs.get("path") or ".")
+        except CodeToolError as exc:
+            return _error(exc.error_type, str(exc), path=str(kwargs.get("path") or "."))
+
+        glob = str(kwargs.get("glob") or "*")
+        max_results = max(1, min(int(kwargs.get("max_results") or 50), 200))
+        matches: List[Dict[str, Any]] = []
+        searched_files = 0
+        skipped_files: List[str] = []
+
+        for file_path in _iter_search_files(root, glob):
+            resolved = file_path.resolve()
+            if not resolved.is_file() or not self.workspace.is_visible(resolved):
+                continue
+            searched_files += 1
+            try:
+                text = resolved.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                skipped_files.append(self.workspace.relative(resolved))
+                continue
+            for line_number, line in enumerate(text.splitlines(), start=1):
+                if query not in line:
+                    continue
+                matches.append({
+                    "path": self.workspace.relative(resolved),
+                    "line": line_number,
+                    "preview": line.strip(),
+                })
+                if len(matches) >= max_results:
+                    return _json({
+                        "query": query,
+                        "matches": matches,
+                        "searched_files": searched_files,
+                        "skipped_non_utf8": skipped_files,
+                        "truncated": True,
+                    })
+
+        return _json({
+            "query": query,
+            "matches": matches,
+            "searched_files": searched_files,
+            "skipped_non_utf8": skipped_files,
+            "truncated": False,
+        })
+
+
+class EditFileTool(_CodeTool):
+    @property
+    def name(self) -> str:
+        return "edit_file"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Edit a UTF-8 file by replacing an exact old_string with new_string. "
+            "By default old_string must occur exactly once."
+        )
+
+    def parameters_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "path": {"type": "string"},
+                "old_string": {"type": "string"},
+                "new_string": {"type": "string"},
+                "replace_all": {"type": "boolean", "default": False},
+            },
+            "required": ["path", "old_string", "new_string"],
+        }
+
+    async def execute(self, **kwargs) -> str:
+        try:
+            target = self.workspace.check_write(kwargs.get("path"))
+        except CodeToolError as exc:
+            return _error(exc.error_type, str(exc), path=str(kwargs.get("path") or ""))
+        if not target.exists() or not target.is_file():
+            return _error("not_found", "file not found", path=self.workspace.relative(target))
+        old_string = str(kwargs.get("old_string") or "")
+        if not old_string:
+            return _error("invalid_edit", "old_string is required", path=self.workspace.relative(target))
+        new_string = str(kwargs.get("new_string") or "")
+        try:
+            text = target.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return _error("not_utf8", "file is not valid UTF-8 text", path=self.workspace.relative(target))
+
+        occurrences = text.count(old_string)
+        if occurrences == 0:
+            return _error("edit_not_found", "old_string was not found", path=self.workspace.relative(target))
+        replace_all = bool(kwargs.get("replace_all", False))
+        if occurrences > 1 and not replace_all:
+            return _error(
+                "edit_not_unique",
+                "old_string occurs more than once; set replace_all=true or provide a more specific old_string",
+                path=self.workspace.relative(target),
+                occurrences=occurrences,
+            )
+
+        updated = text.replace(old_string, new_string, -1 if replace_all else 1)
+        target.write_text(updated, encoding="utf-8")
+        return _json({
+            "path": self.workspace.relative(target),
+            "replacements": occurrences if replace_all else 1,
+            "bytes_written": len(updated.encode("utf-8")),
+        })
+
+
 class WriteFileTool(_CodeTool):
     @property
     def name(self) -> str:
@@ -411,7 +547,10 @@ class ApplyPatchTool(_CodeTool):
 
     @property
     def description(self) -> str:
-        return "Apply a simple unified diff patch to existing UTF-8 files in the code workspace."
+        return (
+            "Apply a unified diff patch to existing UTF-8 files in the code workspace. "
+            "Prefer edit_file for small exact replacements; use apply_patch for multi-line or multi-file changes."
+        )
 
     def parameters_schema(self) -> Dict[str, Any]:
         return {
@@ -473,7 +612,8 @@ def _apply_simple_unified_patch(workspace: CodeWorkspace, base: Path, patch: str
         text_lines = target.read_text(encoding="utf-8").splitlines()
         i += 1
         while i < len(lines) and lines[i].startswith("@@"):
-            match = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", lines[i])
+            hunk_header = lines[i]
+            match = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", hunk_header)
             if not match:
                 raise ValueError("invalid hunk header")
             old_index = int(match.group(1)) - 1
@@ -497,10 +637,43 @@ def _apply_simple_unified_patch(workspace: CodeWorkspace, base: Path, patch: str
                     raise ValueError("invalid hunk line")
                 i += 1
             if text_lines[old_index:old_index + len(remove)] != remove:
-                raise ValueError(f"hunk does not match target file: {new_path}")
+                old_index = _find_unique_hunk_offset(text_lines, remove, new_path, hunk_header)
             text_lines[old_index:old_index + len(remove)] = add
         target.write_text("\n".join(text_lines) + "\n", encoding="utf-8")
         changed.append(workspace.relative(target))
     if not changed:
         raise ValueError("no file changes found in patch")
     return changed
+
+
+def _iter_search_files(root: Path, glob: str):
+    if root.is_file():
+        if fnmatch(root.name, glob):
+            yield root
+        return
+    yield from sorted(root.rglob(glob), key=lambda p: p.as_posix())
+
+
+def _find_unique_hunk_offset(text_lines: List[str], remove: List[str], path: str, hunk_header: str) -> int:
+    if not remove:
+        raise ValueError(
+            f"hunk does not match target file: {path}; {hunk_header}; empty context cannot be relocated"
+        )
+
+    matches = [
+        index
+        for index in range(0, len(text_lines) - len(remove) + 1)
+        if text_lines[index:index + len(remove)] == remove
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        lines = ", ".join(str(index + 1) for index in matches[:5])
+        suffix = "..." if len(matches) > 5 else ""
+        raise ValueError(
+            f"hunk does not match target file: {path}; {hunk_header}; "
+            f"multiple matching locations found at lines {lines}{suffix}"
+        )
+    raise ValueError(
+        f"hunk does not match target file: {path}; {hunk_header}; no matching context found"
+    )

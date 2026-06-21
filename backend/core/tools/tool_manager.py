@@ -6,20 +6,51 @@ from .base import BaseTool
 from .code_tools import (
     ApplyPatchTool,
     CodeToolConfig,
+    EditFileTool,
     ListFilesTool,
     ReadFileTool,
     RunCommandTool,
+    SearchFilesTool,
     WriteFileTool,
 )
 from .connection_manager import ConnectionManager
 from .mcp_client import MCPClient, MCPClientError
 from .mcp_tools import MCPSearchTool, MCPUrlReadTool
+from .tool_arguments import normalize_tool_arguments
 from .tool_filter import ToolFilter
 from .web_search import FetchUrlTool, WebSearchTool
 from ..storage.tool_result_storage import ToolResultStorage
 from ..utils.logger import setup_logger
 
 logger = setup_logger("ToolManager")
+
+
+BUILTIN_UTILITY_TOOLS = {"read_tool_result", "list_available_tools"}
+BUILTIN_WEB_TOOLS = {"web_search", "fetch_url"}
+BUILTIN_CODE_TOOL_GROUPS = {
+    "read": {"list_files", "read_file"},
+    "search": {"search_files"},
+    "edit": {"edit_file", "apply_patch"},
+    "shell": {"run_command"},
+    "write": {"write_file"},
+}
+BUILTIN_LOCAL_TOOL_NAMES = (
+    BUILTIN_UTILITY_TOOLS
+    | BUILTIN_WEB_TOOLS
+    | set().union(*BUILTIN_CODE_TOOL_GROUPS.values())
+)
+BUILTIN_EXPOSURE_PROFILES = {
+    "minimal": BUILTIN_UTILITY_TOOLS | BUILTIN_WEB_TOOLS,
+    "coding": (
+        BUILTIN_UTILITY_TOOLS
+        | BUILTIN_WEB_TOOLS
+        | BUILTIN_CODE_TOOL_GROUPS["read"]
+        | BUILTIN_CODE_TOOL_GROUPS["search"]
+        | BUILTIN_CODE_TOOL_GROUPS["edit"]
+        | BUILTIN_CODE_TOOL_GROUPS["shell"]
+    ),
+    "full": BUILTIN_LOCAL_TOOL_NAMES,
+}
 
 
 def _tool_exception_error(tool_name: str, exc: Exception) -> Dict[str, str]:
@@ -48,6 +79,7 @@ class ToolManager:
             enabled=tools_config.get("enabled_tools"),
             disabled=tools_config.get("disabled_tools"),
         )
+        self._model_visible_builtin_tools = self._resolve_model_visible_builtin_tools(tools_config)
         if self._enabled:
             self._register_tools(config)
             self.register(ReadToolResultTool(self.tool_result_store, tools_config))
@@ -70,7 +102,9 @@ class ToolManager:
             self._register_legacy_mcp_tools(mcp_config)
             return
 
-        self._register_builtin_tools(tools_config.get("builtin", tools_config))
+        builtin_config = tools_config.get("builtin", tools_config)
+        if builtin_config.get("enabled", True) is not False:
+            self._register_builtin_tools(builtin_config)
 
     def _register_legacy_mcp_tools(self, mcp_config: Dict[str, Any]):
         """Register compatibility adapters for the old single-server MCP config."""
@@ -122,6 +156,8 @@ class ToolManager:
         for tool in (
             ListFilesTool(code_tool_config),
             ReadFileTool(code_tool_config),
+            SearchFilesTool(code_tool_config),
+            EditFileTool(code_tool_config),
             RunCommandTool(code_tool_config),
             WriteFileTool(code_tool_config),
             ApplyPatchTool(code_tool_config),
@@ -182,7 +218,7 @@ class ToolManager:
     def list_tools(self) -> List[str]:
         names = [
             name for name in self._tools
-            if self._filter.is_allowed(name)
+            if self._is_model_visible_local_tool(name)
         ]
         names.extend(
             info["callable_name"]
@@ -198,7 +234,7 @@ class ToolManager:
         """Get all model-visible tools as OpenAI function calling schemas."""
         tools: List[Dict[str, Any]] = []
         for name, tool in self._tools.items():
-            if self._filter.is_allowed(name):
+            if self._is_model_visible_local_tool(name):
                 tools.append(tool.to_openai_tool())
         for info in self._connection_manager.list_all_tools():
             original_name = info["tool"].get("name", "")
@@ -213,6 +249,7 @@ class ToolManager:
         """Execute a tool by exposed name."""
         if not self._filter.is_allowed(name):
             return json.dumps({"error": f"Tool '{name}' is disabled"}, ensure_ascii=False)
+        arguments = normalize_tool_arguments(name, arguments)
 
         try:
             if self._connection_manager.has_tool(name):
@@ -247,6 +284,10 @@ class ToolManager:
             "local_tools": [
                 name for name in self._tools
                 if self._filter.is_allowed(name)
+            ],
+            "hidden_local_tools": [
+                name for name in self._tools
+                if self._filter.is_allowed(name) and not self._is_model_visible_local_tool(name)
             ],
             "mcp_servers": [
                 {
@@ -308,6 +349,47 @@ class ToolManager:
             await self._mcp_client.close()
             self._mcp_client = None
         await self._connection_manager.close()
+
+    def _resolve_model_visible_builtin_tools(self, tools_config: Dict[str, Any]) -> Optional[set[str]]:
+        builtin_config = tools_config.get("builtin", {})
+        exposure = str(
+            builtin_config.get("exposure")
+            or tools_config.get("builtin_exposure")
+            or tools_config.get("exposure")
+            or "coding"
+        ).lower()
+        visible = set(BUILTIN_EXPOSURE_PROFILES.get(exposure, BUILTIN_EXPOSURE_PROFILES["coding"]))
+
+        code_config = builtin_config.get("code", tools_config.get("code", {}))
+        groups = code_config.get("groups")
+        if groups is not None:
+            visible -= set().union(*BUILTIN_CODE_TOOL_GROUPS.values())
+            for group in groups:
+                visible |= BUILTIN_CODE_TOOL_GROUPS.get(str(group), set())
+
+        explicit_visible = (
+            builtin_config["model_visible_tools"]
+            if "model_visible_tools" in builtin_config
+            else tools_config.get("model_visible_tools")
+        )
+        if explicit_visible is not None:
+            visible = set(str(name) for name in explicit_visible)
+
+        hidden = (
+            builtin_config["hidden_tools"]
+            if "hidden_tools" in builtin_config
+            else tools_config.get("hidden_tools", [])
+        )
+        visible -= set(str(name) for name in hidden)
+
+        return visible
+
+    def _is_model_visible_local_tool(self, name: str) -> bool:
+        if not self._filter.is_allowed(name):
+            return False
+        if name not in BUILTIN_LOCAL_TOOL_NAMES:
+            return True
+        return name in self._model_visible_builtin_tools
 
 
 class ReadToolResultTool(BaseTool):

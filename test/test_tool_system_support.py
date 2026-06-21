@@ -63,9 +63,47 @@ def test_tool_manager_registers_builtin_code_tools():
 
     assert "list_files" in names
     assert "read_file" in names
+    assert "search_files" in names
+    assert "edit_file" in names
     assert "run_command" in names
-    assert "write_file" in names
+    assert "write_file" not in names
     assert "apply_patch" in names
+
+
+def test_tool_manager_full_exposure_registers_raw_write_file_for_model():
+    manager = ToolManager({
+        "tools": {
+            "enabled": True,
+            "builtin": {
+                "exposure": "full",
+                "code": {
+                    "enabled": True,
+                    "workspace_roots": ["D:\\Workspace\\ChatTree\\tmp"],
+                }
+            },
+        }
+    })
+
+    names = [tool["function"]["name"] for tool in manager.get_openai_tools()]
+
+    assert "write_file" in names
+
+
+def test_tool_manager_builtin_enabled_false_hides_builtin_runtime_tools():
+    manager = ToolManager({
+        "tools": {
+            "enabled": True,
+            "builtin": {
+                "enabled": False,
+            },
+        }
+    })
+
+    names = [tool["function"]["name"] for tool in manager.get_openai_tools()]
+
+    assert "web_search" not in names
+    assert "read_file" not in names
+    assert "list_available_tools" in names
 
 
 def test_stdio_command_splits_line_arguments():

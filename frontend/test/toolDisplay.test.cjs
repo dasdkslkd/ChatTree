@@ -19,8 +19,10 @@ require.extensions['.ts'] = function loadTs(module, filename) {
 
 const {
   extractToolResultEnvelope,
+  formatToolArguments,
   formatToolOutput,
   isToolResultError,
+  summarizeToolCall,
 } = require(path.join(__dirname, '../src/utils/toolDisplay.ts'));
 
 function testFormatsRunCommandStdout() {
@@ -150,6 +152,56 @@ function testShowsStructuredErrorMessage() {
   }), true);
 }
 
+function testSummarizesCommonToolCalls() {
+  assert.equal(
+    summarizeToolCall('read_file', '{"path":"src/main.py"}'),
+    '读取 src/main.py',
+  );
+  assert.equal(
+    summarizeToolCall('run_command', '{"command":"pytest -q","timeout_seconds":30}'),
+    '运行 pytest -q',
+  );
+  assert.equal(
+    summarizeToolCall('edit_file', '{"path":"a.py","old_string":"x","new_string":"y"}'),
+    '编辑 a.py · 精确替换',
+  );
+  assert.equal(
+    summarizeToolCall('search_files', '{"query":"ToolManager","path":"backend"}'),
+    '搜索 "ToolManager"',
+  );
+}
+
+function testSummarizesPatchAndCompactArguments() {
+  const patch = [
+    '--- a/a.py',
+    '+++ b/a.py',
+    '@@ -1 +1 @@',
+    '-old',
+    '+new',
+    '--- a/b.py',
+    '+++ b/b.py',
+    '@@ -1 +1 @@',
+    '-old',
+    '+new',
+  ].join('\n');
+
+  assert.equal(
+    summarizeToolCall('apply_patch', JSON.stringify({ patch })),
+    '应用补丁 · 2 个文件',
+  );
+  assert.equal(
+    summarizeToolCall('run_command', 'pytest test/test_code_tools.py -q'),
+    '运行 pytest test/test_code_tools.py -q',
+  );
+}
+
+function testFormatsToolArguments() {
+  assert.equal(
+    formatToolArguments('{"path":"src/main.py","limit":20}'),
+    '{\n  "path": "src/main.py",\n  "limit": 20\n}',
+  );
+}
+
 function main() {
   testFormatsRunCommandStdout();
   testUnwrapsPreviewThenFormatsStdout();
@@ -157,6 +209,9 @@ function main() {
   testExtractsToolResultIdFromLegacyReadMore();
   testFormatsRawContentWhileExtractingModelEnvelope();
   testShowsStructuredErrorMessage();
+  testSummarizesCommonToolCalls();
+  testSummarizesPatchAndCompactArguments();
+  testFormatsToolArguments();
   console.log('toolDisplay tests passed');
 }
 

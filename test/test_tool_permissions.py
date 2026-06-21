@@ -73,14 +73,14 @@ def test_builtin_read_tools_are_allowed_by_default(tool_name):
     assert "built-in read" in decision.reason
 
 
-@pytest.mark.parametrize("tool_name", ["list_files", "read_file"])
+@pytest.mark.parametrize("tool_name", ["list_files", "read_file", "search_files"])
 def test_builtin_code_read_tools_are_allowed_by_default(tool_name):
     decision = PermissionEngine.default().evaluate(make_context(tool_name=tool_name))
 
     assert decision.behavior == "allow"
 
 
-@pytest.mark.parametrize("tool_name", ["write_file", "apply_patch", "run_command"])
+@pytest.mark.parametrize("tool_name", ["edit_file", "write_file", "apply_patch", "run_command"])
 def test_builtin_code_mutating_tools_ask_by_default(tool_name):
     decision = PermissionEngine.default().evaluate(make_context(tool_name=tool_name))
 
@@ -252,6 +252,8 @@ def test_capabilities_for_builtin_read_tool():
 def test_capabilities_for_builtin_code_tools():
     assert capabilities_for_tool("list_files") == {ToolCapability.FILESYSTEM_READ}
     assert capabilities_for_tool("read_file") == {ToolCapability.FILESYSTEM_READ}
+    assert capabilities_for_tool("search_files") == {ToolCapability.FILESYSTEM_READ}
+    assert capabilities_for_tool("edit_file") == {ToolCapability.FILESYSTEM_WRITE}
     assert capabilities_for_tool("write_file") == {ToolCapability.FILESYSTEM_WRITE}
     assert capabilities_for_tool("apply_patch") == {ToolCapability.FILESYSTEM_WRITE}
     assert capabilities_for_tool("run_command") == {ToolCapability.COMMAND_EXEC}

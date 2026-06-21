@@ -66,13 +66,36 @@ export interface McpServerConfig {
   disabled_tools?: string[];
 }
 
+export type BuiltinToolExposure = 'minimal' | 'coding' | 'full';
+export type BuiltinCodeToolGroup = 'read' | 'search' | 'edit' | 'shell' | 'write';
+
+export interface BuiltinCodeToolsConfig {
+  enabled?: boolean;
+  groups?: BuiltinCodeToolGroup[];
+  workspace_roots?: string[];
+  protected_paths?: string[];
+  command_timeout_seconds?: number;
+  max_read_chars?: number;
+  max_output_chars?: number;
+  allow_parent_dir_creation?: boolean;
+}
+
+export interface BuiltinToolsConfig {
+  enabled?: boolean;
+  exposure?: BuiltinToolExposure;
+  model_visible_tools?: string[];
+  hidden_tools?: string[];
+  web_search?: Record<string, unknown>;
+  code?: BuiltinCodeToolsConfig;
+}
+
 export interface ToolsConfig {
   enabled?: boolean;
   max_rounds?: number;
   max_result_length?: number;
   enabled_tools?: string[] | null;
   disabled_tools?: string[];
-  builtin?: Record<string, unknown>;
+  builtin?: BuiltinToolsConfig;
   mcp?: {
     enabled?: boolean;
     servers?: Record<string, McpServerConfig>;
@@ -98,6 +121,7 @@ export interface ToolInventoryStatus {
   tools_enabled: boolean;
   model_visible_tools: string[];
   local_tools: string[];
+  hidden_local_tools?: string[];
   mcp_servers: McpServerStatus[];
   mcp_tools: McpToolStatus[];
 }

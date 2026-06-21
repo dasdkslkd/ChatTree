@@ -670,6 +670,63 @@ def test_builtin_write_file_relative_path_reaches_manager(tmp_path):
     asyncio.run(_builtin_write_file_relative_path_reaches_manager(tmp_path))
 
 
+async def _builtin_edit_file_relative_path_reaches_manager(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    orchestrator, tool_manager = make_orchestrator(
+        PermissionEngine(rules=[
+            PermissionRule("allow-edit", "allow", "tool", "edit_file")
+        ]),
+        LogicalSandbox(workspace_roots=[workspace], protected_paths=[".git"]),
+    )
+
+    message = await orchestrator.execute_tool_call(
+        make_tool_call("edit_file", {"path": "sample.txt", "old_string": "a", "new_string": "b"}),
+        conversation_id="conv-1",
+        node_id="node-1",
+    )
+
+    assert tool_manager.calls == [
+        ("edit_file", {"path": "sample.txt", "old_string": "a", "new_string": "b"})
+    ]
+    assert json.loads(message["content"]) == {"ok": True, "name": "edit_file"}
+
+
+def test_builtin_edit_file_relative_path_reaches_manager(tmp_path):
+    asyncio.run(_builtin_edit_file_relative_path_reaches_manager(tmp_path))
+
+
+async def _compact_run_command_arguments_are_normalized_before_policy_and_execution(tmp_path):
+    approval_manager = ApprovalManager(timeout_seconds=1)
+    orchestrator, tool_manager = make_orchestrator(
+        PermissionEngine(rules=[
+            PermissionRule("allow-command", "allow", "tool", "run_command")
+        ]),
+        LogicalSandbox(workspace_roots=[tmp_path], protected_paths=[".git"]),
+        approval_manager=approval_manager,
+    )
+    events = []
+
+    async def emit_event(event):
+        events.append(event)
+        if event["event_type"] == "tool_approval_request":
+            assert event["approval"]["arguments_preview"] == '{"command": "python custom_script.py"}'
+            approval_manager.decide(event["approval"]["id"], "approve", "once")
+
+    await orchestrator.execute_tool_call(
+        make_raw_tool_call("run_command", "python custom_script.py"),
+        conversation_id="conv-1",
+        node_id="node-1",
+        emit_event=emit_event,
+    )
+
+    assert tool_manager.calls == [("run_command", {"command": "python custom_script.py"})]
+
+
+def test_compact_run_command_arguments_are_normalized_before_policy_and_execution(tmp_path):
+    asyncio.run(_compact_run_command_arguments_are_normalized_before_policy_and_execution(tmp_path))
+
+
 async def _builtin_write_file_outside_workspace_denied(tmp_path):
     outside = tmp_path.parent / "outside.txt"
     orchestrator, tool_manager = make_orchestrator(

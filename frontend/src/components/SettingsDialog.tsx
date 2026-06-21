@@ -28,7 +28,17 @@ import { toast } from 'sonner';
 import { configApi } from '../api/config';
 import { modelApi } from '../api/model';
 import { usePromptStore } from '../store/promtStore';
-import type { ConfigData, ModelProviderConfig, APIFormat, McpServerConfig, McpTransport, ToolsConfig, ToolInventoryStatus } from '../types/model';
+import type {
+  BuiltinCodeToolGroup,
+  BuiltinToolExposure,
+  ConfigData,
+  ModelProviderConfig,
+  APIFormat,
+  McpServerConfig,
+  McpTransport,
+  ToolsConfig,
+  ToolInventoryStatus,
+} from '../types/model';
 import type { Prompt, PromptResponse } from '../types/prompt';
 
 /* ─── Constants ─── */
@@ -46,6 +56,20 @@ const API_FORMAT_OPTIONS: { value: APIFormat; label: string; description: string
   { value: 'responses', label: 'Responses API', description: 'OpenAI Responses API' },
   { value: 'anthropic', label: 'Anthropic', description: 'Anthropic Messages API' },
   { value: 'gemini', label: 'Gemini', description: 'Google Gemini API' },
+];
+
+const BUILTIN_EXPOSURE_OPTIONS: { value: BuiltinToolExposure; label: string; description: string }[] = [
+  { value: 'coding', label: 'Coding', description: '代码读写、搜索、命令和网页工具' },
+  { value: 'minimal', label: 'Minimal', description: '仅基础工具和网页工具' },
+  { value: 'full', label: 'Full', description: '暴露所有内置工具，包括 write_file' },
+];
+
+const BUILTIN_CODE_GROUP_OPTIONS: { value: BuiltinCodeToolGroup; label: string; description: string }[] = [
+  { value: 'read', label: '读取', description: 'list_files, read_file' },
+  { value: 'search', label: '搜索', description: 'search_files' },
+  { value: 'edit', label: '编辑', description: 'edit_file, apply_patch' },
+  { value: 'shell', label: '命令', description: 'run_command' },
+  { value: 'write', label: '写入', description: 'write_file' },
 ];
 
 const DEFAULT_PROVIDER_CONFIG: ModelProviderConfig = {
@@ -90,6 +114,14 @@ const DEFAULT_TOOLS_CONFIG: ToolsConfig = {
   enabled: true,
   max_rounds: 5,
   max_result_length: 8000,
+  builtin: {
+    enabled: true,
+    exposure: 'coding',
+    code: {
+      enabled: true,
+      groups: ['read', 'search', 'edit', 'shell'],
+    },
+  },
   mcp: {
     enabled: false,
     servers: {},
@@ -715,6 +747,14 @@ function normalizeToolsConfig(raw?: ToolsConfig): ToolsConfig {
   return {
     ...DEFAULT_TOOLS_CONFIG,
     ...(raw || {}),
+    builtin: {
+      ...(DEFAULT_TOOLS_CONFIG.builtin || {}),
+      ...(raw?.builtin || {}),
+      code: {
+        ...(DEFAULT_TOOLS_CONFIG.builtin?.code || {}),
+        ...(raw?.builtin?.code || {}),
+      },
+    },
     mcp: {
       ...(DEFAULT_TOOLS_CONFIG.mcp || {}),
       ...(raw?.mcp || {}),
@@ -870,6 +910,50 @@ function McpSection() {
     }));
   };
 
+  const setBuiltinExposure = (exposure: BuiltinToolExposure) => {
+    updateTools(current => ({
+      ...current,
+      builtin: {
+        ...(current.builtin || {}),
+        exposure,
+      },
+    }));
+  };
+
+  const setBuiltinCodeEnabled = (enabled: boolean) => {
+    updateTools(current => ({
+      ...current,
+      builtin: {
+        ...(current.builtin || {}),
+        code: {
+          ...(current.builtin?.code || {}),
+          enabled,
+        },
+      },
+    }));
+  };
+
+  const setBuiltinCodeGroup = (group: BuiltinCodeToolGroup, enabled: boolean) => {
+    updateTools(current => {
+      const groups = new Set(current.builtin?.code?.groups || []);
+      if (enabled) {
+        groups.add(group);
+      } else {
+        groups.delete(group);
+      }
+      return {
+        ...current,
+        builtin: {
+          ...(current.builtin || {}),
+          code: {
+            ...(current.builtin?.code || {}),
+            groups: Array.from(groups),
+          },
+        },
+      };
+    });
+  };
+
   const setServerField = <K extends keyof McpServerConfig>(key: K, value: McpServerConfig[K]) => {
     if (!selectedServerId) return;
     updateTools(current => ({
@@ -955,7 +1039,7 @@ function McpSection() {
       setToolsForm(committedTools);
       await configApi.update({ tools: committedTools });
       await loadRuntimeStatus();
-      toast.success('MCP 配置已保存');
+      toast.success('工具配置已保存');
       await loadConfig();
     } catch (err) {
       toast.error('保存失败: ' + (err instanceof Error ? err.message : ''));
@@ -1035,6 +1119,78 @@ function McpSection() {
               <div className="space-y-1">
                 <Label className="text-xs">结果上限</Label>
                 <Input type="number" min={1000} value={toolsForm.max_result_length ?? 8000} onChange={(e) => updateTools(current => ({ ...current, max_result_length: parseNumber(e.target.value, 8000) }))} />
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-xl overflow-hidden" style={{ border: '0.5px solid var(--border)' }}>
+            <div className="flex items-center justify-between px-4 py-2.5" style={{ borderBottom: '0.5px solid var(--border)' }}>
+              <div>
+                <div className="text-sm font-medium" style={{ color: 'var(--fg-85)' }}>内置工具</div>
+                <div className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>
+                  可见 {runtimeStatus?.model_visible_tools?.length ?? 0} 个
+                  {runtimeStatus?.hidden_local_tools?.length ? `，隐藏 ${runtimeStatus.hidden_local_tools.length} 个` : ''}
+                </div>
+              </div>
+              <Switch
+                checked={toolsForm.builtin?.enabled !== false}
+                onCheckedChange={(checked) => updateTools(current => ({
+                  ...current,
+                  builtin: { ...(current.builtin || {}), enabled: checked },
+                }))}
+              />
+            </div>
+            <div className="grid grid-cols-[220px_1fr] gap-4 px-4 py-3">
+              <div className="space-y-2">
+                <Label className="text-xs">暴露模式</Label>
+                <Select
+                  value={toolsForm.builtin?.exposure || 'coding'}
+                  onValueChange={(value) => setBuiltinExposure(value as BuiltinToolExposure)}
+                >
+                  <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {BUILTIN_EXPOSURE_OPTIONS.map(option => (
+                      <SelectItem key={option.value} value={option.value} textValue={option.label}>
+                        <div className="flex flex-col">
+                          <span>{option.label}</span>
+                          <span className="text-xs opacity-70">{option.description}</span>
+                        </div>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <Label className="text-xs">代码工具分组</Label>
+                  <Switch
+                    checked={toolsForm.builtin?.code?.enabled !== false}
+                    onCheckedChange={setBuiltinCodeEnabled}
+                  />
+                </div>
+                <div className="grid grid-cols-5 gap-2">
+                  {BUILTIN_CODE_GROUP_OPTIONS.map(option => {
+                    const enabledGroups = toolsForm.builtin?.code?.groups || [];
+                    const enabled = enabledGroups.includes(option.value);
+                    return (
+                      <button
+                        key={option.value}
+                        type="button"
+                        className="rounded-lg px-2 py-2 text-left text-xs transition-colors"
+                        title={option.description}
+                        style={{
+                          border: '0.5px solid var(--border)',
+                          color: enabled ? 'var(--fg-85)' : 'var(--fg-tertiary)',
+                          background: enabled ? 'var(--bg-button-secondary)' : 'transparent',
+                        }}
+                        onClick={() => setBuiltinCodeGroup(option.value, !enabled)}
+                      >
+                        <div className="font-medium">{option.label}</div>
+                        <div className="truncate opacity-70">{option.description}</div>
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
             </div>
           </div>
