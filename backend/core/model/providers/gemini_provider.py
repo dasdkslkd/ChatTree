@@ -9,16 +9,14 @@ from typing import List, Dict, Any, Optional, AsyncIterator, Tuple
 from ..base import BaseProvider, logger
 from ..usage import estimated_usage, usage_from_gemini, usage_total
 from ...config.types import Message, StreamChunk, StreamStatus, StreamController
+from .retry import RetryPolicy, RetryableHTTPError, classify_retry_error, run_with_retries, sleep_before_retry
 from .sse import iter_decoded_sse_lines
 
 _SENTINEL = object()
 
 
-class GeminiHTTPError(RuntimeError):
-    def __init__(self, status: int, body: str):
-        self.status = status
-        self.body = body
-        super().__init__(f"HTTP {status}: {body}")
+class GeminiHTTPError(RetryableHTTPError):
+    pass
 
 
 class GeminiProvider(BaseProvider):
@@ -71,7 +69,7 @@ class GeminiProvider(BaseProvider):
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             error_body = exc.read().decode("utf-8", errors="replace")
-            raise GeminiHTTPError(exc.code, error_body) from exc
+            raise GeminiHTTPError(exc.code, error_body, dict(exc.headers or {})) from exc
 
     def _request_get_json(self, path: str, timeout: int = 30) -> Dict[str, Any]:
         req = urllib.request.Request(
@@ -84,7 +82,7 @@ class GeminiProvider(BaseProvider):
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             error_body = exc.read().decode("utf-8", errors="replace")
-            raise GeminiHTTPError(exc.code, error_body) from exc
+            raise GeminiHTTPError(exc.code, error_body, dict(exc.headers or {})) from exc
 
     def _stream_to_queue(
         self,
@@ -106,7 +104,7 @@ class GeminiProvider(BaseProvider):
                         loop.call_soon_threadsafe(queue.put_nowait, line)
         except urllib.error.HTTPError as exc:
             error_body = exc.read().decode("utf-8", errors="replace")
-            loop.call_soon_threadsafe(queue.put_nowait, GeminiHTTPError(exc.code, error_body))
+            loop.call_soon_threadsafe(queue.put_nowait, GeminiHTTPError(exc.code, error_body, dict(exc.headers or {})))
         except Exception as exc:
             loop.call_soon_threadsafe(queue.put_nowait, exc)
         finally:
@@ -218,7 +216,13 @@ class GeminiProvider(BaseProvider):
             thinking_enabled=thinking_enabled,
             extra_kwargs=kwargs,
         )
-        result = self._request_json(f"/models/{model}:generateContent", body)
+        policy = RetryPolicy.from_config(self.config)
+        result = run_with_retries(
+            lambda: self._request_json(f"/models/{model}:generateContent", body),
+            policy,
+            label="Gemini generateContent",
+            logger=logger,
+        )
         usage_info = usage_from_gemini(result.get("usageMetadata"))
         return self._extract_text(result), usage_total(usage_info, 0)
 
@@ -258,58 +262,81 @@ class GeminiProvider(BaseProvider):
                 extra_kwargs=kwargs,
             )
 
-            async for event in self._iter_sse_events(f"/models/{model}:streamGenerateContent", body):
-                if usage := event.get("usageMetadata"):
-                    usage_info = usage_from_gemini(usage)
-                    total_tokens = usage_total(usage_info, total_tokens)
+            stream_policy = RetryPolicy.from_config(self.config, stream=True)
+            retry_failures = 0
+            while True:
+                attempt_had_output = False
+                try:
+                    async for event in self._iter_sse_events(f"/models/{model}:streamGenerateContent", body):
+                        if usage := event.get("usageMetadata"):
+                            usage_info = usage_from_gemini(usage)
+                            total_tokens = usage_total(usage_info, total_tokens)
 
-                for reasoning in self._extract_reasoning_parts(event):
-                    if stream_controller and await stream_controller.is_stopped():
+                        for reasoning in self._extract_reasoning_parts(event):
+                            if stream_controller and await stream_controller.is_stopped():
+                                yield StreamChunk(
+                                    status=StreamStatus.STOPPED,
+                                    content=None,
+                                    node_id=stream_controller.node_id,
+                                    conversation_id=stream_controller.conversation_id,
+                                    error="用户手动终止",
+                                    tokens_used=total_tokens,
+                                )
+                                return
+                            attempt_had_output = True
+                            yield StreamChunk(
+                                status=StreamStatus.CONTENT,
+                                content=None,
+                                node_id=stream_controller.node_id if stream_controller else None,
+                                conversation_id=stream_controller.conversation_id if stream_controller else None,
+                                error=None,
+                                tokens_used=0,
+                                event_type="reasoning",
+                                reasoning=reasoning,
+                            )
+
+                        text = self._extract_text(event)
+                        if not text:
+                            continue
+                        attempt_had_output = True
+                        token_delta = int(len(text.split()) * 1.3)
+                        total_tokens += token_delta
+
+                        if stream_controller and await stream_controller.is_stopped():
+                            yield StreamChunk(
+                                status=StreamStatus.STOPPED,
+                                content=None,
+                                node_id=stream_controller.node_id,
+                                conversation_id=stream_controller.conversation_id,
+                                error="用户手动终止",
+                                tokens_used=total_tokens,
+                            )
+                            return
+
                         yield StreamChunk(
-                            status=StreamStatus.STOPPED,
-                            content=None,
-                            node_id=stream_controller.node_id,
-                            conversation_id=stream_controller.conversation_id,
-                            error="用户手动终止",
-                            tokens_used=total_tokens,
+                            status=StreamStatus.CONTENT,
+                            content=text,
+                            node_id=stream_controller.node_id if stream_controller else None,
+                            conversation_id=stream_controller.conversation_id if stream_controller else None,
+                            error=None,
+                            tokens_used=token_delta,
                         )
-                        return
-                    yield StreamChunk(
-                        status=StreamStatus.CONTENT,
-                        content=None,
-                        node_id=stream_controller.node_id if stream_controller else None,
-                        conversation_id=stream_controller.conversation_id if stream_controller else None,
-                        error=None,
-                        tokens_used=0,
-                        event_type="reasoning",
-                        reasoning=reasoning,
+                    break
+                except Exception as exc:
+                    decision = classify_retry_error(exc, stream_policy)
+                    if (
+                        attempt_had_output
+                        or not decision.retryable
+                        or retry_failures >= stream_policy.max_retries(stream=True)
+                    ):
+                        raise
+                    retry_failures += 1
+                    delay = await sleep_before_retry(retry_failures, stream_policy, decision)
+                    logger.warning(
+                        f"Gemini stream failed before output; retrying "
+                        f"{retry_failures}/{stream_policy.max_retries(stream=True)} "
+                        f"in {delay:.2f}s: {exc}"
                     )
-
-                text = self._extract_text(event)
-                if not text:
-                    continue
-                token_delta = int(len(text.split()) * 1.3)
-                total_tokens += token_delta
-
-                if stream_controller and await stream_controller.is_stopped():
-                    yield StreamChunk(
-                        status=StreamStatus.STOPPED,
-                        content=None,
-                        node_id=stream_controller.node_id,
-                        conversation_id=stream_controller.conversation_id,
-                        error="用户手动终止",
-                        tokens_used=total_tokens,
-                    )
-                    return
-
-                yield StreamChunk(
-                    status=StreamStatus.CONTENT,
-                    content=text,
-                    node_id=stream_controller.node_id if stream_controller else None,
-                    conversation_id=stream_controller.conversation_id if stream_controller else None,
-                    error=None,
-                    tokens_used=token_delta,
-                )
 
             if usage_info is None:
                 usage_info = estimated_usage(total_tokens)
@@ -398,7 +425,13 @@ class GeminiProvider(BaseProvider):
 
     def list_models(self) -> List[str]:
         try:
-            data = self._request_get_json("/models")
+            policy = RetryPolicy.from_config(self.config)
+            data = run_with_retries(
+                lambda: self._request_get_json("/models"),
+                policy,
+                label="Gemini list models",
+                logger=logger,
+            )
             models: List[str] = []
             for model in data.get("models", []):
                 methods = model.get("supportedGenerationMethods") or []

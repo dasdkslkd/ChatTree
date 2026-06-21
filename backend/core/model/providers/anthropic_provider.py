@@ -1,14 +1,20 @@
 # model/providers/anthropic_provider.py - Anthropic HTTP 提供商（纯标准库）
 import asyncio
 import json
+import urllib.error
 import urllib.request
 from typing import List, Dict, Any, Optional, AsyncIterator
 from ..base import BaseProvider, logger
 from ..usage import estimated_usage, usage_from_anthropic, usage_total
 from ...config.types import Message, StreamChunk, StreamStatus, StreamController
+from .retry import RetryPolicy, RetryableHTTPError, classify_retry_error, run_with_retries, sleep_before_retry
 from .sse import iter_decoded_sse_lines
 
 _SENTINEL = object()  # 队列结束标记
+
+
+class AnthropicHTTPError(RetryableHTTPError):
+    pass
 
 
 class AnthropicProvider(BaseProvider):
@@ -118,8 +124,12 @@ class AnthropicProvider(BaseProvider):
         url = self._api_base() + path
         data = json.dumps(body).encode()
         req = urllib.request.Request(url, data=data, headers=self._headers(), method="POST")
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            return json.loads(resp.read().decode())
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as exc:
+            error_body = exc.read().decode("utf-8", errors="replace")
+            raise AnthropicHTTPError(exc.code, error_body, dict(exc.headers or {})) from exc
 
     # ── 同步生成 ──
     def generate_response(self, model: str, messages: List[Message],
@@ -134,7 +144,13 @@ class AnthropicProvider(BaseProvider):
             model, api_messages, system_text, max_tokens or 4096, temperature,
             stream=False, tools=tools, tool_choice=tool_choice
         )
-        result = self._http_post("/v1/messages", body)
+        policy = RetryPolicy.from_config(self.config)
+        result = run_with_retries(
+            lambda: self._http_post("/v1/messages", body),
+            policy,
+            label="Anthropic messages request",
+            logger=logger,
+        )
         content = ""
         for block in result.get("content", []):
             if block.get("type") == "text":
@@ -169,131 +185,155 @@ class AnthropicProvider(BaseProvider):
                                     reasoning_effort=reasoning_effort, thinking_enabled=thinking_enabled,
                                     tools=tools, tool_choice=tool_choice)
 
-            # 用 asyncio.Queue 实现真流式：线程读 HTTP → 放入队列 → 异步取出并 yield
-            queue: asyncio.Queue = asyncio.Queue()
-            loop = asyncio.get_event_loop()
-            loop.run_in_executor(None, self._stream_to_queue, body, queue, loop)
             tool_blocks: Dict[int, Dict[str, Any]] = {}
             tool_call_started = False
+            stream_policy = RetryPolicy.from_config(self.config, stream=True)
+            retry_failures = 0
 
             while True:
-                item = await queue.get()
-                if item is _SENTINEL:
-                    break
-                if isinstance(item, Exception):
-                    raise item
-
-                line = item
-                if not line.startswith("data: "):
-                    continue
-                payload = line[6:].strip()
-                if payload == "[DONE]":
-                    break
+                attempt_had_output = False
+                queue: asyncio.Queue = asyncio.Queue()
+                loop = asyncio.get_event_loop()
+                loop.run_in_executor(None, self._stream_to_queue, body, queue, loop)
                 try:
-                    event = json.loads(payload)
-                except json.JSONDecodeError:
-                    continue
+                    while True:
+                        item = await queue.get()
+                        if item is _SENTINEL:
+                            break
+                        if isinstance(item, Exception):
+                            raise item
 
-                etype = event.get("type", "")
-                if usage := event.get("usage"):
-                    usage_info = usage_from_anthropic(usage)
-                    total_tokens = usage_total(usage_info, total_tokens)
-                if message_usage := event.get("message", {}).get("usage"):
-                    usage_info = usage_from_anthropic(message_usage)
-                    total_tokens = usage_total(usage_info, total_tokens)
-                if etype == "content_block_start":
-                    block = event.get("content_block") or {}
-                    if block.get("type") == "tool_use":
-                        if not tool_call_started:
-                            tool_call_started = True
-                            yield StreamChunk(
-                                status=StreamStatus.CONTENT, content=None,
-                                node_id=stream_controller.node_id if stream_controller else None,
-                                conversation_id=stream_controller.conversation_id if stream_controller else None,
-                                error=None, tokens_used=0,
-                                event_type="tool_call_start",
-                            )
-                        index = int(event.get("index", len(tool_blocks)))
-                        tool_blocks[index] = {
-                            "id": block.get("id", f"toolu_{index}"),
-                            "type": "function",
-                            "function": {
-                                "name": block.get("name", ""),
-                                "arguments": json.dumps(block.get("input") or {}, ensure_ascii=False)
-                                if block.get("input") else "",
-                            },
-                        }
-                    continue
-                if etype == "content_block_delta":
-                    delta = event.get("delta", {})
-                    index = int(event.get("index", 0))
-                    if delta.get("type") == "input_json_delta":
-                        tool_call = tool_blocks.setdefault(
-                            index,
-                            {"id": f"toolu_{index}", "type": "function", "function": {"name": "", "arguments": ""}},
-                        )
-                        tool_call["function"]["arguments"] += delta.get("partial_json") or ""
-                        continue
-                    # 思考增量：Anthropic 的 thinking_delta（携带 thinking 文本）
-                    if delta.get("type") == "thinking_delta" or "thinking" in delta:
-                        thinking = delta.get("thinking", "")
-                        if thinking:
-                            if stream_controller and await stream_controller.is_stopped():
-                                yield StreamChunk(
-                                    status=StreamStatus.STOPPED, content=None,
-                                    node_id=stream_controller.node_id,
-                                    conversation_id=stream_controller.conversation_id,
-                                    error="用户手动终止", tokens_used=total_tokens,
+                        line = item
+                        if not line.startswith("data: "):
+                            continue
+                        payload = line[6:].strip()
+                        if payload == "[DONE]":
+                            break
+                        try:
+                            event = json.loads(payload)
+                        except json.JSONDecodeError:
+                            continue
+
+                        etype = event.get("type", "")
+                        if usage := event.get("usage"):
+                            usage_info = usage_from_anthropic(usage)
+                            total_tokens = usage_total(usage_info, total_tokens)
+                        if message_usage := event.get("message", {}).get("usage"):
+                            usage_info = usage_from_anthropic(message_usage)
+                            total_tokens = usage_total(usage_info, total_tokens)
+                        if etype == "content_block_start":
+                            block = event.get("content_block") or {}
+                            if block.get("type") == "tool_use":
+                                if not tool_call_started:
+                                    tool_call_started = True
+                                    attempt_had_output = True
+                                    yield StreamChunk(
+                                        status=StreamStatus.CONTENT, content=None,
+                                        node_id=stream_controller.node_id if stream_controller else None,
+                                        conversation_id=stream_controller.conversation_id if stream_controller else None,
+                                        error=None, tokens_used=0,
+                                        event_type="tool_call_start",
+                                    )
+                                index = int(event.get("index", len(tool_blocks)))
+                                tool_blocks[index] = {
+                                    "id": block.get("id", f"toolu_{index}"),
+                                    "type": "function",
+                                    "function": {
+                                        "name": block.get("name", ""),
+                                        "arguments": json.dumps(block.get("input") or {}, ensure_ascii=False)
+                                        if block.get("input") else "",
+                                    },
+                                }
+                            continue
+                        if etype == "content_block_delta":
+                            delta = event.get("delta", {})
+                            index = int(event.get("index", 0))
+                            if delta.get("type") == "input_json_delta":
+                                tool_call = tool_blocks.setdefault(
+                                    index,
+                                    {"id": f"toolu_{index}", "type": "function", "function": {"name": "", "arguments": ""}},
                                 )
-                                return
-                            yield StreamChunk(
-                                status=StreamStatus.CONTENT, content=None,
-                                node_id=stream_controller.node_id if stream_controller else None,
-                                conversation_id=stream_controller.conversation_id if stream_controller else None,
-                                error=None, tokens_used=0,
-                                event_type="reasoning", reasoning=thinking,
-                            )
-                        continue
-                    text = delta.get("text", "")
-                    if text:
-                        total_content += text
-                        token_delta = int(len(text.split()) * 1.3)
-                        total_tokens += token_delta
-                        if stream_controller and await stream_controller.is_stopped():
-                            yield StreamChunk(
-                                status=StreamStatus.STOPPED, content=None,
-                                node_id=stream_controller.node_id,
-                                conversation_id=stream_controller.conversation_id,
-                                error="用户手动终止", tokens_used=total_tokens,
-                            )
-                            return
-                        yield StreamChunk(
-                            status=StreamStatus.CONTENT, content=text,
-                            node_id=stream_controller.node_id if stream_controller else None,
-                            conversation_id=stream_controller.conversation_id if stream_controller else None,
-                            error=None, tokens_used=token_delta,
-                        )
-                elif etype == "content_block_stop":
-                    index = int(event.get("index", 0))
-                    tool_call = tool_blocks.get(index)
-                    if tool_call and tool_call.get("function", {}).get("name"):
-                        if not tool_call["function"]["arguments"]:
-                            tool_call["function"]["arguments"] = "{}"
-                        tool_calls = [tool_call]
-                        yield StreamChunk(
-                            status=StreamStatus.CONTENT, content=None,
-                            node_id=stream_controller.node_id if stream_controller else None,
-                            conversation_id=stream_controller.conversation_id if stream_controller else None,
-                            error=None, tokens_used=0,
-                            event_type="tool_call",
-                            tool_call={"tool_calls": tool_calls},
-                            tool_calls=tool_calls,
-                        )
-                elif etype == "message_delta":
-                    usage = event.get("usage", {})
-                    if usage.get("output_tokens"):
-                        usage_info = usage_from_anthropic(usage)
-                        total_tokens = usage_total(usage_info, total_tokens)
+                                tool_call["function"]["arguments"] += delta.get("partial_json") or ""
+                                continue
+                            # 思考增量：Anthropic 的 thinking_delta（携带 thinking 文本）
+                            if delta.get("type") == "thinking_delta" or "thinking" in delta:
+                                thinking = delta.get("thinking", "")
+                                if thinking:
+                                    if stream_controller and await stream_controller.is_stopped():
+                                        yield StreamChunk(
+                                            status=StreamStatus.STOPPED, content=None,
+                                            node_id=stream_controller.node_id,
+                                            conversation_id=stream_controller.conversation_id,
+                                            error="用户手动终止", tokens_used=total_tokens,
+                                        )
+                                        return
+                                    attempt_had_output = True
+                                    yield StreamChunk(
+                                        status=StreamStatus.CONTENT, content=None,
+                                        node_id=stream_controller.node_id if stream_controller else None,
+                                        conversation_id=stream_controller.conversation_id if stream_controller else None,
+                                        error=None, tokens_used=0,
+                                        event_type="reasoning", reasoning=thinking,
+                                    )
+                                continue
+                            text = delta.get("text", "")
+                            if text:
+                                attempt_had_output = True
+                                total_content += text
+                                token_delta = int(len(text.split()) * 1.3)
+                                total_tokens += token_delta
+                                if stream_controller and await stream_controller.is_stopped():
+                                    yield StreamChunk(
+                                        status=StreamStatus.STOPPED, content=None,
+                                        node_id=stream_controller.node_id,
+                                        conversation_id=stream_controller.conversation_id,
+                                        error="用户手动终止", tokens_used=total_tokens,
+                                    )
+                                    return
+                                yield StreamChunk(
+                                    status=StreamStatus.CONTENT, content=text,
+                                    node_id=stream_controller.node_id if stream_controller else None,
+                                    conversation_id=stream_controller.conversation_id if stream_controller else None,
+                                    error=None, tokens_used=token_delta,
+                                )
+                        elif etype == "content_block_stop":
+                            index = int(event.get("index", 0))
+                            tool_call = tool_blocks.get(index)
+                            if tool_call and tool_call.get("function", {}).get("name"):
+                                if not tool_call["function"]["arguments"]:
+                                    tool_call["function"]["arguments"] = "{}"
+                                tool_calls = [tool_call]
+                                attempt_had_output = True
+                                yield StreamChunk(
+                                    status=StreamStatus.CONTENT, content=None,
+                                    node_id=stream_controller.node_id if stream_controller else None,
+                                    conversation_id=stream_controller.conversation_id if stream_controller else None,
+                                    error=None, tokens_used=0,
+                                    event_type="tool_call",
+                                    tool_call={"tool_calls": tool_calls},
+                                    tool_calls=tool_calls,
+                                )
+                        elif etype == "message_delta":
+                            usage = event.get("usage", {})
+                            if usage.get("output_tokens"):
+                                usage_info = usage_from_anthropic(usage)
+                                total_tokens = usage_total(usage_info, total_tokens)
+                    break
+                except Exception as exc:
+                    decision = classify_retry_error(exc, stream_policy)
+                    if (
+                        attempt_had_output
+                        or not decision.retryable
+                        or retry_failures >= stream_policy.max_retries(stream=True)
+                    ):
+                        raise
+                    retry_failures += 1
+                    delay = await sleep_before_retry(retry_failures, stream_policy, decision)
+                    logger.warning(
+                        f"Anthropic stream failed before output; retrying "
+                        f"{retry_failures}/{stream_policy.max_retries(stream=True)} "
+                        f"in {delay:.2f}s: {exc}"
+                    )
 
             if usage_info is None:
                 usage_info = estimated_usage(total_tokens)
@@ -338,6 +378,9 @@ class AnthropicProvider(BaseProvider):
                 for line in iter_decoded_sse_lines(resp):
                     if line:
                         loop.call_soon_threadsafe(queue.put_nowait, line)
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode("utf-8", errors="replace")
+            loop.call_soon_threadsafe(queue.put_nowait, AnthropicHTTPError(e.code, error_body, dict(e.headers or {})))
         except Exception as e:
             logger.error(f"Anthropic HTTP error: {type(e).__name__}: {e}")
             loop.call_soon_threadsafe(queue.put_nowait, e)

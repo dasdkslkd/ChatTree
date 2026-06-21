@@ -9,16 +9,14 @@ from typing import List, Dict, Any, Optional, AsyncIterator, Tuple
 from ..base import BaseProvider, logger
 from ..usage import estimated_usage, usage_from_openai, usage_total
 from ...config.types import Message, StreamChunk, StreamStatus, StreamController
+from .retry import RetryPolicy, RetryableHTTPError, classify_retry_error, run_with_retries, sleep_before_retry
 from .sse import iter_decoded_sse_lines
 
 _SENTINEL = object()
 
 
-class ProviderHTTPError(RuntimeError):
-    def __init__(self, status: int, body: str):
-        self.status = status
-        self.body = body
-        super().__init__(f"HTTP {status}: {body}")
+class ProviderHTTPError(RetryableHTTPError):
+    pass
 
 
 class OpenAICompatibleProvider(BaseProvider):
@@ -58,7 +56,7 @@ class OpenAICompatibleProvider(BaseProvider):
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             error_body = exc.read().decode("utf-8", errors="replace")
-            raise ProviderHTTPError(exc.code, error_body) from exc
+            raise ProviderHTTPError(exc.code, error_body, dict(exc.headers or {})) from exc
 
     def _stream_to_queue(
         self,
@@ -80,7 +78,7 @@ class OpenAICompatibleProvider(BaseProvider):
                         loop.call_soon_threadsafe(queue.put_nowait, line)
         except urllib.error.HTTPError as exc:
             error_body = exc.read().decode("utf-8", errors="replace")
-            loop.call_soon_threadsafe(queue.put_nowait, ProviderHTTPError(exc.code, error_body))
+            loop.call_soon_threadsafe(queue.put_nowait, ProviderHTTPError(exc.code, error_body, dict(exc.headers or {})))
         except Exception as exc:
             loop.call_soon_threadsafe(queue.put_nowait, exc)
         finally:
@@ -120,7 +118,13 @@ class OpenAICompatibleProvider(BaseProvider):
             tools=tools,
             tool_choice=tool_choice,
         )
-        response = self._request_json("/chat/completions", body)
+        policy = RetryPolicy.from_config(self.config)
+        response = run_with_retries(
+            lambda: self._request_json("/chat/completions", body),
+            policy,
+            label="OpenAI chat completion",
+            logger=logger,
+        )
         choice = (response.get("choices") or [{}])[0]
         message = choice.get("message") or {}
         content = message.get("content") or ""
@@ -214,47 +218,100 @@ class OpenAICompatibleProvider(BaseProvider):
             last_error: Optional[Exception] = None
             tool_call_accumulator: Dict[int, Dict[str, Any]] = {}
             last_emitted_tool_calls = ""
+            stream_policy = RetryPolicy.from_config(self.config, stream=True)
             for attempt_index, current_kwargs in enumerate(attempts):
-                try:
-                    tool_call_started = False
-                    async for event in self._iter_sse_events("/chat/completions", current_kwargs):
-                        if stream_controller and await stream_controller.is_stopped():
-                            yield StreamChunk(
-                                status=StreamStatus.STOPPED,
-                                content=None,
-                                node_id=stream_controller.node_id,
-                                conversation_id=stream_controller.conversation_id,
-                                error="用户手动终止",
-                                tokens_used=total_tokens,
-                            )
-                            return
+                retry_failures = 0
+                fallback_to_next_params = False
+                while True:
+                    attempt_had_output = False
+                    try:
+                        tool_call_started = False
+                        async for event in self._iter_sse_events("/chat/completions", current_kwargs):
+                            if stream_controller and await stream_controller.is_stopped():
+                                yield StreamChunk(
+                                    status=StreamStatus.STOPPED,
+                                    content=None,
+                                    node_id=stream_controller.node_id,
+                                    conversation_id=stream_controller.conversation_id,
+                                    error="用户手动终止",
+                                    tokens_used=total_tokens,
+                                )
+                                return
 
-                        if usage := event.get("usage"):
-                            usage_info = usage_from_openai(usage)
-                            total_tokens = usage_total(usage_info, total_tokens)
+                            if usage := event.get("usage"):
+                                usage_info = usage_from_openai(usage)
+                                total_tokens = usage_total(usage_info, total_tokens)
 
-                        choice = (event.get("choices") or [{}])[0]
-                        delta = choice.get("delta") or {}
-                        delta_tool_calls = delta.get("tool_calls") or []
-                        if delta_tool_calls and not tool_call_started:
-                            tool_call_started = True
-                            yield StreamChunk(
-                                status=StreamStatus.CONTENT,
-                                content=None,
-                                node_id=stream_controller.node_id if stream_controller else None,
-                                conversation_id=stream_controller.conversation_id if stream_controller else None,
-                                error=None,
-                                tokens_used=0,
-                                event_type="tool_call_start",
-                            )
-                        for tool_call in delta_tool_calls:
-                            self._merge_openai_tool_call_delta(tool_call_accumulator, tool_call)
-                        if delta_tool_calls:
-                            tool_calls = self._finalize_openai_tool_calls(tool_call_accumulator)
-                            if tool_calls:
+                            choice = (event.get("choices") or [{}])[0]
+                            delta = choice.get("delta") or {}
+                            delta_tool_calls = delta.get("tool_calls") or []
+                            if delta_tool_calls and not tool_call_started:
+                                tool_call_started = True
+                                attempt_had_output = True
+                                yield StreamChunk(
+                                    status=StreamStatus.CONTENT,
+                                    content=None,
+                                    node_id=stream_controller.node_id if stream_controller else None,
+                                    conversation_id=stream_controller.conversation_id if stream_controller else None,
+                                    error=None,
+                                    tokens_used=0,
+                                    event_type="tool_call_start",
+                                )
+                            for tool_call in delta_tool_calls:
+                                self._merge_openai_tool_call_delta(tool_call_accumulator, tool_call)
+                            if delta_tool_calls:
+                                tool_calls = self._finalize_openai_tool_calls(tool_call_accumulator)
+                                if tool_calls:
+                                    serialized_tool_calls = json.dumps(tool_calls, ensure_ascii=False, sort_keys=True)
+                                    if serialized_tool_calls != last_emitted_tool_calls:
+                                        last_emitted_tool_calls = serialized_tool_calls
+                                        attempt_had_output = True
+                                        yield StreamChunk(
+                                            status=StreamStatus.CONTENT,
+                                            content=None,
+                                            node_id=stream_controller.node_id if stream_controller else None,
+                                            conversation_id=stream_controller.conversation_id if stream_controller else None,
+                                            error=None,
+                                            tokens_used=0,
+                                            event_type="tool_call",
+                                            tool_call={"tool_calls": tool_calls},
+                                            tool_calls=tool_calls,
+                                        )
+                            reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+                            if reasoning:
+                                attempt_had_output = True
+                                yield StreamChunk(
+                                    status=StreamStatus.CONTENT,
+                                    content=None,
+                                    node_id=stream_controller.node_id if stream_controller else None,
+                                    conversation_id=stream_controller.conversation_id if stream_controller else None,
+                                    error=None,
+                                    tokens_used=0,
+                                    event_type="reasoning",
+                                    reasoning=reasoning,
+                                )
+
+                            content = delta.get("content") or ""
+                            if content:
+                                attempt_had_output = True
+                                total_content += content
+                                token_delta = int(len(content.split()) * 1.3)
+                                total_tokens += token_delta
+                                yield StreamChunk(
+                                    status=StreamStatus.CONTENT,
+                                    content=content,
+                                    node_id=stream_controller.node_id if stream_controller else None,
+                                    conversation_id=stream_controller.conversation_id if stream_controller else None,
+                                    error=None,
+                                    tokens_used=token_delta,
+                                )
+                            finish_reason = choice.get("finish_reason")
+                            if finish_reason == "tool_calls" and tool_call_accumulator:
+                                tool_calls = self._finalize_openai_tool_calls(tool_call_accumulator)
                                 serialized_tool_calls = json.dumps(tool_calls, ensure_ascii=False, sort_keys=True)
                                 if serialized_tool_calls != last_emitted_tool_calls:
                                     last_emitted_tool_calls = serialized_tool_calls
+                                    attempt_had_output = True
                                     yield StreamChunk(
                                         status=StreamStatus.CONTENT,
                                         content=None,
@@ -266,56 +323,55 @@ class OpenAICompatibleProvider(BaseProvider):
                                         tool_call={"tool_calls": tool_calls},
                                         tool_calls=tool_calls,
                                     )
-                        reasoning = delta.get("reasoning_content") or delta.get("reasoning")
-                        if reasoning:
-                            yield StreamChunk(
-                                status=StreamStatus.CONTENT,
-                                content=None,
-                                node_id=stream_controller.node_id if stream_controller else None,
-                                conversation_id=stream_controller.conversation_id if stream_controller else None,
-                                error=None,
-                                tokens_used=0,
-                                event_type="reasoning",
-                                reasoning=reasoning,
-                            )
-
-                        content = delta.get("content") or ""
-                        if content:
-                            total_content += content
-                            token_delta = int(len(content.split()) * 1.3)
-                            total_tokens += token_delta
-                            yield StreamChunk(
-                                status=StreamStatus.CONTENT,
-                                content=content,
-                                node_id=stream_controller.node_id if stream_controller else None,
-                                conversation_id=stream_controller.conversation_id if stream_controller else None,
-                                error=None,
-                                tokens_used=token_delta,
-                            )
-                        finish_reason = choice.get("finish_reason")
-                        if finish_reason == "tool_calls" and tool_call_accumulator:
-                            tool_calls = self._finalize_openai_tool_calls(tool_call_accumulator)
-                            serialized_tool_calls = json.dumps(tool_calls, ensure_ascii=False, sort_keys=True)
-                            if serialized_tool_calls != last_emitted_tool_calls:
-                                last_emitted_tool_calls = serialized_tool_calls
-                                yield StreamChunk(
-                                    status=StreamStatus.CONTENT,
-                                    content=None,
-                                    node_id=stream_controller.node_id if stream_controller else None,
-                                    conversation_id=stream_controller.conversation_id if stream_controller else None,
-                                    error=None,
-                                    tokens_used=0,
-                                    event_type="tool_call",
-                                    tool_call={"tool_calls": tool_calls},
-                                    tool_calls=tool_calls,
-                                )
-                    break
-                except ProviderHTTPError as exc:
-                    last_error = exc
-                    if attempt_index + 1 < len(attempts) and exc.status == 400:
-                        logger.warning(f"Chat completions request rejected, retrying with fewer params: {exc}")
+                        break
+                    except ProviderHTTPError as exc:
+                        last_error = exc
+                        if attempt_index + 1 < len(attempts) and exc.status == 400 and not attempt_had_output:
+                            logger.warning(f"Chat completions request rejected, retrying with fewer params: {exc}")
+                            fallback_to_next_params = True
+                            break
+                        decision = classify_retry_error(exc, stream_policy)
+                        if (
+                            attempt_had_output
+                            or not decision.retryable
+                            or retry_failures >= stream_policy.max_retries(stream=True)
+                        ):
+                            raise
+                        retry_failures += 1
+                        delay = await sleep_before_retry(
+                            retry_failures,
+                            stream_policy,
+                            decision,
+                        )
+                        logger.warning(
+                            f"OpenAI stream failed before output; retrying "
+                            f"{retry_failures}/{stream_policy.max_retries(stream=True)} "
+                            f"in {delay:.2f}s: {exc}"
+                        )
                         continue
-                    raise
+                    except Exception as exc:
+                        decision = classify_retry_error(exc, stream_policy)
+                        if (
+                            attempt_had_output
+                            or not decision.retryable
+                            or retry_failures >= stream_policy.max_retries(stream=True)
+                        ):
+                            raise
+                        retry_failures += 1
+                        delay = await sleep_before_retry(
+                            retry_failures,
+                            stream_policy,
+                            decision,
+                        )
+                        logger.warning(
+                            f"OpenAI stream failed before output; retrying "
+                            f"{retry_failures}/{stream_policy.max_retries(stream=True)} "
+                            f"in {delay:.2f}s: {exc}"
+                        )
+                        continue
+                if fallback_to_next_params:
+                    continue
+                break
 
             if last_error and not total_content and usage_info is None and not attempts:
                 raise last_error
@@ -391,54 +447,104 @@ class OpenAICompatibleProvider(BaseProvider):
             retry_kwargs.pop("temperature", None)
             attempts.append(retry_kwargs)
 
+        function_calls: Dict[str, Dict[str, Any]] = {}
+        last_emitted_tool_calls = ""
+        stream_policy = RetryPolicy.from_config(self.config, stream=True)
         for attempt_index, current_kwargs in enumerate(attempts):
-            total_content = ""
-            function_calls: Dict[str, Dict[str, Any]] = {}
-            tool_call_started = False
-            last_emitted_tool_calls = ""
-            try:
-                async for event in self._iter_sse_events("/responses", current_kwargs):
-                    if stream_controller and await stream_controller.is_stopped():
-                        yield StreamChunk(
-                            status=StreamStatus.STOPPED,
-                            content=None,
-                            node_id=stream_controller.node_id,
-                            conversation_id=stream_controller.conversation_id,
-                            error="用户手动终止",
-                            tokens_used=total_tokens,
-                        )
-                        return
+            retry_failures = 0
+            fallback_to_next_params = False
+            while True:
+                total_content = ""
+                function_calls = {}
+                tool_call_started = False
+                last_emitted_tool_calls = ""
+                attempt_had_output = False
+                try:
+                    async for event in self._iter_sse_events("/responses", current_kwargs):
+                        if stream_controller and await stream_controller.is_stopped():
+                            yield StreamChunk(
+                                status=StreamStatus.STOPPED,
+                                content=None,
+                                node_id=stream_controller.node_id,
+                                conversation_id=stream_controller.conversation_id,
+                                error="用户手动终止",
+                                tokens_used=total_tokens,
+                            )
+                            return
 
-                    event_type = event.get("type", "")
-                    if event_type == "response.completed":
-                        response = event.get("response") or {}
-                        if usage := response.get("usage"):
-                            usage_info = usage_from_openai(usage)
-                            total_tokens = usage_total(usage_info, total_tokens)
-                        completed_tool_calls = self._extract_responses_tool_calls(response)
-                        if completed_tool_calls:
-                            function_calls.clear()
-                            serialized_tool_calls = json.dumps(completed_tool_calls, ensure_ascii=False, sort_keys=True)
-                            if serialized_tool_calls != last_emitted_tool_calls:
-                                last_emitted_tool_calls = serialized_tool_calls
-                                yield StreamChunk(
-                                    status=StreamStatus.CONTENT,
-                                    content=None,
-                                    node_id=stream_controller.node_id if stream_controller else None,
-                                    conversation_id=stream_controller.conversation_id if stream_controller else None,
-                                    error=None,
-                                    tokens_used=0,
-                                    event_type="tool_call",
-                                    tool_call={"tool_calls": completed_tool_calls},
-                                    tool_calls=completed_tool_calls,
-                                )
-                        continue
+                        event_type = event.get("type", "")
+                        if event_type == "response.completed":
+                            response = event.get("response") or {}
+                            if usage := response.get("usage"):
+                                usage_info = usage_from_openai(usage)
+                                total_tokens = usage_total(usage_info, total_tokens)
+                            completed_tool_calls = self._extract_responses_tool_calls(response)
+                            if completed_tool_calls:
+                                function_calls.clear()
+                                serialized_tool_calls = json.dumps(completed_tool_calls, ensure_ascii=False, sort_keys=True)
+                                if serialized_tool_calls != last_emitted_tool_calls:
+                                    last_emitted_tool_calls = serialized_tool_calls
+                                    attempt_had_output = True
+                                    yield StreamChunk(
+                                        status=StreamStatus.CONTENT,
+                                        content=None,
+                                        node_id=stream_controller.node_id if stream_controller else None,
+                                        conversation_id=stream_controller.conversation_id if stream_controller else None,
+                                        error=None,
+                                        tokens_used=0,
+                                        event_type="tool_call",
+                                        tool_call={"tool_calls": completed_tool_calls},
+                                        tool_calls=completed_tool_calls,
+                                    )
+                            continue
 
-                    if event_type == "response.output_item.added":
-                        item = event.get("item") or {}
-                        if item.get("type") == "function_call":
+                        if event_type == "response.output_item.added":
+                            item = event.get("item") or {}
+                            if item.get("type") == "function_call":
+                                if not tool_call_started:
+                                    tool_call_started = True
+                                    attempt_had_output = True
+                                    yield StreamChunk(
+                                        status=StreamStatus.CONTENT,
+                                        content=None,
+                                        node_id=stream_controller.node_id if stream_controller else None,
+                                        conversation_id=stream_controller.conversation_id if stream_controller else None,
+                                        error=None,
+                                        tokens_used=0,
+                                        event_type="tool_call_start",
+                                    )
+                                key = str(event.get("output_index", item.get("id") or item.get("call_id") or len(function_calls)))
+                                function_calls[key] = {
+                                    "id": item.get("call_id") or item.get("id") or key,
+                                    "type": "function",
+                                    "function": {
+                                        "name": item.get("name", ""),
+                                        "arguments": item.get("arguments", "") or "",
+                                    },
+                                }
+                                tool_calls = self._finalize_response_function_calls(function_calls)
+                                if tool_calls:
+                                    serialized_tool_calls = json.dumps(tool_calls, ensure_ascii=False, sort_keys=True)
+                                    if serialized_tool_calls != last_emitted_tool_calls:
+                                        last_emitted_tool_calls = serialized_tool_calls
+                                        attempt_had_output = True
+                                        yield StreamChunk(
+                                            status=StreamStatus.CONTENT,
+                                            content=None,
+                                            node_id=stream_controller.node_id if stream_controller else None,
+                                            conversation_id=stream_controller.conversation_id if stream_controller else None,
+                                            error=None,
+                                            tokens_used=0,
+                                            event_type="tool_call",
+                                            tool_call={"tool_calls": tool_calls},
+                                            tool_calls=tool_calls,
+                                        )
+                            continue
+
+                        if event_type == "response.function_call_arguments.delta":
                             if not tool_call_started:
                                 tool_call_started = True
+                                attempt_had_output = True
                                 yield StreamChunk(
                                     status=StreamStatus.CONTENT,
                                     content=None,
@@ -448,20 +554,18 @@ class OpenAICompatibleProvider(BaseProvider):
                                     tokens_used=0,
                                     event_type="tool_call_start",
                                 )
-                            key = str(event.get("output_index", item.get("id") or item.get("call_id") or len(function_calls)))
-                            function_calls[key] = {
-                                "id": item.get("call_id") or item.get("id") or key,
-                                "type": "function",
-                                "function": {
-                                    "name": item.get("name", ""),
-                                    "arguments": item.get("arguments", "") or "",
-                                },
-                            }
+                            key = str(event.get("output_index", "0"))
+                            call = function_calls.setdefault(
+                                key,
+                                {"id": key, "type": "function", "function": {"name": "", "arguments": ""}},
+                            )
+                            call["function"]["arguments"] += event.get("delta") or ""
                             tool_calls = self._finalize_response_function_calls(function_calls)
                             if tool_calls:
                                 serialized_tool_calls = json.dumps(tool_calls, ensure_ascii=False, sort_keys=True)
                                 if serialized_tool_calls != last_emitted_tool_calls:
                                     last_emitted_tool_calls = serialized_tool_calls
+                                    attempt_had_output = True
                                     yield StreamChunk(
                                         status=StreamStatus.CONTENT,
                                         content=None,
@@ -473,31 +577,26 @@ class OpenAICompatibleProvider(BaseProvider):
                                         tool_call={"tool_calls": tool_calls},
                                         tool_calls=tool_calls,
                                     )
-                        continue
+                            continue
 
-                    if event_type == "response.function_call_arguments.delta":
-                        if not tool_call_started:
-                            tool_call_started = True
-                            yield StreamChunk(
-                                status=StreamStatus.CONTENT,
-                                content=None,
-                                node_id=stream_controller.node_id if stream_controller else None,
-                                conversation_id=stream_controller.conversation_id if stream_controller else None,
-                                error=None,
-                                tokens_used=0,
-                                event_type="tool_call_start",
-                            )
-                        key = str(event.get("output_index", "0"))
-                        call = function_calls.setdefault(
-                            key,
-                            {"id": key, "type": "function", "function": {"name": "", "arguments": ""}},
-                        )
-                        call["function"]["arguments"] += event.get("delta") or ""
-                        tool_calls = self._finalize_response_function_calls(function_calls)
-                        if tool_calls:
-                            serialized_tool_calls = json.dumps(tool_calls, ensure_ascii=False, sort_keys=True)
-                            if serialized_tool_calls != last_emitted_tool_calls:
-                                last_emitted_tool_calls = serialized_tool_calls
+                        if event_type == "response.output_item.done":
+                            item = event.get("item") or {}
+                            if item.get("type") == "function_call":
+                                key = str(event.get("output_index", item.get("id") or item.get("call_id") or "0"))
+                                function_calls[key] = {
+                                    "id": item.get("call_id") or item.get("id") or key,
+                                    "type": "function",
+                                    "function": {
+                                        "name": item.get("name", ""),
+                                        "arguments": item.get("arguments", "") or "",
+                                    },
+                                }
+                            continue
+
+                        if event_type == "response.reasoning_summary_text.delta":
+                            reasoning = event.get("delta") or ""
+                            if reasoning:
+                                attempt_had_output = True
                                 yield StreamChunk(
                                     status=StreamStatus.CONTENT,
                                     content=None,
@@ -505,69 +604,74 @@ class OpenAICompatibleProvider(BaseProvider):
                                     conversation_id=stream_controller.conversation_id if stream_controller else None,
                                     error=None,
                                     tokens_used=0,
-                                    event_type="tool_call",
-                                    tool_call={"tool_calls": tool_calls},
-                                    tool_calls=tool_calls,
+                                    event_type="reasoning",
+                                    reasoning=reasoning,
                                 )
-                        continue
+                            continue
 
-                    if event_type == "response.output_item.done":
-                        item = event.get("item") or {}
-                        if item.get("type") == "function_call":
-                            key = str(event.get("output_index", item.get("id") or item.get("call_id") or "0"))
-                            function_calls[key] = {
-                                "id": item.get("call_id") or item.get("id") or key,
-                                "type": "function",
-                                "function": {
-                                    "name": item.get("name", ""),
-                                    "arguments": item.get("arguments", "") or "",
-                                },
-                            }
-                        continue
+                        if event_type != "response.output_text.delta":
+                            continue
 
-                    if event_type == "response.reasoning_summary_text.delta":
-                        reasoning = event.get("delta") or ""
-                        if reasoning:
-                            yield StreamChunk(
-                                status=StreamStatus.CONTENT,
-                                content=None,
-                                node_id=stream_controller.node_id if stream_controller else None,
-                                conversation_id=stream_controller.conversation_id if stream_controller else None,
-                                error=None,
-                                tokens_used=0,
-                                event_type="reasoning",
-                                reasoning=reasoning,
-                            )
-                        continue
-
-                    if event_type != "response.output_text.delta":
-                        continue
-
-                    content = event.get("delta") or ""
-                    if not content:
-                        continue
-                    total_content += content
-                    token_delta = int(len(content.split()) * 1.3)
-                    total_tokens += token_delta
-                    yield StreamChunk(
-                        status=StreamStatus.CONTENT,
-                        content=content,
-                        node_id=stream_controller.node_id if stream_controller else None,
-                        conversation_id=stream_controller.conversation_id if stream_controller else None,
-                        error=None,
-                        tokens_used=token_delta,
+                        content = event.get("delta") or ""
+                        if not content:
+                            continue
+                        attempt_had_output = True
+                        total_content += content
+                        token_delta = int(len(content.split()) * 1.3)
+                        total_tokens += token_delta
+                        yield StreamChunk(
+                            status=StreamStatus.CONTENT,
+                            content=content,
+                            node_id=stream_controller.node_id if stream_controller else None,
+                            conversation_id=stream_controller.conversation_id if stream_controller else None,
+                            error=None,
+                            tokens_used=token_delta,
+                        )
+                    break
+                except ProviderHTTPError as exc:
+                    if (
+                        attempt_index + 1 < len(attempts)
+                        and exc.status == 400
+                        and not attempt_had_output
+                        and "temperature" in current_kwargs
+                    ):
+                        logger.warning(f"Responses stream rejected temperature, retrying without it: {exc}")
+                        fallback_to_next_params = True
+                        break
+                    decision = classify_retry_error(exc, stream_policy)
+                    if (
+                        attempt_had_output
+                        or not decision.retryable
+                        or retry_failures >= stream_policy.max_retries(stream=True)
+                    ):
+                        raise
+                    retry_failures += 1
+                    delay = await sleep_before_retry(retry_failures, stream_policy, decision)
+                    logger.warning(
+                        f"Responses stream failed before output; retrying "
+                        f"{retry_failures}/{stream_policy.max_retries(stream=True)} "
+                        f"in {delay:.2f}s: {exc}"
                     )
-                break
-            except ProviderHTTPError as exc:
-                if (
-                    attempt_index + 1 < len(attempts)
-                    and exc.status == 400
-                    and not total_content
-                    and "temperature" in current_kwargs
-                ):
-                    logger.warning(f"Responses stream rejected temperature, retrying without it: {exc}")
                     continue
-                raise
+                except Exception as exc:
+                    decision = classify_retry_error(exc, stream_policy)
+                    if (
+                        attempt_had_output
+                        or not decision.retryable
+                        or retry_failures >= stream_policy.max_retries(stream=True)
+                    ):
+                        raise
+                    retry_failures += 1
+                    delay = await sleep_before_retry(retry_failures, stream_policy, decision)
+                    logger.warning(
+                        f"Responses stream failed before output; retrying "
+                        f"{retry_failures}/{stream_policy.max_retries(stream=True)} "
+                        f"in {delay:.2f}s: {exc}"
+                    )
+                    continue
+            if fallback_to_next_params:
+                continue
+            break
 
         if function_calls:
             tool_calls = self._finalize_response_function_calls(function_calls)
@@ -646,7 +750,13 @@ class OpenAICompatibleProvider(BaseProvider):
             tool_choice=tool_choice,
         )
         request_kwargs["model"] = model
-        response = self._request_json("/responses", request_kwargs)
+        policy = RetryPolicy.from_config(self.config)
+        response = run_with_retries(
+            lambda: self._request_json("/responses", request_kwargs),
+            policy,
+            label="OpenAI responses request",
+            logger=logger,
+        )
         content = self._extract_responses_text(response)
         usage_info = usage_from_openai(response.get("usage"))
         return content, usage_total(usage_info, 0)
