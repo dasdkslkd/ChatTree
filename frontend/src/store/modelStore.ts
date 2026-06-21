@@ -35,7 +35,7 @@ interface ModelActions {
   loadModels: (provider: string) => Promise<void>;
   /** 加载指定 provider 的模型元数据（已缓存则跳过） */
   loadMetadata: (provider: string) => Promise<void>;
-  loadConfig: () => Promise<void>;
+  loadConfig: (options?: { force?: boolean }) => Promise<void>;
   updateConfig: (config: ConfigUpdateRequest) => Promise<void>;
   /** 设置临时提供商（对话框内预览） */
   setPendingProvider: (provider: string) => void;
@@ -83,6 +83,11 @@ function defaultsFromMeta(meta: ModelMetadata | undefined): {
     thinking: thinkingSpec?.toggleable ? (thinkingSpec.default_enabled ?? false) : null,
   };
 }
+
+const CONFIG_REFRESH_TTL_MS = 30_000;
+let configLoadPromise: Promise<void> | null = null;
+let lastConfigLoadedAt = 0;
+let configLoadGeneration = 0;
 
 export const useModelStore = create<ModelState & ModelActions>()(
   devtools((set, get) => ({
@@ -142,28 +147,55 @@ export const useModelStore = create<ModelState & ModelActions>()(
       return get().modelMetadata[provider]?.[model];
     },
 
-    loadConfig: async () => {
-      set({ loading: true, error: null });
-      try {
-        const config = await configApi.get();
-        const needInit = !get().currentProvider;
-        set({ config });
-        // 首次加载时初始化默认模型
-        if (needInit) {
-          await get().resetToDefault();
-        }
-      } catch (err: any) {
-        set({ error: err.message });
-      } finally {
-        set({ loading: false });
+    loadConfig: async (options = {}) => {
+      const force = options.force === true;
+      const now = Date.now();
+
+      if (!force && configLoadPromise) {
+        return configLoadPromise;
       }
+
+      if (!force && get().config && now - lastConfigLoadedAt < CONFIG_REFRESH_TTL_MS) {
+        return;
+      }
+
+      const generation = ++configLoadGeneration;
+      set({ loading: true, error: null });
+
+      let promise!: Promise<void>;
+      promise = (async () => {
+        try {
+          const config = await configApi.get();
+          if (generation !== configLoadGeneration) return;
+
+          lastConfigLoadedAt = Date.now();
+          const needInit = !get().currentProvider;
+          set({ config });
+          // 首次加载时初始化默认模型
+          if (needInit) {
+            await get().resetToDefault();
+          }
+        } catch (err: any) {
+          if (generation === configLoadGeneration) {
+            set({ error: err.message });
+          }
+        } finally {
+          if (configLoadPromise === promise) {
+            configLoadPromise = null;
+            set({ loading: false });
+          }
+        }
+      })();
+
+      configLoadPromise = promise;
+      return promise;
     },
 
     updateConfig: async (configUpdate) => {
       set({ loading: true, error: null });
       try {
         await configApi.update(configUpdate);
-        await get().loadConfig();
+        await get().loadConfig({ force: true });
       } catch (err: any) {
         set({ error: err.message });
       } finally {
