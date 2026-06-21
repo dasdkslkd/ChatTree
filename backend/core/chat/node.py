@@ -84,6 +84,7 @@ class NodeManager:
         model_id: Optional[str] = None,
         last_pre_compact_message_id: Optional[str] = None,
         messages_to_keep: int = 1,
+        restored_files: Optional[List[Dict[str, Any]]] = None,
         suppress_follow_up_questions: bool = True,
     ) -> ConversationTreeNode:
         """创建 Claude Code 风格 compact boundary + summary 节点。"""
@@ -96,6 +97,8 @@ class NodeManager:
         }
         if last_pre_compact_message_id:
             compact_metadata["last_pre_compact_message_id"] = last_pre_compact_message_id
+        if restored_files:
+            compact_metadata["restored_files"] = restored_files
 
         boundary_msg = Message({
             "id": str(uuid.uuid4()),

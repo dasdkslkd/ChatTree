@@ -209,6 +209,48 @@ def test_manual_compact_saves_boundary_summary_and_moves_current_node():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_compact_restores_recent_import_file_context_after_summary():
+    tmp = tempfile.mkdtemp(prefix="chattree_compact_files_")
+    try:
+        storage = ChatStorage(storage_dir=os.path.join(tmp, "conversations"))
+        prompts = PromptStorage(storage_dir=os.path.join(tmp, "prompts"))
+        manager = ChatManager(CompactModelManager(), storage, prompts)
+        conv = manager.create_conversation("file restore")
+        conv.metadata["provider_id"] = "fake"
+        conv.metadata["model_id"] = "fake-model"
+        storage.save_import_file(conv.metadata["id"], "notes.txt", "important file facts".encode("utf-8"))
+
+        with_file = NodeManager.create_node(
+            _message(
+                Role.USER,
+                "'''USER MENTIONED FILES: notes.txt '''\n\n<file>\nstale inline copy\n</file>\n\n---\n\nuse this file",
+            ),
+            conv.current_node_id,
+            "fake-model",
+        )
+        with_file["assistant_message"] = _message(Role.ASSISTANT, "read it")
+        conv.add_node(with_file, conv.current_node_id)
+        manager._save(conv)
+
+        asyncio.run(manager.compact_conversation(conv.metadata["id"], messages_to_keep=0))
+
+        reloaded = Conversation.from_dict(storage.load(conv.metadata["id"]))
+        compact_node = reloaded.nodes[reloaded.current_node_id]
+        restored = compact_node["system_message"]["compact_metadata"]["restored_files"]
+        assert restored == [{"filename": "notes.txt", "content": "important file facts", "truncated": False}]
+
+        messages = manager._prepare_messages_for_api_with_conversation(reloaded)
+        contents = [message["content"] for message in messages]
+        summary_index = next(i for i, content in enumerate(contents) if "This session is being continued" in content)
+        restored_index = next(i for i, content in enumerate(contents) if "Restored file context" in content)
+        assert restored_index > summary_index
+        assert "notes.txt" in contents[restored_index]
+        assert "important file facts" in contents[restored_index]
+        assert "stale inline copy" not in contents[restored_index]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_messages_to_keep_preserves_latest_original_turn_after_summary():
     conv = Conversation(title="compact keep")
     conv.initialize_with_system_message("root instructions")

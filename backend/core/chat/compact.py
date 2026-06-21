@@ -9,6 +9,10 @@ AUTO_COMPACT_RATIO = 0.9
 MANUAL_COMPACT_BUFFER_TOKENS = 3_000
 MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 3
 MICROCOMPACT_MAX_TOOL_CONTENT_CHARS = 8_000
+POST_COMPACT_MAX_FILES_TO_RESTORE = 5
+POST_COMPACT_MAX_CHARS_PER_FILE = 20_000
+
+MENTIONED_FILES_RE = re.compile(r"^'''USER MENTIONED FILES:\s+(.*?)\s+'''\n\n", re.S)
 
 NO_TOOLS_PREAMBLE = """CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
 
@@ -157,6 +161,36 @@ def microcompact_messages(
         )
         compacted.append(compacted_message)
     return compacted
+
+
+def extract_mentioned_import_filenames(messages: List[Dict[str, Any]], max_files: int = POST_COMPACT_MAX_FILES_TO_RESTORE) -> List[str]:
+    filenames: List[str] = []
+    seen = set()
+    for message in reversed(messages):
+        if message.get("role") not in ("user", "Role.USER"):
+            continue
+        content = str(message.get("content") or "")
+        match = MENTIONED_FILES_RE.match(content)
+        if not match:
+            continue
+        for filename in reversed(match.group(1).split()):
+            if filename in seen:
+                continue
+            seen.add(filename)
+            filenames.append(filename)
+            if len(filenames) >= max_files:
+                return list(reversed(filenames))
+    return list(reversed(filenames))
+
+
+def format_restored_file_context(restored_files: List[Dict[str, Any]]) -> str:
+    parts = ["Restored file context from before compaction:"]
+    for file_info in restored_files:
+        filename = file_info.get("filename") or "unknown"
+        content = str(file_info.get("content") or "")
+        truncated = " (truncated)" if file_info.get("truncated") else ""
+        parts.append(f"\n--- {filename}{truncated} ---\n{content}")
+    return "\n".join(parts).strip()
 
 
 def get_auto_compact_threshold(context_window: int, max_output_tokens: Optional[int] = None) -> int:

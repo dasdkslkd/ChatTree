@@ -54,6 +54,11 @@ export interface Message {
     pre_tokens?: number;
     messages_to_keep?: number;
     last_pre_compact_message_id?: string;
+    restored_files?: Array<{
+      filename: string;
+      content?: string;
+      truncated?: boolean;
+    }>;
   } | null;
   is_compact_summary?: boolean;
   is_visible_in_transcript_only?: boolean;

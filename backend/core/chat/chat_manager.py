@@ -8,7 +8,15 @@ from contextlib import suppress
 from time import time
 from .conversation import Conversation
 from .node import NodeManager
-from .compact import COMPACT_MAX_OUTPUT_TOKENS, get_auto_compact_threshold, get_compact_prompt, microcompact_messages
+from .compact import (
+    COMPACT_MAX_OUTPUT_TOKENS,
+    POST_COMPACT_MAX_CHARS_PER_FILE,
+    extract_mentioned_import_filenames,
+    format_restored_file_context,
+    get_auto_compact_threshold,
+    get_compact_prompt,
+    microcompact_messages,
+)
 from ..config.types import Message, Role, StreamChunk, StreamStatus, StreamController, GenerationInfo
 from ..storage.chat_storage import ChatStorage
 from ..storage.prompt_storage import PromptStorage
@@ -755,6 +763,24 @@ class ChatManager:
             total_chars += len(str(message.get("content") or ""))
         return max(total_chars // 4, len(messages))
 
+    def _restore_import_file_context(
+        self,
+        conversation_id: str,
+        messages: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        restored = []
+        for filename in extract_mentioned_import_filenames(messages):
+            content = self.storage.read_import_file(conversation_id, filename)
+            if content is None:
+                continue
+            truncated = len(content) > POST_COMPACT_MAX_CHARS_PER_FILE
+            restored.append({
+                "filename": filename,
+                "content": content[:POST_COMPACT_MAX_CHARS_PER_FILE],
+                "truncated": truncated,
+            })
+        return restored
+
     def _current_context_tokens(self, conversation: Conversation) -> int:
         current = conversation.nodes.get(conversation.current_node_id or "")
         usage = current.get("usage") if current else None
@@ -837,6 +863,7 @@ class ChatManager:
             "content": get_compact_prompt(custom_instructions),
         }
         compact_messages = [*messages_to_summarize, summary_request]
+        restored_files = self._restore_import_file_context(conversation_id, messages_to_summarize)
         summary, tokens_used = provider.generate_response(
             target_model,
             compact_messages,
@@ -860,6 +887,7 @@ class ChatManager:
                 model_id=target_model,
                 last_pre_compact_message_id=parent_id,
                 messages_to_keep=messages_to_keep,
+                restored_files=restored_files,
                 suppress_follow_up_questions=suppress_follow_up_questions,
             )
             compact_node["usage"] = self._node_usage_snapshot(
@@ -922,6 +950,15 @@ class ChatManager:
         for node in node_chain:
             append_message(node.get("system_message"))
             append_message(node.get("user_message"))
+            if self._is_compact_boundary_node(node):
+                restored_files = ((node.get("system_message") or {}).get("compact_metadata") or {}).get("restored_files") or []
+                if restored_files:
+                    append_message(Message({
+                        "id": f"{node['id']}:restored_files",
+                        "role": Role.SYSTEM,
+                        "content": format_restored_file_context(restored_files),
+                        "timestamp": int(node.get("timestamp") or time()),
+                    }))
             assistant = node.get("assistant_message")
             if assistant and assistant.get("tool_interactions"):
                 for interaction in assistant.get("tool_interactions") or []:

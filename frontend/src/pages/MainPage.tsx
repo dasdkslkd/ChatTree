@@ -1257,6 +1257,11 @@ export default function ChatPage() {
     return '上下文压缩';
   };
 
+  const formatRestoredFiles = (count?: number) => {
+    if (!count) return null;
+    return `恢复 ${count} 个文件`;
+  };
+
   const outline = messages
     .map((m, index) => ({ ...m, originalIndex: index }))
     .filter((m) => m.role === 'user' && !isCompactSummaryMessage(m))
@@ -1289,6 +1294,7 @@ export default function ChatPage() {
     if (isCompactBoundaryMessage(m)) {
       const trigger = formatCompactTrigger(m.compact_metadata?.trigger);
       const tokens = formatCompactTokens(m.compact_metadata?.pre_tokens);
+      const restoredFiles = formatRestoredFiles(m.compact_metadata?.restored_files?.length);
       return (
         <div
           key={m.id}
@@ -1306,6 +1312,7 @@ export default function ChatPage() {
             <Archive className="h-3.5 w-3.5" />
             <span>{trigger}</span>
             {tokens && <span style={{ color: 'var(--fg-tertiary)' }}>{tokens}</span>}
+            {restoredFiles && <span style={{ color: 'var(--fg-tertiary)' }}>{restoredFiles}</span>}
           </div>
         </div>
       );
