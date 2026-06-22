@@ -5,10 +5,28 @@ import os
 import shutil
 import sys
 import tempfile
+import asyncio
+import io
+from time import time
 
 sys.path.insert(0, ".")
 
+from starlette.datastructures import Headers, UploadFile
+
+from backend.api.routes.conversations import read_import_file, upload_import_file
+from backend.core.chat.chat_manager import ChatManager
+from backend.core.config.types import Message, Role
+from backend.core.chat.node import NodeManager
+from backend.core.model.providers.anthropic_provider import AnthropicProvider
+from backend.core.model.providers.gemini_provider import GeminiProvider
+from backend.core.model.providers.openai_compatible import OpenAICompatibleProvider
 from backend.core.storage.chat_storage import ChatStorage
+from backend.core.storage.prompt_storage import PromptStorage
+
+
+class _DummyModelManager:
+    def get_provider_for_model(self, model):
+        raise AssertionError("provider should not be needed")
 
 
 def main():
@@ -47,6 +65,111 @@ def main():
         print("PASS: 导入文件 CRUD + 路径穿越防护正确")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_image_references_are_injected_as_multimodal_user_content():
+    tmp = tempfile.mkdtemp(prefix="chattree_image_context_")
+    try:
+        storage = ChatStorage(storage_dir=os.path.join(tmp, "conversations"))
+        prompts = PromptStorage(storage_dir=os.path.join(tmp, "prompts"))
+        manager = ChatManager(_DummyModelManager(), storage, prompts)
+        conv = manager.create_conversation("image references")
+        storage.save_import_file(conv.metadata["id"], "diagram.png", b"\x89PNG\r\n\x1a\n")
+
+        node = NodeManager.create_node(
+            Message({
+                "id": "user-with-image",
+                "role": Role.USER,
+                "content": "看看这张图",
+                "image_refs": [{"filename": "diagram.png", "mime_type": "image/png"}],
+                "timestamp": int(time()),
+            }),
+            conv.current_node_id,
+            "fake-model",
+        )
+        conv.add_node(node, conv.current_node_id)
+
+        messages = manager._prepare_messages_for_api_with_conversation(conv)
+
+        assert messages[-1]["role"] == "user"
+        assert messages[-1]["content"][0] == {"type": "text", "text": "看看这张图"}
+        assert messages[-1]["content"][1]["type"] == "image_url"
+        assert messages[-1]["content"][1]["image_url"]["url"].startswith("data:image/png;base64,")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_upload_import_accepts_images_as_image_references():
+    tmp = tempfile.mkdtemp(prefix="chattree_image_upload_")
+    try:
+        storage = ChatStorage(storage_dir=os.path.join(tmp, "conversations"))
+        prompts = PromptStorage(storage_dir=os.path.join(tmp, "prompts"))
+        manager = ChatManager(_DummyModelManager(), storage, prompts)
+        conv = manager.create_conversation("image upload")
+        upload = UploadFile(
+            filename="diagram.png",
+            file=io.BytesIO(b"\x89PNG\r\n\x1a\n"),
+            headers=Headers({"content-type": "image/png"}),
+        )
+
+        result = asyncio.run(upload_import_file(conv.metadata["id"], upload, manager))
+
+        assert result["filename"] == "diagram.png"
+        assert result["kind"] == "image"
+        assert result["mime_type"] == "image/png"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_read_import_returns_binary_image_response():
+    tmp = tempfile.mkdtemp(prefix="chattree_image_read_")
+    try:
+        storage = ChatStorage(storage_dir=os.path.join(tmp, "conversations"))
+        prompts = PromptStorage(storage_dir=os.path.join(tmp, "prompts"))
+        manager = ChatManager(_DummyModelManager(), storage, prompts)
+        conv = manager.create_conversation("image read")
+        storage.save_import_file(conv.metadata["id"], "diagram.png", b"\x89PNG\r\n\x1a\n")
+
+        response = asyncio.run(read_import_file(conv.metadata["id"], "diagram.png", manager))
+
+        assert response.media_type == "image/png"
+        assert response.body == b"\x89PNG\r\n\x1a\n"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_multimodal_image_blocks_convert_for_provider_formats():
+    image_url = "data:image/png;base64,aGVsbG8="
+    messages = [Message({
+        "id": "m",
+        "role": Role.USER,
+        "content": [
+            {"type": "text", "text": "看看这张图"},
+            {"type": "image_url", "image_url": {"url": image_url}},
+        ],
+        "timestamp": int(time()),
+    })]
+
+    openai = OpenAICompatibleProvider({"api_key": "test", "api_format": "responses"})
+    _, responses_input = openai._convert_messages_to_responses_input(messages)
+    assert responses_input[0]["content"] == [
+        {"type": "input_text", "text": "看看这张图"},
+        {"type": "input_image", "image_url": image_url},
+    ]
+
+    anthropic = AnthropicProvider({"api_key": "test"})
+    _, anthropic_messages = anthropic._convert_messages(messages)
+    assert anthropic_messages[0]["content"] == [
+        {"type": "text", "text": "看看这张图"},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGVsbG8="}},
+    ]
+
+    gemini = GeminiProvider({"api_key": "test"})
+    _, gemini_messages = gemini._convert_messages(messages)
+    assert gemini_messages[0]["parts"] == [
+        {"text": "看看这张图"},
+        {"inline_data": {"mime_type": "image/png", "data": "aGVsbG8="}},
+    ]
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ from ..usage import estimated_usage, usage_from_openai, usage_total
 from ...config.types import Message, StreamChunk, StreamStatus, StreamController
 from .retry import RetryPolicy, RetryableHTTPError, classify_retry_error, run_with_retries, sleep_before_retry
 from .sse import iter_decoded_sse_lines
+from .multimodal import to_openai_responses_content
 
 _SENTINEL = object()
 
@@ -838,6 +839,7 @@ class OpenAICompatibleProvider(BaseProvider):
         for msg in messages:
             role = str(msg["role"])
             content = msg.get("content") or ""
+            responses_content = to_openai_responses_content(content)
 
             if role == "system":
                 role = "developer"
@@ -854,7 +856,7 @@ class OpenAICompatibleProvider(BaseProvider):
                     response_input.append({
                         "type": "message",
                         "role": "assistant",
-                        "content": content,
+                        "content": responses_content,
                     })
                 continue
             if role == "tool":
@@ -870,7 +872,7 @@ class OpenAICompatibleProvider(BaseProvider):
             response_input.append({
                 "type": "message",
                 "role": role,
-                "content": content,
+                "content": responses_content,
             })
 
         return None, response_input

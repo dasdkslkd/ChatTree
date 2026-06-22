@@ -9,6 +9,7 @@ from ..usage import estimated_usage, usage_from_anthropic, usage_total
 from ...config.types import Message, StreamChunk, StreamStatus, StreamController
 from .retry import RetryPolicy, RetryableHTTPError, classify_retry_error, run_with_retries, sleep_before_retry
 from .sse import iter_decoded_sse_lines
+from .multimodal import to_anthropic_content
 
 _SENTINEL = object()  # 队列结束标记
 
@@ -71,7 +72,7 @@ class AnthropicProvider(BaseProvider):
                     }],
                 })
             else:
-                anthropic_messages.append({"role": role, "content": content})
+                anthropic_messages.append({"role": role, "content": to_anthropic_content(content)})
         merged: List[Dict[str, Any]] = []
         for m in anthropic_messages:
             if merged and merged[-1]["role"] == m["role"]:

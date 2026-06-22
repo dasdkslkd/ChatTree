@@ -27,8 +27,10 @@ interface Props {
   editValue?: string | null;
   onEditValueConsumed?: () => void;
   attachedFiles?: string[];
+  attachedImages?: Array<{ filename: string; url: string }>;
   onFilesPicked?: (files: File[]) => void;
   onRemoveFile?: (filename: string) => void;
+  onPreviewImage?: (filename: string) => void;
   settingsSlot?: ReactNode;
   variant?: 'dock' | 'composer';
 }
@@ -42,8 +44,10 @@ export function ChatInput({
   editValue,
   onEditValueConsumed,
   attachedFiles = [],
+  attachedImages = [],
   onFilesPicked,
   onRemoveFile,
+  onPreviewImage,
   settingsSlot,
   variant = 'dock',
 }: Props) {
@@ -279,8 +283,37 @@ export function ChatInput({
           }
         }}
       >
-        {attachedFiles.length > 0 && (
+        {(attachedFiles.length > 0 || attachedImages.length > 0) && (
           <div className="flex flex-wrap gap-1.5 px-3 pt-2 pb-1">
+            {attachedImages.map((image) => (
+              <span
+                key={image.filename}
+                className="relative inline-flex h-14 w-14 overflow-hidden rounded-md"
+                style={{ border: '0.5px solid var(--border)', background: 'var(--bg-button-tertiary-hover)' }}
+              >
+                <button
+                  type="button"
+                  className="h-full w-full cursor-zoom-in p-0 border-0 bg-transparent"
+                  onClick={() => onPreviewImage?.(image.filename)}
+                  title={image.filename}
+                >
+                  <img
+                    src={image.url}
+                    alt={image.filename}
+                    className="h-full w-full object-cover"
+                  />
+                </button>
+                <button
+                  type="button"
+                  className="absolute right-0.5 top-0.5 flex h-4 w-4 items-center justify-center rounded-full border-0 p-0 cursor-pointer"
+                  style={{ background: 'rgba(0,0,0,0.58)', color: 'white' }}
+                  onClick={() => onRemoveFile?.(image.filename)}
+                  aria-label={`移除 ${image.filename}`}
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </span>
+            ))}
             {attachedFiles.map((fname) => (
               <span
                 key={fname}

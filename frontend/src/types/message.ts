@@ -62,6 +62,13 @@ export interface Message {
   } | null;
   is_compact_summary?: boolean;
   is_visible_in_transcript_only?: boolean;
+  import_files?: Array<{
+    filename: string;
+  }>;
+  image_refs?: Array<{
+    filename: string;
+    mime_type?: string;
+  }>;
 }
 
 export interface SendMessageRequest {
@@ -69,6 +76,13 @@ export interface SendMessageRequest {
   model_id?: string;
   reasoning_effort?: string | null;
   thinking_enabled?: boolean | null;
+  import_files?: Array<{
+    filename: string;
+  }>;
+  image_refs?: Array<{
+    filename: string;
+    mime_type?: string;
+  }>;
 }
 
 export type StreamStatus = 'start' | 'content' | 'complete' | 'error' | 'stopped';

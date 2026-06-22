@@ -166,19 +166,31 @@ def microcompact_messages(
 def extract_mentioned_import_filenames(messages: List[Dict[str, Any]], max_files: int = POST_COMPACT_MAX_FILES_TO_RESTORE) -> List[str]:
     filenames: List[str] = []
     seen = set()
+
+    def add_filename(filename: Any) -> bool:
+        if not isinstance(filename, str) or not filename:
+            return False
+        if filename in seen:
+            return False
+        seen.add(filename)
+        filenames.append(filename)
+        return len(filenames) >= max_files
+
     for message in reversed(messages):
         if message.get("role") not in ("user", "Role.USER"):
             continue
+        import_files = message.get("import_files") or []
+        if isinstance(import_files, list):
+            for file_ref in reversed(import_files):
+                filename = file_ref.get("filename") if isinstance(file_ref, dict) else file_ref
+                if add_filename(filename):
+                    return list(reversed(filenames))
         content = str(message.get("content") or "")
         match = MENTIONED_FILES_RE.match(content)
         if not match:
             continue
         for filename in reversed(match.group(1).split()):
-            if filename in seen:
-                continue
-            seen.add(filename)
-            filenames.append(filename)
-            if len(filenames) >= max_files:
+            if add_filename(filename):
                 return list(reversed(filenames))
     return list(reversed(filenames))
 

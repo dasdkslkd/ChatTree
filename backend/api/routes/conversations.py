@@ -348,20 +348,38 @@ async def upload_import_file(
     }
     ext = _os.path.splitext(file.filename or "")[1].lower()
     content_type = file.content_type or ""
+    image_types = {
+        "image/png", "image/jpeg", "image/gif", "image/webp",
+    }
+    image_exts = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+    }
+    image_mime_type = content_type if content_type in image_types else image_exts.get(ext)
+    is_image_type = image_mime_type is not None
     is_text_type = content_type.startswith("text/") or content_type in {
         "application/json", "application/xml",
         "application/javascript", "application/typescript",
         "application/x-yaml", "application/yaml",
     }
-    if not is_text_type and ext not in allowed_exts:
+    if not is_image_type and not is_text_type and ext not in allowed_exts:
         raise HTTPException(status_code=400, detail=f"Unsupported file type: {content_type or ext}")
     raw = await file.read()
-    try:
-        raw.decode("utf-8")
-    except UnicodeDecodeError:
-        raise HTTPException(status_code=400, detail="File is not valid UTF-8 text.")
+    if not is_image_type:
+        try:
+            raw.decode("utf-8")
+        except UnicodeDecodeError:
+            raise HTTPException(status_code=400, detail="File is not valid UTF-8 text.")
     chat_manager.storage.save_import_file(conversation_id, file.filename or "unnamed", raw)
-    return {"filename": file.filename, "size": len(raw)}
+    return {
+        "filename": file.filename,
+        "size": len(raw),
+        "kind": "image" if is_image_type else "file",
+        "mime_type": image_mime_type if is_image_type else None,
+    }
 
 
 @router.get("/conversations/{conversation_id}/imports/{filename:path}")
@@ -370,7 +388,22 @@ async def read_import_file(
     filename: str,
     chat_manager: ChatManager = Depends(get_chat_manager)
 ):
+    import os as _os
+    from fastapi import Response
     from fastapi.responses import PlainTextResponse
+    image_exts = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+    }
+    media_type = image_exts.get(_os.path.splitext(filename or "")[1].lower())
+    if media_type:
+        raw = chat_manager.storage.read_import_file_bytes(conversation_id, filename)
+        if raw is None:
+            raise HTTPException(status_code=404, detail="File not found")
+        return Response(content=raw, media_type=media_type)
     data = chat_manager.storage.read_import_file(conversation_id, filename)
     if data is None:
         raise HTTPException(status_code=404, detail="File not found")

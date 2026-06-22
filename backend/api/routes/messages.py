@@ -16,6 +16,8 @@ class SendMessageRequest(BaseModel):
     node_id: Optional[str] = None
     reasoning_effort: Optional[str] = None
     thinking_enabled: Optional[bool] = None
+    import_files: Optional[List[Dict[str, Any]]] = None
+    image_refs: Optional[List[Dict[str, Any]]] = None
 
 
 def build_stream_chunk_data(chunk: StreamChunk, conversation_id: str) -> Dict[str, Any]:
@@ -53,6 +55,8 @@ async def stream_message(
                 request.node_id,
                 reasoning_effort=request.reasoning_effort,
                 thinking_enabled=request.thinking_enabled,
+                import_files=request.import_files,
+                image_refs=request.image_refs,
             ):
                 # 将 StreamChunk 转换为 JSON 字符串
                 chunk_data = build_stream_chunk_data(chunk, conversation_id)

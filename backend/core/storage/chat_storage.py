@@ -219,6 +219,14 @@ class ChatStorage(StorageInterface):
         with open(target, 'r', encoding='utf-8') as f:
             return f.read()
 
+    def read_import_file_bytes(self, conversation_id: str, filename: str) -> Optional[bytes]:
+        """读取导入文件原始字节；不存在或越界返回 None。"""
+        target = self._safe_import_path(conversation_id, filename)
+        if target is None or not os.path.isfile(target):
+            return None
+        with open(target, 'rb') as f:
+            return f.read()
+
     def list_import_files(self, conversation_id: str) -> List[Dict[str, Any]]:
         """列出对话的所有导入文件 [{filename, size}]。"""
         imports_dir = self._get_imports_dir(conversation_id)

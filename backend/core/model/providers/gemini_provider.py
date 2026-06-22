@@ -11,6 +11,7 @@ from ..usage import estimated_usage, usage_from_gemini, usage_total
 from ...config.types import Message, StreamChunk, StreamStatus, StreamController
 from .retry import RetryPolicy, RetryableHTTPError, classify_retry_error, run_with_retries, sleep_before_retry
 from .sse import iter_decoded_sse_lines
+from .multimodal import to_gemini_parts
 
 _SENTINEL = object()
 
@@ -126,7 +127,7 @@ class GeminiProvider(BaseProvider):
                 role = "user"
             gemini_messages.append({
                 "role": "model" if role == "assistant" else "user",
-                "parts": [{"text": content}],
+                "parts": to_gemini_parts(content),
             })
 
         return system_prompt.strip() or None, gemini_messages

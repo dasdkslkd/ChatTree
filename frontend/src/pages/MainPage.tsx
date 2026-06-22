@@ -607,7 +607,9 @@ export default function ChatPage() {
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
   const [editValue, setEditValue] = useState<string | null>(null);
   const [attachedFiles, setAttachedFiles] = useState<string[]>([]);
+  const [attachedImageRefs, setAttachedImageRefs] = useState<Array<{ filename: string; mime_type?: string }>>([]);
   const [previewFile, setPreviewFile] = useState<{ name: string; content: string } | null>(null);
+  const [previewImage, setPreviewImage] = useState<{ name: string; url: string } | null>(null);
   const [conversationSearch, setConversationSearch] = useState('');
   const [projectPickerSearch, setProjectPickerSearch] = useState('');
   const [collapsedProjectIds, setCollapsedProjectIds] = useState<Set<string>>(() => new Set());
@@ -1056,11 +1058,15 @@ export default function ChatPage() {
     lines.push(`# ${title}`);
     lines.push('');
     for (const m of messages) {
-      const mention = m.role === 'user' ? parseFileMention(m.content) : null;
-      const displayContent = mention ? mention.cleanContent : m.content;
+      const displayContent = m.role === 'user' ? getUserDisplayContent(m) : m.content;
+      const importFiles = m.role === 'user' ? getUserAttachmentNames(m) : [];
       const roleLabel = m.role === 'user' ? '**User**' : '**Assistant**';
       lines.push(`### ${roleLabel}`);
       lines.push('');
+      for (const filename of importFiles) {
+        lines.push(`- 附件: ${filename}`);
+      }
+      if (importFiles.length > 0) lines.push('');
       lines.push(displayContent);
       lines.push('');
       lines.push('---');
@@ -1091,7 +1097,13 @@ export default function ChatPage() {
     for (const file of files) {
       try {
         const res = await conversationApi.uploadImport(convId, file);
-        setAttachedFiles(prev => prev.includes(res.filename) ? prev : [...prev, res.filename]);
+        if (res.kind === 'image') {
+          setAttachedImageRefs(prev => prev.some(ref => ref.filename === res.filename)
+            ? prev
+            : [...prev, { filename: res.filename, mime_type: res.mime_type ?? file.type }]);
+        } else {
+          setAttachedFiles(prev => prev.includes(res.filename) ? prev : [...prev, res.filename]);
+        }
       } catch (err: any) {
         console.error('Upload failed:', err?.response?.data?.detail || err.message);
       }
@@ -1104,6 +1116,7 @@ export default function ChatPage() {
       await conversationApi.deleteImport(currentConversation.id, filename);
     } catch (_) {}
     setAttachedFiles(prev => prev.filter(f => f !== filename));
+    setAttachedImageRefs(prev => prev.filter(ref => ref.filename !== filename));
   };
 
   const handlePreviewFile = async (filename: string) => {
@@ -1115,6 +1128,17 @@ export default function ChatPage() {
         setPreviewFile({ name: filename, content: text });
       }
     } catch (_) {}
+  };
+
+  const getImportAssetUrl = (filename: string, conversationId = currentConversation?.id) => {
+    if (!conversationId) return '';
+    return `/api/conversations/${conversationId}/imports/${encodeURIComponent(filename)}`;
+  };
+
+  const handlePreviewImage = (filename: string) => {
+    const url = getImportAssetUrl(filename);
+    if (!url) return;
+    setPreviewImage({ name: filename, url });
   };
 
   const handleSend = async (val: string, modelId?: string, _systemPrompt?: string) => {
@@ -1137,33 +1161,22 @@ export default function ChatPage() {
       conversationId = newConv.id;
     }
 
-    let finalContent = val;
-    if (attachedFiles.length > 0) {
-      const parts: string[] = [];
-      for (const fname of attachedFiles) {
-        try {
-          const resp = await fetch(`/api/conversations/${conversationId}/imports/${encodeURIComponent(fname)}`);
-          if (resp.ok) {
-            const text = await resp.text();
-            parts.push(`=== FILE: ${fname} ===\n${text}\n=== END FILE: ${fname} ===`);
-          }
-        } catch (_) {}
-      }
-      if (parts.length > 0) {
-        finalContent = "'''USER MENTIONED FILES: " + attachedFiles.join(' ') + " '''\n\n" + parts.join('\n\n') + "\n\n---\n\n" + val;
-      }
-      setAttachedFiles([]);
-    }
+    const importFiles = attachedFiles.map(filename => ({ filename }));
+    const imageRefs = attachedImageRefs.map(({ filename, mime_type }) => ({ filename, mime_type }));
+    if (importFiles.length > 0) setAttachedFiles([]);
+    if (imageRefs.length > 0) setAttachedImageRefs([]);
     // 第三个参数是乐观渲染的用户气泡文本（显示用户输入的原文）。
     // 推理设置从 modelStore 的当前值读取（已确认值），随请求透传。
     const { currentReasoningEffort, currentThinkingEnabled } = useModelStore.getState();
     await startStreaming(
       conversationId,
       {
-        content: finalContent,
+        content: val,
         model_id: modelId,
         reasoning_effort: currentReasoningEffort,
         thinking_enabled: currentThinkingEnabled,
+        import_files: importFiles.length > 0 ? importFiles : undefined,
+        image_refs: imageRefs.length > 0 ? imageRefs : undefined,
       },
       val,
     );
@@ -1196,7 +1209,12 @@ export default function ChatPage() {
     }
   };
 
-  const handleRetry = async (assistantNodeId: string, userContent: string) => {
+  const handleRetry = async (
+    assistantNodeId: string,
+    userContent: string,
+    importFileNames: string[] = [],
+    imageRefs: Array<{ filename: string; mime_type?: string }> = [],
+  ) => {
     if (!currentConversation || isStreaming) return;
     const convId = currentConversation.id;
     try {
@@ -1210,6 +1228,10 @@ export default function ChatPage() {
           content: userContent,
           reasoning_effort: currentReasoningEffort,
           thinking_enabled: currentThinkingEnabled,
+          import_files: importFileNames.length > 0
+            ? importFileNames.map(filename => ({ filename }))
+            : undefined,
+          image_refs: imageRefs.length > 0 ? imageRefs : undefined,
         },
         userContent,
       );
@@ -1239,6 +1261,30 @@ export default function ChatPage() {
     return { fileNames, cleanContent };
   };
 
+  const getUserImportFileNames = (message: typeof messages[0]): string[] => {
+    const structured = (message.import_files ?? [])
+      .map((file) => file.filename)
+      .filter(Boolean);
+    if (structured.length > 0) return structured;
+    return parseFileMention(message.content)?.fileNames ?? [];
+  };
+
+  const getUserImageRefs = (message: typeof messages[0]): Array<{ filename: string; mime_type?: string }> => {
+    return (message.image_refs ?? [])
+      .filter((file) => Boolean(file.filename));
+  };
+
+  const getUserAttachmentNames = (message: typeof messages[0]): string[] => {
+    return [
+      ...getUserImportFileNames(message),
+      ...getUserImageRefs(message).map(file => file.filename),
+    ];
+  };
+
+  const getUserDisplayContent = (message: typeof messages[0]): string => {
+    return parseFileMention(message.content)?.cleanContent ?? message.content;
+  };
+
   const isCompactBoundaryMessage = (message: typeof messages[0]) =>
     message.role === 'system' && message.subtype === 'compact_boundary';
 
@@ -1266,8 +1312,7 @@ export default function ChatPage() {
     .map((m, index) => ({ ...m, originalIndex: index }))
     .filter((m) => m.role === 'user' && !isCompactSummaryMessage(m))
     .map((m) => {
-      const mention = parseFileMention(m.content);
-      const clean = mention ? mention.cleanContent : m.content;
+      const clean = getUserDisplayContent(m);
       return {
         text: clean.slice(0, 20) + (clean.length > 20 ? '...' : ''),
         originalIndex: m.originalIndex,
@@ -1362,8 +1407,9 @@ export default function ChatPage() {
     const prevUserMessage = index > 0 && messages[index - 1]?.role === 'user'
       ? messages[index - 1]
       : null;
-    const fileMention = m.role === 'user' ? parseFileMention(m.content) : null;
-    const displayContent = fileMention ? fileMention.cleanContent : m.content;
+    const fileNames = m.role === 'user' ? getUserImportFileNames(m) : [];
+    const imageRefs = m.role === 'user' ? getUserImageRefs(m) : [];
+    const displayContent = m.role === 'user' ? getUserDisplayContent(m) : m.content;
     const assistantTimeline = m.role === 'assistant' ? getAssistantTimeline(m) : [];
     const hasDisplayContent = displayContent.trim().length > 0;
 
@@ -1377,11 +1423,35 @@ export default function ChatPage() {
         )}
       >
         <div className="flex flex-col items-start max-w-full">
-          {fileMention && (
+          {imageRefs.length > 0 && (
+            <div className="mb-1.5 flex max-w-full flex-wrap gap-2">
+              {imageRefs.map((image) => {
+                const imageUrl = getImportAssetUrl(image.filename);
+                return (
+                  <button
+                    key={image.filename}
+                    type="button"
+                    className="h-24 w-24 overflow-hidden rounded-md border p-0 cursor-zoom-in transition-opacity hover:opacity-90"
+                    style={{ borderColor: 'var(--border)', background: 'var(--bg-button-tertiary-hover)' }}
+                    onClick={() => handlePreviewImage(image.filename)}
+                    title={image.filename}
+                  >
+                    <img
+                      src={imageUrl}
+                      alt={image.filename}
+                      className="h-full w-full object-cover"
+                      loading="lazy"
+                    />
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          {fileNames.length > 0 && (
             <div className="max-w-full w-fit mb-1 px-2.5 py-1.5 rounded-lg text-xs flex flex-wrap items-center gap-1.5"
                  style={{ background: 'var(--accent-soft)', border: '0.5px solid var(--border)', color: 'var(--fg-tertiary)' }}>
               <FileText className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--icon-accent)' }} />
-              {fileMention.fileNames.map((fn, fi) => (
+              {fileNames.map((fn, fi) => (
                 <span key={fi} className="px-1.5 py-0.5 rounded text-[11px] font-medium cursor-pointer transition-colors"
                       style={{ background: 'var(--accent-soft)', color: 'var(--icon-accent)' }}
                       onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-active)'; }}
@@ -1456,7 +1526,7 @@ export default function ChatPage() {
               variant="ghost"
               size="sm"
               className="opacity-0 group-hover:opacity-100 transition-opacity h-7 w-7 p-0"
-              onClick={() => handleCopy(m.content, m.id)}
+              onClick={() => handleCopy(displayContent, m.id)}
               aria-label="复制消息"
             >
               {copiedMessageId === m.id ? (
@@ -1496,7 +1566,12 @@ export default function ChatPage() {
                 variant="ghost"
                 size="sm"
                 className="opacity-0 group-hover:opacity-100 transition-opacity h-7 w-7 p-0"
-                onClick={() => handleRetry(m.node_id, prevUserMessage.content)}
+                onClick={() => handleRetry(
+                  m.node_id,
+                  getUserDisplayContent(prevUserMessage),
+                  getUserImportFileNames(prevUserMessage),
+                  getUserImageRefs(prevUserMessage),
+                )}
                 disabled={isStreaming}
                 aria-label="重试"
                 title="重试（删除当前回复并重新生成）"
@@ -1720,8 +1795,13 @@ export default function ChatPage() {
                     editValue={editValue}
                     onEditValueConsumed={() => setEditValue(null)}
                     attachedFiles={attachedFiles}
+                    attachedImages={attachedImageRefs.map(ref => ({
+                      filename: ref.filename,
+                      url: getImportAssetUrl(ref.filename),
+                    }))}
                     onFilesPicked={handleFilesPicked}
                     onRemoveFile={handleRemoveFile}
+                    onPreviewImage={handlePreviewImage}
                   />
                 </div>
               </div>
@@ -1820,8 +1900,13 @@ export default function ChatPage() {
                   editValue={editValue}
                   onEditValueConsumed={() => setEditValue(null)}
                   attachedFiles={attachedFiles}
+                  attachedImages={attachedImageRefs.map(ref => ({
+                    filename: ref.filename,
+                    url: getImportAssetUrl(ref.filename),
+                  }))}
                   onFilesPicked={handleFilesPicked}
                   onRemoveFile={handleRemoveFile}
+                  onPreviewImage={handlePreviewImage}
                 />
               </footer>
             </>
@@ -1965,6 +2050,25 @@ export default function ChatPage() {
             <pre className="text-sm whitespace-pre-wrap break-words leading-relaxed">
               {previewFile?.content}
             </pre>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Image preview dialog */}
+      <Dialog open={!!previewImage} onOpenChange={(open) => { if (!open) setPreviewImage(null); }}>
+        <DialogContent className="max-w-[92vw] max-h-[92vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="truncate">{previewImage?.name}</DialogTitle>
+          </DialogHeader>
+          <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto rounded-md"
+               style={{ background: 'var(--bg-button-tertiary-hover)' }}>
+            {previewImage && (
+              <img
+                src={previewImage.url}
+                alt={previewImage.name}
+                className="max-h-[78vh] max-w-full object-contain"
+              />
+            )}
           </div>
         </DialogContent>
       </Dialog>

@@ -98,7 +98,10 @@ export const conversationApi = {
 
   // ɾ���ڵ�
   // �ϴ������ļ�
-  uploadImport: async (conversationId: string, file: File): Promise<{ filename: string; size: number }> => {
+  uploadImport: async (
+    conversationId: string,
+    file: File,
+  ): Promise<{ filename: string; size: number; kind?: 'file' | 'image'; mime_type?: string | null }> => {
     const formData = new FormData();
     formData.append('file', file);
     const response = await apiClient.post(`/conversations/${conversationId}/imports`, formData, {

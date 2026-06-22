@@ -3,6 +3,7 @@ from typing import Any, Callable, List, Optional, Dict, AsyncIterator
 import uuid
 import asyncio  
 import json
+import base64
 from copy import deepcopy
 from contextlib import suppress
 from time import time
@@ -198,6 +199,8 @@ class ChatManager:
         node_id: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
         thinking_enabled: Optional[bool] = None,
+        import_files: Optional[List[Dict[str, Any]]] = None,
+        image_refs: Optional[List[Dict[str, Any]]] = None,
     ) -> AsyncIterator[StreamChunk]:
         """
         异步流式发送消息
@@ -324,6 +327,12 @@ class ChatManager:
             "tool_call_id": None,
             "timestamp": int(time())
         })
+        normalized_import_files = self._normalize_import_file_refs(import_files)
+        if normalized_import_files:
+            user_msg["import_files"] = normalized_import_files
+        normalized_image_refs = self._normalize_image_refs(image_refs)
+        if normalized_image_refs:
+            user_msg["image_refs"] = normalized_image_refs
 
         # ── 临界区 1（锁内）：重新加载最新快照 + 建节点 + 立即保存 user 消息 ──
         # 锁内重载确保看到其他并发流刚提交的兄弟节点，add_node 不会丢失 root 引用。
@@ -781,6 +790,136 @@ class ChatManager:
             })
         return restored
 
+    def _normalize_import_file_refs(
+        self,
+        import_files: Optional[List[Dict[str, Any]]],
+    ) -> List[Dict[str, Any]]:
+        if not isinstance(import_files, list):
+            return []
+        normalized: List[Dict[str, Any]] = []
+        seen = set()
+        for file_ref in import_files:
+            filename = file_ref.get("filename") if isinstance(file_ref, dict) else file_ref
+            if not isinstance(filename, str):
+                continue
+            filename = filename.strip()
+            if not filename or filename in seen:
+                continue
+            seen.add(filename)
+            normalized.append({"filename": filename})
+        return normalized
+
+    def _normalize_image_refs(
+        self,
+        image_refs: Optional[List[Dict[str, Any]]],
+    ) -> List[Dict[str, Any]]:
+        if not isinstance(image_refs, list):
+            return []
+        normalized: List[Dict[str, Any]] = []
+        seen = set()
+        for image_ref in image_refs:
+            if not isinstance(image_ref, dict):
+                continue
+            filename = image_ref.get("filename")
+            if not isinstance(filename, str):
+                continue
+            filename = filename.strip()
+            if not filename or filename in seen:
+                continue
+            mime_type = image_ref.get("mime_type")
+            if not isinstance(mime_type, str) or not mime_type.startswith("image/"):
+                mime_type = "image/png"
+            seen.add(filename)
+            normalized.append({"filename": filename, "mime_type": mime_type})
+        return normalized
+
+    def _format_user_content_with_images(
+        self,
+        conversation_id: str,
+        content: Any,
+        image_refs: List[Dict[str, Any]],
+    ) -> Any:
+        if not image_refs:
+            return content
+        blocks: List[Dict[str, Any]] = []
+        if isinstance(content, list):
+            blocks.extend(content)
+        elif str(content):
+            blocks.append({"type": "text", "text": str(content)})
+        for image_ref in image_refs:
+            filename = image_ref.get("filename")
+            mime_type = image_ref.get("mime_type") or "image/png"
+            if not isinstance(filename, str):
+                continue
+            raw = self.storage.read_import_file_bytes(conversation_id, filename)
+            if raw is None:
+                blocks.append({"type": "text", "text": f"[Attached image `{filename}` is no longer available.]"})
+                continue
+            encoded = base64.b64encode(raw).decode("ascii")
+            blocks.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime_type};base64,{encoded}"},
+            })
+        return blocks or content
+
+    def _import_reference_scan_messages(
+        self,
+        conversation: Conversation,
+        *,
+        include_messages_to_keep: bool = True,
+    ) -> List[Dict[str, Any]]:
+        messages: List[Dict[str, Any]] = []
+        for node in self._model_node_chain(
+            conversation,
+            include_messages_to_keep=include_messages_to_keep,
+        ):
+            msg = node.get("user_message")
+            if msg:
+                messages.append(dict(msg))
+        return messages
+
+    def _format_import_file_context_message(
+        self,
+        conversation_id: str,
+        import_files: List[Dict[str, Any]],
+    ) -> Optional[Message]:
+        parts = [
+            "<system-reminder>",
+            "The user attached the following file references. These may or may not be related to the current task.",
+        ]
+        added = 0
+        for file_ref in import_files:
+            filename = file_ref.get("filename") if isinstance(file_ref, dict) else None
+            if not isinstance(filename, str) or not filename:
+                continue
+            content = self.storage.read_import_file(conversation_id, filename)
+            if content is None:
+                parts.append(f"\nUser attached file `{filename}`, but it is no longer available.")
+                added += 1
+                continue
+            truncated = len(content) > POST_COMPACT_MAX_CHARS_PER_FILE
+            visible_content = content[:POST_COMPACT_MAX_CHARS_PER_FILE]
+            suffix = " (truncated)" if truncated else ""
+            parts.append(
+                f"\nUser attached file `{filename}`{suffix}:\n"
+                f"<file name=\"{filename}\">\n{visible_content}\n</file>"
+            )
+            if truncated:
+                parts.append(
+                    "The file was truncated for model context. Ask the user or use available file tools if more content is needed."
+                )
+            added += 1
+        if added == 0:
+            return None
+        parts.append("</system-reminder>")
+        return Message({
+            "id": str(uuid.uuid4()),
+            "role": Role.SYSTEM,
+            "content": "\n".join(parts),
+            "timestamp": int(time()),
+            "is_visible_in_transcript_only": True,
+        })
+
     def _current_context_tokens(self, conversation: Conversation) -> int:
         current = conversation.nodes.get(conversation.current_node_id or "")
         usage = current.get("usage") if current else None
@@ -863,7 +1002,10 @@ class ChatManager:
             "content": get_compact_prompt(custom_instructions),
         }
         compact_messages = [*messages_to_summarize, summary_request]
-        restored_files = self._restore_import_file_context(conversation_id, messages_to_summarize)
+        restored_files = self._restore_import_file_context(
+            conversation_id,
+            self._import_reference_scan_messages(conversation, include_messages_to_keep=False),
+        )
         summary, tokens_used = provider.generate_response(
             target_model,
             compact_messages,
@@ -931,6 +1073,12 @@ class ChatManager:
             content = msg.get("content") or ""
             if role == "tool" and msg.get("model_visible_content") is not None:
                 content = str(msg.get("model_visible_content") or "")
+            if role == "user" and msg.get("image_refs"):
+                content = self._format_user_content_with_images(
+                    conversation.metadata["id"],
+                    content,
+                    msg.get("image_refs") or [],
+                )
             out: Dict[str, Any] = {
                 "role": role,
                 "content": content,
@@ -949,7 +1097,17 @@ class ChatManager:
         )
         for node in node_chain:
             append_message(node.get("system_message"))
-            append_message(node.get("user_message"))
+            user_message = node.get("user_message")
+            append_message(user_message)
+            if user_message:
+                import_files = user_message.get("import_files") or []
+                if import_files:
+                    append_message(
+                        self._format_import_file_context_message(
+                            conversation.metadata["id"],
+                            import_files,
+                        )
+                    )
             if self._is_compact_boundary_node(node):
                 restored_files = ((node.get("system_message") or {}).get("compact_metadata") or {}).get("restored_files") or []
                 if restored_files:

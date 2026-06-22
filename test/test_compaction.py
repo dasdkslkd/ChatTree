@@ -251,6 +251,76 @@ def test_compact_restores_recent_import_file_context_after_summary():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_import_file_references_are_injected_as_model_context_without_mutating_user_text():
+    tmp = tempfile.mkdtemp(prefix="chattree_import_context_")
+    try:
+        storage = ChatStorage(storage_dir=os.path.join(tmp, "conversations"))
+        prompts = PromptStorage(storage_dir=os.path.join(tmp, "prompts"))
+        manager = ChatManager(CompactModelManager(), storage, prompts)
+        conv = manager.create_conversation("file references")
+        storage.save_import_file(conv.metadata["id"], "notes with space.txt", "important file facts".encode("utf-8"))
+
+        node = NodeManager.create_node(
+            Message({
+                "id": "user-with-files",
+                "role": Role.USER,
+                "content": "请根据这个文件回答",
+                "import_files": [{"filename": "notes with space.txt"}],
+                "timestamp": 1,
+            }),
+            conv.current_node_id,
+            "fake-model",
+        )
+        conv.add_node(node, conv.current_node_id)
+
+        messages = manager._prepare_messages_for_api_with_conversation(conv)
+
+        assert messages[-2]["role"] == "user"
+        assert messages[-2]["content"] == "请根据这个文件回答"
+        assert "import_files" not in messages[-2]
+        assert messages[-1]["role"] == "system"
+        assert "User attached file `notes with space.txt`" in messages[-1]["content"]
+        assert "important file facts" in messages[-1]["content"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_compact_restores_structured_import_file_references_after_summary():
+    tmp = tempfile.mkdtemp(prefix="chattree_compact_structured_files_")
+    try:
+        storage = ChatStorage(storage_dir=os.path.join(tmp, "conversations"))
+        prompts = PromptStorage(storage_dir=os.path.join(tmp, "prompts"))
+        manager = ChatManager(CompactModelManager(), storage, prompts)
+        conv = manager.create_conversation("structured file restore")
+        conv.metadata["provider_id"] = "fake"
+        conv.metadata["model_id"] = "fake-model"
+        storage.save_import_file(conv.metadata["id"], "notes with space.txt", "important file facts".encode("utf-8"))
+
+        with_file = NodeManager.create_node(
+            Message({
+                "id": "structured-file-user",
+                "role": Role.USER,
+                "content": "use this file",
+                "import_files": [{"filename": "notes with space.txt"}],
+                "timestamp": 1,
+            }),
+            conv.current_node_id,
+            "fake-model",
+        )
+        with_file["assistant_message"] = _message(Role.ASSISTANT, "read it")
+        conv.add_node(with_file, conv.current_node_id)
+        manager._save(conv)
+
+        asyncio.run(manager.compact_conversation(conv.metadata["id"], messages_to_keep=0))
+
+        reloaded = Conversation.from_dict(storage.load(conv.metadata["id"]))
+        compact_node = reloaded.nodes[reloaded.current_node_id]
+        restored = compact_node["system_message"]["compact_metadata"]["restored_files"]
+        assert restored == [{"filename": "notes with space.txt", "content": "important file facts", "truncated": False}]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_messages_to_keep_preserves_latest_original_turn_after_summary():
     conv = Conversation(title="compact keep")
     conv.initialize_with_system_message("root instructions")
