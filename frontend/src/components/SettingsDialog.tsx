@@ -23,11 +23,12 @@ import { Switch } from '@/components/ui/switch';
 import {
   Settings, StickyNote, Plus, Trash2, Eye, EyeOff,
   Loader2, Save, Pencil, Server, Wrench, Terminal, Link2, RefreshCw,
-  Boxes, Sparkles, Bot, Package,
+  Boxes, Sparkles, Bot, Package, MessageSquare,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { configApi } from '../api/config';
 import { modelApi } from '../api/model';
+import { useNavigationStore } from '../store/navigationStore';
 import { usePromptStore } from '../store/promtStore';
 import type {
   BuiltinCodeToolGroup,
@@ -151,14 +152,89 @@ interface SettingsDialogProps {
 
 /* ─── Component ─── */
 
-export function SettingsDialog({ open, onOpenChange, defaultSection = 'providers' }: SettingsDialogProps) {
+export function SettingsPageView({ defaultSection = 'providers' }: { defaultSection?: SettingsSection }) {
   const [section, setSection] = useState<SettingsSection>(defaultSection);
+  const { openChat } = useNavigationStore();
 
-  // Reset section when dialog opens
   useEffect(() => {
-    if (open) setSection(defaultSection);
-  }, [open, defaultSection]);
+    setSection(defaultSection);
+  }, [defaultSection]);
 
+  return (
+    <div className="flex h-full overflow-hidden" style={{ background: 'var(--bg-surface)' }}>
+      {/* Left nav */}
+      <nav
+        className="app-sidebar flex-shrink-0"
+        style={{ width: '300px' }}
+      >
+        <div className="app-sidebar-topbar">
+          <span className="text-base font-semibold" style={{ color: 'var(--fg-85)' }}>设置</span>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-2 custom-scrollbar">
+          {(() => {
+            const groups: Record<string, typeof SETTINGS_NAV> = {};
+            SETTINGS_NAV.forEach(item => {
+              if (!groups[item.group]) groups[item.group] = [];
+              groups[item.group].push(item);
+            });
+            return Object.entries(groups).map(([group, items]) => (
+              <div key={group}>
+                <div
+                  className="app-sidebar-project-heading"
+                  style={{ letterSpacing: '0.025em' }}
+                >
+                  {group}
+                </div>
+                <div className="flex flex-col gap-1">
+                  {items.map(item => {
+                    const Icon = item.icon;
+                    const isActive = section === item.key;
+                    return (
+                      <button
+                        type="button"
+                        key={item.key}
+                        className={cn('app-sidebar-action', isActive && 'is-active')}
+                        onClick={() => setSection(item.key)}
+                      >
+                        <Icon
+                          className="w-4 h-4 flex-shrink-0"
+                          style={{ color: isActive ? 'var(--icon-accent)' : 'var(--icon-tertiary)' }}
+                        />
+                        <span>{item.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ));
+          })()}
+        </div>
+        <div className="app-sidebar-footer">
+          <button
+            type="button"
+            className="app-sidebar-action"
+            onClick={openChat}
+            title="返回对话"
+          >
+            <MessageSquare className="h-4 w-4 shrink-0" />
+            <span>返回对话</span>
+          </button>
+        </div>
+      </nav>
+
+      {/* Content */}
+      <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+        {section === 'providers' && <ProvidersSection />}
+        {section === 'mcp' && <McpSection />}
+        {section === 'capabilities' && <CapabilitiesSection />}
+        {section === 'prompts' && <PromptsSection />}
+      </div>
+    </div>
+  );
+}
+
+export function SettingsDialog({ open, onOpenChange, defaultSection = 'providers' }: SettingsDialogProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
@@ -174,83 +250,7 @@ export function SettingsDialog({ open, onOpenChange, defaultSection = 'providers
           boxShadow: 'var(--shadow-2xl)',
         }}
       >
-        <div className="flex h-full overflow-hidden">
-          {/* Left nav */}
-          <nav
-            className="flex-shrink-0 flex flex-col overflow-hidden"
-            style={{
-              width: '220px',
-              borderRight: '0.5px solid var(--border)',
-            }}
-          >
-            {/* Nav header */}
-            <div
-              className="flex items-center justify-between px-4 py-4 flex-shrink-0"
-              style={{ borderBottom: '0.5px solid var(--border)' }}
-            >
-              <span className="text-lg font-semibold" style={{ color: 'var(--fg-85)' }}>设置</span>
-            </div>
-
-            {/* Nav items */}
-            <div className="flex-1 overflow-y-auto p-2 custom-scrollbar">
-              {(() => {
-                const groups: Record<string, typeof SETTINGS_NAV> = {};
-                SETTINGS_NAV.forEach(item => {
-                  if (!groups[item.group]) groups[item.group] = [];
-                  groups[item.group].push(item);
-                });
-                return Object.entries(groups).map(([group, items]) => (
-                  <div key={group}>
-                    <div
-                      className="px-3 pt-4 pb-1 text-xs uppercase"
-                      style={{ color: 'var(--fg-tertiary)', letterSpacing: '0.025em' }}
-                    >
-                      {group}
-                    </div>
-                    {items.map(item => {
-                      const Icon = item.icon;
-                      const isActive = section === item.key;
-                      return (
-                        <div
-                          key={item.key}
-                          className={cn(
-                            'flex items-center gap-2.5 px-3 py-1.5 rounded-lg cursor-pointer transition-colors text-sm',
-                          )}
-                          style={{
-                            color: isActive ? 'var(--fg-85)' : 'var(--fg-secondary)',
-                            background: isActive ? 'var(--bg-button-tertiary-active)' : undefined,
-                            fontWeight: isActive ? 500 : 400,
-                          }}
-                          onClick={() => setSection(item.key)}
-                          onMouseEnter={(e) => {
-                            if (!isActive) (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-hover)';
-                          }}
-                          onMouseLeave={(e) => {
-                            if (!isActive) (e.currentTarget as HTMLElement).style.background = '';
-                          }}
-                        >
-                          <Icon
-                            className="w-4 h-4 flex-shrink-0"
-                            style={{ color: isActive ? 'var(--icon-accent)' : 'var(--icon-tertiary)' }}
-                          />
-                          <span>{item.label}</span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ));
-              })()}
-            </div>
-          </nav>
-
-          {/* Right body */}
-          <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
-            {section === 'providers' && <ProvidersSection />}
-            {section === 'mcp' && <McpSection />}
-            {section === 'capabilities' && <CapabilitiesSection />}
-            {section === 'prompts' && <PromptsSection />}
-          </div>
-        </div>
+        <SettingsPageView defaultSection={defaultSection} />
       </DialogContent>
     </Dialog>
   );
@@ -753,6 +753,7 @@ function CapabilitiesSection() {
   const [inventory, setInventory] = useState<CapabilityInventory | null>(null);
   const [mcpStatus, setMcpStatus] = useState<ToolInventoryStatus | null>(null);
   const [loading, setLoading] = useState(true);
+  const [reloading, setReloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const loadCapabilities = useCallback(async () => {
@@ -776,6 +777,24 @@ function CapabilitiesSection() {
 
   useEffect(() => { loadCapabilities(); }, [loadCapabilities]);
 
+  const reloadCapabilities = useCallback(async () => {
+    try {
+      setReloading(true);
+      setError(null);
+      const nextInventory = await configApi.reloadCapabilities();
+      const nextMcpStatus = await configApi.getMcpStatus();
+      setInventory(nextInventory);
+      setMcpStatus(nextMcpStatus);
+      toast.success('能力已重载');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '重载能力失败';
+      toast.error(message);
+      if (!inventory) setError(message);
+    } finally {
+      setReloading(false);
+    }
+  }, [inventory]);
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -789,8 +808,16 @@ function CapabilitiesSection() {
     return (
       <div className="flex flex-col h-full" style={{ fontFamily: 'var(--font-sans)' }}>
         <div className="flex-shrink-0 px-6 pt-6 pb-4">
-          <h1 className="text-2xl font-semibold mb-1" style={{ color: 'var(--fg-85)' }}>能力</h1>
-          <p className="text-sm" style={{ color: 'var(--fg-secondary)' }}>查看当前可用的技能、代理、插件和 MCP Server</p>
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <h1 className="text-2xl font-semibold mb-1" style={{ color: 'var(--fg-85)' }}>能力</h1>
+              <p className="text-sm" style={{ color: 'var(--fg-secondary)' }}>查看当前可用的技能、代理、插件和 MCP Server</p>
+            </div>
+            <Button variant="outline" size="sm" className="mt-2 mr-10" onClick={reloadCapabilities} disabled={reloading}>
+              <RefreshCw className={cn('h-3.5 w-3.5 mr-1', reloading && 'animate-spin')} />
+              重载
+            </Button>
+          </div>
         </div>
         <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 pb-6 text-center">
           <Boxes className="h-9 w-9" style={{ color: 'var(--icon-tertiary)' }} />
@@ -798,9 +825,9 @@ function CapabilitiesSection() {
             <div className="text-sm font-medium" style={{ color: 'var(--fg-85)' }}>加载失败</div>
             <div className="mt-1 max-w-[420px] text-xs" style={{ color: 'var(--fg-tertiary)' }}>{error}</div>
           </div>
-          <Button variant="outline" size="sm" onClick={loadCapabilities}>
-            <RefreshCw className="h-3.5 w-3.5 mr-1" />
-            重试
+          <Button variant="outline" size="sm" className="mt-2 mr-10" onClick={reloadCapabilities} disabled={reloading}>
+            <RefreshCw className={cn('h-3.5 w-3.5 mr-1', reloading && 'animate-spin')} />
+            {reloading ? '重载中' : '重载'}
           </Button>
         </div>
       </div>
@@ -816,8 +843,16 @@ function CapabilitiesSection() {
   return (
     <div className="flex flex-col h-full" style={{ fontFamily: 'var(--font-sans)' }}>
       <div className="flex-shrink-0 px-6 pt-6 pb-4">
-        <h1 className="text-2xl font-semibold mb-1" style={{ color: 'var(--fg-85)' }}>能力</h1>
-        <p className="text-sm" style={{ color: 'var(--fg-secondary)' }}>查看当前可用的技能、代理、插件和 MCP Server</p>
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h1 className="text-2xl font-semibold mb-1" style={{ color: 'var(--fg-85)' }}>能力</h1>
+            <p className="text-sm" style={{ color: 'var(--fg-secondary)' }}>查看当前可用的技能、代理、插件和 MCP Server</p>
+          </div>
+          <Button variant="outline" size="sm" onClick={reloadCapabilities} disabled={reloading}>
+            <RefreshCw className={cn('h-3.5 w-3.5 mr-1', reloading && 'animate-spin')} />
+            {reloading ? '重载中' : '重载'}
+          </Button>
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto custom-scrollbar min-h-0 px-6 pb-6 space-y-4">

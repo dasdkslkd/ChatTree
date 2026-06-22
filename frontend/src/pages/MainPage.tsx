@@ -1171,6 +1171,46 @@ export default function ChatPage() {
     loadConversations();
   }, []);
 
+  useEffect(() => {
+    const conversationId = currentConversation?.id;
+    if (!conversationId) return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        let active = null;
+        for (let attempt = 0; attempt < 10; attempt += 1) {
+          const activeStreams = await messageApi.getActiveStreams(conversationId);
+          if (cancelled) return;
+          active = activeStreams.find((item) => item.node_id && !item.done) ?? null;
+          if (active) break;
+          await new Promise((resolve) => window.setTimeout(resolve, 500));
+        }
+        if (cancelled) return;
+        if (!active) {
+          await refreshMessages(conversationId, { retries: 0 });
+          return;
+        }
+        if (!active?.node_id) return;
+        if (streamManager.isStreaming(conversationId)) return;
+
+        await refreshMessages(conversationId, {
+          awaitNodeId: active.node_id,
+          awaitRole: 'user',
+          retries: 0,
+        });
+        if (cancelled) return;
+        void streamManager.resumeStream(conversationId, active.node_id);
+      } catch (_) {
+        await refreshMessages(conversationId, { retries: 0 });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentConversation?.id, refreshMessages]);
+
   const handleSelectConversation = async (id: string) => {
     if (currentConversation && historyRef.current) {
       setScrollPositions(prev => ({

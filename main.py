@@ -84,6 +84,7 @@ async def startup_event():
     chat_manager.tool_orchestrator = tool_orchestrator
 
     app.state.config_manager = config_manager
+    app.state.project_root = PROJECT_ROOT
     app.state.capability_registry = capability_registry
     app.state.model_manager = model_manager
     app.state.tool_manager = tool_manager

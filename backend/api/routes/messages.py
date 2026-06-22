@@ -1,14 +1,20 @@
 # backend/api/routes/messages.py
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 from pydantic import BaseModel
+import asyncio
 import json
+import logging
+from time import time
 from ...core.chat.chat_manager import ChatManager
 from ..dependencies import get_chat_manager
 from ...core.config.types import Message, StreamChunk
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+_STREAM_DONE = object()
+_STREAM_SESSIONS: dict[str, "DetachedStreamSession"] = {}
 
 class SendMessageRequest(BaseModel):
     content: str
@@ -19,6 +25,56 @@ class SendMessageRequest(BaseModel):
     thinking_enabled: Optional[bool] = None
     import_files: Optional[List[Dict[str, Any]]] = None
     image_refs: Optional[List[Dict[str, Any]]] = None
+
+
+class DetachedStreamSession:
+    def __init__(self, conversation_id: str):
+        self.conversation_id = conversation_id
+        self.node_id: str | None = None
+        self.events: list[str] = []
+        self.done = False
+        self.created_at = time()
+        self.updated_at = self.created_at
+        self._condition = asyncio.Condition()
+
+    async def append(self, event: str, node_id: str | None = None) -> None:
+        async with self._condition:
+            if node_id:
+                self.node_id = node_id
+            self.events.append(event)
+            self.updated_at = time()
+            self._condition.notify_all()
+
+    async def finish(self) -> None:
+        async with self._condition:
+            self.done = True
+            self.updated_at = time()
+            self._condition.notify_all()
+
+    async def subscribe(self, start_index: int = 0) -> AsyncIterator[str]:
+        index = max(0, start_index)
+        while True:
+            async with self._condition:
+                while index >= len(self.events) and not self.done:
+                    await self._condition.wait()
+                if index < len(self.events):
+                    event = self.events[index]
+                    index += 1
+                elif self.done:
+                    break
+                else:
+                    continue
+            yield event
+
+    def snapshot(self) -> Dict[str, Any]:
+        return {
+            "conversation_id": self.conversation_id,
+            "node_id": self.node_id,
+            "event_count": len(self.events),
+            "done": self.done,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
 
 
 def build_stream_chunk_data(chunk: StreamChunk, conversation_id: str) -> Dict[str, Any]:
@@ -39,15 +95,33 @@ def build_stream_chunk_data(chunk: StreamChunk, conversation_id: str) -> Dict[st
             chunk_data[opt_key] = val
     return chunk_data
 
-@router.post("/conversations/{conversation_id}/messages/stream")
-async def stream_message(
+
+def _format_sse_data(payload: Dict[str, Any] | str) -> str:
+    if payload == "[DONE]":
+        return "data: [DONE]\n\n"
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _stream_error_chunk(conversation_id: str, error: str) -> Dict[str, Any]:
+    return {
+        "status": "error",
+        "content": "",
+        "node_id": None,
+        "conversation_id": conversation_id,
+        "error": error,
+        "tokens_used": 0,
+    }
+
+
+async def detached_stream_event_generator(
     conversation_id: str,
     request: SendMessageRequest,
-    chat_manager: ChatManager = Depends(get_chat_manager)
-):
-    """流式发送消息 - 返回 SSE 格式"""
+    chat_manager: ChatManager,
+) -> AsyncIterator[str]:
+    """Stream SSE events without tying generation lifetime to the client socket."""
+    session = DetachedStreamSession(conversation_id)
 
-    async def event_generator():
+    async def produce() -> None:
         try:
             async for chunk in chat_manager.send_message_stream(
                 conversation_id=conversation_id,
@@ -60,24 +134,69 @@ async def stream_message(
                 import_files=request.import_files,
                 image_refs=request.image_refs,
             ):
-                # 将 StreamChunk 转换为 JSON 字符串
                 chunk_data = build_stream_chunk_data(chunk, conversation_id)
-                yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n"
-            
-            yield "data: [DONE]\n\n"
+                await session.append(
+                    _format_sse_data(chunk_data),
+                    chunk_data.get("node_id"),
+                )
+                if session.node_id:
+                    _STREAM_SESSIONS[session.node_id] = session
+
+            await session.append(_format_sse_data("[DONE]"))
         except Exception as e:
-            error_chunk = {
-                "status": "error",
-                "content": "",
-                "node_id": None,
-                "conversation_id": conversation_id,
-                "error": str(e),
-                "tokens_used": 0
-            }
-            yield f"data: {json.dumps(error_chunk, ensure_ascii=False)}\n\n"
+            logger.exception("Detached stream failed for conversation %s", conversation_id)
+            await session.append(_format_sse_data(_stream_error_chunk(conversation_id, str(e))))
+        finally:
+            await session.finish()
+            if session.node_id:
+                _STREAM_SESSIONS.pop(session.node_id, None)
+
+    asyncio.create_task(produce())
+    async for event in session.subscribe():
+        yield event
+
+@router.post("/conversations/{conversation_id}/messages/stream")
+async def stream_message(
+    conversation_id: str,
+    request: SendMessageRequest,
+    chat_manager: ChatManager = Depends(get_chat_manager)
+):
+    """流式发送消息 - 返回 SSE 格式"""
     
     return StreamingResponse(
-        event_generator(),
+        detached_stream_event_generator(conversation_id, request, chat_manager),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+
+@router.get("/conversations/{conversation_id}/messages/streams/active", response_model=List[Dict[str, Any]])
+async def get_active_streams(conversation_id: str):
+    """获取当前对话仍在生成中的可重连流。"""
+    return [
+        session.snapshot()
+        for session in _STREAM_SESSIONS.values()
+        if session.conversation_id == conversation_id and not session.done and session.node_id
+    ]
+
+
+@router.get("/conversations/{conversation_id}/messages/{node_id}/stream/attach")
+async def attach_stream_message(
+    conversation_id: str,
+    node_id: str,
+    from_event: int = 0,
+):
+    """重新订阅仍在运行的流式消息。"""
+    session = _STREAM_SESSIONS.get(node_id)
+    if not session or session.conversation_id != conversation_id:
+        raise HTTPException(status_code=404, detail="流式消息不存在或已结束")
+
+    return StreamingResponse(
+        session.subscribe(from_event),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

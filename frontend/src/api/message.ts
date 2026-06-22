@@ -18,6 +18,81 @@ export type ToolResultSlice = {
   content: string;
 };
 
+export interface ActiveStreamInfo {
+  conversation_id: string;
+  node_id: string | null;
+  event_count: number;
+  done: boolean;
+  created_at: number;
+  updated_at: number;
+}
+
+async function* parseSseResponse(response: Response): AsyncGenerator<StreamChunk, void> {
+  if (!response.ok) {
+    throw new Error(`HTTP error! status: ${response.status}`);
+  }
+
+  const reader = response.body?.getReader();
+  const decoder = new TextDecoder();
+
+  if (!reader) {
+    throw new Error('Response body is not readable');
+  }
+
+  let buffer = '';
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop() || '';
+
+      for (const part of parts) {
+        const trimmed = part.trim();
+        if (!trimmed) continue;
+
+        if (trimmed.startsWith('data: ')) {
+          const jsonData = trimmed.slice(6);
+          if (jsonData === '[DONE]') {
+            return;
+          }
+          try {
+            const parsed: StreamChunk = JSON.parse(jsonData);
+            yield parsed;
+          } catch (e) {
+            console.error('Failed to parse stream chunk:', e, jsonData);
+          }
+        }
+      }
+    }
+
+    if (buffer.trim()) {
+      const trimmed = buffer.trim();
+      if (trimmed.startsWith('data: ')) {
+        const jsonData = trimmed.slice(6);
+        if (jsonData !== '[DONE]') {
+          try {
+            const parsed: StreamChunk = JSON.parse(jsonData);
+            yield parsed;
+          } catch (e) {
+            console.error('Failed to parse final stream chunk:', e, jsonData);
+          }
+        }
+      }
+    }
+  } finally {
+    try {
+      await reader.cancel();
+    } catch (_) {
+      // reader 可能已关闭，忽略
+    }
+  }
+}
+
 export const messageApi = {
   // 流式发送消息
   stream: async function* (
@@ -35,74 +110,25 @@ export const messageApi = {
       signal,
     });
 
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
+    yield* parseSseResponse(response);
+  },
 
-    const reader = response.body?.getReader();
-    const decoder = new TextDecoder();
+  getActiveStreams: async (conversationId: string): Promise<ActiveStreamInfo[]> => {
+    const response = await apiClient.get(`/conversations/${conversationId}/messages/streams/active`);
+    return response.data;
+  },
 
-    if (!reader) {
-      throw new Error('Response body is not readable');
-    }
-
-    let buffer = '';
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-
-        // 按双换行符分割 SSE 消息
-        const parts = buffer.split('\n\n');
-        // 最后一部分可能不完整，保留到下次处理
-        buffer = parts.pop() || '';
-
-        for (const part of parts) {
-          const trimmed = part.trim();
-          if (!trimmed) continue;
-
-          if (trimmed.startsWith('data: ')) {
-            const jsonData = trimmed.slice(6);
-            if (jsonData === '[DONE]') {
-              return;
-            }
-            try {
-              const parsed: StreamChunk = JSON.parse(jsonData);
-              yield parsed;
-            } catch (e) {
-              console.error('Failed to parse stream chunk:', e, jsonData);
-            }
-          }
-        }
-      }
-
-      // 处理剩余的buffer
-      if (buffer.trim()) {
-        const trimmed = buffer.trim();
-        if (trimmed.startsWith('data: ')) {
-          const jsonData = trimmed.slice(6);
-          if (jsonData !== '[DONE]') {
-            try {
-              const parsed: StreamChunk = JSON.parse(jsonData);
-              yield parsed;
-            } catch (e) {
-              console.error('Failed to parse final stream chunk:', e, jsonData);
-            }
-          }
-        }
-      }
-    } finally {
-      // 无论正常结束、提前 return（[DONE]）还是因 abort 抛出，
-      // 都要释放底层连接，避免并发时连接泄漏。
-      try {
-        await reader.cancel();
-      } catch (_) {
-        // reader 可能已关闭，忽略
-      }
-    }
+  attachStream: async function* (
+    conversationId: string,
+    nodeId: string,
+    fromEvent = 0,
+    signal?: AbortSignal,
+  ): AsyncGenerator<StreamChunk, void> {
+    const response = await fetch(
+      `/api/conversations/${conversationId}/messages/${nodeId}/stream/attach?from_event=${fromEvent}`,
+      { signal },
+    );
+    yield* parseSseResponse(response);
   },
 
   // 获取消息历史

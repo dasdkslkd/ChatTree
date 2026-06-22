@@ -2,7 +2,7 @@ import './App.css'
 import { Toaster } from '@/components/ui/sonner'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { Wifi, WifiOff } from 'lucide-react'
-import { SettingsDialog } from './components/SettingsDialog'
+import { SettingsPageView } from './components/SettingsDialog'
 import { useNavigationStore } from './store/navigationStore'
 import { useModelStore } from './store/modelStore'
 import { useConversationStore } from './store/conversationStore'
@@ -49,7 +49,7 @@ function formatTokens(value?: number | null): string {
 }
 
 function App() {
-  const { settingsOpen, settingsSection, closeSettings, openSettings } = useNavigationStore();
+  const { activePage, settingsSection, openSettings } = useNavigationStore();
   const { currentProvider, currentModel, loadConfig, loadProviders, loadMetadata, getMetadata } = useModelStore();
   const { messages } = useConversationStore();
   const [connected, setConnected] = useState(true);
@@ -167,8 +167,13 @@ function App() {
           {/* Page content */}
           <div className="flex-1 overflow-hidden">
             <Suspense fallback={null}>
-              <ChatPage />
+              <div className="h-full" style={{ display: activePage === 'settings' ? 'none' : 'block' }}>
+                <ChatPage />
+              </div>
             </Suspense>
+            <div className="h-full" style={{ display: activePage === 'settings' ? 'block' : 'none' }}>
+              <SettingsPageView defaultSection={settingsSection} />
+            </div>
           </div>
 
           {/* Status bar — inside main surface, below content */}
@@ -401,12 +406,6 @@ function App() {
           </footer>
         </div>
 
-        {/* Settings dialog */}
-        <SettingsDialog
-          open={settingsOpen}
-          onOpenChange={(open) => { if (!open) closeSettings(); }}
-          defaultSection={settingsSection}
-        />
       </div>
       <Toaster />
     </TooltipProvider>

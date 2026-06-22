@@ -36,6 +36,11 @@ export const configApi = {
     return response.data;
   },
 
+  reloadCapabilities: async (): Promise<CapabilityInventory> => {
+    const response = await apiClient.post('/capabilities/reload');
+    return response.data;
+  },
+
   connectMcpServer: async (serverName: string): Promise<ToolInventoryStatus> => {
     const response = await apiClient.post(`/tools/mcp/servers/${encodeURIComponent(serverName)}/connect`);
     return response.data;

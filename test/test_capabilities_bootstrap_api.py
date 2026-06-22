@@ -4,11 +4,14 @@ import sys
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from types import SimpleNamespace
 
 sys.path.insert(0, ".")
 
+from backend.api.routes import capabilities as capabilities_route
 from backend.api.routes.capabilities import router
 from backend.core.capabilities.bootstrap import build_capability_registry
+from backend.core.config.config import Config
 
 
 def write_skill(root: Path, folder: str, name: str, description: str) -> Path:
@@ -154,3 +157,71 @@ def test_capabilities_api_returns_inventory_and_summary(tmp_path):
     assert inventory_response.json()["skills"][0]["name"] == "project-skill"
     assert summary_response.status_code == 200
     assert "project-skill" in summary_response.json()["summary"]
+
+
+def test_capabilities_reload_rebuilds_registry_from_disk(tmp_path, monkeypatch):
+    class FakeToolManager:
+        def __init__(self, config):
+            self.config = config
+            self.initialized = False
+            self.closed = False
+
+        async def init(self):
+            self.initialized = True
+
+        async def close(self):
+            self.closed = True
+
+        async def describe_inventory_async(self):
+            return {"mcp_servers": []}
+
+    class FakeModelManager:
+        pass
+
+    project_root = tmp_path / "project"
+    write_skill(
+        project_root / ".chattree" / "skills",
+        "initial-skill",
+        "initial-skill",
+        "Initial skill",
+    )
+    config_manager = Config(str(tmp_path / "config.json"))
+    config_manager.data = {"provider": {}, "default_provider": "", "tools": {}}
+    config_manager.save()
+    registry = build_capability_registry(project_root, config_manager.data)
+    old_tool_manager = FakeToolManager(config_manager.data)
+    chat_manager = SimpleNamespace(
+        model_manager=object(),
+        tool_manager=old_tool_manager,
+        tool_orchestrator=None,
+        capability_registry=registry,
+    )
+
+    app = FastAPI()
+    app.state.project_root = project_root
+    app.state.config_manager = config_manager
+    app.state.capability_registry = registry
+    app.state.tool_manager = old_tool_manager
+    app.state.chat_manager = chat_manager
+    app.include_router(router)
+    client = TestClient(app)
+
+    write_skill(
+        project_root / ".chattree" / "skills",
+        "new-skill",
+        "new-skill",
+        "New skill",
+    )
+    monkeypatch.setattr(capabilities_route, "ToolManager", FakeToolManager, raising=False)
+    monkeypatch.setattr(capabilities_route, "ModelManager", FakeModelManager, raising=False)
+
+    response = client.post("/capabilities/reload")
+
+    assert response.status_code == 200
+    skill_names = [skill["name"] for skill in response.json()["skills"]]
+    assert skill_names == ["initial-skill", "new-skill"]
+    assert app.state.capability_registry is chat_manager.capability_registry
+    assert app.state.capability_registry.get("new-skill") is not None
+    assert old_tool_manager.closed is True
+    assert app.state.tool_manager is chat_manager.tool_manager
+    assert app.state.tool_manager.initialized is True

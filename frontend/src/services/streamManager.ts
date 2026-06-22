@@ -617,6 +617,210 @@ export class StreamManager {
     }
   }
 
+  /** Resume rendering an already-running backend stream after a page reload/reconnect. */
+  async resumeStream(conversationId: string, nodeId: string): Promise<void> {
+    const existing = this.streams.get(conversationId);
+    if (existing?.status === 'streaming' && existing.nodeId === nodeId) return;
+
+    const existingController = this.abortControllers.get(conversationId);
+    if (existingController) {
+      existingController.abort();
+      this.clearDisplayPump(conversationId);
+    }
+    this.immediateDisplayConversations.delete(conversationId);
+
+    const abortController = new AbortController();
+    this.abortControllers.set(conversationId, abortController);
+
+    let state: StreamState = {
+      status: 'streaming',
+      content: '',
+      reasoning: '',
+      reasoningActive: false,
+      toolInteractions: [],
+      pendingApprovals: {},
+      nodeId,
+      tokensUsed: 0,
+      duration: 0,
+      errorMessage: null,
+      abortController,
+      pendingUserMessage: null,
+    };
+    this.streams.set(conversationId, state);
+    this.notify(conversationId);
+
+    let currentContent = '';
+    let currentReasoning = '';
+    const startTime = Date.now();
+    let finishStatus: 'completed' | 'error' | 'stopped' = 'completed';
+    let drained = false;
+    let brokeEarly = false;
+
+    const myTimer = window.setInterval(() => {
+      const s = this.streams.get(conversationId);
+      if (s && s.status === 'streaming') {
+        this.streams.set(conversationId, { ...s, duration: Date.now() - startTime });
+        this.notify(conversationId);
+      }
+    }, 100);
+    this.durationTimers.set(conversationId, myTimer);
+
+    try {
+      for await (const chunk of messageApi.attachStream(conversationId, nodeId, 0, abortController.signal)) {
+        if (this.abortControllers.get(conversationId) !== abortController) {
+          brokeEarly = true;
+          break;
+        }
+        if (abortController.signal.aborted) {
+          brokeEarly = true;
+          break;
+        }
+
+        const current = this.streams.get(conversationId);
+        if (!current) { brokeEarly = true; break; }
+        state = current;
+
+        if (chunk.content) {
+          if (currentReasoning && state.reasoning !== currentReasoning) {
+            this.flushDisplayPump(conversationId, abortController, true);
+            const flushedState = this.streams.get(conversationId);
+            if (!flushedState) { brokeEarly = true; break; }
+            state = flushedState;
+          }
+          currentContent += chunk.content;
+          this.setDisplayTargets(conversationId, abortController, { contentTarget: currentContent });
+          state = { ...state, reasoningActive: false };
+        }
+        if (chunk.reasoning) {
+          currentReasoning += chunk.reasoning;
+          this.setDisplayTargets(conversationId, abortController, { reasoningTarget: currentReasoning });
+          state = { ...state, reasoningActive: true };
+        }
+        const displayedState = this.streams.get(conversationId);
+        if (displayedState) {
+          state = { ...state, content: displayedState.content, reasoning: displayedState.reasoning };
+        }
+        if (chunk.event_type === 'tool_call_start') {
+          this.flushDisplayPump(conversationId, abortController, true);
+          const flushedState = this.streams.get(conversationId);
+          if (!flushedState) { brokeEarly = true; break; }
+          state = {
+            ...flushedState,
+            content: '',
+            reasoning: '',
+            reasoningActive: false,
+            toolInteractions: appendToolCallStart(flushedState.toolInteractions, currentContent, currentReasoning),
+          };
+          currentContent = '';
+          currentReasoning = '';
+          this.clearDisplayPump(conversationId);
+        } else if (chunk.event_type === 'tool_call') {
+          const toolCalls = getChunkToolCalls(chunk);
+          if (toolCalls.length > 0) {
+            this.flushDisplayPump(conversationId, abortController, true);
+            const flushedState = this.streams.get(conversationId);
+            if (!flushedState) { brokeEarly = true; break; }
+            state = flushedState;
+          }
+          state = {
+            ...state,
+            toolInteractions: appendToolCalls(state.toolInteractions, toolCalls, currentContent, currentReasoning),
+          };
+          if (toolCalls.length > 0) {
+            currentContent = '';
+            currentReasoning = '';
+            this.clearDisplayPump(conversationId);
+            state = { ...state, content: '', reasoning: '', reasoningActive: false };
+          }
+        } else if (chunk.event_type === 'tool_result') {
+          state = {
+            ...state,
+            toolInteractions: appendToolResult(state.toolInteractions, chunk.tool_call),
+            reasoningActive: false,
+          };
+        }
+        if (chunk.event_type === 'tool_approval_request') {
+          state = {
+            ...state,
+            pendingApprovals: mergeApproval(state.pendingApprovals, chunk.approval, 'pending'),
+          };
+        } else if (chunk.event_type === 'tool_approval_result') {
+          state = {
+            ...state,
+            pendingApprovals: mergeApproval(state.pendingApprovals, chunk.approval),
+          };
+        }
+        if (chunk.node_id) {
+          state = { ...state, nodeId: chunk.node_id };
+        }
+        if (chunk.tokens_used) {
+          state = { ...state, tokensUsed: chunk.tokens_used };
+        }
+
+        if (chunk.status === 'complete') {
+          finishStatus = 'completed';
+          state = { ...state, duration: Date.now() - startTime, status: 'completed' as const, reasoningActive: false };
+        } else if (chunk.status === 'stopped') {
+          finishStatus = 'stopped';
+          state = { ...state, duration: Date.now() - startTime, status: 'stopped' as const, reasoningActive: false };
+        } else if (chunk.status === 'error') {
+          finishStatus = 'error';
+          const chunkError = typeof chunk.error === 'string' && chunk.error.trim()
+            ? chunk.error
+            : state.errorMessage;
+          state = {
+            ...state,
+            duration: Date.now() - startTime,
+            status: 'error' as const,
+            errorMessage: chunkError,
+            reasoningActive: false,
+          };
+        }
+
+        this.streams.set(conversationId, state);
+        this.notify(conversationId);
+      }
+      drained = !brokeEarly;
+    } catch (err) {
+      finishStatus = err instanceof Error && err.name === 'AbortError' ? 'stopped' : 'error';
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      const finalState = this.streams.get(conversationId);
+      if (
+        this.abortControllers.get(conversationId) === abortController &&
+        finalState &&
+        finalState.status === 'streaming'
+      ) {
+        this.streams.set(conversationId, {
+          ...finalState,
+          status: finishStatus === 'error' ? 'error' : 'stopped',
+          errorMessage: finishStatus === 'error' ? errorMessage : finalState.errorMessage,
+          duration: Date.now() - startTime,
+          reasoningActive: false,
+        });
+        this.notify(conversationId);
+      }
+    } finally {
+      clearInterval(myTimer);
+      if (this.durationTimers.get(conversationId) === myTimer) {
+        this.durationTimers.delete(conversationId);
+      }
+      if (this.abortControllers.get(conversationId) === abortController) {
+        await this.waitForDisplayDrain(conversationId, abortController);
+        if (this.abortControllers.get(conversationId) !== abortController) {
+          return;
+        }
+        const finalState = this.streams.get(conversationId);
+        this.notifyFinish({
+          conversationId,
+          status: finishStatus,
+          drained,
+          nodeId: finalState?.nodeId ?? nodeId,
+          controller: abortController,
+        });
+      }
+    }
+  }
+
   /** Stop an active stream (graceful) */
   async stopStream(conversationId: string): Promise<void> {
     const state = this.streams.get(conversationId);
