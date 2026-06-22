@@ -46,6 +46,7 @@ class NodeManager:
             "system_message": system_msg,
             "timestamp": int(time()),
             "model_id": None,
+            "tool_permission_mode": None,
             "total_tokens": 0,
             "branch_usage_info": estimated_usage(0),
             "usage": _empty_node_usage(),
@@ -55,7 +56,8 @@ class NodeManager:
     def create_node(
         user_message: Message,
         parent_id: Optional[str] = None,
-        model_id: Optional[str] = None
+        model_id: Optional[str] = None,
+        tool_permission_mode: Optional[str] = None,
     ) -> ConversationTreeNode:
         """创建新节点（一轮交互）"""
         node_id = str(uuid.uuid4())
@@ -70,6 +72,7 @@ class NodeManager:
             "system_message": None,
             "timestamp": int(time()),
             "model_id": model_id,
+            "tool_permission_mode": tool_permission_mode,
             "total_tokens": 0,
             "branch_usage_info": estimated_usage(0),
             "usage": _empty_node_usage(),
@@ -130,6 +133,7 @@ class NodeManager:
             "system_message": boundary_msg,
             "timestamp": now,
             "model_id": model_id,
+            "tool_permission_mode": None,
             "total_tokens": 0,
             "branch_usage_info": estimated_usage(0),
             "usage": _empty_node_usage(),

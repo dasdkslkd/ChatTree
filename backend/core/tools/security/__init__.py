@@ -2,7 +2,7 @@ from .approval import ApprovalDecision, ApprovalManager, ApprovalRequest
 from .capabilities import ToolCapability, capabilities_for_tool
 from .command_policy import CommandDecision, CommandPolicy, CommandRule
 from .logical_sandbox import LogicalSandbox, SandboxViolation
-from .permissions import PermissionContext, PermissionDecision, PermissionEngine, PermissionRule
+from .permissions import PermissionContext, PermissionDecision, PermissionEngine, PermissionRule, normalize_permission_mode
 
 __all__ = [
     "ApprovalDecision",
@@ -16,6 +16,7 @@ __all__ = [
     "PermissionDecision",
     "PermissionEngine",
     "PermissionRule",
+    "normalize_permission_mode",
     "SandboxViolation",
     "ToolCapability",
     "capabilities_for_tool",

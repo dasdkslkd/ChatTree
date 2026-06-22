@@ -65,7 +65,7 @@ import {
 } from 'lucide-react';
 import { conversationApi } from '../api/conversation';
 import { messageApi, type ToolResultSlice } from '../api/message';
-import type { SendMessageRequest, ToolApprovalDecision, ToolApprovalPayload, ToolApprovalScope } from '../types/message';
+import type { SendMessageRequest, ToolApprovalDecision, ToolApprovalPayload, ToolApprovalScope, ToolPermissionMode } from '../types/message';
 import type { WorkspaceContext } from '../types/conversation';
 import { useConversationStore } from '../store/conversationStore';
 import { useModelStore } from '../store/modelStore';
@@ -1451,7 +1451,12 @@ export default function ChatPage() {
     setPreviewImage({ name: filename, url });
   };
 
-  const handleSend = async (val: string, modelId?: string, providerId?: string) => {
+  const handleSend = async (
+    val: string,
+    modelId?: string,
+    providerId?: string,
+    toolPermissionMode: ToolPermissionMode = 'modify_only',
+  ) => {
     if (!val.trim()) return;
     setShouldAutoScroll(true);
 
@@ -1469,6 +1474,7 @@ export default function ChatPage() {
       provider_id: providerId,
       reasoning_effort: currentReasoningEffort,
       thinking_enabled: currentThinkingEnabled,
+      tool_permission_mode: toolPermissionMode,
       import_files: importFiles.length > 0 ? importFiles : undefined,
       image_refs: imageRefs.length > 0 ? imageRefs : undefined,
     };
@@ -1557,6 +1563,7 @@ export default function ChatPage() {
           content: userContent,
           reasoning_effort: currentReasoningEffort,
           thinking_enabled: currentThinkingEnabled,
+          tool_permission_mode: 'modify_only',
           import_files: importFileNames.length > 0
             ? importFileNames.map(filename => ({ filename }))
             : undefined,

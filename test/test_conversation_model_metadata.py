@@ -188,6 +188,37 @@ def test_stream_respects_request_provider_when_model_name_is_shared(tmp_path):
     assert manager.model_manager.get_model_calls[-1] == ("second", True)
 
 
+def test_stream_persists_tool_permission_mode_per_new_leaf_node(tmp_path):
+    manager = make_chat_manager(tmp_path)
+    conversation = manager.create_conversation("tool permission mode")
+    conversation_id = conversation.metadata["id"]
+
+    asyncio.run(
+        drain(manager.send_message_stream(
+            conversation_id,
+            "first",
+            model_id="deepseek-v4-pro",
+            tool_permission_mode="auto_approve",
+        ))
+    )
+    first_node_id = manager.get_conversation(conversation_id).current_node_id
+
+    asyncio.run(
+        drain(manager.send_message_stream(
+            conversation_id,
+            "second",
+            model_id="deepseek-v4-pro",
+            tool_permission_mode="modify_only",
+        ))
+    )
+    second_node_id = manager.get_conversation(conversation_id).current_node_id
+
+    reloaded = manager.get_conversation(conversation_id)
+    assert reloaded is not None
+    assert reloaded.nodes[first_node_id]["tool_permission_mode"] == "auto_approve"
+    assert reloaded.nodes[second_node_id]["tool_permission_mode"] == "modify_only"
+
+
 def test_list_conversations_does_not_guess_provider_for_legacy_shared_model(tmp_path):
     manager = make_chat_manager(tmp_path)
     conversation = manager.create_conversation("legacy shared")

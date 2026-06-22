@@ -32,6 +32,7 @@ from ..capabilities.prompting import (
     collect_skill_injection_names,
     format_skill_injections,
 )
+from ..tools.security.permissions import PermissionMode, normalize_permission_mode
 
 logger = setup_logger('ChatManager')
 
@@ -280,6 +281,7 @@ class ChatManager:
         thinking_enabled: Optional[bool] = None,
         import_files: Optional[List[Dict[str, Any]]] = None,
         image_refs: Optional[List[Dict[str, Any]]] = None,
+        tool_permission_mode: Optional[str] = None,
     ) -> AsyncIterator[StreamChunk]:
         """
         异步流式发送消息
@@ -394,6 +396,7 @@ class ChatManager:
         )
         eff_effort = normalize_effort(eff_effort, meta)
         eff_thinking = normalize_thinking(eff_thinking, meta)
+        eff_tool_permission_mode = normalize_permission_mode(tool_permission_mode)
         logger.info(f"Stream reasoning: effort={eff_effort}, thinking={eff_thinking}")
 
         # 创建用户消息
@@ -436,7 +439,8 @@ class ChatManager:
             new_node = NodeManager.create_node(
                 user_message=user_msg,
                 parent_id=current_node_id,
-                model_id=target_model
+                model_id=target_model,
+                tool_permission_mode=eff_tool_permission_mode,
             )
             if skill_names:
                 new_node["active_skill_names"] = skill_names
@@ -636,6 +640,7 @@ class ChatManager:
                         conversation_id=conversation_id,
                         emit_event=emit_tool_event,
                         workspace=workspace_context,
+                        permission_mode=new_node.get("tool_permission_mode") or "default",
                     )
                 )
                 event_get_task = asyncio.create_task(approval_events.get())
@@ -1581,6 +1586,7 @@ class ChatManager:
         conversation_id: Optional[str] = None,
         emit_event: Optional[Callable[[Dict[str, Any]], Any]] = None,
         workspace: Optional[Dict[str, Any]] = None,
+        permission_mode: PermissionMode = "default",
     ) -> List[Message]:
         results: List[Message] = []
         for tool_call in tool_calls:
@@ -1596,16 +1602,27 @@ class ChatManager:
                         node_id,
                         emit_event=emit_event,
                         workspace=workspace,
+                        permission_mode=permission_mode,
                     )
                 except TypeError as exc:
-                    if "unexpected keyword argument 'workspace'" not in str(exc):
+                    error_text = str(exc)
+                    if "unexpected keyword argument 'permission_mode'" in error_text:
+                        message = await tool_orchestrator.execute_tool_call(
+                            tool_call,
+                            conversation_id or "",
+                            node_id,
+                            emit_event=emit_event,
+                            workspace=workspace,
+                        )
+                    elif "unexpected keyword argument 'workspace'" in error_text:
+                        message = await tool_orchestrator.execute_tool_call(
+                            tool_call,
+                            conversation_id or "",
+                            node_id,
+                            emit_event=emit_event,
+                        )
+                    else:
                         raise
-                    message = await tool_orchestrator.execute_tool_call(
-                        tool_call,
-                        conversation_id or "",
-                        node_id,
-                        emit_event=emit_event,
-                    )
                 results.append(
                     self._model_visible_tool_message(
                         message,

@@ -10,6 +10,13 @@ import {
   DialogTitle,
   DialogFooter,
 } from '@/components/ui/dialog'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { SendHorizontal, Bot, StickyNote, X, Settings, Square, Plus, FileText, Pencil, Trash2, Check } from 'lucide-react'
 import { useState, useEffect, useRef, type ReactNode } from 'react'
 import { useModelStore } from '../store/modelStore'
@@ -17,9 +24,16 @@ import { usePromptStore } from '../store/promtStore'
 import { useNavigationStore } from '../store/navigationStore'
 import { useConversationStore } from '../store/conversationStore'
 import { conversationApi } from '../api/conversation'
+import type { ToolPermissionMode } from '../types/message'
 
 interface Props {
-  onSend: (value: string, modelId?: string, providerId?: string, systemPrompt?: string) => Promise<void>;
+  onSend: (
+    value: string,
+    modelId?: string,
+    providerId?: string,
+    toolPermissionMode?: ToolPermissionMode,
+    systemPrompt?: string,
+  ) => Promise<void>;
   onStop?: () => void;
   isStreaming?: boolean;
   disabled: boolean;
@@ -66,6 +80,7 @@ export function ChatInput({
   const [selectedPromptId, setSelectedPromptId] = useState<string | null>(null);
   const [selectedPromptTitle, setSelectedPromptTitle] = useState<string | null>(null);
   const [editingQueuedMessageId, setEditingQueuedMessageId] = useState<string | null>(null);
+  const [toolPermissionMode, setToolPermissionMode] = useState<ToolPermissionMode>('modify_only');
 
   const {
     providers,
@@ -147,7 +162,13 @@ export function ChatInput({
     if (!value.trim() || (disabled && !isStreaming)) return;
     const systemPrompt = currentPrompt?.content;
     setValue('');
-    await onSend(value, currentModel || undefined, currentProvider || undefined, systemPrompt);
+    await onSend(
+      value,
+      currentModel || undefined,
+      currentProvider || undefined,
+      toolPermissionMode,
+      systemPrompt,
+    );
   };
 
   const handleFilePick = () => { fileInputRef.current?.click(); };
@@ -260,6 +281,11 @@ export function ChatInput({
   const inputDisabled = disabled && !isStreaming;
   const sendDisabled = !value.trim() || (disabled && !isStreaming);
   const showStreamingSend = !!isStreaming && !!value.trim();
+  const currentPermissionLabel = {
+    auto_approve: '自动批准',
+    modify_only: '仅修改',
+    ask_always: '全部需批准',
+  }[toolPermissionMode];
 
   // 所选模型的元数据 → 决定是否渲染推理强度/思考开关控件
   const activeMeta = getMetadata(activeDialogProvider, activeDialogModel);
@@ -493,49 +519,78 @@ export function ChatInput({
             )}
           </div>
 
-          {/* 发送/终止按钮 */}
-          {isStreaming && !showStreamingSend ? (
-            <button
-              className="w-7 h-7 rounded-full flex items-center justify-center cursor-pointer transition-all"
-              style={{
-                background: 'var(--accent-red)',
-                color: '#fff',
-                border: 'none',
-              }}
-              onClick={onStop}
-              aria-label="终止生成"
-            >
-              <Square className="h-3 w-3 fill-current" />
-            </button>
-          ) : (
-            <button
-              className="w-7 h-7 rounded-full flex items-center justify-center cursor-pointer transition-all"
-              style={{
-                background: sendDisabled
-                  ? 'var(--muted)'
-                  : 'linear-gradient(160deg, var(--accent-hover), var(--accent-active))',
-                color: sendDisabled ? 'var(--fg-tertiary)' : '#fff5ef',
-                border: 'none',
-                boxShadow: sendDisabled ? 'none' : 'var(--glow-accent), inset 0 1px 0 rgba(255,255,255,0.25)',
-                opacity: sendDisabled ? 0.35 : 1,
-              }}
-              onClick={handleSend}
-              disabled={sendDisabled}
-              aria-label={isStreaming ? '加入发送队列' : '发送消息'}
-              onMouseEnter={(e) => {
-                if (!sendDisabled) {
-                  (e.currentTarget as HTMLElement).style.filter = 'brightness(1.08)';
-                  (e.currentTarget as HTMLElement).style.transform = 'scale(1.06)';
-                }
-              }}
-              onMouseLeave={(e) => {
-                (e.currentTarget as HTMLElement).style.filter = '';
-                (e.currentTarget as HTMLElement).style.transform = '';
-              }}
-            >
-              <SendHorizontal className="h-4 w-4" />
-            </button>
-          )}
+          <div className="flex items-center gap-1">
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  className="h-7 min-w-[66px] rounded-full px-2 text-xs font-medium flex items-center justify-center cursor-pointer transition-colors"
+                  style={{
+                    color: 'var(--fg-tertiary)',
+                    border: '0.5px solid var(--border)',
+                    background: 'color-mix(in srgb, var(--bg-input) 72%, transparent)',
+                  }}
+                  aria-label={`工具权限：${currentPermissionLabel}`}
+                  title={`工具权限：${currentPermissionLabel}`}
+                >
+                  {currentPermissionLabel}
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-48">
+                <DropdownMenuRadioGroup
+                  value={toolPermissionMode}
+                  onValueChange={(value) => setToolPermissionMode(value as ToolPermissionMode)}
+                >
+                  <DropdownMenuRadioItem value="auto_approve">自动批准</DropdownMenuRadioItem>
+                  <DropdownMenuRadioItem value="modify_only">仅修改</DropdownMenuRadioItem>
+                  <DropdownMenuRadioItem value="ask_always">全部需批准</DropdownMenuRadioItem>
+                </DropdownMenuRadioGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
+            {/* 发送/终止按钮 */}
+            {isStreaming && !showStreamingSend ? (
+              <button
+                className="w-7 h-7 rounded-full flex items-center justify-center cursor-pointer transition-all"
+                style={{
+                  background: 'var(--accent-red)',
+                  color: '#fff',
+                  border: 'none',
+                }}
+                onClick={onStop}
+                aria-label="终止生成"
+              >
+                <Square className="h-3 w-3 fill-current" />
+              </button>
+            ) : (
+              <button
+                className="w-7 h-7 rounded-full flex items-center justify-center cursor-pointer transition-all"
+                style={{
+                  background: sendDisabled
+                    ? 'var(--muted)'
+                    : 'linear-gradient(160deg, var(--accent-hover), var(--accent-active))',
+                  color: sendDisabled ? 'var(--fg-tertiary)' : '#fff5ef',
+                  border: 'none',
+                  boxShadow: sendDisabled ? 'none' : 'var(--glow-accent), inset 0 1px 0 rgba(255,255,255,0.25)',
+                  opacity: sendDisabled ? 0.35 : 1,
+                }}
+                onClick={handleSend}
+                disabled={sendDisabled}
+                aria-label={isStreaming ? '加入发送队列' : '发送消息'}
+                onMouseEnter={(e) => {
+                  if (!sendDisabled) {
+                    (e.currentTarget as HTMLElement).style.filter = 'brightness(1.08)';
+                    (e.currentTarget as HTMLElement).style.transform = 'scale(1.06)';
+                  }
+                }}
+                onMouseLeave={(e) => {
+                  (e.currentTarget as HTMLElement).style.filter = '';
+                  (e.currentTarget as HTMLElement).style.transform = '';
+                }}
+              >
+                <SendHorizontal className="h-4 w-4" />
+              </button>
+            )}
+          </div>
         </div>
       </div>
 

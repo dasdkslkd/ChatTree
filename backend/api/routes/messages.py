@@ -25,6 +25,7 @@ class SendMessageRequest(BaseModel):
     thinking_enabled: Optional[bool] = None
     import_files: Optional[List[Dict[str, Any]]] = None
     image_refs: Optional[List[Dict[str, Any]]] = None
+    tool_permission_mode: Optional[str] = None
 
 
 class DetachedStreamSession:
@@ -133,6 +134,7 @@ async def detached_stream_event_generator(
                 thinking_enabled=request.thinking_enabled,
                 import_files=request.import_files,
                 image_refs=request.image_refs,
+                tool_permission_mode=request.tool_permission_mode,
             ):
                 chunk_data = build_stream_chunk_data(chunk, conversation_id)
                 await session.append(

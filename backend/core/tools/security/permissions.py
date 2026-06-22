@@ -2,10 +2,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
+import re
 from typing import Any, Dict, List, Literal, Optional
 
 PermissionBehavior = Literal["allow", "ask", "deny"]
-PermissionMode = Literal["default", "dont_ask", "bypass_permissions"]
+PermissionMode = Literal[
+    "default",
+    "dont_ask",
+    "bypass_permissions",
+    "auto_approve",
+    "modify_only",
+    "ask_always",
+]
 RuleTargetType = Literal["tool", "mcp_server", "mcp_tool", "filesystem", "network", "command"]
 RuleSource = Literal["default", "user", "session", "project"]
 
@@ -52,6 +60,7 @@ class PermissionEngine:
         return cls(default_permission_rules())
 
     def evaluate(self, context: PermissionContext) -> PermissionDecision:
+        mode = normalize_permission_mode(context.mode)
         rules = [
             *context.turn_grants,
             *context.session_grants,
@@ -62,6 +71,21 @@ class PermissionEngine:
         deny = self._first_behavior(matched, "deny")
         if deny:
             return PermissionDecision("deny", f"Denied by rule {deny.id}", [deny])
+
+        if mode == "ask_always":
+            return PermissionDecision("ask", "ask_always mode requires approval for every tool call", matched)
+
+        if mode == "auto_approve":
+            if _is_explicit_delete(context.tool_name, context.arguments):
+                return PermissionDecision("ask", "auto_approve mode requires approval for explicit delete/remove operations", matched)
+            return PermissionDecision("allow", "auto_approve mode allows non-delete tool calls", matched)
+
+        if mode == "modify_only":
+            if _is_explicit_delete(context.tool_name, context.arguments):
+                return PermissionDecision("ask", "modify_only mode requires approval for explicit delete/remove operations", matched)
+            if _is_mutating_tool_call(context.tool_name, context.arguments):
+                return PermissionDecision("allow", "modify_only mode allows modifying tool calls", matched)
+            return PermissionDecision("ask", "modify_only mode requires approval for non-modifying tool calls", matched)
 
         explicit_ask = self._first_behavior(
             [rule for rule in matched if not self._is_default_ask(rule)],
@@ -74,25 +98,25 @@ class PermissionEngine:
         )
 
         if explicit_ask:
-            if context.mode == "dont_ask":
+            if mode == "dont_ask":
                 return PermissionDecision("deny", f"dont_ask mode converted ask rule {explicit_ask.id} to deny", [explicit_ask])
             return PermissionDecision("ask", self._ask_reason(explicit_ask), [explicit_ask])
 
-        if context.mode == "bypass_permissions":
+        if mode == "bypass_permissions":
             return PermissionDecision("allow", "bypass_permissions mode allows non-denied tool calls", matched)
 
         if allow:
             return PermissionDecision("allow", self._allow_reason(allow), [allow])
 
         if default_ask:
-            if context.mode == "dont_ask":
+            if mode == "dont_ask":
                 return PermissionDecision("deny", f"dont_ask mode converted ask rule {default_ask.id} to deny", [default_ask])
             return PermissionDecision("ask", self._ask_reason(default_ask), [default_ask])
 
         fallback = PermissionDecision("ask", "No matching allow rule; approval required", matched)
-        if context.mode == "dont_ask":
+        if mode == "dont_ask":
             return PermissionDecision("deny", "dont_ask mode denied unclassified tool call", matched)
-        if context.mode == "bypass_permissions":
+        if mode == "bypass_permissions":
             return PermissionDecision("allow", "bypass_permissions mode allows unclassified tool call", matched)
         return fallback
 
@@ -167,3 +191,68 @@ def default_permission_rules() -> List[PermissionRule]:
         PermissionRule("default-ask-apply-patch", "ask", "tool", "apply_patch", source="default"),
         PermissionRule("default-ask-mcp", "ask", "mcp_tool", "*", source="default"),
     ]
+
+
+def normalize_permission_mode(value: Any) -> PermissionMode:
+    if value in ("auto_approve", "auto", "bypass_permissions"):
+        return "auto_approve"
+    if value in ("modify_only", "ask_on_modify", "ask_modify", "modify", None, ""):
+        return "modify_only"
+    if value == "default":
+        return "default"
+    if value in ("ask_always", "ask_all", "all"):
+        return "ask_always"
+    if value == "dont_ask":
+        return "dont_ask"
+    return "ask_on_modify"
+
+
+_MUTATING_NAME_TOKENS = {
+    "write",
+    "delete",
+    "remove",
+    "move",
+    "edit",
+    "create",
+    "mkdir",
+    "append",
+    "patch",
+    "rename",
+    "copy",
+    "run",
+    "command",
+    "shell",
+    "exec",
+}
+
+_DELETE_NAME_TOKENS = {"delete", "remove", "rm", "unlink", "rmdir"}
+_COMMAND_KEYS = {"command", "cmd", "script"}
+
+
+def _is_mutating_tool_call(tool_name: str, arguments: Dict[str, Any]) -> bool:
+    parts = _tool_name_parts(tool_name)
+    if any(part in _MUTATING_NAME_TOKENS for part in parts):
+        return True
+    return _command_text(arguments) is not None
+
+
+def _is_explicit_delete(tool_name: str, arguments: Dict[str, Any]) -> bool:
+    parts = _tool_name_parts(tool_name)
+    if any(part in _DELETE_NAME_TOKENS for part in parts):
+        return True
+    command = _command_text(arguments)
+    if not command:
+        return False
+    return bool(re.search(r"(?i)(^|[;&|]\s*)(rm|del|erase|rmdir|remove-item)\b", command))
+
+
+def _tool_name_parts(tool_name: str) -> List[str]:
+    normalized = tool_name[5:] if tool_name.startswith("mcp__") else tool_name
+    return [part for part in re.split(r"[^a-zA-Z0-9]+", normalized.lower()) if part]
+
+
+def _command_text(arguments: Dict[str, Any]) -> Optional[str]:
+    for key, value in arguments.items():
+        if key.lower() in _COMMAND_KEYS and isinstance(value, str):
+            return value
+    return None

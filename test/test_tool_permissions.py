@@ -13,6 +13,7 @@ from backend.core.tools.security.permissions import (
     PermissionContext,
     PermissionEngine,
     PermissionRule,
+    normalize_permission_mode,
 )
 from backend.core.tools.security.capabilities import ToolCapability, capabilities_for_tool
 from backend.core.tools.security.command_policy import CommandPolicy
@@ -85,6 +86,83 @@ def test_builtin_code_mutating_tools_ask_by_default(tool_name):
     decision = PermissionEngine.default().evaluate(make_context(tool_name=tool_name))
 
     assert decision.behavior == "ask"
+
+
+@pytest.mark.parametrize("tool_name", ["web_search", "read_file", "edit_file", "write_file", "run_command"])
+def test_auto_approve_mode_allows_non_delete_tools(tool_name):
+    decision = PermissionEngine.default().evaluate(make_context(tool_name=tool_name, mode="auto_approve"))
+
+    assert decision.behavior == "allow"
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        ("delete_file", {"path": "notes.txt"}),
+        ("mcp__filesystem__remove_file", {"path": "notes.txt"}),
+        ("run_command", {"command": "rm notes.txt"}),
+    ],
+)
+def test_auto_approve_mode_still_asks_for_explicit_delete(tool_name, arguments):
+    decision = PermissionEngine.default().evaluate(
+        make_context(tool_name=tool_name, arguments=arguments, mode="auto_approve")
+    )
+
+    assert decision.behavior == "ask"
+    assert "delete" in decision.reason.lower() or "remove" in decision.reason.lower()
+
+
+@pytest.mark.parametrize("tool_name", ["web_search", "read_file", "search_files"])
+def test_modify_only_mode_asks_for_read_tools(tool_name):
+    decision = PermissionEngine.default().evaluate(make_context(tool_name=tool_name, mode="modify_only"))
+
+    assert decision.behavior == "ask"
+
+
+@pytest.mark.parametrize("tool_name", ["edit_file", "write_file", "apply_patch", "run_command"])
+def test_modify_only_mode_allows_mutating_tools(tool_name):
+    decision = PermissionEngine.default().evaluate(make_context(tool_name=tool_name, mode="modify_only"))
+
+    assert decision.behavior == "allow"
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        ("delete_file", {"path": "notes.txt"}),
+        ("run_command", {"command": "rm notes.txt"}),
+    ],
+)
+def test_modify_only_mode_still_asks_for_explicit_delete(tool_name, arguments):
+    decision = PermissionEngine.default().evaluate(
+        make_context(tool_name=tool_name, arguments=arguments, mode="modify_only")
+    )
+
+    assert decision.behavior == "ask"
+
+
+@pytest.mark.parametrize("tool_name", ["web_search", "read_file", "edit_file"])
+def test_ask_always_mode_asks_for_every_tool(tool_name):
+    decision = PermissionEngine.default().evaluate(make_context(tool_name=tool_name, mode="ask_always"))
+
+    assert decision.behavior == "ask"
+
+
+@pytest.mark.parametrize(
+    ("raw", "normalized"),
+    [
+        ("auto", "auto_approve"),
+        ("ask_modify", "modify_only"),
+        ("ask_on_modify", "modify_only"),
+        ("modify_only", "modify_only"),
+        ("all", "ask_always"),
+        ("bypass_permissions", "auto_approve"),
+        ("default", "default"),
+        (None, "modify_only"),
+    ],
+)
+def test_normalize_permission_mode_accepts_new_and_legacy_names(raw, normalized):
+    assert normalize_permission_mode(raw) == normalized
 
 
 def test_mcp_tools_ask_by_default():

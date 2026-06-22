@@ -88,6 +88,7 @@ class ConversationTreeNode(TypedDict):
     system_message: Optional[Message]  # 仅根节点有
     timestamp: int
     model_id: Optional[str]
+    tool_permission_mode: Optional[str]
     total_tokens: int
 
     branch_usage_info: UsageInfo

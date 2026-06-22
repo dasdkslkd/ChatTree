@@ -77,6 +77,7 @@ export interface SendMessageRequest {
   provider_id?: string;
   reasoning_effort?: string | null;
   thinking_enabled?: boolean | null;
+  tool_permission_mode?: ToolPermissionMode;
   import_files?: Array<{
     filename: string;
   }>;
@@ -85,6 +86,8 @@ export interface SendMessageRequest {
     mime_type?: string;
   }>;
 }
+
+export type ToolPermissionMode = 'auto_approve' | 'modify_only' | 'ask_always';
 
 export type StreamStatus = 'start' | 'content' | 'complete' | 'error' | 'stopped';
 

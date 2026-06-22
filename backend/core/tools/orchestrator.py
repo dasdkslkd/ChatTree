@@ -14,7 +14,7 @@ from backend.core.config.types import Message, Role
 from backend.core.tools.security.approval import ApprovalManager, ApprovalRequest
 from backend.core.tools.security.command_policy import CommandPolicy
 from backend.core.tools.security.logical_sandbox import LogicalSandbox, SandboxViolation
-from backend.core.tools.security.permissions import PermissionContext, PermissionDecision, PermissionEngine
+from backend.core.tools.security.permissions import PermissionContext, PermissionDecision, PermissionEngine, PermissionMode
 from backend.core.tools.tool_arguments import normalize_tool_arguments
 
 
@@ -90,6 +90,7 @@ class ToolOrchestrator:
         node_id: str,
         emit_event: Optional[Callable[[Dict[str, Any]], Any]] = None,
         workspace: Optional[Dict[str, Any]] = None,
+        permission_mode: PermissionMode = "default",
     ) -> Message:
         name = _tool_name(tool_call)
         arguments = normalize_tool_arguments(
@@ -105,6 +106,7 @@ class ToolOrchestrator:
             tool_name=name,
             arguments=arguments,
             source="model",
+            mode=permission_mode,
         )
         command_decision = _command_policy_decision(name, arguments)
         if command_decision and command_decision.behavior == "deny":
