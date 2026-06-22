@@ -10,7 +10,7 @@ import {
   DialogTitle,
   DialogFooter,
 } from '@/components/ui/dialog'
-import { SendHorizontal, Bot, StickyNote, X, Settings, Square, Plus, FileText } from 'lucide-react'
+import { SendHorizontal, Bot, StickyNote, X, Settings, Square, Plus, FileText, Pencil, Trash2, Check } from 'lucide-react'
 import { useState, useEffect, useRef, type ReactNode } from 'react'
 import { useModelStore } from '../store/modelStore'
 import { usePromptStore } from '../store/promtStore'
@@ -31,6 +31,9 @@ interface Props {
   onFilesPicked?: (files: File[]) => void;
   onRemoveFile?: (filename: string) => void;
   onPreviewImage?: (filename: string) => void;
+  queuedMessages?: Array<{ id: string; content: string }>;
+  onUpdateQueuedMessage?: (id: string, content: string) => void;
+  onDeleteQueuedMessage?: (id: string) => void;
   settingsSlot?: ReactNode;
   variant?: 'dock' | 'composer';
 }
@@ -48,6 +51,9 @@ export function ChatInput({
   onFilesPicked,
   onRemoveFile,
   onPreviewImage,
+  queuedMessages = [],
+  onUpdateQueuedMessage,
+  onDeleteQueuedMessage,
   settingsSlot,
   variant = 'dock',
 }: Props) {
@@ -59,6 +65,7 @@ export function ChatInput({
   const [promptDialogOpen, setPromptDialogOpen] = useState(false);
   const [selectedPromptId, setSelectedPromptId] = useState<string | null>(null);
   const [selectedPromptTitle, setSelectedPromptTitle] = useState<string | null>(null);
+  const [editingQueuedMessageId, setEditingQueuedMessageId] = useState<string | null>(null);
 
   const {
     providers,
@@ -137,7 +144,7 @@ export function ChatInput({
   }, [value]);
 
   const handleSend = async () => {
-    if (!value.trim() || disabled) return;
+    if (!value.trim() || (disabled && !isStreaming)) return;
     const systemPrompt = currentPrompt?.content;
     setValue('');
     await onSend(value, currentModel || undefined, currentProvider || undefined, systemPrompt);
@@ -250,6 +257,9 @@ export function ChatInput({
 
   const hiddenModels = activeDialogProvider ? (config?.provider?.[activeDialogProvider]?.hidden_models || []) : [];
   const dialogModels = (activeDialogProvider ? models[activeDialogProvider] || [] : []).filter(m => !hiddenModels.includes(m));
+  const inputDisabled = disabled && !isStreaming;
+  const sendDisabled = !value.trim() || (disabled && !isStreaming);
+  const showStreamingSend = !!isStreaming && !!value.trim();
 
   // 所选模型的元数据 → 决定是否渲染推理强度/思考开关控件
   const activeMeta = getMetadata(activeDialogProvider, activeDialogModel);
@@ -283,6 +293,64 @@ export function ChatInput({
           }
         }}
       >
+        {queuedMessages.length > 0 && (
+          <div className="flex flex-col gap-1.5 px-3 pt-2 pb-1">
+            {queuedMessages.map((message, index) => {
+              const isEditing = editingQueuedMessageId === message.id;
+              return (
+                <div
+                  key={message.id}
+                  className="flex items-start gap-2 rounded-xl px-2.5 py-2 text-xs"
+                  style={{
+                    background: 'color-mix(in srgb, var(--accent-soft) 54%, transparent)',
+                    border: '0.5px solid color-mix(in srgb, var(--icon-accent) 28%, transparent)',
+                    color: 'var(--fg-secondary)',
+                  }}
+                >
+                  <span className="shrink-0 pt-0.5 font-medium" style={{ color: 'var(--icon-accent)' }}>
+                    排队 {index + 1}
+                  </span>
+                  {isEditing ? (
+                    <textarea
+                      className="min-h-7 flex-1 resize-none border-0 bg-transparent p-0 outline-none"
+                      style={{ color: 'var(--fg-85)', fontFamily: 'var(--font-sans)' }}
+                      value={message.content}
+                      onChange={(e) => onUpdateQueuedMessage?.(message.id, e.target.value)}
+                      autoFocus
+                    />
+                  ) : (
+                    <span className="min-w-0 flex-1 whitespace-pre-wrap break-words leading-5">
+                      {message.content}
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border-0 bg-transparent p-0 cursor-pointer"
+                    style={{ color: 'var(--fg-tertiary)' }}
+                    onClick={() => setEditingQueuedMessageId(isEditing ? null : message.id)}
+                    aria-label={`${isEditing ? '完成编辑' : '编辑'}排队消息 ${index + 1}`}
+                    title={isEditing ? '完成编辑' : '编辑'}
+                  >
+                    {isEditing ? <Check className="h-3.5 w-3.5" /> : <Pencil className="h-3.5 w-3.5" />}
+                  </button>
+                  <button
+                    type="button"
+                    className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border-0 bg-transparent p-0 cursor-pointer"
+                    style={{ color: 'var(--fg-tertiary)' }}
+                    onClick={() => {
+                      if (editingQueuedMessageId === message.id) setEditingQueuedMessageId(null);
+                      onDeleteQueuedMessage?.(message.id);
+                    }}
+                    aria-label={`删除排队消息 ${index + 1}`}
+                    title="删除"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
         {(attachedFiles.length > 0 || attachedImages.length > 0) && (
           <div className="flex flex-wrap gap-1.5 px-3 pt-2 pb-1">
             {attachedImages.map((image) => (
@@ -354,7 +422,7 @@ export function ChatInput({
               handleSend();
             }
           }}
-          disabled={disabled}
+          disabled={inputDisabled}
           placeholder={variant === 'composer' ? '随心输入' : '按 Enter 发送，Ctrl+Enter 换行'}
           rows={2}
         />
@@ -426,7 +494,7 @@ export function ChatInput({
           </div>
 
           {/* 发送/终止按钮 */}
-          {isStreaming ? (
+          {isStreaming && !showStreamingSend ? (
             <button
               className="w-7 h-7 rounded-full flex items-center justify-center cursor-pointer transition-all"
               style={{
@@ -443,19 +511,19 @@ export function ChatInput({
             <button
               className="w-7 h-7 rounded-full flex items-center justify-center cursor-pointer transition-all"
               style={{
-                background: disabled || !value.trim()
+                background: sendDisabled
                   ? 'var(--muted)'
                   : 'linear-gradient(160deg, var(--accent-hover), var(--accent-active))',
-                color: disabled || !value.trim() ? 'var(--fg-tertiary)' : '#fff5ef',
+                color: sendDisabled ? 'var(--fg-tertiary)' : '#fff5ef',
                 border: 'none',
-                boxShadow: disabled || !value.trim() ? 'none' : 'var(--glow-accent), inset 0 1px 0 rgba(255,255,255,0.25)',
-                opacity: disabled || !value.trim() ? 0.35 : 1,
+                boxShadow: sendDisabled ? 'none' : 'var(--glow-accent), inset 0 1px 0 rgba(255,255,255,0.25)',
+                opacity: sendDisabled ? 0.35 : 1,
               }}
               onClick={handleSend}
-              disabled={disabled || !value.trim()}
-              aria-label="发送消息"
+              disabled={sendDisabled}
+              aria-label={isStreaming ? '加入发送队列' : '发送消息'}
               onMouseEnter={(e) => {
-                if (!disabled && value.trim()) {
+                if (!sendDisabled) {
                   (e.currentTarget as HTMLElement).style.filter = 'brightness(1.08)';
                   (e.currentTarget as HTMLElement).style.transform = 'scale(1.06)';
                 }

@@ -65,7 +65,7 @@ import {
 } from 'lucide-react';
 import { conversationApi } from '../api/conversation';
 import { messageApi, type ToolResultSlice } from '../api/message';
-import type { ToolApprovalDecision, ToolApprovalPayload, ToolApprovalScope } from '../types/message';
+import type { SendMessageRequest, ToolApprovalDecision, ToolApprovalPayload, ToolApprovalScope } from '../types/message';
 import type { WorkspaceContext } from '../types/conversation';
 import { useConversationStore } from '../store/conversationStore';
 import { useModelStore } from '../store/modelStore';
@@ -495,6 +495,20 @@ type AssistantTimelineBlock =
   | { type: 'content'; key: string; content: string }
   | { type: 'tools'; key: string; items: ToolRenderItem[] };
 
+type QueuedMessage = {
+  id: string;
+  conversationId: string;
+  content: string;
+  request: SendMessageRequest;
+};
+
+function createQueuedMessageId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `queued-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 function stripChronologicalPrefix(raw: unknown, snippets: string[]): string {
   if (typeof raw !== 'string' || raw.length === 0) return '';
   let remaining = raw;
@@ -774,6 +788,7 @@ export default function ChatPage() {
   const [editValue, setEditValue] = useState<string | null>(null);
   const [attachedFiles, setAttachedFiles] = useState<string[]>([]);
   const [attachedImageRefs, setAttachedImageRefs] = useState<Array<{ filename: string; mime_type?: string }>>([]);
+  const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([]);
   const [previewFile, setPreviewFile] = useState<{ name: string; content: string } | null>(null);
   const [previewImage, setPreviewImage] = useState<{ name: string; url: string } | null>(null);
   const [conversationSearch, setConversationSearch] = useState('');
@@ -796,8 +811,15 @@ export default function ChatPage() {
   const userScrollingRef = useRef(false);
   const scrollEndTimeoutRef = useRef<number | null>(null);
   const programmaticScrollRef = useRef(false);
+  const queuedMessagesRef = useRef<QueuedMessage[]>([]);
 
   const { chatViewMode, toggleChatViewMode, openSettings } = useNavigationStore();
+
+  const updateQueuedMessages = useCallback((updater: (messages: QueuedMessage[]) => QueuedMessage[]) => {
+    const next = updater(queuedMessagesRef.current);
+    queuedMessagesRef.current = next;
+    setQueuedMessages(next);
+  }, []);
 
   const isAtBottom = useCallback(() => {
     if (!historyRef.current) return true;
@@ -898,6 +920,12 @@ export default function ChatPage() {
   });
   const pendingApprovalList = Object.values(pendingApprovals).filter((approval) => approval.status === 'pending');
   const pendingApprovalCount = pendingApprovalList.length;
+  const visibleQueuedMessages = useMemo(
+    () => queuedMessages
+      .filter((message) => message.conversationId === currentConversation?.id)
+      .map(({ id, content }) => ({ id, content })),
+    [queuedMessages, currentConversation?.id],
+  );
   const defaultWorkspace = useMemo(
     () => conversations.find((conversation) => conversation.workspace?.cwd)?.workspace || null,
     [conversations],
@@ -1115,6 +1143,47 @@ export default function ChatPage() {
     return -1;
   })();
 
+  const sendNextQueuedMessage = useCallback(async (conversationId: string) => {
+    const nextMessage = queuedMessagesRef.current.find((message) =>
+      message.conversationId === conversationId && message.content.trim()
+    );
+    if (!nextMessage) {
+      updateQueuedMessages((messages) =>
+        messages.filter((message) => message.conversationId !== conversationId || message.content.trim())
+      );
+      return;
+    }
+
+    updateQueuedMessages((messages) => messages.filter((message) => message.id !== nextMessage.id));
+    setShouldAutoScroll(true);
+    await startStreaming(
+      conversationId,
+      {
+        ...nextMessage.request,
+        content: nextMessage.content,
+      },
+      nextMessage.content,
+    );
+  }, [startStreaming, updateQueuedMessages]);
+
+  const handleUpdateQueuedMessage = useCallback((id: string, content: string) => {
+    updateQueuedMessages((messages) =>
+      messages.map((message) => message.id === id ? { ...message, content } : message)
+    );
+  }, [updateQueuedMessages]);
+
+  const handleDeleteQueuedMessage = useCallback((id: string) => {
+    updateQueuedMessages((messages) => messages.filter((message) => message.id !== id));
+  }, [updateQueuedMessages]);
+
+  const handleStopStreaming = useCallback(() => {
+    if (currentConversation?.id) {
+      const conversationId = currentConversation.id;
+      updateQueuedMessages((messages) => messages.filter((message) => message.conversationId !== conversationId));
+    }
+    abortStreaming();
+  }, [abortStreaming, currentConversation?.id, updateQueuedMessages]);
+
   // 全局注册一次：任意对话的流结束（completed/error/stopped）时，
   // 从后端刷新真实消息，再清理 StreamManager 中该对话的临时状态。
   // 不依赖当前查看的是哪个对话，因此切走的对话流完成也能正确落地。
@@ -1147,9 +1216,10 @@ export default function ChatPage() {
       }
       // 同步对话列表（更新时间、标题等）
       await loadConversations();
+      await sendNextQueuedMessage(finishedId);
     });
     return unsubscribe;
-  }, [refreshMessages, loadConversations]);
+  }, [refreshMessages, loadConversations, sendNextQueuedMessage]);
 
   const shouldAutoScrollRef = useRef(shouldAutoScroll);
   shouldAutoScrollRef.current = shouldAutoScroll;
@@ -1381,14 +1451,44 @@ export default function ChatPage() {
     setPreviewImage({ name: filename, url });
   };
 
-  const handleSend = async (val: string, modelId?: string, providerId?: string, _systemPrompt?: string) => {
+  const handleSend = async (val: string, modelId?: string, providerId?: string) => {
     if (!val.trim()) return;
-    // 仅阻止向“当前对话”重复发送（它已在流式中）。其他对话的流不受影响，
-    // 因此可以在后台对话流式的同时，向另一对话发送——真正的多并发。
-    if (isStreaming) return;
     setShouldAutoScroll(true);
 
     let conversationId = currentConversation?.id;
+    const importFiles = attachedFiles.map(filename => ({ filename }));
+    const imageRefs = attachedImageRefs.map(({ filename, mime_type }) => ({ filename, mime_type }));
+    const clearAttachments = () => {
+      if (importFiles.length > 0) setAttachedFiles([]);
+      if (imageRefs.length > 0) setAttachedImageRefs([]);
+    };
+    const { currentReasoningEffort, currentThinkingEnabled } = useModelStore.getState();
+    const request: SendMessageRequest = {
+      content: val,
+      model_id: modelId,
+      provider_id: providerId,
+      reasoning_effort: currentReasoningEffort,
+      thinking_enabled: currentThinkingEnabled,
+      import_files: importFiles.length > 0 ? importFiles : undefined,
+      image_refs: imageRefs.length > 0 ? imageRefs : undefined,
+    };
+
+    if (isStreaming) {
+      if (!conversationId) return;
+      const queuedConversationId = conversationId;
+      clearAttachments();
+      updateQueuedMessages((messages) => [
+        ...messages,
+        {
+          id: createQueuedMessageId(),
+          conversationId: queuedConversationId,
+          content: val,
+          request,
+        },
+      ]);
+      return;
+    }
+
     if (!conversationId) {
       const newConv = await createConversation({
         title: val.slice(0, 20),
@@ -1401,24 +1501,12 @@ export default function ChatPage() {
       conversationId = newConv.id;
     }
 
-    const importFiles = attachedFiles.map(filename => ({ filename }));
-    const imageRefs = attachedImageRefs.map(({ filename, mime_type }) => ({ filename, mime_type }));
-    if (importFiles.length > 0) setAttachedFiles([]);
-    if (imageRefs.length > 0) setAttachedImageRefs([]);
+    clearAttachments();
     // 第三个参数是乐观渲染的用户气泡文本（显示用户输入的原文）。
     // 推理设置从 modelStore 的当前值读取（已确认值），随请求透传。
-    const { currentReasoningEffort, currentThinkingEnabled } = useModelStore.getState();
     await startStreaming(
       conversationId,
-      {
-        content: val,
-        model_id: modelId,
-        provider_id: providerId,
-        reasoning_effort: currentReasoningEffort,
-        thinking_enabled: currentThinkingEnabled,
-        import_files: importFiles.length > 0 ? importFiles : undefined,
-        image_refs: imageRefs.length > 0 ? imageRefs : undefined,
-      },
+      request,
       val,
     );
   };
@@ -2036,7 +2124,7 @@ export default function ChatPage() {
                     variant="composer"
                     settingsSlot={projectSettingsSlot}
                     onSend={handleSend}
-                    onStop={abortStreaming}
+                    onStop={handleStopStreaming}
                     isStreaming={isStreaming}
                     disabled={isStreaming}
                     conversationId={null}
@@ -2050,6 +2138,9 @@ export default function ChatPage() {
                     onFilesPicked={handleFilesPicked}
                     onRemoveFile={handleRemoveFile}
                     onPreviewImage={handlePreviewImage}
+                    queuedMessages={visibleQueuedMessages}
+                    onUpdateQueuedMessage={handleUpdateQueuedMessage}
+                    onDeleteQueuedMessage={handleDeleteQueuedMessage}
                   />
                 </div>
               </div>
@@ -2148,7 +2239,7 @@ export default function ChatPage() {
               <footer className="absolute bottom-4 left-1/2 -translate-x-1/2 w-[800px] max-w-[calc(100%-48px)] z-10">
                 <ChatInput
                   onSend={handleSend}
-                  onStop={abortStreaming}
+                  onStop={handleStopStreaming}
                   isStreaming={isStreaming}
                   disabled={isStreaming}
                   conversationId={currentConversation?.id || null}
@@ -2162,6 +2253,9 @@ export default function ChatPage() {
                   onFilesPicked={handleFilesPicked}
                   onRemoveFile={handleRemoveFile}
                   onPreviewImage={handlePreviewImage}
+                  queuedMessages={visibleQueuedMessages}
+                  onUpdateQueuedMessage={handleUpdateQueuedMessage}
+                  onDeleteQueuedMessage={handleDeleteQueuedMessage}
                 />
               </footer>
             </>
