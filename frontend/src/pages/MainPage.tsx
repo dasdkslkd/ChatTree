@@ -1,4 +1,42 @@
-import { lazy, Suspense, useEffect, useState, useRef, useLayoutEffect, useCallback, useMemo } from 'react';
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useState,
+  useRef,
+  useLayoutEffect,
+  useCallback,
+  useMemo,
+} from 'react';
+import SyntaxHighlighter from 'react-syntax-highlighter/dist/esm/prism-light';
+import oneDark from 'react-syntax-highlighter/dist/esm/styles/prism/one-dark';
+import bash from 'react-syntax-highlighter/dist/esm/languages/prism/bash';
+import c from 'react-syntax-highlighter/dist/esm/languages/prism/c';
+import cpp from 'react-syntax-highlighter/dist/esm/languages/prism/cpp';
+import csharp from 'react-syntax-highlighter/dist/esm/languages/prism/csharp';
+import css from 'react-syntax-highlighter/dist/esm/languages/prism/css';
+import diff from 'react-syntax-highlighter/dist/esm/languages/prism/diff';
+import docker from 'react-syntax-highlighter/dist/esm/languages/prism/docker';
+import go from 'react-syntax-highlighter/dist/esm/languages/prism/go';
+import ini from 'react-syntax-highlighter/dist/esm/languages/prism/ini';
+import java from 'react-syntax-highlighter/dist/esm/languages/prism/java';
+import javascript from 'react-syntax-highlighter/dist/esm/languages/prism/javascript';
+import json from 'react-syntax-highlighter/dist/esm/languages/prism/json';
+import jsx from 'react-syntax-highlighter/dist/esm/languages/prism/jsx';
+import less from 'react-syntax-highlighter/dist/esm/languages/prism/less';
+import markdown from 'react-syntax-highlighter/dist/esm/languages/prism/markdown';
+import markup from 'react-syntax-highlighter/dist/esm/languages/prism/markup';
+import php from 'react-syntax-highlighter/dist/esm/languages/prism/php';
+import powershell from 'react-syntax-highlighter/dist/esm/languages/prism/powershell';
+import python from 'react-syntax-highlighter/dist/esm/languages/prism/python';
+import ruby from 'react-syntax-highlighter/dist/esm/languages/prism/ruby';
+import rust from 'react-syntax-highlighter/dist/esm/languages/prism/rust';
+import scss from 'react-syntax-highlighter/dist/esm/languages/prism/scss';
+import sql from 'react-syntax-highlighter/dist/esm/languages/prism/sql';
+import toml from 'react-syntax-highlighter/dist/esm/languages/prism/toml';
+import tsx from 'react-syntax-highlighter/dist/esm/languages/prism/tsx';
+import typescript from 'react-syntax-highlighter/dist/esm/languages/prism/typescript';
+import yaml from 'react-syntax-highlighter/dist/esm/languages/prism/yaml';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -54,6 +92,37 @@ import {
 
 const MarkdownContent = lazy(() => import('../components/MarkdownContent'));
 const MANUAL_PROJECTS_STORAGE_KEY = 'chattree.manualProjectWorkspaces';
+
+SyntaxHighlighter.registerLanguage('bash', bash);
+SyntaxHighlighter.registerLanguage('batch', bash);
+SyntaxHighlighter.registerLanguage('c', c);
+SyntaxHighlighter.registerLanguage('cpp', cpp);
+SyntaxHighlighter.registerLanguage('csharp', csharp);
+SyntaxHighlighter.registerLanguage('css', css);
+SyntaxHighlighter.registerLanguage('diff', diff);
+SyntaxHighlighter.registerLanguage('docker', docker);
+SyntaxHighlighter.registerLanguage('go', go);
+SyntaxHighlighter.registerLanguage('ini', ini);
+SyntaxHighlighter.registerLanguage('java', java);
+SyntaxHighlighter.registerLanguage('javascript', javascript);
+SyntaxHighlighter.registerLanguage('json', json);
+SyntaxHighlighter.registerLanguage('jsx', jsx);
+SyntaxHighlighter.registerLanguage('less', less);
+SyntaxHighlighter.registerLanguage('markdown', markdown);
+SyntaxHighlighter.registerLanguage('markup', markup);
+SyntaxHighlighter.registerLanguage('html', markup);
+SyntaxHighlighter.registerLanguage('xml', markup);
+SyntaxHighlighter.registerLanguage('php', php);
+SyntaxHighlighter.registerLanguage('powershell', powershell);
+SyntaxHighlighter.registerLanguage('python', python);
+SyntaxHighlighter.registerLanguage('ruby', ruby);
+SyntaxHighlighter.registerLanguage('rust', rust);
+SyntaxHighlighter.registerLanguage('scss', scss);
+SyntaxHighlighter.registerLanguage('sql', sql);
+SyntaxHighlighter.registerLanguage('toml', toml);
+SyntaxHighlighter.registerLanguage('tsx', tsx);
+SyntaxHighlighter.registerLanguage('typescript', typescript);
+SyntaxHighlighter.registerLanguage('yaml', yaml);
 
 function loadManualProjectWorkspaces(): WorkspaceContext[] {
   try {
@@ -144,6 +213,103 @@ function MarkdownView({ content, enableMermaid = false }: { content: string; ena
         {content}
       </MarkdownContent>
     </Suspense>
+  );
+}
+
+const languageByExtension: Record<string, string> = {
+  bash: 'bash',
+  bat: 'batch',
+  c: 'c',
+  cmd: 'batch',
+  conf: 'ini',
+  cpp: 'cpp',
+  cs: 'csharp',
+  css: 'css',
+  csv: 'csv',
+  dockerfile: 'docker',
+  env: 'ini',
+  ex: 'elixir',
+  exs: 'elixir',
+  fish: 'fish',
+  go: 'go',
+  h: 'c',
+  hpp: 'cpp',
+  html: 'html',
+  htm: 'html',
+  ini: 'ini',
+  java: 'java',
+  js: 'javascript',
+  json: 'json',
+  jsx: 'jsx',
+  kt: 'kotlin',
+  less: 'less',
+  log: 'text',
+  lua: 'lua',
+  md: 'markdown',
+  perl: 'perl',
+  php: 'php',
+  pl: 'perl',
+  properties: 'properties',
+  ps1: 'powershell',
+  py: 'python',
+  r: 'r',
+  rb: 'ruby',
+  rs: 'rust',
+  sass: 'sass',
+  scala: 'scala',
+  scss: 'scss',
+  sh: 'bash',
+  sql: 'sql',
+  svelte: 'svelte',
+  swift: 'swift',
+  toml: 'toml',
+  ts: 'typescript',
+  tsx: 'tsx',
+  txt: 'text',
+  vue: 'vue',
+  xml: 'xml',
+  yaml: 'yaml',
+  yml: 'yaml',
+  zsh: 'bash',
+};
+
+function inferPreviewLanguage(filename: string) {
+  const normalized = filename.toLowerCase();
+  const base = normalized.split(/[\\/]/).pop() || normalized;
+  if (base === 'dockerfile') return 'docker';
+  if (base === 'makefile') return 'makefile';
+  if (base === '.gitignore') return 'gitignore';
+  const ext = base.includes('.') ? base.split('.').pop() || '' : '';
+  return languageByExtension[ext] || 'text';
+}
+
+function FilePreviewCode({ name, content }: { name: string; content: string }) {
+  const language = inferPreviewLanguage(name);
+
+  return (
+    <div className="file-preview-code-shell custom-scrollbar">
+      <SyntaxHighlighter
+        language={language}
+        style={oneDark}
+        customStyle={{
+          margin: 0,
+          minHeight: '100%',
+          background: 'transparent',
+          padding: '14px 16px',
+        }}
+        codeTagProps={{
+          style: {
+            fontFamily: 'var(--font-mono)',
+            fontSize: '13px',
+            lineHeight: '20px',
+          },
+        }}
+        wrapLongLines={false}
+        showLineNumbers={content.includes('\n') && content.split('\n').length > 12}
+      >
+        {content}
+      </SyntaxHighlighter>
+    </div>
   );
 }
 
@@ -2039,17 +2205,20 @@ export default function ChatPage() {
 
       {/* File preview dialog */}
       <Dialog open={!!previewFile} onOpenChange={(open) => { if (!open) setPreviewFile(null); }}>
-        <DialogContent className="max-w-2xl max-h-[80vh] flex flex-col">
+        <DialogContent
+          className="max-w-[92vw] sm:max-w-[92vw] max-h-[86vh] flex flex-col"
+          style={{ width: 'min(1120px, 92vw)' }}
+        >
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <FileText className="h-4 w-4" />
               {previewFile?.name}
             </DialogTitle>
           </DialogHeader>
-          <div className="flex-1 overflow-auto mt-2 rounded-md bg-muted/50 border p-4">
-            <pre className="text-sm whitespace-pre-wrap break-words leading-relaxed">
-              {previewFile?.content}
-            </pre>
+          <div className="file-preview-panel">
+            {previewFile && (
+              <FilePreviewCode name={previewFile.name} content={previewFile.content} />
+            )}
           </div>
         </DialogContent>
       </Dialog>

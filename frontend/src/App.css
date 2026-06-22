@@ -206,6 +206,45 @@
   color: rgba(255, 255, 255, 0.9);
 }
 
+/* ====== File preview dialog ====== */
+.file-preview-panel {
+  min-height: 0;
+  flex: 1 1 auto;
+  margin-top: 8px;
+  border: 0.5px solid var(--border, rgba(255,247,240,0.09));
+  border-radius: 8px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--bg-editor, #221f1c) 82%, transparent);
+  box-shadow: var(--highlight-top);
+}
+
+.file-preview-code-shell {
+  height: min(68vh, 720px);
+  overflow: auto;
+  scrollbar-gutter: stable both-edges;
+}
+
+.file-preview-code-shell pre {
+  min-width: max-content;
+}
+
+.file-preview-code-shell code {
+  font-family: var(--font-mono, "JetBrains Mono", ui-monospace, monospace) !important;
+}
+
+.file-preview-code-fallback {
+  min-width: max-content;
+  min-height: 100%;
+  margin: 0;
+  padding: 14px 16px;
+  color: var(--fg-secondary, rgba(251,247,244,0.72));
+  background: transparent;
+  font-family: var(--font-mono, "JetBrains Mono", ui-monospace, monospace);
+  font-size: 13px;
+  line-height: 20px;
+  white-space: pre;
+}
+
 /* ====== Tables ====== */
 .prose table {
   border-collapse: collapse;
