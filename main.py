@@ -11,10 +11,14 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 # ---------- 导入路由 ----------
-from backend.api.routes import config, conversations, messages, models, prompts, tool_approvals, tool_results
+from backend.api.routes import capabilities, config, conversations, messages, models, prompts, tool_approvals, tool_results
 
 # ---------- 导入核心 ----------
 from backend.core.chat.chat_manager import ChatManager
+from backend.core.capabilities.bootstrap import (
+    build_capability_registry,
+    build_runtime_config_with_plugin_mcp,
+)
 from backend.core.model.model_manager import ModelManager
 from backend.core.config.config import Config
 from backend.core.storage.chat_storage import ChatStorage
@@ -57,13 +61,18 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup_event():
     config_manager = Config()
+    capability_registry = build_capability_registry(PROJECT_ROOT, config_manager.data)
+    runtime_config = build_runtime_config_with_plugin_mcp(
+        config_manager.data,
+        capability_registry,
+    )
     model_manager = ModelManager()
     chat_storage = ChatStorage()
     prompt_storage = PromptStorage()
-    tool_manager = ToolManager(config_manager.data)
+    tool_manager = ToolManager(runtime_config)
     await tool_manager.init()
     approval_manager = ApprovalManager()
-    logical_sandbox = LogicalSandbox.for_config(config_manager.data, Path.cwd())
+    logical_sandbox = LogicalSandbox.for_config(runtime_config, Path.cwd())
     tool_orchestrator = ToolOrchestrator(
         tool_manager=tool_manager,
         permission_engine=PermissionEngine.default(),
@@ -71,9 +80,11 @@ async def startup_event():
         logical_sandbox=logical_sandbox,
     )
     chat_manager = ChatManager(model_manager, chat_storage, prompt_storage, tool_manager)
+    chat_manager.capability_registry = capability_registry
     chat_manager.tool_orchestrator = tool_orchestrator
 
     app.state.config_manager = config_manager
+    app.state.capability_registry = capability_registry
     app.state.model_manager = model_manager
     app.state.tool_manager = tool_manager
     app.state.approval_manager = approval_manager
@@ -94,6 +105,7 @@ app.include_router(models.router,        prefix="",               tags=["模型"
 app.include_router(prompts.router,        prefix="",               tags=["提示词"])
 app.include_router(tool_approvals.router, prefix="", tags=["工具审批"])
 app.include_router(tool_results.router, prefix="", tags=["工具结果"])
+app.include_router(capabilities.router, prefix="", tags=["能力"])
 
 if __name__ == "__main__":
     uvicorn.run(

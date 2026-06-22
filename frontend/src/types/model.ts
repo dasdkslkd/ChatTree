@@ -109,6 +109,9 @@ export interface McpServerStatus {
   connected: boolean;
   tools_count?: number;
   error?: string | null;
+  source?: 'user' | 'plugin' | string;
+  plugin_id?: string | null;
+  plugin_name?: string | null;
 }
 
 export interface McpToolStatus {
@@ -124,6 +127,60 @@ export interface ToolInventoryStatus {
   hidden_local_tools?: string[];
   mcp_servers: McpServerStatus[];
   mcp_tools: McpToolStatus[];
+}
+
+export type CapabilityKind = 'skill' | 'agent' | 'plugin' | 'mcp_server' | 'hook';
+export type CapabilitySource = 'system' | 'user' | 'project' | 'plugin';
+
+export interface CapabilitySkill {
+  name: string;
+  kind: CapabilityKind;
+  source: CapabilitySource | string;
+  description?: string;
+  path?: string | null;
+  plugin_id?: string | null;
+  plugin_name?: string | null;
+  namespace?: string | null;
+  when_to_use?: string | null;
+  allowed_tools?: string[];
+  model?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface CapabilityAgent {
+  name: string;
+  description?: string;
+  system_prompt?: string;
+  tools?: string[];
+  skills?: string[];
+  model?: string | null;
+  max_turns?: number | null;
+  plugin_id?: string | null;
+  plugin_name?: string | null;
+  path?: string | null;
+  source: CapabilitySource | string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface CapabilityPlugin {
+  plugin_id: string;
+  name: string;
+  root: string;
+  enabled: boolean;
+  description?: string;
+  version?: string | null;
+  skill_roots?: string[];
+  agent_roots?: string[];
+  hooks?: string[];
+  mcp_servers?: Record<string, unknown>;
+  interface?: Record<string, unknown>;
+  error?: string | null;
+}
+
+export interface CapabilityInventory {
+  skills: CapabilitySkill[];
+  agents: CapabilityAgent[];
+  plugins: CapabilityPlugin[];
 }
 
 // 完整配置数据

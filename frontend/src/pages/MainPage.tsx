@@ -1307,7 +1307,7 @@ export default function ChatPage() {
     setPreviewImage({ name: filename, url });
   };
 
-  const handleSend = async (val: string, modelId?: string, _systemPrompt?: string) => {
+  const handleSend = async (val: string, modelId?: string, providerId?: string, _systemPrompt?: string) => {
     if (!val.trim()) return;
     // 仅阻止向“当前对话”重复发送（它已在流式中）。其他对话的流不受影响，
     // 因此可以在后台对话流式的同时，向另一对话发送——真正的多并发。
@@ -1339,6 +1339,7 @@ export default function ChatPage() {
       {
         content: val,
         model_id: modelId,
+        provider_id: providerId,
         reasoning_effort: currentReasoningEffort,
         thinking_enabled: currentThinkingEnabled,
         import_files: importFiles.length > 0 ? importFiles : undefined,

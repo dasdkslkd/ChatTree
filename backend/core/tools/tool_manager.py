@@ -312,12 +312,7 @@ class ToolManager:
                 if self._filter.is_allowed(name) and not self._is_model_visible_local_tool(name)
             ],
             "mcp_servers": [
-                {
-                    "name": name,
-                    "enabled": self._mcp_servers_config.get(name, {}).get("enabled", True) is not False,
-                    "connected": name in connected_servers,
-                    "error": self._mcp_init_errors.get(name),
-                }
+                self._describe_mcp_server(name, connected_servers)
                 for name in configured_servers
             ],
             "mcp_tools": [
@@ -329,6 +324,23 @@ class ToolManager:
                 for info in mcp_tools
             ],
         }
+
+    def _describe_mcp_server(self, name: str, connected_servers: set[str]) -> Dict[str, Any]:
+        server_config = self._mcp_servers_config.get(name, {})
+        source = server_config.get("source") or "user"
+        inventory = {
+            "name": name,
+            "enabled": server_config.get("enabled", True) is not False,
+            "connected": name in connected_servers,
+            "error": self._mcp_init_errors.get(name),
+            "source": source,
+        }
+        if source == "plugin":
+            if server_config.get("plugin_id") is not None:
+                inventory["plugin_id"] = server_config.get("plugin_id")
+            if server_config.get("plugin_name") is not None:
+                inventory["plugin_name"] = server_config.get("plugin_name")
+        return inventory
 
     async def describe_inventory_async(self) -> Dict[str, Any]:
         inventory = self.describe_inventory()

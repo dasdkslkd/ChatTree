@@ -13,6 +13,7 @@ router = APIRouter()
 class SendMessageRequest(BaseModel):
     content: str
     model_id: Optional[str] = None
+    provider_id: Optional[str] = None
     node_id: Optional[str] = None
     reasoning_effort: Optional[str] = None
     thinking_enabled: Optional[bool] = None
@@ -49,10 +50,11 @@ async def stream_message(
     async def event_generator():
         try:
             async for chunk in chat_manager.send_message_stream(
-                conversation_id,
-                request.content,
-                request.model_id,
-                request.node_id,
+                conversation_id=conversation_id,
+                content=request.content,
+                model_id=request.model_id,
+                provider_id=request.provider_id,
+                node_id=request.node_id,
                 reasoning_effort=request.reasoning_effort,
                 thinking_enabled=request.thinking_enabled,
                 import_files=request.import_files,

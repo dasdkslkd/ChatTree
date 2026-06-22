@@ -74,6 +74,7 @@ export interface Message {
 export interface SendMessageRequest {
   content: string;
   model_id?: string;
+  provider_id?: string;
   reasoning_effort?: string | null;
   thinking_enabled?: boolean | null;
   import_files?: Array<{

@@ -8,3 +8,5 @@ reference/
 docs/
 .worktrees/
 tmp/
+.chattree/
+*.lnk

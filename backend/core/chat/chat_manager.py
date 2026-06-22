@@ -26,6 +26,12 @@ from ..model.usage import add_usage, estimated_usage, usage_total
 from ..utils.logger import setup_logger
 from ..config.config import cfg
 from ..workspace import build_default_workspace, normalize_workspace
+from ..capabilities.prompting import (
+    build_available_capabilities_prompt,
+    build_skill_injections,
+    collect_explicit_skill_mentions,
+    format_skill_injections,
+)
 
 logger = setup_logger('ChatManager')
 
@@ -38,6 +44,7 @@ class ChatManager:
         self.prompts = prompts
         self.tool_manager = tool_manager
         self.tool_orchestrator = None
+        self.capability_registry = None
         self.current_conversation: Optional[Conversation] = None
         self._active_controllers: Dict[str, StreamController] = {}  # node_id -> controller
         # 每对话异步锁，串行化同一对话的 load-modify-save 临界区。
@@ -109,6 +116,12 @@ class ChatManager:
         conversations = self.storage.list()
         for item in conversations:
             item["workspace"] = normalize_workspace(item.get("workspace"), default_workspace)
+            if not item.get("model_id") or not item.get("provider_id"):
+                loaded = self.get_conversation(item["id"])
+                if loaded is not None:
+                    model_id, provider_id = self._model_summary_for_conversation(loaded)
+                    item["model_id"] = item.get("model_id") or model_id or ""
+                    item["provider_id"] = item.get("provider_id") or provider_id or ""
         return conversations
     
     def delete_conversation(self, conversation_id: str):
@@ -191,11 +204,58 @@ class ChatManager:
             updated_at,
         )
 
+    def _provider_for_model(self, model_id: Optional[str]) -> Optional[str]:
+        if not model_id:
+            return None
+        matches = [
+            provider_id
+            for provider_id, models in self.model_manager.model_list.items()
+            if model_id in models
+        ]
+        # 旧数据只有 node.model_id、没有 provider_id 时，同名模型可能属于多个
+        # provider，无法精确恢复原供应商。此时宁可返回空让前端不显示 provider，
+        # 也不要猜第一个匹配项造成模型切换卡误报。
+        return matches[0] if len(matches) == 1 else None
+
+    def _current_branch_model(self, conversation: Conversation) -> Optional[str]:
+        current = conversation.nodes.get(conversation.current_node_id or "")
+        if current and current.get("model_id"):
+            return current.get("model_id")
+        for node in reversed(conversation.get_node_chain(conversation.current_node_id)):
+            if node.get("model_id"):
+                return node.get("model_id")
+        return None
+
+    def _model_summary_for_conversation(
+        self,
+        conversation: Conversation,
+    ) -> tuple[Optional[str], Optional[str]]:
+        model_id = conversation.metadata.get("model_id") or self._current_branch_model(conversation)
+        provider_id = (
+            conversation.metadata.get("provider_id")
+            or conversation.current_provider
+            or self._provider_for_model(model_id)
+        )
+        return model_id, provider_id
+
+    def _set_conversation_model_metadata(
+        self,
+        conversation: Conversation,
+        *,
+        provider_id: str,
+        model_id: str,
+    ) -> None:
+        conversation.current_provider = provider_id
+        conversation.current_model = model_id
+        conversation.metadata["provider_id"] = provider_id
+        conversation.metadata["model_id"] = model_id
+
     async def send_message_stream(
         self,
         conversation_id: str,
         content: str,
         model_id: Optional[str] = None,
+        provider_id: Optional[str] = None,
         node_id: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
         thinking_enabled: Optional[bool] = None,
@@ -222,8 +282,8 @@ class ChatManager:
             return
 
         preview = Conversation.from_dict(conversation_data)
-        # 确定模型：优先使用传入的model_id，其次使用对话的current_model，最后使用第一个可用模型
-        target_model = model_id or preview.current_model
+        # 确定模型：请求值 > 会话 metadata > 当前分支节点 > 第一个可用模型。
+        target_model = model_id or preview.current_model or self._current_branch_model(preview)
         if not target_model:
             # 尝试获取第一个可用的模型
             for provider, models in self.model_manager.model_list.items():
@@ -244,11 +304,11 @@ class ChatManager:
             return
         
         # 获取提供商
-        target_provider = None
-        for provider, models in self.model_manager.model_list.items():
-            if target_model in models:
-                target_provider = provider
-                break
+        target_provider = (
+            provider_id
+            or preview.current_provider
+            or self._provider_for_model(target_model)
+        )
 
         logger.info(f"Stream: model={target_model}, provider={target_provider}, model_list_keys={list(self.model_manager.model_list.keys())}")
 
@@ -353,6 +413,11 @@ class ChatManager:
                 model_id=target_model
             )
             conversation.add_node(new_node, parent_id=current_node_id)
+            self._set_conversation_model_metadata(
+                conversation,
+                provider_id=target_provider,
+                model_id=target_model,
+            )
             self._update_branch_usage_for_node(
                 conversation,
                 new_node["id"],
@@ -369,6 +434,39 @@ class ChatManager:
 
         # 准备消息链（使用锁内加载的最新 conversation）
         messages = self._prepare_messages_for_api_with_conversation(conversation)
+        capability_registry = self.capability_registry
+        if capability_registry is not None:
+            insert_at = 0
+            while (
+                insert_at < len(messages)
+                and messages[insert_at].get("role") == "system"
+            ):
+                insert_at += 1
+
+            capability_messages: List[Dict[str, str]] = [
+                {
+                    "role": "system",
+                    "content": build_available_capabilities_prompt(
+                        capability_registry
+                    ),
+                }
+            ]
+            skill_names = collect_explicit_skill_mentions(
+                content,
+                capability_registry,
+            )
+            skill_injections = build_skill_injections(
+                skill_names,
+                capability_registry,
+            )
+            if skill_injections:
+                capability_messages.append(
+                    {
+                        "role": "system",
+                        "content": format_skill_injections(skill_injections),
+                    }
+                )
+            messages[insert_at:insert_at] = capability_messages
 
         workspace_context = normalize_workspace(
             preview.metadata.get("workspace"),
@@ -652,6 +750,11 @@ class ChatManager:
                     NodeManager.add_assistant_message(latest.nodes[new_node["id"]], assistant_msg)
                     if all_tool_messages:
                         NodeManager.add_tool_messages(latest.nodes[new_node["id"]], all_tool_messages)
+                    self._set_conversation_model_metadata(
+                        latest,
+                        provider_id=target_provider,
+                        model_id=target_model,
+                    )
                     self._update_token_stats_for_conversation(latest, target_provider, tokens_used)
                     self._update_branch_usage_for_node(
                         latest,
@@ -671,6 +774,11 @@ class ChatManager:
                         turn_usage=usage_info,
                         branch_usage=usage_info,
                         model_context_window=meta.get("context_length"),
+                    )
+                    self._set_conversation_model_metadata(
+                        conversation,
+                        provider_id=target_provider,
+                        model_id=target_model,
                     )
                     self._mark_conversation_updated_at(conversation, completion_timestamp)
                     self.storage.save({
@@ -750,19 +858,24 @@ class ChatManager:
         model_id: Optional[str] = None,
         provider_id: Optional[str] = None,
     ) -> tuple[Optional[str], Optional[str]]:
-        target_model = model_id or conversation.metadata.get("model_id") or conversation.current_model
+        target_model = (
+            model_id
+            or conversation.metadata.get("model_id")
+            or conversation.current_model
+            or self._current_branch_model(conversation)
+        )
         if not target_model:
             for _, models in self.model_manager.model_list.items():
                 if models:
                     target_model = models[0]
                     break
 
-        target_provider = provider_id or conversation.metadata.get("provider_id") or conversation.current_provider
-        if not target_provider and target_model:
-            for provider, models in self.model_manager.model_list.items():
-                if target_model in models:
-                    target_provider = provider
-                    break
+        target_provider = (
+            provider_id
+            or conversation.metadata.get("provider_id")
+            or conversation.current_provider
+            or self._provider_for_model(target_model)
+        )
 
         return target_model, target_provider
 

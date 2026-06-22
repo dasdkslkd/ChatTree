@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from pydantic import BaseModel
+from ...core.capabilities.bootstrap import build_runtime_config_with_plugin_mcp
 from ...core.config.config import Config, cfg
 from ...core.model.model_manager import ModelManager
 from ...core.tools.orchestrator import ToolOrchestrator
@@ -32,6 +33,12 @@ class AddProviderRequest(BaseModel):
 def _sync_runtime_managers(app, config_data: Dict[str, Any], model_manager, tool_manager: ToolManager) -> None:
     app.state.model_manager = model_manager
     app.state.tool_manager = tool_manager
+    chat_manager = getattr(app.state, 'chat_manager', None)
+    capability_registry = getattr(app.state, 'capability_registry', None)
+    if capability_registry is None and chat_manager is not None:
+        capability_registry = getattr(chat_manager, 'capability_registry', None)
+    if capability_registry is not None:
+        app.state.capability_registry = capability_registry
 
     old_orchestrator = getattr(app.state, 'tool_orchestrator', None)
     approval_manager = getattr(app.state, 'approval_manager', None) or getattr(
@@ -59,10 +66,21 @@ def _sync_runtime_managers(app, config_data: Dict[str, Any], model_manager, tool
         )
         app.state.tool_orchestrator = tool_orchestrator
 
-    if hasattr(app.state, 'chat_manager'):
-        app.state.chat_manager.model_manager = model_manager
-        app.state.chat_manager.tool_manager = tool_manager
-        app.state.chat_manager.tool_orchestrator = tool_orchestrator
+    if chat_manager is not None:
+        chat_manager.model_manager = model_manager
+        chat_manager.tool_manager = tool_manager
+        chat_manager.tool_orchestrator = tool_orchestrator
+        chat_manager.capability_registry = capability_registry
+
+
+def _runtime_config_for_app(app, config_data: Dict[str, Any]) -> Dict[str, Any]:
+    capability_registry = getattr(app.state, 'capability_registry', None)
+    if capability_registry is None:
+        chat_manager = getattr(app.state, 'chat_manager', None)
+        capability_registry = getattr(chat_manager, 'capability_registry', None)
+    if capability_registry is None:
+        return config_data
+    return build_runtime_config_with_plugin_mcp(config_data, capability_registry)
 
 
 @router.get("/health")
@@ -130,9 +148,10 @@ async def update_config(
         old_tool_manager = getattr(http_request.app.state, 'tool_manager', None)
         if old_tool_manager:
             await old_tool_manager.close()
-        tool_manager = ToolManager(config_manager.data)
+        runtime_config = _runtime_config_for_app(http_request.app, config_manager.data)
+        tool_manager = ToolManager(runtime_config)
         await tool_manager.init()
-        _sync_runtime_managers(http_request.app, config_manager.data, model_manager, tool_manager)
+        _sync_runtime_managers(http_request.app, runtime_config, model_manager, tool_manager)
 
         return {"message": "配置已更新"}
     except Exception as e:
@@ -170,9 +189,10 @@ async def add_provider(
         old_tool_manager = getattr(http_request.app.state, 'tool_manager', None)
         if old_tool_manager:
             await old_tool_manager.close()
-        tool_manager = ToolManager(config_manager.data)
+        runtime_config = _runtime_config_for_app(http_request.app, config_manager.data)
+        tool_manager = ToolManager(runtime_config)
         await tool_manager.init()
-        _sync_runtime_managers(http_request.app, config_manager.data, model_manager, tool_manager)
+        _sync_runtime_managers(http_request.app, runtime_config, model_manager, tool_manager)
 
         return {"message": f"提供商 {provider_id} 已添加"}
     except HTTPException:
@@ -200,9 +220,10 @@ async def delete_provider(
         old_tool_manager = getattr(http_request.app.state, 'tool_manager', None)
         if old_tool_manager:
             await old_tool_manager.close()
-        tool_manager = ToolManager(config_manager.data)
+        runtime_config = _runtime_config_for_app(http_request.app, config_manager.data)
+        tool_manager = ToolManager(runtime_config)
         await tool_manager.init()
-        _sync_runtime_managers(http_request.app, config_manager.data, model_manager, tool_manager)
+        _sync_runtime_managers(http_request.app, runtime_config, model_manager, tool_manager)
 
         return {"message": f"提供商 {provider_id} 已删除"}
     except HTTPException:

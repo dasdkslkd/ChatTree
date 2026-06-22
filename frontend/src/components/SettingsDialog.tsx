@@ -23,6 +23,7 @@ import { Switch } from '@/components/ui/switch';
 import {
   Settings, StickyNote, Plus, Trash2, Eye, EyeOff,
   Loader2, Save, Pencil, Server, Wrench, Terminal, Link2, RefreshCw,
+  Boxes, Sparkles, Bot, Package,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { configApi } from '../api/config';
@@ -38,16 +39,20 @@ import type {
   McpTransport,
   ToolsConfig,
   ToolInventoryStatus,
+  CapabilityInventory,
+  CapabilityPlugin,
+  McpServerStatus,
 } from '../types/model';
 import type { Prompt, PromptResponse } from '../types/prompt';
 
 /* ─── Constants ─── */
 
-type SettingsSection = 'providers' | 'prompts' | 'mcp';
+type SettingsSection = 'providers' | 'prompts' | 'mcp' | 'capabilities';
 
 const SETTINGS_NAV: { key: SettingsSection; label: string; icon: typeof Settings; group: string }[] = [
   { key: 'providers', label: '供应商', icon: Server, group: '应用' },
   { key: 'mcp', label: 'MCP', icon: Wrench, group: '应用' },
+  { key: 'capabilities', label: '能力', icon: Boxes, group: '应用' },
   { key: 'prompts', label: '提示词', icon: StickyNote, group: '应用' },
 ];
 
@@ -242,6 +247,7 @@ export function SettingsDialog({ open, onOpenChange, defaultSection = 'providers
           <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
             {section === 'providers' && <ProvidersSection />}
             {section === 'mcp' && <McpSection />}
+            {section === 'capabilities' && <CapabilitiesSection />}
             {section === 'prompts' && <PromptsSection />}
           </div>
         </div>
@@ -739,6 +745,337 @@ function ProvidersSection() {
       </Dialog>
     </div>
   );
+}
+
+/* ─── Capabilities Section ─── */
+
+function CapabilitiesSection() {
+  const [inventory, setInventory] = useState<CapabilityInventory | null>(null);
+  const [mcpStatus, setMcpStatus] = useState<ToolInventoryStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadCapabilities = useCallback(async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      const [nextInventory, nextMcpStatus] = await Promise.all([
+        configApi.getCapabilities(),
+        configApi.getMcpStatus(),
+      ]);
+      setInventory(nextInventory);
+      setMcpStatus(nextMcpStatus);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '加载能力信息失败');
+      setInventory(null);
+      setMcpStatus(null);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { loadCapabilities(); }, [loadCapabilities]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-full">
+        <Loader2 className="h-5 w-5 animate-spin mr-2" style={{ color: 'var(--icon-accent)' }} />
+        <span style={{ color: 'var(--fg-tertiary)' }}>加载能力信息中...</span>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex flex-col h-full" style={{ fontFamily: 'var(--font-sans)' }}>
+        <div className="flex-shrink-0 px-6 pt-6 pb-4">
+          <h1 className="text-2xl font-semibold mb-1" style={{ color: 'var(--fg-85)' }}>能力</h1>
+          <p className="text-sm" style={{ color: 'var(--fg-secondary)' }}>查看当前可用的技能、代理、插件和 MCP Server</p>
+        </div>
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 pb-6 text-center">
+          <Boxes className="h-9 w-9" style={{ color: 'var(--icon-tertiary)' }} />
+          <div>
+            <div className="text-sm font-medium" style={{ color: 'var(--fg-85)' }}>加载失败</div>
+            <div className="mt-1 max-w-[420px] text-xs" style={{ color: 'var(--fg-tertiary)' }}>{error}</div>
+          </div>
+          <Button variant="outline" size="sm" onClick={loadCapabilities}>
+            <RefreshCw className="h-3.5 w-3.5 mr-1" />
+            重试
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  const skills = inventory?.skills || [];
+  const agents = inventory?.agents || [];
+  const plugins = inventory?.plugins || [];
+  const mcpServers = mcpStatus?.mcp_servers || [];
+  const hasAnyCapability = skills.length + agents.length + plugins.length + mcpServers.length > 0;
+
+  return (
+    <div className="flex flex-col h-full" style={{ fontFamily: 'var(--font-sans)' }}>
+      <div className="flex-shrink-0 px-6 pt-6 pb-4">
+        <h1 className="text-2xl font-semibold mb-1" style={{ color: 'var(--fg-85)' }}>能力</h1>
+        <p className="text-sm" style={{ color: 'var(--fg-secondary)' }}>查看当前可用的技能、代理、插件和 MCP Server</p>
+      </div>
+
+      <div className="flex-1 overflow-y-auto custom-scrollbar min-h-0 px-6 pb-6 space-y-4">
+        <div className="grid grid-cols-4 gap-3">
+          <CapabilityCountCard label="Skills" value={skills.length} icon={Sparkles} />
+          <CapabilityCountCard label="Agents" value={agents.length} icon={Bot} />
+          <CapabilityCountCard label="Plugins" value={plugins.length} icon={Package} />
+          <CapabilityCountCard label="MCP Servers" value={mcpServers.length} icon={Link2} />
+        </div>
+
+        {!hasAnyCapability ? (
+          <div className="rounded-xl px-4 py-10 text-center" style={{ border: '0.5px solid var(--border)' }}>
+            <Boxes className="mx-auto mb-3 h-9 w-9" style={{ color: 'var(--icon-tertiary)' }} />
+            <div className="text-sm font-medium" style={{ color: 'var(--fg-85)' }}>暂无能力</div>
+            <div className="mt-1 text-xs" style={{ color: 'var(--fg-tertiary)' }}>当前项目还没有发现 Skills、Agents、Plugins 或 MCP Servers。</div>
+          </div>
+        ) : (
+          <>
+            <CapabilityGroup title="Skills" count={skills.length} emptyText="暂无 Skills">
+              {skills.map(skill => (
+                <CapabilityItem
+                  key={`${skill.source}:${skill.name}:${skill.path || ''}`}
+                  icon={Sparkles}
+                  name={skill.name}
+                  description={skill.description || skill.when_to_use || '未提供描述'}
+                  source={skill.source}
+                  path={skill.path}
+                  pluginId={skill.plugin_id}
+                  pluginName={skill.plugin_name}
+                  badges={skill.allowed_tools?.slice(0, 3)}
+                />
+              ))}
+            </CapabilityGroup>
+
+            <CapabilityGroup title="Agents" count={agents.length} emptyText="暂无 Agents">
+              {agents.map(agent => (
+                <CapabilityItem
+                  key={`${agent.source}:${agent.name}:${agent.path || ''}`}
+                  icon={Bot}
+                  name={agent.name}
+                  description={agent.description || '未提供描述'}
+                  source={agent.source}
+                  path={agent.path}
+                  pluginId={agent.plugin_id}
+                  pluginName={agent.plugin_name}
+                  badges={[...(agent.skills || []), ...(agent.tools || [])].slice(0, 3)}
+                />
+              ))}
+            </CapabilityGroup>
+
+            <CapabilityGroup title="Plugins" count={plugins.length} emptyText="暂无 Plugins">
+              {plugins.map(plugin => (
+                <PluginCapabilityItem key={plugin.plugin_id} plugin={plugin} />
+              ))}
+            </CapabilityGroup>
+
+            <CapabilityGroup title="MCP Servers" count={mcpServers.length} emptyText="暂无 MCP Servers">
+              {mcpServers.map(server => (
+                <McpCapabilityItem key={server.name} server={server} />
+              ))}
+            </CapabilityGroup>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CapabilityCountCard({ label, value, icon: Icon }: { label: string; value: number; icon: typeof Settings }) {
+  return (
+    <div className="rounded-xl px-3 py-3" style={{ border: '0.5px solid var(--border)' }}>
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div className="truncate text-xs" style={{ color: 'var(--fg-tertiary)' }}>{label}</div>
+          <div className="mt-1 text-xl font-semibold" style={{ color: 'var(--fg-85)' }}>{value}</div>
+        </div>
+        <Icon className="h-4 w-4 flex-shrink-0" style={{ color: 'var(--icon-accent)' }} />
+      </div>
+    </div>
+  );
+}
+
+function CapabilityGroup({ title, count, emptyText, children }: {
+  title: string;
+  count: number;
+  emptyText: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-xl overflow-hidden" style={{ border: '0.5px solid var(--border)' }}>
+      <div
+        className="flex items-center justify-between px-4 py-2.5"
+        style={{ background: 'var(--bg-elevated-secondary, rgba(255,247,240,0.035))', borderBottom: '0.5px solid var(--border)' }}
+      >
+        <span className="text-sm font-medium" style={{ color: 'var(--fg-85)' }}>{title}</span>
+        <span className="text-xs px-1.5 py-0.5 rounded-full" style={{ background: 'var(--accent-soft)', color: 'var(--icon-accent)' }}>
+          {count}
+        </span>
+      </div>
+      <div className="divide-y" style={{ '--tw-divide-color': 'var(--border-light, rgba(255,247,240,0.05))' } as React.CSSProperties}>
+        {count > 0 ? children : (
+          <div className="px-4 py-6 text-center text-xs" style={{ color: 'var(--fg-tertiary)' }}>
+            {emptyText}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CapabilityItem({
+  icon: Icon,
+  name,
+  description,
+  source,
+  path,
+  pluginId,
+  pluginName,
+  badges,
+}: {
+  icon: typeof Settings;
+  name: string;
+  description?: string;
+  source?: string;
+  path?: string | null;
+  pluginId?: string | null;
+  pluginName?: string | null;
+  badges?: string[];
+}) {
+  return (
+    <div className="flex gap-3 px-4 py-3">
+      <Icon className="mt-0.5 h-4 w-4 flex-shrink-0" style={{ color: 'var(--icon-tertiary)' }} />
+      <div className="min-w-0 flex-1 space-y-1">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <span className="min-w-0 truncate text-sm font-medium" style={{ color: 'var(--fg-85)' }}>{name}</span>
+          {source && <SourceBadge source={source} />}
+          {pluginName || pluginId ? <PluginBadge pluginName={pluginName} pluginId={pluginId} /> : null}
+        </div>
+        {description && (
+          <div className="line-clamp-2 text-xs leading-relaxed" style={{ color: 'var(--fg-secondary)' }}>
+            {description}
+          </div>
+        )}
+        {path && (
+          <div className="truncate text-[11px]" title={path} style={{ color: 'var(--fg-tertiary)' }}>
+            {path}
+          </div>
+        )}
+        {badges?.length ? (
+          <div className="flex flex-wrap gap-1 pt-0.5">
+            {badges.map(badge => (
+              <span key={badge} className="max-w-[160px] truncate rounded px-1.5 py-0.5 text-[11px]" style={{ border: '0.5px solid var(--border)', color: 'var(--fg-tertiary)' }}>
+                {badge}
+              </span>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function PluginCapabilityItem({ plugin }: { plugin: CapabilityPlugin }) {
+  const mcpCount = plugin.mcp_servers ? Object.keys(plugin.mcp_servers).length : 0;
+  const detailParts = [
+    plugin.version ? `版本 ${plugin.version}` : '',
+    `${plugin.skill_roots?.length || 0} skills roots`,
+    `${plugin.agent_roots?.length || 0} agents roots`,
+    mcpCount ? `${mcpCount} MCP servers` : '',
+  ].filter(Boolean);
+
+  return (
+    <CapabilityItem
+      icon={Package}
+      name={plugin.name || plugin.plugin_id}
+      description={plugin.description || plugin.error || detailParts.join(' · ') || '未提供描述'}
+      source="plugin"
+      path={plugin.root}
+      pluginId={plugin.plugin_id}
+      pluginName={plugin.name}
+      badges={detailParts.slice(0, 3)}
+    />
+  );
+}
+
+function McpCapabilityItem({ server }: { server: McpServerStatus }) {
+  const statusView = getMcpRuntimeStatusView(server);
+  return (
+    <div className="flex gap-3 px-4 py-3">
+      <Link2 className="mt-0.5 h-4 w-4 flex-shrink-0" style={{ color: 'var(--icon-tertiary)' }} />
+      <div className="min-w-0 flex-1 space-y-1">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <span className="min-w-0 truncate text-sm font-medium" style={{ color: 'var(--fg-85)' }}>{server.name}</span>
+          <span className="flex items-center gap-1.5 rounded px-1.5 py-0.5 text-xs" title={statusView.title} style={{ border: '0.5px solid var(--border)', color: statusView.color }}>
+            <span className="h-1.5 w-1.5 rounded-full" style={{ background: statusView.color }} />
+            {statusView.label}
+          </span>
+          <SourceBadge source={server.source || 'user'} />
+          {server.plugin_name || server.plugin_id ? <PluginBadge pluginName={server.plugin_name} pluginId={server.plugin_id} /> : null}
+        </div>
+        <div className="flex flex-wrap gap-1 pt-0.5">
+          {server.transport && (
+            <span className="rounded px-1.5 py-0.5 text-[11px]" style={{ border: '0.5px solid var(--border)', color: 'var(--fg-tertiary)' }}>
+              {server.transport === 'stdio' ? 'stdio' : 'HTTP'}
+            </span>
+          )}
+          <span className="rounded px-1.5 py-0.5 text-[11px]" style={{ border: '0.5px solid var(--border)', color: 'var(--fg-tertiary)' }}>
+            工具 {server.tools_count ?? 0}
+          </span>
+        </div>
+        {server.error && (
+          <div className="truncate text-[11px]" title={server.error} style={{ color: 'var(--destructive, #ef4444)' }}>
+            {server.error}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SourceBadge({ source }: { source: string }) {
+  return (
+    <span className="rounded px-1.5 py-0.5 text-xs" style={{ border: '0.5px solid var(--border)', color: 'var(--fg-tertiary)' }}>
+      {sourceLabel(source)}
+    </span>
+  );
+}
+
+function PluginBadge({ pluginName, pluginId }: { pluginName?: string | null; pluginId?: string | null }) {
+  const text = pluginName && pluginId ? `${pluginName} / ${pluginId}` : pluginName || pluginId || '';
+  return (
+    <span className="max-w-[220px] truncate rounded px-1.5 py-0.5 text-xs" title={text} style={{ background: 'var(--bg-button-secondary)', color: 'var(--fg-secondary)' }}>
+      {text}
+    </span>
+  );
+}
+
+function sourceLabel(source: string): string {
+  switch (source) {
+    case 'system': return '系统';
+    case 'user': return '用户';
+    case 'project': return '项目';
+    case 'plugin': return '插件';
+    default: return source;
+  }
+}
+
+function getMcpRuntimeStatusView(server: McpServerStatus) {
+  if (server.enabled === false) {
+    return { label: '已禁用', color: 'var(--fg-tertiary)', title: '此 Server 已禁用' };
+  }
+  if (server.connected) {
+    return { label: '已连接', color: 'var(--accent-green)', title: `已连接，${server.tools_count ?? 0} 个工具` };
+  }
+  if (server.error) {
+    return { label: '连接失败', color: 'var(--destructive, #ef4444)', title: server.error };
+  }
+  return { label: '未连接', color: 'var(--fg-tertiary)', title: '尚未建立运行时连接' };
 }
 
 /* ─── MCP Section ─── */

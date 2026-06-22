@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 
 type ChatViewMode = 'chat' | 'tree';
-type SettingsSection = 'providers' | 'prompts' | 'mcp';
+type SettingsSection = 'providers' | 'prompts' | 'mcp' | 'capabilities';
 
 interface NavigationState {
   chatViewMode: ChatViewMode;

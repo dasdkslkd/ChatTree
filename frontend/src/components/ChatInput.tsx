@@ -19,7 +19,7 @@ import { useConversationStore } from '../store/conversationStore'
 import { conversationApi } from '../api/conversation'
 
 interface Props {
-  onSend: (value: string, modelId?: string, systemPrompt?: string) => Promise<void>;
+  onSend: (value: string, modelId?: string, providerId?: string, systemPrompt?: string) => Promise<void>;
   onStop?: () => void;
   isStreaming?: boolean;
   disabled: boolean;
@@ -140,7 +140,7 @@ export function ChatInput({
     if (!value.trim() || disabled) return;
     const systemPrompt = currentPrompt?.content;
     setValue('');
-    await onSend(value, currentModel || undefined, systemPrompt);
+    await onSend(value, currentModel || undefined, currentProvider || undefined, systemPrompt);
   };
 
   const handleFilePick = () => { fileInputRef.current?.click(); };
