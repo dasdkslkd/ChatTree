@@ -2097,6 +2097,13 @@ export default function ChatPage() {
                   <div ref={messagesEndRef} />
                 </div>
               </div>
+              <div
+                aria-hidden="true"
+                className="pointer-events-none absolute bottom-0 left-0 right-0 z-[9] h-[150px]"
+                style={{
+                  background: 'linear-gradient(180deg, color-mix(in srgb, var(--bg-surface) 0%, transparent), var(--bg-surface) 72%)',
+                }}
+              />
               <footer className="absolute bottom-4 left-1/2 -translate-x-1/2 w-[800px] max-w-[calc(100%-48px)] z-10">
                 <ChatInput
                   onSend={handleSend}
