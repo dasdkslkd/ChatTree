@@ -209,6 +209,14 @@ export class StreamManager {
     return false;
   }
 
+  getStreamingConversationIds(): string[] {
+    const ids: string[] = [];
+    for (const [conversationId, state] of this.streams.entries()) {
+      if (state.status === 'streaming') ids.push(conversationId);
+    }
+    return ids;
+  }
+
   /** Subscribe to stream state changes */
   subscribe(listener: StatusListener): () => void {
     this.listeners.add(listener);

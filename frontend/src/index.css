@@ -499,7 +499,7 @@
   position: relative;
   min-height: 30px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
   align-items: center;
   gap: 6px;
   padding: 0 4px 0 9px;
@@ -531,6 +531,11 @@
   color: var(--fg-tertiary);
   font-size: 12px;
   white-space: nowrap;
+}
+
+.app-session-running {
+  color: var(--icon-accent);
+  opacity: 0.88;
 }
 
 .app-session-more {

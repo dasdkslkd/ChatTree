@@ -870,6 +870,11 @@ export default function ChatPage() {
     streamedContent, streamedReasoning, startStreaming, isStreaming, abortStreaming,
     streamedReasoningActive, streamedToolInteractions, pendingApprovals, streamDuration, streamStatus, streamErrorMessage, pendingUserMessage, currentNodeId: streamNodeId,
   } = useStreamingManager(currentConversation?.id ?? null);
+  const [localStreamingConversationIds, setLocalStreamingConversationIds] = useState<Set<string>>(() => new Set());
+  const [backendActiveStreamConversationIds, setBackendActiveStreamConversationIds] = useState<Set<string>>(() => new Set());
+  const activeStreamConversationIds = useMemo(() => {
+    return new Set([...localStreamingConversationIds, ...backendActiveStreamConversationIds]);
+  }, [localStreamingConversationIds, backendActiveStreamConversationIds]);
 
   // 结构性去重：一旦本轮流式产生的节点已出现在真实消息里（refreshMessages 注入），
   // 就隐藏对应的乐观叠加层，无论 cleanup 何时执行。这样真实消息与乐观叠加层
@@ -1169,6 +1174,35 @@ export default function ChatPage() {
 
   useEffect(() => {
     loadConversations();
+  }, []);
+
+  useEffect(() => {
+    const updateLocalStreamingIds = () => {
+      setLocalStreamingConversationIds(new Set(streamManager.getStreamingConversationIds()));
+    };
+    updateLocalStreamingIds();
+    return streamManager.subscribe(updateLocalStreamingIds);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const syncBackendActiveStreams = async () => {
+      try {
+        const activeStreams = await messageApi.getAllActiveStreams();
+        if (cancelled) return;
+        setBackendActiveStreamConversationIds(
+          new Set(activeStreams.map((item) => item.conversation_id).filter(Boolean)),
+        );
+      } catch (_) {
+        if (!cancelled) setBackendActiveStreamConversationIds(new Set());
+      }
+    };
+    void syncBackendActiveStreams();
+    const timer = window.setInterval(syncBackendActiveStreams, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
   }, []);
 
   useEffect(() => {
@@ -1861,6 +1895,7 @@ export default function ChatPage() {
                       <div className="app-session-list">
                         {visible.items.map((c) => {
                           const isSelected = c.id === currentConversation?.id;
+                          const isRunning = activeStreamConversationIds.has(c.id);
                           return (
                             <div
                               key={c.id}
@@ -1871,6 +1906,12 @@ export default function ChatPage() {
                               title={c.title || '未命名'}
                             >
                               <span className="app-session-title">{c.title || '未命名'}</span>
+                              {isRunning && (
+                                <Loader2
+                                  className="app-session-running h-3.5 w-3.5"
+                                  aria-label="正在运行"
+                                />
+                              )}
                               <span className="app-session-time">{formatConversationTime(c.updated_at)}</span>
                               <DropdownMenu>
                                 <DropdownMenuTrigger asChild>

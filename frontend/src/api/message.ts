@@ -118,6 +118,11 @@ export const messageApi = {
     return response.data;
   },
 
+  getAllActiveStreams: async (): Promise<ActiveStreamInfo[]> => {
+    const response = await apiClient.get('/conversations/messages/streams/active');
+    return response.data;
+  },
+
   attachStream: async function* (
     conversationId: string,
     nodeId: string,

@@ -61,6 +61,9 @@ def test_detached_stream_attach_replays_buffer_and_continues_live():
         assert "first" in first_event
 
         session = messages_route._STREAM_SESSIONS["node-1"]
+        active_streams = await messages_route.get_all_active_streams()
+        assert active_streams[0]["conversation_id"] == "conv-1"
+        assert active_streams[0]["node_id"] == "node-1"
         attached = session.subscribe(0)
 
         replayed = await anext(attached)

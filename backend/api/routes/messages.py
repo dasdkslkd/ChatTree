@@ -184,6 +184,16 @@ async def get_active_streams(conversation_id: str):
     ]
 
 
+@router.get("/conversations/messages/streams/active", response_model=List[Dict[str, Any]])
+async def get_all_active_streams():
+    """获取所有仍在生成中的可重连流。"""
+    return [
+        session.snapshot()
+        for session in _STREAM_SESSIONS.values()
+        if not session.done and session.node_id
+    ]
+
+
 @router.get("/conversations/{conversation_id}/messages/{node_id}/stream/attach")
 async def attach_stream_message(
     conversation_id: str,
