@@ -29,7 +29,7 @@ from ..workspace import build_default_workspace, normalize_workspace
 from ..capabilities.prompting import (
     build_available_capabilities_prompt,
     build_skill_injections,
-    collect_explicit_skill_mentions,
+    collect_skill_injection_names,
     format_skill_injections,
 )
 
@@ -226,6 +226,25 @@ class ChatManager:
                 return node.get("model_id")
         return None
 
+    def _recent_active_skill_names(
+        self,
+        conversation: Conversation,
+        *,
+        max_nodes: int = 4,
+    ) -> list[str]:
+        names: list[str] = []
+        seen: set[str] = set()
+        checked = 0
+        for node in reversed(conversation.get_node_chain(conversation.current_node_id)):
+            checked += 1
+            for name in node.get("active_skill_names") or []:
+                if name and name not in seen:
+                    seen.add(name)
+                    names.append(name)
+            if checked >= max_nodes:
+                break
+        return names
+
     def _model_summary_for_conversation(
         self,
         conversation: Conversation,
@@ -394,6 +413,7 @@ class ChatManager:
         if normalized_image_refs:
             user_msg["image_refs"] = normalized_image_refs
 
+        skill_names: list[str] = []
         # ── 临界区 1（锁内）：重新加载最新快照 + 建节点 + 立即保存 user 消息 ──
         # 锁内重载确保看到其他并发流刚提交的兄弟节点，add_node 不会丢失 root 引用。
         # 立即落盘是为了让前端的 userMsgLanded 判定能尽快看到真实 user 消息。
@@ -407,11 +427,19 @@ class ChatManager:
             if node_id:
                 conversation.switch_to_node(node_id)
             current_node_id = conversation.current_node_id
+            if self.capability_registry is not None:
+                skill_names = collect_skill_injection_names(
+                    content,
+                    self.capability_registry,
+                    active_skill_names=self._recent_active_skill_names(conversation),
+                )
             new_node = NodeManager.create_node(
                 user_message=user_msg,
                 parent_id=current_node_id,
                 model_id=target_model
             )
+            if skill_names:
+                new_node["active_skill_names"] = skill_names
             conversation.add_node(new_node, parent_id=current_node_id)
             self._set_conversation_model_metadata(
                 conversation,
@@ -451,10 +479,6 @@ class ChatManager:
                     ),
                 }
             ]
-            skill_names = collect_explicit_skill_mentions(
-                content,
-                capability_registry,
-            )
             skill_injections = build_skill_injections(
                 skill_names,
                 capability_registry,

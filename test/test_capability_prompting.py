@@ -13,6 +13,7 @@ from backend.core.capabilities.prompting import (
     build_available_capabilities_prompt,
     build_skill_injections,
     collect_explicit_skill_mentions,
+    collect_skill_injection_names,
     format_skill_injections,
 )
 
@@ -104,27 +105,50 @@ def test_collect_explicit_skill_mentions_supports_dollar_and_slash(tmp_path):
     assert collect_explicit_skill_mentions("/plugin.skill please", registry) == [
         "plugin.skill"
     ]
+    assert collect_explicit_skill_mentions("用 kimi-webbridge 打开网页", registry) == []
 
 
-def test_collect_explicit_skill_mentions_detects_known_skill_names_in_text(tmp_path):
+def test_collect_skill_injection_names_uses_current_turn_task_intent(tmp_path):
     registry = make_registry(tmp_path / "review" / "SKILL.md")
 
-    assert collect_explicit_skill_mentions("你有kimi-webbridge技能吗", registry) == [
-        "kimi-webbridge"
-    ]
-    assert collect_explicit_skill_mentions("你有 kimi-webbridge 技能吗", registry) == [
-        "kimi-webbridge"
-    ]
-    assert collect_explicit_skill_mentions(
+    assert collect_skill_injection_names("你有kimi-webbridge技能吗", registry) == []
+    assert collect_skill_injection_names("你有 kimi-webbridge 技能吗", registry) == []
+    assert collect_skill_injection_names(
         "先用 $review，再看看 kimi-webbridge", registry
     ) == ["review", "kimi-webbridge"]
-    assert collect_explicit_skill_mentions("用webbridge打开bilibili", registry) == [
+    assert collect_skill_injection_names("用webbridge打开bilibili", registry) == [
         "kimi-webbridge"
     ]
-    assert collect_explicit_skill_mentions("open this in browser", registry) == [
+    assert collect_skill_injection_names("打开 bilibili", registry) == [
         "kimi-webbridge"
     ]
-    assert collect_explicit_skill_mentions("other words should not match", registry) == []
+    assert collect_skill_injection_names("open this in browser", registry) == [
+        "kimi-webbridge"
+    ]
+    assert collect_skill_injection_names("screenshot this page", registry) == [
+        "kimi-webbridge"
+    ]
+    assert collect_skill_injection_names("other words should not match", registry) == []
+
+
+def test_collect_skill_injection_names_inherits_recent_active_skill(tmp_path):
+    registry = make_registry(tmp_path / "review" / "SKILL.md")
+
+    assert collect_skill_injection_names(
+        "截图一下",
+        registry,
+        active_skill_names=["kimi-webbridge"],
+    ) == ["kimi-webbridge"]
+    assert collect_skill_injection_names(
+        "继续检查这个 diff",
+        registry,
+        active_skill_names=["review"],
+    ) == ["review"]
+    assert collect_skill_injection_names(
+        "谢谢",
+        registry,
+        active_skill_names=["kimi-webbridge"],
+    ) == []
 
 
 def test_collect_explicit_skill_mentions_skips_missing_skills(tmp_path):
