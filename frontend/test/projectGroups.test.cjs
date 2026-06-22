@@ -64,6 +64,39 @@ function testGroupsByWorkspaceAndSortsByRecentConversation() {
   assert.equal(groups[1].path, 'D:/Projects/B');
 }
 
+function testProjectOrderOverridesRecentConversationSort() {
+  const groups = groupConversationsByProject([
+    conv('a', 'A', 30, 'D:/Projects/A', 'A'),
+    conv('b', 'B', 20, 'D:/Projects/B', 'B'),
+    conv('c', 'C', 10, 'D:/Projects/C', 'C'),
+  ], {
+    projectOrder: [
+      encodeURIComponent('D:/Projects/C'),
+      encodeURIComponent('D:/Projects/A'),
+    ],
+  });
+
+  assert.deepEqual(groups.map((group) => group.path), [
+    'D:/Projects/C',
+    'D:/Projects/A',
+    'D:/Projects/B',
+  ]);
+}
+
+function testUnknownProjectsSinkAfterSavedOrder() {
+  const groups = groupConversationsByProject([
+    conv('recent-new', 'New', 100, 'D:/Projects/New', 'New'),
+    conv('ordered', 'Ordered', 1, 'D:/Projects/Ordered', 'Ordered'),
+  ], {
+    projectOrder: [encodeURIComponent('D:/Projects/Ordered')],
+  });
+
+  assert.deepEqual(groups.map((group) => group.path), [
+    'D:/Projects/Ordered',
+    'D:/Projects/New',
+  ]);
+}
+
 function testDefaultVisibleHistoryCountAndExpansion() {
   const conversations = Array.from({ length: 7 }, (_, index) =>
     conv(`c-${index}`, `Title ${index}`, 100 - index, 'D:/Projects/A', 'A')
@@ -143,6 +176,8 @@ function testExtraWorkspacesShowAsEmptyProjectGroups() {
 }
 
 testGroupsByWorkspaceAndSortsByRecentConversation();
+testProjectOrderOverridesRecentConversationSort();
+testUnknownProjectsSinkAfterSavedOrder();
 testDefaultVisibleHistoryCountAndExpansion();
 testSearchKeepsGroupsAndStillLimitsToFive();
 testNewConversationWorkspaceFallsBackInPriorityOrder();

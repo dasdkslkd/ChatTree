@@ -7,6 +7,7 @@ import {
   useLayoutEffect,
   useCallback,
   useMemo,
+  type DragEvent,
 } from 'react';
 import SyntaxHighlighter from 'react-syntax-highlighter/dist/esm/prism-light';
 import oneDark from 'react-syntax-highlighter/dist/esm/styles/prism/one-dark';
@@ -92,6 +93,7 @@ import {
 
 const MarkdownContent = lazy(() => import('../components/MarkdownContent'));
 const MANUAL_PROJECTS_STORAGE_KEY = 'chattree.manualProjectWorkspaces';
+const PROJECT_ORDER_STORAGE_KEY = 'chattree.projectOrder';
 
 SyntaxHighlighter.registerLanguage('bash', bash);
 SyntaxHighlighter.registerLanguage('batch', bash);
@@ -140,6 +142,20 @@ function loadManualProjectWorkspaces(): WorkspaceContext[] {
 
 function saveManualProjectWorkspaces(workspaces: WorkspaceContext[]) {
   window.localStorage.setItem(MANUAL_PROJECTS_STORAGE_KEY, JSON.stringify(workspaces));
+}
+
+function loadProjectOrder(): string[] {
+  try {
+    const raw = window.localStorage.getItem(PROJECT_ORDER_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function saveProjectOrder(order: string[]) {
+  window.localStorage.setItem(PROJECT_ORDER_STORAGE_KEY, JSON.stringify(order));
 }
 
 function mergeManualProjectWorkspace(workspaces: WorkspaceContext[], workspace: WorkspaceContext): WorkspaceContext[] {
@@ -797,6 +813,8 @@ export default function ChatPage() {
   const [expandedHistoryProjectIds, setExpandedHistoryProjectIds] = useState<Set<string>>(() => new Set());
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [manualProjectWorkspaces, setManualProjectWorkspaces] = useState<WorkspaceContext[]>(() => loadManualProjectWorkspaces());
+  const [projectOrder, setProjectOrder] = useState<string[]>(() => loadProjectOrder());
+  const [draggingProjectId, setDraggingProjectId] = useState<string | null>(null);
   const [projectFolderDialogMode, setProjectFolderDialogMode] = useState<'create' | 'existing' | null>(null);
   const [projectFolderPath, setProjectFolderPath] = useState('');
   const [projectFolderLabel, setProjectFolderLabel] = useState('');
@@ -897,6 +915,9 @@ export default function ChatPage() {
   const activeStreamConversationIds = useMemo(() => {
     return new Set([...localStreamingConversationIds, ...backendActiveStreamConversationIds]);
   }, [localStreamingConversationIds, backendActiveStreamConversationIds]);
+  const projectDragMovedRef = useRef(false);
+  const projectGroupRefs = useRef(new Map<string, HTMLDivElement>());
+  const projectFlipFirstRef = useRef<Map<string, number> | null>(null);
 
   // 结构性去重：一旦本轮流式产生的节点已出现在真实消息里（refreshMessages 注入），
   // 就隐藏对应的乐观叠加层，无论 cleanup 何时执行。这样真实消息与乐观叠加层
@@ -937,8 +958,9 @@ export default function ChatPage() {
       collapsedProjectIds,
       expandedHistoryProjectIds,
       searchQuery: conversationSearch,
+      projectOrder,
     }),
-    [conversations, defaultWorkspace, manualProjectWorkspaces, collapsedProjectIds, expandedHistoryProjectIds, conversationSearch],
+    [conversations, defaultWorkspace, manualProjectWorkspaces, collapsedProjectIds, expandedHistoryProjectIds, conversationSearch, projectOrder],
   );
   const allProjectGroups = useMemo(
     () => groupConversationsByProject(conversations, {
@@ -946,9 +968,44 @@ export default function ChatPage() {
       extraWorkspaces: manualProjectWorkspaces,
       collapsedProjectIds,
       expandedHistoryProjectIds,
+      projectOrder,
     }),
-    [conversations, defaultWorkspace, manualProjectWorkspaces, collapsedProjectIds, expandedHistoryProjectIds],
+    [conversations, defaultWorkspace, manualProjectWorkspaces, collapsedProjectIds, expandedHistoryProjectIds, projectOrder],
   );
+  const measureProjectGroupTops = useCallback((skipProjectId?: string) => {
+    const tops = new Map<string, number>();
+    for (const [projectId, element] of projectGroupRefs.current.entries()) {
+      if (projectId === skipProjectId) continue;
+      element.getAnimations().forEach((animation) => animation.cancel());
+      tops.set(projectId, element.getBoundingClientRect().top);
+    }
+    return tops;
+  }, []);
+
+  useLayoutEffect(() => {
+    const first = projectFlipFirstRef.current;
+    if (!first) return;
+    projectFlipFirstRef.current = null;
+
+    window.requestAnimationFrame(() => {
+      for (const group of projectGroups) {
+        if (group.id === draggingProjectId) continue;
+        const element = projectGroupRefs.current.get(group.id);
+        const previousTop = first.get(group.id);
+        if (!element || previousTop == null) continue;
+        const delta = previousTop - element.getBoundingClientRect().top;
+        if (!delta) continue;
+        element.animate(
+          [
+            { transform: `translateY(${delta}px)` },
+            { transform: 'translateY(0)' },
+          ],
+          { duration: 240, easing: 'cubic-bezier(.22,1,.36,1)' },
+        );
+      }
+    });
+  }, [draggingProjectId, projectGroups]);
+
   const selectedNewConversationWorkspace = useMemo(
     () => getWorkspaceForNewConversation(allProjectGroups, selectedProjectId, defaultWorkspace),
     [allProjectGroups, selectedProjectId, defaultWorkspace],
@@ -977,6 +1034,49 @@ export default function ChatPage() {
       return next;
     });
   };
+
+  const updateProjectOrder = useCallback((order: string[]) => {
+    setProjectOrder(order);
+    saveProjectOrder(order);
+  }, []);
+
+  const handleProjectDragStart = useCallback((event: DragEvent, projectId: string) => {
+    projectDragMovedRef.current = false;
+    setDraggingProjectId(projectId);
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', projectId);
+  }, []);
+
+  const handleProjectDragOver = useCallback((event: DragEvent, targetProjectId: string) => {
+    if (!draggingProjectId || draggingProjectId === targetProjectId) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+
+    const ids = allProjectGroups.map((group) => group.id);
+    const fromIndex = ids.indexOf(draggingProjectId);
+    const targetIndex = ids.indexOf(targetProjectId);
+    if (fromIndex < 0 || targetIndex < 0) return;
+
+    const rect = event.currentTarget.getBoundingClientRect();
+    const insertAfterTarget = event.clientY > rect.top + rect.height / 2;
+    const withoutDragged = ids.filter((id) => id !== draggingProjectId);
+    const targetIndexAfterRemoval = withoutDragged.indexOf(targetProjectId);
+    const insertIndex = targetIndexAfterRemoval + (insertAfterTarget ? 1 : 0);
+    withoutDragged.splice(insertIndex, 0, draggingProjectId);
+
+    if (withoutDragged.join('\u0000') !== ids.join('\u0000')) {
+      projectDragMovedRef.current = true;
+      projectFlipFirstRef.current = measureProjectGroupTops(draggingProjectId);
+      updateProjectOrder(withoutDragged);
+    }
+  }, [allProjectGroups, draggingProjectId, measureProjectGroupTops, updateProjectOrder]);
+
+  const handleProjectDragEnd = useCallback(() => {
+    setDraggingProjectId(null);
+    window.setTimeout(() => {
+      projectDragMovedRef.current = false;
+    }, 100);
+  }, []);
 
   const toggleHistoryExpanded = (projectId: string) => {
     setExpandedHistoryProjectIds((prev) => {
@@ -1969,11 +2069,27 @@ export default function ChatPage() {
                 const visible = getVisibleProjectConversations(group);
                 const selectedProject = selectedProjectId === group.id && !currentConversation;
                 return (
-                  <div key={group.id} className="app-project-group">
+                  <div
+                    key={group.id}
+                    ref={(element) => {
+                      if (element) projectGroupRefs.current.set(group.id, element);
+                      else projectGroupRefs.current.delete(group.id);
+                    }}
+                    className={cn('app-project-group', draggingProjectId === group.id && 'is-dragging')}
+                    onDragOver={(event) => handleProjectDragOver(event, group.id)}
+                    onDrop={(event) => event.preventDefault()}
+                  >
                     <button
                       type="button"
                       className={cn('app-project-row', selectedProject && 'is-active')}
-                      onClick={() => {
+                      draggable
+                      onDragStart={(event) => handleProjectDragStart(event, group.id)}
+                      onDragEnd={handleProjectDragEnd}
+                      onClick={(event) => {
+                        if (projectDragMovedRef.current) {
+                          event.preventDefault();
+                          return;
+                        }
                         setSelectedProjectId(group.id);
                         toggleProjectCollapsed(group.id);
                       }}

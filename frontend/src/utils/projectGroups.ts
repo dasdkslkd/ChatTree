@@ -18,6 +18,7 @@ export interface GroupOptions {
   collapsedProjectIds?: Set<string>;
   expandedHistoryProjectIds?: Set<string>;
   searchQuery?: string;
+  projectOrder?: string[];
 }
 
 export interface VisibleProjectConversations {
@@ -76,7 +77,13 @@ export function groupConversationsByProject(
   for (const group of groups) {
     group.conversations.sort(sortByUpdatedAtDesc);
   }
+  const orderIndex = new Map((options.projectOrder || []).map((id, index) => [id, index]));
   groups.sort((a, b) => {
+    const aOrder = orderIndex.get(a.id);
+    const bOrder = orderIndex.get(b.id);
+    if (aOrder !== undefined || bOrder !== undefined) {
+      return (aOrder ?? Number.MAX_SAFE_INTEGER) - (bOrder ?? Number.MAX_SAFE_INTEGER);
+    }
     const latestDiff = latestUpdatedAt(b) - latestUpdatedAt(a);
     if (latestDiff !== 0) return latestDiff;
     return a.label.localeCompare(b.label);
