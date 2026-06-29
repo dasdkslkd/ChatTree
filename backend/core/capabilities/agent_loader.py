@@ -14,12 +14,26 @@ _KNOWN_FRONTMATTER_FIELDS = {
     "tools",
     "skills",
     "model",
+    "model_id",
+    "modelId",
+    "provider_id",
+    "providerId",
+    "permission_mode",
+    "permissionMode",
+    "max_tool_rounds",
+    "maxToolRounds",
+    "timeout_seconds",
+    "timeoutSeconds",
+    "output_mode",
+    "outputMode",
+    "input_schema",
+    "inputSchema",
+    "output_schema",
+    "outputSchema",
     "max_turns",
     "maxTurns",
 }
 _PLUGIN_PRIVILEGED_FIELDS = {
-    "permission_mode",
-    "permissionMode",
     "hooks",
     "mcp_servers",
     "mcpServers",
@@ -67,6 +81,9 @@ def load_agent_file(
     metadata = _metadata_from_frontmatter(frontmatter, is_plugin_agent)
     metadata["base_name"] = base_name
     metadata["content_length"] = len(content)
+    permission_mode = _optional_str(frontmatter.get("permission_mode", frontmatter.get("permissionMode")))
+    if is_plugin_agent and permission_mode not in {None, "ask_always"}:
+        permission_mode = None
 
     return AgentDefinition(
         name=name,
@@ -75,6 +92,18 @@ def load_agent_file(
         tools=_normalize_string_list(frontmatter.get("tools")),
         skills=_normalize_string_list(frontmatter.get("skills")),
         model=_optional_str(frontmatter.get("model")),
+        model_id=_optional_str(frontmatter.get("model_id", frontmatter.get("modelId"))),
+        provider_id=_optional_str(frontmatter.get("provider_id", frontmatter.get("providerId"))),
+        permission_mode=permission_mode,
+        max_tool_rounds=_parse_positive_int(
+            frontmatter.get("max_tool_rounds", frontmatter.get("maxToolRounds"))
+        ),
+        timeout_seconds=_parse_positive_int(
+            frontmatter.get("timeout_seconds", frontmatter.get("timeoutSeconds"))
+        ),
+        output_mode=_optional_str(frontmatter.get("output_mode", frontmatter.get("outputMode"))),
+        input_schema=_optional_dict(frontmatter.get("input_schema", frontmatter.get("inputSchema"))),
+        output_schema=_optional_dict(frontmatter.get("output_schema", frontmatter.get("outputSchema"))),
         max_turns=_parse_positive_int(
             frontmatter.get("max_turns", frontmatter.get("maxTurns"))
         ),
@@ -126,3 +155,7 @@ def _optional_str(value: Any) -> Optional[str]:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _optional_dict(value: Any) -> Optional[dict[str, Any]]:
+    return value if isinstance(value, dict) else None

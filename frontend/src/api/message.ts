@@ -19,8 +19,12 @@ export type ToolResultSlice = {
 };
 
 export interface ActiveStreamInfo {
+  run_id?: string | null;
   conversation_id: string;
   node_id: string | null;
+  target_node_id?: string | null;
+  kind?: string;
+  status?: string;
   event_count: number;
   done: boolean;
   created_at: number;

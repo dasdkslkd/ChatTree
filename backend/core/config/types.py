@@ -145,9 +145,10 @@ class StreamStatus(str, Enum):
 
 class StreamController:
     """流控制器，用于终止和管理活跃流"""
-    def __init__(self, node_id: str, conversation_id: str):
+    def __init__(self, node_id: str, conversation_id: str, run_id: Optional[str] = None):
         self.node_id = node_id
         self.conversation_id = conversation_id
+        self.run_id = run_id
         self._is_stopped = False
         self._lock = asyncio.Lock()
     
@@ -172,6 +173,9 @@ class StreamChunk(TypedDict, total=False):
     status: StreamStatus
     content: Optional[str]
     node_id: Optional[str]
+    target_node_id: Optional[str]
+    run_id: Optional[str]
+    event_index: Optional[int]
     conversation_id: Optional[str]
     error: Optional[str]
     tokens_used: int  # 当前chunk的token数

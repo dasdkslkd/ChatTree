@@ -75,6 +75,48 @@ def get_capability_registry(request: Request):
         raise HTTPException(status_code=500, detail=f"依赖注入错误: {str(e)}")
 
 
+def get_run_manager(request: Request):
+    """获取运行管理器"""
+    try:
+        if not hasattr(request.app.state, 'run_manager'):
+            logger.error("❌ run_manager 未在 app.state 中初始化")
+            raise HTTPException(status_code=500, detail="运行管理器未初始化")
+        return request.app.state.run_manager
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ 获取 run_manager 失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"依赖注入错误: {str(e)}")
+
+
+def get_subagent_executor(request: Request):
+    """获取 Subagent 执行器"""
+    try:
+        if not hasattr(request.app.state, 'subagent_executor'):
+            logger.error("❌ subagent_executor 未在 app.state 中初始化")
+            raise HTTPException(status_code=500, detail="Subagent 执行器未初始化")
+        return request.app.state.subagent_executor
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ 获取 subagent_executor 失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"依赖注入错误: {str(e)}")
+
+
+def get_workflow_manager(request: Request):
+    """获取 Workflow 管理器"""
+    try:
+        if not hasattr(request.app.state, 'workflow_manager'):
+            logger.error("❌ workflow_manager 未在 app.state 中初始化")
+            raise HTTPException(status_code=500, detail="Workflow 管理器未初始化")
+        return request.app.state.workflow_manager
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ 获取 workflow_manager 失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"依赖注入错误: {str(e)}")
+
+
 def get_config_manager(request: Request):
     """获取配置管理器"""
     try:

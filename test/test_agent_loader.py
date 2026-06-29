@@ -171,7 +171,7 @@ Prompt mentions hooks and mcp_servers but body is not parsed for powers.
         plugin_name="plugin-name",
     )
 
-    assert not hasattr(agent, "permission_mode")
+    assert agent.permission_mode is None
     assert not hasattr(agent, "hooks")
     assert not hasattr(agent, "mcp_servers")
     assert "permission_mode" not in agent.metadata

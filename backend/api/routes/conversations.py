@@ -5,8 +5,9 @@ from typing import List, Dict, Any, Optional
 import logging
 from pathlib import Path
 
-from backend.api.dependencies import get_chat_manager
+from backend.api.dependencies import get_chat_manager, get_run_manager
 from backend.core.chat.chat_manager import ChatManager
+from backend.core.runs import RunManager
 from backend.core.workspace import normalize_workspace
 
 logger = logging.getLogger(__name__)
@@ -255,10 +256,32 @@ async def compact_conversation(
 async def delete_node(
     conversation_id: str,
     node_id: str,
-    chat_manager: ChatManager = Depends(get_chat_manager)
+    force: bool = False,
+    chat_manager: ChatManager = Depends(get_chat_manager),
+    run_manager: RunManager = Depends(get_run_manager),
 ):
     """删除节点及其子节点"""
     try:
+        conv = chat_manager.get_conversation(conversation_id)
+        if not conv:
+            raise HTTPException(status_code=404, detail="对话不存在")
+        active_runs = run_manager.active_runs_for_targets(
+            conversation_id=conversation_id,
+            target_node_ids=conv.get_descendant_node_ids(node_id),
+        )
+        if active_runs and not force:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "该分支仍有运行中的任务，请先停止后再删除",
+                    "active_run_ids": [run["run_id"] for run in active_runs],
+                },
+            )
+        if active_runs and force:
+            for run in active_runs:
+                await run_manager.request_stop(str(run["run_id"]))
+                if run.get("target_node_id"):
+                    await chat_manager.stop_stream(str(run["target_node_id"]))
         result = await chat_manager.delete_node(conversation_id, node_id)
         if result is None:
             raise HTTPException(status_code=404, detail="对话不存在")

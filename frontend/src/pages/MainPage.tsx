@@ -65,15 +65,17 @@ import {
   PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Archive,
 } from 'lucide-react';
 import { conversationApi } from '../api/conversation';
-import { messageApi, type ToolResultSlice } from '../api/message';
+import { messageApi, type ActiveStreamInfo, type ToolResultSlice } from '../api/message';
 import type { SendMessageRequest, ToolApprovalDecision, ToolApprovalPayload, ToolApprovalScope, ToolPermissionMode } from '../types/message';
 import type { WorkspaceContext } from '../types/conversation';
 import { useConversationStore } from '../store/conversationStore';
 import { useModelStore } from '../store/modelStore';
 import { useNavigationStore } from '../store/navigationStore';
-import { useStreamingManager } from '../hooks/useStreamingManager';
+import { useRunManager } from '../hooks/useRunManager';
 import { streamManager } from '../services/streamManager';
 import { getGenerationStatusText, getStreamStatusText as getStreamStatusLabel } from '../utils/generationStatus';
+import { isRunBlockingSelectedBranch, isRunVisibleInSelectedTranscript } from '../utils/runVisibility';
+import { resolveSendNodeId } from '../utils/sendTarget';
 import {
   extractToolResultEnvelope,
   formatToolArguments,
@@ -83,6 +85,7 @@ import {
   type ToolResultEnvelope,
 } from '../utils/toolDisplay';
 import { ChatInput } from '../components/ChatInput';
+import { RunStatusPanel } from '../components/runs/RunStatusPanel';
 import TreeView from './TreeView';
 import {
   getVisibleProjectConversations,
@@ -514,6 +517,8 @@ type AssistantTimelineBlock =
 type QueuedMessage = {
   id: string;
   conversationId: string;
+  nodeId?: string | null;
+  blockingRunIds?: string[];
   content: string;
   request: SendMessageRequest;
 };
@@ -802,6 +807,7 @@ export default function ChatPage() {
   const [isScrolling, setIsScrolling] = useState(false);
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
   const [editValue, setEditValue] = useState<string | null>(null);
+  const [editTargetNodeId, setEditTargetNodeId] = useState<string | null>(null);
   const [attachedFiles, setAttachedFiles] = useState<string[]>([]);
   const [attachedImageRefs, setAttachedImageRefs] = useState<Array<{ filename: string; mime_type?: string }>>([]);
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([]);
@@ -876,9 +882,9 @@ export default function ChatPage() {
 
   const {
     conversations, currentConversation, messages,
-    pendingScrollNodeId, clearPendingScroll,
+    currentNodeId, pendingScrollNodeId, clearPendingScroll,
     createConversation, selectConversation, deleteConversation, loadConversations,
-    clearCurrentConversation, updateConversationTitle, refreshMessages, deleteNode,
+    clearCurrentConversation, updateConversationTitle, refreshMessages, deleteNode, switchNode, setCurrentNodeIdLocal,
   } = useConversationStore();
 
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
@@ -906,15 +912,27 @@ export default function ChatPage() {
     setRenameTitle('');
   };
 
-  const {
-    streamedContent, streamedReasoning, startStreaming, isStreaming, abortStreaming,
-    streamedReasoningActive, streamedToolInteractions, pendingApprovals, streamDuration, streamStatus, streamErrorMessage, pendingUserMessage, currentNodeId: streamNodeId,
-  } = useStreamingManager(currentConversation?.id ?? null);
-  const [localStreamingConversationIds, setLocalStreamingConversationIds] = useState<Set<string>>(() => new Set());
-  const [backendActiveStreamConversationIds, setBackendActiveStreamConversationIds] = useState<Set<string>>(() => new Set());
-  const activeStreamConversationIds = useMemo(() => {
-    return new Set([...localStreamingConversationIds, ...backendActiveStreamConversationIds]);
-  }, [localStreamingConversationIds, backendActiveStreamConversationIds]);
+  const activeRunStates = useRunManager(currentConversation?.id ?? null);
+  const autoFollowedRunIdsRef = useRef<Set<string>>(new Set());
+  const startStreaming = useCallback(
+    async (
+      convId: string,
+      request: SendMessageRequest,
+      pending: string | null = null,
+      nodeId?: string,
+    ) => {
+      await streamManager.startStream(convId, request, pending, nodeId);
+    },
+    [],
+  );
+  const [localStreamingConversationCounts, setLocalStreamingConversationCounts] = useState<Map<string, number>>(() => new Map());
+  const [backendActiveStreamConversationCounts, setBackendActiveStreamConversationCounts] = useState<Map<string, number>>(() => new Map());
+  const activeStreamConversationCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const [id, count] of localStreamingConversationCounts) counts.set(id, Math.max(counts.get(id) ?? 0, count));
+    for (const [id, count] of backendActiveStreamConversationCounts) counts.set(id, Math.max(counts.get(id) ?? 0, count));
+    return counts;
+  }, [localStreamingConversationCounts, backendActiveStreamConversationCounts]);
   const projectDragMovedRef = useRef(false);
   const projectGroupRefs = useRef(new Map<string, HTMLDivElement>());
   const projectFlipFirstRef = useRef<Map<string, number> | null>(null);
@@ -925,27 +943,104 @@ export default function ChatPage() {
   // 注意：后端在流式 START 时就已创建节点并保存 user 消息，但 assistant 消息要到
   // 结束才保存。因此必须按角色分别判断——否则中途重新进入正在流式的对话会
   // 把 user 消息拉回 messages，误判“整轮已落地”而把正在生成的助手块也隐藏掉。
-  const userMsgLanded =
-    streamNodeId != null && messages.some((m) => m.node_id === streamNodeId && m.role === 'user');
-  const assistantMsgLanded =
-    streamNodeId != null && messages.some((m) => m.node_id === streamNodeId && m.role === 'assistant');
-  // 用户气泡：真实 user 消息已出现即隐藏。
-  const showPendingBubble = !!pendingUserMessage && !userMsgLanded;
-  // 助手流式块：仅当真实 assistant 消息已出现（=本轮已结束并保存）才隐藏，
-  // 保证流式进行中（assistant 尚未保存）始终显示“思考中/流式内容/计时”。
-  const showStreamBlock = streamStatus !== 'idle' && !assistantMsgLanded;
-  const streamedTimeline = getAssistantTimeline({
-    content: streamedContent,
-    reasoning: streamedReasoning,
-    tool_interactions: streamedToolInteractions,
-  });
-  const pendingApprovalList = Object.values(pendingApprovals).filter((approval) => approval.status === 'pending');
-  const pendingApprovalCount = pendingApprovalList.length;
+  const currentBranchNodeIds = useMemo(
+    () => new Set(messages.map((message) => message.node_id).filter(Boolean)),
+    [messages],
+  );
+  const selectedBranchTipId = currentNodeId || currentConversation?.current_node_id || null;
+
+  useEffect(() => {
+    const activeRunIds = new Set(activeRunStates.map((run) => run.runId));
+    for (const runId of autoFollowedRunIdsRef.current) {
+      if (!activeRunIds.has(runId)) autoFollowedRunIdsRef.current.delete(runId);
+    }
+  }, [activeRunStates]);
+
+  useEffect(() => {
+    if (!selectedBranchTipId) return;
+    for (const run of activeRunStates) {
+      if (run.kind !== 'chat' || run.status !== 'streaming') continue;
+      if (!run.pendingUserMessage) continue;
+      if (run.anchorNodeId !== selectedBranchTipId) continue;
+      if (autoFollowedRunIdsRef.current.has(run.runId)) continue;
+      const targetNodeId = run.targetNodeId || run.nodeId;
+      if (!targetNodeId || targetNodeId === selectedBranchTipId) continue;
+
+      autoFollowedRunIdsRef.current.add(run.runId);
+      setCurrentNodeIdLocal(targetNodeId);
+      break;
+    }
+  }, [activeRunStates, selectedBranchTipId, setCurrentNodeIdLocal]);
+
+  const activeRunDrafts = useMemo(() => activeRunStates
+    .filter((run) => run.kind === 'chat')
+    .map((run) => {
+      const nodeId = run.targetNodeId || run.nodeId;
+      if (!isRunVisibleInSelectedTranscript(run, selectedBranchTipId, currentBranchNodeIds)) return null;
+      const userLanded = nodeId != null && messages.some((m) => m.node_id === nodeId && m.role === 'user');
+      const assistantLanded = nodeId != null && messages.some((m) => m.node_id === nodeId && m.role === 'assistant');
+      const timeline = getAssistantTimeline({
+        content: run.content,
+        reasoning: run.reasoning,
+        tool_interactions: run.toolInteractions,
+      });
+      const pendingApprovalList = Object.values(run.pendingApprovals).filter((approval) => approval.status === 'pending');
+      let activeReasoningIndex = -1;
+      if (run.status === 'streaming') {
+        for (let i = timeline.length - 1; i >= 0; i -= 1) {
+          if (timeline[i].type === 'reasoning') {
+            const hasLaterBlock = timeline.slice(i + 1).some((block) => block.type !== 'reasoning');
+            activeReasoningIndex = run.reasoningActive || !hasLaterBlock ? i : -1;
+            break;
+          }
+        }
+      }
+      return {
+        run,
+        nodeId,
+        showPendingBubble: !!run.pendingUserMessage && !userLanded,
+        showStreamBlock: run.status !== 'idle' && !assistantLanded,
+        timeline,
+        pendingApprovalList,
+        activeReasoningIndex,
+      };
+    })
+    .filter((draft): draft is NonNullable<typeof draft> => Boolean(draft))
+    .filter((draft) => draft.showPendingBubble || draft.showStreamBlock),
+    [activeRunStates, currentBranchNodeIds, messages, selectedBranchTipId],
+  );
+  const currentBranchStreamingRunIds = useMemo(
+    () => activeRunStates
+      .filter((run) => isRunBlockingSelectedBranch(run, selectedBranchTipId, currentBranchNodeIds))
+      .map((run) => run.runId),
+    [activeRunStates, currentBranchNodeIds, selectedBranchTipId],
+  );
+  const currentBranchHasStreamingChat = currentBranchStreamingRunIds.length > 0;
+  const currentBranchStreamActivity = useMemo(
+    () => activeRunDrafts.map((draft) => [
+      draft.run.runId,
+      draft.run.status,
+      draft.run.content.length,
+      draft.run.reasoning.length,
+      draft.run.toolInteractions.length,
+      Object.keys(draft.run.pendingApprovals).length,
+      draft.run.pendingUserMessage?.length ?? 0,
+    ].join(':')).join('|'),
+    [activeRunDrafts],
+  );
+  const currentBranchHasPendingUserMessage = activeRunDrafts.some((draft) => draft.showPendingBubble);
+  const pendingApprovalCount = activeRunDrafts.reduce(
+    (count, draft) => count + draft.pendingApprovalList.length,
+    0,
+  );
   const visibleQueuedMessages = useMemo(
     () => queuedMessages
-      .filter((message) => message.conversationId === currentConversation?.id)
+      .filter((message) =>
+        message.conversationId === currentConversation?.id
+        && (!message.nodeId || message.nodeId === selectedBranchTipId)
+      )
       .map(({ id, content }) => ({ id, content })),
-    [queuedMessages, currentConversation?.id],
+    [queuedMessages, currentConversation?.id, selectedBranchTipId],
   );
   const defaultWorkspace = useMemo(
     () => conversations.find((conversation) => conversation.workspace?.cwd)?.workspace || null,
@@ -1230,22 +1325,17 @@ export default function ChatPage() {
   );
 
   const handleNewConversation = () => {
+    setEditValue(null);
+    setEditTargetNodeId(null);
     clearCurrentConversation();
   };
-  const streamedActiveReasoningIndex = (() => {
-    if (streamStatus !== 'streaming') return -1;
-    for (let i = streamedTimeline.length - 1; i >= 0; i -= 1) {
-      if (streamedTimeline[i].type === 'reasoning') {
-        const hasLaterBlock = streamedTimeline.slice(i + 1).some((block) => block.type !== 'reasoning');
-        return streamedReasoningActive || !hasLaterBlock ? i : -1;
-      }
-    }
-    return -1;
-  })();
-
   const sendNextQueuedMessage = useCallback(async (conversationId: string) => {
     const nextMessage = queuedMessagesRef.current.find((message) =>
       message.conversationId === conversationId && message.content.trim()
+      && (
+        !message.blockingRunIds?.length
+        || streamManager.areRunsInactive(message.blockingRunIds)
+      )
     );
     if (!nextMessage) {
       updateQueuedMessages((messages) =>
@@ -1263,6 +1353,7 @@ export default function ChatPage() {
         content: nextMessage.content,
       },
       nextMessage.content,
+      nextMessage.nodeId || undefined,
     );
   }, [startStreaming, updateQueuedMessages]);
 
@@ -1279,16 +1370,22 @@ export default function ChatPage() {
   const handleStopStreaming = useCallback(() => {
     if (currentConversation?.id) {
       const conversationId = currentConversation.id;
-      updateQueuedMessages((messages) => messages.filter((message) => message.conversationId !== conversationId));
+      updateQueuedMessages((messages) => messages.filter((message) =>
+        message.conversationId !== conversationId
+        || (
+          message.nodeId != null
+          && message.nodeId !== selectedBranchTipId
+        )
+      ));
     }
-    abortStreaming();
-  }, [abortStreaming, currentConversation?.id, updateQueuedMessages]);
+    void Promise.all(currentBranchStreamingRunIds.map((runId) => streamManager.stopRun(runId)));
+  }, [currentBranchStreamingRunIds, currentConversation?.id, selectedBranchTipId, updateQueuedMessages]);
 
   // 全局注册一次：任意对话的流结束（completed/error/stopped）时，
   // 从后端刷新真实消息，再清理 StreamManager 中该对话的临时状态。
   // 不依赖当前查看的是哪个对话，因此切走的对话流完成也能正确落地。
   useEffect(() => {
-    const unsubscribe = streamManager.onFinish(async ({ conversationId: finishedId, drained, nodeId, controller }) => {
+    const unsubscribe = streamManager.onFinish(async ({ conversationId: finishedId, runId, drained, nodeId, targetNodeId, controller }) => {
       // 完成判据：等待本轮节点(nodeId)的 assistant 消息落盘，而非“消息数 +1”。
       // 对多消息轮次（未来工具轮次）同样稳健。nodeId 为空（停得太早还没拿到）时
       // refreshMessages 退化为单次拉取。
@@ -1298,20 +1395,20 @@ export default function ChatPage() {
       const confirmed = await refreshMessages(
         finishedId,
         drained
-          ? (nodeId ? { awaitNodeId: nodeId, retries: 0 } : undefined)
-          : { awaitNodeId: nodeId ?? undefined, retries: 6 },
+          ? (targetNodeId || nodeId ? { awaitNodeId: targetNodeId ?? nodeId ?? undefined, retries: 0 } : undefined)
+          : { awaitNodeId: targetNodeId ?? nodeId ?? undefined, retries: 6 },
       );
       // 仅当确认真实消息已落地，才清理临时流状态（移除乐观气泡）。
       // 身份校验：若 await 期间用户对同一对话发起了新流，controller 已被替换则跳过。
       if (drained || confirmed) {
-        streamManager.cleanupIfController(finishedId, controller);
+        streamManager.cleanupIfController(finishedId, controller, runId);
       } else {
         // 硬 abort 且后端保存超过重试预算：保留乐观气泡，延后再确认一次，
         // 成功后再清理，彻底避免用户消息闪失。
         setTimeout(async () => {
-          await refreshMessages(finishedId, { awaitNodeId: nodeId ?? undefined, retries: 6 });
+          await refreshMessages(finishedId, { awaitNodeId: targetNodeId ?? nodeId ?? undefined, retries: 6 });
           // 无论是否确认，这是最后兜底：清理临时状态，避免气泡永久残留。
-          streamManager.cleanupIfController(finishedId, controller);
+          streamManager.cleanupIfController(finishedId, controller, runId);
         }, 800);
       }
       // 同步对话列表（更新时间、标题等）
@@ -1325,16 +1422,16 @@ export default function ChatPage() {
   shouldAutoScrollRef.current = shouldAutoScroll;
 
   useEffect(() => {
-    if (isStreaming && shouldAutoScrollRef.current && !userScrollingRef.current) {
+    if (currentBranchHasStreamingChat && shouldAutoScrollRef.current && !userScrollingRef.current) {
       requestAnimationFrame(() => scrollToBottom(false));
     }
-  }, [streamedContent, isStreaming, scrollToBottom]);
+  }, [currentBranchStreamActivity, currentBranchHasStreamingChat, scrollToBottom]);
 
   useEffect(() => {
-    if (pendingUserMessage) {
+    if (currentBranchHasPendingUserMessage) {
       requestAnimationFrame(() => scrollToBottom(false));
     }
-  }, [pendingUserMessage, scrollToBottom]);
+  }, [currentBranchHasPendingUserMessage, scrollToBottom]);
 
   useEffect(() => {
     if (pendingApprovalCount > 0) {
@@ -1348,7 +1445,12 @@ export default function ChatPage() {
 
   useEffect(() => {
     const updateLocalStreamingIds = () => {
-      setLocalStreamingConversationIds(new Set(streamManager.getStreamingConversationIds()));
+      const counts = new Map<string, number>();
+      for (const conversationId of streamManager.getStreamingConversationIds()) {
+        const count = streamManager.getConversationStates(conversationId).filter((state) => state.status === 'streaming').length;
+        if (count > 0) counts.set(conversationId, count);
+      }
+      setLocalStreamingConversationCounts(counts);
     };
     updateLocalStreamingIds();
     return streamManager.subscribe(updateLocalStreamingIds);
@@ -1360,11 +1462,14 @@ export default function ChatPage() {
       try {
         const activeStreams = await messageApi.getAllActiveStreams();
         if (cancelled) return;
-        setBackendActiveStreamConversationIds(
-          new Set(activeStreams.map((item) => item.conversation_id).filter(Boolean)),
-        );
+        const counts = new Map<string, number>();
+        for (const item of activeStreams) {
+          if (!item.conversation_id) continue;
+          counts.set(item.conversation_id, (counts.get(item.conversation_id) ?? 0) + 1);
+        }
+        setBackendActiveStreamConversationCounts(counts);
       } catch (_) {
-        if (!cancelled) setBackendActiveStreamConversationIds(new Set());
+        if (!cancelled) setBackendActiveStreamConversationCounts(new Map());
       }
     };
     void syncBackendActiveStreams();
@@ -1382,29 +1487,29 @@ export default function ChatPage() {
     let cancelled = false;
     (async () => {
       try {
-        let active = null;
+        let activeStreams: ActiveStreamInfo[] = [];
         for (let attempt = 0; attempt < 10; attempt += 1) {
-          const activeStreams = await messageApi.getActiveStreams(conversationId);
+          activeStreams = await messageApi.getActiveStreams(conversationId);
           if (cancelled) return;
-          active = activeStreams.find((item) => item.node_id && !item.done) ?? null;
-          if (active) break;
+          if (activeStreams.some((item) => item.node_id && !item.done)) break;
           await new Promise((resolve) => window.setTimeout(resolve, 500));
         }
         if (cancelled) return;
-        if (!active) {
+        const attachable = activeStreams.filter((item) => item.node_id && !item.done);
+        if (attachable.length === 0) {
           await refreshMessages(conversationId, { retries: 0 });
           return;
         }
-        if (!active?.node_id) return;
-        if (streamManager.isStreaming(conversationId)) return;
-
-        await refreshMessages(conversationId, {
-          awaitNodeId: active.node_id,
+        await Promise.all(attachable.map((active) => refreshMessages(conversationId, {
+          awaitNodeId: active.node_id ?? undefined,
           awaitRole: 'user',
           retries: 0,
-        });
+        })));
         if (cancelled) return;
-        void streamManager.resumeStream(conversationId, active.node_id);
+        for (const active of attachable) {
+          if (!active.node_id) continue;
+          void streamManager.resumeStream(conversationId, active.node_id, active.run_id ?? undefined, 0);
+        }
       } catch (_) {
         await refreshMessages(conversationId, { retries: 0 });
       }
@@ -1423,6 +1528,8 @@ export default function ChatPage() {
       }));
     }
     pendingScrollId.current = id;
+    setEditValue(null);
+    setEditTargetNodeId(null);
     const selected = conversations.find((conversation) => conversation.id === id);
     if (selected?.workspace?.cwd) {
       const group = allProjectGroups.find((item) => item.path === selected.workspace?.cwd);
@@ -1578,16 +1685,23 @@ export default function ChatPage() {
       import_files: importFiles.length > 0 ? importFiles : undefined,
       image_refs: imageRefs.length > 0 ? imageRefs : undefined,
     };
+    const sendNodeId = resolveSendNodeId({
+      editTargetNodeId,
+      currentNodeId,
+      conversationCurrentNodeId: currentConversation?.current_node_id,
+    });
 
-    if (isStreaming) {
-      if (!conversationId) return;
+    if (conversationId && currentBranchHasStreamingChat) {
       const queuedConversationId = conversationId;
       clearAttachments();
+      setEditTargetNodeId(null);
       updateQueuedMessages((messages) => [
         ...messages,
         {
           id: createQueuedMessageId(),
           conversationId: queuedConversationId,
+          nodeId: sendNodeId,
+          blockingRunIds: currentBranchStreamingRunIds,
           content: val,
           request,
         },
@@ -1608,12 +1722,14 @@ export default function ChatPage() {
     }
 
     clearAttachments();
+    setEditTargetNodeId(null);
     // 第三个参数是乐观渲染的用户气泡文本（显示用户输入的原文）。
     // 推理设置从 modelStore 的当前值读取（已确认值），随请求透传。
     await startStreaming(
       conversationId,
       request,
       val,
+      sendNodeId,
     );
   };
 
@@ -1635,7 +1751,7 @@ export default function ChatPage() {
   };
 
   const handleDeleteBranch = async (nodeId: string) => {
-    if (!currentConversation || isStreaming) return;
+    if (!currentConversation) return;
     if (!confirm('确定删除该消息及其所有后续分支？')) return;
     try {
       await deleteNode(nodeId);
@@ -1650,7 +1766,7 @@ export default function ChatPage() {
     importFileNames: string[] = [],
     imageRefs: Array<{ filename: string; mime_type?: string }> = [],
   ) => {
-    if (!currentConversation || isStreaming) return;
+    if (!currentConversation) return;
     const convId = currentConversation.id;
     try {
       await conversationApi.deleteNode(convId, assistantNodeId);
@@ -1678,11 +1794,11 @@ export default function ChatPage() {
   };
 
   const handleEditUserMessage = async (_nodeId: string, parentNodeId: string | undefined, userContent: string) => {
-    if (!currentConversation || isStreaming) return;
+    if (!currentConversation) return;
     if (!parentNodeId) return;
     try {
-      await conversationApi.switchNode(currentConversation.id, parentNodeId);
-      await selectConversation(currentConversation.id);
+      await switchNode(parentNodeId);
+      setEditTargetNodeId(parentNodeId);
       setEditValue(userContent);
     } catch (err) {
       console.error('编辑失败:', err);
@@ -1763,10 +1879,6 @@ export default function ChatPage() {
     const minutes = Math.floor(seconds / 60);
     const remainingSeconds = seconds % 60;
     return `${minutes}m ${remainingSeconds}s`;
-  };
-
-  const getStreamStatusText = (): string | null => {
-    return getStreamStatusLabel(streamStatus, streamErrorMessage);
   };
 
   // Parse '''USER MENTIONED FILES: ...''' prefix from message content
@@ -1977,7 +2089,6 @@ export default function ChatPage() {
                 size="sm"
                 className="opacity-0 group-hover:opacity-100 transition-opacity h-7 w-7 p-0"
                 onClick={() => handleEditUserMessage(m.node_id, m.parent_node_id, displayContent)}
-                disabled={isStreaming}
                 aria-label="编辑"
                 title="编辑消息（创建新分支）"
               >
@@ -1990,7 +2101,6 @@ export default function ChatPage() {
                 size="sm"
                 className="opacity-0 group-hover:opacity-100 transition-opacity h-7 w-7 p-0 text-destructive hover:text-destructive"
                 onClick={() => handleDeleteBranch(m.node_id)}
-                disabled={isStreaming}
                 aria-label="删除分支"
                 title="删除此消息及所有后续分支"
               >
@@ -2008,7 +2118,6 @@ export default function ChatPage() {
                   getUserImportFileNames(prevUserMessage),
                   getUserImageRefs(prevUserMessage),
                 )}
-                disabled={isStreaming}
                 aria-label="重试"
                 title="重试（删除当前回复并重新生成）"
               >
@@ -2106,7 +2215,8 @@ export default function ChatPage() {
                       <div className="app-session-list">
                         {visible.items.map((c) => {
                           const isSelected = c.id === currentConversation?.id;
-                          const isRunning = activeStreamConversationIds.has(c.id);
+                          const runningCount = activeStreamConversationCounts.get(c.id) ?? 0;
+                          const isRunning = runningCount > 0;
                           return (
                             <div
                               key={c.id}
@@ -2118,10 +2228,10 @@ export default function ChatPage() {
                             >
                               <span className="app-session-title">{c.title || '未命名'}</span>
                               {isRunning && (
-                                <Loader2
-                                  className="app-session-running h-3.5 w-3.5"
-                                  aria-label="正在运行"
-                                />
+                                <span className="app-session-running inline-flex items-center gap-1" aria-label={`正在运行 ${runningCount} 个任务`}>
+                                  <Loader2 className="h-3.5 w-3.5" />
+                                  {runningCount > 1 && <span className="text-[10px] tabular-nums">{runningCount}</span>}
+                                </span>
                               )}
                               <span className="app-session-time">{formatConversationTime(c.updated_at)}</span>
                               <DropdownMenu>
@@ -2248,8 +2358,8 @@ export default function ChatPage() {
                     settingsSlot={projectSettingsSlot}
                     onSend={handleSend}
                     onStop={handleStopStreaming}
-                    isStreaming={isStreaming}
-                    disabled={isStreaming}
+                    isStreaming={currentBranchHasStreamingChat}
+                    disabled={currentBranchHasStreamingChat}
                     conversationId={null}
                     editValue={editValue}
                     onEditValueConsumed={() => setEditValue(null)}
@@ -2280,75 +2390,79 @@ export default function ChatPage() {
               >
                 <div className="w-[800px] max-w-full flex flex-col px-4">
                   {messages.map((m, index) => renderMsg(m, index))}
-                  {showPendingBubble && (
-                    <div className="w-full my-2 flex flex-col items-end">
-                      <div className="flex flex-col items-start max-w-full">
-                        <div
-                          className="max-w-full w-fit px-3 py-2 rounded-2xl rounded-br-sm leading-relaxed prose prose-sm prose-invert max-w-none [&_p]:m-0"
-                          style={{
-                            background: 'linear-gradient(160deg, rgba(217,119,87,0.16), rgba(217,119,87,0.08))',
-                            border: '0.5px solid rgba(217,119,87,0.28)',
-                            boxShadow: 'var(--highlight-top)',
-                            color: 'var(--fg-85)',
-                            fontSize: 'var(--codex-chat-font-size)',
-                            lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
-                          }}
-                        >
-                          <MarkdownView content={pendingUserMessage} />
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                  {showStreamBlock && (
-                    <div className="w-full my-2 flex flex-col items-start">
-                      <div className="flex flex-col items-start max-w-full">
-                        {streamedTimeline.map((block, blockIndex) => {
-                          if (block.type === 'reasoning') {
-                            const reasoningStillOpen = blockIndex === streamedActiveReasoningIndex;
-                            return <ThinkingBlock key={block.key} reasoning={block.reasoning} streaming={reasoningStillOpen} />;
-                          }
-                          if (block.type === 'tools') {
-                            return <ToolCallGroup key={block.key} items={block.items} />;
-                          }
-                          return (
+                  {activeRunDrafts.map((draft) => (
+                    <div key={draft.run.runId} className="contents">
+                      {draft.showPendingBubble && (
+                        <div className="w-full my-2 flex flex-col items-end">
+                          <div className="flex flex-col items-start max-w-full">
                             <div
-                              key={block.key}
-                              className="max-w-full w-fit px-3 py-2 rounded-2xl rounded-bl-sm leading-relaxed prose prose-sm max-w-none [&_p]:m-0"
+                              className="max-w-full w-fit px-3 py-2 rounded-2xl rounded-br-sm leading-relaxed prose prose-sm prose-invert max-w-none [&_p]:m-0"
                               style={{
-                                color: 'var(--fg-secondary)',
+                                background: 'linear-gradient(160deg, rgba(217,119,87,0.16), rgba(217,119,87,0.08))',
+                                border: '0.5px solid rgba(217,119,87,0.28)',
+                                boxShadow: 'var(--highlight-top)',
+                                color: 'var(--fg-85)',
                                 fontSize: 'var(--codex-chat-font-size)',
                                 lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
                               }}
                             >
-                              <MarkdownView content={block.content} />
-                            </div>
-                          );
-                        })}
-                        <ToolApprovalGroup approvals={pendingApprovalList} />
-                        {streamedTimeline.length === 0 && pendingApprovalList.length === 0 && streamStatus === 'streaming' && (
-                          <div
-                            className="max-w-full w-fit px-3 py-2 rounded-2xl rounded-bl-sm leading-relaxed prose prose-sm max-w-none [&_p]:m-0"
-                            style={{
-                              color: 'var(--fg-secondary)',
-                              fontSize: 'var(--codex-chat-font-size)',
-                              lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
-                            }}
-                          >
-                            <div className="flex items-center gap-2">
-                              <Loader2 className="h-4 w-4 animate-spin" style={{ color: 'var(--icon-accent)' }} />
-                              <span className="text-sm" style={{ color: 'var(--fg-tertiary)' }}>思考中...</span>
+                              <MarkdownView content={draft.run.pendingUserMessage || ''} />
                             </div>
                           </div>
-                        )}
-                        <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
-                          <span>{formatDuration(streamDuration)}</span>
-                          {getStreamStatusText() && (
-                            <span className="text-destructive">{getStreamStatusText()}</span>
-                          )}
                         </div>
-                      </div>
+                      )}
+                      {draft.showStreamBlock && (
+                        <div className="w-full my-2 flex flex-col items-start">
+                          <div className="flex flex-col items-start max-w-full">
+                            {draft.timeline.map((block, blockIndex) => {
+                              if (block.type === 'reasoning') {
+                                const reasoningStillOpen = blockIndex === draft.activeReasoningIndex;
+                                return <ThinkingBlock key={block.key} reasoning={block.reasoning} streaming={reasoningStillOpen} />;
+                              }
+                              if (block.type === 'tools') {
+                                return <ToolCallGroup key={block.key} items={block.items} />;
+                              }
+                              return (
+                                <div
+                                  key={block.key}
+                                  className="max-w-full w-fit px-3 py-2 rounded-2xl rounded-bl-sm leading-relaxed prose prose-sm max-w-none [&_p]:m-0"
+                                  style={{
+                                    color: 'var(--fg-secondary)',
+                                    fontSize: 'var(--codex-chat-font-size)',
+                                    lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
+                                  }}
+                                >
+                                  <MarkdownView content={block.content} />
+                                </div>
+                              );
+                            })}
+                            <ToolApprovalGroup approvals={draft.pendingApprovalList} />
+                            {draft.timeline.length === 0 && draft.pendingApprovalList.length === 0 && draft.run.status === 'streaming' && (
+                              <div
+                                className="max-w-full w-fit px-3 py-2 rounded-2xl rounded-bl-sm leading-relaxed prose prose-sm max-w-none [&_p]:m-0"
+                                style={{
+                                  color: 'var(--fg-secondary)',
+                                  fontSize: 'var(--codex-chat-font-size)',
+                                  lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
+                                }}
+                              >
+                                <div className="flex items-center gap-2">
+                                  <Loader2 className="h-4 w-4 animate-spin" style={{ color: 'var(--icon-accent)' }} />
+                                  <span className="text-sm" style={{ color: 'var(--fg-tertiary)' }}>思考中...</span>
+                                </div>
+                              </div>
+                            )}
+                            <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
+                              <span>{formatDuration(draft.run.duration)}</span>
+                              {getStreamStatusLabel(draft.run.status, draft.run.errorMessage) && (
+                                <span className="text-destructive">{getStreamStatusLabel(draft.run.status, draft.run.errorMessage)}</span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
-                  )}
+                  ))}
                   <div ref={messagesEndRef} />
                 </div>
               </div>
@@ -2363,8 +2477,8 @@ export default function ChatPage() {
                 <ChatInput
                   onSend={handleSend}
                   onStop={handleStopStreaming}
-                  isStreaming={isStreaming}
-                  disabled={isStreaming}
+                  isStreaming={currentBranchHasStreamingChat}
+                  disabled={currentBranchHasStreamingChat}
                   conversationId={currentConversation?.id || null}
                   editValue={editValue}
                   onEditValueConsumed={() => setEditValue(null)}
@@ -2417,19 +2531,24 @@ export default function ChatPage() {
             </Button>
           </div>
 
-          {!outlineCollapsed && outline.map((item, idx) => (
-            <div
-              key={idx}
-              className="flex items-center py-2 px-3 cursor-pointer rounded-lg mx-2 my-0.5 transition-colors"
-              style={{ color: 'var(--fg-85)' }}
-              title={item.text}
-              onClick={() => handleJumpToMessage(item.originalIndex)}
-              onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-hover)'; }}
-              onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = ''; }}
-            >
-              <span className="truncate text-sm">{item.text}</span>
-            </div>
-          ))}
+          {!outlineCollapsed && (
+            <>
+              {outline.map((item, idx) => (
+                <div
+                  key={idx}
+                  className="flex items-center py-2 px-3 cursor-pointer rounded-lg mx-2 my-0.5 transition-colors"
+                  style={{ color: 'var(--fg-85)' }}
+                  title={item.text}
+                  onClick={() => handleJumpToMessage(item.originalIndex)}
+                  onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-hover)'; }}
+                  onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = ''; }}
+                >
+                  <span className="truncate text-sm">{item.text}</span>
+                </div>
+              ))}
+              <RunStatusPanel conversationId={currentConversation?.id ?? null} runs={activeRunStates} />
+            </>
+          )}
         </aside>
       )}
 

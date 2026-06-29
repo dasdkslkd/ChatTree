@@ -29,6 +29,13 @@ global.localStorage = {
   removeItem: (key) => storage.delete(key),
 };
 
+let historyResponse = [
+  { id: 'msg-1', role: 'user', content: '保留的问题', node_id: 'node-1' },
+  { id: 'msg-2', role: 'assistant', content: '保留的回答', node_id: 'node-1' },
+];
+let branchesResponse = { 'node-1': [] };
+let switchNodeCalls = [];
+
 const refreshedTree = {
   root_node_id: 'root',
   current_node_id: 'node-1',
@@ -66,12 +73,16 @@ require.cache[require.resolve(conversationApiModule)] = {
   loaded: true,
   exports: {
     conversationApi: {
+      switchNode: async (conversationId, nodeId) => {
+        switchNodeCalls.push({ conversationId, nodeId });
+        return { current_node_id: nodeId };
+      },
       deleteNode: async () => ({
         deleted_node_id: 'node-2',
         new_current_node_id: 'node-1',
         parent_node_id: 'node-1',
       }),
-      getBranches: async () => ({ 'node-1': [] }),
+      getBranches: async () => branchesResponse,
       getTree: async () => {
         getTreeCalls += 1;
         return refreshedTree;
@@ -86,10 +97,7 @@ require.cache[require.resolve(messageApiModule)] = {
   loaded: true,
   exports: {
     messageApi: {
-      getHistory: async () => [
-        { id: 'msg-1', role: 'user', content: '保留的问题', node_id: 'node-1' },
-        { id: 'msg-2', role: 'assistant', content: '保留的回答', node_id: 'node-1' },
-      ],
+      getHistory: async () => historyResponse,
     },
   },
 };
@@ -160,8 +168,116 @@ async function testDeleteNodeRefreshesTreeData() {
   assert.deepEqual(state.messages.map((message) => message.node_id), ['node-1', 'node-1']);
 }
 
+async function testRefreshMessagesUsesHistoryTipInsteadOfStaleConversationList() {
+  const currentConversation = {
+    id: 'conv-1',
+    title: '刷新测试',
+    created_at: 1,
+    updated_at: 1,
+    model: '',
+    model_id: '',
+    provider_id: '',
+    current_node_id: 'root',
+    total_tokens: {},
+  };
+  historyResponse = [
+    { id: 'msg-a', role: 'user', content: '你好', node_id: 'node-hello' },
+    { id: 'msg-b', role: 'assistant', content: '你好回复', node_id: 'node-hello' },
+  ];
+  branchesResponse = {};
+
+  useConversationStore.setState({
+    conversations: [currentConversation],
+    currentConversation,
+    messages: [],
+    branches: {},
+    currentNodeId: 'root',
+    loading: false,
+    error: null,
+  });
+
+  const ok = await useConversationStore.getState().refreshMessages('conv-1', {
+    awaitNodeId: 'node-hello',
+    awaitRole: 'assistant',
+    retries: 0,
+  });
+
+  const state = useConversationStore.getState();
+  assert.equal(ok, true);
+  assert.equal(state.currentNodeId, 'node-hello');
+  assert.equal(state.currentConversation.current_node_id, 'node-hello');
+}
+
+async function testSwitchNodeUpdatesCurrentConversationSnapshot() {
+  switchNodeCalls = [];
+  historyResponse = [];
+  branchesResponse = {};
+  const currentConversation = {
+    id: 'conv-1',
+    title: '编辑测试',
+    created_at: 1,
+    updated_at: 1,
+    model: '',
+    model_id: '',
+    provider_id: '',
+    current_node_id: 'node-hello',
+    total_tokens: {},
+  };
+
+  useConversationStore.setState({
+    conversations: [currentConversation],
+    currentConversation,
+    messages: [{ id: 'old', role: 'user', content: '你好', node_id: 'node-hello' }],
+    branches: {},
+    currentNodeId: 'node-hello',
+    loading: false,
+    error: null,
+  });
+
+  await useConversationStore.getState().switchNode('root');
+
+  const state = useConversationStore.getState();
+  assert.deepEqual(switchNodeCalls, [{ conversationId: 'conv-1', nodeId: 'root' }]);
+  assert.equal(state.currentNodeId, 'root');
+  assert.equal(state.currentConversation.current_node_id, 'root');
+}
+
+function testSetCurrentNodeIdLocalKeepsSnapshotsInSync() {
+  const currentConversation = {
+    id: 'conv-1',
+    title: '本地切换测试',
+    created_at: 1,
+    updated_at: 1,
+    model: '',
+    model_id: '',
+    provider_id: '',
+    current_node_id: 'node-hello',
+    total_tokens: {},
+  };
+
+  useConversationStore.setState({
+    conversations: [currentConversation],
+    currentConversation,
+    messages: [{ id: 'msg-a', role: 'user', content: '你好', node_id: 'node-hello' }],
+    branches: {},
+    currentNodeId: 'node-hello',
+    loading: false,
+    error: null,
+  });
+
+  useConversationStore.getState().setCurrentNodeIdLocal('node-openai');
+
+  const state = useConversationStore.getState();
+  assert.equal(state.currentNodeId, 'node-openai');
+  assert.equal(state.currentConversation.current_node_id, 'node-openai');
+  assert.equal(state.conversations[0].current_node_id, 'node-openai');
+}
+
 async function main() {
   await testDeleteNodeRefreshesTreeData();
+  await testRefreshMessagesUsesHistoryTipInsteadOfStaleConversationList();
+  await testSwitchNodeUpdatesCurrentConversationSnapshot();
+  testSetCurrentNodeIdLocalKeepsSnapshotsInSync();
   console.log('conversationStore tests passed');
 }
 

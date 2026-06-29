@@ -6,15 +6,15 @@ from pydantic import BaseModel
 import asyncio
 import json
 import logging
-from time import time
 from ...core.chat.chat_manager import ChatManager
-from ..dependencies import get_chat_manager
+from ..dependencies import get_chat_manager, get_run_manager
 from ...core.config.types import Message, StreamChunk
+from ...core.runs import RunKind, RunManager, RunNotFoundError, RunStatus
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
-_STREAM_DONE = object()
-_STREAM_SESSIONS: dict[str, "DetachedStreamSession"] = {}
+_DEFAULT_RUN_MANAGER = RunManager()
+_STREAM_SESSIONS: dict[str, "LegacyRunStreamSession"] = {}
 
 class SendMessageRequest(BaseModel):
     content: str
@@ -28,54 +28,24 @@ class SendMessageRequest(BaseModel):
     tool_permission_mode: Optional[str] = None
 
 
-class DetachedStreamSession:
-    def __init__(self, conversation_id: str):
+class LegacyRunStreamSession:
+    def __init__(self, run_manager: RunManager, run_id: str, conversation_id: str):
+        self.run_manager = run_manager
+        self.run_id = run_id
         self.conversation_id = conversation_id
         self.node_id: str | None = None
-        self.events: list[str] = []
-        self.done = False
-        self.created_at = time()
-        self.updated_at = self.created_at
-        self._condition = asyncio.Condition()
-
-    async def append(self, event: str, node_id: str | None = None) -> None:
-        async with self._condition:
-            if node_id:
-                self.node_id = node_id
-            self.events.append(event)
-            self.updated_at = time()
-            self._condition.notify_all()
-
-    async def finish(self) -> None:
-        async with self._condition:
-            self.done = True
-            self.updated_at = time()
-            self._condition.notify_all()
 
     async def subscribe(self, start_index: int = 0) -> AsyncIterator[str]:
-        index = max(0, start_index)
-        while True:
-            async with self._condition:
-                while index >= len(self.events) and not self.done:
-                    await self._condition.wait()
-                if index < len(self.events):
-                    event = self.events[index]
-                    index += 1
-                elif self.done:
-                    break
-                else:
-                    continue
+        async for event in _subscribe_sse(self.run_manager, self.run_id, start_index):
             yield event
 
     def snapshot(self) -> Dict[str, Any]:
-        return {
-            "conversation_id": self.conversation_id,
-            "node_id": self.node_id,
-            "event_count": len(self.events),
-            "done": self.done,
-            "created_at": self.created_at,
-            "updated_at": self.updated_at,
-        }
+        run = self.run_manager.get_run(self.run_id) or {}
+        return _run_to_active_stream_info(run)
+
+
+def _resolve_run_manager(run_manager: Any = None) -> RunManager:
+    return run_manager if isinstance(run_manager, RunManager) else _DEFAULT_RUN_MANAGER
 
 
 def build_stream_chunk_data(chunk: StreamChunk, conversation_id: str) -> Dict[str, Any]:
@@ -84,6 +54,9 @@ def build_stream_chunk_data(chunk: StreamChunk, conversation_id: str) -> Dict[st
         "status": chunk.get("status", "content"),
         "content": chunk.get("content", ""),
         "node_id": chunk.get("node_id"),
+        "target_node_id": chunk.get("target_node_id") or chunk.get("node_id"),
+        "run_id": chunk.get("run_id"),
+        "event_index": chunk.get("event_index"),
         "conversation_id": chunk.get("conversation_id", conversation_id),
         "error": chunk.get("error"),
         "tokens_used": chunk.get("tokens_used", 0),
@@ -114,15 +87,58 @@ def _stream_error_chunk(conversation_id: str, error: str) -> Dict[str, Any]:
     }
 
 
+def _run_to_active_stream_info(run: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "run_id": run.get("run_id"),
+        "conversation_id": run.get("conversation_id"),
+        "node_id": run.get("target_node_id"),
+        "target_node_id": run.get("target_node_id"),
+        "kind": run.get("kind"),
+        "status": run.get("status"),
+        "event_count": run.get("event_count", 0),
+        "done": run.get("status") in {RunStatus.COMPLETED.value, RunStatus.FAILED.value, RunStatus.CANCELLED.value},
+        "created_at": run.get("created_at"),
+        "updated_at": run.get("updated_at"),
+    }
+
+
+async def _subscribe_sse(run_manager: RunManager, run_id: str, from_event: int = 0) -> AsyncIterator[str]:
+    try:
+        async for payload in run_manager.subscribe(run_id, from_event):
+            if payload.get("type") == "run_finished":
+                continue
+            yield _format_sse_data(payload)
+    except RunNotFoundError:
+        yield _format_sse_data({"status": "error", "error": "运行不存在或已结束", "run_id": run_id})
+    yield _format_sse_data("[DONE]")
+
+
 async def detached_stream_event_generator(
     conversation_id: str,
     request: SendMessageRequest,
     chat_manager: ChatManager,
+    run_manager: RunManager | None = None,
 ) -> AsyncIterator[str]:
     """Stream SSE events without tying generation lifetime to the client socket."""
-    session = DetachedStreamSession(conversation_id)
+    run_manager = _resolve_run_manager(run_manager)
+    run = await run_manager.create_run(
+        conversation_id=conversation_id,
+        kind=RunKind.CHAT,
+        anchor_node_id=request.node_id,
+        summary=request.content[:80],
+        metadata={
+            "model_id": request.model_id,
+            "provider_id": request.provider_id,
+            "reasoning_effort": request.reasoning_effort,
+            "thinking_enabled": request.thinking_enabled,
+            "tool_permission_mode": request.tool_permission_mode,
+        },
+    )
 
     async def produce() -> None:
+        final_status = RunStatus.COMPLETED
+        final_error: str | None = None
+        bound_node_id: str | None = None
         try:
             async for chunk in chat_manager.send_message_stream(
                 conversation_id=conversation_id,
@@ -135,38 +151,51 @@ async def detached_stream_event_generator(
                 import_files=request.import_files,
                 image_refs=request.image_refs,
                 tool_permission_mode=request.tool_permission_mode,
+                run_id=run.run_id,
             ):
                 chunk_data = build_stream_chunk_data(chunk, conversation_id)
-                await session.append(
-                    _format_sse_data(chunk_data),
-                    chunk_data.get("node_id"),
-                )
-                if session.node_id:
-                    _STREAM_SESSIONS[session.node_id] = session
+                node_id = chunk_data.get("node_id")
+                if node_id and node_id != bound_node_id:
+                    bound_node_id = node_id
+                    await run_manager.bind_target_node(run.run_id, node_id)
+                    legacy_session = LegacyRunStreamSession(run_manager, run.run_id, conversation_id)
+                    legacy_session.node_id = node_id
+                    _STREAM_SESSIONS[node_id] = legacy_session
+                    chunk_data["target_node_id"] = node_id
+                    if await run_manager.is_stop_requested(run.run_id):
+                        await chat_manager.stop_stream(node_id)
+                await run_manager.append_event(run.run_id, chunk_data)
+                if chunk_data.get("status") == "error":
+                    final_status = RunStatus.FAILED
+                    final_error = chunk_data.get("error")
+                elif chunk_data.get("status") == "stopped":
+                    final_status = RunStatus.CANCELLED
 
-            await session.append(_format_sse_data("[DONE]"))
         except Exception as e:
             logger.exception("Detached stream failed for conversation %s", conversation_id)
-            await session.append(_format_sse_data(_stream_error_chunk(conversation_id, str(e))))
+            final_status = RunStatus.FAILED
+            final_error = str(e)
+            await run_manager.append_event(run.run_id, _stream_error_chunk(conversation_id, str(e)))
         finally:
-            await session.finish()
-            if session.node_id:
-                _STREAM_SESSIONS.pop(session.node_id, None)
+            await run_manager.finish_run(run.run_id, final_status, final_error)
+            if bound_node_id:
+                _STREAM_SESSIONS.pop(bound_node_id, None)
 
     asyncio.create_task(produce())
-    async for event in session.subscribe():
+    async for event in _subscribe_sse(run_manager, run.run_id, 0):
         yield event
 
 @router.post("/conversations/{conversation_id}/messages/stream")
 async def stream_message(
     conversation_id: str,
     request: SendMessageRequest,
-    chat_manager: ChatManager = Depends(get_chat_manager)
+    chat_manager: ChatManager = Depends(get_chat_manager),
+    run_manager: RunManager = Depends(get_run_manager),
 ):
     """流式发送消息 - 返回 SSE 格式"""
     
     return StreamingResponse(
-        detached_stream_event_generator(conversation_id, request, chat_manager),
+        detached_stream_event_generator(conversation_id, request, chat_manager, run_manager),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -177,22 +206,29 @@ async def stream_message(
 
 
 @router.get("/conversations/{conversation_id}/messages/streams/active", response_model=List[Dict[str, Any]])
-async def get_active_streams(conversation_id: str):
+async def get_active_streams(
+    conversation_id: str,
+    run_manager: RunManager = Depends(get_run_manager),
+):
     """获取当前对话仍在生成中的可重连流。"""
+    run_manager = _resolve_run_manager(run_manager)
     return [
-        session.snapshot()
-        for session in _STREAM_SESSIONS.values()
-        if session.conversation_id == conversation_id and not session.done and session.node_id
+        _run_to_active_stream_info(run)
+        for run in run_manager.list_active(conversation_id)
+        if run.get("kind") == RunKind.CHAT.value and run.get("target_node_id")
     ]
 
 
 @router.get("/conversations/messages/streams/active", response_model=List[Dict[str, Any]])
-async def get_all_active_streams():
+async def get_all_active_streams(
+    run_manager: RunManager = Depends(get_run_manager),
+):
     """获取所有仍在生成中的可重连流。"""
+    run_manager = _resolve_run_manager(run_manager)
     return [
-        session.snapshot()
-        for session in _STREAM_SESSIONS.values()
-        if not session.done and session.node_id
+        _run_to_active_stream_info(run)
+        for run in run_manager.list_active()
+        if run.get("kind") == RunKind.CHAT.value and run.get("target_node_id")
     ]
 
 
@@ -201,14 +237,20 @@ async def attach_stream_message(
     conversation_id: str,
     node_id: str,
     from_event: int = 0,
+    run_manager: RunManager = Depends(get_run_manager),
 ):
     """重新订阅仍在运行的流式消息。"""
-    session = _STREAM_SESSIONS.get(node_id)
-    if not session or session.conversation_id != conversation_id:
+    run_manager = _resolve_run_manager(run_manager)
+    run = run_manager.find_active_by_target(
+        conversation_id=conversation_id,
+        target_node_id=node_id,
+        kind=RunKind.CHAT,
+    )
+    if not run:
         raise HTTPException(status_code=404, detail="流式消息不存在或已结束")
 
     return StreamingResponse(
-        session.subscribe(from_event),
+        _subscribe_sse(run_manager, str(run["run_id"]), from_event),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -221,12 +263,20 @@ async def attach_stream_message(
 async def stop_stream_message(
     conversation_id: str,
     node_id: str,
-    chat_manager: ChatManager = Depends(get_chat_manager)
+    chat_manager: ChatManager = Depends(get_chat_manager),
+    run_manager: RunManager = Depends(get_run_manager),
 ):
     """停止流式消息"""
     try:
         if not chat_manager.storage.index.get(conversation_id):
             raise HTTPException(status_code=404, detail="对话不存在")
+        run = run_manager.find_active_by_target(
+            conversation_id=conversation_id,
+            target_node_id=node_id,
+            kind=RunKind.CHAT,
+        )
+        if run:
+            await run_manager.request_stop(str(run["run_id"]))
         await chat_manager.stop_stream(node_id)
         return {"detail": "流式消息已停止"}
     except HTTPException:

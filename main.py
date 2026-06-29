@@ -11,7 +11,7 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 # ---------- 导入路由 ----------
-from backend.api.routes import capabilities, config, conversations, messages, models, prompts, tool_approvals, tool_results
+from backend.api.routes import agents, capabilities, config, conversations, messages, models, prompts, runs, tool_approvals, tool_results, workflows
 
 # ---------- 导入核心 ----------
 from backend.core.chat.chat_manager import ChatManager
@@ -21,6 +21,9 @@ from backend.core.capabilities.bootstrap import (
 )
 from backend.core.model.model_manager import ModelManager
 from backend.core.config.config import Config
+from backend.core.agents import SubagentExecutor
+from backend.core.runs import RunManager
+from backend.core.workflows import WorkflowManager
 from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
 from backend.core.tools.orchestrator import ToolOrchestrator
@@ -72,6 +75,7 @@ async def startup_event():
     tool_manager = ToolManager(runtime_config)
     await tool_manager.init()
     approval_manager = ApprovalManager()
+    run_manager = RunManager()
     logical_sandbox = LogicalSandbox.for_config(runtime_config, Path.cwd())
     tool_orchestrator = ToolOrchestrator(
         tool_manager=tool_manager,
@@ -82,6 +86,15 @@ async def startup_event():
     chat_manager = ChatManager(model_manager, chat_storage, prompt_storage, tool_manager)
     chat_manager.capability_registry = capability_registry
     chat_manager.tool_orchestrator = tool_orchestrator
+    subagent_executor = SubagentExecutor(
+        chat_manager=chat_manager,
+        run_manager=run_manager,
+        capability_registry=capability_registry,
+    )
+    workflow_manager = WorkflowManager(
+        run_manager=run_manager,
+        subagent_executor=subagent_executor,
+    )
 
     app.state.config_manager = config_manager
     app.state.project_root = PROJECT_ROOT
@@ -89,8 +102,11 @@ async def startup_event():
     app.state.model_manager = model_manager
     app.state.tool_manager = tool_manager
     app.state.approval_manager = approval_manager
+    app.state.run_manager = run_manager
     app.state.tool_orchestrator = tool_orchestrator
     app.state.chat_manager = chat_manager
+    app.state.subagent_executor = subagent_executor
+    app.state.workflow_manager = workflow_manager
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -107,6 +123,9 @@ app.include_router(prompts.router,        prefix="",               tags=["提示
 app.include_router(tool_approvals.router, prefix="", tags=["工具审批"])
 app.include_router(tool_results.router, prefix="", tags=["工具结果"])
 app.include_router(capabilities.router, prefix="", tags=["能力"])
+app.include_router(runs.router, prefix="", tags=["运行"])
+app.include_router(agents.router, prefix="", tags=["Agent"])
+app.include_router(workflows.router, prefix="", tags=["Workflow"])
 
 if __name__ == "__main__":
     uvicorn.run(

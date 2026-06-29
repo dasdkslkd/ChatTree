@@ -43,13 +43,27 @@ class FakeProvider:
                               "total_tokens": self._total,
                               "source": "api",
                               "raw": {"total_tokens": self._total},
-                          })
+                           })
+
+
+class CapturingProvider(FakeProvider):
+    def __init__(self):
+        super().__init__(total_tokens=1, deltas=("ok",))
+        self.calls = []
+
+    async def generate_response_stream(self, model, messages, stream_controller: StreamController = None, **kw):
+        self.calls.append({
+            "node_id": stream_controller.node_id,
+            "messages": [(m.get("role"), m.get("content")) for m in messages],
+        })
+        async for chunk in super().generate_response_stream(model, messages, stream_controller, **kw):
+            yield chunk
 
 
 class FakeModelManager:
-    def __init__(self):
+    def __init__(self, provider=None):
         self.model_list = {"fake": ["fake-model"]}
-        self._p = FakeProvider()
+        self._p = provider or FakeProvider()
 
     def get_model(self, provider, is_async=False):
         return self._p
@@ -58,6 +72,44 @@ class FakeModelManager:
 async def drain(stream):
     async for _ in stream:
         pass
+
+
+def _role_value(role):
+    return getattr(role, "value", role)
+
+
+def test_concurrent_streams_without_explicit_node_id_use_same_start_parent():
+    async def run():
+        tmp = tempfile.mkdtemp(prefix="chattree_test_")
+        try:
+            provider = CapturingProvider()
+            storage = ChatStorage(storage_dir=os.path.join(tmp, "conversations"))
+            prompts = PromptStorage(storage_dir=os.path.join(tmp, "prompts"))
+            cm = ChatManager(FakeModelManager(provider), storage, prompts)
+
+            conv = cm.create_conversation("race parent test")
+            cid = conv.metadata["id"]
+            root_id = conv.root_node_id
+
+            await asyncio.gather(
+                drain(cm.send_message_stream(cid, "msg A", model_id="fake-model")),
+                drain(cm.send_message_stream(cid, "msg B", model_id="fake-model")),
+            )
+
+            reloaded = Conversation.from_dict(storage.load(cid))
+            non_root = [node for nid, node in reloaded.nodes.items() if nid != root_id]
+            assert len(non_root) == 2
+            assert {node["parent_id"] for node in non_root} == {root_id}
+            assert {node["user_message"]["content"] for node in non_root} == {"msg A", "msg B"}
+            for call in provider.calls:
+                visible_user_messages = [
+                    content for role, content in call["messages"] if _role_value(role) == "user"
+                ]
+                assert visible_user_messages in (["msg A"], ["msg B"])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    asyncio.run(run())
 
 
 async def main():

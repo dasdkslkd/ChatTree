@@ -282,6 +282,7 @@ class ChatManager:
         import_files: Optional[List[Dict[str, Any]]] = None,
         image_refs: Optional[List[Dict[str, Any]]] = None,
         tool_permission_mode: Optional[str] = None,
+        run_id: Optional[str] = None,
     ) -> AsyncIterator[StreamChunk]:
         """
         异步流式发送消息
@@ -296,6 +297,7 @@ class ChatManager:
                 status=StreamStatus.ERROR,
                 node_id=None,
                 conversation_id=conversation_id,
+                run_id=run_id,
                 content="",
                 error="对话不存在",
                 tokens_used=0
@@ -318,6 +320,7 @@ class ChatManager:
                 status=StreamStatus.ERROR,
                 node_id=None,
                 conversation_id=conversation_id,
+                run_id=run_id,
                 content="",
                 error="未指定模型ID",
                 tokens_used=0
@@ -339,6 +342,7 @@ class ChatManager:
                 content="",
                 node_id=None,
                 conversation_id=conversation_id,
+                run_id=run_id,
                 error=f"无法找到模型 {target_model} 对应的提供商",
                 tokens_used=0
             )
@@ -352,6 +356,7 @@ class ChatManager:
                 content="",
                 node_id=None,
                 conversation_id=conversation_id,
+                run_id=run_id,
                 error=f"无法初始化提供商 {target_provider}",
                 tokens_used=0
             )
@@ -398,6 +403,11 @@ class ChatManager:
         eff_thinking = normalize_thinking(eff_thinking, meta)
         eff_tool_permission_mode = normalize_permission_mode(tool_permission_mode)
         logger.info(f"Stream reasoning: effort={eff_effort}, thinking={eff_thinking}")
+        requested_parent_node_id = node_id or preview.current_node_id
+        if not node_id and requested_parent_node_id in self._active_controllers:
+            active_parent = preview.nodes.get(requested_parent_node_id, {}).get("parent_id")
+            if active_parent:
+                requested_parent_node_id = active_parent
 
         # 创建用户消息
         user_msg = Message({
@@ -425,10 +435,15 @@ class ChatManager:
             if conversation is None:
                 yield StreamChunk(
                     status=StreamStatus.ERROR, content="", node_id=None,
-                    conversation_id=conversation_id, error="对话不存在", tokens_used=0)
+                    conversation_id=conversation_id, run_id=run_id, error="对话不存在", tokens_used=0)
                 return
             if node_id:
                 conversation.switch_to_node(node_id)
+            elif requested_parent_node_id and requested_parent_node_id in conversation.nodes:
+                parent_id = requested_parent_node_id
+                if parent_id in self._active_controllers:
+                    parent_id = conversation.nodes.get(parent_id, {}).get("parent_id") or parent_id
+                conversation.switch_to_node(parent_id)
             current_node_id = conversation.current_node_id
             if self.capability_registry is not None:
                 skill_names = collect_skill_injection_names(
@@ -460,9 +475,19 @@ class ChatManager:
         # 创建流控制器（在锁外，避免把网络流式包进锁里阻塞同对话其他分支）
         controller = StreamController(
             node_id=new_node["id"],
-            conversation_id=conversation.metadata["id"]
+            conversation_id=conversation.metadata["id"],
+            run_id=run_id,
         )
         self._active_controllers[new_node["id"]] = controller
+        yield StreamChunk(
+            status=StreamStatus.START,
+            content=None,
+            node_id=new_node["id"],
+            target_node_id=new_node["id"],
+            conversation_id=conversation_id,
+            run_id=run_id,
+            tokens_used=0,
+        )
 
         # 准备消息链（使用锁内加载的最新 conversation）
         messages = self._prepare_messages_for_api_with_conversation(conversation)
@@ -523,6 +548,20 @@ class ChatManager:
             tool_round = 0
 
             while True:
+                if await controller.is_stopped():
+                    generation_status = "stopped"
+                    yield StreamChunk(
+                        status=StreamStatus.STOPPED,
+                        content="",
+                        node_id=new_node["id"],
+                        target_node_id=new_node["id"],
+                        conversation_id=conversation_id,
+                        run_id=run_id,
+                        error=None,
+                        tokens_used=tokens_used,
+                    )
+                    break
+
                 round_content = ""
                 round_reasoning = ""
                 round_status = "completed"
@@ -570,6 +609,8 @@ class ChatManager:
                         continue
 
                     chunk["conversation_id"] = conversation_id
+                    if run_id:
+                        chunk["run_id"] = run_id
                     yield chunk
 
                 if round_status != "completed":
@@ -577,6 +618,8 @@ class ChatManager:
                     final_reasoning = round_reasoning
                     if complete_chunk:
                         complete_chunk["conversation_id"] = conversation_id
+                        complete_chunk["run_id"] = run_id
+                        complete_chunk["target_node_id"] = new_node["id"]
                         yield complete_chunk
                     break
 
@@ -585,6 +628,8 @@ class ChatManager:
                     final_reasoning = round_reasoning
                     if complete_chunk:
                         complete_chunk["conversation_id"] = conversation_id
+                        complete_chunk["run_id"] = run_id
+                        complete_chunk["target_node_id"] = new_node["id"]
                         yield complete_chunk
                     break
 
@@ -594,6 +639,8 @@ class ChatManager:
                     final_reasoning = round_reasoning
                     if complete_chunk:
                         complete_chunk["conversation_id"] = conversation_id
+                        complete_chunk["run_id"] = run_id
+                        complete_chunk["target_node_id"] = new_node["id"]
                         yield complete_chunk
                     break
 
@@ -604,7 +651,9 @@ class ChatManager:
                         status=StreamStatus.ERROR,
                         content="",
                         node_id=new_node["id"],
+                        target_node_id=new_node["id"],
                         conversation_id=conversation_id,
+                        run_id=run_id,
                         error=error_message,
                         tokens_used=tokens_used,
                     )
@@ -706,7 +755,9 @@ class ChatManager:
                         status=StreamStatus.CONTENT,
                         content=None,
                         node_id=new_node["id"],
+                        target_node_id=new_node["id"],
                         conversation_id=conversation_id,
+                        run_id=run_id,
                         error=None,
                         tokens_used=0,
                         event_type="tool_result",
@@ -732,7 +783,9 @@ class ChatManager:
                 status=StreamStatus.ERROR,
                 content="",
                 node_id=new_node["id"],
+                target_node_id=new_node["id"],
                 conversation_id=conversation_id,
+                run_id=run_id,
                 error=error_message,
                 tokens_used=tokens_used,
             )

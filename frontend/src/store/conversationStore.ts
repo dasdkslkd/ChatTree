@@ -31,6 +31,7 @@ interface ConversationActions {
   updateConversationTitle: (id: string, title: string) => Promise<void>;
   clearCurrentConversation: () => void;
   switchNode: (nodeId: string) => Promise<void>;
+  setCurrentNodeIdLocal: (nodeId: string) => void;
   deleteNode: (nodeId: string) => Promise<void>;
   abortStreaming: () => void;
   clearError: () => void;
@@ -121,13 +122,16 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
               conversationApi.getBranches(id),
             ]);
             const conversation = get().conversations.find((c) => c.id === id);
+            const currentNodeId = latestNodeIdFromHistory(history) || conversation?.current_node_id || null;
             set({
-              currentConversation: conversation || null,
+              currentConversation: conversation
+                ? { ...conversation, current_node_id: currentNodeId || conversation.current_node_id }
+                : null,
               messages: history,
               branches: branches || {},
               treeData: null,
               streamingContent: '',
-              currentNodeId: conversation?.current_node_id || null,
+              currentNodeId,
               pendingScrollNodeId: null,
             });
             // 同步模型选择到 modelStore
@@ -191,18 +195,43 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
             const history = await messageApi.getHistory(currentConversation.id);
             const branches = await conversationApi.getBranches(currentConversation.id);
 
-            set({
+            set((state) => ({
               messages: history,
               branches: branches || {},
               currentNodeId: nodeId,
+              currentConversation: state.currentConversation
+                ? { ...state.currentConversation, current_node_id: nodeId }
+                : state.currentConversation,
+              conversations: state.conversations.map((conversation) =>
+                conversation.id === currentConversation.id
+                  ? { ...conversation, current_node_id: nodeId }
+                  : conversation
+              ),
               streamingContent: '',
               pendingScrollNodeId: nodeId,
-            });
+            }));
           } catch (err: any) {
             set({ error: err.message });
           } finally {
             set({ loading: false });
           }
+        },
+
+        setCurrentNodeIdLocal: (nodeId) => {
+          const currentConversationId = get().currentConversation?.id;
+          set((state) => ({
+            currentNodeId: nodeId,
+            currentConversation: state.currentConversation
+              ? { ...state.currentConversation, current_node_id: nodeId }
+              : state.currentConversation,
+            conversations: currentConversationId
+              ? state.conversations.map((conversation) =>
+                conversation.id === currentConversationId
+                  ? { ...conversation, current_node_id: nodeId }
+                  : conversation
+              )
+              : state.conversations,
+          }));
         },
 
         abortStreaming: () => set({ isStreaming: false, streamingContent: '' }),
@@ -238,11 +267,20 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
                 // 写入最新结果以保持一致。ok=true 时返回 true 让调用方清理乐观气泡；
                 // 重试用尽仍未落地则返回 false，调用方保留气泡、择机再刷新。
                 const conv = get().conversations.find((c) => c.id === conversationId);
-                set({
+                const currentNodeId = latestNodeIdFromHistory(history) || conv?.current_node_id || get().currentNodeId;
+                set((state) => ({
                   messages: history,
                   branches: branches || {},
-                  currentNodeId: conv?.current_node_id || get().currentNodeId,
-                });
+                  currentNodeId,
+                  currentConversation: state.currentConversation?.id === conversationId
+                    ? { ...state.currentConversation, current_node_id: currentNodeId || state.currentConversation.current_node_id }
+                    : state.currentConversation,
+                  conversations: state.conversations.map((conversation) =>
+                    conversation.id === conversationId
+                      ? { ...conversation, current_node_id: currentNodeId || conversation.current_node_id }
+                      : conversation
+                  ),
+                }));
                 return ok;
               }
               // 后端尚未保存完成，稍候重试（保留乐观气泡）
@@ -324,6 +362,14 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
     )
   )
 );
+
+function latestNodeIdFromHistory(history: Message[]): string | null {
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const nodeId = history[index]?.node_id;
+    if (nodeId) return nodeId;
+  }
+  return null;
+}
 
 // 直接导出 zustand store hook（与 conversationStore 别名、modelStore/navigationStore 一致），
 // 保留 selector 重载 useConversationStore((s) => ...) 与静态 useConversationStore.getState()。

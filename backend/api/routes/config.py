@@ -71,6 +71,13 @@ def _sync_runtime_managers(app, config_data: Dict[str, Any], model_manager, tool
         chat_manager.tool_manager = tool_manager
         chat_manager.tool_orchestrator = tool_orchestrator
         chat_manager.capability_registry = capability_registry
+    subagent_executor = getattr(app.state, 'subagent_executor', None)
+    if subagent_executor is not None:
+        subagent_executor.chat_manager = chat_manager
+        subagent_executor.capability_registry = capability_registry
+    workflow_manager = getattr(app.state, 'workflow_manager', None)
+    if workflow_manager is not None and subagent_executor is not None:
+        workflow_manager.subagent_executor = subagent_executor
 
 
 def _runtime_config_for_app(app, config_data: Dict[str, Any]) -> Dict[str, Any]:

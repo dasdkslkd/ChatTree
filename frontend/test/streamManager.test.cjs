@@ -126,17 +126,20 @@ function chunk(overrides) {
 
 const { StreamManager } = require(path.join(__dirname, '../src/services/streamManager.ts'));
 const { messageApi } = require(path.join(__dirname, '../src/api/message.ts'));
+const { runsApi } = require(path.join(__dirname, '../src/api/runs.ts'));
 const { getGenerationStatusText, getStreamStatusText } = require(path.join(__dirname, '../src/utils/generationStatus.ts'));
 
 async function withManager(run) {
   resetTimers();
   installWindowTimers();
   const originalStream = messageApi.stream;
+  const originalStop = runsApi.stop;
   const manager = new StreamManager();
   try {
     await run(manager);
   } finally {
     messageApi.stream = originalStream;
+    runsApi.stop = originalStop;
     manager.resetAll();
   }
 }
@@ -326,6 +329,100 @@ async function testStreamErrorStatePreservesRealMessage() {
   });
 }
 
+async function testBlockingRunAliasesFollowServerRunId() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    messageApi.stream = controlled.stream;
+    const running = manager.startStream('conv-1', { content: 'hello' });
+    const clientRunId = manager.getConversationStates('conv-1')[0].runId;
+
+    await controlled.push(chunk({
+      run_id: 'run-server-1',
+      status: 'content',
+      content: 'hello',
+    }));
+
+    try {
+      assert.equal(manager.areRunsInactive([clientRunId]), false);
+      await controlled.push(chunk({
+        run_id: 'run-server-1',
+        status: 'complete',
+        content: null,
+      }));
+      assert.equal(manager.areRunsInactive([clientRunId]), true);
+    } finally {
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
+async function testGetStatePrefersActiveStreamingRunOverNewerError() {
+  await withManager(async (manager) => {
+    const oldStream = createControlledStream();
+    const newStream = createControlledStream();
+    let streamCount = 0;
+    messageApi.stream = () => {
+      streamCount += 1;
+      return streamCount === 1 ? oldStream.stream() : newStream.stream();
+    };
+
+    const oldRunning = manager.startStream('conv-1', { content: 'old' });
+    await oldStream.push(chunk({
+      run_id: 'run-old',
+      node_id: 'node-old',
+      status: 'content',
+      content: 'still running',
+    }));
+    const newRunning = manager.startStream('conv-1', { content: 'new' });
+    await newStream.push(chunk({
+      run_id: 'run-new',
+      node_id: 'node-new',
+      status: 'error',
+      error: 'failed quickly',
+    }));
+
+    try {
+      const state = manager.getState('conv-1');
+      assert.equal(state.status, 'streaming');
+      assert.equal(state.runId, 'run-old');
+    } finally {
+      await oldStream.close();
+      await newStream.close();
+      await runTimersUntil(oldRunning);
+      await runTimersUntil(newRunning);
+    }
+  });
+}
+
+async function testStopUsesServerRunIdBeforeTargetNodeArrives() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    const stoppedRunIds = [];
+    messageApi.stream = controlled.stream;
+    runsApi.stop = async (runId) => {
+      stoppedRunIds.push(runId);
+    };
+    const running = manager.startStream('conv-1', { content: 'hello' });
+
+    await controlled.push({
+      type: 'run_started',
+      run_id: 'run_server_early',
+      conversation_id: 'conv-1',
+      kind: 'chat',
+      status: 'running',
+    });
+
+    try {
+      await manager.stopRun('run_server_early');
+      assert.deepEqual(stoppedRunIds, ['run_server_early']);
+    } finally {
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
 function testGenerationStatusUsesPersistedErrorMessage() {
   assert.equal(
     getGenerationStatusText({ status: 'error', error_message: 'provider authentication failed' }),
@@ -344,6 +441,9 @@ async function main() {
   await testToolCallStartCreatesRunningPlaceholder();
   await testToolCallDeltaUpdatesRunningPlaceholder();
   await testStreamErrorStatePreservesRealMessage();
+  await testBlockingRunAliasesFollowServerRunId();
+  await testGetStatePrefersActiveStreamingRunOverNewerError();
+  await testStopUsesServerRunIdBeforeTargetNodeArrives();
   testGenerationStatusUsesPersistedErrorMessage();
   console.log('streamManager tests passed');
 }

@@ -230,6 +230,19 @@ class Conversation:
                 stack.extend(self.nodes[node_id]["children_ids"])
         
         return count
+
+    def get_descendant_node_ids(self, node_id: str, include_self: bool = True) -> List[str]:
+        """返回 node_id 子树内的节点 id。"""
+        if node_id not in self.nodes:
+            return []
+        result: List[str] = []
+        stack = [node_id]
+        while stack:
+            current = stack.pop()
+            if include_self or current != node_id:
+                result.append(current)
+            stack.extend(reversed(self.nodes.get(current, {}).get("children_ids", [])))
+        return result
     
     def switch_to_node(self, node_id: str) -> bool:
         """切换到指定节点继续对话"""

@@ -54,6 +54,14 @@ class AgentDefinition:
     tools: List[str] = field(default_factory=list)
     skills: List[str] = field(default_factory=list)
     model: Optional[str] = None
+    model_id: Optional[str] = None
+    provider_id: Optional[str] = None
+    permission_mode: Optional[str] = None
+    max_tool_rounds: Optional[int] = None
+    timeout_seconds: Optional[int] = None
+    output_mode: Optional[str] = None
+    input_schema: Optional[Dict[str, Any]] = None
+    output_schema: Optional[Dict[str, Any]] = None
     max_turns: Optional[int] = None
     plugin_id: Optional[str] = None
     plugin_name: Optional[str] = None
