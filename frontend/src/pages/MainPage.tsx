@@ -861,6 +861,7 @@ export default function ChatPage() {
   const conversationSearchInputRef = useRef<HTMLInputElement>(null);
   const pendingScrollId = useRef<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const assistantTimelineCacheRef = useRef<WeakMap<object, AssistantTimelineBlock[]>>(new WeakMap());
 
   const userScrollingRef = useRef(false);
   const scrollEndTimeoutRef = useRef<number | null>(null);
@@ -876,6 +877,14 @@ export default function ChatPage() {
   }, []);
 
   const getToolPermissionDraft = useCallback(() => toolPermissionDraftRef.current, []);
+
+  const getCachedAssistantTimeline = useCallback((message: typeof messages[0]) => {
+    const cached = assistantTimelineCacheRef.current.get(message);
+    if (cached) return cached;
+    const timeline = getAssistantTimeline(message);
+    assistantTimelineCacheRef.current.set(message, timeline);
+    return timeline;
+  }, []);
 
   const updateQueuedMessages = useCallback((updater: (messages: QueuedMessage[]) => QueuedMessage[]) => {
     const next = updater(queuedMessagesRef.current);
@@ -1096,6 +1105,18 @@ export default function ChatPage() {
     (count, draft) => count + draft.pendingApprovalList.length,
     0,
   );
+  const coveredToolMessages = useMemo(() => {
+    const ids = new Set<string>();
+    const names = new Set<string>();
+    for (const message of messages) {
+      if (message.role !== 'assistant') continue;
+      for (const item of getAssistantToolItems(message)) {
+        if (item.key) ids.add(item.key);
+        if (item.name) names.add(item.name);
+      }
+    }
+    return { ids, names };
+  }, [messages]);
   const visibleQueuedMessages = useMemo(
     () => queuedMessages
       .filter((message) =>
@@ -2019,7 +2040,9 @@ export default function ChatPage() {
     }
 
     if (m.role === 'tool') {
-      if (isToolMessageCovered(m, messages.slice(0, index))) return null;
+      const coveredById = m.tool_call_id ? coveredToolMessages.ids.has(m.tool_call_id) : false;
+      const coveredByName = !m.tool_call_id && m.name ? coveredToolMessages.names.has(m.name) : false;
+      if (coveredById || coveredByName || isToolMessageCovered(m, messages.slice(0, index))) return null;
       return (
         <div
           key={m.id}
@@ -2039,7 +2062,7 @@ export default function ChatPage() {
     const fileNames = m.role === 'user' ? getUserImportFileNames(m) : [];
     const imageRefs = m.role === 'user' ? getUserImageRefs(m) : [];
     const displayContent = m.role === 'user' ? getUserDisplayContent(m) : m.content;
-    const assistantTimeline = m.role === 'assistant' ? getAssistantTimeline(m) : [];
+    const assistantTimeline = m.role === 'assistant' ? getCachedAssistantTimeline(m) : [];
     const hasDisplayContent = displayContent.trim().length > 0;
 
     return (

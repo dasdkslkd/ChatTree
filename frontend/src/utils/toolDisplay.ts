@@ -44,8 +44,35 @@ function stringifyDisplay(value: unknown): string {
   }
 }
 
+function stringifyInline(value: unknown): string {
+  if (value == null) return '';
+  if (typeof value === 'string') return compact(value, 240);
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (Array.isArray(value)) {
+    return compact(value.map((item) => stringifyInline(item)).filter(Boolean).join(', '), 240);
+  }
+  try {
+    return compact(JSON.stringify(value), 240);
+  } catch {
+    return compact(String(value), 240);
+  }
+}
+
+function formatKeyValueRecord(record: Record<string, unknown>): string {
+  const hiddenKeys = new Set(['tool_result_id', 'toolResultId', 'read_more', 'total_chars', 'truncated']);
+  const lines = Object.entries(record)
+    .filter(([key, value]) => !hiddenKeys.has(key) && value !== undefined && value !== null && value !== '')
+    .map(([key, value]) => `${key}: ${stringifyInline(value)}`)
+    .filter((line) => line.trim().length > 0);
+  return lines.join('\n');
+}
+
 export function formatToolArguments(value: unknown): string {
-  return stringifyDisplay(parseJsonString(value));
+  const parsed = parseJsonString(value);
+  const record = asRecord(parsed);
+  if (record) return formatKeyValueRecord(record);
+  if (Array.isArray(parsed)) return parsed.map((item) => stringifyInline(item)).join('\n');
+  return stringifyDisplay(parsed);
 }
 
 export function summarizeToolCall(toolName: string, rawArguments: unknown): string {
@@ -249,23 +276,70 @@ function formatStructuredError(error: unknown): string {
 
 function formatCommandRecord(record: Record<string, unknown>): string | null {
   const hasCommandShape =
+    Object.prototype.hasOwnProperty.call(record, 'command') ||
     Object.prototype.hasOwnProperty.call(record, 'stdout') ||
     Object.prototype.hasOwnProperty.call(record, 'stderr') ||
     Object.prototype.hasOwnProperty.call(record, 'exit_code') ||
     Object.prototype.hasOwnProperty.call(record, 'timed_out');
   if (!hasCommandShape) return null;
 
+  const command = typeof record.command === 'string' ? record.command : '';
   const stdout = typeof record.stdout === 'string' ? record.stdout : '';
   const stderr = typeof record.stderr === 'string' ? record.stderr : '';
   const exitCode = record.exit_code;
   const timedOut = record.timed_out === true;
+  const lines: string[] = [];
 
-  if (stdout && stderr) return `${stdout}\n[stderr]\n${stderr}`;
-  if (stdout) return stdout;
-  if (stderr) return stderr;
-  if (timedOut) return 'Command timed out.';
-  if (typeof exitCode === 'number') return `exit_code: ${exitCode}`;
-  return '';
+  if (command) lines.push(`命令: ${command}`);
+  if (typeof exitCode === 'number') lines.push(`退出码: ${exitCode}`);
+  if (timedOut) lines.push('状态: 超时');
+  if (stdout.trim()) lines.push(`输出:\n${stdout.trimEnd()}`);
+  if (stderr.trim()) lines.push(`错误输出:\n${stderr.trimEnd()}`);
+  if (lines.length > 0) return lines.join('\n');
+  return formatKeyValueRecord(record);
+}
+
+function resultTitle(record: Record<string, unknown>, fallback: string): string {
+  const title = record.title ?? record.name ?? record.heading;
+  return typeof title === 'string' && title.trim() ? title.trim() : fallback;
+}
+
+function resultUrl(record: Record<string, unknown>): string {
+  const url = record.url ?? record.link ?? record.href;
+  return typeof url === 'string' ? url.trim() : '';
+}
+
+function resultSnippet(record: Record<string, unknown>): string {
+  const snippet = record.snippet ?? record.content ?? record.text ?? record.description;
+  return typeof snippet === 'string' ? compact(snippet, 300) : '';
+}
+
+function formatResultList(results: unknown[]): string | null {
+  if (results.length === 0) return '';
+  const blocks = results.slice(0, 8).map((item, index) => {
+    const record = asRecord(item);
+    if (!record) return stringifyInline(item);
+    const lines = [`结果 ${index + 1}: ${resultTitle(record, `#${index + 1}`)}`];
+    const url = resultUrl(record);
+    const snippet = resultSnippet(record);
+    if (url) lines.push(url);
+    if (snippet) lines.push(snippet);
+    if (lines.length === 1) {
+      const fallback = formatKeyValueRecord(record);
+      if (fallback) lines.push(fallback);
+    }
+    return lines.join('\n');
+  });
+  return blocks.join('\n\n');
+}
+
+function formatStructuredResultRecord(record: Record<string, unknown>): string | null {
+  const resultKeys = ['results', 'items', 'organic_results', 'matches'];
+  for (const key of resultKeys) {
+    const value = record[key];
+    if (Array.isArray(value)) return formatResultList(value);
+  }
+  return null;
 }
 
 function formatParsedPayload(payload: unknown, depth = 0): string {
@@ -285,6 +359,9 @@ function formatParsedPayload(payload: unknown, depth = 0): string {
   const commandOutput = formatCommandRecord(record);
   if (commandOutput !== null) return commandOutput;
 
+  const structuredResults = formatStructuredResultRecord(record);
+  if (structuredResults !== null) return structuredResults;
+
   if (Object.prototype.hasOwnProperty.call(record, 'preview')) {
     return formatParsedPayload(record.preview, depth + 1);
   }
@@ -298,7 +375,7 @@ function formatParsedPayload(payload: unknown, depth = 0): string {
     return formatParsedPayload(record.result, depth + 1);
   }
 
-  return stringifyDisplay(record);
+  return formatKeyValueRecord(record) || stringifyDisplay(record);
 }
 
 export function formatToolOutput(toolMessage?: ToolMessageLike | null): string {

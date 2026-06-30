@@ -68,6 +68,8 @@ def build_stream_chunk_data(chunk: StreamChunk, conversation_id: str) -> Dict[st
         val = chunk.get(opt_key)
         if val is not None:
             chunk_data[opt_key] = val
+    if chunk_data.get("event_type") == "tool_result" and isinstance(chunk_data.get("tool_call"), dict):
+        chunk_data["tool_call"] = slim_tool_result_for_ui(chunk_data["tool_call"])
     return chunk_data
 
 
@@ -102,6 +104,58 @@ def _run_to_active_stream_info(run: Dict[str, Any]) -> Dict[str, Any]:
         "created_at": run.get("created_at"),
         "updated_at": run.get("updated_at"),
     }
+
+
+_HEAVY_TOOL_RESULT_FIELDS = {"raw_content", "model_visible_content"}
+
+
+def slim_tool_result_for_ui(tool_message: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a UI-safe tool message without model-only or raw result payloads."""
+    return {
+        key: value
+        for key, value in dict(tool_message).items()
+        if key not in _HEAVY_TOOL_RESULT_FIELDS
+    }
+
+
+def _slim_tool_interaction_for_ui(interaction: Any) -> Any:
+    if not isinstance(interaction, dict):
+        return interaction
+    slimmed = dict(interaction)
+    tools = slimmed.get("tools")
+    if isinstance(tools, list):
+        slimmed["tools"] = [
+            slim_tool_result_for_ui(tool) if isinstance(tool, dict) else tool
+            for tool in tools
+        ]
+    return slimmed
+
+
+def slim_message_for_ui(message: Message | Dict[str, Any]) -> Message:
+    """Slim heavy nested tool payloads before sending transcript data to the UI."""
+    slimmed: Dict[str, Any] = dict(message)
+    if slimmed.get("role") == "tool":
+        return Message(slim_tool_result_for_ui(slimmed))
+
+    tool_results = slimmed.get("tool_results")
+    if isinstance(tool_results, list):
+        slimmed["tool_results"] = [
+            slim_tool_result_for_ui(tool) if isinstance(tool, dict) else tool
+            for tool in tool_results
+        ]
+
+    tool_interactions = slimmed.get("tool_interactions")
+    if isinstance(tool_interactions, list):
+        slimmed["tool_interactions"] = [
+            _slim_tool_interaction_for_ui(interaction)
+            for interaction in tool_interactions
+        ]
+
+    return Message(slimmed)
+
+
+def slim_messages_for_ui(messages: List[Message]) -> List[Message]:
+    return [slim_message_for_ui(message) for message in messages]
 
 
 async def _subscribe_sse(run_manager: RunManager, run_id: str, from_event: int = 0) -> AsyncIterator[str]:
@@ -309,7 +363,7 @@ async def get_messages(
         conversation = chat_manager.get_conversation(conversation_id)
         if not conversation:
             raise HTTPException(status_code=404, detail="对话不存在")
-        return conversation.get_message_chain_from_node(node_id)
+        return slim_messages_for_ui(conversation.get_message_chain_from_node(node_id))
     except HTTPException:
         raise
     except Exception as e:
@@ -325,7 +379,7 @@ async def get_all_messages(
         conversation = chat_manager.get_conversation(conversation_id)
         if not conversation:
             raise HTTPException(status_code=404, detail="对话不存在")
-        return conversation.get_message_chain_from_node()
+        return slim_messages_for_ui(conversation.get_message_chain_from_node())
     except HTTPException:
         raise
     except Exception as e:

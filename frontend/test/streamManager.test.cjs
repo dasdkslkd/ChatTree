@@ -29,6 +29,14 @@ function resetTimers() {
 
 function installWindowTimers() {
   global.window = {
+    requestAnimationFrame(callback) {
+      const id = nextTimerId++;
+      timers.set(id, () => callback(Date.now()));
+      return id;
+    },
+    cancelAnimationFrame(id) {
+      timers.delete(id);
+    },
     setTimeout(callback) {
       const id = nextTimerId++;
       timers.set(id, callback);
@@ -50,6 +58,15 @@ function installWindowTimers() {
 
 async function tick() {
   await new Promise((resolve) => setImmediate(resolve));
+}
+
+async function flushTimersOnce() {
+  const pending = [...timers.entries()];
+  timers.clear();
+  for (const [, callback] of pending) {
+    callback();
+  }
+  await tick();
 }
 
 async function runTimersUntil(promise, maxSteps = 500) {
@@ -489,6 +506,36 @@ async function testRunFinishedCancelledMapsToStoppedState() {
   });
 }
 
+async function testCoalescesContentNotificationsAndFlushesCompletionImmediately() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    messageApi.stream = controlled.stream;
+    const changedIds = [];
+    const unsubscribe = manager.subscribe((conversationId) => {
+      changedIds.push(conversationId);
+    });
+    const running = manager.startStream('conv-1', { content: 'hello' });
+
+    await controlled.push(chunk({ event_type: 'text', content: 'a' }));
+    await controlled.push(chunk({ event_type: 'text', content: 'b' }));
+    assert.deepEqual(changedIds, ['conv-1']);
+
+    await flushTimersOnce();
+    assert.deepEqual(changedIds, ['conv-1', 'conv-1']);
+
+    await controlled.push(chunk({ status: 'complete', content: null }));
+    assert.deepEqual(changedIds, ['conv-1', 'conv-1', 'conv-1']);
+
+    try {
+      assert.equal(manager.getConversationStates('conv-1')[0].content, 'ab');
+    } finally {
+      unsubscribe();
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
 function testGenerationStatusUsesPersistedErrorMessage() {
   assert.equal(
     getGenerationStatusText({ status: 'error', error_message: 'provider authentication failed' }),
@@ -512,6 +559,7 @@ async function main() {
   await testStopUsesServerRunIdBeforeTargetNodeArrives();
   await testRunFinishedFailedMapsToErrorState();
   await testRunFinishedCancelledMapsToStoppedState();
+  await testCoalescesContentNotificationsAndFlushesCompletionImmediately();
   testGenerationStatusUsesPersistedErrorMessage();
   console.log('streamManager tests passed');
 }

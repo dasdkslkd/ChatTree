@@ -37,7 +37,7 @@ function testFormatsRunCommandStdout() {
     }),
   });
 
-  assert.equal(output, 'hello\n');
+  assert.equal(output, '命令: echo hello\n退出码: 0\n输出:\nhello');
 }
 
 function testUnwrapsPreviewThenFormatsStdout() {
@@ -52,7 +52,7 @@ function testUnwrapsPreviewThenFormatsStdout() {
     }),
   });
 
-  assert.equal(output, 'demo ok\n');
+  assert.equal(output, '命令: python demo.py\n退出码: 0\n输出:\ndemo ok');
 }
 
 function testExtractsContentEnvelopeAndFormatsPreview() {
@@ -73,7 +73,7 @@ function testExtractsContentEnvelopeAndFormatsPreview() {
     }),
   };
 
-  assert.equal(formatToolOutput(toolMessage), 'full preview ok\n');
+  assert.equal(formatToolOutput(toolMessage), '命令: node demo.js\n退出码: 0\n输出:\nfull preview ok');
   assert.deepEqual(extractToolResultEnvelope(toolMessage), {
     toolResultId: 'result-123',
     readMore: true,
@@ -122,13 +122,46 @@ function testFormatsRawContentWhileExtractingModelEnvelope() {
     }),
   };
 
-  assert.equal(formatToolOutput(toolMessage), 'raw stdout\n');
+  assert.equal(formatToolOutput(toolMessage), '命令: pytest -q\n退出码: 0\n输出:\nraw stdout');
   assert.deepEqual(extractToolResultEnvelope(toolMessage), {
     toolResultId: 'result-raw',
     readMore: undefined,
     preview: 'Command: pytest -q\nExit code: 0',
     totalChars: 1200,
     truncated: false,
+  });
+}
+
+function testFormatsSlimmedToolResultEnvelopeWithoutRawFields() {
+  const toolMessage = {
+    name: 'run_command',
+    tool_call_id: 'call-1',
+    tool_result_id: 'result-slim',
+    content: JSON.stringify({
+      tool_result_id: 'result-slim',
+      total_chars: 36000,
+      truncated: true,
+      preview: JSON.stringify({
+        command: 'npm test',
+        exit_code: 0,
+        stdout: 'slim preview ok\n',
+        stderr: '',
+      }),
+    }),
+  };
+
+  assert.equal(formatToolOutput(toolMessage), '命令: npm test\n退出码: 0\n输出:\nslim preview ok');
+  assert.deepEqual(extractToolResultEnvelope(toolMessage), {
+    toolResultId: 'result-slim',
+    readMore: undefined,
+    preview: JSON.stringify({
+      command: 'npm test',
+      exit_code: 0,
+      stdout: 'slim preview ok\n',
+      stderr: '',
+    }),
+    totalChars: 36000,
+    truncated: true,
   });
 }
 
@@ -198,8 +231,63 @@ function testSummarizesPatchAndCompactArguments() {
 function testFormatsToolArguments() {
   assert.equal(
     formatToolArguments('{"path":"src/main.py","limit":20}'),
-    '{\n  "path": "src/main.py",\n  "limit": 20\n}',
+    'path: src/main.py\nlimit: 20',
   );
+}
+
+function testFormatsSearchResultsAsReadableSummary() {
+  const output = formatToolOutput({
+    content: JSON.stringify({
+      preview: JSON.stringify({
+        results: [
+          {
+            title: 'OpenAI Docs',
+            url: 'https://platform.openai.com/docs',
+            content: 'Build with OpenAI models and tools.',
+          },
+          {
+            title: 'API Reference',
+            link: 'https://platform.openai.com/docs/api-reference',
+            snippet: 'Reference for endpoints.',
+          },
+        ],
+      }),
+      tool_result_id: 'search-1',
+      total_chars: 5000,
+      truncated: true,
+    }),
+  });
+
+  assert.equal(
+    output,
+    [
+      '结果 1: OpenAI Docs',
+      'https://platform.openai.com/docs',
+      'Build with OpenAI models and tools.',
+      '',
+      '结果 2: API Reference',
+      'https://platform.openai.com/docs/api-reference',
+      'Reference for endpoints.',
+    ].join('\n'),
+  );
+}
+
+function testFormatsUnknownObjectAsKeyValueSummary() {
+  const output = formatToolOutput({
+    content: JSON.stringify({
+      preview: JSON.stringify({
+        filename: 'report.csv',
+        rows: 42,
+        columns: ['date', 'close'],
+        nested: { ignored: true },
+      }),
+      tool_result_id: 'unknown-1',
+      total_chars: 1000,
+      truncated: false,
+    }),
+  });
+
+  assert.equal(output, 'filename: report.csv\nrows: 42\ncolumns: date, close\nnested: {"ignored":true}');
 }
 
 function main() {
@@ -208,10 +296,13 @@ function main() {
   testExtractsContentEnvelopeAndFormatsPreview();
   testExtractsToolResultIdFromLegacyReadMore();
   testFormatsRawContentWhileExtractingModelEnvelope();
+  testFormatsSlimmedToolResultEnvelopeWithoutRawFields();
   testShowsStructuredErrorMessage();
   testSummarizesCommonToolCalls();
   testSummarizesPatchAndCompactArguments();
   testFormatsToolArguments();
+  testFormatsSearchResultsAsReadableSummary();
+  testFormatsUnknownObjectAsKeyValueSummary();
   console.log('toolDisplay tests passed');
 }
 

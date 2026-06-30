@@ -157,6 +157,7 @@ export class StreamManager {
   private listeners = new Set<StatusListener>();
   private finishListeners = new Set<FinishListener>();
   private durationTimers = new Map<string, number>();
+  private pendingNotifyHandles = new Map<string, { handle: number; kind: 'animationFrame' | 'timeout' }>();
   private runAliases = new Map<string, string>();
   private tempSeq = 0;
 
@@ -222,8 +223,41 @@ export class StreamManager {
     return () => this.finishListeners.delete(listener);
   }
 
-  private notify(conversationId: string) {
+  private emitNotify(conversationId: string) {
     this.listeners.forEach((listener) => listener(conversationId));
+  }
+
+  private clearPendingNotify(conversationId: string) {
+    const pending = this.pendingNotifyHandles.get(conversationId);
+    if (!pending) return;
+    if (pending.kind === 'animationFrame' && typeof window.cancelAnimationFrame === 'function') {
+      window.cancelAnimationFrame(pending.handle);
+    } else {
+      window.clearTimeout(pending.handle);
+    }
+    this.pendingNotifyHandles.delete(conversationId);
+  }
+
+  private notify(conversationId: string, immediate = false) {
+    if (immediate) {
+      this.clearPendingNotify(conversationId);
+      this.emitNotify(conversationId);
+      return;
+    }
+    if (this.pendingNotifyHandles.has(conversationId)) return;
+    if (typeof window.requestAnimationFrame === 'function') {
+      const handle = window.requestAnimationFrame(() => {
+        this.pendingNotifyHandles.delete(conversationId);
+        this.emitNotify(conversationId);
+      });
+      this.pendingNotifyHandles.set(conversationId, { handle, kind: 'animationFrame' });
+      return;
+    }
+    const handle = window.setTimeout(() => {
+      this.pendingNotifyHandles.delete(conversationId);
+      this.emitNotify(conversationId);
+    }, 50);
+    this.pendingNotifyHandles.set(conversationId, { handle, kind: 'timeout' });
   }
 
   private notifyFinish(info: FinishInfo) {
@@ -340,7 +374,14 @@ export class StreamManager {
       next.reasoningActive = false;
     }
     this.streams.set(runId, next);
-    this.notify(next.conversationId);
+    this.notify(
+      next.conversationId,
+      next.status === 'completed'
+        || next.status === 'stopped'
+        || next.status === 'error'
+        || chunk.event_type === 'tool_approval_request'
+        || chunk.event_type === 'tool_approval_result',
+    );
     return runId;
   }
 
@@ -393,7 +434,7 @@ export class StreamManager {
       getRequestRunKind(request),
     ));
     this.addToConversation(conversationId, runId);
-    this.notify(conversationId);
+    this.notify(conversationId, true);
     await this.consume(runId, () => messageApi.stream(conversationId, request, nodeId, abortController.signal));
   }
 
@@ -420,7 +461,7 @@ export class StreamManager {
       anchorNodeId,
     ));
     this.addToConversation(conversationId, resolvedRunId);
-    this.notify(conversationId);
+    this.notify(conversationId, true);
     await this.consume(resolvedRunId, () => runId
       ? runsApi.attach(runId, fromEvent, abortController.signal)
       : messageApi.attachStream(conversationId, nodeId as string, fromEvent, abortController.signal));
@@ -464,7 +505,7 @@ export class StreamManager {
           errorMessage: finishStatus === 'error' && err instanceof Error ? err.message : state.errorMessage,
           reasoningActive: false,
         });
-        this.notify(state.conversationId);
+        this.notify(state.conversationId, true);
       }
     } finally {
       clearInterval(timer);
@@ -478,7 +519,7 @@ export class StreamManager {
           reasoningActive: false,
         };
         this.streams.set(runId, finalState);
-        this.notify(finalState.conversationId);
+        this.notify(finalState.conversationId, true);
         this.notifyFinish({
           conversationId: finalState.conversationId,
           runId,
@@ -496,7 +537,7 @@ export class StreamManager {
     const state = this.streams.get(runId);
     if (!state || state.status !== 'streaming') return;
     this.streams.set(runId, { ...state, status: 'stopped', reasoningActive: false });
-    this.notify(state.conversationId);
+    this.notify(state.conversationId, true);
     try {
       if (runId.startsWith('run_')) await runsApi.stop(runId);
       else if (state.targetNodeId) await messageApi.stopStream(state.conversationId, state.targetNodeId);
@@ -530,7 +571,7 @@ export class StreamManager {
     set?.delete(runId);
     if (set && set.size === 0) this.runsByConversation.delete(state.conversationId);
     this.conversationSnapshots.delete(state.conversationId);
-    this.notify(state.conversationId);
+    this.notify(state.conversationId, true);
   }
 
   cleanupIfController(conversationId: string, controller: AbortController, runId?: string): void {
@@ -547,6 +588,9 @@ export class StreamManager {
       state.abortController?.abort();
     }
     for (const timer of this.durationTimers.values()) clearInterval(timer);
+    for (const conversationId of this.pendingNotifyHandles.keys()) {
+      this.clearPendingNotify(conversationId);
+    }
     this.streams.clear();
     this.runsByConversation.clear();
     this.conversationSnapshots.clear();
@@ -554,6 +598,7 @@ export class StreamManager {
     this.listeners.clear();
     this.finishListeners.clear();
     this.durationTimers.clear();
+    this.pendingNotifyHandles.clear();
   }
 }
 
