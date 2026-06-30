@@ -10,6 +10,7 @@ from ...core.chat.chat_manager import ChatManager
 from ..dependencies import get_chat_manager, get_run_manager
 from ...core.config.types import Message, StreamChunk
 from ...core.runs import RunKind, RunManager, RunNotFoundError, RunStatus
+from ...core.slash import SlashCommandDispatcher
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -91,6 +92,7 @@ def _run_to_active_stream_info(run: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "run_id": run.get("run_id"),
         "conversation_id": run.get("conversation_id"),
+        "anchor_node_id": run.get("anchor_node_id"),
         "node_id": run.get("target_node_id"),
         "target_node_id": run.get("target_node_id"),
         "kind": run.get("kind"),
@@ -121,12 +123,24 @@ async def detached_stream_event_generator(
 ) -> AsyncIterator[str]:
     """Stream SSE events without tying generation lifetime to the client socket."""
     run_manager = _resolve_run_manager(run_manager)
+    slash_result = SlashCommandDispatcher().dispatch(request.content)
+    run_kind = RunKind(str(slash_result.run_kind or RunKind.CHAT.value))
     run = await run_manager.create_run(
         conversation_id=conversation_id,
-        kind=RunKind.CHAT,
+        kind=run_kind,
         anchor_node_id=request.node_id,
         summary=request.content[:80],
         metadata={
+            "slash_command": {
+                "command": slash_result.canonical_name,
+                "input_command": slash_result.command_name,
+                "kind": slash_result.kind.value,
+                "args": slash_result.args,
+                "original_input": slash_result.original_input,
+                "tool_policy": slash_result.tool_policy.value,
+                "persistence_policy": slash_result.persistence_policy.value,
+                "run_kind": slash_result.run_kind,
+            } if not slash_result.is_passthrough else None,
             "model_id": request.model_id,
             "provider_id": request.provider_id,
             "reasoning_effort": request.reasoning_effort,
@@ -215,7 +229,7 @@ async def get_active_streams(
     return [
         _run_to_active_stream_info(run)
         for run in run_manager.list_active(conversation_id)
-        if run.get("kind") == RunKind.CHAT.value and run.get("target_node_id")
+        if run.get("kind") in {RunKind.CHAT.value, RunKind.SIDE_QUESTION.value}
     ]
 
 
@@ -228,7 +242,7 @@ async def get_all_active_streams(
     return [
         _run_to_active_stream_info(run)
         for run in run_manager.list_active()
-        if run.get("kind") == RunKind.CHAT.value and run.get("target_node_id")
+        if run.get("kind") in {RunKind.CHAT.value, RunKind.SIDE_QUESTION.value}
     ]
 
 

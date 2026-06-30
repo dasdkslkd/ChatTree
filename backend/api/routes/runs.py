@@ -87,6 +87,8 @@ async def stop_run(
     await run_manager.request_stop(run_id)
     if run.get("kind") == RunKind.CHAT.value and run.get("target_node_id"):
         await chat_manager.stop_stream(str(run["target_node_id"]))
+    elif run.get("kind") == RunKind.SIDE_QUESTION.value:
+        await chat_manager.stop_stream(run_id)
     elif run.get("kind") == RunKind.SUBAGENT.value:
         await subagent_executor.stop(run_id)
     elif run.get("kind") == RunKind.WORKFLOW.value:
@@ -108,6 +110,8 @@ async def stop_conversation_runs(
         await run_manager.request_stop(run_id)
         if run.get("kind") == RunKind.CHAT.value and run.get("target_node_id"):
             await chat_manager.stop_stream(str(run["target_node_id"]))
+        elif run.get("kind") == RunKind.SIDE_QUESTION.value:
+            await chat_manager.stop_stream(run_id)
         elif run.get("kind") == RunKind.SUBAGENT.value:
             await subagent_executor.stop(run_id)
         elif run.get("kind") == RunKind.WORKFLOW.value:

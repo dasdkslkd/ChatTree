@@ -5,10 +5,10 @@ import json
 from contextlib import suppress
 from typing import Any, Dict, Optional
 
-from backend.core.capabilities.prompting import build_skill_injections, format_skill_injections
 from backend.core.capabilities.registry import CapabilityRegistry
 from backend.core.chat.chat_manager import ChatManager
 from backend.core.config.types import Message, Role, StreamController, StreamStatus
+from backend.core.prompts import PromptBuilder
 from backend.core.runs import RunKind, RunManager, RunStatus
 from backend.core.tools.security.permissions import normalize_permission_mode
 
@@ -363,13 +363,10 @@ class SubagentExecutor:
         if agent is None:
             raise KeyError(agent_name)
         system_parts = [agent.system_prompt or f"You are subagent {agent.name}."]
-        skill_injections = build_skill_injections(agent.skills, self.capability_registry)
-        if skill_injections:
-            system_parts.append(format_skill_injections(skill_injections))
         if parent_node_id:
             system_parts.append(f"Parent conversation node: {parent_node_id}")
         content = input_data if isinstance(input_data, str) else json.dumps(input_data, ensure_ascii=False)
-        return [
+        base_messages = [
             Message({
                 "role": Role.SYSTEM,
                 "content": "\n\n".join(part for part in system_parts if part),
@@ -378,6 +375,14 @@ class SubagentExecutor:
                 "role": Role.USER,
                 "content": content,
             }),
+        ]
+        return [
+            Message(message)
+            for message in PromptBuilder(self.capability_registry).build_messages(
+                base_messages,
+                active_skill_names=agent.skills,
+                include_available_capabilities=False,
+            )
         ]
 
     def _filter_tools(self, allowed_names: list[str]) -> list[dict[str, Any]]:

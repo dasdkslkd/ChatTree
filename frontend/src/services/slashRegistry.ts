@@ -1,0 +1,118 @@
+import { slashApi } from '../api/slash';
+import type { SlashCommandInfo } from '../types/slash';
+
+const DEFAULT_COMMANDS: SlashCommandInfo[] = [
+  {
+    name: 'init',
+    aliases: [],
+    description: 'create project agent instructions',
+    supports_inline_args: false,
+    requires_args: false,
+    dispatch_kind: 'main_prompt',
+    tool_policy: 'inherit',
+    persistence_policy: 'main_thread',
+    run_kind: 'chat',
+    stream_target_policy: 'target_node',
+    blocks_main_thread: true,
+    enabled: true,
+  },
+  {
+    name: 'review',
+    aliases: [],
+    description: 'review current changes or custom target',
+    supports_inline_args: true,
+    requires_args: false,
+    dispatch_kind: 'main_prompt',
+    tool_policy: 'inherit',
+    persistence_policy: 'main_thread',
+    run_kind: 'chat',
+    stream_target_policy: 'target_node',
+    blocks_main_thread: true,
+    enabled: true,
+  },
+  {
+    name: 'btw',
+    aliases: [],
+    description: 'ask a side question without interrupting the main conversation',
+    supports_inline_args: true,
+    requires_args: true,
+    dispatch_kind: 'side_question',
+    tool_policy: 'disabled',
+    persistence_policy: 'side_run',
+    run_kind: 'side_question',
+    stream_target_policy: 'anchor_only',
+    blocks_main_thread: false,
+    enabled: true,
+  },
+  {
+    name: 'fork',
+    aliases: [],
+    description: 'start a background fork',
+    supports_inline_args: true,
+    requires_args: true,
+    dispatch_kind: 'subagent',
+    tool_policy: 'inherit',
+    persistence_policy: 'side_run',
+    run_kind: 'subagent',
+    stream_target_policy: 'anchor_only',
+    blocks_main_thread: false,
+    enabled: true,
+  },
+  {
+    name: 'workflow',
+    aliases: [],
+    description: 'run a dynamic workflow',
+    supports_inline_args: true,
+    requires_args: true,
+    dispatch_kind: 'workflow',
+    tool_policy: 'inherit',
+    persistence_policy: 'side_run',
+    run_kind: 'workflow',
+    stream_target_policy: 'anchor_only',
+    blocks_main_thread: false,
+    enabled: true,
+  },
+];
+
+let commands = DEFAULT_COMMANDS;
+let refreshPromise: Promise<SlashCommandInfo[]> | null = null;
+
+function commandNames(command: SlashCommandInfo): string[] {
+  return [command.name, ...(command.aliases || [])];
+}
+
+export interface SlashCommandMatch {
+  command: SlashCommandInfo;
+  inputName: string;
+  args: string;
+}
+
+export const slashRegistry = {
+  list: (): SlashCommandInfo[] => commands,
+
+  refresh: async (): Promise<SlashCommandInfo[]> => {
+    if (!refreshPromise) {
+      refreshPromise = slashApi.listCommands()
+        .then((next) => {
+          commands = next.filter((command) => command.enabled);
+          return commands;
+        })
+        .finally(() => {
+          refreshPromise = null;
+        });
+    }
+    return refreshPromise;
+  },
+
+  match: (text: string): SlashCommandMatch | null => {
+    const match = text.match(/^\s*\/([A-Za-z0-9_.:-]+)(?:\s+([\s\S]*))?$/);
+    if (!match) return null;
+    const inputName = match[1];
+    const args = match[2] || '';
+    const command = commands.find((candidate) => commandNames(candidate).includes(inputName));
+    if (!command?.enabled) return null;
+    if (args && !command.supports_inline_args) return null;
+    return { command, inputName, args };
+  },
+};
+

@@ -73,9 +73,11 @@ import { useModelStore } from '../store/modelStore';
 import { useNavigationStore } from '../store/navigationStore';
 import { useRunManager } from '../hooks/useRunManager';
 import { streamManager } from '../services/streamManager';
+import { slashRegistry } from '../services/slashRegistry';
 import { getGenerationStatusText, getStreamStatusText as getStreamStatusLabel } from '../utils/generationStatus';
 import { isRunBlockingSelectedBranch, isRunVisibleInSelectedTranscript } from '../utils/runVisibility';
 import { resolveSendNodeId } from '../utils/sendTarget';
+import { shouldQueueForMainThread, shouldRenderRunDraft } from '../utils/slashRuntime';
 import {
   DEFAULT_TOOL_PERMISSION_MODE,
   createToolPermissionDraft,
@@ -950,6 +952,9 @@ export default function ChatPage() {
 
   const activeRunStates = useRunManager(currentConversation?.id ?? null);
   const autoFollowedRunIdsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    void slashRegistry.refresh().catch(() => {});
+  }, []);
   const startStreaming = useCallback(
     async (
       convId: string,
@@ -1031,7 +1036,7 @@ export default function ChatPage() {
   }, [activeRunStates, selectedBranchTipId, setCurrentNodeIdLocal]);
 
   const activeRunDrafts = useMemo(() => activeRunStates
-    .filter((run) => run.kind === 'chat')
+    .filter((run) => shouldRenderRunDraft(run))
     .map((run) => {
       const nodeId = run.targetNodeId || run.nodeId;
       if (!isRunVisibleInSelectedTranscript(run, selectedBranchTipId, currentBranchNodeIds)) return null;
@@ -1444,6 +1449,10 @@ export default function ChatPage() {
   // 不依赖当前查看的是哪个对话，因此切走的对话流完成也能正确落地。
   useEffect(() => {
     const unsubscribe = streamManager.onFinish(async ({ conversationId: finishedId, runId, drained, nodeId, targetNodeId, controller }) => {
+      if (!targetNodeId && !nodeId) {
+        await sendNextQueuedMessage(finishedId);
+        return;
+      }
       // 完成判据：等待本轮节点(nodeId)的 assistant 消息落盘，而非“消息数 +1”。
       // 对多消息轮次（未来工具轮次）同样稳健。nodeId 为空（停得太早还没拿到）时
       // refreshMessages 退化为单次拉取。
@@ -1549,24 +1558,31 @@ export default function ChatPage() {
         for (let attempt = 0; attempt < 10; attempt += 1) {
           activeStreams = await messageApi.getActiveStreams(conversationId);
           if (cancelled) return;
-          if (activeStreams.some((item) => item.node_id && !item.done)) break;
+          if (activeStreams.some((item) => !item.done && (item.node_id || item.run_id))) break;
           await new Promise((resolve) => window.setTimeout(resolve, 500));
         }
         if (cancelled) return;
-        const attachable = activeStreams.filter((item) => item.node_id && !item.done);
+        const attachable = activeStreams.filter((item) => !item.done && (item.node_id || item.run_id));
         if (attachable.length === 0) {
           await refreshMessages(conversationId, { retries: 0 });
           return;
         }
-        await Promise.all(attachable.map((active) => refreshMessages(conversationId, {
-          awaitNodeId: active.node_id ?? undefined,
-          awaitRole: 'user',
-          retries: 0,
-        })));
+        await Promise.all(attachable
+          .filter((active) => active.node_id)
+          .map((active) => refreshMessages(conversationId, {
+            awaitNodeId: active.node_id ?? undefined,
+            awaitRole: 'user',
+            retries: 0,
+          })));
         if (cancelled) return;
         for (const active of attachable) {
-          if (!active.node_id) continue;
-          void streamManager.resumeStream(conversationId, active.node_id, active.run_id ?? undefined, 0);
+          void streamManager.resumeStream(
+            conversationId,
+            active.node_id ?? null,
+            active.run_id ?? undefined,
+            0,
+            active.anchor_node_id ?? null,
+          );
         }
       } catch (_) {
         await refreshMessages(conversationId, { retries: 0 });
@@ -1748,8 +1764,16 @@ export default function ChatPage() {
       currentNodeId,
       conversationCurrentNodeId: currentConversation?.current_node_id,
     });
+    const slashMatch = slashRegistry.match(val);
+    const slashCommand = slashMatch?.command ?? null;
+    const streamNodeId = slashCommand?.stream_target_policy === 'anchor_only'
+      ? undefined
+      : sendNodeId;
+    if (slashCommand?.stream_target_policy === 'anchor_only') {
+      request.node_id = sendNodeId ?? undefined;
+    }
 
-    if (conversationId && currentBranchHasStreamingChat) {
+    if (conversationId && shouldQueueForMainThread({ currentBranchHasStreamingChat, slashCommand })) {
       const queuedConversationId = conversationId;
       clearAttachments();
       setEditTargetNodeId(null);
@@ -1758,7 +1782,7 @@ export default function ChatPage() {
         {
           id: createQueuedMessageId(),
           conversationId: queuedConversationId,
-          nodeId: sendNodeId,
+          nodeId: streamNodeId ?? null,
           blockingRunIds: currentBranchStreamingRunIds,
           content: val,
           request,
@@ -1787,7 +1811,7 @@ export default function ChatPage() {
       conversationId,
       request,
       val,
-      sendNodeId,
+      streamNodeId,
     );
   };
 

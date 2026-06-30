@@ -21,6 +21,7 @@ export type ToolResultSlice = {
 export interface ActiveStreamInfo {
   run_id?: string | null;
   conversation_id: string;
+  anchor_node_id?: string | null;
   node_id: string | null;
   target_node_id?: string | null;
   kind?: string;
@@ -110,7 +111,7 @@ export const messageApi = {
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ ...data, node_id: nodeId }),
+      body: JSON.stringify({ ...data, node_id: nodeId ?? data.node_id }),
       signal,
     });
 

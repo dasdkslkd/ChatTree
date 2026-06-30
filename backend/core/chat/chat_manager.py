@@ -27,10 +27,14 @@ from ..utils.logger import setup_logger
 from ..config.config import cfg
 from ..workspace import build_default_workspace, normalize_workspace
 from ..capabilities.prompting import (
-    build_available_capabilities_prompt,
-    build_skill_injections,
     collect_skill_injection_names,
-    format_skill_injections,
+)
+from ..prompts import PromptBuilder
+from ..slash import (
+    SlashCommandDispatcher,
+    SlashDispatchKind,
+    SlashDispatchResult,
+    SlashToolPolicy,
 )
 from ..tools.security.permissions import PermissionMode, normalize_permission_mode
 
@@ -46,6 +50,7 @@ class ChatManager:
         self.tool_manager = tool_manager
         self.tool_orchestrator = None
         self.capability_registry = None
+        self.slash_dispatcher = SlashCommandDispatcher()
         self.current_conversation: Optional[Conversation] = None
         self._active_controllers: Dict[str, StreamController] = {}  # node_id -> controller
         # 每对话异步锁，串行化同一对话的 load-modify-save 临界区。
@@ -270,6 +275,121 @@ class ChatManager:
         conversation.metadata["provider_id"] = provider_id
         conversation.metadata["model_id"] = model_id
 
+    def _dispatch_slash_content(self, content: str) -> SlashDispatchResult:
+        return self.slash_dispatcher.dispatch(content)
+
+    def _slash_command_metadata(
+        self,
+        slash_result: SlashDispatchResult,
+    ) -> Dict[str, Any]:
+        command_name = slash_result.canonical_name or slash_result.command_name or ""
+        return {
+            "command": command_name,
+            "kind": slash_result.kind.value,
+            "args": slash_result.args,
+            "original_input": slash_result.original_input,
+            "tool_policy": slash_result.tool_policy.value,
+            "persistence_policy": slash_result.persistence_policy.value,
+            "run_kind": slash_result.run_kind,
+        }
+
+    def _slash_runtime_error(self, slash_result: SlashDispatchResult) -> str:
+        if slash_result.error:
+            return slash_result.error
+        command_name = slash_result.canonical_name or slash_result.command_name or "unknown"
+        if slash_result.kind == SlashDispatchKind.SUBAGENT:
+            return f"Slash command '/{command_name}' 已解析，但 fork agent 运行层尚未接入。"
+        if slash_result.kind == SlashDispatchKind.WORKFLOW:
+            return f"Slash command '/{command_name}' 已解析，但 workflow slash 运行层尚未接入。"
+        return f"Slash command '/{command_name}' 暂不可用。"
+
+    def _build_prompt_messages(
+        self,
+        conversation: Conversation,
+        skill_names: List[str],
+    ) -> List[Message]:
+        base_messages = self._prepare_messages_for_api_with_conversation(conversation)
+        built_messages = PromptBuilder(self.capability_registry).build_messages(
+            base_messages,
+            active_skill_names=skill_names,
+        )
+        return [Message(message) for message in built_messages]
+
+    async def _send_side_question_stream(
+        self,
+        *,
+        conversation: Conversation,
+        content: str,
+        provider: Any,
+        target_model: str,
+        eff_effort: Optional[str],
+        eff_thinking: Optional[bool],
+        run_id: Optional[str],
+    ) -> AsyncIterator[StreamChunk]:
+        base_messages = self._prepare_messages_for_api_with_conversation(conversation)
+        messages = [
+            Message(message)
+            for message in PromptBuilder(self.capability_registry).build_messages(
+                base_messages,
+                active_skill_names=[],
+                include_available_capabilities=False,
+            )
+        ]
+        messages.append(Message({"role": Role.USER, "content": content}))
+
+        controller = StreamController(
+            node_id=f"side_{run_id or uuid.uuid4().hex}",
+            conversation_id=conversation.metadata["id"],
+            run_id=run_id,
+        )
+        controller_key = run_id or controller.node_id
+        self._active_controllers[controller_key] = controller
+        try:
+            yield StreamChunk(
+                status=StreamStatus.START,
+                content=None,
+                node_id=None,
+                target_node_id=None,
+                conversation_id=conversation.metadata["id"],
+                run_id=run_id,
+                tokens_used=0,
+            )
+
+            tokens_used = 0
+            async for chunk in provider.generate_response_stream(
+                model=target_model,
+                messages=messages,
+                stream_controller=controller,
+                tools=None,
+                tool_choice=None,
+                reasoning_effort=eff_effort,
+                thinking_enabled=eff_thinking,
+            ):  # type: ignore
+                if await controller.is_stopped():
+                    yield StreamChunk(
+                        status=StreamStatus.STOPPED,
+                        content="",
+                        node_id=None,
+                        target_node_id=None,
+                        conversation_id=conversation.metadata["id"],
+                        run_id=run_id,
+                        error=None,
+                        tokens_used=tokens_used,
+                    )
+                    break
+                chunk["node_id"] = None
+                chunk["target_node_id"] = None
+                chunk["conversation_id"] = conversation.metadata["id"]
+                if run_id:
+                    chunk["run_id"] = run_id
+                if chunk.get("tokens_used"):
+                    tokens_used = chunk.get("tokens_used", tokens_used) or tokens_used
+                if chunk.get("status") == StreamStatus.COMPLETE and not chunk.get("tokens_used"):
+                    chunk["tokens_used"] = tokens_used
+                yield chunk
+        finally:
+            self._active_controllers.pop(controller_key, None)
+
     async def send_message_stream(
         self,
         conversation_id: str,
@@ -347,6 +467,24 @@ class ChatManager:
                 tokens_used=0
             )
             return
+
+        slash_result = self._dispatch_slash_content(content)
+        if slash_result.kind in {
+            SlashDispatchKind.SUBAGENT,
+            SlashDispatchKind.WORKFLOW,
+            SlashDispatchKind.ERROR,
+        }:
+            yield StreamChunk(
+                status=StreamStatus.ERROR,
+                content="",
+                node_id=None,
+                conversation_id=conversation_id,
+                run_id=run_id,
+                error=self._slash_runtime_error(slash_result),
+                tokens_used=0,
+            )
+            return
+        model_content = slash_result.model_input or content
         
         provider = self.model_manager.get_model(target_provider, True)
         if not provider:
@@ -402,6 +540,21 @@ class ChatManager:
         eff_effort = normalize_effort(eff_effort, meta)
         eff_thinking = normalize_thinking(eff_thinking, meta)
         logger.info(f"Stream reasoning: effort={eff_effort}, thinking={eff_thinking}")
+        if slash_result.kind == SlashDispatchKind.SIDE_QUESTION:
+            side_run_context = Conversation.from_dict(preview.to_dict())
+            if node_id and node_id in side_run_context.nodes:
+                side_run_context.switch_to_node(node_id)
+            async for chunk in self._send_side_question_stream(
+                conversation=side_run_context,
+                content=model_content,
+                provider=provider,
+                target_model=target_model,
+                eff_effort=eff_effort,
+                eff_thinking=eff_thinking,
+                run_id=run_id,
+            ):
+                yield chunk
+            return
         requested_parent_node_id = node_id or preview.current_node_id
         if not node_id and requested_parent_node_id in self._active_controllers:
             active_parent = preview.nodes.get(requested_parent_node_id, {}).get("parent_id")
@@ -412,12 +565,17 @@ class ChatManager:
         user_msg = Message({
             "id": str(uuid.uuid4()),
             "role": Role.USER,
-            "content": content,
+            "content": model_content,
             "name": None,
             "tool_calls": None,
             "tool_call_id": None,
             "timestamp": int(time())
         })
+        if slash_result.kind in {
+            SlashDispatchKind.MAIN_PROMPT,
+            SlashDispatchKind.SIDE_QUESTION,
+        }:
+            user_msg["slash_command"] = self._slash_command_metadata(slash_result)
         normalized_import_files = self._normalize_import_file_refs(import_files)
         if normalized_import_files:
             user_msg["import_files"] = normalized_import_files
@@ -454,7 +612,7 @@ class ChatManager:
             )
             if self.capability_registry is not None:
                 skill_names = collect_skill_injection_names(
-                    content,
+                    model_content,
                     self.capability_registry,
                     active_skill_names=self._recent_active_skill_names(conversation),
                 )
@@ -497,36 +655,7 @@ class ChatManager:
         )
 
         # 准备消息链（使用锁内加载的最新 conversation）
-        messages = self._prepare_messages_for_api_with_conversation(conversation)
-        capability_registry = self.capability_registry
-        if capability_registry is not None:
-            insert_at = 0
-            while (
-                insert_at < len(messages)
-                and messages[insert_at].get("role") == "system"
-            ):
-                insert_at += 1
-
-            capability_messages: List[Dict[str, str]] = [
-                {
-                    "role": "system",
-                    "content": build_available_capabilities_prompt(
-                        capability_registry
-                    ),
-                }
-            ]
-            skill_injections = build_skill_injections(
-                skill_names,
-                capability_registry,
-            )
-            if skill_injections:
-                capability_messages.append(
-                    {
-                        "role": "system",
-                        "content": format_skill_injections(skill_injections),
-                    }
-                )
-            messages[insert_at:insert_at] = capability_messages
+        messages = self._build_prompt_messages(conversation, skill_names)
 
         workspace_context = normalize_workspace(
             preview.metadata.get("workspace"),
@@ -535,6 +664,8 @@ class ChatManager:
 
         tools = self.tool_manager.get_openai_tools() if self.tool_manager else []
         tools = tools or None
+        if slash_result.tool_policy == SlashToolPolicy.DISABLED:
+            tools = None
         max_tool_rounds = int(cfg.data.get("tools", {}).get("max_rounds", 5)) if isinstance(cfg.data, dict) else 5
 
         total_content = ""

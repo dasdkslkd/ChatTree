@@ -71,6 +71,37 @@ class DelayedStartChatManager:
         return True
 
 
+class SideQuestionChatManager:
+    async def send_message_stream(self, **kwargs):
+        yield StreamChunk(
+            status=StreamStatus.START,
+            content=None,
+            node_id=None,
+            target_node_id=None,
+            conversation_id=kwargs["conversation_id"],
+            run_id=kwargs.get("run_id"),
+            tokens_used=0,
+        )
+        yield StreamChunk(
+            status=StreamStatus.CONTENT,
+            content="aside",
+            node_id=None,
+            target_node_id=None,
+            conversation_id=kwargs["conversation_id"],
+            run_id=kwargs.get("run_id"),
+            tokens_used=0,
+        )
+        yield StreamChunk(
+            status=StreamStatus.COMPLETE,
+            content=None,
+            node_id=None,
+            target_node_id=None,
+            conversation_id=kwargs["conversation_id"],
+            run_id=kwargs.get("run_id"),
+            tokens_used=1,
+        )
+
+
 def test_detached_stream_continues_after_client_disconnect():
     async def run():
         manager = FakeChatManager()
@@ -130,6 +161,40 @@ def test_detached_stream_attach_replays_buffer_and_continues_live():
 
         await asyncio.wait_for(manager.completed.wait(), timeout=1)
         await stream.aclose()
+
+    asyncio.run(run())
+
+
+def test_detached_btw_stream_uses_side_question_run_without_target_bind():
+    async def run():
+        manager = SideQuestionChatManager()
+        run_manager = RunManager()
+        request = messages_route.SendMessageRequest(
+            content="/btw explain this",
+            model_id="fake-model",
+            node_id="node-anchor",
+        )
+        stream = messages_route.detached_stream_event_generator("conv-1", request, manager, run_manager)
+
+        started_event = parse_sse(await anext(stream))
+        assert started_event["type"] == "run_started"
+        assert started_event["kind"] == "side_question"
+        assert started_event["anchor_node_id"] == "node-anchor"
+        assert started_event["target_node_id"] is None
+
+        start_chunk = parse_sse(await anext(stream))
+        content_chunk = parse_sse(await anext(stream))
+        complete_chunk = parse_sse(await anext(stream))
+
+        assert start_chunk["target_node_id"] is None
+        assert content_chunk["content"] == "aside"
+        assert content_chunk["target_node_id"] is None
+        assert complete_chunk["status"] == "complete"
+        assert complete_chunk["target_node_id"] is None
+        assert run_manager.get_run(started_event["run_id"])["target_node_id"] is None
+
+        done_event = await anext(stream)
+        assert "[DONE]" in done_event
 
     asyncio.run(run())
 

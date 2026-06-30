@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 
 class RunKind(str, Enum):
     CHAT = "chat"
+    SIDE_QUESTION = "side_question"
     SUBAGENT = "subagent"
     WORKFLOW = "workflow"
     WORKFLOW_STEP = "workflow_step"

@@ -24,13 +24,19 @@ import { usePromptStore } from '../store/promtStore'
 import { useNavigationStore } from '../store/navigationStore'
 import { useConversationStore } from '../store/conversationStore'
 import { conversationApi } from '../api/conversation'
+import { slashRegistry } from '../services/slashRegistry'
 import type { ToolPermissionMode } from '../types/message'
+import type { SlashCommandInfo } from '../types/slash'
 import {
   getPendingToolPermissionMode,
   markToolPermissionModeSent,
   selectToolPermissionMode,
   type ToolPermissionDraft,
 } from '../utils/toolPermissionDraft'
+import {
+  applySlashCommandCompletion,
+  getSlashCompletionCandidates,
+} from '../utils/slashRuntime'
 
 interface Props {
   onSend: (
@@ -92,6 +98,9 @@ export function ChatInput({
   const [selectedPromptId, setSelectedPromptId] = useState<string | null>(null);
   const [selectedPromptTitle, setSelectedPromptTitle] = useState<string | null>(null);
   const [editingQueuedMessageId, setEditingQueuedMessageId] = useState<string | null>(null);
+  const [slashCommands, setSlashCommands] = useState<SlashCommandInfo[]>(() => slashRegistry.list());
+  const [slashHighlightIndex, setSlashHighlightIndex] = useState(0);
+  const [slashDismissedForValue, setSlashDismissedForValue] = useState<string | null>(null);
 
   const {
     providers,
@@ -123,6 +132,21 @@ export function ChatInput({
   // 初始加载（loadConfig/loadProviders 已在 App.tsx 中调用）
   useEffect(() => {
     loadPrompts();
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setSlashCommands(slashRegistry.list());
+    slashRegistry.refresh()
+      .then((commands) => {
+        if (!cancelled) setSlashCommands(commands);
+      })
+      .catch((err) => {
+        console.error('加载斜杠命令失败:', err);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // 窗口焦点同步配置
@@ -168,6 +192,10 @@ export function ChatInput({
       textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 200)}px`;
     }
   }, [value]);
+
+  useEffect(() => {
+    setSlashHighlightIndex(0);
+  }, [value, slashCommands]);
 
   const handleSend = async () => {
     if (!value.trim() || (disabled && !isStreaming)) return;
@@ -295,6 +323,11 @@ export function ChatInput({
   const inputDisabled = disabled && !isStreaming;
   const sendDisabled = !value.trim() || (disabled && !isStreaming);
   const showStreamingSend = !!isStreaming && !!value.trim();
+  const slashCandidates = getSlashCompletionCandidates(value, slashCommands);
+  const slashCompletionOpen = slashCandidates.length > 0 && slashDismissedForValue !== value;
+  const highlightedSlashCommand = slashCompletionOpen
+    ? slashCandidates[Math.min(slashHighlightIndex, slashCandidates.length - 1)]
+    : null;
   const currentPermissionLabel = {
     auto_approve: '自动批准',
     modify_only: '仅修改',
@@ -306,8 +339,77 @@ export function ChatInput({
   const effortSpec = activeMeta?.reasoning_effort;
   const thinkingSpec = activeMeta?.thinking;
 
+  const completeSlashCommand = (command: SlashCommandInfo) => {
+    const nextValue = applySlashCommandCompletion(value, command);
+    setValue(nextValue);
+    setSlashHighlightIndex(0);
+    setSlashDismissedForValue(nextValue);
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+      const length = nextValue.length;
+      textareaRef.current?.setSelectionRange(length, length);
+    });
+  };
+
   return (
-    <div className="w-full">
+    <div className="relative w-full">
+      {slashCompletionOpen && (
+        <div
+          className="absolute left-0 right-0 z-50 px-1"
+          style={{ bottom: 'calc(100% + 8px)' }}
+        >
+          <div
+            className="overflow-hidden rounded-xl"
+            style={{
+              border: '0.5px solid var(--border)',
+              background: 'color-mix(in srgb, var(--bg-input) 96%, var(--bg-button-tertiary-hover))',
+              boxShadow: 'var(--shadow-xl), var(--highlight-top)',
+              backdropFilter: 'blur(12px)',
+            }}
+          >
+            {slashCandidates.map((command, index) => {
+              const highlighted = index === Math.min(slashHighlightIndex, slashCandidates.length - 1);
+              return (
+                <button
+                  key={command.name}
+                  type="button"
+                  className="flex h-11 w-full items-center gap-3 border-0 px-3 text-left text-xs transition-colors"
+                  style={{
+                    background: highlighted ? 'var(--accent-soft)' : 'transparent',
+                    color: 'var(--fg-secondary)',
+                  }}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    completeSlashCommand(command);
+                  }}
+                  onMouseEnter={() => setSlashHighlightIndex(index)}
+                >
+                  <span
+                    className="shrink-0 font-medium"
+                    style={{ color: highlighted ? 'var(--icon-accent)' : 'var(--fg-85)' }}
+                  >
+                    /{command.name}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate" style={{ color: 'var(--fg-tertiary)' }}>
+                    {command.description}
+                  </span>
+                  {!command.blocks_main_thread && (
+                    <span
+                      className="shrink-0 rounded-full px-2 py-0.5"
+                      style={{
+                        background: 'color-mix(in srgb, var(--icon-accent) 14%, transparent)',
+                        color: 'var(--icon-accent)',
+                      }}
+                    >
+                      后台
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
       <div
         className={cn(
           'flex flex-col overflow-hidden transition-all',
@@ -455,8 +557,35 @@ export function ChatInput({
             fontFamily: 'var(--font-sans)',
           }}
           value={value}
-          onChange={(e) => setValue(e.target.value)}
+          onChange={(e) => {
+            setValue(e.target.value);
+            if (slashDismissedForValue && slashDismissedForValue !== e.target.value) {
+              setSlashDismissedForValue(null);
+            }
+          }}
           onKeyDown={(e) => {
+            if (slashCompletionOpen) {
+              if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                setSlashHighlightIndex((index) => (index + 1) % slashCandidates.length);
+                return;
+              }
+              if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                setSlashHighlightIndex((index) => (index - 1 + slashCandidates.length) % slashCandidates.length);
+                return;
+              }
+              if ((e.key === 'Enter' || e.key === 'Tab') && highlightedSlashCommand) {
+                e.preventDefault();
+                completeSlashCommand(highlightedSlashCommand);
+                return;
+              }
+              if (e.key === 'Escape') {
+                e.preventDefault();
+                setSlashDismissedForValue(value);
+                return;
+              }
+            }
             if (e.key === 'Enter' && !e.ctrlKey && !e.shiftKey) {
               e.preventDefault();
               handleSend();

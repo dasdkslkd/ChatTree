@@ -4,7 +4,13 @@ from types import SimpleNamespace
 import pytest
 
 from backend.core.agents import SubagentExecutor
-from backend.core.capabilities.types import AgentDefinition
+from backend.core.capabilities.registry import CapabilityRegistry
+from backend.core.capabilities.types import (
+    AgentDefinition,
+    CapabilityDefinition,
+    CapabilityKind,
+    CapabilitySource,
+)
 from backend.core.config.types import StreamStatus
 from backend.core.runs import RunManager
 
@@ -123,6 +129,37 @@ def test_empty_agent_tools_means_no_tools_and_star_allows_all_tools():
         "read_file",
         "run_command",
     ]
+
+
+def test_subagent_build_messages_uses_prompt_builder_for_agent_skills(tmp_path):
+    skill_path = tmp_path / "review" / "SKILL.md"
+    skill_path.parent.mkdir()
+    skill_path.write_text("# Review\n\n检查代码。", encoding="utf-8")
+    registry = CapabilityRegistry()
+    registry.add_agents([AgentDefinition(name="a", system_prompt="Agent base", skills=["review"])])
+    registry.add_capabilities(
+        [
+            CapabilityDefinition(
+                name="review",
+                kind=CapabilityKind.SKILL,
+                source=CapabilitySource.PROJECT,
+                description="Review skill",
+                path=skill_path,
+            )
+        ]
+    )
+    executor = SubagentExecutor(
+        chat_manager=FakeChatManager(FakeProvider([])),
+        run_manager=RunManager(),
+        capability_registry=registry,
+    )
+
+    messages = executor._build_messages("a", "inspect", parent_node_id="node-1")
+
+    assert messages[0]["content"] == "Agent base\n\nParent conversation node: node-1"
+    assert "<name>review</name>" in messages[1]["content"]
+    assert "## Available Capabilities" not in messages[1]["content"]
+    assert messages[2]["content"] == "inspect"
 
 
 def test_subagent_rejects_invalid_input_schema_before_creating_run():

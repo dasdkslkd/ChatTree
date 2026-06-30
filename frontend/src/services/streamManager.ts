@@ -1,6 +1,7 @@
 import type { SendMessageRequest, ToolApprovalPayload } from '../types/message';
 import { messageApi } from '../api/message';
 import { runsApi } from '../api/runs';
+import { slashRegistry } from './slashRegistry';
 
 export interface StreamState {
   runId: string;
@@ -144,6 +145,11 @@ function mapRunStatus(status: unknown): 'completed' | 'error' | 'stopped' | null
   return null;
 }
 
+function getRequestRunKind(request: SendMessageRequest): string {
+  const match = slashRegistry.match(request.content);
+  return match?.command.run_kind || 'chat';
+}
+
 export class StreamManager {
   private streams = new Map<string, StreamState>();
   private runsByConversation = new Map<string, Set<string>>();
@@ -280,6 +286,9 @@ export class StreamManager {
     if (chunk.kind) {
       next.kind = String(chunk.kind);
     }
+    if (chunk.anchor_node_id !== undefined && !next.targetNodeId) {
+      next.anchorNodeId = chunk.anchor_node_id || null;
+    }
     if (chunk.node_id || chunk.target_node_id) {
       const nodeId = chunk.target_node_id || chunk.node_id;
       next.nodeId = chunk.node_id || nodeId;
@@ -342,6 +351,7 @@ export class StreamManager {
     pendingUserMessage: string | null,
     nodeId: string | null,
     kind = 'chat',
+    anchorNodeId?: string | null,
   ): StreamState {
     return {
       runId,
@@ -351,7 +361,7 @@ export class StreamManager {
       reasoningActive: false,
       toolInteractions: [],
       pendingApprovals: {},
-      anchorNodeId: nodeId,
+      anchorNodeId: anchorNodeId ?? nodeId,
       nodeId,
       targetNodeId: nodeId,
       conversationId,
@@ -374,24 +384,46 @@ export class StreamManager {
   ): Promise<void> {
     let runId = `client_${Date.now()}_${this.tempSeq++}`;
     const abortController = new AbortController();
-    this.streams.set(runId, this.createState(runId, conversationId, abortController, pendingUserMessage, nodeId ?? null));
+    this.streams.set(runId, this.createState(
+      runId,
+      conversationId,
+      abortController,
+      pendingUserMessage,
+      nodeId ?? null,
+      getRequestRunKind(request),
+    ));
     this.addToConversation(conversationId, runId);
     this.notify(conversationId);
     await this.consume(runId, () => messageApi.stream(conversationId, request, nodeId, abortController.signal));
   }
 
-  async resumeStream(conversationId: string, nodeId: string, runId?: string, fromEvent = 0): Promise<void> {
+  async resumeStream(
+    conversationId: string,
+    nodeId: string | null,
+    runId?: string,
+    fromEvent = 0,
+    anchorNodeId?: string | null,
+  ): Promise<void> {
     const existing = this.getConversationStates(conversationId)
-      .find((state) => (runId && state.runId === runId) || state.targetNodeId === nodeId);
+      .find((state) => (runId && state.runId === runId) || (nodeId && state.targetNodeId === nodeId));
     if (existing?.status === 'streaming') return;
+    if (!runId && !nodeId) return;
     const resolvedRunId = runId || `attach_${nodeId}`;
     const abortController = new AbortController();
-    this.streams.set(resolvedRunId, this.createState(resolvedRunId, conversationId, abortController, null, nodeId));
+    this.streams.set(resolvedRunId, this.createState(
+      resolvedRunId,
+      conversationId,
+      abortController,
+      null,
+      nodeId,
+      'chat',
+      anchorNodeId,
+    ));
     this.addToConversation(conversationId, resolvedRunId);
     this.notify(conversationId);
     await this.consume(resolvedRunId, () => runId
       ? runsApi.attach(runId, fromEvent, abortController.signal)
-      : messageApi.attachStream(conversationId, nodeId, fromEvent, abortController.signal));
+      : messageApi.attachStream(conversationId, nodeId as string, fromEvent, abortController.signal));
   }
 
   private async consume(

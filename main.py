@@ -11,7 +11,7 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 # ---------- 导入路由 ----------
-from backend.api.routes import agents, capabilities, config, conversations, messages, models, prompts, runs, tool_approvals, tool_results, workflows
+from backend.api.routes import agents, capabilities, config, conversations, messages, models, prompts, runs, slash, tool_approvals, tool_results, workflows
 
 # ---------- 导入核心 ----------
 from backend.core.chat.chat_manager import ChatManager
@@ -124,6 +124,7 @@ app.include_router(tool_approvals.router, prefix="", tags=["工具审批"])
 app.include_router(tool_results.router, prefix="", tags=["工具结果"])
 app.include_router(capabilities.router, prefix="", tags=["能力"])
 app.include_router(runs.router, prefix="", tags=["运行"])
+app.include_router(slash.router, prefix="", tags=["Slash"])
 app.include_router(agents.router, prefix="", tags=["Agent"])
 app.include_router(workflows.router, prefix="", tags=["Workflow"])
 
