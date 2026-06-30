@@ -133,12 +133,14 @@ async function withManager(run) {
   resetTimers();
   installWindowTimers();
   const originalStream = messageApi.stream;
+  const originalAttach = runsApi.attach;
   const originalStop = runsApi.stop;
   const manager = new StreamManager();
   try {
     await run(manager);
   } finally {
     messageApi.stream = originalStream;
+    runsApi.attach = originalAttach;
     runsApi.stop = originalStop;
     manager.resetAll();
   }
@@ -423,6 +425,70 @@ async function testStopUsesServerRunIdBeforeTargetNodeArrives() {
   });
 }
 
+async function testRunFinishedFailedMapsToErrorState() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    runsApi.attach = controlled.stream;
+    const running = manager.resumeStream('conv-1', '', 'run-failed', 0);
+
+    await controlled.push({
+      type: 'run_started',
+      run_id: 'run-failed',
+      conversation_id: 'conv-1',
+      kind: 'workflow',
+      status: 'running',
+    });
+    await controlled.push({
+      type: 'run_finished',
+      run_id: 'run-failed',
+      conversation_id: 'conv-1',
+      kind: 'workflow',
+      status: 'failed',
+      error: 'workflow failed',
+    });
+
+    try {
+      const state = manager.getState('conv-1');
+      assert.equal(state.status, 'error');
+      assert.equal(state.errorMessage, 'workflow failed');
+    } finally {
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
+async function testRunFinishedCancelledMapsToStoppedState() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    runsApi.attach = controlled.stream;
+    const running = manager.resumeStream('conv-1', '', 'run-cancelled', 0);
+
+    await controlled.push({
+      type: 'run_started',
+      run_id: 'run-cancelled',
+      conversation_id: 'conv-1',
+      kind: 'workflow',
+      status: 'running',
+    });
+    await controlled.push({
+      type: 'run_finished',
+      run_id: 'run-cancelled',
+      conversation_id: 'conv-1',
+      kind: 'workflow',
+      status: 'cancelled',
+    });
+
+    try {
+      const state = manager.getState('conv-1');
+      assert.equal(state.status, 'stopped');
+    } finally {
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
 function testGenerationStatusUsesPersistedErrorMessage() {
   assert.equal(
     getGenerationStatusText({ status: 'error', error_message: 'provider authentication failed' }),
@@ -444,6 +510,8 @@ async function main() {
   await testBlockingRunAliasesFollowServerRunId();
   await testGetStatePrefersActiveStreamingRunOverNewerError();
   await testStopUsesServerRunIdBeforeTargetNodeArrives();
+  await testRunFinishedFailedMapsToErrorState();
+  await testRunFinishedCancelledMapsToStoppedState();
   testGenerationStatusUsesPersistedErrorMessage();
   console.log('streamManager tests passed');
 }

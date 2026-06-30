@@ -5,10 +5,11 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
-from backend.api.dependencies import get_chat_manager, get_run_manager, get_subagent_executor
+from backend.api.dependencies import get_chat_manager, get_run_manager, get_subagent_executor, get_workflow_manager
 from backend.core.agents import SubagentExecutor
 from backend.core.chat.chat_manager import ChatManager
 from backend.core.runs import RunKind, RunManager
+from backend.core.workflows import WorkflowManager
 
 router = APIRouter()
 
@@ -78,6 +79,7 @@ async def stop_run(
     run_manager: RunManager = Depends(get_run_manager),
     chat_manager: ChatManager = Depends(get_chat_manager),
     subagent_executor: SubagentExecutor = Depends(get_subagent_executor),
+    workflow_manager: WorkflowManager = Depends(get_workflow_manager),
 ):
     run = run_manager.get_run(run_id)
     if not run:
@@ -87,6 +89,8 @@ async def stop_run(
         await chat_manager.stop_stream(str(run["target_node_id"]))
     elif run.get("kind") == RunKind.SUBAGENT.value:
         await subagent_executor.stop(run_id)
+    elif run.get("kind") == RunKind.WORKFLOW.value:
+        await workflow_manager.stop(run_id)
     return {"detail": "运行已请求停止"}
 
 
@@ -96,6 +100,7 @@ async def stop_conversation_runs(
     run_manager: RunManager = Depends(get_run_manager),
     chat_manager: ChatManager = Depends(get_chat_manager),
     subagent_executor: SubagentExecutor = Depends(get_subagent_executor),
+    workflow_manager: WorkflowManager = Depends(get_workflow_manager),
 ):
     stopped: list[str] = []
     for run in run_manager.list_active(conversation_id):
@@ -105,6 +110,8 @@ async def stop_conversation_runs(
             await chat_manager.stop_stream(str(run["target_node_id"]))
         elif run.get("kind") == RunKind.SUBAGENT.value:
             await subagent_executor.stop(run_id)
+        elif run.get("kind") == RunKind.WORKFLOW.value:
+            await workflow_manager.stop(run_id)
         stopped.append(run_id)
     return {"detail": "会话运行已请求停止", "run_ids": stopped}
 

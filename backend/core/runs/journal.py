@@ -8,13 +8,13 @@ from typing import Any, Dict, Iterable, List
 class RunJournal:
     """Append-only UTF-8 run event journal."""
 
-    def __init__(self, root: str | Path = "data/runs") -> None:
+    def __init__(self, root: str | Path = "data/conversations") -> None:
         self.root = Path(root)
 
     def _path_for(self, conversation_id: str, run_id: str) -> Path:
         safe_conversation = conversation_id.replace("/", "_").replace("\\", "_")
         safe_run = run_id.replace("/", "_").replace("\\", "_")
-        return self.root / safe_conversation / f"{safe_run}.jsonl"
+        return self.root / safe_conversation / "runs" / f"{safe_run}.jsonl"
 
     def append_event(self, conversation_id: str, run_id: str, event: Dict[str, Any]) -> None:
         path = self._path_for(conversation_id, run_id)

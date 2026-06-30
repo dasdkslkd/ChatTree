@@ -20,6 +20,7 @@ class WorkflowManager:
         self.run_manager = run_manager
         self.subagent_executor = subagent_executor
         self.runner = runner or WorkflowJsRunner()
+        self._tasks: dict[str, asyncio.Task] = {}
 
     def validate(self, script: str) -> Dict[str, Any]:
         self.runner.validate_script(script)
@@ -49,7 +50,7 @@ class WorkflowManager:
             summary="Dynamic workflow",
             metadata={"args": args or {}, "budget": budget},
         )
-        asyncio.create_task(self._produce(
+        task = asyncio.create_task(self._produce(
             run_id=run.run_id,
             conversation_id=conversation_id,
             script=script,
@@ -57,7 +58,16 @@ class WorkflowManager:
             parent_node_id=parent_node_id,
             budget=budget,
         ))
+        self._tasks[run.run_id] = task
         return run.to_dict()
+
+    async def stop(self, run_id: str) -> bool:
+        requested = await self.run_manager.request_stop(run_id)
+        task = self._tasks.get(run_id)
+        if task and not task.done():
+            task.cancel()
+            return True
+        return requested
 
     async def _produce(
         self,
@@ -89,11 +99,26 @@ class WorkflowManager:
                 self.runner.run(script=script, args=args, budget=budget, bridge=bridge),
                 timeout=int(budget.get("max_seconds") or 600),
             )
+            if await self.run_manager.is_stop_requested(run_id):
+                final_status = RunStatus.CANCELLED
+                await self.run_manager.append_event(run_id, {
+                    "status": "stopped",
+                    "event_type": "workflow_cancelled",
+                    "content": "",
+                })
+                return
             await self.run_manager.append_event(run_id, {
                 "status": "complete",
                 "event_type": "workflow_result",
                 "content": "" if result is None else str(result),
                 "result": result,
+            })
+        except asyncio.CancelledError:
+            final_status = RunStatus.CANCELLED
+            await self.run_manager.append_event(run_id, {
+                "status": "stopped",
+                "event_type": "workflow_cancelled",
+                "content": "",
             })
         except Exception as exc:
             final_status = RunStatus.FAILED
@@ -105,4 +130,5 @@ class WorkflowManager:
                 "error": final_error,
             })
         finally:
+            self._tasks.pop(run_id, None)
             await self.run_manager.finish_run(run_id, final_status, final_error)

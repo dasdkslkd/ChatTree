@@ -43,15 +43,22 @@ try {
   const budget = payload.budget || {};
   const workflow = () => hostCall('workflow', {});
   const log = (message, data) => hostCall('log', { message, data });
-  const agent = (name, input, options = {}) => hostCall('agent', { name, input, options });
+  const agent = (name, input, options = {}) => {
+    if (typeof name === 'object' && name !== null) {
+      return hostCall('agent', name);
+    }
+    return hostCall('agent', { name, input, options });
+  };
+  const phase_start = (name, data) => hostCall('phase_start', { name, data });
+  const phase_end = (name, data) => hostCall('phase_end', { name, data });
   const phase = async (name, fn) => {
-    await hostCall('phase_start', { name });
+    await phase_start(name);
     try {
       const result = await fn();
-      await hostCall('phase_end', { name, data: { ok: true } });
+      await phase_end(name, { ok: true });
       return result;
     } catch (error) {
-      await hostCall('phase_end', { name, data: { ok: false, error: String(error?.message || error) } });
+      await phase_end(name, { ok: false, error: String(error?.message || error) });
       throw error;
     }
   };
@@ -70,13 +77,15 @@ try {
     'parallel',
     'pipeline',
     'phase',
+    'phase_start',
+    'phase_end',
     'log',
     'workflow',
     'budget',
     'args',
     `"use strict"; const require = undefined; const process = undefined; const global = undefined; ${payload.script}`,
   );
-  const result = await fn(agent, parallel, pipeline, phase, log, workflow, budget, args);
+  const result = await fn(agent, parallel, pipeline, phase, phase_start, phase_end, log, workflow, budget, args);
   emit({ type: 'done', result });
   process.exit(0);
 } catch (error) {

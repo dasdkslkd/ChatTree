@@ -8,5 +8,8 @@ reference/
 docs/
 .worktrees/
 tmp/
-.chattree/
+.chattree/*
+!.chattree/agents/
+.chattree/agents/*
+!.chattree/agents/general.md
 *.lnk

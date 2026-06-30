@@ -137,6 +137,13 @@ function mergeApproval(
   };
 }
 
+function mapRunStatus(status: unknown): 'completed' | 'error' | 'stopped' | null {
+  if (status === 'complete' || status === 'completed') return 'completed';
+  if (status === 'error' || status === 'failed') return 'error';
+  if (status === 'stopped' || status === 'cancelled') return 'stopped';
+  return null;
+}
+
 export class StreamManager {
   private streams = new Map<string, StreamState>();
   private runsByConversation = new Map<string, Set<string>>();
@@ -311,13 +318,14 @@ export class StreamManager {
       next.pendingApprovals = mergeApproval(next.pendingApprovals, chunk.approval);
     }
     if (chunk.tokens_used) next.tokensUsed = chunk.tokens_used;
-    if (chunk.status === 'complete') {
+    const mappedStatus = mapRunStatus(chunk.status);
+    if (mappedStatus === 'completed') {
       next.status = 'completed';
       next.reasoningActive = false;
-    } else if (chunk.status === 'stopped') {
+    } else if (mappedStatus === 'stopped') {
       next.status = 'stopped';
       next.reasoningActive = false;
-    } else if (chunk.status === 'error') {
+    } else if (mappedStatus === 'error') {
       next.status = 'error';
       next.errorMessage = typeof chunk.error === 'string' ? chunk.error : next.errorMessage;
       next.reasoningActive = false;
@@ -407,9 +415,10 @@ export class StreamManager {
       for await (const chunk of openStream()) {
         runId = this.applyChunk(runId, chunk);
         const state = this.streams.get(runId);
-        if (chunk.status === 'error') finishStatus = 'error';
-        else if (chunk.status === 'stopped') finishStatus = 'stopped';
-        else if (chunk.status === 'complete') finishStatus = 'completed';
+        const mappedStatus = mapRunStatus(chunk.status);
+        if (mappedStatus === 'error') finishStatus = 'error';
+        else if (mappedStatus === 'stopped') finishStatus = 'stopped';
+        else if (mappedStatus === 'completed') finishStatus = 'completed';
         if (!state || state.abortController?.signal.aborted) break;
       }
       drained = true;

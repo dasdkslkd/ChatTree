@@ -114,6 +114,26 @@ Prompt body.
     assert agent.skills == ["review", "testing"]
 
 
+def test_load_agent_file_treats_inline_empty_list_as_empty_string_list(tmp_path):
+    agent_path = write_agent(
+        tmp_path,
+        "helper",
+        """---
+description: Helps with code
+tools: []
+skills: []
+---
+
+Prompt body.
+""",
+    )
+
+    agent = load_agent_file(agent_path, source=CapabilitySource.PROJECT)
+
+    assert agent.tools == []
+    assert agent.skills == []
+
+
 def test_load_agent_roots_namespaces_plugin_agents(tmp_path):
     root = tmp_path / "agents"
     write_agent(

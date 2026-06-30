@@ -135,6 +135,8 @@ def _normalize_string_list(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
     if isinstance(value, str):
+        if value.strip() == "[]":
+            return []
         return [item.strip() for item in value.split(",") if item.strip()]
     text = str(value).strip()
     return [text] if text else []

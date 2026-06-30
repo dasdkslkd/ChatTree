@@ -42,3 +42,37 @@ def test_run_manager_rejects_two_writers_for_same_target(tmp_path):
             await manager.create_run(conversation_id="conv", kind=RunKind.CHAT, target_node_id="node-a")
 
     asyncio.run(run())
+
+
+def test_run_journal_stores_events_under_conversation_runs_dir(tmp_path):
+    async def run():
+        manager = RunManager(RunJournal(tmp_path))
+        record = await manager.create_run(conversation_id="conv", kind=RunKind.WORKFLOW)
+        await manager.append_event(record.run_id, {"status": "complete", "event_type": "workflow_result"})
+
+        new_path = tmp_path / "conv" / "runs" / f"{record.run_id}.jsonl"
+        old_path = tmp_path / "conv" / f"{record.run_id}.jsonl"
+        assert new_path.exists()
+        assert not old_path.exists()
+
+        payloads = [event["payload"] for event in manager.journal.read_events("conv", record.run_id)]
+        assert payloads[-1]["event_type"] == "workflow_result"
+
+    asyncio.run(run())
+
+
+def test_run_journal_ignores_legacy_data_runs_layout(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    legacy_root = tmp_path / "data" / "runs"
+    path = legacy_root / "conv" / "run_legacy.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        '{"run_id":"run_legacy","event_index":0,"payload":{"type":"run_finished","status":"completed"}}\n',
+        encoding="utf-8",
+    )
+
+    journal = RunJournal()
+
+    events = journal.read_events("conv", "run_legacy")
+
+    assert events == []

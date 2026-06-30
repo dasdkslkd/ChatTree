@@ -3,8 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import suppress
-from copy import deepcopy
-from time import time
 from typing import Any, Dict, Optional
 
 from backend.core.capabilities.prompting import build_skill_injections, format_skill_injections
@@ -44,6 +42,7 @@ class SubagentExecutor:
         agent = self.capability_registry.get_agent(agent_name)
         if agent is None:
             raise KeyError(agent_name)
+        self._validate_schema(agent.input_schema, input_data, "input_schema")
 
         summary = f"{agent.name}: {str(input_data)[:80]}"
         run = await self.run_manager.create_run(
@@ -99,6 +98,83 @@ class SubagentExecutor:
             agent = self.capability_registry.get_agent(agent_name)
             if agent is None:
                 raise KeyError(agent_name)
+            if agent.timeout_seconds:
+                await asyncio.wait_for(
+                    self._produce_inner(
+                        run_id=run_id,
+                        conversation_id=conversation_id,
+                        agent_name=agent_name,
+                        agent=agent,
+                        input_data=input_data,
+                        parent_node_id=parent_node_id,
+                        provider_id=provider_id,
+                        model_id=model_id,
+                        permission_mode=permission_mode,
+                        workspace=workspace,
+                    ),
+                    timeout=agent.timeout_seconds,
+                )
+            else:
+                await self._produce_inner(
+                    run_id=run_id,
+                    conversation_id=conversation_id,
+                    agent_name=agent_name,
+                    agent=agent,
+                    input_data=input_data,
+                    parent_node_id=parent_node_id,
+                    provider_id=provider_id,
+                    model_id=model_id,
+                    permission_mode=permission_mode,
+                    workspace=workspace,
+                )
+        except asyncio.CancelledError:
+            final_status = RunStatus.CANCELLED
+            await self.run_manager.append_event(run_id, {
+                "status": "stopped",
+                "event_type": "subagent_result",
+                "agent_name": agent_name,
+                "content": "",
+                "reasoning": None,
+            })
+        except asyncio.TimeoutError:
+            final_status = RunStatus.FAILED
+            agent = self.capability_registry.get_agent(agent_name)
+            final_error = f"subagent timeout after {agent.timeout_seconds if agent else 'configured'} seconds"
+            await self.run_manager.append_event(run_id, {
+                "status": "error",
+                "event_type": "subagent_error",
+                "agent_name": agent_name,
+                "content": "",
+                "error": final_error,
+            })
+        except Exception as exc:
+            final_status = RunStatus.FAILED
+            final_error = str(exc) or exc.__class__.__name__
+            await self.run_manager.append_event(run_id, {
+                "status": "error",
+                "event_type": "subagent_error",
+                "agent_name": agent_name,
+                "content": "",
+                "error": final_error,
+            })
+        finally:
+            self._controllers.pop(run_id, None)
+            await self.run_manager.finish_run(run_id, final_status, final_error)
+
+    async def _produce_inner(
+        self,
+        *,
+        run_id: str,
+        conversation_id: str,
+        agent_name: str,
+        agent,
+        input_data: Any,
+        parent_node_id: Optional[str],
+        provider_id: Optional[str],
+        model_id: Optional[str],
+        permission_mode: Optional[str],
+        workspace: Optional[Dict[str, Any]],
+    ) -> None:
             conversation = self.chat_manager.get_conversation(conversation_id)
             if conversation is None:
                 raise ValueError("对话不存在")
@@ -139,7 +215,11 @@ class SubagentExecutor:
             total_content = ""
             total_reasoning = ""
             tool_round = 0
+            model_turn = 0
             while True:
+                if agent.max_turns and model_turn >= agent.max_turns:
+                    raise RuntimeError(f"max_turns exceeded: {agent.max_turns}")
+                model_turn += 1
                 round_content = ""
                 round_reasoning = ""
                 round_tool_calls: list[dict[str, Any]] = []
@@ -178,10 +258,9 @@ class SubagentExecutor:
                         complete_seen = True
                         continue
                     if status == StreamStatus.ERROR:
-                        final_status = RunStatus.FAILED
-                        final_error = chunk.get("error")
+                        raise RuntimeError(chunk.get("error") or "subagent provider error")
                     elif status == StreamStatus.STOPPED:
-                        final_status = RunStatus.CANCELLED
+                        raise asyncio.CancelledError()
                     payload = dict(chunk)
                     payload.update({
                         "run_id": run_id,
@@ -191,8 +270,6 @@ class SubagentExecutor:
                     })
                     await self.run_manager.append_event(run_id, payload)
 
-                if final_status != RunStatus.COMPLETED:
-                    break
                 if not round_tool_calls:
                     if complete_seen:
                         await self.run_manager.append_event(run_id, {
@@ -272,26 +349,14 @@ class SubagentExecutor:
                             "tool_result_id": tool_msg.get("tool_result_id"),
                         },
                     })
+            self._validate_output_schema(agent.output_schema, total_content)
             await self.run_manager.append_event(run_id, {
-                "status": "complete" if final_status == RunStatus.COMPLETED else "stopped",
+                "status": "complete",
                 "event_type": "subagent_result",
                 "agent_name": agent_name,
                 "content": total_content,
                 "reasoning": total_reasoning or None,
             })
-        except Exception as exc:
-            final_status = RunStatus.FAILED
-            final_error = str(exc) or exc.__class__.__name__
-            await self.run_manager.append_event(run_id, {
-                "status": "error",
-                "event_type": "subagent_error",
-                "agent_name": agent_name,
-                "content": "",
-                "error": final_error,
-            })
-        finally:
-            self._controllers.pop(run_id, None)
-            await self.run_manager.finish_run(run_id, final_status, final_error)
 
     def _build_messages(self, agent_name: str, input_data: Any, parent_node_id: Optional[str]) -> list[Message]:
         agent = self.capability_registry.get_agent(agent_name)
@@ -320,6 +385,8 @@ class SubagentExecutor:
             return []
         tools = self.chat_manager.tool_manager.get_openai_tools()
         if not allowed_names:
+            return []
+        if "*" in allowed_names:
             return tools
         allowed = set(allowed_names)
         return [
@@ -327,6 +394,66 @@ class SubagentExecutor:
             for tool in tools
             if tool.get("function", {}).get("name") in allowed
         ]
+
+    def _validate_output_schema(self, schema: Optional[dict[str, Any]], content: str) -> None:
+        if not schema:
+            return
+        try:
+            value = json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"output_schema validation failed: output is not valid JSON") from exc
+        self._validate_schema(schema, value, "output_schema")
+
+    def _validate_schema(self, schema: Optional[dict[str, Any]], value: Any, label: str) -> None:
+        if not schema:
+            return
+        error = self._schema_error(schema, value, label)
+        if error:
+            raise ValueError(error)
+
+    def _schema_error(self, schema: dict[str, Any], value: Any, path: str) -> Optional[str]:
+        expected_type = schema.get("type")
+        if expected_type and not self._matches_schema_type(expected_type, value):
+            return f"{path} validation failed: expected {expected_type}"
+
+        if expected_type == "object" or "properties" in schema or "required" in schema:
+            if not isinstance(value, dict):
+                return f"{path} validation failed: expected object"
+            for key in schema.get("required") or []:
+                if key not in value:
+                    return f"{path} validation failed: missing required property {key}"
+            properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+            for key, child_schema in properties.items():
+                if key in value and isinstance(child_schema, dict):
+                    child_error = self._schema_error(child_schema, value[key], f"{path}.{key}")
+                    if child_error:
+                        return child_error
+
+        if expected_type == "array" and isinstance(value, list) and isinstance(schema.get("items"), dict):
+            for index, item in enumerate(value):
+                item_error = self._schema_error(schema["items"], item, f"{path}[{index}]")
+                if item_error:
+                    return item_error
+        return None
+
+    def _matches_schema_type(self, expected_type: Any, value: Any) -> bool:
+        if isinstance(expected_type, list):
+            return any(self._matches_schema_type(item, value) for item in expected_type)
+        if expected_type == "object":
+            return isinstance(value, dict)
+        if expected_type == "array":
+            return isinstance(value, list)
+        if expected_type == "string":
+            return isinstance(value, str)
+        if expected_type == "boolean":
+            return isinstance(value, bool)
+        if expected_type == "integer":
+            return isinstance(value, int) and not isinstance(value, bool)
+        if expected_type == "number":
+            return (isinstance(value, int) or isinstance(value, float)) and not isinstance(value, bool)
+        if expected_type == "null":
+            return value is None
+        return True
 
     def _tool_event_payload(self, event: Dict[str, Any], agent_name: str) -> Dict[str, Any]:
         chunk = self.chat_manager._tool_event_stream_chunk(
