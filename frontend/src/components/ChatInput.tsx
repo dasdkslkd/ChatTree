@@ -25,6 +25,12 @@ import { useNavigationStore } from '../store/navigationStore'
 import { useConversationStore } from '../store/conversationStore'
 import { conversationApi } from '../api/conversation'
 import type { ToolPermissionMode } from '../types/message'
+import {
+  getPendingToolPermissionMode,
+  markToolPermissionModeSent,
+  selectToolPermissionMode,
+  type ToolPermissionDraft,
+} from '../utils/toolPermissionDraft'
 
 interface Props {
   onSend: (
@@ -49,6 +55,9 @@ interface Props {
   onUpdateQueuedMessage?: (id: string, content: string) => void;
   onDeleteQueuedMessage?: (id: string) => void;
   settingsSlot?: ReactNode;
+  toolPermissionDraft: ToolPermissionDraft;
+  getToolPermissionDraft: () => ToolPermissionDraft;
+  onToolPermissionDraftChange: (draft: ToolPermissionDraft) => void;
   variant?: 'dock' | 'composer';
 }
 
@@ -69,6 +78,9 @@ export function ChatInput({
   onUpdateQueuedMessage,
   onDeleteQueuedMessage,
   settingsSlot,
+  toolPermissionDraft,
+  getToolPermissionDraft,
+  onToolPermissionDraftChange,
   variant = 'dock',
 }: Props) {
   const { openSettings } = useNavigationStore();
@@ -80,7 +92,6 @@ export function ChatInput({
   const [selectedPromptId, setSelectedPromptId] = useState<string | null>(null);
   const [selectedPromptTitle, setSelectedPromptTitle] = useState<string | null>(null);
   const [editingQueuedMessageId, setEditingQueuedMessageId] = useState<string | null>(null);
-  const [toolPermissionMode, setToolPermissionMode] = useState<ToolPermissionMode>('modify_only');
 
   const {
     providers,
@@ -161,14 +172,17 @@ export function ChatInput({
   const handleSend = async () => {
     if (!value.trim() || (disabled && !isStreaming)) return;
     const systemPrompt = currentPrompt?.content;
+    const draftAtSend = getToolPermissionDraft();
+    const pendingToolPermissionMode = getPendingToolPermissionMode(draftAtSend);
     setValue('');
     await onSend(
       value,
       currentModel || undefined,
       currentProvider || undefined,
-      toolPermissionMode,
+      pendingToolPermissionMode,
       systemPrompt,
     );
+    onToolPermissionDraftChange(markToolPermissionModeSent(getToolPermissionDraft(), pendingToolPermissionMode));
   };
 
   const handleFilePick = () => { fileInputRef.current?.click(); };
@@ -285,7 +299,7 @@ export function ChatInput({
     auto_approve: '自动批准',
     modify_only: '仅修改',
     ask_always: '全部需批准',
-  }[toolPermissionMode];
+  }[toolPermissionDraft.mode];
 
   // 所选模型的元数据 → 决定是否渲染推理强度/思考开关控件
   const activeMeta = getMetadata(activeDialogProvider, activeDialogModel);
@@ -538,8 +552,12 @@ export function ChatInput({
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-48">
                 <DropdownMenuRadioGroup
-                  value={toolPermissionMode}
-                  onValueChange={(value) => setToolPermissionMode(value as ToolPermissionMode)}
+                  value={toolPermissionDraft.mode}
+                  onValueChange={(value) => {
+                    onToolPermissionDraftChange(
+                      selectToolPermissionMode(getToolPermissionDraft(), value as ToolPermissionMode),
+                    );
+                  }}
                 >
                   <DropdownMenuRadioItem value="auto_approve">自动批准</DropdownMenuRadioItem>
                   <DropdownMenuRadioItem value="modify_only">仅修改</DropdownMenuRadioItem>

@@ -140,6 +140,8 @@ class Conversation:
                 msg["branch_usage_info"] = node.get("branch_usage_info")
             if node.get("usage") is not None:
                 msg["context_usage"] = node.get("usage")
+            if node.get("tool_permission_mode") is not None:
+                msg["tool_permission_mode"] = node.get("tool_permission_mode")
             return msg
         
         for node in node_chain:

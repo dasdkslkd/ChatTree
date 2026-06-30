@@ -77,6 +77,12 @@ import { getGenerationStatusText, getStreamStatusText as getStreamStatusLabel } 
 import { isRunBlockingSelectedBranch, isRunVisibleInSelectedTranscript } from '../utils/runVisibility';
 import { resolveSendNodeId } from '../utils/sendTarget';
 import {
+  DEFAULT_TOOL_PERMISSION_MODE,
+  createToolPermissionDraft,
+  syncToolPermissionDraftFromBranch,
+  type ToolPermissionDraft,
+} from '../utils/toolPermissionDraft';
+import {
   extractToolResultEnvelope,
   formatToolArguments,
   formatToolOutput,
@@ -530,6 +536,27 @@ function createQueuedMessageId(): string {
   return `queued-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+function normalizeToolPermissionMode(value: unknown): ToolPermissionMode | undefined {
+  return value === 'auto_approve' || value === 'modify_only' || value === 'ask_always'
+    ? value
+    : undefined;
+}
+
+function getBranchToolPermissionMode(
+  messages: Array<{ node_id?: string | null; tool_permission_mode?: ToolPermissionMode | null }>,
+  nodeId: string | null,
+): ToolPermissionMode | undefined {
+  if (!nodeId) return undefined;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.node_id === nodeId) {
+      const mode = normalizeToolPermissionMode(message.tool_permission_mode);
+      if (mode) return mode;
+    }
+  }
+  return undefined;
+}
+
 function stripChronologicalPrefix(raw: unknown, snippets: string[]): string {
   if (typeof raw !== 'string' || raw.length === 0) return '';
   let remaining = raw;
@@ -811,6 +838,7 @@ export default function ChatPage() {
   const [attachedFiles, setAttachedFiles] = useState<string[]>([]);
   const [attachedImageRefs, setAttachedImageRefs] = useState<Array<{ filename: string; mime_type?: string }>>([]);
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([]);
+  const [toolPermissionDraft, setToolPermissionDraftState] = useState<ToolPermissionDraft>(() => createToolPermissionDraft());
   const [previewFile, setPreviewFile] = useState<{ name: string; content: string } | null>(null);
   const [previewImage, setPreviewImage] = useState<{ name: string; url: string } | null>(null);
   const [conversationSearch, setConversationSearch] = useState('');
@@ -836,8 +864,16 @@ export default function ChatPage() {
   const scrollEndTimeoutRef = useRef<number | null>(null);
   const programmaticScrollRef = useRef(false);
   const queuedMessagesRef = useRef<QueuedMessage[]>([]);
+  const toolPermissionDraftRef = useRef<ToolPermissionDraft>(toolPermissionDraft);
 
   const { chatViewMode, toggleChatViewMode, openSettings } = useNavigationStore();
+
+  const updateToolPermissionDraft = useCallback((draft: ToolPermissionDraft) => {
+    toolPermissionDraftRef.current = draft;
+    setToolPermissionDraftState(draft);
+  }, []);
+
+  const getToolPermissionDraft = useCallback(() => toolPermissionDraftRef.current, []);
 
   const updateQueuedMessages = useCallback((updater: (messages: QueuedMessage[]) => QueuedMessage[]) => {
     const next = updater(queuedMessagesRef.current);
@@ -948,6 +984,28 @@ export default function ChatPage() {
     [messages],
   );
   const selectedBranchTipId = currentNodeId || currentConversation?.current_node_id || null;
+  const currentBranchToolPermissionMode = useMemo(
+    () => getBranchToolPermissionMode(messages, selectedBranchTipId),
+    [messages, selectedBranchTipId],
+  );
+
+  useEffect(() => {
+    const next = syncToolPermissionDraftFromBranch(
+      toolPermissionDraftRef.current,
+      currentBranchToolPermissionMode,
+    );
+    if (next !== toolPermissionDraftRef.current) {
+      updateToolPermissionDraft(next);
+    }
+  }, [currentBranchToolPermissionMode, updateToolPermissionDraft]);
+
+  useEffect(() => {
+    if (currentConversation || toolPermissionDraftRef.current.explicit) return;
+    const current = toolPermissionDraftRef.current;
+    if (current.mode !== DEFAULT_TOOL_PERMISSION_MODE) {
+      updateToolPermissionDraft(createToolPermissionDraft());
+    }
+  }, [currentConversation, updateToolPermissionDraft]);
 
   useEffect(() => {
     const activeRunIds = new Set(activeRunStates.map((run) => run.runId));
@@ -1662,7 +1720,7 @@ export default function ChatPage() {
     val: string,
     modelId?: string,
     providerId?: string,
-    toolPermissionMode: ToolPermissionMode = 'modify_only',
+    toolPermissionMode?: ToolPermissionMode,
   ) => {
     if (!val.trim()) return;
     setShouldAutoScroll(true);
@@ -1779,7 +1837,6 @@ export default function ChatPage() {
           content: userContent,
           reasoning_effort: currentReasoningEffort,
           thinking_enabled: currentThinkingEnabled,
-          tool_permission_mode: 'modify_only',
           import_files: importFileNames.length > 0
             ? importFileNames.map(filename => ({ filename }))
             : undefined,
@@ -2374,6 +2431,9 @@ export default function ChatPage() {
                     queuedMessages={visibleQueuedMessages}
                     onUpdateQueuedMessage={handleUpdateQueuedMessage}
                     onDeleteQueuedMessage={handleDeleteQueuedMessage}
+                    toolPermissionDraft={toolPermissionDraft}
+                    getToolPermissionDraft={getToolPermissionDraft}
+                    onToolPermissionDraftChange={updateToolPermissionDraft}
                   />
                 </div>
               </div>
@@ -2493,6 +2553,9 @@ export default function ChatPage() {
                   queuedMessages={visibleQueuedMessages}
                   onUpdateQueuedMessage={handleUpdateQueuedMessage}
                   onDeleteQueuedMessage={handleDeleteQueuedMessage}
+                  toolPermissionDraft={toolPermissionDraft}
+                  getToolPermissionDraft={getToolPermissionDraft}
+                  onToolPermissionDraftChange={updateToolPermissionDraft}
                 />
               </footer>
             </>

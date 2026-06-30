@@ -217,6 +217,58 @@ def test_stream_persists_tool_permission_mode_per_new_leaf_node(tmp_path):
     assert reloaded is not None
     assert reloaded.nodes[first_node_id]["tool_permission_mode"] == "auto_approve"
     assert reloaded.nodes[second_node_id]["tool_permission_mode"] == "modify_only"
+    history = reloaded.get_message_chain_from_node(second_node_id)
+    user_modes = [msg.get("tool_permission_mode") for msg in history if msg.get("role") == "user"]
+    assert user_modes == ["auto_approve", "modify_only"]
+
+
+def test_stream_defaults_tool_permission_mode_to_ask_always(tmp_path):
+    manager = make_chat_manager(tmp_path)
+    conversation = manager.create_conversation("tool permission default")
+    conversation_id = conversation.metadata["id"]
+
+    asyncio.run(
+        drain(manager.send_message_stream(
+            conversation_id,
+            "first",
+            model_id="deepseek-v4-pro",
+        ))
+    )
+    first_node_id = manager.get_conversation(conversation_id).current_node_id
+
+    reloaded = manager.get_conversation(conversation_id)
+    assert reloaded is not None
+    assert reloaded.nodes[first_node_id]["tool_permission_mode"] == "ask_always"
+
+
+def test_stream_inherits_tool_permission_mode_from_parent_node(tmp_path):
+    manager = make_chat_manager(tmp_path)
+    conversation = manager.create_conversation("tool permission inherit")
+    conversation_id = conversation.metadata["id"]
+
+    asyncio.run(
+        drain(manager.send_message_stream(
+            conversation_id,
+            "first",
+            model_id="deepseek-v4-pro",
+            tool_permission_mode="ask_always",
+        ))
+    )
+    first_node_id = manager.get_conversation(conversation_id).current_node_id
+
+    asyncio.run(
+        drain(manager.send_message_stream(
+            conversation_id,
+            "second",
+            model_id="deepseek-v4-pro",
+        ))
+    )
+    second_node_id = manager.get_conversation(conversation_id).current_node_id
+
+    reloaded = manager.get_conversation(conversation_id)
+    assert reloaded is not None
+    assert reloaded.nodes[first_node_id]["tool_permission_mode"] == "ask_always"
+    assert reloaded.nodes[second_node_id]["tool_permission_mode"] == "ask_always"
 
 
 def test_list_conversations_does_not_guess_provider_for_legacy_shared_model(tmp_path):

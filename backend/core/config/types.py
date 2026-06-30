@@ -76,6 +76,7 @@ class Message(TypedDict, total=False):
     is_visible_in_transcript_only: Optional[bool]  # UI/transcript 可见，语义上是恢复上下文
     import_files: Optional[List[Dict[str, Any]]]  # 用户显式引用的导入文件元数据
     image_refs: Optional[List[Dict[str, Any]]]  # 用户显式引用的图片附件元数据
+    tool_permission_mode: Optional[str]  # 所在节点的工具审批模式
 
 class ConversationTreeNode(TypedDict):
     """对话树节点 - 一轮完整交互"""

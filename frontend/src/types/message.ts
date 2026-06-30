@@ -69,6 +69,7 @@ export interface Message {
     filename: string;
     mime_type?: string;
   }>;
+  tool_permission_mode?: ToolPermissionMode | null;
 }
 
 export interface SendMessageRequest {

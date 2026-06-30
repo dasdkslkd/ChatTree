@@ -401,7 +401,6 @@ class ChatManager:
         )
         eff_effort = normalize_effort(eff_effort, meta)
         eff_thinking = normalize_thinking(eff_thinking, meta)
-        eff_tool_permission_mode = normalize_permission_mode(tool_permission_mode)
         logger.info(f"Stream reasoning: effort={eff_effort}, thinking={eff_thinking}")
         requested_parent_node_id = node_id or preview.current_node_id
         if not node_id and requested_parent_node_id in self._active_controllers:
@@ -445,6 +444,14 @@ class ChatManager:
                     parent_id = conversation.nodes.get(parent_id, {}).get("parent_id") or parent_id
                 conversation.switch_to_node(parent_id)
             current_node_id = conversation.current_node_id
+            parent_tool_permission_mode = None
+            if current_node_id and current_node_id in conversation.nodes:
+                parent_tool_permission_mode = conversation.nodes[current_node_id].get("tool_permission_mode")
+            eff_tool_permission_mode = normalize_permission_mode(
+                tool_permission_mode
+                if tool_permission_mode not in (None, "")
+                else parent_tool_permission_mode or "ask_always"
+            )
             if self.capability_registry is not None:
                 skill_names = collect_skill_injection_names(
                     content,
