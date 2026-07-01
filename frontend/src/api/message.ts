@@ -3,8 +3,6 @@ import type {
   Message,
   SendMessageRequest,
   StreamChunk,
-  SyntheticInput,
-  SyntheticInputStartRequest,
   ToolApprovalDecision,
   ToolApprovalScope,
 } from '../types/message';
@@ -128,32 +126,6 @@ export const messageApi = {
   getAllActiveStreams: async (): Promise<ActiveStreamInfo[]> => {
     const response = await apiClient.get('/conversations/messages/streams/active');
     return response.data;
-  },
-
-  getPendingSyntheticInputs: async (conversationId: string): Promise<SyntheticInput[]> => {
-    const response = await apiClient.get(`/conversations/${conversationId}/synthetic-inputs/pending`);
-    return response.data;
-  },
-
-  streamSyntheticInput: async function* (
-    conversationId: string,
-    inputId: string,
-    data: SyntheticInputStartRequest,
-    signal?: AbortSignal,
-  ): AsyncGenerator<StreamChunk, void> {
-    const response = await fetch(
-      `/api/conversations/${conversationId}/synthetic-inputs/${encodeURIComponent(inputId)}/stream`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(data),
-        signal,
-      },
-    );
-
-    yield* parseSseResponse(response);
   },
 
   attachStream: async function* (

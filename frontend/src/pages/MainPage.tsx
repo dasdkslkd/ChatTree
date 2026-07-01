@@ -70,7 +70,6 @@ import { messageApi, type ActiveStreamInfo, type ToolResultSlice } from '../api/
 import type {
   Message,
   SendMessageRequest,
-  SyntheticInputStartRequest,
   ToolApprovalDecision,
   ToolApprovalPayload,
   ToolApprovalScope,
@@ -1030,7 +1029,6 @@ export default function ChatPage() {
   const scrollEndTimeoutRef = useRef<number | null>(null);
   const programmaticScrollRef = useRef(false);
   const queuedMessagesRef = useRef<QueuedMessage[]>([]);
-  const syntheticInputDrainInFlightRef = useRef<Set<string>>(new Set());
   const toolPermissionDraftRef = useRef<ToolPermissionDraft>(toolPermissionDraft);
   const [expandedProcessedMessageIds, setExpandedProcessedMessageIds] = useState<Set<string>>(() => new Set());
 
@@ -1741,67 +1739,6 @@ export default function ChatPage() {
     return true;
   }, [startStreaming, updateQueuedMessages]);
 
-  const buildSyntheticInputStartRequest = useCallback((conversationId: string): SyntheticInputStartRequest => {
-    if (currentConversation?.id !== conversationId) return {};
-    const {
-      currentProvider,
-      currentModel,
-      currentReasoningEffort,
-      currentThinkingEnabled,
-    } = useModelStore.getState();
-    return {
-      provider_id: currentProvider ?? undefined,
-      model_id: currentModel ?? undefined,
-      reasoning_effort: currentReasoningEffort,
-      thinking_enabled: currentThinkingEnabled,
-      tool_permission_mode: toolPermissionDraftRef.current.mode,
-    };
-  }, [currentConversation?.id]);
-
-  const hasPendingQueuedMessage = useCallback((conversationId: string) =>
-    queuedMessagesRef.current.some((message) =>
-      message.conversationId === conversationId && message.content.trim()
-    ),
-  []);
-
-  const hasStreamingChatRun = useCallback((conversationId: string) =>
-    streamManager.getConversationStates(conversationId).some((state) =>
-      state.kind === 'chat' && state.status === 'streaming'
-    ),
-  []);
-
-  const drainPendingSyntheticInput = useCallback(async (conversationId: string): Promise<boolean> => {
-    if (hasPendingQueuedMessage(conversationId) || hasStreamingChatRun(conversationId)) return false;
-    const inFlight = syntheticInputDrainInFlightRef.current;
-    if (inFlight.has(conversationId)) return false;
-    inFlight.add(conversationId);
-    try {
-      const pendingInputs = await messageApi.getPendingSyntheticInputs(conversationId);
-      const nextInput = pendingInputs.find((input) =>
-        input.kind === 'task_notification' && input.status === 'pending'
-      );
-      if (!nextInput) return false;
-      if (hasPendingQueuedMessage(conversationId) || hasStreamingChatRun(conversationId)) return false;
-      if (currentConversation?.id === conversationId) setShouldAutoScroll(true);
-      await streamManager.startSyntheticInputStream(
-        conversationId,
-        nextInput,
-        buildSyntheticInputStartRequest(conversationId),
-      );
-      return true;
-    } catch (err) {
-      console.error('Failed to drain synthetic input:', err);
-      return false;
-    } finally {
-      inFlight.delete(conversationId);
-    }
-  }, [
-    buildSyntheticInputStartRequest,
-    currentConversation?.id,
-    hasPendingQueuedMessage,
-    hasStreamingChatRun,
-  ]);
-
   const handleUpdateQueuedMessage = useCallback((id: string, content: string) => {
     updateQueuedMessages((messages) =>
       messages.map((message) => message.id === id ? { ...message, content } : message)
@@ -1852,8 +1789,7 @@ export default function ChatPage() {
           streamManager.cleanupIfController(finishedId, controller, runId);
         }
         await loadConversations();
-        const sentQueued = await sendNextQueuedMessage(finishedId);
-        if (!sentQueued) await drainPendingSyntheticInput(finishedId);
+        await sendNextQueuedMessage(finishedId);
         return;
       }
 
@@ -1868,7 +1804,6 @@ export default function ChatPage() {
                 : { awaitNodeId, retries: 6 },
             );
             await loadConversations();
-            await drainPendingSyntheticInput(finishedId);
           })();
         });
         return;
@@ -1901,8 +1836,7 @@ export default function ChatPage() {
       }
       // 同步对话列表（更新时间、标题等）
       await loadConversations();
-      const sentQueued = await sendNextQueuedMessage(finishedId);
-      if (!sentQueued) await drainPendingSyntheticInput(finishedId);
+      await sendNextQueuedMessage(finishedId);
     });
     return unsubscribe;
   }, [
@@ -1911,7 +1845,6 @@ export default function ChatPage() {
     patchAssistantMessageFromStream,
     loadConversations,
     sendNextQueuedMessage,
-    drainPendingSyntheticInput,
   ]);
 
   const shouldAutoScrollRef = useRef(shouldAutoScroll);
