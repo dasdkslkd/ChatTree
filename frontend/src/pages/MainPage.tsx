@@ -7,6 +7,7 @@ import {
   useLayoutEffect,
   useCallback,
   useMemo,
+  isValidElement,
   type DragEvent,
 } from 'react';
 import SyntaxHighlighter from 'react-syntax-highlighter/dist/esm/prism-light';
@@ -92,6 +93,16 @@ import {
   summarizeToolCall,
   type ToolResultEnvelope,
 } from '../utils/toolDisplay';
+import {
+  formatProcessedDuration,
+  getAssistantFoldedContentBlocks,
+  getTimelineFoldState,
+  hasAssistantProcessHistory,
+} from '../utils/assistantTimelineFolding';
+import {
+  getActiveStreamPollingDelay,
+  getConversationActiveStreamLookupLimit,
+} from '../utils/activeStreamPolling';
 import { ChatInput } from '../components/ChatInput';
 import { RunStatusPanel } from '../components/runs/RunStatusPanel';
 import TreeView from './TreeView';
@@ -188,9 +199,44 @@ function formatConversationTime(timestamp: number | undefined): string {
 
 /* ---------- Markdown custom code blocks ---------- */
 
+function normalizeCodeLanguage(language: string): string {
+  const normalized = language.toLowerCase();
+  if (normalized === 'js') return 'javascript';
+  if (normalized === 'ts') return 'typescript';
+  if (normalized === 'py') return 'python';
+  if (normalized === 'ps1' || normalized === 'pwsh' || normalized === 'shell') return 'powershell';
+  if (normalized === 'sh' || normalized === 'zsh') return 'bash';
+  if (normalized === 'yml') return 'yaml';
+  return normalized;
+}
+
+function getCodeBlockPayload(children: React.ReactNode): { code: string; language: string | null } | null {
+  const codeElement = Array.isArray(children)
+    ? children.find((child) => isValidElement(child))
+    : children;
+  if (!isValidElement(codeElement)) return null;
+  const props = codeElement.props as { className?: string; children?: React.ReactNode };
+  const className = props.className || '';
+  const languageMatch = className.match(/language-([\w-]+)/);
+  const rawChildren = props.children;
+  const code = Array.isArray(rawChildren)
+    ? rawChildren.map((child) => String(child)).join('')
+    : typeof rawChildren === 'string'
+      ? rawChildren
+      : rawChildren == null
+        ? ''
+        : String(rawChildren);
+  return {
+    code: code.replace(/\n$/, ''),
+    language: languageMatch ? normalizeCodeLanguage(languageMatch[1]) : null,
+  };
+}
+
 function CodeBlockWrapper({ children, ...props }: React.HTMLAttributes<HTMLPreElement>) {
   const [copied, setCopied] = useState(false);
   const codeRef = useRef<HTMLDivElement>(null);
+  const payload = getCodeBlockPayload(children);
+  const languageLabel = payload?.language || '代码';
 
   const handleCopy = () => {
     const pre = codeRef.current?.querySelector('pre');
@@ -204,7 +250,7 @@ function CodeBlockWrapper({ children, ...props }: React.HTMLAttributes<HTMLPreEl
     <div ref={codeRef} className="code-block-wrapper my-2">
       <div className="code-toolbar-wrapper">
         <div className="code-toolbar">
-          <span className="text-xs text-muted-foreground select-none">代码</span>
+          <span className="text-xs text-muted-foreground select-none">{languageLabel}</span>
           <button
             className="flex items-center gap-1 px-0 py-1.5 rounded text-xs text-muted-foreground hover:text-foreground hover:bg-black/5 transition-colors cursor-pointer"
             onClick={handleCopy}
@@ -218,9 +264,30 @@ function CodeBlockWrapper({ children, ...props }: React.HTMLAttributes<HTMLPreEl
           </button>
         </div>
       </div>
-      <pre {...props}>
-        {children}
-      </pre>
+      {payload?.language ? (
+        <SyntaxHighlighter
+          language={payload.language}
+          style={oneDark}
+          customStyle={{
+            margin: 0,
+            padding: '10px 12px',
+            background: 'transparent',
+            fontSize: 13,
+            lineHeight: '20px',
+          }}
+          codeTagProps={{
+            style: {
+              fontFamily: 'var(--font-mono, "JetBrains Mono", ui-monospace, monospace)',
+            },
+          }}
+        >
+          {payload.code}
+        </SyntaxHighlighter>
+      ) : (
+        <pre {...props}>
+          {children}
+        </pre>
+      )}
     </div>
   );
 }
@@ -741,6 +808,48 @@ function ToolCallGroup({ items }: { items: ToolRenderItem[] }) {
   );
 }
 
+function AnimatedProcessedBlocks({
+  expanded,
+  blocks,
+  renderBlock,
+}: {
+  expanded: boolean;
+  blocks: AssistantTimelineBlock[];
+  renderBlock: (block: AssistantTimelineBlock) => React.ReactNode;
+}) {
+  const [rendered, setRendered] = useState(expanded);
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    let frame = 0;
+    let timer = 0;
+    if (expanded) {
+      setRendered(true);
+      frame = window.requestAnimationFrame(() => setVisible(true));
+    } else {
+      setVisible(false);
+      timer = window.setTimeout(() => setRendered(false), 180);
+    }
+    return () => {
+      if (frame) window.cancelAnimationFrame(frame);
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [expanded]);
+
+  if (!rendered) return null;
+
+  return (
+    <div
+      className={cn('processed-blocks-shell', visible && 'expanded')}
+      aria-hidden={!visible}
+    >
+      <div className="processed-blocks-inner">
+        {blocks.map(renderBlock)}
+      </div>
+    </div>
+  );
+}
+
 function ToolApprovalCard({ approval }: { approval: ToolApprovalPayload }) {
   const [submittingAction, setSubmittingAction] = useState<string | null>(null);
   const toolName = approval.tool_name || 'tool';
@@ -868,6 +977,7 @@ export default function ChatPage() {
   const programmaticScrollRef = useRef(false);
   const queuedMessagesRef = useRef<QueuedMessage[]>([]);
   const toolPermissionDraftRef = useRef<ToolPermissionDraft>(toolPermissionDraft);
+  const [expandedProcessedMessageIds, setExpandedProcessedMessageIds] = useState<Set<string>>(() => new Set());
 
   const { chatViewMode, toggleChatViewMode, openSettings } = useNavigationStore();
 
@@ -884,6 +994,18 @@ export default function ChatPage() {
     const timeline = getAssistantTimeline(message);
     assistantTimelineCacheRef.current.set(message, timeline);
     return timeline;
+  }, []);
+
+  const toggleProcessedBlocks = useCallback((messageId: string) => {
+    setExpandedProcessedMessageIds((current) => {
+      const next = new Set(current);
+      if (next.has(messageId)) {
+        next.delete(messageId);
+      } else {
+        next.add(messageId);
+      }
+      return next;
+    });
   }, []);
 
   const updateQueuedMessages = useCallback((updater: (messages: QueuedMessage[]) => QueuedMessage[]) => {
@@ -1546,7 +1668,30 @@ export default function ChatPage() {
 
   useEffect(() => {
     let cancelled = false;
+    let timer: number | null = null;
+
+    const clearTimer = () => {
+      if (timer !== null) {
+        window.clearTimeout(timer);
+        timer = null;
+      }
+    };
+
+    const scheduleNextSync = (activeStreamCount: number) => {
+      clearTimer();
+      const delay = getActiveStreamPollingDelay({
+        activeStreamCount,
+        documentHidden: document.hidden,
+      });
+      if (delay === null || cancelled) return;
+      timer = window.setTimeout(syncBackendActiveStreams, delay);
+    };
+
     const syncBackendActiveStreams = async () => {
+      if (document.hidden) {
+        scheduleNextSync(0);
+        return;
+      }
       try {
         const activeStreams = await messageApi.getAllActiveStreams();
         if (cancelled) return;
@@ -1556,17 +1701,33 @@ export default function ChatPage() {
           counts.set(item.conversation_id, (counts.get(item.conversation_id) ?? 0) + 1);
         }
         setBackendActiveStreamConversationCounts(counts);
+        scheduleNextSync(activeStreams.filter((item) => !item.done).length);
       } catch (_) {
         if (!cancelled) setBackendActiveStreamConversationCounts(new Map());
+        scheduleNextSync(0);
       }
     };
+
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        clearTimer();
+        return;
+      }
+      void syncBackendActiveStreams();
+    };
+
     void syncBackendActiveStreams();
-    const timer = window.setInterval(syncBackendActiveStreams, 5000);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      clearTimer();
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, []);
+
+  const currentBackendActiveStreamHintCount = currentConversation?.id
+    ? backendActiveStreamConversationCounts.get(currentConversation.id) ?? 0
+    : 0;
 
   useEffect(() => {
     const conversationId = currentConversation?.id;
@@ -1576,16 +1737,19 @@ export default function ChatPage() {
     (async () => {
       try {
         let activeStreams: ActiveStreamInfo[] = [];
-        for (let attempt = 0; attempt < 10; attempt += 1) {
+        const maxAttempts = getConversationActiveStreamLookupLimit({
+          activeStreamHintCount: currentBackendActiveStreamHintCount,
+        });
+        for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
           activeStreams = await messageApi.getActiveStreams(conversationId);
           if (cancelled) return;
           if (activeStreams.some((item) => !item.done && (item.node_id || item.run_id))) break;
+          if (attempt + 1 >= maxAttempts) break;
           await new Promise((resolve) => window.setTimeout(resolve, 500));
         }
         if (cancelled) return;
         const attachable = activeStreams.filter((item) => !item.done && (item.node_id || item.run_id));
         if (attachable.length === 0) {
-          await refreshMessages(conversationId, { retries: 0 });
           return;
         }
         await Promise.all(attachable
@@ -1613,7 +1777,7 @@ export default function ChatPage() {
     return () => {
       cancelled = true;
     };
-  }, [currentConversation?.id, refreshMessages]);
+  }, [currentBackendActiveStreamHintCount, currentConversation?.id, refreshMessages]);
 
   const handleSelectConversation = async (id: string) => {
     if (currentConversation && historyRef.current) {
@@ -1983,6 +2147,28 @@ export default function ChatPage() {
     return `${minutes}m ${remainingSeconds}s`;
   };
 
+  const renderAssistantTimelineBlock = (block: AssistantTimelineBlock) => {
+    if (block.type === 'reasoning') {
+      return <ThinkingBlock key={block.key} reasoning={block.reasoning} />;
+    }
+    if (block.type === 'tools') {
+      return <ToolCallGroup key={block.key} items={block.items} />;
+    }
+    return (
+      <div
+        key={block.key}
+        className="max-w-full w-fit px-3 py-2 rounded-2xl leading-relaxed prose prose-sm max-w-none [&_p]:m-0 [&_p:not(:last-child)]:mb-2"
+        style={{
+          color: 'var(--fg-secondary)',
+          fontSize: 'var(--codex-chat-font-size)',
+          lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
+        }}
+      >
+        <MarkdownView content={block.content} enableMermaid />
+      </div>
+    );
+  };
+
   // Parse '''USER MENTIONED FILES: ...''' prefix from message content
 
   const renderMsg = (m: typeof messages[0], index: number) => {
@@ -2062,7 +2248,27 @@ export default function ChatPage() {
     const fileNames = m.role === 'user' ? getUserImportFileNames(m) : [];
     const imageRefs = m.role === 'user' ? getUserImageRefs(m) : [];
     const displayContent = m.role === 'user' ? getUserDisplayContent(m) : m.content;
-    const assistantTimeline = m.role === 'assistant' ? getCachedAssistantTimeline(m) : [];
+    const processedBlocksExpanded = m.role === 'assistant' && expandedProcessedMessageIds.has(m.id);
+    const assistantHasProcessHistory = m.role === 'assistant' && hasAssistantProcessHistory(m);
+    const foldedAssistantContentBlocks = m.role === 'assistant' && assistantHasProcessHistory
+      ? getAssistantFoldedContentBlocks(m)
+      : [];
+    const assistantCanFoldProcess = assistantHasProcessHistory && foldedAssistantContentBlocks.length > 0;
+    const assistantTimeline = m.role === 'assistant' && (!assistantCanFoldProcess || processedBlocksExpanded)
+      ? getCachedAssistantTimeline(m)
+      : [];
+    const assistantFoldState = m.role === 'assistant' && (!assistantCanFoldProcess || processedBlocksExpanded)
+      ? getTimelineFoldState(assistantTimeline, {
+          processExpanded: processedBlocksExpanded,
+          finalContentKeys: foldedAssistantContentBlocks.map((block) => block.key),
+        })
+      : null;
+    const visibleAssistantContentBlocks = processedBlocksExpanded
+      ? assistantFoldState?.contentBlocks ?? []
+      : foldedAssistantContentBlocks;
+    const processedDuration = m.role === 'assistant'
+      ? formatProcessedDuration(m.generation_info?.duration_ms)
+      : null;
     const hasDisplayContent = displayContent.trim().length > 0;
 
     return (
@@ -2070,11 +2276,15 @@ export default function ChatPage() {
         key={m.id}
         id={`message-${index}`}
         className={cn(
-          'w-full my-2 flex flex-col group',
+          'chat-message-row w-full my-2 flex flex-col group',
           m.role === 'user' ? 'items-end' : 'items-start',
         )}
       >
-        <div className="flex flex-col items-start max-w-full">
+        <div className={cn(
+          'flex flex-col max-w-full',
+          m.role === 'user' ? 'items-end' : 'items-start',
+          m.role === 'assistant' && 'w-full',
+        )}>
           {imageRefs.length > 0 && (
             <div className="mb-1.5 flex max-w-full flex-wrap gap-2">
               {imageRefs.map((image) => {
@@ -2112,27 +2322,31 @@ export default function ChatPage() {
               ))}
             </div>
           )}
-          {m.role === 'assistant' && assistantTimeline.map((block) => {
-            if (block.type === 'reasoning') {
-              return <ThinkingBlock key={block.key} reasoning={block.reasoning} />;
-            }
-            if (block.type === 'tools') {
-              return <ToolCallGroup key={block.key} items={block.items} />;
-            }
-            return (
-              <div
-                key={block.key}
-                className="max-w-full w-fit px-3 py-2 rounded-2xl leading-relaxed prose prose-sm max-w-none [&_p]:m-0 [&_p:not(:last-child)]:mb-2"
-                style={{
-                  color: 'var(--fg-secondary)',
-                  fontSize: 'var(--codex-chat-font-size)',
-                  lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
-                }}
+          {m.role === 'assistant' && assistantCanFoldProcess && (
+            <div className={cn('processed-fold', processedBlocksExpanded && 'expanded')}>
+              <button
+                type="button"
+                className="processed-fold-button"
+                aria-expanded={processedBlocksExpanded}
+                onClick={() => toggleProcessedBlocks(m.id)}
               >
-                <MarkdownView content={block.content} enableMermaid />
-              </div>
-            );
-          })}
+                <span>{processedDuration ? `已处理 ${processedDuration}` : '已处理'}</span>
+                <ChevronRight className="processed-fold-chevron" />
+              </button>
+            </div>
+          )}
+          {m.role === 'assistant' && assistantCanFoldProcess && (
+            <>
+              <AnimatedProcessedBlocks
+                expanded={processedBlocksExpanded}
+                blocks={processedBlocksExpanded ? assistantFoldState?.processBlocks ?? [] : []}
+                renderBlock={renderAssistantTimelineBlock}
+              />
+              <div className="processed-answer-divider" />
+              {visibleAssistantContentBlocks.map(renderAssistantTimelineBlock)}
+            </>
+          )}
+          {m.role === 'assistant' && !assistantCanFoldProcess && assistantFoldState?.visibleBlocks.map(renderAssistantTimelineBlock)}
           {m.role !== 'assistant' && hasDisplayContent && (
             <div
               className={cn(
@@ -2161,9 +2375,9 @@ export default function ChatPage() {
               <MarkdownView content={displayContent} enableMermaid />
             </div>
           )}
-          {m.role === 'assistant' && m.generation_info && (
+          {m.role === 'assistant' && m.generation_info && (!assistantCanFoldProcess || m.generation_info.status !== 'completed') && (
             <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
-              <span>{formatDuration(m.generation_info.duration_ms)}</span>
+              {!assistantCanFoldProcess && <span>{formatDuration(m.generation_info.duration_ms)}</span>}
               {m.generation_info.status !== 'completed' && (
                 <span className={cn(
                   m.generation_info.status === 'error' ? 'text-destructive' : 'text-amber-500'
@@ -2173,7 +2387,10 @@ export default function ChatPage() {
               )}
             </div>
           )}
-          <div className="flex items-center gap-1 mt-1">
+          <div className={cn(
+            'flex items-center gap-1 mt-1',
+            m.role === 'user' ? 'self-end justify-end' : 'self-start justify-start',
+          )}>
             <Button
               variant="ghost"
               size="sm"
@@ -2490,7 +2707,7 @@ export default function ChatPage() {
               <div
                 ref={historyRef}
                 className={cn(
-                  'w-full flex-1 overflow-y-scroll pt-4 pb-[140px] flex flex-col items-center custom-scrollbar',
+                  'chat-history-scroll w-full flex-1 overflow-y-scroll pt-4 pb-[140px] flex flex-col items-center custom-scrollbar',
                   isScrolling && 'scrollbar-visible'
                 )}
                 onScroll={handleScroll}
@@ -2575,7 +2792,7 @@ export default function ChatPage() {
               </div>
               <div
                 aria-hidden="true"
-                className="pointer-events-none absolute bottom-0 left-0 right-0 z-[9] h-[150px]"
+                className="pointer-events-none absolute bottom-0 left-0 right-[12px] z-[9] h-[150px]"
                 style={{
                   background: 'linear-gradient(180deg, color-mix(in srgb, var(--bg-surface) 0%, transparent), var(--bg-surface) 72%)',
                 }}

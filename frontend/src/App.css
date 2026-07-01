@@ -98,10 +98,13 @@
 .prose blockquote {
   color: var(--fg-85, rgba(251,247,244,0.88));
   margin: 0 0 8px;
-  padding: 8px 0 8px 24px;
+  padding: 9px 12px 9px 22px;
   position: relative;
-  border-left: none;
+  border: 0.5px solid var(--border-light, rgba(255,247,240,0.05));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-editor, #221f1c) 10%, transparent);
   font-style: normal;
+  overflow: hidden;
 }
 .prose blockquote::after {
   content: '';
@@ -156,6 +159,10 @@
   background: transparent;
   border: none;
   margin: 0;
+}
+
+.prose .code-block-wrapper pre {
+  scrollbar-gutter: stable;
 }
 
 /* Code inside code blocks */
@@ -247,24 +254,127 @@
 
 /* ====== Tables ====== */
 .prose table {
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
   width: 100%;
   color: var(--fg-secondary, rgba(251,247,244,0.72));
   margin: 0.75rem 0 1rem;
+  border: 0.5px solid var(--border-light, rgba(255,247,240,0.05));
+  border-radius: 10px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--bg-editor, #221f1c) 10%, transparent);
+  box-shadow: var(--highlight-top);
 }
 
 .prose th,
 .prose td {
-  border: 1px solid var(--border, rgba(255,247,240,0.09));
+  border: 0;
+  border-right: 0.5px solid var(--border, rgba(255,247,240,0.09));
+  border-bottom: 0.5px solid var(--border, rgba(255,247,240,0.09));
   padding: 0.5rem 0.75rem;
   text-align: left;
   color: inherit;
+}
+
+.prose th:last-child,
+.prose td:last-child {
+  border-right: 0;
+}
+
+.prose tr:last-child td {
+  border-bottom: 0;
 }
 
 .prose th {
   color: var(--fg-85, rgba(251,247,244,0.88));
   background: var(--muted, #2a2723);
   font-weight: 600;
+}
+
+.chat-history-scroll {
+  scrollbar-gutter: stable;
+}
+
+.chat-history-scroll::-webkit-scrollbar-track {
+  margin-bottom: 150px;
+}
+
+.chat-message-row {
+  content-visibility: auto;
+  contain-intrinsic-size: 1px 180px;
+}
+
+/* ====== Assistant processed fold separator ====== */
+.processed-fold {
+  width: min(100%, 760px);
+  display: flex;
+  align-items: center;
+  margin: 8px 0 2px;
+  color: var(--fg-tertiary, rgba(251,247,244,0.55));
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.processed-fold-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 24px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.processed-fold-button:hover {
+  color: var(--fg-secondary, rgba(251,247,244,0.72));
+}
+
+.processed-fold-chevron {
+  width: 15px;
+  height: 15px;
+  transition: transform var(--transition-basic, 0.15s);
+}
+
+.processed-fold.expanded .processed-fold-chevron {
+  transform: rotate(90deg);
+}
+
+.processed-blocks-shell {
+  width: min(100%, 760px);
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  margin: 0;
+  transition:
+    grid-template-rows var(--transition-basic, 0.18s),
+    opacity var(--transition-basic, 0.18s),
+    margin var(--transition-basic, 0.18s);
+}
+
+.processed-blocks-shell.expanded {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  margin: 6px 0 8px;
+}
+
+.processed-blocks-inner {
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.processed-answer-divider {
+  width: min(100%, 760px);
+  height: 0.5px;
+  margin: 8px 0 14px;
+  background: var(--border-light, rgba(255,247,240,0.05));
 }
 
 /* ====== Tool calls (reference/gui components.css) ====== */
