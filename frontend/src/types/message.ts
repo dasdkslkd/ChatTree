@@ -89,6 +89,29 @@ export interface SendMessageRequest {
   }>;
 }
 
+export interface SyntheticInput {
+  input_id: string;
+  kind: string;
+  conversation_id: string;
+  anchor_node_id?: string | null;
+  source_run_id: string;
+  source_run_kind: string;
+  status: string;
+  summary: string;
+  content: string;
+  metadata?: Record<string, unknown>;
+  created_at: number;
+  consumed_at?: number | null;
+}
+
+export interface SyntheticInputStartRequest {
+  model_id?: string;
+  provider_id?: string;
+  reasoning_effort?: string | null;
+  thinking_enabled?: boolean | null;
+  tool_permission_mode?: ToolPermissionMode;
+}
+
 export type ToolPermissionMode = 'auto_approve' | 'modify_only' | 'ask_always';
 
 export type StreamStatus = 'start' | 'content' | 'complete' | 'error' | 'stopped';

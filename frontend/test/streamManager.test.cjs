@@ -154,6 +154,7 @@ async function withManager(run) {
   resetTimers();
   installWindowTimers();
   const originalStream = messageApi.stream;
+  const originalSyntheticStream = messageApi.streamSyntheticInput;
   const originalAttach = runsApi.attach;
   const originalStop = runsApi.stop;
   const manager = new StreamManager();
@@ -161,6 +162,7 @@ async function withManager(run) {
     await run(manager);
   } finally {
     messageApi.stream = originalStream;
+    messageApi.streamSyntheticInput = originalSyntheticStream;
     runsApi.attach = originalAttach;
     runsApi.stop = originalStop;
     manager.resetAll();
@@ -599,6 +601,59 @@ async function testDurationNotificationsUseCoarseInterval() {
   });
 }
 
+async function testSyntheticInputStartsAnchoredChatWithoutPendingUserBubble() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    let call = null;
+    messageApi.streamSyntheticInput = (conversationId, inputId, data, signal) => {
+      call = { conversationId, inputId, data, signal };
+      return controlled.stream();
+    };
+    const input = {
+      input_id: 'synthetic-1',
+      kind: 'task_notification',
+      conversation_id: 'conv-1',
+      anchor_node_id: 'node-parent',
+      source_run_id: 'run-subagent',
+      source_run_kind: 'subagent',
+      status: 'pending',
+      summary: 'subagent completed',
+      content: 'done',
+      created_at: Date.now() / 1000,
+    };
+    const running = manager.startSyntheticInputStream('conv-1', input, { model_id: 'model-1' });
+
+    try {
+      const initialState = manager.getConversationStates('conv-1')[0];
+      assert.equal(initialState.kind, 'chat');
+      assert.equal(initialState.anchorNodeId, 'node-parent');
+      assert.equal(initialState.nodeId, null);
+      assert.equal(initialState.targetNodeId, null);
+      assert.equal(initialState.pendingUserMessage, null);
+      assert.equal(call.conversationId, 'conv-1');
+      assert.equal(call.inputId, 'synthetic-1');
+      assert.deepEqual(call.data, { model_id: 'model-1' });
+
+      await controlled.push(chunk({
+        run_id: 'run-synthetic-chat',
+        anchor_node_id: 'node-parent',
+        node_id: 'node-child',
+        target_node_id: 'node-child',
+        content: 'integrated',
+      }));
+      const boundState = manager.getConversationStates('conv-1')[0];
+      assert.equal(boundState.runId, 'run-synthetic-chat');
+      assert.equal(boundState.anchorNodeId, 'node-parent');
+      assert.equal(boundState.nodeId, 'node-child');
+      assert.equal(boundState.targetNodeId, 'node-child');
+      assert.equal(boundState.content, 'integrated');
+    } finally {
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
 function testGenerationStatusUsesPersistedErrorMessage() {
   assert.equal(
     getGenerationStatusText({ status: 'error', error_message: 'provider authentication failed' }),
@@ -625,6 +680,7 @@ async function main() {
   await testCompletedDirectResponseCanBeArchivedAndRemovedFromActiveRuns();
   await testCoalescesContentNotificationsAndFlushesCompletionImmediately();
   await testDurationNotificationsUseCoarseInterval();
+  await testSyntheticInputStartsAnchoredChatWithoutPendingUserBubble();
   testGenerationStatusUsesPersistedErrorMessage();
   console.log('streamManager tests passed');
 }

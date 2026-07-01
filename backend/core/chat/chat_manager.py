@@ -423,6 +423,7 @@ class ChatManager:
         import_files: Optional[List[Dict[str, Any]]] = None,
         image_refs: Optional[List[Dict[str, Any]]] = None,
         tool_permission_mode: Optional[str] = None,
+        message_subtype: Optional[str] = None,
         run_id: Optional[str] = None,
     ) -> AsyncIterator[StreamChunk]:
         """
@@ -592,6 +593,8 @@ class ChatManager:
             "tool_call_id": None,
             "timestamp": int(time())
         })
+        if message_subtype:
+            user_msg["subtype"] = message_subtype
         if slash_result.kind == SlashDispatchKind.MAIN_PROMPT:
             user_msg["slash_command"] = self._slash_command_metadata(slash_result)
         normalized_import_files = self._normalize_import_file_refs(import_files)

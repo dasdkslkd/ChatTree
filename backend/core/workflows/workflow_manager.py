@@ -56,6 +56,7 @@ class WorkflowManager:
             script=script,
             args=args or {},
             parent_node_id=parent_node_id,
+            parent_run_id=parent_run_id,
             budget=budget,
         ))
         self._tasks[run.run_id] = task
@@ -77,10 +78,12 @@ class WorkflowManager:
         script: str,
         args: Dict[str, Any],
         parent_node_id: Optional[str],
+        parent_run_id: Optional[str],
         budget: Dict[str, Any],
     ) -> None:
         final_status = RunStatus.COMPLETED
         final_error = None
+        notification_payload: Optional[Dict[str, Any]] = None
         try:
             bridge = WorkflowRuntimeBridge(
                 workflow_run_id=run_id,
@@ -107,12 +110,13 @@ class WorkflowManager:
                     "content": "",
                 })
                 return
-            await self.run_manager.append_event(run_id, {
+            notification_payload = {
                 "status": "complete",
                 "event_type": "workflow_result",
                 "content": "" if result is None else str(result),
                 "result": result,
-            })
+            }
+            await self.run_manager.append_event(run_id, notification_payload)
         except asyncio.CancelledError:
             final_status = RunStatus.CANCELLED
             await self.run_manager.append_event(run_id, {
@@ -123,12 +127,52 @@ class WorkflowManager:
         except Exception as exc:
             final_status = RunStatus.FAILED
             final_error = str(exc) or exc.__class__.__name__
-            await self.run_manager.append_event(run_id, {
+            notification_payload = {
                 "status": "error",
                 "event_type": "workflow_error",
                 "content": "",
                 "error": final_error,
-            })
+            }
+            await self.run_manager.append_event(run_id, notification_payload)
         finally:
             self._tasks.pop(run_id, None)
             await self.run_manager.finish_run(run_id, final_status, final_error)
+            if notification_payload and final_status in {RunStatus.COMPLETED, RunStatus.FAILED}:
+                source_status = "completed" if final_status == RunStatus.COMPLETED else "failed"
+                await self._enqueue_synthetic_task_notification(
+                    run_id,
+                    source_status,
+                    notification_payload.get("content") or notification_payload.get("error") or "",
+                    event_payload=notification_payload,
+                )
+
+    async def _enqueue_synthetic_task_notification(
+        self,
+        run_id: str,
+        source_status: str,
+        content: str,
+        *,
+        event_payload: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        run = self.run_manager.get_run(run_id)
+        if not run or run.get("parent_run_id"):
+            return None
+        if run.get("kind") != RunKind.WORKFLOW.value:
+            return None
+        event_payload = dict(event_payload or {})
+        item = self.run_manager.synthetic_inputs.enqueue(
+            kind="task_notification",
+            conversation_id=str(run["conversation_id"]),
+            anchor_node_id=run.get("anchor_node_id"),
+            source_run_id=run_id,
+            source_run_kind=RunKind.WORKFLOW.value,
+            status="pending",
+            summary=f"Workflow {source_status}",
+            content=content,
+            metadata={
+                "origin": "task_notification",
+                "source_status": source_status,
+                "event_type": event_payload.get("event_type"),
+            },
+        )
+        return item.to_dict()

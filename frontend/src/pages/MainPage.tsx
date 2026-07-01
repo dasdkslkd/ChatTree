@@ -67,7 +67,15 @@ import {
 } from 'lucide-react';
 import { conversationApi } from '../api/conversation';
 import { messageApi, type ActiveStreamInfo, type ToolResultSlice } from '../api/message';
-import type { Message, SendMessageRequest, ToolApprovalDecision, ToolApprovalPayload, ToolApprovalScope, ToolPermissionMode } from '../types/message';
+import type {
+  Message,
+  SendMessageRequest,
+  SyntheticInputStartRequest,
+  ToolApprovalDecision,
+  ToolApprovalPayload,
+  ToolApprovalScope,
+  ToolPermissionMode,
+} from '../types/message';
 import type { WorkspaceContext } from '../types/conversation';
 import { useConversationStore } from '../store/conversationStore';
 import { useModelStore } from '../store/modelStore';
@@ -1021,6 +1029,7 @@ export default function ChatPage() {
   const scrollEndTimeoutRef = useRef<number | null>(null);
   const programmaticScrollRef = useRef(false);
   const queuedMessagesRef = useRef<QueuedMessage[]>([]);
+  const syntheticInputDrainInFlightRef = useRef<Set<string>>(new Set());
   const toolPermissionDraftRef = useRef<ToolPermissionDraft>(toolPermissionDraft);
   const [expandedProcessedMessageIds, setExpandedProcessedMessageIds] = useState<Set<string>>(() => new Set());
 
@@ -1702,7 +1711,7 @@ export default function ChatPage() {
     setEditTargetNodeId(null);
     clearCurrentConversation();
   };
-  const sendNextQueuedMessage = useCallback(async (conversationId: string) => {
+  const sendNextQueuedMessage = useCallback(async (conversationId: string): Promise<boolean> => {
     const nextMessage = queuedMessagesRef.current.find((message) =>
       message.conversationId === conversationId && message.content.trim()
       && (
@@ -1714,7 +1723,7 @@ export default function ChatPage() {
       updateQueuedMessages((messages) =>
         messages.filter((message) => message.conversationId !== conversationId || message.content.trim())
       );
-      return;
+      return false;
     }
 
     updateQueuedMessages((messages) => messages.filter((message) => message.id !== nextMessage.id));
@@ -1728,7 +1737,69 @@ export default function ChatPage() {
       nextMessage.content,
       nextMessage.nodeId || undefined,
     );
+    return true;
   }, [startStreaming, updateQueuedMessages]);
+
+  const buildSyntheticInputStartRequest = useCallback((conversationId: string): SyntheticInputStartRequest => {
+    if (currentConversation?.id !== conversationId) return {};
+    const {
+      currentProvider,
+      currentModel,
+      currentReasoningEffort,
+      currentThinkingEnabled,
+    } = useModelStore.getState();
+    return {
+      provider_id: currentProvider ?? undefined,
+      model_id: currentModel ?? undefined,
+      reasoning_effort: currentReasoningEffort,
+      thinking_enabled: currentThinkingEnabled,
+      tool_permission_mode: toolPermissionDraftRef.current.mode,
+    };
+  }, [currentConversation?.id]);
+
+  const hasPendingQueuedMessage = useCallback((conversationId: string) =>
+    queuedMessagesRef.current.some((message) =>
+      message.conversationId === conversationId && message.content.trim()
+    ),
+  []);
+
+  const hasStreamingChatRun = useCallback((conversationId: string) =>
+    streamManager.getConversationStates(conversationId).some((state) =>
+      state.kind === 'chat' && state.status === 'streaming'
+    ),
+  []);
+
+  const drainPendingSyntheticInput = useCallback(async (conversationId: string): Promise<boolean> => {
+    if (hasPendingQueuedMessage(conversationId) || hasStreamingChatRun(conversationId)) return false;
+    const inFlight = syntheticInputDrainInFlightRef.current;
+    if (inFlight.has(conversationId)) return false;
+    inFlight.add(conversationId);
+    try {
+      const pendingInputs = await messageApi.getPendingSyntheticInputs(conversationId);
+      const nextInput = pendingInputs.find((input) =>
+        input.kind === 'task_notification' && input.status === 'pending'
+      );
+      if (!nextInput) return false;
+      if (hasPendingQueuedMessage(conversationId) || hasStreamingChatRun(conversationId)) return false;
+      if (currentConversation?.id === conversationId) setShouldAutoScroll(true);
+      await streamManager.startSyntheticInputStream(
+        conversationId,
+        nextInput,
+        buildSyntheticInputStartRequest(conversationId),
+      );
+      return true;
+    } catch (err) {
+      console.error('Failed to drain synthetic input:', err);
+      return false;
+    } finally {
+      inFlight.delete(conversationId);
+    }
+  }, [
+    buildSyntheticInputStartRequest,
+    currentConversation?.id,
+    hasPendingQueuedMessage,
+    hasStreamingChatRun,
+  ]);
 
   const handleUpdateQueuedMessage = useCallback((id: string, content: string) => {
     updateQueuedMessages((messages) =>
@@ -1780,7 +1851,8 @@ export default function ChatPage() {
           streamManager.cleanupIfController(finishedId, controller, runId);
         }
         await loadConversations();
-        await sendNextQueuedMessage(finishedId);
+        const sentQueued = await sendNextQueuedMessage(finishedId);
+        if (!sentQueued) await drainPendingSyntheticInput(finishedId);
         return;
       }
 
@@ -1795,6 +1867,7 @@ export default function ChatPage() {
                 : { awaitNodeId, retries: 6 },
             );
             await loadConversations();
+            await drainPendingSyntheticInput(finishedId);
           })();
         });
         return;
@@ -1827,10 +1900,18 @@ export default function ChatPage() {
       }
       // 同步对话列表（更新时间、标题等）
       await loadConversations();
-      await sendNextQueuedMessage(finishedId);
+      const sentQueued = await sendNextQueuedMessage(finishedId);
+      if (!sentQueued) await drainPendingSyntheticInput(finishedId);
     });
     return unsubscribe;
-  }, [addArchivedSideRun, refreshMessages, patchAssistantMessageFromStream, loadConversations, sendNextQueuedMessage]);
+  }, [
+    addArchivedSideRun,
+    refreshMessages,
+    patchAssistantMessageFromStream,
+    loadConversations,
+    sendNextQueuedMessage,
+    drainPendingSyntheticInput,
+  ]);
 
   const shouldAutoScrollRef = useRef(shouldAutoScroll);
   shouldAutoScrollRef.current = shouldAutoScroll;
@@ -2318,6 +2399,9 @@ export default function ChatPage() {
   const isCompactSummaryMessage = (message: typeof messages[0]) =>
     message.is_compact_summary === true;
 
+  const isTaskNotificationMessage = (message: typeof messages[0]) =>
+    message.role === 'user' && message.subtype === 'task_notification';
+
   const formatCompactTokens = (tokens?: number) => {
     if (!tokens || tokens <= 0) return null;
     if (tokens >= 1000) return `${Math.round(tokens / 1000)}k tokens`;
@@ -2337,7 +2421,7 @@ export default function ChatPage() {
 
   const outline = messages
     .map((m, index) => ({ ...m, originalIndex: index }))
-    .filter((m) => m.role === 'user' && !isCompactSummaryMessage(m))
+    .filter((m) => m.role === 'user' && !isCompactSummaryMessage(m) && !isTaskNotificationMessage(m))
     .map((m) => {
       const clean = getUserDisplayContent(m);
       return {
@@ -2434,6 +2518,10 @@ export default function ChatPage() {
       );
     }
 
+    if (isTaskNotificationMessage(m)) {
+      return null;
+    }
+
     if (m.role === 'tool') {
       const coveredById = m.tool_call_id ? coveredToolMessages.ids.has(m.tool_call_id) : false;
       const coveredByName = !m.tool_call_id && m.name ? coveredToolMessages.names.has(m.name) : false;
@@ -2451,7 +2539,9 @@ export default function ChatPage() {
       );
     }
 
-    const prevUserMessage = index > 0 && messages[index - 1]?.role === 'user'
+    const prevUserMessage = index > 0
+      && messages[index - 1]?.role === 'user'
+      && !isTaskNotificationMessage(messages[index - 1])
       ? messages[index - 1]
       : null;
     const fileNames = m.role === 'user' ? getUserImportFileNames(m) : [];

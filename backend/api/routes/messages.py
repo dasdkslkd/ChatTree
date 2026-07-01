@@ -35,6 +35,18 @@ class SendMessageRequest(BaseModel):
     import_files: Optional[List[Dict[str, Any]]] = None
     image_refs: Optional[List[Dict[str, Any]]] = None
     tool_permission_mode: Optional[str] = None
+    synthetic_input_id: Optional[str] = None
+    synthetic_origin: Optional[str] = None
+    synthetic_kind: Optional[str] = None
+    synthetic_metadata: Optional[Dict[str, Any]] = None
+
+
+class SyntheticInputStartRequest(BaseModel):
+    model_id: Optional[str] = None
+    provider_id: Optional[str] = None
+    reasoning_effort: Optional[str] = None
+    thinking_enabled: Optional[bool] = None
+    tool_permission_mode: Optional[str] = None
 
 
 class LegacyRunStreamSession:
@@ -150,6 +162,34 @@ def _direct_response_runtime_context(
             "plugins": len(registry.plugins()),
         }
     return context
+
+
+def _synthetic_run_metadata(request: SendMessageRequest) -> Dict[str, Any]:
+    if not request.synthetic_input_id:
+        return {}
+    synthetic_metadata = dict(request.synthetic_metadata or {})
+    return {
+        "origin": request.synthetic_origin or synthetic_metadata.get("origin") or "synthetic_input",
+        "synthetic_input": {
+            **synthetic_metadata,
+            "input_id": request.synthetic_input_id,
+            "kind": request.synthetic_kind,
+            "origin": request.synthetic_origin or synthetic_metadata.get("origin"),
+        },
+    }
+
+
+def build_task_notification_content(item: Dict[str, Any]) -> str:
+    metadata = dict(item.get("metadata") or {})
+    payload = {
+        "kind": item.get("kind"),
+        "summary": item.get("summary"),
+        "source_run_id": item.get("source_run_id"),
+        "source_run_kind": item.get("source_run_kind"),
+        "source_status": metadata.get("source_status"),
+        "content": item.get("content") or "",
+    }
+    return "<task-notification>\n" + json.dumps(payload, ensure_ascii=False, indent=2) + "\n</task-notification>"
 
 
 _HEAVY_TOOL_RESULT_FIELDS = {"raw_content", "model_visible_content"}
@@ -363,6 +403,7 @@ async def detached_stream_event_generator(
             "reasoning_effort": request.reasoning_effort,
             "thinking_enabled": request.thinking_enabled,
             "tool_permission_mode": request.tool_permission_mode,
+            **_synthetic_run_metadata(request),
         },
     )
 
@@ -382,6 +423,7 @@ async def detached_stream_event_generator(
                 import_files=request.import_files,
                 image_refs=request.image_refs,
                 tool_permission_mode=request.tool_permission_mode,
+                message_subtype=request.synthetic_kind if request.synthetic_input_id else None,
                 run_id=run.run_id,
             ):
                 chunk_data = build_stream_chunk_data(chunk, conversation_id)
@@ -470,6 +512,80 @@ async def get_all_active_streams(
         for run in run_manager.list_active()
         if run.get("kind") in _ACTIVE_MESSAGE_STREAM_KINDS
     ]
+
+
+@router.get("/conversations/{conversation_id}/synthetic-inputs/pending", response_model=List[Dict[str, Any]])
+async def get_pending_synthetic_inputs(
+    conversation_id: str,
+    run_manager: RunManager = Depends(get_run_manager),
+):
+    return run_manager.synthetic_inputs.list_pending(conversation_id)
+
+
+@router.post("/conversations/{conversation_id}/synthetic-inputs/{input_id}/consume", response_model=Dict[str, Any])
+async def consume_synthetic_input(
+    conversation_id: str,
+    input_id: str,
+    run_manager: RunManager = Depends(get_run_manager),
+):
+    item = run_manager.synthetic_inputs.mark_consumed(conversation_id, input_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Synthetic input 不存在")
+    return item
+
+
+@router.post("/conversations/{conversation_id}/synthetic-inputs/{input_id}/stream")
+async def stream_synthetic_input(
+    conversation_id: str,
+    input_id: str,
+    request: Optional[SyntheticInputStartRequest] = None,
+    chat_manager: ChatManager = Depends(get_chat_manager),
+    run_manager: RunManager = Depends(get_run_manager),
+    subagent_executor: SubagentExecutor = Depends(get_subagent_executor),
+    workflow_manager: WorkflowManager = Depends(get_workflow_manager),
+):
+    item = run_manager.synthetic_inputs.get(conversation_id, input_id)
+    if item is None or item.get("status") != "pending":
+        raise HTTPException(status_code=404, detail="Pending synthetic input 不存在")
+    if item.get("kind") != "task_notification":
+        raise HTTPException(status_code=400, detail="不支持的 synthetic input 类型")
+
+    run_manager.synthetic_inputs.mark_consumed(conversation_id, input_id)
+    request = request or SyntheticInputStartRequest()
+    synthetic_request = SendMessageRequest(
+        content=build_task_notification_content(item),
+        model_id=request.model_id,
+        provider_id=request.provider_id,
+        node_id=item.get("anchor_node_id"),
+        reasoning_effort=request.reasoning_effort,
+        thinking_enabled=request.thinking_enabled,
+        tool_permission_mode=request.tool_permission_mode,
+        synthetic_input_id=input_id,
+        synthetic_origin="task_notification",
+        synthetic_kind=str(item.get("kind") or ""),
+        synthetic_metadata={
+            "origin": "task_notification",
+            "source_run_id": item.get("source_run_id"),
+            "source_run_kind": item.get("source_run_kind"),
+            "source_status": (item.get("metadata") or {}).get("source_status"),
+        },
+    )
+    return StreamingResponse(
+        detached_stream_event_generator(
+            conversation_id,
+            synthetic_request,
+            chat_manager,
+            run_manager,
+            subagent_executor,
+            workflow_manager,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/conversations/{conversation_id}/messages/{node_id}/stream/attach")

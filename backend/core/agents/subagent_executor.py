@@ -66,6 +66,7 @@ class SubagentExecutor:
             agent_name=agent_name,
             input_data=input_data,
             parent_node_id=parent_node_id,
+            parent_run_id=parent_run_id,
             provider_id=provider_id,
             model_id=model_id,
             permission_mode=permission_mode,
@@ -89,6 +90,7 @@ class SubagentExecutor:
         agent_name: str,
         input_data: Any,
         parent_node_id: Optional[str],
+        parent_run_id: Optional[str],
         provider_id: Optional[str],
         model_id: Optional[str],
         permission_mode: Optional[str],
@@ -96,12 +98,13 @@ class SubagentExecutor:
     ) -> None:
         final_status = RunStatus.COMPLETED
         final_error: Optional[str] = None
+        notification_payload: Optional[Dict[str, Any]] = None
         try:
             agent = self.capability_registry.get_agent(agent_name)
             if agent is None:
                 raise KeyError(agent_name)
             if agent.timeout_seconds:
-                await asyncio.wait_for(
+                notification_payload = await asyncio.wait_for(
                     self._produce_inner(
                         run_id=run_id,
                         conversation_id=conversation_id,
@@ -117,7 +120,7 @@ class SubagentExecutor:
                     timeout=agent.timeout_seconds,
                 )
             else:
-                await self._produce_inner(
+                notification_payload = await self._produce_inner(
                     run_id=run_id,
                     conversation_id=conversation_id,
                     agent_name=agent_name,
@@ -142,26 +145,36 @@ class SubagentExecutor:
             final_status = RunStatus.FAILED
             agent = self.capability_registry.get_agent(agent_name)
             final_error = f"subagent timeout after {agent.timeout_seconds if agent else 'configured'} seconds"
-            await self.run_manager.append_event(run_id, {
+            notification_payload = {
                 "status": "error",
                 "event_type": "subagent_error",
                 "agent_name": agent_name,
                 "content": "",
                 "error": final_error,
-            })
+            }
+            await self.run_manager.append_event(run_id, notification_payload)
         except Exception as exc:
             final_status = RunStatus.FAILED
             final_error = str(exc) or exc.__class__.__name__
-            await self.run_manager.append_event(run_id, {
+            notification_payload = {
                 "status": "error",
                 "event_type": "subagent_error",
                 "agent_name": agent_name,
                 "content": "",
                 "error": final_error,
-            })
+            }
+            await self.run_manager.append_event(run_id, notification_payload)
         finally:
             self._controllers.pop(run_id, None)
             await self.run_manager.finish_run(run_id, final_status, final_error)
+            if notification_payload and final_status in {RunStatus.COMPLETED, RunStatus.FAILED}:
+                source_status = "completed" if final_status == RunStatus.COMPLETED else "failed"
+                await self._enqueue_synthetic_task_notification(
+                    run_id,
+                    source_status,
+                    notification_payload.get("content") or notification_payload.get("error") or "",
+                    event_payload=notification_payload,
+                )
 
     async def _produce_inner(
         self,
@@ -176,7 +189,7 @@ class SubagentExecutor:
         model_id: Optional[str],
         permission_mode: Optional[str],
         workspace: Optional[Dict[str, Any]],
-    ) -> None:
+    ) -> Dict[str, Any]:
             conversation = self.chat_manager.get_conversation(conversation_id)
             if conversation is None:
                 raise ValueError("对话不存在")
@@ -352,13 +365,15 @@ class SubagentExecutor:
                         },
                     })
             self._validate_output_schema(agent.output_schema, total_content)
-            await self.run_manager.append_event(run_id, {
+            result_payload = {
                 "status": "complete",
                 "event_type": "subagent_result",
                 "agent_name": agent_name,
                 "content": total_content,
                 "reasoning": total_reasoning or None,
-            })
+            }
+            await self.run_manager.append_event(run_id, result_payload)
+            return result_payload
 
     def _build_messages(self, agent_name: str, input_data: Any, parent_node_id: Optional[str]) -> list[Message]:
         agent = self.capability_registry.get_agent(agent_name)
@@ -508,3 +523,36 @@ class SubagentExecutor:
         payload["agent_name"] = agent_name
         payload["target_node_id"] = None
         return payload
+
+    async def _enqueue_synthetic_task_notification(
+        self,
+        run_id: str,
+        source_status: str,
+        content: str,
+        *,
+        event_payload: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        run = self.run_manager.get_run(run_id)
+        if not run or run.get("parent_run_id"):
+            return None
+        if run.get("kind") != RunKind.SUBAGENT.value:
+            return None
+        metadata = dict(run.get("metadata") or {})
+        event_payload = dict(event_payload or {})
+        item = self.run_manager.synthetic_inputs.enqueue(
+            kind="task_notification",
+            conversation_id=str(run["conversation_id"]),
+            anchor_node_id=run.get("anchor_node_id"),
+            source_run_id=run_id,
+            source_run_kind=RunKind.SUBAGENT.value,
+            status="pending",
+            summary=f"Subagent {metadata.get('agent_name') or event_payload.get('agent_name') or 'run'} {source_status}",
+            content=content,
+            metadata={
+                "origin": "task_notification",
+                "source_status": source_status,
+                "event_type": event_payload.get("event_type"),
+                "agent_name": metadata.get("agent_name") or event_payload.get("agent_name"),
+            },
+        )
+        return item.to_dict()

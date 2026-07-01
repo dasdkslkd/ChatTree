@@ -1,4 +1,9 @@
-import type { SendMessageRequest, ToolApprovalPayload } from '../types/message';
+import type {
+  SendMessageRequest,
+  SyntheticInput,
+  SyntheticInputStartRequest,
+  ToolApprovalPayload,
+} from '../types/message';
 import { messageApi } from '../api/message';
 import { runsApi } from '../api/runs';
 import { slashRegistry } from './slashRegistry';
@@ -438,6 +443,30 @@ export class StreamManager {
     this.addToConversation(conversationId, runId);
     this.notify(conversationId, true);
     await this.consume(runId, () => messageApi.stream(conversationId, request, nodeId, abortController.signal));
+  }
+
+  async startSyntheticInputStream(
+    conversationId: string,
+    input: SyntheticInput,
+    request: SyntheticInputStartRequest = {},
+  ): Promise<void> {
+    let runId = `synthetic_${Date.now()}_${this.tempSeq++}`;
+    const abortController = new AbortController();
+    this.streams.set(runId, this.createState(
+      runId,
+      conversationId,
+      abortController,
+      null,
+      null,
+      'chat',
+      input.anchor_node_id ?? null,
+    ));
+    this.addToConversation(conversationId, runId);
+    this.notify(conversationId, true);
+    await this.consume(
+      runId,
+      () => messageApi.streamSyntheticInput(conversationId, input.input_id, request, abortController.signal),
+    );
   }
 
   async resumeStream(

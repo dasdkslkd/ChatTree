@@ -7,6 +7,7 @@ from time import time
 from typing import Any, AsyncIterator, Dict, Iterable, Optional
 
 from .journal import RunJournal
+from .synthetic_inputs import SyntheticInputQueue
 from .types import TERMINAL_RUN_STATUSES, RunKind, RunRecord, RunStatus
 
 
@@ -23,6 +24,7 @@ class RunManager:
 
     def __init__(self, journal: Optional[RunJournal] = None) -> None:
         self.journal = journal or RunJournal()
+        self.synthetic_inputs = SyntheticInputQueue()
         self._runs: Dict[str, RunRecord] = {}
         self._events: Dict[str, list[Dict[str, Any]]] = {}
         self._conditions: Dict[str, asyncio.Condition] = {}
