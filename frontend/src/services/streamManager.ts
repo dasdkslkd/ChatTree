@@ -3,6 +3,8 @@ import { messageApi } from '../api/message';
 import { runsApi } from '../api/runs';
 import { slashRegistry } from './slashRegistry';
 
+export const STREAM_DURATION_UPDATE_MS = 1000;
+
 export interface StreamState {
   runId: string;
   status: 'idle' | 'streaming' | 'completed' | 'error' | 'stopped';
@@ -481,7 +483,7 @@ export class StreamManager {
         this.streams.set(runId, { ...state, duration: Date.now() - start });
         this.notify(state.conversationId);
       }
-    }, 250);
+    }, STREAM_DURATION_UPDATE_MS);
     this.durationTimers.set(runId, timer);
 
     try {

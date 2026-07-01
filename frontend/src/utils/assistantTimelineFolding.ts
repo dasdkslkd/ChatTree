@@ -24,6 +24,10 @@ export type TimelineFoldState<T extends TimelineFoldBlock> = {
   visibleBlocks: T[];
 };
 
+export type StreamingTimelineFoldState<T extends TimelineFoldBlock> = TimelineFoldState<T> & {
+  processExpanded: boolean;
+};
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -135,6 +139,19 @@ export function getTimelineFoldState<T extends TimelineFoldBlock>(
     contentBlocks,
     visibleBlocks: options.processExpanded
       ? [...processBlocks, ...contentBlocks]
-      : contentBlocks,
+    : contentBlocks,
+  };
+}
+
+export function getStreamingTimelineFoldState<T extends TimelineFoldBlock>(
+  blocks: T[],
+  finalContentKeys?: Iterable<string>,
+): StreamingTimelineFoldState<T> {
+  return {
+    ...getTimelineFoldState(blocks, {
+      processExpanded: true,
+      finalContentKeys,
+    }),
+    processExpanded: true,
   };
 }

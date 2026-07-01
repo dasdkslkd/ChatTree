@@ -20,6 +20,7 @@ require.extensions['.ts'] = function loadTs(module, filename) {
 const {
   formatProcessedDuration,
   getAssistantFoldedContentBlocks,
+  getStreamingTimelineFoldState,
   getTimelineFoldState,
   hasAssistantProcessHistory,
 } = require(path.join(__dirname, '../src/utils/assistantTimelineFolding.ts'));
@@ -95,6 +96,35 @@ function testKeepsIntermediateContentInProcessWhenFinalKeysProvided() {
   assert.deepEqual(folded.contentBlocks.map((block) => block.key), ['content-final']);
 }
 
+function testStreamingProcessDefaultsExpandedAndKeepsAnswerSeparated() {
+  const blocks = [
+    { type: 'reasoning', key: 'r1' },
+    { type: 'tools', key: 't1' },
+    { type: 'content', key: 'content-final' },
+  ];
+
+  const folded = getStreamingTimelineFoldState(blocks, ['content-final']);
+
+  assert.equal(folded.canFoldProcess, true);
+  assert.equal(folded.processExpanded, true);
+  assert.deepEqual(folded.processBlocks.map((block) => block.key), ['r1', 't1']);
+  assert.deepEqual(folded.contentBlocks.map((block) => block.key), ['content-final']);
+  assert.deepEqual(folded.visibleBlocks.map((block) => block.key), ['r1', 't1', 'content-final']);
+}
+
+function testStreamingDoesNotInventFoldForProcessOnlyDrafts() {
+  const blocks = [
+    { type: 'reasoning', key: 'r1' },
+    { type: 'tools', key: 't1' },
+  ];
+
+  const folded = getStreamingTimelineFoldState(blocks);
+
+  assert.equal(folded.canFoldProcess, false);
+  assert.equal(folded.processExpanded, true);
+  assert.deepEqual(folded.visibleBlocks.map((block) => block.key), ['r1', 't1']);
+}
+
 function testDetectsAssistantProcessHistoryWithoutFormattingTools() {
   assert.equal(hasAssistantProcessHistory({
     tool_interactions: [{
@@ -126,6 +156,8 @@ function main() {
   testCollapsesProcessBlocksEvenForLatestCompletedAssistant();
   testDoesNotFoldWhenThereIsNoContentBlock();
   testKeepsIntermediateContentInProcessWhenFinalKeysProvided();
+  testStreamingProcessDefaultsExpandedAndKeepsAnswerSeparated();
+  testStreamingDoesNotInventFoldForProcessOnlyDrafts();
   testDetectsAssistantProcessHistoryWithoutFormattingTools();
   testExtractsFoldedFinalContentWithoutToolBlocks();
   console.log('assistantTimelineFolding tests passed');

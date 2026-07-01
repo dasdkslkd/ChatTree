@@ -273,11 +273,75 @@ function testSetCurrentNodeIdLocalKeepsSnapshotsInSync() {
   assert.equal(state.conversations[0].current_node_id, 'node-openai');
 }
 
+function testPatchAssistantMessageFromStreamUpsertsCurrentNode() {
+  const currentConversation = {
+    id: 'conv-1',
+    title: '流式补丁测试',
+    created_at: 1,
+    updated_at: 1,
+    model: '',
+    model_id: '',
+    provider_id: '',
+    current_node_id: 'node-old',
+    total_tokens: {},
+  };
+
+  useConversationStore.setState({
+    conversations: [currentConversation],
+    currentConversation,
+    messages: [],
+    branches: {},
+    currentNodeId: 'node-old',
+    loading: false,
+    error: null,
+  });
+
+  const patched = useConversationStore.getState().patchAssistantMessageFromStream('conv-1', {
+    id: 'stream-run-node-new',
+    role: 'assistant',
+    content: '流式完成回答',
+    node_id: 'node-new',
+    timestamp: 2,
+    generation_info: {
+      duration_ms: 1000,
+      status: 'completed',
+    },
+  }, '问题');
+
+  const state = useConversationStore.getState();
+  assert.equal(patched, true);
+  assert.equal(state.messages.length, 2);
+  assert.equal(state.messages[0].role, 'user');
+  assert.equal(state.messages[0].content, '问题');
+  assert.equal(state.messages[1].role, 'assistant');
+  assert.equal(state.messages[1].content, '流式完成回答');
+  assert.equal(state.currentNodeId, 'node-new');
+  assert.equal(state.currentConversation.current_node_id, 'node-new');
+  assert.equal(state.conversations[0].current_node_id, 'node-new');
+
+  useConversationStore.getState().patchAssistantMessageFromStream('conv-1', {
+    id: 'stream-run-node-new',
+    role: 'assistant',
+    content: '后端前的最终回答',
+    node_id: 'node-new',
+    timestamp: 3,
+    generation_info: {
+      duration_ms: 1200,
+      status: 'completed',
+    },
+  });
+
+  const replaced = useConversationStore.getState();
+  assert.equal(replaced.messages.length, 2);
+  assert.equal(replaced.messages[1].content, '后端前的最终回答');
+}
+
 async function main() {
   await testDeleteNodeRefreshesTreeData();
   await testRefreshMessagesUsesHistoryTipInsteadOfStaleConversationList();
   await testSwitchNodeUpdatesCurrentConversationSnapshot();
   testSetCurrentNodeIdLocalKeepsSnapshotsInSync();
+  testPatchAssistantMessageFromStreamUpsertsCurrentNode();
   console.log('conversationStore tests passed');
 }
 

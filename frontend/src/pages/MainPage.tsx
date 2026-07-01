@@ -67,13 +67,13 @@ import {
 } from 'lucide-react';
 import { conversationApi } from '../api/conversation';
 import { messageApi, type ActiveStreamInfo, type ToolResultSlice } from '../api/message';
-import type { SendMessageRequest, ToolApprovalDecision, ToolApprovalPayload, ToolApprovalScope, ToolPermissionMode } from '../types/message';
+import type { Message, SendMessageRequest, ToolApprovalDecision, ToolApprovalPayload, ToolApprovalScope, ToolPermissionMode } from '../types/message';
 import type { WorkspaceContext } from '../types/conversation';
 import { useConversationStore } from '../store/conversationStore';
 import { useModelStore } from '../store/modelStore';
 import { useNavigationStore } from '../store/navigationStore';
 import { useRunManager } from '../hooks/useRunManager';
-import { streamManager } from '../services/streamManager';
+import { streamManager, type StreamState } from '../services/streamManager';
 import { slashRegistry } from '../services/slashRegistry';
 import { getGenerationStatusText, getStreamStatusText as getStreamStatusLabel } from '../utils/generationStatus';
 import { isRunBlockingSelectedBranch, isRunVisibleInSelectedTranscript } from '../utils/runVisibility';
@@ -96,6 +96,7 @@ import {
 import {
   formatProcessedDuration,
   getAssistantFoldedContentBlocks,
+  getStreamingTimelineFoldState,
   getTimelineFoldState,
   hasAssistantProcessHistory,
 } from '../utils/assistantTimelineFolding';
@@ -605,6 +606,48 @@ function createQueuedMessageId(): string {
   return `queued-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+function getStreamGenerationStatus(status: StreamState['status']): 'completed' | 'error' | 'stopped' {
+  if (status === 'error') return 'error';
+  if (status === 'stopped') return 'stopped';
+  return 'completed';
+}
+
+function createAssistantMessageFromStream(run: StreamState): Message | null {
+  const nodeId = run.targetNodeId || run.nodeId;
+  if (!nodeId) return null;
+  const status = getStreamGenerationStatus(run.status);
+  return {
+    id: `stream-${run.runId}-${nodeId}`,
+    role: 'assistant',
+    content: run.content,
+    node_id: nodeId,
+    parent_node_id: run.anchorNodeId || undefined,
+    timestamp: Date.now() / 1000,
+    tokens_used: run.tokensUsed || undefined,
+    generation_info: {
+      duration_ms: run.duration,
+      status,
+      error_message: run.errorMessage,
+      tokens_used: run.tokensUsed || undefined,
+    },
+    reasoning: run.reasoning || undefined,
+    tool_interactions: run.toolInteractions.length > 0 ? run.toolInteractions : undefined,
+  };
+}
+
+function scheduleIdleTask(task: () => void, timeout = 1200): () => void {
+  const win = window as typeof window & {
+    requestIdleCallback?: (callback: () => void, options?: { timeout?: number }) => number;
+    cancelIdleCallback?: (handle: number) => void;
+  };
+  if (typeof win.requestIdleCallback === 'function') {
+    const handle = win.requestIdleCallback(task, { timeout });
+    return () => win.cancelIdleCallback?.(handle);
+  }
+  const handle = window.setTimeout(task, Math.min(timeout, 600));
+  return () => window.clearTimeout(handle);
+}
+
 function normalizeToolPermissionMode(value: unknown): ToolPermissionMode | undefined {
   return value === 'auto_approve' || value === 'modify_only' || value === 'ask_always'
     ? value
@@ -1053,7 +1096,8 @@ export default function ChatPage() {
     conversations, currentConversation, messages,
     currentNodeId, pendingScrollNodeId, clearPendingScroll,
     createConversation, selectConversation, deleteConversation, loadConversations,
-    clearCurrentConversation, updateConversationTitle, refreshMessages, deleteNode, switchNode, setCurrentNodeIdLocal,
+    clearCurrentConversation, updateConversationTitle, refreshMessages, patchAssistantMessageFromStream,
+    deleteNode, switchNode, setCurrentNodeIdLocal,
   } = useConversationStore();
 
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
@@ -1179,12 +1223,23 @@ export default function ChatPage() {
         tool_interactions: run.toolInteractions,
       });
       const pendingApprovalList = Object.values(run.pendingApprovals).filter((approval) => approval.status === 'pending');
+      const streamingFoldedContentBlocks = getAssistantFoldedContentBlocks({
+        content: run.content,
+        reasoning: run.reasoning,
+        tool_interactions: run.toolInteractions,
+      });
+      const streamingFoldState = getStreamingTimelineFoldState(
+        timeline,
+        streamingFoldedContentBlocks.map((block) => block.key),
+      );
       let activeReasoningIndex = -1;
+      let activeReasoningKey: string | null = null;
       if (run.status === 'streaming') {
         for (let i = timeline.length - 1; i >= 0; i -= 1) {
           if (timeline[i].type === 'reasoning') {
             const hasLaterBlock = timeline.slice(i + 1).some((block) => block.type !== 'reasoning');
             activeReasoningIndex = run.reasoningActive || !hasLaterBlock ? i : -1;
+            activeReasoningKey = activeReasoningIndex >= 0 ? timeline[activeReasoningIndex].key : null;
             break;
           }
         }
@@ -1195,8 +1250,10 @@ export default function ChatPage() {
         showPendingBubble: !!run.pendingUserMessage && !userLanded,
         showStreamBlock: run.status !== 'idle' && !assistantLanded,
         timeline,
+        streamingFoldState,
         pendingApprovalList,
         activeReasoningIndex,
+        activeReasoningKey,
       };
     })
     .filter((draft): draft is NonNullable<typeof draft> => Boolean(draft))
@@ -1592,10 +1649,38 @@ export default function ChatPage() {
   // 不依赖当前查看的是哪个对话，因此切走的对话流完成也能正确落地。
   useEffect(() => {
     const unsubscribe = streamManager.onFinish(async ({ conversationId: finishedId, runId, drained, nodeId, targetNodeId, controller }) => {
+      const finishedRun = streamManager.getConversationStates(finishedId).find((state) => state.runId === runId);
+      const streamMessage = finishedRun ? createAssistantMessageFromStream(finishedRun) : null;
+      const patchedAssistant = streamMessage
+        ? patchAssistantMessageFromStream(finishedId, streamMessage, finishedRun?.pendingUserMessage)
+        : false;
+      const awaitNodeId = targetNodeId ?? nodeId ?? streamMessage?.node_id ?? undefined;
+      const hasQueuedFollowup = queuedMessagesRef.current.some((message) =>
+        message.conversationId === finishedId
+        && message.content.trim()
+      );
+
       if (!targetNodeId && !nodeId) {
         await sendNextQueuedMessage(finishedId);
         return;
       }
+
+      if (patchedAssistant && !hasQueuedFollowup) {
+        streamManager.cleanupIfController(finishedId, controller, runId);
+        scheduleIdleTask(() => {
+          void (async () => {
+            await refreshMessages(
+              finishedId,
+              drained
+                ? (awaitNodeId ? { awaitNodeId, retries: 0 } : undefined)
+                : { awaitNodeId, retries: 6 },
+            );
+            await loadConversations();
+          })();
+        });
+        return;
+      }
+
       // 完成判据：等待本轮节点(nodeId)的 assistant 消息落盘，而非“消息数 +1”。
       // 对多消息轮次（未来工具轮次）同样稳健。nodeId 为空（停得太早还没拿到）时
       // refreshMessages 退化为单次拉取。
@@ -1605,8 +1690,8 @@ export default function ChatPage() {
       const confirmed = await refreshMessages(
         finishedId,
         drained
-          ? (targetNodeId || nodeId ? { awaitNodeId: targetNodeId ?? nodeId ?? undefined, retries: 0 } : undefined)
-          : { awaitNodeId: targetNodeId ?? nodeId ?? undefined, retries: 6 },
+          ? (awaitNodeId ? { awaitNodeId, retries: 0 } : undefined)
+          : { awaitNodeId, retries: 6 },
       );
       // 仅当确认真实消息已落地，才清理临时流状态（移除乐观气泡）。
       // 身份校验：若 await 期间用户对同一对话发起了新流，controller 已被替换则跳过。
@@ -1616,7 +1701,7 @@ export default function ChatPage() {
         // 硬 abort 且后端保存超过重试预算：保留乐观气泡，延后再确认一次，
         // 成功后再清理，彻底避免用户消息闪失。
         setTimeout(async () => {
-          await refreshMessages(finishedId, { awaitNodeId: targetNodeId ?? nodeId ?? undefined, retries: 6 });
+          await refreshMessages(finishedId, { awaitNodeId, retries: 6 });
           // 无论是否确认，这是最后兜底：清理临时状态，避免气泡永久残留。
           streamManager.cleanupIfController(finishedId, controller, runId);
         }, 800);
@@ -1626,7 +1711,7 @@ export default function ChatPage() {
       await sendNextQueuedMessage(finishedId);
     });
     return unsubscribe;
-  }, [refreshMessages, loadConversations, sendNextQueuedMessage]);
+  }, [refreshMessages, patchAssistantMessageFromStream, loadConversations, sendNextQueuedMessage]);
 
   const shouldAutoScrollRef = useRef(shouldAutoScroll);
   shouldAutoScrollRef.current = shouldAutoScroll;
@@ -2157,7 +2242,7 @@ export default function ChatPage() {
     return (
       <div
         key={block.key}
-        className="max-w-full w-fit px-3 py-2 rounded-2xl leading-relaxed prose prose-sm max-w-none [&_p]:m-0 [&_p:not(:last-child)]:mb-2"
+        className="max-w-full w-full min-w-0 px-3 py-2 rounded-2xl leading-relaxed prose prose-sm max-w-none [&_p]:m-0 [&_p:not(:last-child)]:mb-2"
         style={{
           color: 'var(--fg-secondary)',
           fontSize: 'var(--codex-chat-font-size)',
@@ -2451,6 +2536,11 @@ export default function ChatPage() {
     );
   };
 
+  const renderedMessages = useMemo(
+    () => messages.map((m, index) => renderMsg(m, index)),
+    [messages, expandedProcessedMessageIds, copiedMessageId, coveredToolMessages, currentConversation?.id],
+  );
+
   return (
     <div className="flex h-full" style={{ background: 'var(--bg-surface)' }}>
       {/* Left conversation list (collapsible) */}
@@ -2713,7 +2803,7 @@ export default function ChatPage() {
                 onScroll={handleScroll}
               >
                 <div className="w-[800px] max-w-full flex flex-col px-4">
-                  {messages.map((m, index) => renderMsg(m, index))}
+                  {renderedMessages}
                   {activeRunDrafts.map((draft) => (
                     <div key={draft.run.runId} className="contents">
                       {draft.showPendingBubble && (
@@ -2737,29 +2827,61 @@ export default function ChatPage() {
                       )}
                       {draft.showStreamBlock && (
                         <div className="w-full my-2 flex flex-col items-start">
-                          <div className="flex flex-col items-start max-w-full">
-                            {draft.timeline.map((block, blockIndex) => {
-                              if (block.type === 'reasoning') {
-                                const reasoningStillOpen = blockIndex === draft.activeReasoningIndex;
-                                return <ThinkingBlock key={block.key} reasoning={block.reasoning} streaming={reasoningStillOpen} />;
-                              }
-                              if (block.type === 'tools') {
-                                return <ToolCallGroup key={block.key} items={block.items} />;
-                              }
-                              return (
-                                <div
-                                  key={block.key}
-                                  className="max-w-full w-fit px-3 py-2 rounded-2xl rounded-bl-sm leading-relaxed prose prose-sm max-w-none [&_p]:m-0"
-                                  style={{
-                                    color: 'var(--fg-secondary)',
-                                    fontSize: 'var(--codex-chat-font-size)',
-                                    lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
-                                  }}
-                                >
-                                  <MarkdownView content={block.content} />
+                          <div className="flex flex-col items-start max-w-full w-full min-w-0">
+                            {draft.streamingFoldState.canFoldProcess ? (
+                              <>
+                                <div className="processed-fold expanded">
+                                  <div className="processed-fold-button" aria-expanded="true">
+                                    <span>{draft.run.duration > 0 ? `已处理 ${formatProcessedDuration(draft.run.duration) ?? ''}`.trim() : '已处理'}</span>
+                                    <ChevronRight className="processed-fold-chevron" />
+                                  </div>
                                 </div>
-                              );
-                            })}
+                                <AnimatedProcessedBlocks
+                                  expanded
+                                  blocks={draft.streamingFoldState.processBlocks}
+                                  renderBlock={(block) => {
+                                    if (block.type === 'reasoning') {
+                                      return (
+                                        <ThinkingBlock
+                                          key={block.key}
+                                          reasoning={block.reasoning}
+                                          streaming={block.key === draft.activeReasoningKey}
+                                        />
+                                      );
+                                    }
+                                    if (block.type === 'tools') {
+                                      return <ToolCallGroup key={block.key} items={block.items} />;
+                                    }
+                                    return renderAssistantTimelineBlock(block);
+                                  }}
+                                />
+                                <div className="processed-answer-divider" />
+                                {draft.streamingFoldState.contentBlocks.map(renderAssistantTimelineBlock)}
+                              </>
+                            ) : (
+                              draft.timeline.map((block, blockIndex) => {
+                                if (block.type === 'reasoning') {
+                                  const reasoningStillOpen = blockIndex === draft.activeReasoningIndex;
+                                  return <ThinkingBlock key={block.key} reasoning={block.reasoning} streaming={reasoningStillOpen} />;
+                                }
+                                if (block.type === 'tools') {
+                                  return <ToolCallGroup key={block.key} items={block.items} />;
+                                }
+                                return (
+                                  <div
+                                    key={block.key}
+                                    className="max-w-full w-full min-w-0 px-3 py-2 rounded-2xl rounded-bl-sm leading-relaxed prose prose-sm max-w-none [&_p]:m-0"
+                                    style={{
+                                      color: 'var(--fg-secondary)',
+                                      fontSize: 'var(--codex-chat-font-size)',
+                                      lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
+                                    }}
+                                  >
+                                    <MarkdownView content={block.content} />
+                                  </div>
+                                );
+                              })
+                            )}
                             <ToolApprovalGroup approvals={draft.pendingApprovalList} />
                             {draft.timeline.length === 0 && draft.pendingApprovalList.length === 0 && draft.run.status === 'streaming' && (
                               <div
@@ -2776,12 +2898,11 @@ export default function ChatPage() {
                                 </div>
                               </div>
                             )}
-                            <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
-                              <span>{formatDuration(draft.run.duration)}</span>
-                              {getStreamStatusLabel(draft.run.status, draft.run.errorMessage) && (
+                            {getStreamStatusLabel(draft.run.status, draft.run.errorMessage) && (
+                              <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
                                 <span className="text-destructive">{getStreamStatusLabel(draft.run.status, draft.run.errorMessage)}</span>
-                              )}
-                            </div>
+                              </div>
+                            )}
                           </div>
                         </div>
                       )}

@@ -20,11 +20,13 @@ require.extensions['.ts'] = function loadTs(module, filename) {
 let nextTimerId = 1;
 let timers = new Map();
 let intervals = new Map();
+let intervalDelays = new Map();
 
 function resetTimers() {
   nextTimerId = 1;
   timers = new Map();
   intervals = new Map();
+  intervalDelays = new Map();
 }
 
 function installWindowTimers() {
@@ -45,13 +47,15 @@ function installWindowTimers() {
     clearTimeout(id) {
       timers.delete(id);
     },
-    setInterval(callback) {
+    setInterval(callback, delay) {
       const id = nextTimerId++;
       intervals.set(id, callback);
+      intervalDelays.set(id, delay);
       return id;
     },
     clearInterval(id) {
       intervals.delete(id);
+      intervalDelays.delete(id);
     },
   };
 }
@@ -141,7 +145,7 @@ function chunk(overrides) {
   };
 }
 
-const { StreamManager } = require(path.join(__dirname, '../src/services/streamManager.ts'));
+const { StreamManager, STREAM_DURATION_UPDATE_MS } = require(path.join(__dirname, '../src/services/streamManager.ts'));
 const { messageApi } = require(path.join(__dirname, '../src/api/message.ts'));
 const { runsApi } = require(path.join(__dirname, '../src/api/runs.ts'));
 const { getGenerationStatusText, getStreamStatusText } = require(path.join(__dirname, '../src/utils/generationStatus.ts'));
@@ -536,6 +540,21 @@ async function testCoalescesContentNotificationsAndFlushesCompletionImmediately(
   });
 }
 
+async function testDurationNotificationsUseCoarseInterval() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    messageApi.stream = controlled.stream;
+    const running = manager.startStream('conv-1', { content: 'hello' });
+
+    try {
+      assert.deepEqual([...intervalDelays.values()], [STREAM_DURATION_UPDATE_MS]);
+    } finally {
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
 function testGenerationStatusUsesPersistedErrorMessage() {
   assert.equal(
     getGenerationStatusText({ status: 'error', error_message: 'provider authentication failed' }),
@@ -560,6 +579,7 @@ async function main() {
   await testRunFinishedFailedMapsToErrorState();
   await testRunFinishedCancelledMapsToStoppedState();
   await testCoalescesContentNotificationsAndFlushesCompletionImmediately();
+  await testDurationNotificationsUseCoarseInterval();
   testGenerationStatusUsesPersistedErrorMessage();
   console.log('streamManager tests passed');
 }

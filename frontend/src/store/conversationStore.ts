@@ -38,6 +38,7 @@ interface ConversationActions {
   loadTree: (conversationId: string) => Promise<void>;
   clearPendingScroll: () => void;
   refreshMessages: (conversationId: string, opts?: { awaitNodeId?: string; awaitRole?: 'assistant' | 'user'; retries?: number }) => Promise<boolean>;
+  patchAssistantMessageFromStream: (conversationId: string, message: Message, pendingUserContent?: string | null) => boolean;
 }
 
 const useConversationStoreBase = create<ConversationState & ConversationActions>()(
@@ -237,6 +238,63 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
         abortStreaming: () => set({ isStreaming: false, streamingContent: '' }),
         clearError: () => set({ error: null }),
         clearPendingScroll: () => set({ pendingScrollNodeId: null }),
+
+        patchAssistantMessageFromStream: (
+          conversationId: string,
+          message: Message,
+          pendingUserContent?: string | null,
+        ): boolean => {
+          if (get().currentConversation?.id !== conversationId || message.role !== 'assistant' || !message.node_id) {
+            return false;
+          }
+          let patched = false;
+          set((state) => {
+            if (state.currentConversation?.id !== conversationId) return state;
+            let replaced = false;
+            const messages = state.messages.map((existing) => {
+              const sameAssistantNode = existing.role === 'assistant' && existing.node_id === message.node_id;
+              const sameMessageId = existing.id === message.id;
+              if (!sameAssistantNode && !sameMessageId) return existing;
+              replaced = true;
+              return {
+                ...existing,
+                ...message,
+                id: existing.id || message.id,
+                timestamp: existing.timestamp || message.timestamp,
+              };
+            });
+            const hasUserMessage = messages.some((existing) =>
+              existing.role === 'user' && existing.node_id === message.node_id
+            );
+            const userContent = pendingUserContent?.trim();
+            if (!hasUserMessage && userContent) {
+              messages.push({
+                id: `stream-user-${message.id}`,
+                role: 'user',
+                content: pendingUserContent ?? '',
+                node_id: message.node_id,
+                parent_node_id: message.parent_node_id,
+                timestamp: Math.max(0, message.timestamp - 0.001),
+              });
+            }
+            if (!replaced) messages.push(message);
+            patched = true;
+            const currentNodeId = message.node_id || state.currentNodeId;
+            return {
+              messages,
+              currentNodeId,
+              currentConversation: state.currentConversation
+                ? { ...state.currentConversation, current_node_id: currentNodeId || state.currentConversation.current_node_id }
+                : state.currentConversation,
+              conversations: state.conversations.map((conversation) =>
+                conversation.id === conversationId
+                  ? { ...conversation, current_node_id: currentNodeId || conversation.current_node_id }
+                  : conversation
+              ),
+            };
+          });
+          return patched;
+        },
 
         // 流式结束后，从后端拉取真实消息。
         // 完成判据：等待 **本轮节点的指定角色消息** 落盘，而非“消息数 +1”。
