@@ -78,7 +78,7 @@ import { slashRegistry } from '../services/slashRegistry';
 import { getGenerationStatusText, getStreamStatusText as getStreamStatusLabel } from '../utils/generationStatus';
 import { isDetachedRunView, isRunBlockingSelectedBranch, isRunVisibleInMainTranscript } from '../utils/runVisibility';
 import { resolveSendNodeId } from '../utils/sendTarget';
-import { shouldQueueForMainThread, shouldRenderRunDraft } from '../utils/slashRuntime';
+import { getSlashRunLabel, shouldQueueForMainThread, shouldRenderRunDraft } from '../utils/slashRuntime';
 import {
   DEFAULT_TOOL_PERMISSION_MODE,
   createToolPermissionDraft,
@@ -993,6 +993,7 @@ export default function ChatPage() {
   const [attachedFiles, setAttachedFiles] = useState<string[]>([]);
   const [attachedImageRefs, setAttachedImageRefs] = useState<Array<{ filename: string; mime_type?: string }>>([]);
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([]);
+  const [archivedSideRunsByConversation, setArchivedSideRunsByConversation] = useState<Record<string, StreamState[]>>({});
   const [toolPermissionDraft, setToolPermissionDraftState] = useState<ToolPermissionDraft>(() => createToolPermissionDraft());
   const [previewFile, setPreviewFile] = useState<{ name: string; content: string } | null>(null);
   const [previewImage, setPreviewImage] = useState<{ name: string; url: string } | null>(null);
@@ -1128,6 +1129,47 @@ export default function ChatPage() {
 
   const activeRunStates = useRunManager(currentConversation?.id ?? null);
   const autoFollowedRunIdsRef = useRef<Set<string>>(new Set());
+  const archivedSideRunStates = useMemo(() => {
+    const conversationId = currentConversation?.id;
+    return conversationId ? archivedSideRunsByConversation[conversationId] ?? [] : [];
+  }, [archivedSideRunsByConversation, currentConversation?.id]);
+  const archivedSideRunIds = useMemo(
+    () => new Set(archivedSideRunStates.map((run) => run.runId)),
+    [archivedSideRunStates],
+  );
+  const sidePanelRunStates = useMemo(
+    () => [
+      ...archivedSideRunStates,
+      ...activeRunStates.filter((run) => !archivedSideRunIds.has(run.runId)),
+    ],
+    [activeRunStates, archivedSideRunIds, archivedSideRunStates],
+  );
+
+  const addArchivedSideRun = useCallback((conversationId: string, run: StreamState) => {
+    setArchivedSideRunsByConversation((current) => {
+      const existing = current[conversationId] ?? [];
+      return {
+        ...current,
+        [conversationId]: [
+          ...existing.filter((item) => item.runId !== run.runId),
+          run,
+        ],
+      };
+    });
+  }, []);
+
+  const removeArchivedSideRun = useCallback((conversationId: string, runId: string) => {
+    setArchivedSideRunsByConversation((current) => {
+      const existing = current[conversationId] ?? [];
+      if (!existing.some((run) => run.runId === runId)) return current;
+      const next = existing.filter((run) => run.runId !== runId);
+      if (next.length > 0) {
+        return { ...current, [conversationId]: next };
+      }
+      const { [conversationId]: _removed, ...rest } = current;
+      return rest;
+    });
+  }, []);
   useEffect(() => {
     void slashRegistry.refresh().catch(() => {});
   }, []);
@@ -1262,7 +1304,7 @@ export default function ChatPage() {
     [activeRunStates, currentBranchNodeIds, messages, selectedBranchTipId],
   );
 
-  const sideRunDrafts = useMemo(() => activeRunStates
+  const sideRunDrafts = useMemo(() => sidePanelRunStates
     .filter((run) => shouldRenderRunDraft(run))
     .map((run) => {
       if (!isDetachedRunView(run, selectedBranchTipId)) return null;
@@ -1295,6 +1337,7 @@ export default function ChatPage() {
       }
       return {
         run,
+        archived: archivedSideRunIds.has(run.runId),
         showPendingBubble: !!run.pendingUserMessage,
         showStreamBlock: run.status !== 'idle',
         timeline,
@@ -1306,7 +1349,7 @@ export default function ChatPage() {
     })
     .filter((draft): draft is NonNullable<typeof draft> => Boolean(draft))
     .filter((draft) => draft.showPendingBubble || draft.showStreamBlock),
-    [activeRunStates, selectedBranchTipId],
+    [archivedSideRunIds, selectedBranchTipId, sidePanelRunStates],
   );
 
   const sideRunActivity = useMemo(
@@ -1728,6 +1771,15 @@ export default function ChatPage() {
       );
 
       if (!targetNodeId && !nodeId) {
+        const archivedRun = finishedRun && shouldRenderRunDraft(finishedRun)
+          ? streamManager.archiveRun(runId)
+          : null;
+        if (archivedRun) {
+          addArchivedSideRun(finishedId, archivedRun);
+        } else {
+          streamManager.cleanupIfController(finishedId, controller, runId);
+        }
+        await loadConversations();
         await sendNextQueuedMessage(finishedId);
         return;
       }
@@ -1778,7 +1830,7 @@ export default function ChatPage() {
       await sendNextQueuedMessage(finishedId);
     });
     return unsubscribe;
-  }, [refreshMessages, patchAssistantMessageFromStream, loadConversations, sendNextQueuedMessage]);
+  }, [addArchivedSideRun, refreshMessages, patchAssistantMessageFromStream, loadConversations, sendNextQueuedMessage]);
 
   const shouldAutoScrollRef = useRef(shouldAutoScroll);
   shouldAutoScrollRef.current = shouldAutoScroll;
@@ -3053,12 +3105,13 @@ export default function ChatPage() {
                 <Button
                   variant={rightPanelView === 'side' ? 'secondary' : 'ghost'}
                   size="sm"
-                  className="h-8 gap-1.5 px-2 text-xs"
+                  className="h-8 min-w-0 gap-1.5 px-2 text-xs"
                   onClick={() => setRightPanelView('side')}
-                  title="侧边聊天"
+                  title="侧边运行：/btw /fork /workflow /status /help /capabilities"
+                  aria-label="侧边运行：/btw /fork /workflow /status /help /capabilities"
                 >
                   <MessageSquare className="h-3.5 w-3.5" />
-                  侧边聊天
+                  <span className="min-w-0 truncate">/btw /fork /workflow /status /help /capabilities</span>
                   {sideRunDrafts.length > 0 && (
                     <span
                       className="ml-0.5 rounded-full px-1.5 py-0.5 text-[10px]"
@@ -3104,7 +3157,7 @@ export default function ChatPage() {
                 <div className="flex min-h-0 flex-1 flex-col gap-3 px-3 pb-4">
                   {sideRunDrafts.length === 0 && (
                     <div className="rounded-lg border px-3 py-4 text-sm" style={{ borderColor: 'var(--border)', color: 'var(--fg-tertiary)' }}>
-                      暂无侧边运行。发送 <code>/btw</code>、<code>/fork</code> 或 <code>/workflow</code> 后会显示在这里。
+                      暂无侧边运行。发送 <code>/btw</code>、<code>/fork</code>、<code>/workflow</code>、<code>/status</code>、<code>/help</code> 或 <code>/capabilities</code> 后会显示在这里。
                     </div>
                   )}
                   {sideRunDrafts.map((draft) => (
@@ -3115,7 +3168,7 @@ export default function ChatPage() {
                     >
                       <div className="flex items-center gap-2 border-b px-3 py-2" style={{ borderColor: 'var(--border)' }}>
                         <span className="min-w-0 flex-1 truncate text-xs font-semibold" style={{ color: 'var(--fg-secondary)' }}>
-                          {draft.run.kind === 'side_question' ? 'btw' : draft.run.kind} · {draft.run.runId.slice(0, 12)}
+                          {getSlashRunLabel(draft.run.kind, draft.run.pendingUserMessage)} · {draft.run.runId.slice(0, 12)}
                         </span>
                         {draft.run.status === 'streaming' && (
                           <button
@@ -3131,7 +3184,13 @@ export default function ChatPage() {
                         <button
                           type="button"
                           className="rounded border-0 bg-transparent p-1"
-                          onClick={() => streamManager.cleanupRun(draft.run.runId)}
+                          onClick={() => {
+                            if (draft.archived && currentConversation?.id) {
+                              removeArchivedSideRun(currentConversation.id, draft.run.runId);
+                            } else {
+                              streamManager.cleanupRun(draft.run.runId);
+                            }
+                          }}
                           title="关闭"
                           style={{ color: 'var(--fg-tertiary)' }}
                         >

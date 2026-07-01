@@ -1,4 +1,4 @@
-export type RunKind = 'chat' | 'side_question' | 'subagent' | 'workflow' | 'workflow_step';
+export type RunKind = 'chat' | 'side_question' | 'subagent' | 'workflow' | 'workflow_step' | 'direct_response';
 export type RunStatus = 'queued' | 'running' | 'waiting_approval' | 'stopping' | 'completed' | 'failed' | 'cancelled';
 
 export interface RunRecord {

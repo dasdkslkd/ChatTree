@@ -25,12 +25,34 @@ class PromptSection:
 
 
 @dataclass(frozen=True)
+class RuntimePromptContext:
+    """Runtime-specific prompt block supplied by the caller."""
+
+    name: str
+    content: str
+    role: str = "system"
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def as_section(self, *, priority: int = 15) -> PromptSection:
+        metadata = {"runtime_context": self.name}
+        metadata.update(self.metadata)
+        return PromptSection(
+            name=f"runtime_context:{self.name}",
+            role=self.role,
+            content=self.content,
+            priority=priority,
+            metadata=metadata,
+        )
+
+
+@dataclass(frozen=True)
 class PromptBuildRequest:
     """Inputs needed to build provider-ready prompt messages."""
 
     base_messages: Iterable[dict[str, Any]]
     active_skill_names: Iterable[str] = ()
     extra_sections: Iterable[PromptSection] = ()
+    runtime_context: Optional[RuntimePromptContext] = None
     capability_char_budget: Optional[int] = None
     include_available_capabilities: bool = True
     include_core_prompt: bool = True

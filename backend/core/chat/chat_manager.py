@@ -29,7 +29,8 @@ from ..workspace import build_default_workspace, normalize_workspace
 from ..capabilities.prompting import (
     collect_skill_injection_names,
 )
-from ..prompts import PromptBuilder
+from ..prompts import PromptBuilder, PromptBuildRequest
+from ..prompts.types import RuntimePromptContext
 from ..slash import (
     SlashCommandDispatcher,
     SlashDispatchKind,
@@ -318,11 +319,14 @@ class ChatManager:
     ) -> List[Message]:
         base_messages = self._prepare_messages_for_api_with_conversation(conversation)
         custom_prompt, custom_mode = self._selected_system_prompt(conversation)
-        built_messages = PromptBuilder(self.capability_registry).build_messages(
-            base_messages,
-            active_skill_names=skill_names,
-            custom_system_prompt=custom_prompt,
-            custom_system_prompt_mode=custom_mode,
+        built_messages = PromptBuilder(self.capability_registry).build(
+            PromptBuildRequest(
+                base_messages=base_messages,
+                active_skill_names=skill_names,
+                runtime_context=self._runtime_prompt_context("main", conversation),
+                custom_system_prompt=custom_prompt,
+                custom_system_prompt_mode=custom_mode,
+            )
         )
         return [Message(message) for message in built_messages]
 
@@ -341,12 +345,15 @@ class ChatManager:
         custom_prompt, custom_mode = self._selected_system_prompt(conversation)
         messages = [
             Message(message)
-            for message in PromptBuilder(self.capability_registry).build_messages(
-                base_messages,
-                active_skill_names=[],
-                include_available_capabilities=False,
-                custom_system_prompt=custom_prompt,
-                custom_system_prompt_mode=custom_mode,
+            for message in PromptBuilder(self.capability_registry).build(
+                PromptBuildRequest(
+                    base_messages=base_messages,
+                    active_skill_names=[],
+                    include_available_capabilities=False,
+                    runtime_context=self._runtime_prompt_context("side_question", conversation),
+                    custom_system_prompt=custom_prompt,
+                    custom_system_prompt_mode=custom_mode,
+                )
             )
         ]
         messages.append(Message({"role": Role.USER, "content": content}))
@@ -1061,6 +1068,57 @@ class ChatManager:
         return content, self._normalize_selected_system_prompt_mode(
             str(prompt.get("mode") or "override")
         )
+
+    def _runtime_prompt_context(self, runtime: str, conversation: Optional[Conversation] = None) -> RuntimePromptContext:
+        details = self._runtime_context_details(conversation)
+        if runtime == "side_question":
+            return RuntimePromptContext(
+                name="side_question",
+                content="\n".join([
+                    "## Runtime Context",
+                    "",
+                    "Runtime mode: side question (/btw)",
+                    *details,
+                    "- Answer only the side question using the current conversation context.",
+                    "- Keep the run read-only: do not call tools, edit files, or create a main-branch response.",
+                    "- Preserve selected system prompt semantics: default core prompt, override custom prompt, or appended custom prompt.",
+                ]),
+                metadata={"runtime_mode": "side_question"},
+            )
+        return RuntimePromptContext(
+            name="main",
+                content="\n".join([
+                    "## Runtime Context",
+                    "",
+                    "Runtime mode: main chat",
+                    *details,
+                    "- This is the primary persisted conversation branch.",
+                    "- Use tools only when they are provided for this call and follow the active permission mode.",
+                    "- Preserve selected system prompt semantics: default core prompt, override custom prompt, or appended custom prompt.",
+            ]),
+            metadata={"runtime_mode": "main"},
+        )
+
+    def _runtime_context_details(self, conversation: Optional[Conversation]) -> list[str]:
+        if conversation is None:
+            return []
+        metadata = conversation.metadata or {}
+        prompt = metadata.get("selected_system_prompt") or {}
+        workspace = normalize_workspace(
+            metadata.get("workspace"),
+            build_default_workspace(cfg.data if isinstance(cfg.data, dict) else None),
+        )
+        workspace_roots = workspace.get("workspace_roots") or []
+        cwd = workspace.get("cwd") or ""
+        mode = self._normalize_selected_system_prompt_mode(str(prompt.get("mode") or "override")) if prompt else "none"
+        return [
+            f"- Conversation id: {metadata.get('id') or ''}",
+            f"- Current node id: {conversation.current_node_id or ''}",
+            f"- Provider/model: {(metadata.get('provider_id') or conversation.current_provider or '')}/{(metadata.get('model_id') or conversation.current_model or '')}",
+            f"- Workspace cwd: {cwd}",
+            f"- Workspace roots: {', '.join(map(str, workspace_roots[:3])) if workspace_roots else 'none'}",
+            f"- Selected system prompt mode: {mode}",
+        ]
 
     @staticmethod
     def _normalize_selected_system_prompt_mode(mode: str) -> str:

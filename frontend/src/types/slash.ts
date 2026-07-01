@@ -3,6 +3,7 @@ export type SlashDispatchKind =
   | 'side_question'
   | 'subagent'
   | 'workflow'
+  | 'direct_response'
   | 'local_ui';
 
 export type SlashToolPolicy = 'inherit' | 'disabled' | 'read_only';

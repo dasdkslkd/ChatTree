@@ -156,10 +156,14 @@ def test_subagent_build_messages_uses_prompt_builder_for_agent_skills(tmp_path):
 
     messages = executor._build_messages("a", "inspect", parent_node_id="node-1")
 
-    assert messages[0]["content"] == "Agent base\n\nParent conversation node: node-1"
-    assert "<name>review</name>" in messages[1]["content"]
-    assert "## Available Capabilities" not in messages[1]["content"]
-    assert messages[2]["content"] == "inspect"
+    assert "ChatTree Worker Fork Prompt" in messages[0]["content"]
+    assert "Agent base" in messages[0]["content"]
+    assert "Parent conversation node: node-1" in messages[0]["content"]
+    assert "# ChatTree Core Prompt" not in messages[0]["content"]
+    assert "Runtime mode: subagent worker" in messages[1]["content"]
+    assert "<name>review</name>" in messages[2]["content"]
+    assert "## Available Capabilities" not in messages[2]["content"]
+    assert messages[3]["content"] == "inspect"
 
 
 def test_subagent_rejects_invalid_input_schema_before_creating_run():

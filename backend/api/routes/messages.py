@@ -11,13 +11,19 @@ from ...core.chat.chat_manager import ChatManager
 from ..dependencies import get_chat_manager, get_run_manager, get_subagent_executor, get_workflow_manager
 from ...core.config.types import Message, StreamChunk
 from ...core.runs import RunKind, RunManager, RunNotFoundError, RunStatus
-from ...core.slash import SlashCommandDispatcher, SlashDispatchKind
+from ...core.slash import SlashCommandDispatcher, SlashDispatchKind, SlashCommandRegistry
+from ...core.slash.direct_response import build_direct_response_text
 from ...core.workflows import WorkflowManager
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 _DEFAULT_RUN_MANAGER = RunManager()
 _STREAM_SESSIONS: dict[str, "LegacyRunStreamSession"] = {}
+_ACTIVE_MESSAGE_STREAM_KINDS = {
+    RunKind.CHAT.value,
+    RunKind.SIDE_QUESTION.value,
+    RunKind.DIRECT_RESPONSE.value,
+}
 
 class SendMessageRequest(BaseModel):
     content: str
@@ -106,6 +112,44 @@ def _run_to_active_stream_info(run: Dict[str, Any]) -> Dict[str, Any]:
         "created_at": run.get("created_at"),
         "updated_at": run.get("updated_at"),
     }
+
+
+def _direct_response_runtime_context(
+    *,
+    conversation_id: str,
+    request: SendMessageRequest,
+    chat_manager: ChatManager,
+    run_manager: RunManager,
+) -> Dict[str, Any]:
+    context: Dict[str, Any] = {
+        "conversation_id": conversation_id,
+        "anchor_node_id": request.node_id,
+        "tool_permission_mode": request.tool_permission_mode,
+        "active_runs": run_manager.list_active(conversation_id),
+    }
+    try:
+        conversation = chat_manager.get_conversation(conversation_id)
+    except Exception:
+        conversation = None
+    if conversation is not None:
+        metadata = conversation.metadata or {}
+        model_id = request.model_id or metadata.get("model_id") or conversation.current_model
+        provider_id = request.provider_id or metadata.get("provider_id") or conversation.current_provider
+        prompt = metadata.get("selected_system_prompt") or {}
+        workspace = metadata.get("workspace") or {}
+        context.update({
+            "provider_model": "/".join([str(provider_id or ""), str(model_id or "")]).strip("/"),
+            "workspace_cwd": workspace.get("cwd") if isinstance(workspace, dict) else None,
+            "prompt_mode": prompt.get("mode") if isinstance(prompt, dict) and prompt else "none",
+        })
+    registry = getattr(chat_manager, "capability_registry", None)
+    if registry is not None:
+        context["capability_counts"] = {
+            "skills": len(registry.skills()),
+            "agents": len(registry.agents()),
+            "plugins": len(registry.plugins()),
+        }
+    return context
 
 
 _HEAVY_TOOL_RESULT_FIELDS = {"raw_content", "model_visible_content"}
@@ -231,6 +275,72 @@ async def detached_stream_event_generator(
             yield event
         return
 
+    if slash_result.kind == SlashDispatchKind.DIRECT_RESPONSE:
+        run = await run_manager.create_run(
+            conversation_id=conversation_id,
+            kind=RunKind.DIRECT_RESPONSE,
+            anchor_node_id=request.node_id,
+            summary=request.content[:80],
+            metadata={
+                "slash_command": {
+                    "command": slash_result.canonical_name,
+                    "input_command": slash_result.command_name,
+                    "kind": slash_result.kind.value,
+                    "args": slash_result.args,
+                    "original_input": slash_result.original_input,
+                    "tool_policy": slash_result.tool_policy.value,
+                    "persistence_policy": slash_result.persistence_policy.value,
+                    "run_kind": slash_result.run_kind,
+                },
+                "model_id": request.model_id,
+                "provider_id": request.provider_id,
+                "reasoning_effort": request.reasoning_effort,
+                "thinking_enabled": request.thinking_enabled,
+                "tool_permission_mode": request.tool_permission_mode,
+            },
+        )
+        content = build_direct_response_text(
+            slash_result,
+            SlashCommandRegistry.builtins().public_definitions(),
+            _direct_response_runtime_context(
+                conversation_id=conversation_id,
+                request=request,
+                chat_manager=chat_manager,
+                run_manager=run_manager,
+            ),
+        )
+        await run_manager.append_event(run.run_id, {
+            "status": "start",
+            "content": None,
+            "node_id": None,
+            "target_node_id": None,
+            "conversation_id": conversation_id,
+            "run_id": run.run_id,
+            "tokens_used": 0,
+        })
+        await run_manager.append_event(run.run_id, {
+            "status": "content",
+            "content": content,
+            "node_id": None,
+            "target_node_id": None,
+            "conversation_id": conversation_id,
+            "run_id": run.run_id,
+            "tokens_used": 0,
+        })
+        await run_manager.append_event(run.run_id, {
+            "status": "complete",
+            "content": None,
+            "node_id": None,
+            "target_node_id": None,
+            "conversation_id": conversation_id,
+            "run_id": run.run_id,
+            "tokens_used": 0,
+        })
+        await run_manager.finish_run(run.run_id, RunStatus.COMPLETED)
+        async for event in _subscribe_sse(run_manager, run.run_id, 0):
+            yield event
+        return
+
     run_kind = RunKind(str(slash_result.run_kind or RunKind.CHAT.value))
     run = await run_manager.create_run(
         conversation_id=conversation_id,
@@ -345,7 +455,7 @@ async def get_active_streams(
     return [
         _run_to_active_stream_info(run)
         for run in run_manager.list_active(conversation_id)
-        if run.get("kind") in {RunKind.CHAT.value, RunKind.SIDE_QUESTION.value}
+        if run.get("kind") in _ACTIVE_MESSAGE_STREAM_KINDS
     ]
 
 
@@ -358,7 +468,7 @@ async def get_all_active_streams(
     return [
         _run_to_active_stream_info(run)
         for run in run_manager.list_active()
-        if run.get("kind") in {RunKind.CHAT.value, RunKind.SIDE_QUESTION.value}
+        if run.get("kind") in _ACTIVE_MESSAGE_STREAM_KINDS
     ]
 
 

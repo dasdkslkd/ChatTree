@@ -576,6 +576,20 @@ export class StreamManager {
     this.notify(state.conversationId, true);
   }
 
+  archiveRun(runId: string): StreamState | null {
+    const resolvedRunId = this.resolveRunId(runId);
+    const state = this.streams.get(resolvedRunId);
+    if (!state) return null;
+    const archived: StreamState = {
+      ...state,
+      runId: resolvedRunId,
+      abortController: null,
+      reasoningActive: false,
+    };
+    this.cleanupRun(resolvedRunId);
+    return archived;
+  }
+
   cleanupIfController(conversationId: string, controller: AbortController, runId?: string): void {
     const states = runId ? [this.streams.get(runId)] : this.getConversationStates(conversationId);
     for (const state of states) {

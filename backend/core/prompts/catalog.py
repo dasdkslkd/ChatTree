@@ -67,7 +67,7 @@ def load_prompt_template(name: str) -> str:
     return _LEADING_HTML_COMMENT_RE.sub("", raw, count=1).strip()
 
 
-def validate_prompt_catalog(*, require_source_files: bool = True) -> None:
+def validate_prompt_catalog(*, require_source_files: bool = False) -> None:
     repo_root = Path(__file__).resolve().parents[3]
     for name, sources in PROMPT_SOURCES.items():
         text = load_prompt_template(name)

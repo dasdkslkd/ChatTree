@@ -76,6 +76,25 @@ def test_dispatch_btw_fork_workflow_are_structured_results():
     assert workflow.args == "run deep review"
 
 
+def test_dispatch_direct_response_commands_are_structured_results():
+    dispatcher = SlashCommandDispatcher()
+
+    status = dispatcher.dispatch("/status")
+    help_result = dispatcher.dispatch("/help")
+    capabilities = dispatcher.dispatch("/capabilities")
+
+    assert status.kind == SlashDispatchKind.DIRECT_RESPONSE
+    assert status.canonical_name == "status"
+    assert status.run_kind == "direct_response"
+    assert status.persistence_policy == SlashPersistencePolicy.SIDE_RUN
+    assert status.blocks_main_thread is False
+    assert status.model_input is None
+    assert help_result.kind == SlashDispatchKind.DIRECT_RESPONSE
+    assert help_result.canonical_name == "help"
+    assert capabilities.kind == SlashDispatchKind.DIRECT_RESPONSE
+    assert capabilities.canonical_name == "capabilities"
+
+
 def test_dispatch_empty_btw_returns_usage_error():
     result = SlashCommandDispatcher().dispatch("/btw")
 
@@ -92,14 +111,15 @@ def test_side_command_is_not_registered():
     assert result.model_input == "/side summarize context"
 
 
-def test_builtin_registry_lists_five_commands_without_side():
+def test_builtin_registry_lists_direct_response_commands_without_side():
     registry = SlashCommandRegistry.builtins()
     names = [definition.name for definition in registry.list()]
 
-    assert names == ["init", "review", "btw", "fork", "workflow"]
+    assert names == ["init", "review", "btw", "fork", "workflow", "status", "help", "capabilities"]
     assert registry.get("side") is None
     assert registry.get("btw").stream_target_policy == "anchor_only"
     assert registry.get("review").stream_target_policy == "target_node"
+    assert registry.get("status").stream_target_policy == "none"
 
 
 def test_dispatch_unknown_command_is_plain_message():

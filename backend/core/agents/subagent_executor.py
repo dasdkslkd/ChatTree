@@ -8,8 +8,9 @@ from typing import Any, Dict, Optional
 from backend.core.capabilities.registry import CapabilityRegistry
 from backend.core.chat.chat_manager import ChatManager
 from backend.core.config.types import Message, Role, StreamController, StreamStatus
-from backend.core.prompts import PromptBuilder
+from backend.core.prompts import PromptBuilder, PromptBuildRequest
 from backend.core.prompts.catalog import load_prompt_template
+from backend.core.prompts.types import RuntimePromptContext
 from backend.core.runs import RunKind, RunManager, RunStatus
 from backend.core.tools.security.permissions import normalize_permission_mode
 
@@ -363,9 +364,11 @@ class SubagentExecutor:
         agent = self.capability_registry.get_agent(agent_name)
         if agent is None:
             raise KeyError(agent_name)
+        is_workflow_worker = agent.name == "workflow-worker" or agent.metadata.get("runtime") == "workflow"
+        has_workflow_worker_prompt = "Workflow Worker Agent Prompt" in (agent.system_prompt or "")
         system_parts = [load_prompt_template("fork")]
-        if agent.name == "workflow-worker" or agent.metadata.get("runtime") == "workflow":
-            system_parts.append(load_prompt_template("workflow"))
+        if is_workflow_worker and not has_workflow_worker_prompt:
+            system_parts.append(load_prompt_template("agent:workflow-worker"))
         system_parts.append(agent.system_prompt or f"You are subagent {agent.name}.")
         if parent_node_id:
             system_parts.append(f"Parent conversation node: {parent_node_id}")
@@ -382,12 +385,43 @@ class SubagentExecutor:
         ]
         return [
             Message(message)
-            for message in PromptBuilder(self.capability_registry).build_messages(
-                base_messages,
-                active_skill_names=agent.skills,
-                include_available_capabilities=False,
+            for message in PromptBuilder(self.capability_registry).build(
+                PromptBuildRequest(
+                    base_messages=base_messages,
+                    active_skill_names=agent.skills,
+                    runtime_context=self._runtime_prompt_context(agent, is_workflow_worker),
+                    include_core_prompt=False,
+                    include_available_capabilities=False,
+                )
             )
         ]
+
+    def _runtime_prompt_context(self, agent, is_workflow_worker: bool) -> RuntimePromptContext:
+        if is_workflow_worker:
+            return RuntimePromptContext(
+                name="workflow_worker",
+                content="\n".join([
+                    "## Runtime Context",
+                    "",
+                    "Runtime mode: workflow worker",
+                    "- You are running inside a workflow as a worker subagent.",
+                    "- Return the data or result the workflow requested; it will be consumed by the workflow runtime.",
+                    "- Do not assume your response is a user-facing final answer.",
+                ]),
+                metadata={"runtime_mode": "workflow_worker", "agent_name": agent.name},
+            )
+        return RuntimePromptContext(
+            name="subagent_worker",
+            content="\n".join([
+                "## Runtime Context",
+                "",
+                "Runtime mode: subagent worker",
+                "- You are running as a background worker subagent.",
+                "- Complete the delegated task and return a concise result to the main ChatTree run.",
+                "- Do not assume your response is a user-facing final answer.",
+            ]),
+            metadata={"runtime_mode": "subagent_worker", "agent_name": agent.name},
+        )
 
     def _filter_tools(self, allowed_names: list[str]) -> list[dict[str, Any]]:
         if not self.chat_manager.tool_manager:

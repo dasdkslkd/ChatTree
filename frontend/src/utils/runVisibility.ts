@@ -28,7 +28,7 @@ export function isDetachedRunView(
 ): boolean {
   const targetNodeId = getRunTargetNodeId(run);
   if (targetNodeId) return false;
-  if (!['side_question', 'subagent', 'workflow'].includes(run.kind)) return false;
+  if (!['side_question', 'subagent', 'workflow', 'direct_response'].includes(run.kind)) return false;
   return !run.anchorNodeId || run.anchorNodeId === selectedBranchTipId;
 }
 
@@ -37,6 +37,7 @@ export function isRunVisibleInMainTranscript(
   selectedBranchTipId: string | null,
   currentBranchNodeIds: Set<string>,
 ): boolean {
+  if (run.kind === 'direct_response') return false;
   if (isDetachedRunView(run, selectedBranchTipId)) return false;
   return isRunVisibleInSelectedTranscript(run, selectedBranchTipId, currentBranchNodeIds);
 }

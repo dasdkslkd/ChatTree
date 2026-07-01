@@ -10,7 +10,7 @@ from backend.core.capabilities.prompting import (
 from backend.core.capabilities.registry import CapabilityRegistry
 
 from .catalog import load_prompt_template
-from .types import PromptBuildRequest, PromptSection
+from .types import PromptBuildRequest, PromptSection, RuntimePromptContext
 
 
 class PromptBuilder:
@@ -31,6 +31,7 @@ class PromptBuilder:
         *,
         active_skill_names: Iterable[str] = (),
         extra_sections: Iterable[PromptSection] = (),
+        runtime_context: Optional[RuntimePromptContext] = None,
         capability_char_budget: Optional[int] = None,
         include_available_capabilities: bool = True,
         custom_system_prompt: Optional[str] = None,
@@ -40,6 +41,7 @@ class PromptBuilder:
             base_messages=base_messages,
             active_skill_names=active_skill_names,
             extra_sections=extra_sections,
+            runtime_context=runtime_context,
             capability_char_budget=capability_char_budget,
             include_available_capabilities=include_available_capabilities,
             include_core_prompt=True,
@@ -92,6 +94,8 @@ class PromptBuilder:
                     metadata={"runtime_mode": request.runtime_mode},
                 )
             )
+        if request.runtime_context is not None:
+            sections.append(request.runtime_context.as_section(priority=15))
         if self.registry is None:
             if custom_prompt and custom_mode == "append":
                 sections.append(

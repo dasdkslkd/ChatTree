@@ -21,6 +21,7 @@ const {
   applySlashCommandCompletion,
   getSlashCompletionCandidates,
   getSlashCompletionState,
+  getSlashRunLabel,
   shouldQueueForMainThread,
   shouldRenderRunDraft,
 } = require(path.join(__dirname, '../src/utils/slashRuntime.ts'));
@@ -139,6 +140,17 @@ function testBtwSideQuestionRunsRenderAsDrafts() {
   assert.equal(shouldRenderRunDraft(run({ kind: 'side_question' })), true);
 }
 
+function testDirectResponseRunsRenderAsDrafts() {
+  assert.equal(shouldRenderRunDraft(run({ kind: 'direct_response', status: 'completed', content: 'status ok' })), true);
+}
+
+function testSidePanelRunLabelsUseSlashNames() {
+  assert.equal(getSlashRunLabel('side_question'), 'btw');
+  assert.equal(getSlashRunLabel('subagent'), 'fork');
+  assert.equal(getSlashRunLabel('workflow'), 'workflow');
+  assert.equal(getSlashRunLabel('direct_response'), 'status/help/capabilities');
+}
+
 function testUnknownBackgroundRunWithoutTranscriptStateDoesNotRenderAsDraft() {
   assert.equal(shouldRenderRunDraft(run({ kind: 'unknown_background' })), false);
 }
@@ -158,6 +170,8 @@ testSlashCompletionAppliesCanonicalCommandAndPreservesArgs();
 testForkWorkflowErrorRunsRenderAsDrafts();
 testForkWorkflowPendingSlashRunsRenderAsDrafts();
 testBtwSideQuestionRunsRenderAsDrafts();
+testDirectResponseRunsRenderAsDrafts();
+testSidePanelRunLabelsUseSlashNames();
 testUnknownBackgroundRunWithoutTranscriptStateDoesNotRenderAsDraft();
 testBackgroundWorkflowWithoutTranscriptStateDoesNotRenderAsDraft();
 

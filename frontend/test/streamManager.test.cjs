@@ -510,6 +510,50 @@ async function testRunFinishedCancelledMapsToStoppedState() {
   });
 }
 
+async function testCompletedDirectResponseCanBeArchivedAndRemovedFromActiveRuns() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    messageApi.stream = controlled.stream;
+    const running = manager.startStream('conv-1', { content: '/status' }, '/status');
+
+    await controlled.push({
+      type: 'run_started',
+      run_id: 'run-status',
+      conversation_id: 'conv-1',
+      kind: 'direct_response',
+      status: 'running',
+    });
+    await controlled.push({
+      event_type: 'text',
+      run_id: 'run-status',
+      conversation_id: 'conv-1',
+      kind: 'direct_response',
+      status: 'content',
+      content: 'All systems nominal',
+    });
+    await controlled.push({
+      type: 'run_finished',
+      run_id: 'run-status',
+      conversation_id: 'conv-1',
+      kind: 'direct_response',
+      status: 'completed',
+    });
+
+    try {
+      const archived = manager.archiveRun('run-status');
+      assert.equal(archived.runId, 'run-status');
+      assert.equal(archived.kind, 'direct_response');
+      assert.equal(archived.status, 'completed');
+      assert.equal(archived.content, 'All systems nominal');
+      assert.equal(archived.pendingUserMessage, '/status');
+      assert.deepEqual(manager.getConversationStates('conv-1'), []);
+    } finally {
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
 async function testCoalescesContentNotificationsAndFlushesCompletionImmediately() {
   await withManager(async (manager) => {
     const controlled = createControlledStream();
@@ -578,6 +622,7 @@ async function main() {
   await testStopUsesServerRunIdBeforeTargetNodeArrives();
   await testRunFinishedFailedMapsToErrorState();
   await testRunFinishedCancelledMapsToStoppedState();
+  await testCompletedDirectResponseCanBeArchivedAndRemovedFromActiveRuns();
   await testCoalescesContentNotificationsAndFlushesCompletionImmediately();
   await testDurationNotificationsUseCoarseInterval();
   testGenerationStatusUsesPersistedErrorMessage();

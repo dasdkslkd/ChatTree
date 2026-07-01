@@ -103,6 +103,30 @@ function testDetachedBackgroundRunIsSideViewNotMainTranscript() {
   assert.equal(isRunVisibleInMainTranscript(run, 'node-hello', new Set(['node-hello'])), false);
 }
 
+function testDirectResponseRunIsSideViewNotMainTranscriptWithoutNode() {
+  const run = chatRun({
+    kind: 'direct_response',
+    anchorNodeId: 'node-hello',
+    nodeId: null,
+    targetNodeId: null,
+  });
+
+  assert.equal(isDetachedRunView(run, 'node-hello'), true);
+  assert.equal(isRunVisibleInMainTranscript(run, 'node-hello', new Set(['node-hello'])), false);
+}
+
+function testDirectResponseRunNeverEntersMainTranscriptEvenWithTargetNode() {
+  const run = chatRun({
+    kind: 'direct_response',
+    anchorNodeId: 'node-hello',
+    nodeId: 'node-response',
+    targetNodeId: 'node-response',
+  });
+
+  assert.equal(isRunVisibleInMainTranscript(run, 'node-response', new Set(['node-hello'])), false);
+  assert.equal(isRunBlockingSelectedBranch(run, 'node-response', new Set(['node-hello'])), false);
+}
+
 function testDetachedChatRunStaysInMainTranscriptDuringPreTargetPhase() {
   const run = chatRun({
     kind: 'chat',
@@ -121,6 +145,8 @@ testExistingBranchRunIsVisibleWhenTargetIsInHistory();
 testPreTargetRunStillBelongsToSelectedAnchor();
 testNonStreamingRunDoesNotBlockBranch();
 testDetachedBackgroundRunIsSideViewNotMainTranscript();
+testDirectResponseRunIsSideViewNotMainTranscriptWithoutNode();
+testDirectResponseRunNeverEntersMainTranscriptEvenWithTargetNode();
 testDetachedChatRunStaysInMainTranscriptDuringPreTargetPhase();
 
 console.log('runVisibility tests passed');

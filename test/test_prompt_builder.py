@@ -15,7 +15,7 @@ from backend.core.prompts.builder import PromptBuilder
 def test_prompt_builder_inserts_capabilities_after_existing_system(tmp_path: Path):
     skill_path = tmp_path / "review" / "SKILL.md"
     skill_path.parent.mkdir()
-    skill_path.write_text("# Review\n\n检查代码变更。", encoding="utf-8")
+    skill_path.write_text("# Review\n\nInspect code changes.", encoding="utf-8")
     registry = CapabilityRegistry()
     registry.add_capabilities(
         [
@@ -38,16 +38,18 @@ def test_prompt_builder_inserts_capabilities_after_existing_system(tmp_path: Pat
         active_skill_names=["review"],
     )
 
-    assert [message["role"] for message in built[:4]] == [
+    assert [message["role"] for message in built[:5]] == [
+        "system",
         "system",
         "system",
         "system",
         "user",
     ]
     assert built[0]["content"] == "base system"
-    assert "## Available Capabilities" in built[1]["content"]
-    assert "<name>review</name>" in built[2]["content"]
-    assert "检查代码变更" in built[2]["content"]
+    assert "# ChatTree Core Prompt" in built[1]["content"]
+    assert "## Available Capabilities" in built[2]["content"]
+    assert "<name>review</name>" in built[3]["content"]
+    assert "Inspect code changes." in built[3]["content"]
 
 
 def test_prompt_builder_omits_empty_skill_injection_section(tmp_path: Path):
@@ -68,16 +70,17 @@ def test_prompt_builder_omits_empty_skill_injection_section(tmp_path: Path):
         active_skill_names=[],
     )
 
-    assert len(built) == 2
+    assert len(built) == 3
     assert built[0]["role"] == "system"
-    assert "## Available Capabilities" in built[0]["content"]
-    assert built[1]["content"] == "hello"
+    assert "# ChatTree Core Prompt" in built[0]["content"]
+    assert "## Available Capabilities" in built[1]["content"]
+    assert built[2]["content"] == "hello"
 
 
 def test_prompt_builder_can_skip_available_capability_summary(tmp_path: Path):
     skill_path = tmp_path / "review" / "SKILL.md"
     skill_path.parent.mkdir()
-    skill_path.write_text("# Review\n\n检查代码。", encoding="utf-8")
+    skill_path.write_text("# Review\n\nInspect code.", encoding="utf-8")
     registry = CapabilityRegistry()
     registry.add_capabilities(
         [
@@ -97,7 +100,8 @@ def test_prompt_builder_can_skip_available_capability_summary(tmp_path: Path):
         include_available_capabilities=False,
     )
 
-    assert len(built) == 3
+    assert len(built) == 4
     assert built[0]["content"] == "base"
-    assert "## Available Capabilities" not in built[1]["content"]
-    assert "<name>review</name>" in built[1]["content"]
+    assert "# ChatTree Core Prompt" in built[1]["content"]
+    assert "## Available Capabilities" not in built[2]["content"]
+    assert "<name>review</name>" in built[2]["content"]

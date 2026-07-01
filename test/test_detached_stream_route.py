@@ -102,6 +102,11 @@ class SideQuestionChatManager:
         )
 
 
+class FailingChatManager:
+    async def send_message_stream(self, **kwargs):
+        raise AssertionError("chat stream should not be used for direct-response slash commands")
+
+
 def test_detached_stream_continues_after_client_disconnect():
     async def run():
         manager = FakeChatManager()
@@ -195,6 +200,76 @@ def test_detached_btw_stream_uses_side_question_run_without_target_bind():
 
         done_event = await anext(stream)
         assert "[DONE]" in done_event
+
+    asyncio.run(run())
+
+
+def test_detached_direct_response_stream_creates_run_without_target_or_chat_node():
+    async def run():
+        run_manager = RunManager()
+        request = messages_route.SendMessageRequest(
+            content="/status",
+            model_id="fake-model",
+            node_id="node-anchor",
+        )
+        stream = messages_route.detached_stream_event_generator(
+            "conv-1",
+            request,
+            FailingChatManager(),
+            run_manager,
+        )
+
+        started_event = parse_sse(await anext(stream))
+        assert started_event["type"] == "run_started"
+        assert started_event["kind"] == "direct_response"
+        assert started_event["anchor_node_id"] == "node-anchor"
+        assert started_event["target_node_id"] is None
+
+        start_chunk = parse_sse(await anext(stream))
+        content_chunk = parse_sse(await anext(stream))
+        complete_chunk = parse_sse(await anext(stream))
+
+        assert start_chunk["status"] == "start"
+        assert start_chunk["target_node_id"] is None
+        assert content_chunk["status"] == "content"
+        assert "ChatTree" in content_chunk["content"]
+        assert content_chunk["target_node_id"] is None
+        assert complete_chunk["status"] == "complete"
+        assert complete_chunk["target_node_id"] is None
+        assert run_manager.get_run(started_event["run_id"])["target_node_id"] is None
+
+        done_event = await anext(stream)
+        assert "[DONE]" in done_event
+
+    asyncio.run(run())
+
+
+def test_active_streams_include_direct_response_runs_without_target_node():
+    async def run():
+        run_manager = RunManager()
+        direct = await run_manager.create_run(
+            conversation_id="conv-1",
+            kind="direct_response",
+            anchor_node_id="node-anchor",
+        )
+
+        active_streams = await messages_route.get_all_active_streams(run_manager)
+
+        assert active_streams == [
+            {
+                "run_id": direct.run_id,
+                "conversation_id": "conv-1",
+                "anchor_node_id": "node-anchor",
+                "node_id": None,
+                "target_node_id": None,
+                "kind": "direct_response",
+                "status": "running",
+                "event_count": 1,
+                "done": False,
+                "created_at": direct.created_at,
+                "updated_at": direct.updated_at,
+            }
+        ]
 
     asyncio.run(run())
 

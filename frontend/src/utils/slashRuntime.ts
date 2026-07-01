@@ -62,10 +62,21 @@ export interface RunDraftLike {
 }
 
 export function shouldRenderRunDraft(run: RunDraftLike): boolean {
-  if (run.kind === 'chat' || run.kind === 'side_question') return true;
+  if (run.kind === 'chat' || run.kind === 'side_question' || run.kind === 'direct_response') return true;
   if (run.pendingUserMessage) return true;
   if (run.status === 'error' || run.status === 'stopped') return true;
   if (run.content || run.reasoning) return true;
   if (Array.isArray(run.toolInteractions) && run.toolInteractions.length > 0) return true;
   return false;
+}
+
+export function getSlashRunLabel(kind: string, pendingUserMessage?: string | null): string {
+  if (kind === 'side_question') return 'btw';
+  if (kind === 'subagent') return 'fork';
+  if (kind === 'workflow') return 'workflow';
+  if (kind === 'direct_response') {
+    const match = pendingUserMessage?.match(/^\s*\/(status|help|capabilities)\b/i);
+    return match ? match[1].toLowerCase() : 'status/help/capabilities';
+  }
+  return kind;
 }

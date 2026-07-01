@@ -1,6 +1,7 @@
 import unittest
 import asyncio
 import json
+import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -8,9 +9,16 @@ from backend.api.routes.messages import SendMessageRequest, detached_stream_even
 from backend.core.agents.subagent_executor import SubagentExecutor
 from backend.core.capabilities.agent_loader import load_agent_roots
 from backend.core.capabilities.registry import CapabilityRegistry
-from backend.core.capabilities.types import AgentDefinition, CapabilitySource
+from backend.core.capabilities.types import (
+    AgentDefinition,
+    CapabilityDefinition,
+    CapabilityKind,
+    CapabilitySource,
+)
 from backend.core.chat.chat_manager import ChatManager
+from backend.core.config.types import StreamStatus
 from backend.core.prompts import PromptBuilder
+from backend.core.prompts import types as prompt_types
 from backend.core.prompts.catalog import (
     PROMPT_SOURCES,
     load_prompt_template,
@@ -150,6 +158,63 @@ class PromptBuilderFrameworkTests(unittest.TestCase):
         self.assertEqual(messages[1]["content"], "user selected system")
         self.assertEqual(messages[2]["role"], "user")
 
+    def test_runtime_context_order_with_override_capabilities_skills_and_history(self):
+        self.assertTrue(hasattr(prompt_types, "RuntimePromptContext"))
+        runtime_context = prompt_types.RuntimePromptContext(
+            name="main",
+            content="Runtime mode: main chat",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            skill_path = Path(temp_dir) / "review" / "SKILL.md"
+            skill_path.parent.mkdir()
+            skill_path.write_text("# Review\n\n检查代码。", encoding="utf-8")
+            registry = CapabilityRegistry()
+            registry.add_capabilities([
+                CapabilityDefinition(
+                    name="review",
+                    kind=CapabilityKind.SKILL,
+                    source=CapabilitySource.PROJECT,
+                    description="Review skill",
+                    path=skill_path,
+                )
+            ])
+
+            messages = PromptBuilder(registry).build(
+                PromptBuildRequest(
+                    base_messages=[{"role": "user", "content": "hello"}],
+                    active_skill_names=["review"],
+                    custom_system_prompt="override prompt",
+                    custom_system_prompt_mode="override",
+                    runtime_context=runtime_context,
+                )
+            )
+
+        self.assertEqual(messages[0]["content"], "override prompt")
+        self.assertIn("Runtime mode: main chat", messages[1]["content"])
+        self.assertIn("## Available Capabilities", messages[2]["content"])
+        self.assertIn("<name>review</name>", messages[3]["content"])
+        self.assertEqual(messages[4]["content"], "hello")
+        self.assertFalse(any("# ChatTree Core Prompt" in message.get("content", "") for message in messages))
+
+    def test_runtime_context_order_with_append_custom_prompt(self):
+        self.assertTrue(hasattr(prompt_types, "RuntimePromptContext"))
+        messages = PromptBuilder().build(
+            PromptBuildRequest(
+                base_messages=[{"role": "user", "content": "hello"}],
+                custom_system_prompt="append prompt",
+                custom_system_prompt_mode="append",
+                runtime_context=prompt_types.RuntimePromptContext(
+                    name="main",
+                    content="Runtime mode: main chat",
+                ),
+            )
+        )
+
+        self.assertIn("# ChatTree Core Prompt", messages[0]["content"])
+        self.assertIn("Runtime mode: main chat", messages[1]["content"])
+        self.assertEqual(messages[2]["content"], "append prompt")
+        self.assertEqual(messages[3]["content"], "hello")
+
 
 class ChatManagerPromptSelectionTests(unittest.TestCase):
     class FakeStorage:
@@ -192,6 +257,70 @@ class ChatManagerPromptSelectionTests(unittest.TestCase):
         )
 
 
+class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
+    class FakeStorage:
+        def __init__(self):
+            self.saved = None
+
+        def save(self, data):
+            self.saved = data
+
+        def load(self, conversation_id):
+            if self.saved and self.saved["metadata"]["id"] == conversation_id:
+                return self.saved
+            return None
+
+    class FakePromptStorage:
+        def load(self, prompt_id):
+            return None
+
+    class CapturingProvider:
+        def __init__(self):
+            self.messages = None
+
+        async def generate_response_stream(self, **kwargs):
+            self.messages = kwargs["messages"]
+            yield {"status": StreamStatus.COMPLETE, "content": "", "tokens_used": 0}
+
+    def test_main_chat_builds_main_runtime_context(self):
+        manager = ChatManager(
+            model_manager=None,
+            storage=self.FakeStorage(),
+            prompts=self.FakePromptStorage(),
+        )
+        conversation = manager.create_conversation("title")
+
+        messages = manager._build_prompt_messages(conversation, [])
+
+        self.assertIn("# ChatTree Core Prompt", messages[0]["content"])
+        self.assertIn("Runtime mode: main chat", messages[1]["content"])
+
+    async def test_btw_builds_side_question_runtime_context(self):
+        manager = ChatManager(
+            model_manager=None,
+            storage=self.FakeStorage(),
+            prompts=self.FakePromptStorage(),
+        )
+        conversation = manager.create_conversation("title")
+        provider = self.CapturingProvider()
+
+        async for _ in manager._send_side_question_stream(
+            conversation=conversation,
+            content="summarize this",
+            provider=provider,
+            target_model="model",
+            eff_effort=None,
+            eff_thinking=None,
+            run_id="run-1",
+        ):
+            pass
+
+        self.assertIsNotNone(provider.messages)
+        self.assertIn("# ChatTree Core Prompt", provider.messages[0]["content"])
+        self.assertIn("Runtime mode: side question (/btw)", provider.messages[1]["content"])
+        self.assertEqual(provider.messages[-1]["content"], "summarize this")
+
+
 class SlashPromptPolicyTests(unittest.TestCase):
     def test_btw_command_is_registered_as_side_question(self):
         commands = SlashCommandRegistry.builtins()
@@ -208,6 +337,13 @@ class SlashPromptPolicyTests(unittest.TestCase):
         self.assertEqual(result.kind.value, "side_question")
         self.assertEqual(result.run_kind, "side_question")
         self.assertIn("summarize context", result.model_input)
+        self.assertTrue(result.disable_tools)
+
+    def test_status_dispatches_direct_response_without_prompt(self):
+        result = SlashCommandDispatcher().dispatch("/status")
+        self.assertEqual(result.kind.value, "direct_response")
+        self.assertEqual(result.run_kind, "direct_response")
+        self.assertIsNone(result.model_input)
         self.assertTrue(result.disable_tools)
 
 
@@ -328,6 +464,28 @@ class SlashRuntimeDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any('"target_node_id": null' in event for event in events))
         self.assertTrue(events[-1].strip().endswith("[DONE]"))
 
+    async def test_status_slash_runs_as_direct_response_without_chat_stream(self):
+        class FakeChatManager:
+            async def send_message_stream(self, **kwargs):
+                raise AssertionError("chat stream should not be used for /status")
+
+        run_manager = RunManager()
+        events = await self._collect_events(detached_stream_event_generator(
+            "conversation-1",
+            SendMessageRequest(content="/status", node_id="node-1"),
+            FakeChatManager(),
+            run_manager,
+            None,
+            None,
+        ))
+        runs = run_manager.list_runs("conversation-1")
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]["kind"], "direct_response")
+        self.assertIsNone(runs[0]["target_node_id"])
+        self.assertTrue(any('"status": "content"' in event for event in events))
+        self.assertTrue(any("ChatTree" in event for event in events))
+        self.assertTrue(events[-1].strip().endswith("[DONE]"))
+
 
 class AgentRolePromptTests(unittest.TestCase):
     def test_project_agents_are_role_specific(self):
@@ -390,11 +548,13 @@ class RuntimePolicyTests(unittest.TestCase):
             capability_registry=registry,
         )
         messages = executor._build_messages("workflow-worker", "task", None)
-        system = messages[0]["content"]
-        self.assertIn("ChatTree", system)
-        self.assertIn("Worker body", system)
-        self.assertIn("workflow", system.lower())
-        self.assertIn("directive", system.lower())
+        system_text = "\n\n".join(message["content"] for message in messages if message["role"] == "system")
+        self.assertIn("ChatTree", messages[0]["content"])
+        self.assertIn("Worker body", messages[0]["content"])
+        self.assertIn("Runtime mode: workflow worker", messages[1]["content"])
+        self.assertIn("workflow", system_text.lower())
+        self.assertIn("directive", system_text.lower())
+        self.assertNotIn("# ChatTree Core Prompt", system_text)
 
     def test_subagent_build_messages_include_workflow_policy_for_metadata(self):
         registry = CapabilityRegistry()
@@ -411,10 +571,31 @@ class RuntimePolicyTests(unittest.TestCase):
             capability_registry=registry,
         )
         messages = executor._build_messages("custom-worker", "task", None)
-        system = messages[0]["content"]
-        self.assertIn("Custom worker body", system)
-        self.assertIn("pipeline(", system)
-        self.assertIn("workflow", system.lower())
+        system_text = "\n\n".join(message["content"] for message in messages if message["role"] == "system")
+        self.assertIn("Custom worker body", messages[0]["content"])
+        self.assertIn("Runtime mode: workflow worker", messages[1]["content"])
+        self.assertNotIn("pipeline(", system_text)
+        self.assertIn("returned verbatim", system_text)
+        self.assertIn("workflow", system_text.lower())
+        self.assertNotIn("# ChatTree Core Prompt", system_text)
+
+    def test_subagent_build_messages_include_subagent_runtime_context(self):
+        registry = CapabilityRegistry()
+        registry.add_agents([
+            AgentDefinition(name="reviewer", system_prompt="Reviewer worker body")
+        ])
+        executor = SubagentExecutor(
+            chat_manager=DummyChatManager(),
+            run_manager=DummyRunManager(),
+            capability_registry=registry,
+        )
+
+        messages = executor._build_messages("reviewer", "task", None)
+
+        system_text = "\n\n".join(message["content"] for message in messages if message["role"] == "system")
+        self.assertIn("Reviewer worker body", messages[0]["content"])
+        self.assertIn("Runtime mode: subagent worker", messages[1]["content"])
+        self.assertNotIn("# ChatTree Core Prompt", system_text)
 
 
 class WorkflowRuntimeBridgeTests(unittest.IsolatedAsyncioTestCase):
@@ -515,10 +696,14 @@ class WorkflowRuntimeWorkerTests(unittest.TestCase):
 
 
 class PromptDriftGuardTests(unittest.TestCase):
-    def test_validate_prompt_catalog_rejects_missing_sources(self):
+    def test_validate_prompt_catalog_does_not_require_local_reference_by_default(self):
+        with patch.dict(PROMPT_SOURCES, {"core": ("reference/does-not-exist.md",)}, clear=False):
+            validate_prompt_catalog()
+
+    def test_validate_prompt_catalog_can_audit_missing_sources_explicitly(self):
         with patch.dict(PROMPT_SOURCES, {"core": ("reference/does-not-exist.md",)}, clear=False):
             with self.assertRaises(FileNotFoundError):
-                validate_prompt_catalog()
+                validate_prompt_catalog(require_source_files=True)
 
     def test_prompt_framework_docs_exist(self):
         doc = Path("docs/prompt-framework.md").read_text(encoding="utf-8")

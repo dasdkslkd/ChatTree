@@ -12,6 +12,7 @@ class RunKind(str, Enum):
     SUBAGENT = "subagent"
     WORKFLOW = "workflow"
     WORKFLOW_STEP = "workflow_step"
+    DIRECT_RESPONSE = "direct_response"
 
 
 class RunStatus(str, Enum):
