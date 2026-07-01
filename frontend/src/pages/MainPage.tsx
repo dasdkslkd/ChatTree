@@ -77,7 +77,7 @@ import { streamManager, type StreamState } from '../services/streamManager';
 import { slashRegistry } from '../services/slashRegistry';
 import { getGenerationStatusText, getStreamStatusText as getStreamStatusLabel } from '../utils/generationStatus';
 import { isDetachedRunView, isRunBlockingSelectedBranch, isRunVisibleInMainTranscript } from '../utils/runVisibility';
-import { resolveSendNodeId } from '../utils/sendTarget';
+import { resolveSendNodeId, resolveSlashStreamNodeId, shouldSendSlashAnchorNode } from '../utils/sendTarget';
 import { getSlashRunLabel, shouldQueueForMainThread, shouldRenderRunDraft } from '../utils/slashRuntime';
 import {
   DEFAULT_TOOL_PERMISSION_MODE,
@@ -2157,10 +2157,11 @@ export default function ChatPage() {
     });
     const slashMatch = slashRegistry.match(val);
     const slashCommand = slashMatch?.command ?? null;
-    const streamNodeId = slashCommand?.stream_target_policy === 'anchor_only'
-      ? undefined
-      : sendNodeId;
-    if (slashCommand?.stream_target_policy === 'anchor_only') {
+    const streamNodeId = resolveSlashStreamNodeId({
+      sendNodeId,
+      streamTargetPolicy: slashCommand?.stream_target_policy,
+    });
+    if (shouldSendSlashAnchorNode(slashCommand?.stream_target_policy)) {
       request.node_id = sendNodeId ?? undefined;
     }
 

@@ -17,7 +17,11 @@ require.extensions['.ts'] = function loadTs(module, filename) {
   module._compile(output, filename);
 };
 
-const { resolveSendNodeId } = require(path.join(__dirname, '../src/utils/sendTarget.ts'));
+const {
+  resolveSendNodeId,
+  resolveSlashStreamNodeId,
+  shouldSendSlashAnchorNode,
+} = require(path.join(__dirname, '../src/utils/sendTarget.ts'));
 
 function testEditTargetWinsOverCurrentNode() {
   assert.equal(
@@ -49,9 +53,35 @@ function testFallsBackToCurrentNodeThenConversationNode() {
   );
 }
 
+function testDetachedSlashPoliciesDoNotUseStreamTarget() {
+  for (const policy of ['anchor_only', 'none']) {
+    assert.equal(
+      resolveSlashStreamNodeId({
+        sendNodeId: 'node-current',
+        streamTargetPolicy: policy,
+      }),
+      undefined,
+    );
+    assert.equal(shouldSendSlashAnchorNode(policy), true);
+  }
+}
+
+function testTargetNodePolicyUsesStreamTarget() {
+  assert.equal(
+    resolveSlashStreamNodeId({
+      sendNodeId: 'node-current',
+      streamTargetPolicy: 'target_node',
+    }),
+    'node-current',
+  );
+  assert.equal(shouldSendSlashAnchorNode('target_node'), false);
+}
+
 function main() {
   testEditTargetWinsOverCurrentNode();
   testFallsBackToCurrentNodeThenConversationNode();
+  testDetachedSlashPoliciesDoNotUseStreamTarget();
+  testTargetNodePolicyUsesStreamTarget();
   console.log('sendTarget tests passed');
 }
 
