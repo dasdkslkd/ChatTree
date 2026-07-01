@@ -27,5 +27,6 @@ export interface Conversation {
 export interface ConversationCreateRequest {
   title?: string;
   prompt_id?: string;
+  prompt_mode?: 'override' | 'append';
   workspace?: WorkspaceContext;
 }

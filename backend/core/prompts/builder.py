@@ -33,6 +33,8 @@ class PromptBuilder:
         extra_sections: Iterable[PromptSection] = (),
         capability_char_budget: Optional[int] = None,
         include_available_capabilities: bool = True,
+        custom_system_prompt: Optional[str] = None,
+        custom_system_prompt_mode: str = "override",
     ) -> list[dict[str, Any]]:
         request = PromptBuildRequest(
             base_messages=base_messages,
@@ -41,6 +43,8 @@ class PromptBuilder:
             capability_char_budget=capability_char_budget,
             include_available_capabilities=include_available_capabilities,
             include_core_prompt=True,
+            custom_system_prompt=custom_system_prompt,
+            custom_system_prompt_mode=custom_system_prompt_mode,
             runtime_mode="main",
         )
         return self.build(request)
@@ -65,7 +69,20 @@ class PromptBuilder:
         request: PromptBuildRequest,
     ) -> list[PromptSection]:
         sections = list(request.extra_sections)
-        if request.include_core_prompt:
+        custom_prompt = (request.custom_system_prompt or "").strip()
+        custom_mode = self._normalize_custom_system_prompt_mode(
+            request.custom_system_prompt_mode
+        )
+        if custom_prompt and custom_mode == "override":
+            sections.append(
+                PromptSection(
+                    name="custom_system_prompt",
+                    role="system",
+                    content=custom_prompt,
+                    priority=10,
+                )
+            )
+        elif request.include_core_prompt:
             sections.append(
                 PromptSection(
                     name="core_prompt",
@@ -76,6 +93,15 @@ class PromptBuilder:
                 )
             )
         if self.registry is None:
+            if custom_prompt and custom_mode == "append":
+                sections.append(
+                    PromptSection(
+                        name="custom_system_prompt",
+                        role="system",
+                        content=custom_prompt,
+                        priority=100,
+                    )
+                )
             return sections
 
         char_budget = (
@@ -112,6 +138,15 @@ class PromptBuilder:
                     priority=30,
                 )
             )
+        if custom_prompt and custom_mode == "append":
+            sections.append(
+                PromptSection(
+                    name="custom_system_prompt",
+                    role="system",
+                    content=custom_prompt,
+                    priority=100,
+                )
+            )
         return sections
 
     @staticmethod
@@ -120,3 +155,7 @@ class PromptBuilder:
         while index < len(messages) and messages[index].get("role") == "system":
             index += 1
         return index
+
+    @staticmethod
+    def _normalize_custom_system_prompt_mode(mode: str) -> str:
+        return mode if mode in {"override", "append"} else "override"

@@ -2074,6 +2074,8 @@ export default function ChatPage() {
     modelId?: string,
     providerId?: string,
     toolPermissionMode?: ToolPermissionMode,
+    promptId?: string | null,
+    promptMode?: 'override' | 'append',
   ) => {
     if (!val.trim()) return;
     setShouldAutoScroll(true);
@@ -2131,6 +2133,8 @@ export default function ChatPage() {
     if (!conversationId) {
       const newConv = await createConversation({
         title: val.slice(0, 20),
+        prompt_id: promptId || undefined,
+        prompt_mode: promptId ? promptMode : undefined,
         workspace: workspaceForCreateRequest(),
       });
       if (!newConv) {

@@ -81,6 +81,7 @@ class ChatManager:
         self,
         title: str = '',
         prompt_id: Optional[str] = None,
+        prompt_mode: str = "override",
         workspace: Optional[Dict[str, Any]] = None,
     ) -> Conversation:
         """
@@ -94,8 +95,15 @@ class ChatManager:
         conversation = Conversation(title=title, workspace=workspace_context)
         
         # 初始化系统消息
-        system_prompt = None if not prompt_id else self.prompts.load(prompt_id)
-        conversation.initialize_with_system_message(system_prompt)
+        conversation.initialize_with_system_message(None)
+        if prompt_id:
+            system_prompt = self.prompts.load(prompt_id)
+            if system_prompt:
+                conversation.metadata["selected_system_prompt"] = {
+                    "id": prompt_id,
+                    "mode": self._normalize_selected_system_prompt_mode(prompt_mode),
+                    "content": system_prompt,
+                }
 
         # 直接持久化新对话（不依赖共享 current_conversation 做后续保存）
         self._save(conversation)
@@ -309,9 +317,12 @@ class ChatManager:
         skill_names: List[str],
     ) -> List[Message]:
         base_messages = self._prepare_messages_for_api_with_conversation(conversation)
+        custom_prompt, custom_mode = self._selected_system_prompt(conversation)
         built_messages = PromptBuilder(self.capability_registry).build_messages(
             base_messages,
             active_skill_names=skill_names,
+            custom_system_prompt=custom_prompt,
+            custom_system_prompt_mode=custom_mode,
         )
         return [Message(message) for message in built_messages]
 
@@ -327,12 +338,15 @@ class ChatManager:
         run_id: Optional[str],
     ) -> AsyncIterator[StreamChunk]:
         base_messages = self._prepare_messages_for_api_with_conversation(conversation)
+        custom_prompt, custom_mode = self._selected_system_prompt(conversation)
         messages = [
             Message(message)
             for message in PromptBuilder(self.capability_registry).build_messages(
                 base_messages,
                 active_skill_names=[],
                 include_available_capabilities=False,
+                custom_system_prompt=custom_prompt,
+                custom_system_prompt_mode=custom_mode,
             )
         ]
         messages.append(Message({"role": Role.USER, "content": content}))
@@ -1036,6 +1050,21 @@ class ChatManager:
             system_message.get("role") in (Role.SYSTEM, "system")
             and system_message.get("subtype") == "compact_boundary"
         )
+
+    def _selected_system_prompt(self, conversation: Conversation) -> tuple[Optional[str], str]:
+        prompt = conversation.metadata.get("selected_system_prompt") or {}
+        if not isinstance(prompt, dict):
+            return None, "override"
+        content = prompt.get("content")
+        if not isinstance(content, str) or not content.strip():
+            return None, "override"
+        return content, self._normalize_selected_system_prompt_mode(
+            str(prompt.get("mode") or "override")
+        )
+
+    @staticmethod
+    def _normalize_selected_system_prompt_mode(mode: str) -> str:
+        return mode if mode in {"override", "append"} else "override"
 
     def _model_node_chain(
         self,

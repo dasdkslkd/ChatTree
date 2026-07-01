@@ -17,6 +17,7 @@ router = APIRouter()
 class ConversationCreateRequest(BaseModel):
     title: str = ""
     prompt_id: Optional[str] = None
+    prompt_mode: str = "override"
     workspace: Optional[Dict[str, Any]] = None
 
 class ProjectFolderRequest(BaseModel):
@@ -118,7 +119,12 @@ async def create_conversation(
     """创建新对话"""
     try:
         logger.info(f"收到创建对话请求: {request}")
-        conversation = chat_manager.create_conversation(request.title, request.prompt_id, workspace=request.workspace)
+        conversation = chat_manager.create_conversation(
+            request.title,
+            request.prompt_id,
+            prompt_mode=request.prompt_mode,
+            workspace=request.workspace,
+        )
         logger.info(f"对话创建成功并已保存: {conversation.metadata['id']}")
         return _conversation_response(conversation)
     except Exception as e:

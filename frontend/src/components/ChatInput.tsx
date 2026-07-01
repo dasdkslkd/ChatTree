@@ -38,13 +38,16 @@ import {
   getSlashCompletionCandidates,
 } from '../utils/slashRuntime'
 
+type SystemPromptMode = 'override' | 'append';
+
 interface Props {
   onSend: (
     value: string,
     modelId?: string,
     providerId?: string,
     toolPermissionMode?: ToolPermissionMode,
-    systemPrompt?: string,
+    promptId?: string | null,
+    promptMode?: SystemPromptMode,
   ) => Promise<void>;
   onStop?: () => void;
   isStreaming?: boolean;
@@ -97,6 +100,7 @@ export function ChatInput({
   const [promptDialogOpen, setPromptDialogOpen] = useState(false);
   const [selectedPromptId, setSelectedPromptId] = useState<string | null>(null);
   const [selectedPromptTitle, setSelectedPromptTitle] = useState<string | null>(null);
+  const [selectedPromptMode, setSelectedPromptMode] = useState<SystemPromptMode>('override');
   const [editingQueuedMessageId, setEditingQueuedMessageId] = useState<string | null>(null);
   const [slashCommands, setSlashCommands] = useState<SlashCommandInfo[]>(() => slashRegistry.list());
   const [slashHighlightIndex, setSlashHighlightIndex] = useState(0);
@@ -126,7 +130,7 @@ export function ChatInput({
     cancelModelSelection,
   } = useModelStore();
 
-  const { prompts, currentPrompt, loadPrompts, loadPrompt } = usePromptStore();
+  const { prompts, loadPrompts, loadPrompt } = usePromptStore();
   const currentConversation = useConversationStore((s) => s.currentConversation);
 
   // 初始加载（loadConfig/loadProviders 已在 App.tsx 中调用）
@@ -199,7 +203,6 @@ export function ChatInput({
 
   const handleSend = async () => {
     if (!value.trim() || (disabled && !isStreaming)) return;
-    const systemPrompt = currentPrompt?.content;
     const draftAtSend = getToolPermissionDraft();
     const pendingToolPermissionMode = getPendingToolPermissionMode(draftAtSend);
     setValue('');
@@ -208,7 +211,8 @@ export function ChatInput({
       currentModel || undefined,
       currentProvider || undefined,
       pendingToolPermissionMode,
-      systemPrompt,
+      selectedPromptId,
+      selectedPromptId ? selectedPromptMode : undefined,
     );
     onToolPermissionDraftChange(markToolPermissionModeSent(getToolPermissionDraft(), pendingToolPermissionMode));
   };
@@ -302,9 +306,11 @@ export function ChatInput({
     if (selectedPromptId === promptId) {
       setSelectedPromptId(null);
       setSelectedPromptTitle(null);
+      setSelectedPromptMode('override');
     } else {
       setSelectedPromptId(promptId);
       setSelectedPromptTitle(promptTitle);
+      setSelectedPromptMode('override');
       await loadPrompt(promptId);
     }
   };
@@ -312,6 +318,7 @@ export function ChatInput({
   const clearSelectedPrompt = () => {
     setSelectedPromptId(null);
     setSelectedPromptTitle(null);
+    setSelectedPromptMode('override');
   };
 
   const getProviderDisplayName = (provider: string): string => {
@@ -636,10 +643,23 @@ export function ChatInput({
 
             {/* 提示词选择按钮 */}
             {selectedPromptTitle ? (
-              <div className="flex items-center gap-1 px-2 py-0.5 rounded-full text-xs"
+              <div className="flex items-center gap-1 px-2 py-0.5 rounded-full text-xs max-w-[260px]"
                    style={{ background: 'var(--accent-soft)', color: 'var(--icon-accent)' }}>
                 <StickyNote className="h-3 w-3" />
-                <span>{selectedPromptTitle}</span>
+                <button
+                  className="truncate bg-transparent border-none p-0 text-xs cursor-pointer"
+                  style={{ color: 'var(--icon-accent)' }}
+                  onClick={() => setPromptDialogOpen(true)}
+                  title="更换提示词"
+                >
+                  {selectedPromptTitle}
+                </button>
+                <span
+                  className="rounded-full px-1.5 py-0.5"
+                  style={{ background: 'var(--bg-surface)', color: 'var(--fg-secondary)' }}
+                >
+                  {selectedPromptMode === 'override' ? '替换' : '追加'}
+                </span>
                 <button
                   className="ml-0.5 hover:opacity-70 cursor-pointer bg-transparent border-none p-0"
                   style={{ color: 'var(--icon-accent)' }}
@@ -902,6 +922,38 @@ export function ChatInput({
               </span>
             )}
           </div>
+          {selectedPromptId && (
+            <div className="flex items-center justify-between gap-3 pt-2">
+              <span className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>
+                应用方式
+              </span>
+              <div
+                className="inline-flex rounded-full p-0.5"
+                style={{ background: 'var(--bg-button-tertiary-hover)' }}
+              >
+                {([
+                  ['override', '替换 core'],
+                  ['append', '追加 core'],
+                ] as const).map(([mode, label]) => {
+                  const active = selectedPromptMode === mode;
+                  return (
+                    <button
+                      key={mode}
+                      type="button"
+                      className="rounded-full px-2.5 py-1 text-xs transition-colors"
+                      style={{
+                        background: active ? 'var(--accent-soft)' : 'transparent',
+                        color: active ? 'var(--icon-accent)' : 'var(--fg-secondary)',
+                      }}
+                      onClick={() => setSelectedPromptMode(mode)}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
           <DialogFooter>
             <Button variant="outline" onClick={clearSelectedPrompt}>
               清除选择

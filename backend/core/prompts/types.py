@@ -34,4 +34,6 @@ class PromptBuildRequest:
     capability_char_budget: Optional[int] = None
     include_available_capabilities: bool = True
     include_core_prompt: bool = True
+    custom_system_prompt: Optional[str] = None
+    custom_system_prompt_mode: str = "override"
     runtime_mode: str = "main"

@@ -9,6 +9,7 @@ from backend.core.agents.subagent_executor import SubagentExecutor
 from backend.core.capabilities.agent_loader import load_agent_roots
 from backend.core.capabilities.registry import CapabilityRegistry
 from backend.core.capabilities.types import AgentDefinition, CapabilitySource
+from backend.core.chat.chat_manager import ChatManager
 from backend.core.prompts import PromptBuilder
 from backend.core.prompts.catalog import (
     PROMPT_SOURCES,
@@ -88,6 +89,19 @@ class PromptCatalogTests(unittest.TestCase):
 
 
 class PromptBuilderFrameworkTests(unittest.TestCase):
+    def test_default_core_prompt_injected_when_no_custom_system_prompt(self):
+        messages = PromptBuilder().build(
+            PromptBuildRequest(
+                base_messages=[
+                    {"role": "user", "content": "hello"},
+                ],
+                include_core_prompt=True,
+            )
+        )
+        self.assertEqual(messages[0]["role"], "system")
+        self.assertIn("ChatTree", messages[0]["content"])
+        self.assertEqual(messages[1]["role"], "user")
+
     def test_core_prompt_injected_after_existing_system_messages(self):
         messages = PromptBuilder().build(
             PromptBuildRequest(
@@ -102,6 +116,80 @@ class PromptBuilderFrameworkTests(unittest.TestCase):
         self.assertEqual(messages[1]["role"], "system")
         self.assertIn("ChatTree", messages[1]["content"])
         self.assertEqual(messages[2]["role"], "user")
+
+    def test_custom_system_prompt_override_replaces_core_prompt(self):
+        messages = PromptBuilder().build(
+            PromptBuildRequest(
+                base_messages=[
+                    {"role": "user", "content": "hello"},
+                ],
+                include_core_prompt=True,
+                custom_system_prompt="user selected system",
+                custom_system_prompt_mode="override",
+            )
+        )
+        self.assertEqual(messages[0]["role"], "system")
+        self.assertEqual(messages[0]["content"], "user selected system")
+        self.assertEqual(messages[1]["role"], "user")
+        self.assertFalse(any("ChatTree" in message.get("content", "") for message in messages))
+
+    def test_custom_system_prompt_append_keeps_core_prompt_then_custom_prompt(self):
+        messages = PromptBuilder().build(
+            PromptBuildRequest(
+                base_messages=[
+                    {"role": "user", "content": "hello"},
+                ],
+                include_core_prompt=True,
+                custom_system_prompt="user selected system",
+                custom_system_prompt_mode="append",
+            )
+        )
+        self.assertEqual(messages[0]["role"], "system")
+        self.assertIn("ChatTree", messages[0]["content"])
+        self.assertEqual(messages[1]["role"], "system")
+        self.assertEqual(messages[1]["content"], "user selected system")
+        self.assertEqual(messages[2]["role"], "user")
+
+
+class ChatManagerPromptSelectionTests(unittest.TestCase):
+    class FakeStorage:
+        def __init__(self):
+            self.saved = None
+
+        def save(self, data):
+            self.saved = data
+
+    class FakePromptStorage:
+        def load(self, prompt_id):
+            self.loaded_id = prompt_id
+            return "snapshot prompt body"
+
+    def test_create_conversation_snapshots_selected_prompt_metadata_without_root_system_message(self):
+        storage = self.FakeStorage()
+        prompts = self.FakePromptStorage()
+        manager = ChatManager(model_manager=None, storage=storage, prompts=prompts)
+
+        conversation = manager.create_conversation(
+            "title",
+            prompt_id="prompt-1",
+            prompt_mode="append",
+        )
+
+        self.assertEqual(prompts.loaded_id, "prompt-1")
+        self.assertEqual(
+            conversation.metadata["selected_system_prompt"],
+            {
+                "id": "prompt-1",
+                "mode": "append",
+                "content": "snapshot prompt body",
+            },
+        )
+        root = conversation.nodes[conversation.root_node_id]
+        self.assertIsNone(root["system_message"])
+        self.assertEqual(
+            storage.saved["metadata"]["selected_system_prompt"]["content"],
+            "snapshot prompt body",
+        )
 
 
 class SlashPromptPolicyTests(unittest.TestCase):
