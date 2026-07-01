@@ -4,7 +4,7 @@ import asyncio
 import uuid
 from copy import deepcopy
 from time import time
-from typing import Any, AsyncIterator, Dict, Iterable, Optional
+from typing import Any, AsyncIterator, Callable, Dict, Iterable, Optional
 
 from .journal import RunJournal
 from .synthetic_inputs import SyntheticInputQueue
@@ -30,7 +30,11 @@ class RunManager:
         self._conditions: Dict[str, asyncio.Condition] = {}
         self._writers_by_node: Dict[str, str] = {}
         self._stop_events: Dict[str, asyncio.Event] = {}
+        self._finish_listeners: list[Callable[[Dict[str, Any]], None]] = []
         self._lock = asyncio.Lock()
+
+    def add_finish_listener(self, listener: Callable[[Dict[str, Any]], None]) -> None:
+        self._finish_listeners.append(listener)
 
     async def create_run(
         self,
@@ -191,6 +195,9 @@ class RunManager:
         self.journal.append_event(snapshot.conversation_id, run_id, event)
         async with condition:
             condition.notify_all()
+        snapshot_dict = snapshot.to_dict()
+        for listener in list(self._finish_listeners):
+            listener(snapshot_dict)
         return snapshot
 
     async def request_stop(self, run_id: str) -> bool:

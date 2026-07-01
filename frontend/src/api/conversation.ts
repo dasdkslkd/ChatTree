@@ -7,6 +7,7 @@ export interface TreeNode {
   parent_id: string | null;
   children_ids: string[];
   user_content: string;
+  user_subtype?: string | null;
   assistant_content: string;
   model_id: string | null;
   timestamp: number;

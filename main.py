@@ -95,6 +95,11 @@ async def startup_event():
         run_manager=run_manager,
         subagent_executor=subagent_executor,
     )
+    synthetic_followup_scheduler = messages.SyntheticFollowupScheduler(
+        chat_manager=chat_manager,
+        run_manager=run_manager,
+    )
+    synthetic_followup_scheduler.install()
 
     app.state.config_manager = config_manager
     app.state.project_root = PROJECT_ROOT
@@ -107,6 +112,7 @@ async def startup_event():
     app.state.chat_manager = chat_manager
     app.state.subagent_executor = subagent_executor
     app.state.workflow_manager = workflow_manager
+    app.state.synthetic_followup_scheduler = synthetic_followup_scheduler
 
 @app.on_event("shutdown")
 async def shutdown_event():

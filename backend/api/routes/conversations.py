@@ -317,8 +317,11 @@ async def get_conversation_tree(
         nodes = []
         for node_id, node in conv.nodes.items():
             user_content = ""
+            user_subtype = None
             if node.get("user_message"):
-                user_content = node["user_message"].get("content", "")
+                user_subtype = node["user_message"].get("subtype")
+                if user_subtype != "task_notification":
+                    user_content = node["user_message"].get("content", "")
 
             assistant_content = ""
             if node.get("assistant_message"):
@@ -334,6 +337,7 @@ async def get_conversation_tree(
                 "parent_id": parent_id,
                 "children_ids": node.get("children_ids", []),
                 "user_content": user_content,
+                "user_subtype": user_subtype,
                 "assistant_content": assistant_content,
                 "model_id": node.get("model_id"),
                 "timestamp": node.get("timestamp"),

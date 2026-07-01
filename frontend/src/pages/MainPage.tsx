@@ -87,6 +87,7 @@ import { getGenerationStatusText, getStreamStatusText as getStreamStatusLabel } 
 import { isDetachedRunView, isRunBlockingSelectedBranch, isRunVisibleInMainTranscript } from '../utils/runVisibility';
 import { resolveSendNodeId, resolveSlashStreamNodeId, shouldSendSlashAnchorNode } from '../utils/sendTarget';
 import { getSlashRunLabel, shouldQueueForMainThread, shouldRenderRunDraft } from '../utils/slashRuntime';
+import { isTaskNotificationMessage, shouldExportMessage } from '../utils/taskNotificationVisibility';
 import {
   DEFAULT_TOOL_PERMISSION_MODE,
   createToolPermissionDraft,
@@ -2118,7 +2119,7 @@ export default function ChatPage() {
     const lines: string[] = [];
     lines.push(`# ${title}`);
     lines.push('');
-    for (const m of messages) {
+    for (const m of messages.filter(shouldExportMessage)) {
       const displayContent = m.role === 'user' ? getUserDisplayContent(m) : m.content;
       const importFiles = m.role === 'user' ? getUserAttachmentNames(m) : [];
       const roleLabel = m.role === 'user' ? '**User**' : '**Assistant**';
@@ -2398,9 +2399,6 @@ export default function ChatPage() {
 
   const isCompactSummaryMessage = (message: typeof messages[0]) =>
     message.is_compact_summary === true;
-
-  const isTaskNotificationMessage = (message: typeof messages[0]) =>
-    message.role === 'user' && message.subtype === 'task_notification';
 
   const formatCompactTokens = (tokens?: number) => {
     if (!tokens || tokens <= 0) return null;

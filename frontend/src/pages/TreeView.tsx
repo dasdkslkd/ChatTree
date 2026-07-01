@@ -5,6 +5,7 @@ import { useNavigationStore } from '../store/navigationStore';
 import { Button } from '@/components/ui/button';
 import { ZoomIn, ZoomOut, Maximize2, ArrowDown, ArrowRight, Trash2 } from 'lucide-react';
 import type { TreeNode } from '../api/conversation';
+import { getTreeUserContent } from '../utils/taskNotificationVisibility';
 
 interface LayoutNode {
   id: string;
@@ -33,7 +34,7 @@ const NODE_HEIGHT = 80;
 const ROOT_NODE_HEIGHT = 36;
 
 function isRootNode(node: TreeNode): boolean {
-  return !node.user_content && !node.assistant_content;
+  return !getTreeUserContent(node) && !node.assistant_content;
 }
 
 function truncate(text: string, max: number): string {
@@ -200,7 +201,8 @@ export default function TreeView() {
     e.stopPropagation();
     if (isRootNode(treeData?.nodes.find(n => n.id === nodeId) as TreeNode)) return;
     const node = treeData?.nodes.find(n => n.id === nodeId);
-    const label = node?.user_content ? truncate(stripFileMention(node.user_content), 20) : nodeId.slice(0, 8);
+    const userContent = node ? getTreeUserContent(node) : '';
+    const label = userContent ? truncate(stripFileMention(userContent), 20) : nodeId.slice(0, 8);
     setContextMenu({ x: e.clientX, y: e.clientY, nodeId, label });
   }, [treeData]);
 
@@ -305,6 +307,7 @@ export default function TreeView() {
         {layoutNodes.map((node) => {
           const isActive = node.data.is_current;
           const isRoot = isRootNode(node.data);
+          const userContent = getTreeUserContent(node.data);
 
           return (
             <div
@@ -336,9 +339,9 @@ export default function TreeView() {
                     }
                   `}
                 >
-                  {node.data.user_content && (
+                  {userContent && (
                     <p className="text-[11px] leading-tight font-medium text-foreground line-clamp-2 mb-1">
-                      {truncate(stripFileMention(node.data.user_content), 40)}
+                      {truncate(stripFileMention(userContent), 40)}
                     </p>
                   )}
                   {node.data.assistant_content && (

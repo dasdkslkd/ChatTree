@@ -834,6 +834,78 @@ class SyntheticInputRouteTests(unittest.TestCase):
         self.assertEqual(chat_runs[0]["metadata"]["synthetic_input"]["input_id"], item.input_id)
         self.assertEqual(chat_runs[0]["metadata"]["synthetic_input"]["kind"], "task_notification")
 
+    def test_synthetic_input_stream_keeps_pending_when_followup_cannot_bind_node(self):
+        class FailingBeforeNodeChatManager(self.FakeChatManager):
+            async def send_message_stream(self, **kwargs):
+                self.kwargs.append(kwargs)
+                self.contents.append(kwargs["content"])
+                yield {
+                    "status": "error",
+                    "content": "",
+                    "node_id": None,
+                    "target_node_id": None,
+                    "run_id": kwargs["run_id"],
+                    "error": "model unavailable",
+                }
+
+        run_manager = RunManager()
+        chat_manager = FailingBeforeNodeChatManager()
+        item = run_manager.synthetic_inputs.enqueue(
+            kind="task_notification",
+            conversation_id="conversation-1",
+            anchor_node_id="node-1",
+            source_run_id="run-1",
+            source_run_kind="workflow",
+            status="pending",
+            summary="workflow completed",
+            content="workflow result",
+            metadata={"origin": "task_notification", "source_status": "completed"},
+        )
+        client = self._client(run_manager, chat_manager)
+
+        response = client.post(f"/conversations/conversation-1/synthetic-inputs/{item.input_id}/stream")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(run_manager.synthetic_inputs.list_pending("conversation-1")), 1)
+        self.assertEqual(run_manager.synthetic_inputs.list_pending("conversation-1")[0]["input_id"], item.input_id)
+
+    def test_synthetic_followup_scheduler_starts_followup_without_frontend_trigger(self):
+        from backend.api.routes.messages import SyntheticFollowupScheduler
+
+        run_manager = RunManager()
+        chat_manager = self.FakeChatManager()
+        scheduler = SyntheticFollowupScheduler(
+            chat_manager=chat_manager,
+            run_manager=run_manager,
+        )
+        scheduler.install()
+        run_manager.synthetic_inputs.enqueue(
+            kind="task_notification",
+            conversation_id="conversation-1",
+            anchor_node_id="node-1",
+            source_run_id="run-1",
+            source_run_kind="subagent",
+            status="pending",
+            summary="subagent completed",
+            content="subagent result",
+            metadata={"origin": "task_notification", "source_status": "completed"},
+        )
+
+        async def run_scheduler():
+            await scheduler.drain("conversation-1")
+            await asyncio.sleep(0.05)
+
+        asyncio.run(run_scheduler())
+
+        self.assertEqual(run_manager.synthetic_inputs.list_pending("conversation-1"), [])
+        chat_runs = [
+            run for run in run_manager.list_runs("conversation-1")
+            if run["kind"] == "chat"
+        ]
+        self.assertEqual(len(chat_runs), 1)
+        self.assertEqual(chat_runs[0]["metadata"]["origin"], "task_notification")
+        self.assertIn("subagent result", chat_manager.contents[0])
+
 
 class AgentRolePromptTests(unittest.TestCase):
     def test_project_agents_are_role_specific(self):

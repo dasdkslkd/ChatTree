@@ -4,7 +4,7 @@ import uuid
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from time import time
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 
 @dataclass
@@ -32,6 +32,14 @@ class SyntheticInputQueue:
     def __init__(self) -> None:
         self._items: Dict[str, SyntheticInput] = {}
         self._source_index: Dict[tuple[str, str, str], str] = {}
+        self._pending_listener: Optional[Callable[[str], None]] = None
+
+    def set_pending_listener(self, listener: Optional[Callable[[str], None]]) -> None:
+        self._pending_listener = listener
+
+    def _notify_pending(self, conversation_id: str) -> None:
+        if self._pending_listener is not None:
+            self._pending_listener(conversation_id)
 
     def enqueue(
         self,
@@ -66,6 +74,8 @@ class SyntheticInputQueue:
         )
         self._items[input_id] = item
         self._source_index[source_key] = input_id
+        if item.status == "pending":
+            self._notify_pending(conversation_id)
         return deepcopy(item)
 
     def list_pending(self, conversation_id: str) -> list[Dict[str, Any]]:
@@ -88,6 +98,30 @@ class SyntheticInputQueue:
         if item.status != "consumed":
             item.status = "consumed"
             item.consumed_at = time()
+        return deepcopy(item).to_dict()
+
+    def claim(self, conversation_id: str, input_id: str) -> Optional[Dict[str, Any]]:
+        item = self._items.get(input_id)
+        if not item or item.conversation_id != conversation_id or item.status != "pending":
+            return None
+        item.status = "processing"
+        return deepcopy(item).to_dict()
+
+    def claim_next(self, conversation_id: str) -> Optional[Dict[str, Any]]:
+        pending = self.list_pending(conversation_id)
+        if not pending:
+            return None
+        return self.claim(conversation_id, str(pending[0]["input_id"]))
+
+    def release(self, conversation_id: str, input_id: str, *, notify: bool = True) -> Optional[Dict[str, Any]]:
+        item = self._items.get(input_id)
+        if not item or item.conversation_id != conversation_id:
+            return None
+        if item.status == "processing":
+            item.status = "pending"
+            item.consumed_at = None
+            if notify:
+                self._notify_pending(conversation_id)
         return deepcopy(item).to_dict()
 
     def dequeue(self, conversation_id: str) -> Optional[Dict[str, Any]]:
