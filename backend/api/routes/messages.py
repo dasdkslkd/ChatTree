@@ -185,6 +185,39 @@ def _synthetic_run_metadata(request: SendMessageRequest) -> Dict[str, Any]:
     }
 
 
+def _slash_command_metadata(slash_result: Any) -> Dict[str, Any]:
+    return {
+        "command": slash_result.canonical_name,
+        "input_command": slash_result.command_name,
+        "kind": slash_result.kind.value,
+        "args": slash_result.args,
+        "original_input": slash_result.original_input,
+        "tool_policy": slash_result.tool_policy.value,
+        "persistence_policy": slash_result.persistence_policy.value,
+        "run_kind": slash_result.run_kind,
+    }
+
+
+async def _create_visible_slash_anchor_node(
+    *,
+    conversation_id: str,
+    request: SendMessageRequest,
+    chat_manager: ChatManager,
+    slash_result: Any,
+) -> str:
+    create_anchor = getattr(chat_manager, "create_visible_user_anchor_node", None)
+    if create_anchor is None:
+        raise RuntimeError("ChatManager 不支持 detached slash 锚点节点")
+    return await create_anchor(
+        conversation_id=conversation_id,
+        content=request.content,
+        parent_node_id=request.node_id,
+        model_id=request.model_id,
+        tool_permission_mode=request.tool_permission_mode,
+        slash_metadata=_slash_command_metadata(slash_result),
+    )
+
+
 def build_task_notification_content(item: Dict[str, Any]) -> str:
     metadata = dict(item.get("metadata") or {})
     payload = {
@@ -193,6 +226,8 @@ def build_task_notification_content(item: Dict[str, Any]) -> str:
         "source_run_id": item.get("source_run_id"),
         "source_run_kind": item.get("source_run_kind"),
         "source_status": metadata.get("source_status"),
+        "delegated_task": metadata.get("delegated_task"),
+        "original_slash_input": metadata.get("original_slash_input"),
         "content": item.get("content") or "",
     }
     return "<task-notification>\n" + json.dumps(payload, ensure_ascii=False, indent=2) + "\n</task-notification>"
@@ -219,6 +254,8 @@ def build_synthetic_message_request(
             "source_run_id": item.get("source_run_id"),
             "source_run_kind": item.get("source_run_kind"),
             "source_status": (item.get("metadata") or {}).get("source_status"),
+            "delegated_task": (item.get("metadata") or {}).get("delegated_task"),
+            "original_slash_input": (item.get("metadata") or {}).get("original_slash_input"),
         },
     )
 
@@ -465,14 +502,22 @@ async def detached_stream_event_generator(
             yield _format_sse_data("[DONE]")
             return
         try:
+            anchor_node_id = await _create_visible_slash_anchor_node(
+                conversation_id=conversation_id,
+                request=request,
+                chat_manager=chat_manager,
+                slash_result=slash_result,
+            )
             run = await subagent_executor.start(
                 conversation_id=conversation_id,
                 agent_name="implementer",
                 input_data=slash_result.args,
-                parent_node_id=request.node_id,
+                parent_node_id=anchor_node_id,
                 provider_id=request.provider_id,
                 model_id=request.model_id,
                 permission_mode=request.tool_permission_mode,
+                delegated_task=slash_result.args,
+                original_slash_input=slash_result.original_input,
             )
         except Exception as exc:
             yield _format_sse_data(_stream_error_chunk(conversation_id, str(exc)))
@@ -488,11 +533,20 @@ async def detached_stream_event_generator(
             yield _format_sse_data("[DONE]")
             return
         try:
+            anchor_node_id = await _create_visible_slash_anchor_node(
+                conversation_id=conversation_id,
+                request=request,
+                chat_manager=chat_manager,
+                slash_result=slash_result,
+            )
             run = await workflow_manager.start(
                 conversation_id=conversation_id,
                 script=slash_result.args,
                 args={},
-                parent_node_id=request.node_id,
+                parent_node_id=anchor_node_id,
+                permission_mode=request.tool_permission_mode,
+                delegated_task=slash_result.args,
+                original_slash_input=slash_result.original_input,
             )
         except Exception as exc:
             yield _format_sse_data(_stream_error_chunk(conversation_id, str(exc)))
@@ -727,6 +781,8 @@ async def stop_stream_message(
     node_id: str,
     chat_manager: ChatManager = Depends(get_chat_manager),
     run_manager: RunManager = Depends(get_run_manager),
+    subagent_executor: SubagentExecutor = Depends(get_subagent_executor),
+    workflow_manager: WorkflowManager = Depends(get_workflow_manager),
 ):
     """停止流式消息"""
     try:
@@ -739,6 +795,24 @@ async def stop_stream_message(
         )
         if run:
             await run_manager.request_stop(str(run["run_id"]))
+        subagent_run = run_manager.find_active_by_anchor(
+            conversation_id=conversation_id,
+            anchor_node_id=node_id,
+            kind=RunKind.SUBAGENT,
+        )
+        if subagent_run:
+            await run_manager.request_stop(str(subagent_run["run_id"]))
+            if subagent_executor is not None and hasattr(subagent_executor, "stop"):
+                await subagent_executor.stop(str(subagent_run["run_id"]))
+        workflow_run = run_manager.find_active_by_anchor(
+            conversation_id=conversation_id,
+            anchor_node_id=node_id,
+            kind=RunKind.WORKFLOW,
+        )
+        if workflow_run:
+            await run_manager.request_stop(str(workflow_run["run_id"]))
+            if workflow_manager is not None and hasattr(workflow_manager, "stop"):
+                await workflow_manager.stop(str(workflow_run["run_id"]))
         await chat_manager.stop_stream(node_id)
         return {"detail": "流式消息已停止"}
     except HTTPException:

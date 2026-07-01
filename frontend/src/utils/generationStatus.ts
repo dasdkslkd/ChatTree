@@ -8,6 +8,7 @@ export function getGenerationStatusText(generationInfo?: Pick<GenerationInfo, 's
 }
 
 export function getStreamStatusText(status: string, errorMessage?: string | null): string | null {
+  if (status === 'waiting_approval') return '等待工具审批';
   if (status === 'error') return errorMessage?.trim() || '生成出错';
   if (status === 'stopped') return '已停止';
   return null;

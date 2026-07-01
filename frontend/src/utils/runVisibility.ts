@@ -48,6 +48,6 @@ export function isRunBlockingSelectedBranch(
   currentBranchNodeIds: Set<string>,
 ): boolean {
   return run.kind === 'chat'
-    && run.status === 'streaming'
+    && (run.status === 'streaming' || run.status === 'waiting_approval')
     && isRunVisibleInSelectedTranscript(run, selectedBranchTipId, currentBranchNodeIds);
 }

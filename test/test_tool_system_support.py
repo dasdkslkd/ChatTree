@@ -1,6 +1,10 @@
 import asyncio
 import json
+import sys
 
+sys.path.insert(0, ".")
+
+from backend.core.tools.agent_tools import StartSubagentTool, StartWorkflowTool
 from backend.core.chat.chat_manager import ChatManager
 from backend.core.chat.node import NodeManager
 from backend.core.chat.conversation import Conversation
@@ -87,6 +91,65 @@ def test_tool_manager_full_exposure_registers_raw_write_file_for_model():
     names = [tool["function"]["name"] for tool in manager.get_openai_tools()]
 
     assert "write_file" in names
+
+
+def test_agent_management_tools_are_model_visible_when_registered():
+    manager = ToolManager({
+        "tools": {
+            "enabled": True,
+            "builtin": {"enabled": False},
+        }
+    })
+    manager.register(StartSubagentTool(subagent_executor=object()))
+    manager.register(StartWorkflowTool(workflow_manager=object()))
+
+    names = [tool["function"]["name"] for tool in manager.get_openai_tools()]
+
+    assert "start_subagent" in names
+    assert "start_workflow" in names
+
+
+def test_start_subagent_tool_requires_runtime_context():
+    tool = StartSubagentTool(subagent_executor=object())
+
+    result = asyncio.run(tool.execute(task="inspect environment"))
+
+    payload = json.loads(result)
+    assert payload["error"]["type"] == "missing_runtime_context"
+
+
+def test_start_subagent_tool_starts_background_run_with_inherited_context():
+    class FakeSubagentExecutor:
+        def __init__(self):
+            self.kwargs = None
+
+        async def start(self, **kwargs):
+            self.kwargs = kwargs
+            return {"run_id": "subagent-1", "kind": "subagent", "status": "running"}
+
+    executor = FakeSubagentExecutor()
+    tool = StartSubagentTool(subagent_executor=executor)
+
+    result = asyncio.run(tool.execute(
+        task="检查本机环境",
+        agent_name="explorer",
+        _runtime_context={
+            "conversation_id": "conversation-1",
+            "node_id": "node-1",
+            "permission_mode": "ask_always",
+            "workspace": {"cwd": "D:\\Workspace\\ChatTree"},
+        },
+    ))
+
+    payload = json.loads(result)
+    assert payload["run_id"] == "subagent-1"
+    assert executor.kwargs["conversation_id"] == "conversation-1"
+    assert executor.kwargs["parent_node_id"] == "node-1"
+    assert executor.kwargs["agent_name"] == "explorer"
+    assert executor.kwargs["input_data"] == "检查本机环境"
+    assert executor.kwargs["permission_mode"] == "ask_always"
+    assert executor.kwargs["workspace"] == {"cwd": "D:\\Workspace\\ChatTree"}
+    assert executor.kwargs["delegated_task"] == "检查本机环境"
 
 
 def test_tool_manager_builtin_enabled_false_hides_builtin_runtime_tools():

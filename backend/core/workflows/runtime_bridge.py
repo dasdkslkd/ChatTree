@@ -17,12 +17,14 @@ class WorkflowRuntimeBridge:
         run_manager: RunManager,
         subagent_executor: SubagentExecutor,
         max_parallel: int = 8,
+        permission_mode: str | None = None,
     ) -> None:
         self.workflow_run_id = workflow_run_id
         self.conversation_id = conversation_id
         self.parent_node_id = parent_node_id
         self.run_manager = run_manager
         self.subagent_executor = subagent_executor
+        self.permission_mode = permission_mode
         self._parallel_sem = asyncio.Semaphore(max_parallel)
 
     async def handle_call(self, method: str, params: Dict[str, Any]) -> Any:
@@ -73,23 +75,27 @@ class WorkflowRuntimeBridge:
                 parent_run_id=self.workflow_run_id,
                 provider_id=options.get("provider_id"),
                 model_id=options.get("model_id"),
-                permission_mode=options.get("permission_mode"),
+                permission_mode=options.get("permission_mode") or self.permission_mode,
                 workspace=options.get("workspace"),
             )
             run_id = str(run["run_id"])
             content = ""
             status = RunStatus.COMPLETED.value
-            async for payload in self.run_manager.subscribe(run_id, 0):
-                await self.run_manager.append_event(self.workflow_run_id, {
-                    "status": "content",
-                    "event_type": "workflow_child_event",
-                    "child_run_id": run_id,
-                    "child_kind": "subagent",
-                    "payload": payload,
-                })
-                if payload.get("event_type") in {"subagent_result", "subagent_error"}:
-                    content = payload.get("content") or content
-                if payload.get("type") == "run_finished":
-                    status = payload.get("status") or status
-                    break
+            try:
+                async for payload in self.run_manager.subscribe(run_id, 0):
+                    await self.run_manager.append_event(self.workflow_run_id, {
+                        "status": "content",
+                        "event_type": "workflow_child_event",
+                        "child_run_id": run_id,
+                        "child_kind": "subagent",
+                        "payload": payload,
+                    })
+                    if payload.get("event_type") in {"subagent_result", "subagent_error"}:
+                        content = payload.get("content") or content
+                    if payload.get("type") == "run_finished":
+                        status = payload.get("status") or status
+                        break
+            except asyncio.CancelledError:
+                await self.subagent_executor.stop(run_id)
+                raise
             return {"run_id": run_id, "status": status, "content": content}

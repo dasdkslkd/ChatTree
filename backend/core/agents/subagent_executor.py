@@ -40,6 +40,8 @@ class SubagentExecutor:
         model_id: Optional[str] = None,
         permission_mode: Optional[str] = None,
         workspace: Optional[Dict[str, Any]] = None,
+        delegated_task: Any = None,
+        original_slash_input: Optional[str] = None,
     ) -> Dict[str, Any]:
         agent = self.capability_registry.get_agent(agent_name)
         if agent is None:
@@ -58,6 +60,8 @@ class SubagentExecutor:
                 "provider_id": provider_id or agent.provider_id,
                 "model_id": model_id or agent.model_id or agent.model,
                 "permission_mode": permission_mode or agent.permission_mode,
+                "delegated_task": delegated_task if delegated_task is not None else input_data,
+                "original_slash_input": original_slash_input,
             },
         )
         asyncio.create_task(self._produce(
@@ -309,6 +313,13 @@ class SubagentExecutor:
                     event = dict(event)
                     event["run_id"] = run_id
                     event["agent_name"] = agent_name
+                    if event.get("event_type") == "tool_approval_request":
+                        await self.run_manager.update_status(run_id, RunStatus.WAITING_APPROVAL)
+                        event["status"] = RunStatus.WAITING_APPROVAL.value
+                    elif event.get("event_type") == "tool_approval_result":
+                        if not await self.run_manager.is_stop_requested(run_id):
+                            await self.run_manager.update_status(run_id, RunStatus.RUNNING)
+                        event["status"] = RunStatus.RUNNING.value
                     await approval_events.put(event)
 
                 execute_task = asyncio.create_task(
@@ -322,12 +333,18 @@ class SubagentExecutor:
                     )
                 )
                 event_get_task = asyncio.create_task(approval_events.get())
+                stop_task = asyncio.create_task(self.run_manager.stop_event(run_id).wait())
                 try:
                     while True:
                         done, _ = await asyncio.wait(
-                            {execute_task, event_get_task},
+                            {execute_task, event_get_task, stop_task},
                             return_when=asyncio.FIRST_COMPLETED,
                         )
+                        if stop_task in done and stop_task.result():
+                            execute_task.cancel()
+                            with suppress(asyncio.CancelledError):
+                                await execute_task
+                            raise asyncio.CancelledError()
                         if event_get_task in done:
                             event = event_get_task.result()
                             await self.run_manager.append_event(run_id, self._tool_event_payload(event, agent_name))
@@ -343,6 +360,10 @@ class SubagentExecutor:
                         event_get_task.cancel()
                         with suppress(asyncio.CancelledError):
                             await event_get_task
+                    if not stop_task.done():
+                        stop_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await stop_task
                     if not execute_task.done():
                         execute_task.cancel()
                         with suppress(asyncio.CancelledError):
@@ -538,6 +559,8 @@ class SubagentExecutor:
         if run.get("kind") != RunKind.SUBAGENT.value:
             return None
         metadata = dict(run.get("metadata") or {})
+        slash_metadata = metadata.get("slash_command") if isinstance(metadata.get("slash_command"), dict) else {}
+        original_slash_input = metadata.get("original_slash_input") or slash_metadata.get("original_input")
         event_payload = dict(event_payload or {})
         item = self.run_manager.synthetic_inputs.enqueue(
             kind="task_notification",
@@ -553,6 +576,8 @@ class SubagentExecutor:
                 "source_status": source_status,
                 "event_type": event_payload.get("event_type"),
                 "agent_name": metadata.get("agent_name") or event_payload.get("agent_name"),
+                "delegated_task": metadata.get("delegated_task"),
+                "original_slash_input": original_slash_input,
             },
         )
         return item.to_dict()

@@ -599,6 +599,36 @@ async function testDurationNotificationsUseCoarseInterval() {
   });
 }
 
+async function testWaitingApprovalStatusIsVisible() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    messageApi.stream = controlled.stream;
+    const running = manager.startStream('conv-1', { content: '/fork inspect' }, '/fork inspect');
+
+    await controlled.push({
+      run_id: 'run-fork',
+      conversation_id: 'conv-1',
+      kind: 'subagent',
+      status: 'waiting_approval',
+      event_type: 'tool_approval_request',
+      approval: {
+        id: 'approval-1',
+        status: 'pending',
+        tool_name: 'run_command',
+      },
+    });
+
+    try {
+      const state = manager.getConversationStates('conv-1')[0];
+      assert.equal(state.status, 'waiting_approval');
+      assert.equal(getStreamStatusText(state.status), '等待工具审批');
+    } finally {
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
 function testGenerationStatusUsesPersistedErrorMessage() {
   assert.equal(
     getGenerationStatusText({ status: 'error', error_message: 'provider authentication failed' }),
@@ -625,6 +655,7 @@ async function main() {
   await testCompletedDirectResponseCanBeArchivedAndRemovedFromActiveRuns();
   await testCoalescesContentNotificationsAndFlushesCompletionImmediately();
   await testDurationNotificationsUseCoarseInterval();
+  await testWaitingApprovalStatusIsVisible();
   testGenerationStatusUsesPersistedErrorMessage();
   console.log('streamManager tests passed');
 }

@@ -216,6 +216,26 @@ class RunManager:
         })
         return True
 
+    async def update_status(self, run_id: str, status: RunStatus | str) -> RunRecord:
+        run_status = status if isinstance(status, RunStatus) else RunStatus(str(status))
+        if run_status in TERMINAL_RUN_STATUSES:
+            raise ValueError(f"update_status requires non-terminal status, got {run_status}")
+        async with self._lock:
+            record = self._require_run_locked(run_id)
+            if record.status in TERMINAL_RUN_STATUSES:
+                return deepcopy(record)
+            if record.status == run_status:
+                return deepcopy(record)
+            record.status = run_status
+            record.updated_at = time()
+            snapshot = deepcopy(record)
+        await self.append_event(run_id, {
+            "type": "run_status_changed",
+            "run_id": run_id,
+            "status": run_status.value,
+        })
+        return snapshot
+
     def stop_event(self, run_id: str) -> asyncio.Event:
         return self._stop_events.setdefault(run_id, asyncio.Event())
 
@@ -251,6 +271,26 @@ class RunManager:
             if record.conversation_id != conversation_id:
                 continue
             if record.target_node_id != target_node_id:
+                continue
+            if expected_kind is not None and record.kind != expected_kind:
+                continue
+            return record.to_dict()
+        return None
+
+    def find_active_by_anchor(
+        self,
+        *,
+        conversation_id: str,
+        anchor_node_id: str,
+        kind: Optional[RunKind | str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        expected_kind = kind if isinstance(kind, RunKind) or kind is None else RunKind(str(kind))
+        for record in self._runs.values():
+            if record.status in TERMINAL_RUN_STATUSES:
+                continue
+            if record.conversation_id != conversation_id:
+                continue
+            if record.anchor_node_id != anchor_node_id:
                 continue
             if expected_kind is not None and record.kind != expected_kind:
                 continue

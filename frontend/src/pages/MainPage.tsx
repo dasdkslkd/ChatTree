@@ -70,9 +70,6 @@ import { messageApi, type ActiveStreamInfo, type ToolResultSlice } from '../api/
 import type {
   Message,
   SendMessageRequest,
-  ToolApprovalDecision,
-  ToolApprovalPayload,
-  ToolApprovalScope,
   ToolPermissionMode,
 } from '../types/message';
 import type { WorkspaceContext } from '../types/conversation';
@@ -93,6 +90,10 @@ import {
   syncToolPermissionDraftFromBranch,
   type ToolPermissionDraft,
 } from '../utils/toolPermissionDraft';
+import {
+  collectPendingToolApprovalPrompts,
+  type ToolApprovalDecisionHandler,
+} from '../utils/toolApprovals';
 import {
   extractToolResultEnvelope,
   formatToolArguments,
@@ -901,91 +902,6 @@ function AnimatedProcessedBlocks({
   );
 }
 
-function ToolApprovalCard({ approval }: { approval: ToolApprovalPayload }) {
-  const [submittingAction, setSubmittingAction] = useState<string | null>(null);
-  const toolName = approval.tool_name || 'tool';
-  const risk = approval.risk || approval.risk_level || 'unknown';
-  const reason = approval.reason || '';
-  const argsPreview = approval.arguments_preview || '';
-  const approvalSummary = summarizeToolCall(toolName, argsPreview);
-  const approvalArgs = argsPreview ? formatToolArguments(argsPreview) : '';
-
-  const handleDecision = async (
-    decision: ToolApprovalDecision,
-    scope: ToolApprovalScope,
-    action: string,
-  ) => {
-    setSubmittingAction(action);
-    try {
-      await messageApi.decideApproval(approval.id, decision, scope);
-    } catch (error) {
-      console.error('Failed to decide tool approval:', error);
-      setSubmittingAction(null);
-    }
-  };
-
-  return (
-    <div className="tool-call tool-approval-call">
-      <div className="tc-header tool-approval-header">
-        <span className="tc-name">{toolName}</span>
-        <span className="tc-summary">{approvalSummary || reason || '等待审批'}</span>
-        <span className="tool-approval-risk">{risk}</span>
-      </div>
-      <div className="tool-approval-body">
-        {reason && <div className="tool-approval-reason">{reason}</div>}
-        {approvalArgs && <pre className="tc-cmd custom-scrollbar">{approvalArgs}</pre>}
-        <div className="tool-approval-actions">
-          <Button
-            type="button"
-            size="xs"
-            variant="secondary"
-            disabled={submittingAction !== null}
-            onClick={() => handleDecision('approve', 'once', 'approve-once')}
-          >
-            允许一次
-          </Button>
-          <Button
-            type="button"
-            size="xs"
-            variant="secondary"
-            disabled={submittingAction !== null}
-            onClick={() => handleDecision('approve', 'session', 'approve-session')}
-          >
-            允许本会话
-          </Button>
-          <Button
-            type="button"
-            size="xs"
-            variant="ghost"
-            disabled={submittingAction !== null}
-            onClick={() => handleDecision('deny', 'once', 'deny')}
-          >
-            拒绝
-          </Button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ToolApprovalGroup({ approvals }: { approvals: ToolApprovalPayload[] }) {
-  if (approvals.length === 0) return null;
-  return (
-    <div className="tool-group tool-approval-group">
-      <div className="tool-group-header tool-approval-group-header">
-        <ChevronRight className="tg-chevron" />
-        <span>工具审批</span>
-        <span className="tg-count">{approvals.length} 个</span>
-      </div>
-      <div className="tool-group-body">
-        {approvals.map((approval) => (
-          <ToolApprovalCard key={approval.id} approval={approval} />
-        ))}
-      </div>
-    </div>
-  );
-}
-
 /* ---------- Component ---------- */
 export default function ChatPage() {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
@@ -1273,7 +1189,6 @@ export default function ChatPage() {
         reasoning: run.reasoning,
         tool_interactions: run.toolInteractions,
       });
-      const pendingApprovalList = Object.values(run.pendingApprovals).filter((approval) => approval.status === 'pending');
       const streamingFoldedContentBlocks = getAssistantFoldedContentBlocks({
         content: run.content,
         reasoning: run.reasoning,
@@ -1302,7 +1217,6 @@ export default function ChatPage() {
         showStreamBlock: run.status !== 'idle' && !assistantLanded,
         timeline,
         streamingFoldState,
-        pendingApprovalList,
         activeReasoningIndex,
         activeReasoningKey,
       };
@@ -1321,7 +1235,6 @@ export default function ChatPage() {
         reasoning: run.reasoning,
         tool_interactions: run.toolInteractions,
       });
-      const pendingApprovalList = Object.values(run.pendingApprovals).filter((approval) => approval.status === 'pending');
       const streamingFoldedContentBlocks = getAssistantFoldedContentBlocks({
         content: run.content,
         reasoning: run.reasoning,
@@ -1350,7 +1263,6 @@ export default function ChatPage() {
         showStreamBlock: run.status !== 'idle',
         timeline,
         streamingFoldState,
-        pendingApprovalList,
         activeReasoningIndex,
         activeReasoningKey,
       };
@@ -1367,6 +1279,7 @@ export default function ChatPage() {
       draft.run.content.length,
       draft.run.reasoning.length,
       draft.run.toolInteractions.length,
+      Object.keys(draft.run.pendingApprovals).length,
       draft.run.pendingUserMessage?.length ?? 0,
     ].join(':')).join('|'),
     [sideRunDrafts],
@@ -1391,10 +1304,12 @@ export default function ChatPage() {
     [activeRunDrafts],
   );
   const currentBranchHasPendingUserMessage = activeRunDrafts.some((draft) => draft.showPendingBubble);
-  const pendingApprovalCount = activeRunDrafts.reduce(
-    (count, draft) => count + draft.pendingApprovalList.length,
-    0,
+  const approvalPromptRunStates = sidePanelRunStates;
+  const pendingToolApprovalPrompts = useMemo(
+    () => collectPendingToolApprovalPrompts(approvalPromptRunStates),
+    [approvalPromptRunStates],
   );
+  const pendingApprovalCount = pendingToolApprovalPrompts.length;
 
   useEffect(() => {
     if (sideRunDrafts.length === 0) return;
@@ -1749,6 +1664,59 @@ export default function ChatPage() {
     updateQueuedMessages((messages) => messages.filter((message) => message.id !== id));
   }, [updateQueuedMessages]);
 
+  const syncBackendScheduledFollowup = useCallback(async (conversationId: string) => {
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      try {
+        const activeStreams = await messageApi.getActiveStreams(conversationId);
+        const attachable = activeStreams.filter((item) => !item.done && (item.node_id || item.run_id));
+        if (attachable.length > 0) {
+          await Promise.all(attachable
+            .filter((active) => active.node_id)
+            .map((active) => refreshMessages(conversationId, {
+              awaitNodeId: active.node_id ?? undefined,
+              awaitRole: 'user',
+              retries: 0,
+            })));
+          for (const active of attachable) {
+            void streamManager.resumeStream(
+              conversationId,
+              active.node_id ?? null,
+              active.run_id ?? undefined,
+              0,
+              active.anchor_node_id ?? null,
+            );
+          }
+          return;
+        }
+        await refreshMessages(conversationId, { retries: 0 });
+      } catch (_) {
+        await refreshMessages(conversationId, { retries: 0 });
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 500));
+    }
+    await loadConversations();
+  }, [loadConversations, refreshMessages]);
+
+  const handleToolApprovalDecision = useCallback<ToolApprovalDecisionHandler>(async (
+    approvalId,
+    decision,
+    scope,
+    runId,
+  ) => {
+    await messageApi.decideApproval(approvalId, decision, scope);
+    const run = activeRunStates.find((item) => item.runId === runId);
+    const conversationId = run?.conversationId ?? currentConversation?.id ?? null;
+    if (!conversationId) return;
+    void streamManager.resumeStream(
+      conversationId,
+      run?.targetNodeId ?? run?.nodeId ?? null,
+      runId,
+      run?.eventCount ?? 0,
+      run?.anchorNodeId ?? null,
+    );
+    await refreshMessages(conversationId, { retries: 0 });
+  }, [activeRunStates, currentConversation?.id, refreshMessages]);
+
   const handleStopStreaming = useCallback(() => {
     if (currentConversation?.id) {
       const conversationId = currentConversation.id;
@@ -1789,7 +1757,8 @@ export default function ChatPage() {
           streamManager.cleanupIfController(finishedId, controller, runId);
         }
         await loadConversations();
-        await sendNextQueuedMessage(finishedId);
+        const sentQueued = await sendNextQueuedMessage(finishedId);
+        if (!sentQueued) void syncBackendScheduledFollowup(finishedId);
         return;
       }
 
@@ -1804,6 +1773,7 @@ export default function ChatPage() {
                 : { awaitNodeId, retries: 6 },
             );
             await loadConversations();
+            void syncBackendScheduledFollowup(finishedId);
           })();
         });
         return;
@@ -1836,7 +1806,8 @@ export default function ChatPage() {
       }
       // 同步对话列表（更新时间、标题等）
       await loadConversations();
-      await sendNextQueuedMessage(finishedId);
+      const sentQueued = await sendNextQueuedMessage(finishedId);
+      if (!sentQueued) void syncBackendScheduledFollowup(finishedId);
     });
     return unsubscribe;
   }, [
@@ -1845,6 +1816,7 @@ export default function ChatPage() {
     patchAssistantMessageFromStream,
     loadConversations,
     sendNextQueuedMessage,
+    syncBackendScheduledFollowup,
   ]);
 
   const shouldAutoScrollRef = useRef(shouldAutoScroll);
@@ -2983,7 +2955,7 @@ export default function ChatPage() {
                                 </div>
                                 <AnimatedProcessedBlocks
                                   expanded
-                                  blocks={draft.streamingFoldState.processBlocks}
+                                  blocks={draft.streamingFoldState.visibleBlocks}
                                   renderBlock={(block) => {
                                     if (block.type === 'reasoning') {
                                       return (
@@ -3000,8 +2972,6 @@ export default function ChatPage() {
                                     return renderAssistantTimelineBlock(block);
                                   }}
                                 />
-                                <div className="processed-answer-divider" />
-                                {draft.streamingFoldState.contentBlocks.map(renderAssistantTimelineBlock)}
                               </>
                             ) : (
                               draft.timeline.map((block, blockIndex) => {
@@ -3027,8 +2997,7 @@ export default function ChatPage() {
                                 );
                               })
                             )}
-                            <ToolApprovalGroup approvals={draft.pendingApprovalList} />
-                            {draft.timeline.length === 0 && draft.pendingApprovalList.length === 0 && draft.run.status === 'streaming' && (
+                            {draft.timeline.length === 0 && draft.run.status === 'streaming' && (
                               <div
                                 className="max-w-full w-fit px-3 py-2 rounded-2xl rounded-bl-sm leading-relaxed prose prose-sm max-w-none [&_p]:m-0"
                                 style={{
@@ -3086,6 +3055,8 @@ export default function ChatPage() {
                   toolPermissionDraft={toolPermissionDraft}
                   getToolPermissionDraft={getToolPermissionDraft}
                   onToolPermissionDraftChange={updateToolPermissionDraft}
+                  pendingToolApprovals={pendingToolApprovalPrompts}
+                  onToolApprovalDecision={handleToolApprovalDecision}
                 />
               </footer>
             </>
@@ -3244,7 +3215,7 @@ export default function ChatPage() {
                                 </div>
                                 <AnimatedProcessedBlocks
                                   expanded
-                                  blocks={draft.streamingFoldState.processBlocks}
+                                  blocks={draft.streamingFoldState.visibleBlocks}
                                   renderBlock={(block) => {
                                     if (block.type === 'reasoning') {
                                       return (
@@ -3261,8 +3232,6 @@ export default function ChatPage() {
                                     return renderAssistantTimelineBlock(block);
                                   }}
                                 />
-                                <div className="processed-answer-divider" />
-                                {draft.streamingFoldState.contentBlocks.map(renderAssistantTimelineBlock)}
                               </>
                             ) : (
                               draft.timeline.map((block, blockIndex) => {
@@ -3284,8 +3253,7 @@ export default function ChatPage() {
                                 );
                               })
                             )}
-                            <ToolApprovalGroup approvals={draft.pendingApprovalList} />
-                            {draft.timeline.length === 0 && draft.pendingApprovalList.length === 0 && draft.run.status === 'streaming' && (
+                            {draft.timeline.length === 0 && draft.run.status === 'streaming' && (
                               <div className="flex items-center gap-2 px-3 py-2 text-sm" style={{ color: 'var(--fg-tertiary)' }}>
                                 <Loader2 className="h-4 w-4 animate-spin" style={{ color: 'var(--icon-accent)' }} />
                                 <span>运行中...</span>

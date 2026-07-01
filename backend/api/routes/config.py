@@ -7,6 +7,7 @@ from ...core.capabilities.bootstrap import build_runtime_config_with_plugin_mcp
 from ...core.config.config import Config, cfg
 from ...core.model.model_manager import ModelManager
 from ...core.tools.orchestrator import ToolOrchestrator
+from ...core.tools.agent_tools import register_agent_management_tools
 from ...core.tools.security.approval import ApprovalManager
 from ...core.tools.security.logical_sandbox import LogicalSandbox
 from ...core.tools.security.permissions import PermissionEngine
@@ -78,6 +79,11 @@ def _sync_runtime_managers(app, config_data: Dict[str, Any], model_manager, tool
     workflow_manager = getattr(app.state, 'workflow_manager', None)
     if workflow_manager is not None and subagent_executor is not None:
         workflow_manager.subagent_executor = subagent_executor
+    register_agent_management_tools(
+        tool_manager,
+        subagent_executor=subagent_executor,
+        workflow_manager=workflow_manager,
+    )
 
 
 def _runtime_config_for_app(app, config_data: Dict[str, Any]) -> Dict[str, Any]:

@@ -77,6 +77,53 @@ class ChatManager:
         if not data:
             return None
         return Conversation.from_dict(data)
+
+    async def create_visible_user_anchor_node(
+        self,
+        *,
+        conversation_id: str,
+        content: str,
+        parent_node_id: Optional[str] = None,
+        model_id: Optional[str] = None,
+        tool_permission_mode: Optional[str] = None,
+        slash_metadata: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Create a visible user-only node for detached slash runs."""
+        async with self._lock_for(conversation_id):
+            conversation = self.get_conversation(conversation_id)
+            if conversation is None:
+                raise ValueError("对话不存在")
+            if parent_node_id and parent_node_id in conversation.nodes:
+                conversation.switch_to_node(parent_node_id)
+            current_node_id = conversation.current_node_id
+            parent_tool_permission_mode = None
+            if current_node_id and current_node_id in conversation.nodes:
+                parent_tool_permission_mode = conversation.nodes[current_node_id].get("tool_permission_mode")
+            eff_tool_permission_mode = normalize_permission_mode(
+                tool_permission_mode
+                if tool_permission_mode not in (None, "")
+                else parent_tool_permission_mode or "ask_always"
+            )
+            user_msg = Message({
+                "id": str(uuid.uuid4()),
+                "role": Role.USER,
+                "content": content,
+                "name": None,
+                "tool_calls": None,
+                "tool_call_id": None,
+                "timestamp": int(time()),
+            })
+            if slash_metadata:
+                user_msg["slash_command"] = dict(slash_metadata)
+            new_node = NodeManager.create_node(
+                user_message=user_msg,
+                parent_id=current_node_id,
+                model_id=model_id or conversation.current_model,
+                tool_permission_mode=eff_tool_permission_mode,
+            )
+            conversation.add_node(new_node, parent_id=current_node_id)
+            self._save(conversation)
+            return str(new_node["id"])
     
     def create_conversation(
         self,

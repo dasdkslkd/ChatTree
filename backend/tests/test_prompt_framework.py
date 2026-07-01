@@ -379,6 +379,13 @@ class SlashRuntimeDispatchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_fork_slash_starts_subagent_run_without_chat_run(self):
         class FakeChatManager:
+            def __init__(self):
+                self.anchor_kwargs = None
+
+            async def create_visible_user_anchor_node(self, **kwargs):
+                self.anchor_kwargs = kwargs
+                return "slash-node-1"
+
             async def send_message_stream(self, **kwargs):
                 raise AssertionError("chat stream should not be used for /fork")
 
@@ -395,20 +402,37 @@ class SlashRuntimeDispatchTests(unittest.IsolatedAsyncioTestCase):
                 yield {"status": "complete", "run_id": run_id}
 
         subagent = FakeSubagentExecutor()
+        chat = FakeChatManager()
         events = await self._collect_events(detached_stream_event_generator(
             "conversation-1",
-            SendMessageRequest(content="/fork inspect prompts", node_id="node-1"),
-            FakeChatManager(),
+            SendMessageRequest(
+                content="/fork inspect prompts",
+                node_id="node-1",
+                tool_permission_mode="modify_only",
+            ),
+            chat,
             FakeRunManager(),
             subagent,
             None,
         ))
+        self.assertEqual(chat.anchor_kwargs["content"], "/fork inspect prompts")
+        self.assertEqual(chat.anchor_kwargs["parent_node_id"], "node-1")
+        self.assertEqual(chat.anchor_kwargs["tool_permission_mode"], "modify_only")
         self.assertEqual(subagent.kwargs["agent_name"], "implementer")
         self.assertEqual(subagent.kwargs["input_data"], "inspect prompts")
+        self.assertEqual(subagent.kwargs["parent_node_id"], "slash-node-1")
+        self.assertEqual(subagent.kwargs["permission_mode"], "modify_only")
         self.assertTrue(events[-1].strip().endswith("[DONE]"))
 
     async def test_workflow_slash_starts_workflow_run_without_chat_run(self):
         class FakeChatManager:
+            def __init__(self):
+                self.anchor_kwargs = None
+
+            async def create_visible_user_anchor_node(self, **kwargs):
+                self.anchor_kwargs = kwargs
+                return "slash-node-1"
+
             async def send_message_stream(self, **kwargs):
                 raise AssertionError("chat stream should not be used for /workflow")
 
@@ -425,16 +449,24 @@ class SlashRuntimeDispatchTests(unittest.IsolatedAsyncioTestCase):
                 yield {"status": "complete", "run_id": run_id}
 
         workflow = FakeWorkflowManager()
+        chat = FakeChatManager()
         events = await self._collect_events(detached_stream_event_generator(
             "conversation-1",
-            SendMessageRequest(content="/workflow return 1", node_id="node-1"),
-            FakeChatManager(),
+            SendMessageRequest(
+                content="/workflow return 1",
+                node_id="node-1",
+                tool_permission_mode="ask_always",
+            ),
+            chat,
             FakeRunManager(),
             None,
             workflow,
         ))
+        self.assertEqual(chat.anchor_kwargs["content"], "/workflow return 1")
+        self.assertEqual(chat.anchor_kwargs["parent_node_id"], "node-1")
         self.assertEqual(workflow.kwargs["script"], "return 1")
-        self.assertEqual(workflow.kwargs["parent_node_id"], "node-1")
+        self.assertEqual(workflow.kwargs["parent_node_id"], "slash-node-1")
+        self.assertEqual(workflow.kwargs["permission_mode"], "ask_always")
         self.assertTrue(events[-1].strip().endswith("[DONE]"))
 
     async def test_btw_slash_runs_as_side_question_chat_run(self):
@@ -600,7 +632,11 @@ class SyntheticTaskNotificationTests(unittest.IsolatedAsyncioTestCase):
             kind=RunKind.SUBAGENT,
             anchor_node_id="node-1",
             summary="implementer: inspect",
-            metadata={"agent_name": "implementer"},
+            metadata={
+                "agent_name": "implementer",
+                "delegated_task": "inspect",
+                "slash_command": {"original_input": "/fork inspect"},
+            },
         )
 
         await executor._produce(
@@ -625,7 +661,12 @@ class SyntheticTaskNotificationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pending[0]["source_run_kind"], "subagent")
         self.assertEqual(pending[0]["metadata"]["origin"], "task_notification")
         self.assertEqual(pending[0]["metadata"]["source_status"], "completed")
+        self.assertEqual(pending[0]["metadata"]["delegated_task"], "inspect")
+        self.assertEqual(pending[0]["metadata"]["original_slash_input"], "/fork inspect")
         self.assertIn("subagent answer", pending[0]["content"])
+        wrapped = messages_route.build_task_notification_content(pending[0])
+        self.assertIn('"delegated_task": "inspect"', wrapped)
+        self.assertIn('"/fork inspect"', wrapped)
 
     async def test_failed_subagent_enqueues_failed_task_notification(self):
         run_manager = RunManager()
@@ -699,6 +740,10 @@ class SyntheticTaskNotificationTests(unittest.IsolatedAsyncioTestCase):
             kind=RunKind.WORKFLOW,
             anchor_node_id="node-1",
             summary="Dynamic workflow",
+            metadata={
+                "delegated_task": "return 1",
+                "slash_command": {"original_input": "/workflow return 1"},
+            },
         )
 
         await manager._produce(
@@ -715,7 +760,234 @@ class SyntheticTaskNotificationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(pending), 1)
         self.assertEqual(pending[0]["source_run_kind"], "workflow")
         self.assertEqual(pending[0]["metadata"]["source_status"], "completed")
+        self.assertEqual(pending[0]["metadata"]["delegated_task"], "return 1")
+        self.assertEqual(pending[0]["metadata"]["original_slash_input"], "/workflow return 1")
         self.assertIn("workflow answer", pending[0]["content"])
+
+    async def test_subagent_stop_interrupts_pending_tool_approval_wait(self):
+        approval_requested = asyncio.Event()
+        tool_wait_cancelled = asyncio.Event()
+
+        class ToolCallingProvider:
+            async def generate_response_stream(self, **kwargs):
+                yield {
+                    "status": StreamStatus.COMPLETE,
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "run_command", "arguments": "{}"},
+                        }
+                    ],
+                }
+
+        class WaitingToolChatManager(self.FakeChatManager):
+            def __init__(self, provider):
+                super().__init__(provider)
+                self.tool_manager = type(
+                    "FakeToolManager",
+                    (),
+                    {
+                        "get_openai_tools": lambda _self: [
+                            {"type": "function", "function": {"name": "run_command"}}
+                        ]
+                    },
+                )()
+
+            def _merge_tool_call_lists(self, existing, incoming):
+                return list(existing) + list(incoming)
+
+            async def _execute_tool_calls(self, tool_calls, **kwargs):
+                await kwargs["emit_event"]({
+                    "event_type": "tool_approval_request",
+                    "approval": {"id": "approval-1", "status": "pending"},
+                })
+                approval_requested.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    tool_wait_cancelled.set()
+                    raise
+
+            def _apply_round_tool_result_budget(self, tool_messages):
+                return tool_messages
+
+            def _tool_event_stream_chunk(self, event, node_id, conversation_id):
+                payload = dict(event)
+                payload.update({
+                    "status": "content",
+                    "node_id": node_id,
+                    "conversation_id": conversation_id,
+                })
+                return payload
+
+        run_manager = RunManager()
+        registry = CapabilityRegistry()
+        registry.add_agents([
+            AgentDefinition(
+                name="implementer",
+                system_prompt="Implementer body",
+                provider_id="fake",
+                model_id="model",
+                tools=["run_command"],
+            )
+        ])
+        executor = SubagentExecutor(
+            chat_manager=WaitingToolChatManager(ToolCallingProvider()),
+            run_manager=run_manager,
+            capability_registry=registry,
+        )
+        run = await run_manager.create_run(
+            conversation_id="conversation-1",
+            kind=RunKind.SUBAGENT,
+            anchor_node_id="slash-node-1",
+            summary="implementer: inspect",
+            metadata={"agent_name": "implementer"},
+        )
+        task = asyncio.create_task(executor._produce(
+            run_id=run.run_id,
+            conversation_id="conversation-1",
+            agent_name="implementer",
+            input_data="inspect",
+            parent_node_id="slash-node-1",
+            parent_run_id=None,
+            provider_id=None,
+            model_id=None,
+            permission_mode="ask_always",
+            workspace=None,
+        ))
+        try:
+            await asyncio.wait_for(approval_requested.wait(), timeout=1)
+            await executor.stop(run.run_id)
+            await asyncio.wait_for(task, timeout=0.5)
+        finally:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+        self.assertTrue(tool_wait_cancelled.is_set())
+        self.assertEqual(run_manager.get_run(run.run_id)["status"], "cancelled")
+
+    async def test_subagent_marks_run_waiting_during_tool_approval(self):
+        approval_requested = asyncio.Event()
+        release_tools = asyncio.Event()
+        statuses: list[str] = []
+
+        class ToolCallingProvider:
+            async def generate_response_stream(self, **kwargs):
+                yield {
+                    "status": StreamStatus.COMPLETE,
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "run_command", "arguments": "{}"},
+                        }
+                    ],
+                }
+
+        class WaitingToolChatManager(self.FakeChatManager):
+            def __init__(self, provider, run_manager, run_id_getter):
+                super().__init__(provider)
+                self.run_manager = run_manager
+                self.run_id_getter = run_id_getter
+                self.tool_manager = type(
+                    "FakeToolManager",
+                    (),
+                    {
+                        "get_openai_tools": lambda _self: [
+                            {"type": "function", "function": {"name": "run_command"}}
+                        ]
+                    },
+                )()
+
+            def _merge_tool_call_lists(self, existing, incoming):
+                return list(existing) + list(incoming)
+
+            async def _execute_tool_calls(self, tool_calls, **kwargs):
+                await kwargs["emit_event"]({
+                    "event_type": "tool_approval_request",
+                    "approval": {"id": "approval-1", "status": "pending"},
+                })
+                statuses.append(self.run_manager.get_run(self.run_id_getter())["status"])
+                approval_requested.set()
+                await release_tools.wait()
+                await kwargs["emit_event"]({
+                    "event_type": "tool_approval_result",
+                    "approval": {"id": "approval-1", "status": "denied"},
+                })
+                statuses.append(self.run_manager.get_run(self.run_id_getter())["status"])
+                return [{
+                    "role": "tool",
+                    "name": "run_command",
+                    "tool_call_id": "call-1",
+                    "content": "{}",
+                }]
+
+            def _apply_round_tool_result_budget(self, tool_messages):
+                return tool_messages
+
+            def _tool_event_stream_chunk(self, event, node_id, conversation_id):
+                payload = dict(event)
+                payload.update({
+                    "status": "content",
+                    "node_id": node_id,
+                    "conversation_id": conversation_id,
+                })
+                return payload
+
+        run_manager = RunManager()
+        run_id_holder: dict[str, str] = {}
+        registry = CapabilityRegistry()
+        registry.add_agents([
+            AgentDefinition(
+                name="implementer",
+                system_prompt="Implementer body",
+                provider_id="fake",
+                model_id="model",
+                tools=["run_command"],
+                max_tool_rounds=1,
+            )
+        ])
+        executor = SubagentExecutor(
+            chat_manager=WaitingToolChatManager(
+                ToolCallingProvider(),
+                run_manager,
+                lambda: run_id_holder["run_id"],
+            ),
+            run_manager=run_manager,
+            capability_registry=registry,
+        )
+        run = await run_manager.create_run(
+            conversation_id="conversation-1",
+            kind=RunKind.SUBAGENT,
+            anchor_node_id="slash-node-1",
+            summary="implementer: inspect",
+            metadata={"agent_name": "implementer"},
+        )
+        run_id_holder["run_id"] = run.run_id
+        task = asyncio.create_task(executor._produce(
+            run_id=run.run_id,
+            conversation_id="conversation-1",
+            agent_name="implementer",
+            input_data="inspect",
+            parent_node_id="slash-node-1",
+            parent_run_id=None,
+            provider_id=None,
+            model_id=None,
+            permission_mode="ask_always",
+            workspace=None,
+        ))
+        await asyncio.wait_for(approval_requested.wait(), timeout=1)
+        release_tools.set()
+        await asyncio.wait_for(task, timeout=1)
+
+        self.assertEqual(statuses[:2], ["waiting_approval", "running"])
 
     async def test_btw_and_status_do_not_enqueue_task_notifications(self):
         class FakeChatManager:
@@ -907,6 +1179,87 @@ class SyntheticInputRouteTests(unittest.TestCase):
         self.assertIn("subagent result", chat_manager.contents[0])
 
 
+class DetachedSlashStopRouteTests(unittest.TestCase):
+    class FakeChatManager:
+        storage = type("FakeStorage", (), {"index": {"conversation-1": True}})()
+
+        def __init__(self):
+            self.stopped_nodes: list[str] = []
+
+        async def stop_stream(self, node_id: str):
+            self.stopped_nodes.append(node_id)
+            return False
+
+    class FakeSubagentExecutor:
+        def __init__(self):
+            self.stopped_run_id = None
+
+        async def stop(self, run_id: str):
+            self.stopped_run_id = run_id
+            return True
+
+    class FakeWorkflowManager:
+        def __init__(self):
+            self.stopped_run_id = None
+
+        async def stop(self, run_id: str):
+            self.stopped_run_id = run_id
+            return True
+
+    def _client(self, run_manager, chat_manager, subagent_executor, workflow_manager):
+        app = FastAPI()
+        app.include_router(messages_route.router)
+        app.dependency_overrides[get_run_manager] = lambda: run_manager
+        app.dependency_overrides[get_chat_manager] = lambda: chat_manager
+        app.dependency_overrides[get_subagent_executor] = lambda: subagent_executor
+        app.dependency_overrides[get_workflow_manager] = lambda: workflow_manager
+        return TestClient(app)
+
+    def test_stop_stream_message_stops_detached_subagent_by_anchor_node(self):
+        run_manager = RunManager()
+        run = asyncio.run(run_manager.create_run(
+            conversation_id="conversation-1",
+            kind=RunKind.SUBAGENT,
+            anchor_node_id="slash-node-1",
+            summary="implementer: inspect",
+        ))
+        subagent_executor = self.FakeSubagentExecutor()
+        client = self._client(
+            run_manager,
+            self.FakeChatManager(),
+            subagent_executor,
+            self.FakeWorkflowManager(),
+        )
+
+        response = client.post("/conversations/conversation-1/messages/slash-node-1/stream/stop")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(subagent_executor.stopped_run_id, run.run_id)
+        self.assertEqual(run_manager.get_run(run.run_id)["status"], "stopping")
+
+    def test_stop_stream_message_stops_detached_workflow_by_anchor_node(self):
+        run_manager = RunManager()
+        run = asyncio.run(run_manager.create_run(
+            conversation_id="conversation-1",
+            kind=RunKind.WORKFLOW,
+            anchor_node_id="slash-node-1",
+            summary="Dynamic workflow",
+        ))
+        workflow_manager = self.FakeWorkflowManager()
+        client = self._client(
+            run_manager,
+            self.FakeChatManager(),
+            self.FakeSubagentExecutor(),
+            workflow_manager,
+        )
+
+        response = client.post("/conversations/conversation-1/messages/slash-node-1/stream/stop")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(workflow_manager.stopped_run_id, run.run_id)
+        self.assertEqual(run_manager.get_run(run.run_id)["status"], "stopping")
+
+
 class AgentRolePromptTests(unittest.TestCase):
     def test_project_agents_are_role_specific(self):
         agents = {
@@ -1046,6 +1399,80 @@ class WorkflowRuntimeBridgeTests(unittest.IsolatedAsyncioTestCase):
         result = await bridge._agent({"input": "do the work"})
         self.assertEqual(subagent_executor.agent_name, "workflow-worker")
         self.assertEqual(result["status"], "completed")
+
+    async def test_child_subagent_inherits_workflow_permission_mode(self):
+        class FakeSubagentExecutor:
+            def __init__(self):
+                self.kwargs = None
+
+            async def start(self, **kwargs):
+                self.kwargs = kwargs
+                return {"run_id": "child-1"}
+
+        class FakeRunManager:
+            async def append_event(self, *args, **kwargs):
+                return None
+
+            async def subscribe(self, run_id, offset):
+                yield {"type": "run_finished", "status": "completed"}
+
+        subagent_executor = FakeSubagentExecutor()
+        bridge = WorkflowRuntimeBridge(
+            workflow_run_id="workflow-1",
+            conversation_id="conversation-1",
+            parent_node_id="slash-node-1",
+            run_manager=FakeRunManager(),
+            subagent_executor=subagent_executor,
+            permission_mode="modify_only",
+        )
+
+        await bridge._agent({"input": "do the work"})
+
+        self.assertEqual(subagent_executor.kwargs["permission_mode"], "modify_only")
+        self.assertEqual(subagent_executor.kwargs["parent_node_id"], "slash-node-1")
+
+    async def test_cancelled_workflow_agent_call_stops_child_subagent(self):
+        child_started = asyncio.Event()
+
+        class FakeSubagentExecutor:
+            def __init__(self):
+                self.stopped_run_id = None
+
+            async def start(self, **kwargs):
+                child_started.set()
+                return {"run_id": "child-1"}
+
+            async def stop(self, run_id: str):
+                self.stopped_run_id = run_id
+                return True
+
+        class FakeRunManager:
+            async def append_event(self, *args, **kwargs):
+                return None
+
+            async def subscribe(self, run_id, offset):
+                await asyncio.Event().wait()
+                yield {"type": "run_finished", "status": "completed"}
+
+        subagent_executor = FakeSubagentExecutor()
+        bridge = WorkflowRuntimeBridge(
+            workflow_run_id="workflow-1",
+            conversation_id="conversation-1",
+            parent_node_id="slash-node-1",
+            run_manager=FakeRunManager(),
+            subagent_executor=subagent_executor,
+            permission_mode="ask_always",
+        )
+        task = asyncio.create_task(bridge._agent({"input": "do the work"}))
+        await asyncio.wait_for(child_started.wait(), timeout=1)
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        self.assertEqual(subagent_executor.stopped_run_id, "child-1")
 
 
 class WorkflowRuntimeWorkerTests(unittest.TestCase):

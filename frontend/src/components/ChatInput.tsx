@@ -17,7 +17,7 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { SendHorizontal, Bot, StickyNote, X, Settings, Square, Plus, FileText, Pencil, Trash2, Check } from 'lucide-react'
+import { SendHorizontal, Bot, StickyNote, X, Settings, Square, Plus, FileText, Pencil, Trash2, Check, Loader2 } from 'lucide-react'
 import { useState, useEffect, useRef, type ReactNode } from 'react'
 import { useModelStore } from '../store/modelStore'
 import { usePromptStore } from '../store/promtStore'
@@ -25,8 +25,9 @@ import { useNavigationStore } from '../store/navigationStore'
 import { useConversationStore } from '../store/conversationStore'
 import { conversationApi } from '../api/conversation'
 import { slashRegistry } from '../services/slashRegistry'
-import type { ToolPermissionMode } from '../types/message'
+import type { ToolApprovalDecision, ToolApprovalScope, ToolPermissionMode } from '../types/message'
 import type { SlashCommandInfo } from '../types/slash'
+import type { PendingToolApprovalPrompt, ToolApprovalDecisionHandler } from '../utils/toolApprovals'
 import {
   getPendingToolPermissionMode,
   markToolPermissionModeSent,
@@ -67,6 +68,8 @@ interface Props {
   toolPermissionDraft: ToolPermissionDraft;
   getToolPermissionDraft: () => ToolPermissionDraft;
   onToolPermissionDraftChange: (draft: ToolPermissionDraft) => void;
+  pendingToolApprovals?: PendingToolApprovalPrompt[];
+  onToolApprovalDecision?: ToolApprovalDecisionHandler;
   variant?: 'dock' | 'composer';
 }
 
@@ -90,6 +93,8 @@ export function ChatInput({
   toolPermissionDraft,
   getToolPermissionDraft,
   onToolPermissionDraftChange,
+  pendingToolApprovals = [],
+  onToolApprovalDecision,
   variant = 'dock',
 }: Props) {
   const { openSettings } = useNavigationStore();
@@ -105,6 +110,7 @@ export function ChatInput({
   const [slashCommands, setSlashCommands] = useState<SlashCommandInfo[]>(() => slashRegistry.list());
   const [slashHighlightIndex, setSlashHighlightIndex] = useState(0);
   const [slashDismissedForValue, setSlashDismissedForValue] = useState<string | null>(null);
+  const [submittingApprovalAction, setSubmittingApprovalAction] = useState<string | null>(null);
 
   const {
     providers,
@@ -331,7 +337,8 @@ export function ChatInput({
   const sendDisabled = !value.trim() || (disabled && !isStreaming);
   const showStreamingSend = !!isStreaming && !!value.trim();
   const slashCandidates = getSlashCompletionCandidates(value, slashCommands);
-  const slashCompletionOpen = slashCandidates.length > 0 && slashDismissedForValue !== value;
+  const approvalPopupOpen = pendingToolApprovals.length > 0;
+  const slashCompletionOpen = !approvalPopupOpen && slashCandidates.length > 0 && slashDismissedForValue !== value;
   const highlightedSlashCommand = slashCompletionOpen
     ? slashCandidates[Math.min(slashHighlightIndex, slashCandidates.length - 1)]
     : null;
@@ -358,8 +365,139 @@ export function ChatInput({
     });
   };
 
+  const handleApprovalDecision = async (
+    item: PendingToolApprovalPrompt,
+    decision: ToolApprovalDecision,
+    scope: ToolApprovalScope,
+  ) => {
+    if (!onToolApprovalDecision) return;
+    const actionKey = `${item.approval.id}:${decision}:${scope}`;
+    setSubmittingApprovalAction(actionKey);
+    try {
+      await onToolApprovalDecision(item.approval.id, decision, scope, item.runId);
+    } catch (error) {
+      console.error('Failed to decide tool approval:', error);
+    } finally {
+      setSubmittingApprovalAction(null);
+    }
+  };
+
   return (
     <div className="relative w-full">
+      {approvalPopupOpen && (
+        <div
+          className="absolute left-0 right-0 z-50 px-1"
+          style={{ bottom: 'calc(100% + 8px)' }}
+        >
+          <div
+            role="dialog"
+            aria-label="等待工具审批"
+            className="overflow-hidden rounded-xl"
+            style={{
+              border: '0.5px solid color-mix(in srgb, var(--icon-accent) 42%, var(--border))',
+              background: 'color-mix(in srgb, var(--bg-input) 96%, var(--bg-button-tertiary-hover))',
+              boxShadow: 'var(--shadow-xl), var(--highlight-top)',
+              backdropFilter: 'blur(12px)',
+            }}
+          >
+            <div
+              className="flex items-center justify-between gap-3 border-b px-3 py-2"
+              style={{ borderColor: 'var(--border)' }}
+            >
+              <span className="text-xs font-semibold" style={{ color: 'var(--fg-85)' }}>
+                等待工具审批
+              </span>
+              <span className="rounded-full px-2 py-0.5 text-[11px]" style={{ background: 'var(--accent-soft)', color: 'var(--icon-accent)' }}>
+                {pendingToolApprovals.length} 个
+              </span>
+            </div>
+            <div className="max-h-[320px] overflow-y-auto custom-scrollbar">
+              {pendingToolApprovals.map((item) => {
+                const approveOnceKey = `${item.approval.id}:approve:once`;
+                const approveSessionKey = `${item.approval.id}:approve:session`;
+                const denyKey = `${item.approval.id}:deny:once`;
+                const submitting = submittingApprovalAction !== null;
+                return (
+                  <div
+                    key={`${item.runId}:${item.approval.id}`}
+                    className="border-b px-3 py-2.5 last:border-b-0"
+                    style={{ borderColor: 'var(--border)' }}
+                  >
+                    <div className="flex min-w-0 items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <span className="truncate text-xs font-semibold" style={{ color: 'var(--fg-85)' }}>
+                            {item.approval.tool_name || 'tool'}
+                          </span>
+                          <span className="shrink-0 rounded-full px-1.5 py-0.5 text-[10px]" style={{ background: 'var(--accent-soft)', color: 'var(--icon-accent)' }}>
+                            {item.sourceLabel}
+                          </span>
+                          <span className="shrink-0 rounded-full px-1.5 py-0.5 text-[10px]" style={{ background: 'var(--bg-button-tertiary-hover)', color: 'var(--fg-tertiary)' }}>
+                            {item.runLabel}
+                          </span>
+                        </div>
+                        <div className="mt-1 truncate text-xs" style={{ color: 'var(--fg-secondary)' }}>
+                          {item.toolSummary}
+                        </div>
+                        <div className="mt-1 truncate text-[11px]" style={{ color: 'var(--fg-tertiary)' }}>
+                          来源：{item.sourceSummary}
+                        </div>
+                        {item.argumentsText && (
+                          <pre
+                            className="mt-2 max-h-24 overflow-auto whitespace-pre-wrap break-words rounded-md px-2 py-1.5 text-[11px] custom-scrollbar"
+                            style={{
+                              background: 'var(--bg-button-tertiary-hover)',
+                              color: 'var(--fg-secondary)',
+                              fontFamily: 'var(--font-mono, monospace)',
+                            }}
+                          >
+                            {item.argumentsText}
+                          </pre>
+                        )}
+                      </div>
+                    </div>
+                    <div className="mt-2 flex flex-wrap items-center justify-end gap-1.5">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="secondary"
+                        className="h-7 gap-1.5 px-2 text-xs"
+                        disabled={!onToolApprovalDecision || submitting}
+                        onClick={() => handleApprovalDecision(item, 'approve', 'once')}
+                      >
+                        {submittingApprovalAction === approveOnceKey ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
+                        允许一次
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="secondary"
+                        className="h-7 gap-1.5 px-2 text-xs"
+                        disabled={!onToolApprovalDecision || submitting}
+                        onClick={() => handleApprovalDecision(item, 'approve', 'session')}
+                      >
+                        {submittingApprovalAction === approveSessionKey ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
+                        允许本会话
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 gap-1.5 px-2 text-xs"
+                        disabled={!onToolApprovalDecision || submitting}
+                        onClick={() => handleApprovalDecision(item, 'deny', 'once')}
+                      >
+                        {submittingApprovalAction === denyKey ? <Loader2 className="h-3 w-3 animate-spin" /> : <X className="h-3 w-3" />}
+                        拒绝
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
       {slashCompletionOpen && (
         <div
           className="absolute left-0 right-0 z-50 px-1"

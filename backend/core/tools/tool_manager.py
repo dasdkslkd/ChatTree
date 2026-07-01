@@ -261,6 +261,7 @@ class ToolManager:
         name: str,
         arguments: Dict[str, Any],
         workspace: Optional[Dict[str, Any]] = None,
+        runtime_context: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Execute a tool by exposed name."""
         if not self._filter.is_allowed(name):
@@ -279,7 +280,10 @@ class ToolManager:
                 return json.dumps({"error": f"Tool '{name}' not found"}, ensure_ascii=False)
 
             logger.info(f"Executing tool: {name} with args: {json.dumps(arguments, ensure_ascii=False)[:200]}")
-            result = await tool.execute(**arguments)
+            execute_arguments = dict(arguments)
+            if runtime_context is not None:
+                execute_arguments["_runtime_context"] = runtime_context
+            result = await tool.execute(**execute_arguments)
             logger.info(f"Tool {name} returned {len(result)} chars")
             return result
         except Exception as e:

@@ -822,6 +822,35 @@ def test_run_command_destructive_command_denied(tmp_path):
     asyncio.run(_run_command_destructive_command_denied(tmp_path))
 
 
+async def _run_command_auto_approve_bypasses_unknown_command_policy_prompt(tmp_path):
+    approval_manager = ApprovalManager(timeout_seconds=1)
+    orchestrator, tool_manager = make_orchestrator(
+        PermissionEngine.default(),
+        LogicalSandbox(workspace_roots=[tmp_path], protected_paths=[".git"]),
+        approval_manager=approval_manager,
+    )
+    events = []
+
+    async def emit_event(event):
+        events.append(event)
+
+    message = await orchestrator.execute_tool_call(
+        make_tool_call("run_command", {"command": "python custom_script.py"}),
+        conversation_id="conv-1",
+        node_id="node-1",
+        emit_event=emit_event,
+        permission_mode="auto_approve",
+    )
+
+    assert events == []
+    assert tool_manager.calls == [("run_command", {"command": "python custom_script.py"})]
+    assert json.loads(message["content"])["ok"] is True
+
+
+def test_run_command_auto_approve_bypasses_unknown_command_policy_prompt(tmp_path):
+    asyncio.run(_run_command_auto_approve_bypasses_unknown_command_policy_prompt(tmp_path))
+
+
 async def _run_command_unknown_command_requests_approval(tmp_path):
     approval_manager = ApprovalManager(timeout_seconds=1)
     orchestrator, tool_manager = make_orchestrator(

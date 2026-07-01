@@ -10,7 +10,7 @@ export const STREAM_DURATION_UPDATE_MS = 1000;
 
 export interface StreamState {
   runId: string;
-  status: 'idle' | 'streaming' | 'completed' | 'error' | 'stopped';
+  status: 'idle' | 'streaming' | 'waiting_approval' | 'completed' | 'error' | 'stopped';
   content: string;
   reasoning: string;
   reasoningActive: boolean;
@@ -143,7 +143,9 @@ function mergeApproval(
   };
 }
 
-function mapRunStatus(status: unknown): 'completed' | 'error' | 'stopped' | null {
+function mapRunStatus(status: unknown): 'streaming' | 'waiting_approval' | 'completed' | 'error' | 'stopped' | null {
+  if (status === 'running' || status === 'content' || status === 'start') return 'streaming';
+  if (status === 'waiting_approval') return 'waiting_approval';
   if (status === 'complete' || status === 'completed') return 'completed';
   if (status === 'error' || status === 'failed') return 'error';
   if (status === 'stopped' || status === 'cancelled') return 'stopped';
@@ -168,9 +170,9 @@ export class StreamManager {
 
   getState(conversationId: string): Readonly<StreamState> | undefined {
     const states = this.getConversationStates(conversationId)
-      .filter((state) => state.status === 'streaming' || state.status === 'stopped' || state.status === 'error');
+      .filter((state) => state.status === 'streaming' || state.status === 'waiting_approval' || state.status === 'stopped' || state.status === 'error');
     const streaming = states
-      .filter((state) => state.status === 'streaming')
+      .filter((state) => state.status === 'streaming' || state.status === 'waiting_approval')
       .sort((a, b) => b.createdAt - a.createdAt)[0];
     if (streaming) return streaming;
     return states.sort((a, b) => b.createdAt - a.createdAt)[0];
@@ -205,13 +207,16 @@ export class StreamManager {
 
   isStreaming(conversationId?: string): boolean {
     const states = conversationId ? this.getConversationStates(conversationId) : [...this.streams.values()];
-    return states.some((state) => state.status === 'streaming');
+    return states.some((state) => state.status === 'streaming' || state.status === 'waiting_approval');
   }
 
   getStreamingConversationIds(): string[] {
     const ids: string[] = [];
     for (const [conversationId, runIds] of this.runsByConversation.entries()) {
-      if ([...runIds].some((runId) => this.streams.get(runId)?.status === 'streaming')) {
+      if ([...runIds].some((runId) => {
+        const status = this.streams.get(runId)?.status;
+        return status === 'streaming' || status === 'waiting_approval';
+      })) {
         ids.push(conversationId);
       }
     }
@@ -377,6 +382,11 @@ export class StreamManager {
       next.status = 'error';
       next.errorMessage = typeof chunk.error === 'string' ? chunk.error : next.errorMessage;
       next.reasoningActive = false;
+    } else if (mappedStatus === 'waiting_approval') {
+      next.status = 'waiting_approval';
+      next.reasoningActive = false;
+    } else if (mappedStatus === 'streaming' && next.status === 'waiting_approval') {
+      next.status = 'streaming';
     }
     this.streams.set(runId, next);
     this.notify(
@@ -452,7 +462,7 @@ export class StreamManager {
   ): Promise<void> {
     const existing = this.getConversationStates(conversationId)
       .find((state) => (runId && state.runId === runId) || (nodeId && state.targetNodeId === nodeId));
-    if (existing?.status === 'streaming') return;
+    if (existing?.status === 'streaming' || existing?.status === 'waiting_approval') return;
     if (!runId && !nodeId) return;
     const resolvedRunId = runId || `attach_${nodeId}`;
     const abortController = new AbortController();

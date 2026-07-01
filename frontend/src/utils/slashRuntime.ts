@@ -59,6 +59,7 @@ export interface RunDraftLike {
   content?: string | null;
   reasoning?: string | null;
   toolInteractions?: unknown[] | null;
+  pendingApprovals?: Record<string, { status?: string | null } | null | undefined> | null;
 }
 
 export function shouldRenderRunDraft(run: RunDraftLike): boolean {
@@ -67,6 +68,7 @@ export function shouldRenderRunDraft(run: RunDraftLike): boolean {
   if (run.status === 'error' || run.status === 'stopped') return true;
   if (run.content || run.reasoning) return true;
   if (Array.isArray(run.toolInteractions) && run.toolInteractions.length > 0) return true;
+  if (run.pendingApprovals && Object.values(run.pendingApprovals).some((approval) => approval?.status === 'pending')) return true;
   return false;
 }
 

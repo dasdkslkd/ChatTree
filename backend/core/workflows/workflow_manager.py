@@ -35,6 +35,9 @@ class WorkflowManager:
         parent_node_id: Optional[str] = None,
         parent_run_id: Optional[str] = None,
         budget: Optional[Dict[str, Any]] = None,
+        permission_mode: Optional[str] = None,
+        delegated_task: Any = None,
+        original_slash_input: Optional[str] = None,
     ) -> Dict[str, Any]:
         budget = {
             "max_seconds": 600,
@@ -48,7 +51,13 @@ class WorkflowManager:
             anchor_node_id=parent_node_id,
             parent_run_id=parent_run_id,
             summary="Dynamic workflow",
-            metadata={"args": args or {}, "budget": budget},
+            metadata={
+                "args": args or {},
+                "budget": budget,
+                "permission_mode": permission_mode,
+                "delegated_task": delegated_task if delegated_task is not None else script,
+                "original_slash_input": original_slash_input,
+            },
         )
         task = asyncio.create_task(self._produce(
             run_id=run.run_id,
@@ -58,6 +67,7 @@ class WorkflowManager:
             parent_node_id=parent_node_id,
             parent_run_id=parent_run_id,
             budget=budget,
+            permission_mode=permission_mode,
         ))
         self._tasks[run.run_id] = task
         return run.to_dict()
@@ -80,6 +90,7 @@ class WorkflowManager:
         parent_node_id: Optional[str],
         parent_run_id: Optional[str],
         budget: Dict[str, Any],
+        permission_mode: Optional[str] = None,
     ) -> None:
         final_status = RunStatus.COMPLETED
         final_error = None
@@ -92,6 +103,7 @@ class WorkflowManager:
                 run_manager=self.run_manager,
                 subagent_executor=self.subagent_executor,
                 max_parallel=int(budget.get("max_parallel") or 8),
+                permission_mode=permission_mode,
             )
             await self.run_manager.append_event(run_id, {
                 "status": "start",
@@ -159,6 +171,9 @@ class WorkflowManager:
             return None
         if run.get("kind") != RunKind.WORKFLOW.value:
             return None
+        metadata = dict(run.get("metadata") or {})
+        slash_metadata = metadata.get("slash_command") if isinstance(metadata.get("slash_command"), dict) else {}
+        original_slash_input = metadata.get("original_slash_input") or slash_metadata.get("original_input")
         event_payload = dict(event_payload or {})
         item = self.run_manager.synthetic_inputs.enqueue(
             kind="task_notification",
@@ -173,6 +188,8 @@ class WorkflowManager:
                 "origin": "task_notification",
                 "source_status": source_status,
                 "event_type": event_payload.get("event_type"),
+                "delegated_task": metadata.get("delegated_task"),
+                "original_slash_input": original_slash_input,
             },
         )
         return item.to_dict()

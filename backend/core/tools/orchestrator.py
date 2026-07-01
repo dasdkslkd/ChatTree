@@ -14,7 +14,13 @@ from backend.core.config.types import Message, Role
 from backend.core.tools.security.approval import ApprovalManager, ApprovalRequest
 from backend.core.tools.security.command_policy import CommandPolicy
 from backend.core.tools.security.logical_sandbox import LogicalSandbox, SandboxViolation
-from backend.core.tools.security.permissions import PermissionContext, PermissionDecision, PermissionEngine, PermissionMode
+from backend.core.tools.security.permissions import (
+    PermissionContext,
+    PermissionDecision,
+    PermissionEngine,
+    PermissionMode,
+    normalize_permission_mode,
+)
 from backend.core.tools.tool_arguments import normalize_tool_arguments
 
 
@@ -132,8 +138,9 @@ class ToolOrchestrator:
                 ),
             )
 
-        command_policy_ask = bool(
-            command_decision and command_decision.behavior == "ask"
+        command_policy_ask = _command_policy_ask_applies(
+            command_decision,
+            permission_mode,
         )
         if command_policy_ask:
             decision = PermissionDecision(
@@ -254,10 +261,20 @@ class ToolOrchestrator:
                 ),
             )
 
-        if workspace is None:
-            content = await self.tool_manager.execute_tool(name, arguments)
-        else:
-            content = await self.tool_manager.execute_tool(name, arguments, workspace=workspace)
+        runtime_context = {
+            "conversation_id": conversation_id,
+            "node_id": node_id,
+            "tool_call_id": tool_call_id,
+            "permission_mode": permission_mode,
+            "workspace": workspace,
+        }
+        content = await _execute_manager_tool(
+            self.tool_manager,
+            name,
+            arguments,
+            workspace=workspace,
+            runtime_context=runtime_context,
+        )
         return _tool_message(name=name, tool_call_id=tool_call_id, content=content)
 
     def _sandbox_for_workspace(self, workspace: Optional[Dict[str, Any]]) -> LogicalSandbox:
@@ -365,6 +382,13 @@ def _command_policy_decision(tool_name: str, arguments: Dict[str, Any]):
     return CommandPolicy.default().classify(command)
 
 
+def _command_policy_ask_applies(command_decision: Any, permission_mode: PermissionMode) -> bool:
+    if not command_decision or command_decision.behavior != "ask":
+        return False
+    mode = normalize_permission_mode(permission_mode)
+    return mode != "auto_approve"
+
+
 def _is_command_like_tool(tool_name: str) -> bool:
     lowered = tool_name.lower()
     parts = [part for part in re.split(r"[^a-z0-9]+", lowered) if part]
@@ -424,3 +448,29 @@ def _tool_message(name: str, tool_call_id: str, content: str) -> Message:
         "tool_call_id": tool_call_id,
         "timestamp": int(time.time()),
     }
+
+
+async def _execute_manager_tool(
+    tool_manager: Any,
+    name: str,
+    arguments: Dict[str, Any],
+    *,
+    workspace: Optional[Dict[str, Any]],
+    runtime_context: Dict[str, Any],
+) -> str:
+    try:
+        if workspace is None:
+            return await tool_manager.execute_tool(name, arguments, runtime_context=runtime_context)
+        return await tool_manager.execute_tool(
+            name,
+            arguments,
+            workspace=workspace,
+            runtime_context=runtime_context,
+        )
+    except TypeError as exc:
+        message = str(exc)
+        if "unexpected keyword argument 'runtime_context'" not in message:
+            raise
+        if workspace is None:
+            return await tool_manager.execute_tool(name, arguments)
+        return await tool_manager.execute_tool(name, arguments, workspace=workspace)

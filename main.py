@@ -27,6 +27,7 @@ from backend.core.workflows import WorkflowManager
 from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
 from backend.core.tools.orchestrator import ToolOrchestrator
+from backend.core.tools.agent_tools import register_agent_management_tools
 from backend.core.tools.security.approval import ApprovalManager
 from backend.core.tools.security.logical_sandbox import LogicalSandbox
 from backend.core.tools.security.permissions import PermissionEngine
@@ -94,6 +95,11 @@ async def startup_event():
     workflow_manager = WorkflowManager(
         run_manager=run_manager,
         subagent_executor=subagent_executor,
+    )
+    register_agent_management_tools(
+        tool_manager,
+        subagent_executor=subagent_executor,
+        workflow_manager=workflow_manager,
     )
     synthetic_followup_scheduler = messages.SyntheticFollowupScheduler(
         chat_manager=chat_manager,
