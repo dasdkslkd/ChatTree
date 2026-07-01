@@ -4,7 +4,14 @@ import sys
 
 sys.path.insert(0, ".")
 
-from backend.core.tools.agent_tools import StartSubagentTool, StartWorkflowTool
+from backend.core.tools.agent_tools import (
+    AGENT_TOOL_NAMES,
+    SpawnAgentTool,
+    StartSubagentTool,
+    StartWorkflowTool,
+    WaitAgentTool,
+    register_agent_management_tools,
+)
 from backend.core.chat.chat_manager import ChatManager
 from backend.core.chat.node import NodeManager
 from backend.core.chat.conversation import Conversation
@@ -107,6 +114,55 @@ def test_agent_management_tools_are_model_visible_when_registered():
 
     assert "start_subagent" in names
     assert "start_workflow" in names
+
+
+def test_agent_runtime_tools_register_complete_model_facing_toolset():
+    class FakeAgentRuntime:
+        pass
+
+    manager = ToolManager({
+        "tools": {
+            "enabled": True,
+            "builtin": {"enabled": False},
+        }
+    })
+    register_agent_management_tools(manager, agent_runtime=FakeAgentRuntime())
+
+    names = {tool["function"]["name"] for tool in manager.get_openai_tools()}
+
+    assert AGENT_TOOL_NAMES.issubset(names)
+    assert "start_subagent" in names
+    assert "start_workflow" in names
+
+
+def test_spawn_agent_schema_names_delivery_and_forbids_simulation():
+    tool = SpawnAgentTool(agent_runtime=object())
+    schema = tool.to_openai_tool()["function"]
+    properties = schema["parameters"]["properties"]
+
+    assert "Do not simulate a subagent" in schema["description"]
+    assert properties["context_mode"]["enum"] == ["fresh", "fork"]
+    assert properties["delivery"]["enum"] == ["auto", "wait", "notify", "both"]
+    for role in ["explorer", "planner", "implementer", "reviewer", "verifier", "workflow-worker"]:
+        assert role in properties["agent_name"]["description"]
+
+
+def test_wait_agent_schema_uses_run_ids():
+    tool = WaitAgentTool(agent_runtime=object())
+    schema = tool.to_openai_tool()["function"]["parameters"]
+
+    assert "run_ids" in schema["required"]
+    assert schema["properties"]["run_ids"]["type"] == "array"
+
+
+def test_start_subagent_schema_names_common_agent_roles_and_forbids_simulation():
+    tool = StartSubagentTool(subagent_executor=object())
+    schema = tool.to_openai_tool()["function"]
+    agent_description = schema["parameters"]["properties"]["agent_name"]["description"]
+
+    assert "Do not simulate a subagent" in schema["description"]
+    for role in ["explorer", "planner", "implementer", "reviewer", "verifier"]:
+        assert role in agent_description
 
 
 def test_start_subagent_tool_requires_runtime_context():
@@ -481,6 +537,34 @@ def test_enable_thinking_only_for_known_compatible_models():
     assert "extra_body" not in deepseek_body
     assert not provider._supports_enable_thinking("deepseek-v4-flash-ascend")
     assert provider._supports_enable_thinking("qwen3.6-chat")
+
+
+def test_responses_input_places_function_output_immediately_after_call():
+    provider = OpenAICompatibleProvider({"api_key": "test", "api_format": "responses"})
+
+    _, response_input = provider._convert_messages_to_responses_input([
+        Message({"role": "user", "content": "use tool"}),
+        Message({
+            "role": "assistant",
+            "content": "I will call a tool.",
+            "tool_calls": [{
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "spawn_agent", "arguments": "{}"},
+            }],
+        }),
+        Message({
+            "role": Role.TOOL,
+            "tool_call_id": "call-1",
+            "name": "spawn_agent",
+            "content": "{\"ok\": true}",
+        }),
+    ])
+
+    types = [item["type"] for item in response_input]
+    assert types == ["message", "message", "function_call", "function_call_output"]
+    assert response_input[2]["call_id"] == "call-1"
+    assert response_input[3]["call_id"] == "call-1"
 
 
 def test_fetch_url_extracts_html_without_crawl4ai():

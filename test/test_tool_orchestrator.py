@@ -851,6 +851,44 @@ def test_run_command_auto_approve_bypasses_unknown_command_policy_prompt(tmp_pat
     asyncio.run(_run_command_auto_approve_bypasses_unknown_command_policy_prompt(tmp_path))
 
 
+async def _runtime_context_reaches_manager_tool(tmp_path):
+    class RuntimeContextToolManager:
+        def __init__(self):
+            self.runtime_context = None
+
+        async def execute_tool(self, name, arguments, workspace=None, runtime_context=None):
+            self.runtime_context = runtime_context
+            return json.dumps({"ok": True}, ensure_ascii=False)
+
+    tool_manager = RuntimeContextToolManager()
+    orchestrator = ToolOrchestrator(
+        tool_manager=tool_manager,
+        permission_engine=PermissionEngine.default(),
+        approval_manager=ApprovalManager(),
+        logical_sandbox=LogicalSandbox(workspace_roots=[tmp_path], protected_paths=[".git"]),
+    )
+
+    await orchestrator.execute_tool_call(
+        make_tool_call("web_search", {"query": "ChatTree"}),
+        conversation_id="conv-1",
+        node_id="node-1",
+        run_context={
+            "run_id": "run-1",
+            "run_kind": "chat",
+            "root_run_id": "run-1",
+            "task_summary": "spawn agent",
+        },
+    )
+
+    assert tool_manager.runtime_context["run_id"] == "run-1"
+    assert tool_manager.runtime_context["run_kind"] == "chat"
+    assert tool_manager.runtime_context["task_summary"] == "spawn agent"
+
+
+def test_runtime_context_reaches_manager_tool(tmp_path):
+    asyncio.run(_runtime_context_reaches_manager_tool(tmp_path))
+
+
 async def _run_command_unknown_command_requests_approval(tmp_path):
     approval_manager = ApprovalManager(timeout_seconds=1)
     orchestrator, tool_manager = make_orchestrator(

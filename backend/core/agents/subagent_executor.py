@@ -22,10 +22,12 @@ class SubagentExecutor:
         chat_manager: ChatManager,
         run_manager: RunManager,
         capability_registry: CapabilityRegistry,
+        mailbox: Any = None,
     ) -> None:
         self.chat_manager = chat_manager
         self.run_manager = run_manager
         self.capability_registry = capability_registry
+        self.mailbox = mailbox
         self._controllers: dict[str, StreamController] = {}
 
     async def start(
@@ -42,6 +44,7 @@ class SubagentExecutor:
         workspace: Optional[Dict[str, Any]] = None,
         delegated_task: Any = None,
         original_slash_input: Optional[str] = None,
+        delivery_policy: str = "auto",
     ) -> Dict[str, Any]:
         agent = self.capability_registry.get_agent(agent_name)
         if agent is None:
@@ -62,6 +65,7 @@ class SubagentExecutor:
                 "permission_mode": permission_mode or agent.permission_mode,
                 "delegated_task": delegated_task if delegated_task is not None else input_data,
                 "original_slash_input": original_slash_input,
+                "delivery_policy": delivery_policy,
             },
         )
         asyncio.create_task(self._produce(
@@ -323,6 +327,8 @@ class SubagentExecutor:
                     await approval_events.put(event)
 
                 execute_task = asyncio.create_task(
+                    # Use the persisted run snapshot here because _produce_inner
+                    # does not receive parent_run_id directly.
                     self.chat_manager._execute_tool_calls(
                         round_tool_calls,
                         node_id=run_id,
@@ -330,6 +336,16 @@ class SubagentExecutor:
                         emit_event=emit_tool_event,
                         workspace=workspace or conversation.metadata.get("workspace"),
                         permission_mode=permission or "default",
+                        run_context={
+                            "run_id": run_id,
+                            "run_kind": RunKind.SUBAGENT.value,
+                            "parent_run_id": (self.run_manager.get_run(run_id) or {}).get("parent_run_id"),
+                            "root_run_id": ((self.run_manager.get_run(run_id) or {}).get("metadata") or {}).get("root_run_id") or run_id,
+                            "conversation_id": conversation_id,
+                            "node_id": run_id,
+                            "agent_name": agent_name,
+                            "task_summary": str(input_data)[:160],
+                        },
                     )
                 )
                 event_get_task = asyncio.create_task(approval_events.get())
@@ -554,7 +570,7 @@ class SubagentExecutor:
         event_payload: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         run = self.run_manager.get_run(run_id)
-        if not run or run.get("parent_run_id"):
+        if not run:
             return None
         if run.get("kind") != RunKind.SUBAGENT.value:
             return None
@@ -562,6 +578,28 @@ class SubagentExecutor:
         slash_metadata = metadata.get("slash_command") if isinstance(metadata.get("slash_command"), dict) else {}
         original_slash_input = metadata.get("original_slash_input") or slash_metadata.get("original_input")
         event_payload = dict(event_payload or {})
+        mailbox_message_id = None
+        if self.mailbox is not None:
+            message_type = "result" if source_status == "completed" else "error"
+            mailbox_item = await self.mailbox.publish(
+                conversation_id=str(run["conversation_id"]),
+                source_run_id=run_id,
+                source_run_kind=RunKind.SUBAGENT.value,
+                message_type=message_type,
+                content=content,
+                metadata={
+                    "origin": "task_notification",
+                    "source_status": source_status,
+                    "event_type": event_payload.get("event_type"),
+                    "agent_name": metadata.get("agent_name") or event_payload.get("agent_name"),
+                    "delegated_task": metadata.get("delegated_task"),
+                    "original_slash_input": original_slash_input,
+                },
+                delivery_policy=str(metadata.get("delivery_policy") or "auto"),
+            )
+            mailbox_message_id = mailbox_item.message_id
+        if run.get("parent_run_id"):
+            return None
         item = self.run_manager.synthetic_inputs.enqueue(
             kind="task_notification",
             conversation_id=str(run["conversation_id"]),
@@ -578,6 +616,7 @@ class SubagentExecutor:
                 "agent_name": metadata.get("agent_name") or event_payload.get("agent_name"),
                 "delegated_task": metadata.get("delegated_task"),
                 "original_slash_input": original_slash_input,
+                "mailbox_message_id": mailbox_message_id,
             },
         )
         return item.to_dict()

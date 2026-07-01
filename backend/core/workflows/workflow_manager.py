@@ -16,10 +16,14 @@ class WorkflowManager:
         run_manager: RunManager,
         subagent_executor: SubagentExecutor,
         runner: Optional[WorkflowJsRunner] = None,
+        mailbox: Any = None,
+        agent_runtime: Any = None,
     ) -> None:
         self.run_manager = run_manager
         self.subagent_executor = subagent_executor
         self.runner = runner or WorkflowJsRunner()
+        self.mailbox = mailbox
+        self.agent_runtime = agent_runtime
         self._tasks: dict[str, asyncio.Task] = {}
 
     def validate(self, script: str) -> Dict[str, Any]:
@@ -38,6 +42,7 @@ class WorkflowManager:
         permission_mode: Optional[str] = None,
         delegated_task: Any = None,
         original_slash_input: Optional[str] = None,
+        delivery_policy: str = "auto",
     ) -> Dict[str, Any]:
         budget = {
             "max_seconds": 600,
@@ -57,6 +62,7 @@ class WorkflowManager:
                 "permission_mode": permission_mode,
                 "delegated_task": delegated_task if delegated_task is not None else script,
                 "original_slash_input": original_slash_input,
+                "delivery_policy": delivery_policy,
             },
         )
         task = asyncio.create_task(self._produce(
@@ -102,6 +108,7 @@ class WorkflowManager:
                 parent_node_id=parent_node_id,
                 run_manager=self.run_manager,
                 subagent_executor=self.subagent_executor,
+                agent_runtime=self.agent_runtime,
                 max_parallel=int(budget.get("max_parallel") or 8),
                 permission_mode=permission_mode,
             )
@@ -175,6 +182,25 @@ class WorkflowManager:
         slash_metadata = metadata.get("slash_command") if isinstance(metadata.get("slash_command"), dict) else {}
         original_slash_input = metadata.get("original_slash_input") or slash_metadata.get("original_input")
         event_payload = dict(event_payload or {})
+        mailbox_message_id = None
+        if self.mailbox is not None:
+            message_type = "result" if source_status == "completed" else "error"
+            mailbox_item = await self.mailbox.publish(
+                conversation_id=str(run["conversation_id"]),
+                source_run_id=run_id,
+                source_run_kind=RunKind.WORKFLOW.value,
+                message_type=message_type,
+                content=content,
+                metadata={
+                    "origin": "task_notification",
+                    "source_status": source_status,
+                    "event_type": event_payload.get("event_type"),
+                    "delegated_task": metadata.get("delegated_task"),
+                    "original_slash_input": original_slash_input,
+                },
+                delivery_policy=str(metadata.get("delivery_policy") or "auto"),
+            )
+            mailbox_message_id = mailbox_item.message_id
         item = self.run_manager.synthetic_inputs.enqueue(
             kind="task_notification",
             conversation_id=str(run["conversation_id"]),
@@ -190,6 +216,7 @@ class WorkflowManager:
                 "event_type": event_payload.get("event_type"),
                 "delegated_task": metadata.get("delegated_task"),
                 "original_slash_input": original_slash_input,
+                "mailbox_message_id": mailbox_message_id,
             },
         )
         return item.to_dict()

@@ -78,7 +78,7 @@ function testDoesNotFoldWhenThereIsNoContentBlock() {
   assert.deepEqual(folded.visibleBlocks.map((block) => block.key), ['r1', 't1']);
 }
 
-function testKeepsIntermediateContentInProcessWhenFinalKeysProvided() {
+function testKeepsIntermediateContentInContentBlocksWhenFinalKeysProvided() {
   const blocks = [
     { type: 'reasoning', key: 'r1' },
     { type: 'content', key: 'content-0' },
@@ -92,8 +92,9 @@ function testKeepsIntermediateContentInProcessWhenFinalKeysProvided() {
   });
 
   assert.equal(folded.canFoldProcess, true);
-  assert.deepEqual(folded.processBlocks.map((block) => block.key), ['r1', 'content-0', 't1']);
-  assert.deepEqual(folded.contentBlocks.map((block) => block.key), ['content-final']);
+  assert.deepEqual(folded.processBlocks.map((block) => block.key), ['r1', 't1']);
+  assert.deepEqual(folded.contentBlocks.map((block) => block.key), ['content-0', 'content-final']);
+  assert.deepEqual(folded.visibleBlocks.map((block) => block.key), ['r1', 'content-0', 't1', 'content-final']);
 }
 
 function testStreamingProcessDefaultsExpandedAndKeepsAnswerSeparated() {
@@ -155,7 +156,7 @@ function main() {
   testCollapsesHistoricalProcessBlocks();
   testCollapsesProcessBlocksEvenForLatestCompletedAssistant();
   testDoesNotFoldWhenThereIsNoContentBlock();
-  testKeepsIntermediateContentInProcessWhenFinalKeysProvided();
+  testKeepsIntermediateContentInContentBlocksWhenFinalKeysProvided();
   testStreamingProcessDefaultsExpandedAndKeepsAnswerSeparated();
   testStreamingDoesNotInventFoldForProcessOnlyDrafts();
   testDetectsAssistantProcessHistoryWithoutFormattingTools();

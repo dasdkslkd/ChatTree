@@ -40,6 +40,12 @@ class PermissionContext:
     mode: PermissionMode = "default"
     turn_grants: List[PermissionRule] = field(default_factory=list)
     session_grants: List[PermissionRule] = field(default_factory=list)
+    run_id: Optional[str] = None
+    run_kind: Optional[str] = None
+    parent_run_id: Optional[str] = None
+    root_run_id: Optional[str] = None
+    agent_name: Optional[str] = None
+    task_summary: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +77,14 @@ class PermissionEngine:
         deny = self._first_behavior(matched, "deny")
         if deny:
             return PermissionDecision("deny", f"Denied by rule {deny.id}", [deny])
+
+        if _is_agent_management_tool(context.tool_name):
+            allow = self._first_behavior(matched, "allow")
+            return PermissionDecision(
+                "allow",
+                self._allow_reason(allow) if allow else "Agent management tool allowed",
+                [allow] if allow else matched,
+            )
 
         if mode == "ask_always":
             return PermissionDecision("ask", "ask_always mode requires approval for every tool call", matched)
@@ -182,6 +196,15 @@ def default_permission_rules() -> List[PermissionRule]:
         PermissionRule("default-allow-fetch-url", "allow", "tool", "fetch_url", source="default"),
         PermissionRule("default-allow-read-tool-result", "allow", "tool", "read_tool_result", source="default"),
         PermissionRule("default-allow-list-tools", "allow", "tool", "list_available_tools", source="default"),
+        PermissionRule("default-allow-spawn-agent", "allow", "tool", "spawn_agent", source="default"),
+        PermissionRule("default-allow-wait-agent", "allow", "tool", "wait_agent", source="default"),
+        PermissionRule("default-allow-list-agents", "allow", "tool", "list_agents", source="default"),
+        PermissionRule("default-allow-send-agent-message", "allow", "tool", "send_message", source="default"),
+        PermissionRule("default-allow-send-agent-input", "allow", "tool", "send_input", source="default"),
+        PermissionRule("default-allow-followup-task", "allow", "tool", "followup_task", source="default"),
+        PermissionRule("default-allow-resume-agent", "allow", "tool", "resume_agent", source="default"),
+        PermissionRule("default-allow-close-agent", "allow", "tool", "close_agent", source="default"),
+        PermissionRule("default-allow-interrupt-agent", "allow", "tool", "interrupt_agent", source="default"),
         PermissionRule("default-allow-list-files", "allow", "tool", "list_files", source="default"),
         PermissionRule("default-allow-read-file", "allow", "tool", "read_file", source="default"),
         PermissionRule("default-allow-search-files", "allow", "tool", "search_files", source="default"),
@@ -227,6 +250,21 @@ _MUTATING_NAME_TOKENS = {
 
 _DELETE_NAME_TOKENS = {"delete", "remove", "rm", "unlink", "rmdir"}
 _COMMAND_KEYS = {"command", "cmd", "script"}
+_AGENT_MANAGEMENT_TOOLS = {
+    "spawn_agent",
+    "wait_agent",
+    "list_agents",
+    "send_message",
+    "send_input",
+    "followup_task",
+    "resume_agent",
+    "close_agent",
+    "interrupt_agent",
+}
+
+
+def _is_agent_management_tool(tool_name: str) -> bool:
+    return tool_name in _AGENT_MANAGEMENT_TOOLS
 
 
 def _is_mutating_tool_call(tool_name: str, arguments: Dict[str, Any]) -> bool:

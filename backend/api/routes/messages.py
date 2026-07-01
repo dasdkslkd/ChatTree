@@ -256,6 +256,7 @@ def build_synthetic_message_request(
             "source_status": (item.get("metadata") or {}).get("source_status"),
             "delegated_task": (item.get("metadata") or {}).get("delegated_task"),
             "original_slash_input": (item.get("metadata") or {}).get("original_slash_input"),
+            "mailbox_message_id": (item.get("metadata") or {}).get("mailbox_message_id"),
         },
     )
 
@@ -384,6 +385,11 @@ async def start_detached_chat_run(
                     await run_manager.bind_target_node(run.run_id, node_id)
                     if request.synthetic_input_id and not synthetic_consumed:
                         run_manager.synthetic_inputs.mark_consumed(conversation_id, request.synthetic_input_id)
+                        mailbox = getattr(run_manager, "agent_mailbox", None)
+                        mailbox_message_id = (request.synthetic_metadata or {}).get("mailbox_message_id")
+                        if mailbox is not None and mailbox_message_id:
+                            await mailbox.mark_integrated(conversation_id, str(mailbox_message_id))
+                            await mailbox.acknowledge(conversation_id, str(mailbox_message_id))
                         synthetic_consumed = True
                     legacy_session = LegacyRunStreamSession(run_manager, run.run_id, conversation_id)
                     legacy_session.node_id = node_id
@@ -405,6 +411,10 @@ async def start_detached_chat_run(
             await run_manager.append_event(run.run_id, _stream_error_chunk(conversation_id, str(e)))
         finally:
             if request.synthetic_input_id and not synthetic_consumed:
+                mailbox = getattr(run_manager, "agent_mailbox", None)
+                mailbox_message_id = (request.synthetic_metadata or {}).get("mailbox_message_id")
+                if mailbox is not None and mailbox_message_id:
+                    await mailbox.release_notification(conversation_id, str(mailbox_message_id))
                 run_manager.synthetic_inputs.release(conversation_id, request.synthetic_input_id, notify=False)
             await run_manager.finish_run(run.run_id, final_status, final_error)
             if bound_node_id:
@@ -464,6 +474,12 @@ class SyntheticFollowupScheduler:
             if item.get("kind") != "task_notification":
                 self.run_manager.synthetic_inputs.release(conversation_id, str(item.get("input_id") or ""), notify=False)
                 return False
+            mailbox = getattr(self.run_manager, "agent_mailbox", None)
+            mailbox_message_id = (item.get("metadata") or {}).get("mailbox_message_id")
+            if mailbox is not None and mailbox_message_id and await mailbox.is_integrated(conversation_id, str(mailbox_message_id)):
+                self.run_manager.synthetic_inputs.mark_consumed(conversation_id, str(item.get("input_id") or ""))
+                await mailbox.acknowledge(conversation_id, str(mailbox_message_id))
+                return True
             try:
                 await start_detached_chat_run(
                     conversation_id,

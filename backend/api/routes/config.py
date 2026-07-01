@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 from pydantic import BaseModel
 from ...core.capabilities.bootstrap import build_runtime_config_with_plugin_mcp
+from ...core.agents import AgentMailbox, AgentRuntime
 from ...core.config.config import Config, cfg
 from ...core.model.model_manager import ModelManager
 from ...core.tools.orchestrator import ToolOrchestrator
@@ -73,14 +74,47 @@ def _sync_runtime_managers(app, config_data: Dict[str, Any], model_manager, tool
         chat_manager.tool_orchestrator = tool_orchestrator
         chat_manager.capability_registry = capability_registry
     subagent_executor = getattr(app.state, 'subagent_executor', None)
+    run_manager = getattr(app.state, 'run_manager', None)
+    agent_mailbox = getattr(app.state, 'agent_mailbox', None)
+    if agent_mailbox is None:
+        agent_mailbox = AgentMailbox()
+        app.state.agent_mailbox = agent_mailbox
+    if run_manager is not None:
+        run_manager.agent_mailbox = agent_mailbox
     if subagent_executor is not None:
         subagent_executor.chat_manager = chat_manager
         subagent_executor.capability_registry = capability_registry
+        subagent_executor.mailbox = agent_mailbox
     workflow_manager = getattr(app.state, 'workflow_manager', None)
     if workflow_manager is not None and subagent_executor is not None:
         workflow_manager.subagent_executor = subagent_executor
+        workflow_manager.mailbox = agent_mailbox
+    agent_runtime = getattr(app.state, 'agent_runtime', None)
+    if (
+        agent_runtime is None
+        and run_manager is not None
+        and subagent_executor is not None
+        and capability_registry is not None
+    ):
+        agent_runtime = AgentRuntime(
+            run_manager=run_manager,
+            mailbox=agent_mailbox,
+            subagent_executor=subagent_executor,
+            workflow_manager=workflow_manager,
+            capability_registry=capability_registry,
+        )
+        app.state.agent_runtime = agent_runtime
+    elif agent_runtime is not None:
+        agent_runtime.run_manager = run_manager
+        agent_runtime.mailbox = agent_mailbox
+        agent_runtime.subagent_executor = subagent_executor
+        agent_runtime.workflow_manager = workflow_manager
+        agent_runtime.capability_registry = capability_registry
+    if workflow_manager is not None:
+        workflow_manager.agent_runtime = agent_runtime
     register_agent_management_tools(
         tool_manager,
+        agent_runtime=agent_runtime,
         subagent_executor=subagent_executor,
         workflow_manager=workflow_manager,
     )

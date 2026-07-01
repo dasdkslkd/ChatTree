@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from backend.api.dependencies import get_chat_manager, get_run_manager, get_subagent_executor, get_workflow_manager
 from backend.api.routes import messages as messages_route
 from backend.api.routes.messages import SendMessageRequest, detached_stream_event_generator
+from backend.core.agents.mailbox import AgentMailbox
 from backend.core.agents.subagent_executor import SubagentExecutor
 from backend.core.capabilities.agent_loader import load_agent_roots
 from backend.core.capabilities.registry import CapabilityRegistry
@@ -301,6 +302,27 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("# ChatTree Core Prompt", messages[0]["content"])
         self.assertIn("Runtime mode: main chat", messages[1]["content"])
+        self.assertNotIn("start_subagent", messages[1]["content"])
+        self.assertNotIn("spawn_agent", messages[1]["content"])
+
+    def test_explicit_subagent_request_builds_multi_agent_runtime_context(self):
+        manager = ChatManager(
+            model_manager=None,
+            storage=self.FakeStorage(),
+            prompts=self.FakePromptStorage(),
+        )
+        conversation = manager.create_conversation("title")
+        conversation.nodes[conversation.current_node_id]["user_message"] = {
+            "role": "user",
+            "content": "请开 subagent 检查这个问题",
+        }
+
+        messages = manager._build_prompt_messages(conversation, [])
+
+        self.assertIn("spawn_agent", messages[1]["content"])
+        self.assertIn("wait_agent", messages[1]["content"])
+        self.assertIn("Do not replace an explicit subagent request", messages[1]["content"])
+        self.assertNotIn("start_subagent", messages[1]["content"])
 
     async def test_btw_builds_side_question_runtime_context(self):
         manager = ChatManager(
@@ -608,7 +630,7 @@ class SyntheticTaskNotificationTests(unittest.IsolatedAsyncioTestCase):
         def _provider_for_model(self, model_id):
             return "fake"
 
-    def _executor(self, run_manager, provider):
+    def _executor(self, run_manager, provider, mailbox=None):
         registry = CapabilityRegistry()
         registry.add_agents([
             AgentDefinition(
@@ -622,6 +644,7 @@ class SyntheticTaskNotificationTests(unittest.IsolatedAsyncioTestCase):
             chat_manager=self.FakeChatManager(provider),
             run_manager=run_manager,
             capability_registry=registry,
+            mailbox=mailbox,
         )
 
     async def test_completed_subagent_enqueues_pending_task_notification_once(self):
@@ -723,6 +746,41 @@ class SyntheticTaskNotificationTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(run_manager.synthetic_inputs.list_pending("conversation-1"), [])
+
+    async def test_parented_subagent_publishes_mailbox_without_synthetic_notification(self):
+        run_manager = RunManager()
+        mailbox = AgentMailbox()
+        executor = self._executor(run_manager, self.FakeProvider(), mailbox=mailbox)
+        run = await run_manager.create_run(
+            conversation_id="conversation-1",
+            kind=RunKind.SUBAGENT,
+            anchor_node_id="node-1",
+            parent_run_id="chat-1",
+            summary="implementer: inspect",
+            metadata={"agent_name": "implementer", "delivery_policy": "wait"},
+        )
+
+        await executor._produce(
+            run_id=run.run_id,
+            conversation_id="conversation-1",
+            agent_name="implementer",
+            input_data="inspect",
+            parent_node_id="node-1",
+            parent_run_id="chat-1",
+            provider_id=None,
+            model_id=None,
+            permission_mode=None,
+            workspace=None,
+        )
+
+        messages = await mailbox.wait_for_run(
+            conversation_id="conversation-1",
+            run_id=run.run_id,
+            timeout_seconds=0.01,
+        )
+        self.assertEqual(run_manager.synthetic_inputs.list_pending("conversation-1"), [])
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["content"], "subagent answer")
 
     async def test_workflow_completion_enqueues_task_notification(self):
         class FakeRunner:
@@ -1177,6 +1235,57 @@ class SyntheticInputRouteTests(unittest.TestCase):
         self.assertEqual(len(chat_runs), 1)
         self.assertEqual(chat_runs[0]["metadata"]["origin"], "task_notification")
         self.assertIn("subagent result", chat_manager.contents[0])
+
+    def test_synthetic_followup_scheduler_skips_integrated_mailbox_notification(self):
+        from backend.api.routes.messages import SyntheticFollowupScheduler
+
+        async def scenario():
+            run_manager = RunManager()
+            mailbox = AgentMailbox()
+            run_manager.agent_mailbox = mailbox
+            chat_manager = self.FakeChatManager()
+            scheduler = SyntheticFollowupScheduler(
+                chat_manager=chat_manager,
+                run_manager=run_manager,
+            )
+            mailbox_item = await mailbox.publish(
+                conversation_id="conversation-1",
+                source_run_id="run-1",
+                source_run_kind="subagent",
+                message_type="result",
+                content="subagent result",
+                delivery_policy="both",
+            )
+            await mailbox.mark_integrated("conversation-1", mailbox_item.message_id)
+            run_manager.synthetic_inputs.enqueue(
+                kind="task_notification",
+                conversation_id="conversation-1",
+                anchor_node_id="node-1",
+                source_run_id="run-1",
+                source_run_kind="subagent",
+                status="pending",
+                summary="subagent completed",
+                content="subagent result",
+                metadata={
+                    "origin": "task_notification",
+                    "source_status": "completed",
+                    "mailbox_message_id": mailbox_item.message_id,
+                },
+            )
+
+            await scheduler.drain("conversation-1")
+
+            self.assertEqual(run_manager.synthetic_inputs.list_pending("conversation-1"), [])
+            self.assertEqual(chat_manager.contents, [])
+            self.assertEqual(
+                [
+                    run for run in run_manager.list_runs("conversation-1")
+                    if run["kind"] == "chat"
+                ],
+                [],
+            )
+
+        asyncio.run(scenario())
 
 
 class DetachedSlashStopRouteTests(unittest.TestCase):

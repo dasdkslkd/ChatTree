@@ -22,6 +22,13 @@ class ApprovalRequest:
     risk_level: str
     reason: str
     suggested_actions: List[str]
+    run_id: Optional[str] = None
+    run_kind: Optional[str] = None
+    parent_run_id: Optional[str] = None
+    root_run_id: Optional[str] = None
+    agent_name: Optional[str] = None
+    task_summary: Optional[str] = None
+    source_label: Optional[str] = None
     created_at: int = field(default_factory=lambda: int(time.time()))
     expires_at: Optional[int] = None
     status: ApprovalStatus = "pending"
@@ -40,6 +47,13 @@ class ApprovalRequest:
             "created_at": self.created_at,
             "expires_at": self.expires_at,
             "status": self.status,
+            "run_id": self.run_id,
+            "run_kind": self.run_kind,
+            "parent_run_id": self.parent_run_id,
+            "root_run_id": self.root_run_id,
+            "agent_name": self.agent_name,
+            "task_summary": self.task_summary,
+            "source_label": self.source_label,
         }
 
 

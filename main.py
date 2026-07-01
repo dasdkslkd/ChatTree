@@ -21,7 +21,7 @@ from backend.core.capabilities.bootstrap import (
 )
 from backend.core.model.model_manager import ModelManager
 from backend.core.config.config import Config
-from backend.core.agents import SubagentExecutor
+from backend.core.agents import AgentMailbox, AgentRuntime, SubagentExecutor
 from backend.core.runs import RunManager
 from backend.core.workflows import WorkflowManager
 from backend.core.storage.chat_storage import ChatStorage
@@ -77,6 +77,8 @@ async def startup_event():
     await tool_manager.init()
     approval_manager = ApprovalManager()
     run_manager = RunManager()
+    agent_mailbox = AgentMailbox()
+    run_manager.agent_mailbox = agent_mailbox
     logical_sandbox = LogicalSandbox.for_config(runtime_config, Path.cwd())
     tool_orchestrator = ToolOrchestrator(
         tool_manager=tool_manager,
@@ -91,13 +93,24 @@ async def startup_event():
         chat_manager=chat_manager,
         run_manager=run_manager,
         capability_registry=capability_registry,
+        mailbox=agent_mailbox,
     )
     workflow_manager = WorkflowManager(
         run_manager=run_manager,
         subagent_executor=subagent_executor,
+        mailbox=agent_mailbox,
     )
+    agent_runtime = AgentRuntime(
+        run_manager=run_manager,
+        mailbox=agent_mailbox,
+        subagent_executor=subagent_executor,
+        workflow_manager=workflow_manager,
+        capability_registry=capability_registry,
+    )
+    workflow_manager.agent_runtime = agent_runtime
     register_agent_management_tools(
         tool_manager,
+        agent_runtime=agent_runtime,
         subagent_executor=subagent_executor,
         workflow_manager=workflow_manager,
     )
@@ -114,6 +127,8 @@ async def startup_event():
     app.state.tool_manager = tool_manager
     app.state.approval_manager = approval_manager
     app.state.run_manager = run_manager
+    app.state.agent_mailbox = agent_mailbox
+    app.state.agent_runtime = agent_runtime
     app.state.tool_orchestrator = tool_orchestrator
     app.state.chat_manager = chat_manager
     app.state.subagent_executor = subagent_executor

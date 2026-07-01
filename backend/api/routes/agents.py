@@ -5,9 +5,10 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from backend.api.dependencies import get_capability_registry, get_subagent_executor
-from backend.core.agents import SubagentExecutor
+from backend.api.dependencies import get_agent_mailbox, get_agent_runtime, get_capability_registry, get_run_manager
+from backend.core.agents import AgentMailbox, AgentRuntime, AgentSource
 from backend.core.capabilities.registry import CapabilityRegistry
+from backend.core.runs import RunManager
 
 router = APIRouter()
 
@@ -54,14 +55,24 @@ async def start_agent_run(
     conversation_id: str,
     agent_name: str,
     request: StartSubagentRequest,
-    executor: SubagentExecutor = Depends(get_subagent_executor),
+    agent_runtime: AgentRuntime = Depends(get_agent_runtime),
 ):
     try:
-        return await executor.start(
-            conversation_id=conversation_id,
+        task = request.input if isinstance(request.input, str) else str(request.input)
+        return await agent_runtime.spawn_agent(
+            source=AgentSource(
+                conversation_id=conversation_id,
+                run_id=request.parent_run_id or request.parent_node_id or "",
+                run_kind="chat",
+                anchor_node_id=request.parent_node_id,
+                parent_run_id=request.parent_run_id,
+                root_run_id=request.parent_run_id,
+                task_summary=task[:160],
+            ),
             agent_name=agent_name,
-            input_data=request.input,
-            parent_node_id=request.parent_node_id,
+            task=task,
+            context_mode="fresh",
+            delivery_policy="auto",
             parent_run_id=request.parent_run_id,
             provider_id=request.provider_id,
             model_id=request.model_id,
@@ -72,3 +83,52 @@ async def start_agent_run(
         raise HTTPException(status_code=404, detail="Agent 不存在")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/conversations/{conversation_id}/agents/runs", response_model=Dict[str, Any])
+async def list_agent_runs(
+    conversation_id: str,
+    include_completed: bool = True,
+    agent_runtime: AgentRuntime = Depends(get_agent_runtime),
+):
+    return await agent_runtime.list_agents(
+        conversation_id=conversation_id,
+        include_completed=include_completed,
+    )
+
+
+@router.get("/agents/runs/{run_id}", response_model=Dict[str, Any])
+async def get_agent_run(
+    run_id: str,
+    run_manager: RunManager = Depends(get_run_manager),
+):
+    run = run_manager.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Agent run 不存在")
+    return run
+
+
+@router.post("/agents/runs/{run_id}/interrupt", response_model=Dict[str, Any])
+async def interrupt_agent_run(
+    run_id: str,
+    agent_runtime: AgentRuntime = Depends(get_agent_runtime),
+):
+    return await agent_runtime.interrupt_agent(run_id=run_id)
+
+
+@router.post("/agents/runs/{run_id}/close", response_model=Dict[str, Any])
+async def close_agent_run(
+    run_id: str,
+    agent_runtime: AgentRuntime = Depends(get_agent_runtime),
+):
+    return await agent_runtime.close_agent(run_id=run_id)
+
+
+@router.get("/conversations/{conversation_id}/agents/mailbox/pending", response_model=Dict[str, Any])
+async def list_pending_agent_mailbox_messages(
+    conversation_id: str,
+    mailbox: AgentMailbox = Depends(get_agent_mailbox),
+):
+    return {
+        "messages": await mailbox.list_pending_notifications(conversation_id),
+    }

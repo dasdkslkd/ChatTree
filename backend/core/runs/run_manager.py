@@ -236,6 +236,19 @@ class RunManager:
         })
         return snapshot
 
+    async def update_metadata(self, run_id: str, metadata: Dict[str, Any]) -> RunRecord:
+        async with self._lock:
+            record = self._require_run_locked(run_id)
+            record.metadata.update(dict(metadata or {}))
+            record.updated_at = time()
+            snapshot = deepcopy(record)
+        await self.append_event(run_id, {
+            "type": "run_metadata_updated",
+            "run_id": run_id,
+            "metadata": dict(metadata or {}),
+        })
+        return snapshot
+
     def stop_event(self, run_id: str) -> asyncio.Event:
         return self._stop_events.setdefault(run_id, asyncio.Event())
 

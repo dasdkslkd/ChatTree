@@ -97,6 +97,7 @@ class ToolOrchestrator:
         emit_event: Optional[Callable[[Dict[str, Any]], Any]] = None,
         workspace: Optional[Dict[str, Any]] = None,
         permission_mode: PermissionMode = "default",
+        run_context: Optional[Dict[str, Any]] = None,
     ) -> Message:
         name = _tool_name(tool_call)
         arguments = normalize_tool_arguments(
@@ -113,6 +114,12 @@ class ToolOrchestrator:
             arguments=arguments,
             source="model",
             mode=permission_mode,
+            run_id=_run_context_value(run_context, "run_id"),
+            run_kind=_run_context_value(run_context, "run_kind"),
+            parent_run_id=_run_context_value(run_context, "parent_run_id"),
+            root_run_id=_run_context_value(run_context, "root_run_id"),
+            agent_name=_run_context_value(run_context, "agent_name"),
+            task_summary=_run_context_value(run_context, "task_summary"),
         )
         command_decision = _command_policy_decision(name, arguments)
         if command_decision and command_decision.behavior == "deny":
@@ -168,6 +175,7 @@ class ToolOrchestrator:
                             "tool_name": name,
                             "grant_scope": "session",
                             "reason": "Session approval grant reused.",
+                            **_approval_source_payload(run_context),
                         },
                     }
                 )
@@ -195,6 +203,7 @@ class ToolOrchestrator:
                 risk_level="medium",
                 reason=decision.reason,
                 suggested_actions=["allow_once", "allow_session", "deny"],
+                **_approval_source_payload(run_context),
             )
 
             approval_wait_task = self.approval_manager.begin_request(approval_request)
@@ -226,6 +235,7 @@ class ToolOrchestrator:
                             "tool_call_id": approval_request.tool_call_id,
                             "conversation_id": approval_request.conversation_id,
                             "node_id": approval_request.node_id,
+                            **_approval_source_payload(run_context),
                         },
                     }
                 )
@@ -267,6 +277,7 @@ class ToolOrchestrator:
             "tool_call_id": tool_call_id,
             "permission_mode": permission_mode,
             "workspace": workspace,
+            **(run_context if isinstance(run_context, dict) else {}),
         }
         content = await _execute_manager_tool(
             self.tool_manager,
@@ -387,6 +398,38 @@ def _command_policy_ask_applies(command_decision: Any, permission_mode: Permissi
         return False
     mode = normalize_permission_mode(permission_mode)
     return mode != "auto_approve"
+
+
+def _run_context_value(run_context: Optional[Dict[str, Any]], key: str) -> Optional[str]:
+    if not isinstance(run_context, dict):
+        return None
+    value = run_context.get(key)
+    if value is None:
+        return None
+    return str(value)
+
+
+def _approval_source_payload(run_context: Optional[Dict[str, Any]]) -> Dict[str, Optional[str]]:
+    if not isinstance(run_context, dict):
+        return {}
+    run_kind = _run_context_value(run_context, "run_kind")
+    source_label = _run_context_value(run_context, "source_label")
+    if not source_label:
+        source_label = {
+            "chat": "主对话",
+            "subagent": "Subagent",
+            "workflow": "Workflow",
+            "workflow_step": "Workflow 子任务",
+        }.get(run_kind or "", run_kind)
+    return {
+        "run_id": _run_context_value(run_context, "run_id"),
+        "run_kind": run_kind,
+        "parent_run_id": _run_context_value(run_context, "parent_run_id"),
+        "root_run_id": _run_context_value(run_context, "root_run_id"),
+        "agent_name": _run_context_value(run_context, "agent_name"),
+        "task_summary": _run_context_value(run_context, "task_summary"),
+        "source_label": source_label,
+    }
 
 
 def _is_command_like_tool(tool_name: str) -> bool:

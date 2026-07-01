@@ -103,6 +103,34 @@ def get_subagent_executor(request: Request):
         raise HTTPException(status_code=500, detail=f"依赖注入错误: {str(e)}")
 
 
+def get_agent_runtime(request: Request):
+    """获取 Agent runtime"""
+    try:
+        if not hasattr(request.app.state, 'agent_runtime'):
+            logger.error("❌ agent_runtime 未在 app.state 中初始化")
+            raise HTTPException(status_code=500, detail="Agent runtime 未初始化")
+        return request.app.state.agent_runtime
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ 获取 agent_runtime 失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"依赖注入错误: {str(e)}")
+
+
+def get_agent_mailbox(request: Request):
+    """获取 Agent mailbox"""
+    try:
+        if not hasattr(request.app.state, 'agent_mailbox'):
+            logger.error("❌ agent_mailbox 未在 app.state 中初始化")
+            raise HTTPException(status_code=500, detail="Agent mailbox 未初始化")
+        return request.app.state.agent_mailbox
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ 获取 agent_mailbox 失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"依赖注入错误: {str(e)}")
+
+
 def get_workflow_manager(request: Request):
     """获取 Workflow 管理器"""
     try:

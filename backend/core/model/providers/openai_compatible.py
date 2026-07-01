@@ -837,13 +837,20 @@ class OpenAICompatibleProvider(BaseProvider):
         response_input: List[Dict[str, Any]] = []
 
         for msg in messages:
-            role = str(msg["role"])
+            raw_role = msg["role"]
+            role = raw_role.value if hasattr(raw_role, "value") else str(raw_role)
             content = msg.get("content") or ""
             responses_content = to_openai_responses_content(content)
 
             if role == "system":
                 role = "developer"
             if role == "assistant" and msg.get("tool_calls"):
+                if content:
+                    response_input.append({
+                        "type": "message",
+                        "role": "assistant",
+                        "content": responses_content,
+                    })
                 for tool_call in msg.get("tool_calls") or []:
                     fn = tool_call.get("function") or {}
                     response_input.append({
@@ -851,12 +858,6 @@ class OpenAICompatibleProvider(BaseProvider):
                         "call_id": tool_call.get("id"),
                         "name": fn.get("name"),
                         "arguments": fn.get("arguments") or "{}",
-                    })
-                if content:
-                    response_input.append({
-                        "type": "message",
-                        "role": "assistant",
-                        "content": responses_content,
                     })
                 continue
             if role == "tool":

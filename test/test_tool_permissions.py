@@ -179,6 +179,29 @@ def test_mcp_route_tools_ask_by_default():
     assert "MCP" in decision.reason
 
 
+@pytest.mark.parametrize("tool_name", [
+    "spawn_agent",
+    "wait_agent",
+    "list_agents",
+    "send_message",
+    "send_input",
+    "followup_task",
+    "resume_agent",
+    "close_agent",
+    "interrupt_agent",
+])
+def test_agent_management_tools_allowed_by_default(tool_name):
+    decision = PermissionEngine.default().evaluate(make_context(tool_name=tool_name))
+
+    assert decision.behavior == "allow"
+
+
+def test_spawn_agent_allowed_even_in_ask_always_mode():
+    decision = PermissionEngine.default().evaluate(make_context(tool_name="spawn_agent", mode="ask_always"))
+
+    assert decision.behavior == "allow"
+
+
 def test_mcp_server_rule_matches_route_and_alias_names():
     engine = PermissionEngine(rules=[
         PermissionRule(

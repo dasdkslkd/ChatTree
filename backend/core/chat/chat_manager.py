@@ -38,6 +38,7 @@ from ..slash import (
     SlashToolPolicy,
 )
 from ..tools.security.permissions import PermissionMode, normalize_permission_mode
+from ..tools.agent_tools import AGENT_TOOL_NAMES, LEGACY_AGENT_TOOL_NAMES
 
 logger = setup_logger('ChatManager')
 
@@ -366,11 +367,16 @@ class ChatManager:
     ) -> List[Message]:
         base_messages = self._prepare_messages_for_api_with_conversation(conversation)
         custom_prompt, custom_mode = self._selected_system_prompt(conversation)
+        latest_user_content = self._latest_user_content(conversation)
         built_messages = PromptBuilder(self.capability_registry).build(
             PromptBuildRequest(
                 base_messages=base_messages,
                 active_skill_names=skill_names,
-                runtime_context=self._runtime_prompt_context("main", conversation),
+                runtime_context=self._runtime_prompt_context(
+                    "main",
+                    conversation,
+                    latest_user_content=latest_user_content,
+                ),
                 custom_system_prompt=custom_prompt,
                 custom_system_prompt_mode=custom_mode,
             )
@@ -730,7 +736,12 @@ class ChatManager:
             build_default_workspace(cfg.data if isinstance(cfg.data, dict) else None),
         )
 
+        multi_agent_mode = self._resolve_multi_agent_mode(
+            model_content,
+            preview.metadata if preview is not None else {},
+        )
         tools = self.tool_manager.get_openai_tools() if self.tool_manager else []
+        tools = self._filter_agent_tools_for_mode(tools, multi_agent_mode)
         tools = tools or None
         if slash_result.tool_policy == SlashToolPolicy.DISABLED:
             tools = None
@@ -896,6 +907,14 @@ class ChatManager:
                         emit_event=emit_tool_event,
                         workspace=workspace_context,
                         permission_mode=new_node.get("tool_permission_mode") or "default",
+                        run_context={
+                            "run_id": run_id,
+                            "run_kind": "chat",
+                            "root_run_id": run_id,
+                            "conversation_id": conversation_id,
+                            "node_id": new_node["id"],
+                            "task_summary": model_content[:160],
+                        },
                     )
                 )
                 event_get_task = asyncio.create_task(approval_events.get())
@@ -1119,7 +1138,13 @@ class ChatManager:
             str(prompt.get("mode") or "override")
         )
 
-    def _runtime_prompt_context(self, runtime: str, conversation: Optional[Conversation] = None) -> RuntimePromptContext:
+    def _runtime_prompt_context(
+        self,
+        runtime: str,
+        conversation: Optional[Conversation] = None,
+        *,
+        latest_user_content: str = "",
+    ) -> RuntimePromptContext:
         details = self._runtime_context_details(conversation)
         if runtime == "side_question":
             return RuntimePromptContext(
@@ -1135,6 +1160,22 @@ class ChatManager:
                 ]),
                 metadata={"runtime_mode": "side_question"},
             )
+        multi_agent_mode = self._resolve_multi_agent_mode(
+            latest_user_content,
+            conversation.metadata if conversation is not None else {},
+        )
+        multi_agent_lines: list[str] = []
+        if multi_agent_mode != "none":
+            multi_agent_lines = [
+                "- Multi-agent tools are available in this conversation when tool schemas include `spawn_agent`.",
+                "- If the user explicitly asks to use a subagent, agent, forked agent, or workflow, your first relevant action must be `spawn_agent` or the appropriate agent/workflow tool call.",
+                "- Do not replace an explicit subagent request with direct shell commands, file tools, or a natural-language claim that a subagent was started.",
+                "- Use `wait_agent` when you need the delegated result before answering. Use notification delivery for background work.",
+            ]
+            if multi_agent_mode == "proactive":
+                multi_agent_lines.append("- You may proactively delegate independent multi-step investigation or verification work to subagents.")
+            else:
+                multi_agent_lines.append("- Do not proactively spawn agents unless the user explicitly requested agent delegation.")
         return RuntimePromptContext(
             name="main",
                 content="\n".join([
@@ -1144,10 +1185,72 @@ class ChatManager:
                     *details,
                     "- This is the primary persisted conversation branch.",
                     "- Use tools only when they are provided for this call and follow the active permission mode.",
+                    *multi_agent_lines,
                     "- Preserve selected system prompt semantics: default core prompt, override custom prompt, or appended custom prompt.",
             ]),
             metadata={"runtime_mode": "main"},
         )
+
+    def _latest_user_content(self, conversation: Conversation) -> str:
+        node = conversation.nodes.get(conversation.current_node_id or "")
+        message = (node or {}).get("user_message") or {}
+        content = message.get("content")
+        return content if isinstance(content, str) else str(content or "")
+
+    def _resolve_multi_agent_mode(
+        self,
+        user_input: str,
+        conversation_metadata: Dict[str, Any],
+    ) -> str:
+        configured = (
+            conversation_metadata.get("multi_agent_mode")
+            or (cfg.data.get("multi_agent_mode") if isinstance(cfg.data, dict) else None)
+            or ((cfg.data.get("tools", {}) or {}).get("multi_agent_mode") if isinstance(cfg.data, dict) else None)
+            or "explicit_request_only"
+        )
+        try:
+            mode = str(configured)
+        except Exception:
+            mode = "explicit_request_only"
+        if mode not in {"none", "explicit_request_only", "proactive"}:
+            mode = "explicit_request_only"
+        if mode in {"none", "proactive"}:
+            return mode
+        text = (user_input or "").lower()
+        if any(token in text for token in ("不要用 subagent", "不要使用subagent", "不要使用 subagent", "do not use subagent", "without subagent")):
+            return "none"
+        explicit_tokens = (
+            "subagent",
+            "子agent",
+            "子代理",
+            "开agent",
+            "开 agent",
+            "派agent",
+            "派 agent",
+            "使用agent",
+            "使用 agent",
+            "delegate",
+            "parallel agent",
+            "fork agent",
+            "workflow",
+            "工作流",
+        )
+        return mode if any(token in text for token in explicit_tokens) else "none"
+
+    def _filter_agent_tools_for_mode(
+        self,
+        tools: List[Dict[str, Any]],
+        mode: str,
+    ) -> List[Dict[str, Any]]:
+        filtered: List[Dict[str, Any]] = []
+        for tool in tools:
+            name = str((tool.get("function") or {}).get("name") or "")
+            if name in LEGACY_AGENT_TOOL_NAMES:
+                continue
+            if name in AGENT_TOOL_NAMES and mode == "none":
+                continue
+            filtered.append(tool)
+        return filtered
 
     def _runtime_context_details(self, conversation: Optional[Conversation]) -> list[str]:
         if conversation is None:
@@ -1912,6 +2015,7 @@ class ChatManager:
         emit_event: Optional[Callable[[Dict[str, Any]], Any]] = None,
         workspace: Optional[Dict[str, Any]] = None,
         permission_mode: PermissionMode = "default",
+        run_context: Optional[Dict[str, Any]] = None,
     ) -> List[Message]:
         results: List[Message] = []
         for tool_call in tool_calls:
@@ -1928,10 +2032,20 @@ class ChatManager:
                         emit_event=emit_event,
                         workspace=workspace,
                         permission_mode=permission_mode,
+                        run_context=run_context,
                     )
                 except TypeError as exc:
                     error_text = str(exc)
-                    if "unexpected keyword argument 'permission_mode'" in error_text:
+                    if "unexpected keyword argument 'run_context'" in error_text:
+                        message = await tool_orchestrator.execute_tool_call(
+                            tool_call,
+                            conversation_id or "",
+                            node_id,
+                            emit_event=emit_event,
+                            workspace=workspace,
+                            permission_mode=permission_mode,
+                        )
+                    elif "unexpected keyword argument 'permission_mode'" in error_text:
                         message = await tool_orchestrator.execute_tool_call(
                             tool_call,
                             conversation_id or "",
@@ -1963,7 +2077,12 @@ class ChatManager:
                 raw_result = json.dumps({"error": "Tool manager is not configured"}, ensure_ascii=False)
             else:
                 try:
-                    raw_result = await self.tool_manager.execute_tool(name, arguments, workspace=workspace)
+                    raw_result = await self.tool_manager.execute_tool(
+                        name,
+                        arguments,
+                        workspace=workspace,
+                        runtime_context=run_context,
+                    )
                 except TypeError as exc:
                     if "unexpected keyword argument 'workspace'" not in str(exc):
                         raise

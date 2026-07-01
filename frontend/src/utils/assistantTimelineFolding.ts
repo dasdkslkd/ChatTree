@@ -113,15 +113,8 @@ export function getTimelineFoldState<T extends TimelineFoldBlock>(
     finalContentKeys?: Iterable<string>;
   },
 ): TimelineFoldState<T> {
-  const finalContentKeys = options.finalContentKeys
-    ? new Set(options.finalContentKeys)
-    : null;
-  const isFinalContentBlock = (block: T) => (
-    block.type === 'content'
-    && (!finalContentKeys || finalContentKeys.has(block.key))
-  );
-  const processBlocks = blocks.filter((block) => !isFinalContentBlock(block));
-  const contentBlocks = blocks.filter(isFinalContentBlock);
+  const processBlocks = blocks.filter((block) => block.type !== 'content');
+  const contentBlocks = blocks.filter((block) => block.type === 'content');
   const canFoldProcess = processBlocks.length > 0 && contentBlocks.length > 0;
 
   if (!canFoldProcess) {
@@ -138,7 +131,7 @@ export function getTimelineFoldState<T extends TimelineFoldBlock>(
     processBlocks,
     contentBlocks,
     visibleBlocks: options.processExpanded
-      ? [...processBlocks, ...contentBlocks]
+      ? blocks
     : contentBlocks,
   };
 }

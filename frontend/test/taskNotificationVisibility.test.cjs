@@ -31,9 +31,32 @@ const notificationMessage = {
 
 assert.equal(isTaskNotificationMessage(notificationMessage), true);
 assert.equal(shouldExportMessage(notificationMessage), false);
+assert.equal(shouldExportMessage({
+  role: 'assistant',
+  metadata: { message_kind: 'task_notification' },
+  content: 'secret',
+}), false);
+assert.equal(shouldExportMessage({
+  role: 'user',
+  metadata: { display: 'hidden' },
+  content: 'secret',
+}), false);
+assert.equal(shouldExportMessage({
+  role: 'user',
+  content: '<task-notification>{"content":"secret"}</task-notification>',
+}), false);
 assert.equal(getTreeUserContent({
   user_content: '<task-notification>{"content":"secret"}</task-notification>',
   user_subtype: 'task_notification',
+}), '');
+assert.equal(getTreeUserContent({
+  user_content: '<task-notification>{"content":"secret"}</task-notification>',
+  user_subtype: null,
+}), '');
+assert.equal(getTreeUserContent({
+  user_content: 'secret',
+  user_subtype: null,
+  metadata: { display: 'hidden' },
 }), '');
 assert.equal(getTreeUserContent({
   user_content: 'normal user task',
