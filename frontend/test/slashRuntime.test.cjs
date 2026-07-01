@@ -135,6 +135,14 @@ function testForkWorkflowPendingSlashRunsRenderAsDrafts() {
   assert.equal(shouldRenderRunDraft(run({ kind: 'workflow', pendingUserMessage: '/workflow run' })), true);
 }
 
+function testBtwSideQuestionRunsRenderAsDrafts() {
+  assert.equal(shouldRenderRunDraft(run({ kind: 'side_question' })), true);
+}
+
+function testUnknownBackgroundRunWithoutTranscriptStateDoesNotRenderAsDraft() {
+  assert.equal(shouldRenderRunDraft(run({ kind: 'unknown_background' })), false);
+}
+
 function testBackgroundWorkflowWithoutTranscriptStateDoesNotRenderAsDraft() {
   assert.equal(shouldRenderRunDraft(run({ kind: 'workflow' })), false);
 }
@@ -149,6 +157,8 @@ testSlashCompletionStopsAfterCommandArgsBegin();
 testSlashCompletionAppliesCanonicalCommandAndPreservesArgs();
 testForkWorkflowErrorRunsRenderAsDrafts();
 testForkWorkflowPendingSlashRunsRenderAsDrafts();
+testBtwSideQuestionRunsRenderAsDrafts();
+testUnknownBackgroundRunWithoutTranscriptStateDoesNotRenderAsDraft();
 testBackgroundWorkflowWithoutTranscriptStateDoesNotRenderAsDraft();
 
 console.log('slashRuntime tests passed');

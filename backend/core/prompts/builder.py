@@ -9,6 +9,7 @@ from backend.core.capabilities.prompting import (
 )
 from backend.core.capabilities.registry import CapabilityRegistry
 
+from .catalog import load_prompt_template
 from .types import PromptBuildRequest, PromptSection
 
 
@@ -39,6 +40,8 @@ class PromptBuilder:
             extra_sections=extra_sections,
             capability_char_budget=capability_char_budget,
             include_available_capabilities=include_available_capabilities,
+            include_core_prompt=True,
+            runtime_mode="main",
         )
         return self.build(request)
 
@@ -62,6 +65,16 @@ class PromptBuilder:
         request: PromptBuildRequest,
     ) -> list[PromptSection]:
         sections = list(request.extra_sections)
+        if request.include_core_prompt:
+            sections.append(
+                PromptSection(
+                    name="core_prompt",
+                    role="system",
+                    content=load_prompt_template("core"),
+                    priority=10,
+                    metadata={"runtime_mode": request.runtime_mode},
+                )
+            )
         if self.registry is None:
             return sections
 

@@ -36,9 +36,7 @@ class SlashCommandDispatcher:
                 command_name=parsed.name,
                 canonical_name=definition.name,
                 args=parsed.args,
-                error=f"用法: /{definition.name} <旁路问题>"
-                if definition.name == "btw"
-                else f"用法: /{definition.name} <参数>",
+                error=f"用法: /{definition.name} <参数>",
                 tool_policy=definition.tool_policy,
                 persistence_policy=definition.persistence_policy,
                 run_kind=definition.run_kind,

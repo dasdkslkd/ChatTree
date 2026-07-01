@@ -61,7 +61,7 @@ import {
   DropdownMenuItem,
 } from '@/components/ui/dropdown-menu';
 import {
-  Plus, X, MoreHorizontal, ChevronRight,
+  Plus, X, MoreHorizontal, ChevronRight, Square,
   Copy, Check, Pencil, Loader2, RotateCcw, Network, MessageSquare, Trash2, FileText, Download, FolderOpen, FolderPlus, Search, Settings,
   PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Archive,
 } from 'lucide-react';
@@ -76,7 +76,7 @@ import { useRunManager } from '../hooks/useRunManager';
 import { streamManager, type StreamState } from '../services/streamManager';
 import { slashRegistry } from '../services/slashRegistry';
 import { getGenerationStatusText, getStreamStatusText as getStreamStatusLabel } from '../utils/generationStatus';
-import { isRunBlockingSelectedBranch, isRunVisibleInSelectedTranscript } from '../utils/runVisibility';
+import { isDetachedRunView, isRunBlockingSelectedBranch, isRunVisibleInMainTranscript } from '../utils/runVisibility';
 import { resolveSendNodeId } from '../utils/sendTarget';
 import { shouldQueueForMainThread, shouldRenderRunDraft } from '../utils/slashRuntime';
 import {
@@ -983,6 +983,7 @@ export default function ChatPage() {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [outlineCollapsed, setOutlineCollapsed] = useState(false);
+  const [rightPanelView, setRightPanelView] = useState<'outline' | 'side'>('outline');
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [scrollPositions, setScrollPositions] = useState<Record<string, number>>({});
   const [isScrolling, setIsScrolling] = useState(false);
@@ -1214,7 +1215,7 @@ export default function ChatPage() {
     .filter((run) => shouldRenderRunDraft(run))
     .map((run) => {
       const nodeId = run.targetNodeId || run.nodeId;
-      if (!isRunVisibleInSelectedTranscript(run, selectedBranchTipId, currentBranchNodeIds)) return null;
+      if (!isRunVisibleInMainTranscript(run, selectedBranchTipId, currentBranchNodeIds)) return null;
       const userLanded = nodeId != null && messages.some((m) => m.node_id === nodeId && m.role === 'user');
       const assistantLanded = nodeId != null && messages.some((m) => m.node_id === nodeId && m.role === 'assistant');
       const timeline = getAssistantTimeline({
@@ -1260,6 +1261,65 @@ export default function ChatPage() {
     .filter((draft) => draft.showPendingBubble || draft.showStreamBlock),
     [activeRunStates, currentBranchNodeIds, messages, selectedBranchTipId],
   );
+
+  const sideRunDrafts = useMemo(() => activeRunStates
+    .filter((run) => shouldRenderRunDraft(run))
+    .map((run) => {
+      if (!isDetachedRunView(run, selectedBranchTipId)) return null;
+      const timeline = getAssistantTimeline({
+        content: run.content,
+        reasoning: run.reasoning,
+        tool_interactions: run.toolInteractions,
+      });
+      const pendingApprovalList = Object.values(run.pendingApprovals).filter((approval) => approval.status === 'pending');
+      const streamingFoldedContentBlocks = getAssistantFoldedContentBlocks({
+        content: run.content,
+        reasoning: run.reasoning,
+        tool_interactions: run.toolInteractions,
+      });
+      const streamingFoldState = getStreamingTimelineFoldState(
+        timeline,
+        streamingFoldedContentBlocks.map((block) => block.key),
+      );
+      let activeReasoningIndex = -1;
+      let activeReasoningKey: string | null = null;
+      if (run.status === 'streaming') {
+        for (let i = timeline.length - 1; i >= 0; i -= 1) {
+          if (timeline[i].type === 'reasoning') {
+            const hasLaterBlock = timeline.slice(i + 1).some((block) => block.type !== 'reasoning');
+            activeReasoningIndex = run.reasoningActive || !hasLaterBlock ? i : -1;
+            activeReasoningKey = activeReasoningIndex >= 0 ? timeline[activeReasoningIndex].key : null;
+            break;
+          }
+        }
+      }
+      return {
+        run,
+        showPendingBubble: !!run.pendingUserMessage,
+        showStreamBlock: run.status !== 'idle',
+        timeline,
+        streamingFoldState,
+        pendingApprovalList,
+        activeReasoningIndex,
+        activeReasoningKey,
+      };
+    })
+    .filter((draft): draft is NonNullable<typeof draft> => Boolean(draft))
+    .filter((draft) => draft.showPendingBubble || draft.showStreamBlock),
+    [activeRunStates, selectedBranchTipId],
+  );
+
+  const sideRunActivity = useMemo(
+    () => sideRunDrafts.map((draft) => [
+      draft.run.runId,
+      draft.run.status,
+      draft.run.content.length,
+      draft.run.reasoning.length,
+      draft.run.toolInteractions.length,
+      draft.run.pendingUserMessage?.length ?? 0,
+    ].join(':')).join('|'),
+    [sideRunDrafts],
+  );
   const currentBranchStreamingRunIds = useMemo(
     () => activeRunStates
       .filter((run) => isRunBlockingSelectedBranch(run, selectedBranchTipId, currentBranchNodeIds))
@@ -1284,6 +1344,13 @@ export default function ChatPage() {
     (count, draft) => count + draft.pendingApprovalList.length,
     0,
   );
+
+  useEffect(() => {
+    if (sideRunDrafts.length === 0) return;
+    setOutlineCollapsed(false);
+    setRightPanelView('side');
+  }, [sideRunActivity, sideRunDrafts.length]);
+
   const coveredToolMessages = useMemo(() => {
     const ids = new Set<string>();
     const names = new Set<string>();
@@ -2960,14 +3027,45 @@ export default function ChatPage() {
         <aside
           className="flex flex-col transition-[width] duration-200 overflow-y-auto overflow-x-hidden custom-scrollbar"
           style={{
-            width: outlineCollapsed ? '56px' : '280px',
+            width: outlineCollapsed ? '56px' : rightPanelView === 'side' ? '420px' : '280px',
             background: 'var(--bg-surface)',
             borderLeft: '0.5px solid var(--border)',
           }}
         >
           <div className="flex justify-between items-center p-3 sticky top-0 z-[1] min-h-[56px]"
                style={{ background: 'var(--bg-surface)' }}>
-            {!outlineCollapsed && <span className="font-semibold" style={{ color: 'var(--fg-secondary)' }}>大纲</span>}
+            {!outlineCollapsed && (
+              <div className="flex min-w-0 items-center gap-1">
+                <Button
+                  variant={rightPanelView === 'outline' ? 'secondary' : 'ghost'}
+                  size="sm"
+                  className="h-8 gap-1.5 px-2 text-xs"
+                  onClick={() => setRightPanelView('outline')}
+                  title="大纲"
+                >
+                  <FileText className="h-3.5 w-3.5" />
+                  大纲
+                </Button>
+                <Button
+                  variant={rightPanelView === 'side' ? 'secondary' : 'ghost'}
+                  size="sm"
+                  className="h-8 gap-1.5 px-2 text-xs"
+                  onClick={() => setRightPanelView('side')}
+                  title="侧边聊天"
+                >
+                  <MessageSquare className="h-3.5 w-3.5" />
+                  侧边聊天
+                  {sideRunDrafts.length > 0 && (
+                    <span
+                      className="ml-0.5 rounded-full px-1.5 py-0.5 text-[10px]"
+                      style={{ background: 'var(--bg-button-tertiary-hover)', color: 'var(--fg-secondary)' }}
+                    >
+                      {sideRunDrafts.length}
+                    </span>
+                  )}
+                </Button>
+              </div>
+            )}
             <Button
               variant="ghost"
               size="sm"
@@ -2981,20 +3079,145 @@ export default function ChatPage() {
 
           {!outlineCollapsed && (
             <>
-              {outline.map((item, idx) => (
-                <div
-                  key={idx}
-                  className="flex items-center py-2 px-3 cursor-pointer rounded-lg mx-2 my-0.5 transition-colors"
-                  style={{ color: 'var(--fg-85)' }}
-                  title={item.text}
-                  onClick={() => handleJumpToMessage(item.originalIndex)}
-                  onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-hover)'; }}
-                  onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = ''; }}
-                >
-                  <span className="truncate text-sm">{item.text}</span>
+              {rightPanelView === 'outline' ? (
+                <>
+                  {outline.map((item, idx) => (
+                    <div
+                      key={idx}
+                      className="flex items-center py-2 px-3 cursor-pointer rounded-lg mx-2 my-0.5 transition-colors"
+                      style={{ color: 'var(--fg-85)' }}
+                      title={item.text}
+                      onClick={() => handleJumpToMessage(item.originalIndex)}
+                      onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-hover)'; }}
+                      onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = ''; }}
+                    >
+                      <span className="truncate text-sm">{item.text}</span>
+                    </div>
+                  ))}
+                  <RunStatusPanel conversationId={currentConversation?.id ?? null} runs={activeRunStates} />
+                </>
+              ) : (
+                <div className="flex min-h-0 flex-1 flex-col gap-3 px-3 pb-4">
+                  {sideRunDrafts.length === 0 && (
+                    <div className="rounded-lg border px-3 py-4 text-sm" style={{ borderColor: 'var(--border)', color: 'var(--fg-tertiary)' }}>
+                      暂无侧边运行。发送 <code>/btw</code>、<code>/fork</code> 或 <code>/workflow</code> 后会显示在这里。
+                    </div>
+                  )}
+                  {sideRunDrafts.map((draft) => (
+                    <section
+                      key={draft.run.runId}
+                      className="rounded-lg border"
+                      style={{ borderColor: 'var(--border)', background: 'var(--bg-elevated-secondary, rgba(255,255,255,0.03))' }}
+                    >
+                      <div className="flex items-center gap-2 border-b px-3 py-2" style={{ borderColor: 'var(--border)' }}>
+                        <span className="min-w-0 flex-1 truncate text-xs font-semibold" style={{ color: 'var(--fg-secondary)' }}>
+                          {draft.run.kind === 'side_question' ? 'btw' : draft.run.kind} · {draft.run.runId.slice(0, 12)}
+                        </span>
+                        {draft.run.status === 'streaming' && (
+                          <button
+                            type="button"
+                            className="rounded border-0 bg-transparent p-1"
+                            onClick={() => streamManager.stopRun(draft.run.runId)}
+                            title="停止"
+                            style={{ color: 'var(--fg-tertiary)' }}
+                          >
+                            <Square className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="rounded border-0 bg-transparent p-1"
+                          onClick={() => streamManager.cleanupRun(draft.run.runId)}
+                          title="关闭"
+                          style={{ color: 'var(--fg-tertiary)' }}
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                      <div className="flex flex-col gap-2 px-3 py-3">
+                        {draft.showPendingBubble && (
+                          <div
+                            className="max-w-full rounded-lg px-3 py-2 text-sm prose prose-sm prose-invert max-w-none [&_p]:m-0"
+                            style={{
+                              background: 'linear-gradient(160deg, rgba(217,119,87,0.16), rgba(217,119,87,0.08))',
+                              border: '0.5px solid rgba(217,119,87,0.28)',
+                              color: 'var(--fg-85)',
+                            }}
+                          >
+                            <MarkdownView content={draft.run.pendingUserMessage || ''} />
+                          </div>
+                        )}
+                        {draft.showStreamBlock && (
+                          <div className="min-w-0">
+                            {draft.streamingFoldState.canFoldProcess ? (
+                              <>
+                                <div className="processed-fold expanded">
+                                  <div className="processed-fold-button" aria-expanded="true">
+                                    <span>{draft.run.duration > 0 ? `已处理 ${formatProcessedDuration(draft.run.duration) ?? ''}`.trim() : '已处理'}</span>
+                                    <ChevronRight className="processed-fold-chevron" />
+                                  </div>
+                                </div>
+                                <AnimatedProcessedBlocks
+                                  expanded
+                                  blocks={draft.streamingFoldState.processBlocks}
+                                  renderBlock={(block) => {
+                                    if (block.type === 'reasoning') {
+                                      return (
+                                        <ThinkingBlock
+                                          key={block.key}
+                                          reasoning={block.reasoning}
+                                          streaming={block.key === draft.activeReasoningKey}
+                                        />
+                                      );
+                                    }
+                                    if (block.type === 'tools') {
+                                      return <ToolCallGroup key={block.key} items={block.items} />;
+                                    }
+                                    return renderAssistantTimelineBlock(block);
+                                  }}
+                                />
+                                <div className="processed-answer-divider" />
+                                {draft.streamingFoldState.contentBlocks.map(renderAssistantTimelineBlock)}
+                              </>
+                            ) : (
+                              draft.timeline.map((block, blockIndex) => {
+                                if (block.type === 'reasoning') {
+                                  const reasoningStillOpen = blockIndex === draft.activeReasoningIndex;
+                                  return <ThinkingBlock key={block.key} reasoning={block.reasoning} streaming={reasoningStillOpen} />;
+                                }
+                                if (block.type === 'tools') {
+                                  return <ToolCallGroup key={block.key} items={block.items} />;
+                                }
+                                return (
+                                  <div
+                                    key={block.key}
+                                    className="max-w-full min-w-0 rounded-lg px-3 py-2 text-sm leading-relaxed prose prose-sm max-w-none [&_p]:m-0"
+                                    style={{ color: 'var(--fg-secondary)' }}
+                                  >
+                                    <MarkdownView content={block.content} />
+                                  </div>
+                                );
+                              })
+                            )}
+                            <ToolApprovalGroup approvals={draft.pendingApprovalList} />
+                            {draft.timeline.length === 0 && draft.pendingApprovalList.length === 0 && draft.run.status === 'streaming' && (
+                              <div className="flex items-center gap-2 px-3 py-2 text-sm" style={{ color: 'var(--fg-tertiary)' }}>
+                                <Loader2 className="h-4 w-4 animate-spin" style={{ color: 'var(--icon-accent)' }} />
+                                <span>运行中...</span>
+                              </div>
+                            )}
+                            {getStreamStatusLabel(draft.run.status, draft.run.errorMessage) && (
+                              <div className="mt-1 text-xs text-destructive">
+                                {getStreamStatusLabel(draft.run.status, draft.run.errorMessage)}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </section>
+                  ))}
                 </div>
-              ))}
-              <RunStatusPanel conversationId={currentConversation?.id ?? null} runs={activeRunStates} />
+              )}
             </>
           )}
         </aside>

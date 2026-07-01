@@ -9,6 +9,7 @@ from backend.core.capabilities.registry import CapabilityRegistry
 from backend.core.chat.chat_manager import ChatManager
 from backend.core.config.types import Message, Role, StreamController, StreamStatus
 from backend.core.prompts import PromptBuilder
+from backend.core.prompts.catalog import load_prompt_template
 from backend.core.runs import RunKind, RunManager, RunStatus
 from backend.core.tools.security.permissions import normalize_permission_mode
 
@@ -362,7 +363,10 @@ class SubagentExecutor:
         agent = self.capability_registry.get_agent(agent_name)
         if agent is None:
             raise KeyError(agent_name)
-        system_parts = [agent.system_prompt or f"You are subagent {agent.name}."]
+        system_parts = [load_prompt_template("fork")]
+        if agent.name == "workflow-worker" or agent.metadata.get("runtime") == "workflow":
+            system_parts.append(load_prompt_template("workflow"))
+        system_parts.append(agent.system_prompt or f"You are subagent {agent.name}.")
         if parent_node_id:
             system_parts.append(f"Parent conversation node: {parent_node_id}")
         content = input_data if isinstance(input_data, str) else json.dumps(input_data, ensure_ascii=False)

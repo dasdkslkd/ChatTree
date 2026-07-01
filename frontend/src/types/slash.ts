@@ -6,7 +6,7 @@ export type SlashDispatchKind =
   | 'local_ui';
 
 export type SlashToolPolicy = 'inherit' | 'disabled' | 'read_only';
-export type SlashPersistencePolicy = 'main_thread' | 'side_run' | 'none';
+export type SlashPersistencePolicy = 'main_thread' | 'side_run' | 'background_run' | 'none';
 export type SlashStreamTargetPolicy = 'target_node' | 'anchor_only' | 'none';
 
 export interface SlashCommandInfo {
@@ -23,4 +23,3 @@ export interface SlashCommandInfo {
   blocks_main_thread: boolean;
   enabled: boolean;
 }
-

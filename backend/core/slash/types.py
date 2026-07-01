@@ -24,6 +24,7 @@ class SlashToolPolicy(str, Enum):
 class SlashPersistencePolicy(str, Enum):
     MAIN_THREAD = "main_thread"
     SIDE_RUN = "side_run"
+    BACKGROUND_RUN = "background_run"
     NONE = "none"
 
 

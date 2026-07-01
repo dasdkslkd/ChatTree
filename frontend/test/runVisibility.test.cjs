@@ -18,6 +18,8 @@ require.extensions['.ts'] = function loadTs(module, filename) {
 };
 
 const {
+  isDetachedRunView,
+  isRunVisibleInMainTranscript,
   isRunBlockingSelectedBranch,
   isRunVisibleInSelectedTranscript,
 } = require('../src/utils/runVisibility.ts');
@@ -89,10 +91,36 @@ function testNonStreamingRunDoesNotBlockBranch() {
   assert.equal(isRunBlockingSelectedBranch(run, 'node-openai', new Set(['node-hello'])), false);
 }
 
+function testDetachedBackgroundRunIsSideViewNotMainTranscript() {
+  const run = chatRun({
+    kind: 'subagent',
+    anchorNodeId: 'node-hello',
+    nodeId: null,
+    targetNodeId: null,
+  });
+
+  assert.equal(isDetachedRunView(run, 'node-hello'), true);
+  assert.equal(isRunVisibleInMainTranscript(run, 'node-hello', new Set(['node-hello'])), false);
+}
+
+function testDetachedChatRunStaysInMainTranscriptDuringPreTargetPhase() {
+  const run = chatRun({
+    kind: 'chat',
+    anchorNodeId: 'node-hello',
+    nodeId: null,
+    targetNodeId: null,
+  });
+
+  assert.equal(isDetachedRunView(run, 'node-hello'), false);
+  assert.equal(isRunVisibleInMainTranscript(run, 'node-hello', new Set(['node-hello'])), true);
+}
+
 testChildRunIsHiddenFromParentTranscript();
 testChildRunIsVisibleOnItsOwnBranch();
 testExistingBranchRunIsVisibleWhenTargetIsInHistory();
 testPreTargetRunStillBelongsToSelectedAnchor();
 testNonStreamingRunDoesNotBlockBranch();
+testDetachedBackgroundRunIsSideViewNotMainTranscript();
+testDetachedChatRunStaysInMainTranscriptDuringPreTargetPhase();
 
 console.log('runVisibility tests passed');

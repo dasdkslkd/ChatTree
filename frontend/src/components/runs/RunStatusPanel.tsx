@@ -120,7 +120,7 @@ export function RunStatusPanel({ conversationId, runs }: Props) {
         <textarea
           value={workflowScript}
           onChange={(event) => setWorkflowScript(event.target.value)}
-          placeholder={'return await phase("检查", async () => await agent("agent-name", args.task || "任务"))'}
+          placeholder={'return await phase("检查", async () => await agent(args.task || "任务", { agentType: "workflow-worker" }))'}
           className="min-h-20 resize-y rounded-md border bg-transparent px-2 py-1.5 text-xs outline-none"
           style={{ borderColor: 'var(--border)', color: 'var(--fg-secondary)' }}
         />

@@ -22,6 +22,25 @@ export function isRunVisibleInSelectedTranscript(
   return targetNodeId === selectedBranchTipId || currentBranchNodeIds.has(targetNodeId);
 }
 
+export function isDetachedRunView(
+  run: BranchRunLike,
+  selectedBranchTipId: string | null,
+): boolean {
+  const targetNodeId = getRunTargetNodeId(run);
+  if (targetNodeId) return false;
+  if (!['side_question', 'subagent', 'workflow'].includes(run.kind)) return false;
+  return !run.anchorNodeId || run.anchorNodeId === selectedBranchTipId;
+}
+
+export function isRunVisibleInMainTranscript(
+  run: BranchRunLike,
+  selectedBranchTipId: string | null,
+  currentBranchNodeIds: Set<string>,
+): boolean {
+  if (isDetachedRunView(run, selectedBranchTipId)) return false;
+  return isRunVisibleInSelectedTranscript(run, selectedBranchTipId, currentBranchNodeIds);
+}
+
 export function isRunBlockingSelectedBranch(
   run: BranchRunLike,
   selectedBranchTipId: string | null,

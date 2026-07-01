@@ -62,9 +62,7 @@ class WorkflowRuntimeBridge:
 
     async def _agent(self, params: Dict[str, Any]) -> Dict[str, Any]:
         async with self._parallel_sem:
-            agent_name = str(params.get("name") or params.get("agent") or "")
-            if not agent_name:
-                raise ValueError("agent name is required")
+            agent_name = str(params.get("name") or params.get("agent") or "workflow-worker")
             input_data = params.get("input", params.get("prompt", ""))
             options = params.get("options") if isinstance(params.get("options"), dict) else {}
             run = await self.subagent_executor.start(

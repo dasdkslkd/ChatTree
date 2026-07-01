@@ -52,7 +52,7 @@ const DEFAULT_COMMANDS: SlashCommandInfo[] = [
     requires_args: true,
     dispatch_kind: 'subagent',
     tool_policy: 'inherit',
-    persistence_policy: 'side_run',
+    persistence_policy: 'background_run',
     run_kind: 'subagent',
     stream_target_policy: 'anchor_only',
     blocks_main_thread: false,
@@ -66,7 +66,7 @@ const DEFAULT_COMMANDS: SlashCommandInfo[] = [
     requires_args: true,
     dispatch_kind: 'workflow',
     tool_policy: 'inherit',
-    persistence_policy: 'side_run',
+    persistence_policy: 'background_run',
     run_kind: 'workflow',
     stream_target_policy: 'anchor_only',
     blocks_main_thread: false,
@@ -115,4 +115,3 @@ export const slashRegistry = {
     return { command, inputName, args };
   },
 };
-

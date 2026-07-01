@@ -298,9 +298,9 @@ class ChatManager:
             return slash_result.error
         command_name = slash_result.canonical_name or slash_result.command_name or "unknown"
         if slash_result.kind == SlashDispatchKind.SUBAGENT:
-            return f"Slash command '/{command_name}' 已解析，但 fork agent 运行层尚未接入。"
+            return f"Slash command '/{command_name}' 是后台 subagent 命令，必须由消息 SSE 入口分派。"
         if slash_result.kind == SlashDispatchKind.WORKFLOW:
-            return f"Slash command '/{command_name}' 已解析，但 workflow slash 运行层尚未接入。"
+            return f"Slash command '/{command_name}' 是后台 workflow 命令，必须由消息 SSE 入口分派。"
         return f"Slash command '/{command_name}' 暂不可用。"
 
     def _build_prompt_messages(
@@ -571,10 +571,7 @@ class ChatManager:
             "tool_call_id": None,
             "timestamp": int(time())
         })
-        if slash_result.kind in {
-            SlashDispatchKind.MAIN_PROMPT,
-            SlashDispatchKind.SIDE_QUESTION,
-        }:
+        if slash_result.kind == SlashDispatchKind.MAIN_PROMPT:
             user_msg["slash_command"] = self._slash_command_metadata(slash_result)
         normalized_import_files = self._normalize_import_file_refs(import_files)
         if normalized_import_files:

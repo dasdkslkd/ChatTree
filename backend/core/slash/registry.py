@@ -61,7 +61,7 @@ def built_in_slash_definitions() -> list[SlashCommandDefinition]:
             requires_args=True,
             dispatch_kind=SlashDispatchKind.SUBAGENT,
             tool_policy=SlashToolPolicy.INHERIT,
-            persistence_policy=SlashPersistencePolicy.SIDE_RUN,
+            persistence_policy=SlashPersistencePolicy.BACKGROUND_RUN,
             run_kind="subagent",
             prompt_builder=None,
             stream_target_policy="anchor_only",
@@ -75,7 +75,7 @@ def built_in_slash_definitions() -> list[SlashCommandDefinition]:
             requires_args=True,
             dispatch_kind=SlashDispatchKind.WORKFLOW,
             tool_policy=SlashToolPolicy.INHERIT,
-            persistence_policy=SlashPersistencePolicy.SIDE_RUN,
+            persistence_policy=SlashPersistencePolicy.BACKGROUND_RUN,
             run_kind="workflow",
             prompt_builder=None,
             stream_target_policy="anchor_only",
@@ -105,4 +105,3 @@ class SlashCommandRegistry:
 
     def public_definitions(self) -> list[dict]:
         return [definition.to_public_dict() for definition in self._definitions]
-

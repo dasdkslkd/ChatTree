@@ -40,14 +40,31 @@ const firstLine = await new Promise((resolve) => {
 try {
   const payload = JSON.parse(firstLine);
   const args = payload.args || {};
-  const budget = payload.budget || {};
-  const workflow = () => hostCall('workflow', {});
+  const rawBudget = payload.budget || {};
+  const budget = {
+    ...rawBudget,
+    total: rawBudget.total ?? null,
+    spent: () => Number(rawBudget.spent || 0),
+    remaining: () => rawBudget.total == null ? Infinity : Math.max(0, Number(rawBudget.total) - Number(rawBudget.spent || 0)),
+  };
+  const workflow = (nameOrRef, workflowArgs) => hostCall('workflow', { nameOrRef, args: workflowArgs });
   const log = (message, data) => hostCall('log', { message, data });
-  const agent = (name, input, options = {}) => {
-    if (typeof name === 'object' && name !== null) {
-      return hostCall('agent', name);
+  const isNewAgentOptions = (value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    return Object.prototype.hasOwnProperty.call(value, 'agentType')
+      || Object.prototype.hasOwnProperty.call(value, 'agent')
+      || Object.prototype.hasOwnProperty.call(value, 'name');
+  };
+  const agent = (promptOrName, inputOrOptions = {}, maybeOptions = {}) => {
+    if (typeof promptOrName === 'object' && promptOrName !== null) {
+      return hostCall('agent', promptOrName);
     }
-    return hostCall('agent', { name, input, options });
+    if (typeof inputOrOptions === 'string' || !isNewAgentOptions(inputOrOptions)) {
+      return hostCall('agent', { name: promptOrName, input: inputOrOptions, options: maybeOptions || {} });
+    }
+    const options = inputOrOptions;
+    const name = options.agentType || options.agent || options.name || 'workflow-worker';
+    return hostCall('agent', { name, input: promptOrName, options });
   };
   const phase_start = (name, data) => hostCall('phase_start', { name, data });
   const phase_end = (name, data) => hostCall('phase_end', { name, data });
@@ -63,15 +80,24 @@ try {
     }
   };
   const parallel = async (items) => Promise.all(items.map((item) => typeof item === 'function' ? item() : item));
-  const pipeline = async (steps, initial) => {
-    let value = initial;
-    for (const step of steps) {
-      value = await step(value);
-    }
-    return value;
+  const pipeline = async (items, ...stages) => {
+    if (!Array.isArray(items)) throw new Error('pipeline items must be an array');
+    return Promise.all(items.map(async (item, index) => {
+      let value = item;
+      try {
+        for (const stage of stages) {
+          value = await stage(value, item, index);
+          if (value === null || value === undefined) break;
+        }
+        return value ?? null;
+      } catch {
+        return null;
+      }
+    }));
   };
 
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const script = String(payload.script || '').replace(/\bexport\s+const\s+meta\s*=/, 'const meta =');
   const fn = new AsyncFunction(
     'agent',
     'parallel',
@@ -83,7 +109,7 @@ try {
     'workflow',
     'budget',
     'args',
-    `"use strict"; const require = undefined; const process = undefined; const global = undefined; ${payload.script}`,
+    `"use strict"; const require = undefined; const process = undefined; const global = undefined; ${script}`,
   );
   const result = await fn(agent, parallel, pipeline, phase, phase_start, phase_end, log, workflow, budget, args);
   emit({ type: 'done', result });

@@ -6,11 +6,13 @@ from pydantic import BaseModel
 import asyncio
 import json
 import logging
+from ...core.agents import SubagentExecutor
 from ...core.chat.chat_manager import ChatManager
-from ..dependencies import get_chat_manager, get_run_manager
+from ..dependencies import get_chat_manager, get_run_manager, get_subagent_executor, get_workflow_manager
 from ...core.config.types import Message, StreamChunk
 from ...core.runs import RunKind, RunManager, RunNotFoundError, RunStatus
-from ...core.slash import SlashCommandDispatcher
+from ...core.slash import SlashCommandDispatcher, SlashDispatchKind
+from ...core.workflows import WorkflowManager
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -174,10 +176,61 @@ async def detached_stream_event_generator(
     request: SendMessageRequest,
     chat_manager: ChatManager,
     run_manager: RunManager | None = None,
+    subagent_executor: SubagentExecutor | None = None,
+    workflow_manager: WorkflowManager | None = None,
 ) -> AsyncIterator[str]:
     """Stream SSE events without tying generation lifetime to the client socket."""
     run_manager = _resolve_run_manager(run_manager)
     slash_result = SlashCommandDispatcher().dispatch(request.content)
+
+    if slash_result.kind == SlashDispatchKind.ERROR:
+        yield _format_sse_data(_stream_error_chunk(conversation_id, slash_result.error or "Slash command error"))
+        yield _format_sse_data("[DONE]")
+        return
+
+    if slash_result.kind == SlashDispatchKind.SUBAGENT:
+        if subagent_executor is None:
+            yield _format_sse_data(_stream_error_chunk(conversation_id, "Subagent 执行器未初始化"))
+            yield _format_sse_data("[DONE]")
+            return
+        try:
+            run = await subagent_executor.start(
+                conversation_id=conversation_id,
+                agent_name="implementer",
+                input_data=slash_result.args,
+                parent_node_id=request.node_id,
+                provider_id=request.provider_id,
+                model_id=request.model_id,
+                permission_mode=request.tool_permission_mode,
+            )
+        except Exception as exc:
+            yield _format_sse_data(_stream_error_chunk(conversation_id, str(exc)))
+            yield _format_sse_data("[DONE]")
+            return
+        async for event in _subscribe_sse(run_manager, str(run["run_id"]), 0):
+            yield event
+        return
+
+    if slash_result.kind == SlashDispatchKind.WORKFLOW:
+        if workflow_manager is None:
+            yield _format_sse_data(_stream_error_chunk(conversation_id, "Workflow 管理器未初始化"))
+            yield _format_sse_data("[DONE]")
+            return
+        try:
+            run = await workflow_manager.start(
+                conversation_id=conversation_id,
+                script=slash_result.args,
+                args={},
+                parent_node_id=request.node_id,
+            )
+        except Exception as exc:
+            yield _format_sse_data(_stream_error_chunk(conversation_id, str(exc)))
+            yield _format_sse_data("[DONE]")
+            return
+        async for event in _subscribe_sse(run_manager, str(run["run_id"]), 0):
+            yield event
+        return
+
     run_kind = RunKind(str(slash_result.run_kind or RunKind.CHAT.value))
     run = await run_manager.create_run(
         conversation_id=conversation_id,
@@ -259,11 +312,20 @@ async def stream_message(
     request: SendMessageRequest,
     chat_manager: ChatManager = Depends(get_chat_manager),
     run_manager: RunManager = Depends(get_run_manager),
+    subagent_executor: SubagentExecutor = Depends(get_subagent_executor),
+    workflow_manager: WorkflowManager = Depends(get_workflow_manager),
 ):
     """流式发送消息 - 返回 SSE 格式"""
     
     return StreamingResponse(
-        detached_stream_event_generator(conversation_id, request, chat_manager, run_manager),
+        detached_stream_event_generator(
+            conversation_id,
+            request,
+            chat_manager,
+            run_manager,
+            subagent_executor,
+            workflow_manager,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

@@ -125,6 +125,9 @@ class WorkflowJsRunner:
                     process.kill()
                 with suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(asyncio.to_thread(process.wait), timeout=1)
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is not None and not stream.closed:
+                    stream.close()
 
     def _write_worker_message(self, process: subprocess.Popen, payload: Dict[str, Any]) -> None:
         if process.stdin is None or process.stdin.closed:

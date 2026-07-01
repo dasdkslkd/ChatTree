@@ -33,3 +33,5 @@ class PromptBuildRequest:
     extra_sections: Iterable[PromptSection] = ()
     capability_char_budget: Optional[int] = None
     include_available_capabilities: bool = True
+    include_core_prompt: bool = True
+    runtime_mode: str = "main"
