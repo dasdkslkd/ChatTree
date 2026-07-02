@@ -35,7 +35,11 @@ class WaitTerminalTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return "Wait for a managed background terminal run to finish and return its status and output tails."
+        return (
+            "Join a managed background terminal run and return its final status and output. "
+            "Use this only when the current answer must consume the background terminal result; "
+            "once a final result is returned, ChatTree treats that terminal result as observed and will not send a later task notification for it."
+        )
 
     def parameters_schema(self) -> Dict[str, Any]:
         return {
@@ -66,6 +70,15 @@ class WaitTerminalTool(BaseTool):
         if snapshot is None:
             return _json({"error": {"type": "not_found", "message": "terminal run not found", "terminal_run_id": run_id}})
         snapshot["wait_timed_out"] = False
+        context = _runtime_context(kwargs) or {}
+        if snapshot.get("status") in {"completed", "failed", "cancelled"} and hasattr(executor, "mark_observed"):
+            await executor.mark_observed(
+                run_id,
+                observer_run_id=str(context.get("run_id") or "") or None,
+                via=self.name,
+            )
+            snapshot = executor.snapshot(run_id) or snapshot
+            snapshot["wait_timed_out"] = False
         return _json(snapshot)
 
 
@@ -80,7 +93,10 @@ class StartTerminalTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return "Start a managed background terminal command in the code workspace and return a terminal_run_id immediately."
+        return (
+            "Start a true background terminal command in the code workspace and return a terminal_run_id immediately. "
+            "Use run_command for short synchronous commands when the current answer needs the result immediately."
+        )
 
     def parameters_schema(self) -> Dict[str, Any]:
         return {
@@ -134,7 +150,7 @@ class StartTerminalTool(BaseTool):
             "kind": "terminal",
             "terminal_run_id": run["run_id"],
             "run_id": run["run_id"],
-            "message": "Terminal command is running in the background. Use wait_terminal, read_terminal, or stop_terminal with this terminal_run_id.",
+            "message": "Terminal command is running in the background. Use read_terminal to inspect it, wait_terminal only when this answer must join the result, or stop_terminal to cancel it.",
         })
 
 
@@ -145,7 +161,10 @@ class ReadTerminalTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return "Read stdout, stderr, status, and metadata for a managed terminal run."
+        return (
+            "Read stdout, stderr, status, and metadata for a managed terminal run without blocking. "
+            "If a model tool call reads a final result, ChatTree treats that terminal result as observed and suppresses later task notification for it."
+        )
 
     def parameters_schema(self) -> Dict[str, Any]:
         return {
@@ -167,6 +186,14 @@ class ReadTerminalTool(BaseTool):
         snapshot = executor.snapshot(run_id)
         if snapshot is None:
             return _json({"error": {"type": "not_found", "message": "terminal run not found", "terminal_run_id": run_id}})
+        context = _runtime_context(kwargs) or {}
+        if snapshot.get("status") in {"completed", "failed", "cancelled"} and context.get("run_id") and hasattr(executor, "mark_observed"):
+            await executor.mark_observed(
+                run_id,
+                observer_run_id=str(context.get("run_id") or "") or None,
+                via=self.name,
+            )
+            snapshot = executor.snapshot(run_id) or snapshot
         return _json(snapshot)
 
 

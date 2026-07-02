@@ -851,6 +851,32 @@ def test_run_command_auto_approve_bypasses_unknown_command_policy_prompt(tmp_pat
     asyncio.run(_run_command_auto_approve_bypasses_unknown_command_policy_prompt(tmp_path))
 
 
+async def _explicit_background_terminal_task_allows_sync_run_command_fallback(tmp_path):
+    orchestrator, tool_manager = make_orchestrator(
+        PermissionEngine.default(),
+        LogicalSandbox(workspace_roots=[tmp_path], protected_paths=[".git"]),
+    )
+
+    message = await orchestrator.execute_tool_call(
+        make_tool_call("run_command", {"command": "python tmp/random_integral.py"}),
+        conversation_id="conv-1",
+        node_id="node-1",
+        permission_mode="auto_approve",
+        run_context={
+            "run_id": "run-1",
+            "run_kind": "chat",
+            "task_summary": "开一个后台终端，python计算一个随机积分",
+        },
+    )
+
+    assert tool_manager.calls == [("run_command", {"command": "python tmp/random_integral.py"})]
+    assert json.loads(message["content"]) == {"ok": True, "name": "run_command"}
+
+
+def test_explicit_background_terminal_task_allows_sync_run_command_fallback(tmp_path):
+    asyncio.run(_explicit_background_terminal_task_allows_sync_run_command_fallback(tmp_path))
+
+
 async def _runtime_context_reaches_manager_tool(tmp_path):
     class RuntimeContextToolManager:
         def __init__(self):

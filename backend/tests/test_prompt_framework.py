@@ -54,6 +54,17 @@ class PromptCatalogTests(unittest.TestCase):
         self.assertNotIn("Codex", text)
         self.assertGreaterEqual(len(text), 3000)
 
+    def test_core_prompt_defines_terminal_tool_boundaries(self):
+        text = load_prompt_template("core")
+        self.assertIn("run_command", text)
+        self.assertIn("start_terminal", text)
+        self.assertIn("wait_terminal", text)
+        self.assertIn("Use `run_command` for short synchronous commands", text)
+        self.assertIn("Use `start_terminal` only for true background terminal work", text)
+        self.assertIn("Use `wait_terminal` only when the current answer must join", text)
+        self.assertIn("If the user explicitly asked for a background terminal and that terminal fails", text)
+        self.assertIn("do not describe the final result as completed by the background terminal", text)
+
     def test_side_prompt_is_not_registered(self):
         self.assertNotIn("side", PROMPT_SOURCES)
         self.assertNotIn("btw", PROMPT_SOURCES)

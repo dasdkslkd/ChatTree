@@ -484,7 +484,7 @@ class RunCommandTool(_CodeTool):
 
     @property
     def description(self) -> str:
-        return "Run a development command in the code workspace and return stdout, stderr, and exit code."
+        return "Run a short synchronous development command in the code workspace and return stdout, stderr, and exit code."
 
     def parameters_schema(self) -> Dict[str, Any]:
         return {
@@ -497,7 +497,7 @@ class RunCommandTool(_CodeTool):
                 "background": {
                     "type": "boolean",
                     "default": False,
-                    "description": "Run the command as a managed background terminal run and return a terminal_run_id immediately.",
+                    "description": "This is a compatibility alias for starting a managed background terminal run. Prefer start_terminal for new true background terminal work.",
                 },
             },
             "required": ["command"],
@@ -547,7 +547,7 @@ class RunCommandTool(_CodeTool):
                 "terminal_run_id": run["run_id"],
                 "run_id": run["run_id"],
                 "background": True,
-                "message": "Command is running in the background. Use the terminal run detail or wait for the completion notification.",
+                "message": "Command is running in the background as a compatibility path. Prefer start_terminal for new background terminal work; use read_terminal to inspect it, wait_terminal only when this answer must join the result, or stop_terminal to cancel it.",
             })
         python_c_args = _windows_multiline_python_c_args(command)
         try:

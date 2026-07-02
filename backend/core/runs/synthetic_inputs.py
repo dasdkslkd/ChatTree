@@ -100,6 +100,19 @@ class SyntheticInputQueue:
             item.consumed_at = time()
         return deepcopy(item).to_dict()
 
+    def mark_consumed_by_source(
+        self,
+        *,
+        conversation_id: str,
+        kind: str,
+        source_run_kind: str,
+        source_run_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        existing_id = self._source_index.get((kind, source_run_kind, source_run_id))
+        if not existing_id:
+            return None
+        return self.mark_consumed(conversation_id, existing_id)
+
     def claim(self, conversation_id: str, input_id: str) -> Optional[Dict[str, Any]]:
         item = self._items.get(input_id)
         if not item or item.conversation_id != conversation_id or item.status != "pending":

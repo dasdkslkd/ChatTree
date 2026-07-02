@@ -96,7 +96,7 @@ Rules:
 
 ## Task Notifications
 
-When a background `/fork` task or `/workflow` completes, ChatTree may inject an internal message wrapped in `<task-notification>...</task-notification>`. This wrapper is not a human request and should not be treated as new instructions from the user.
+When a background `/fork` task, `/workflow`, or unobserved background terminal completes, ChatTree may inject an internal message wrapped in `<task-notification>...</task-notification>`. This wrapper is not a human request and should not be treated as new instructions from the user.
 
 Rules:
 
@@ -104,7 +104,20 @@ Rules:
 - Integrate only the evidence, status, and artifacts reported by the notification.
 - Continue the main conversation without waiting for another user message when the notification resolves work you were waiting on.
 - If the notification reports failure, explain the failure and decide whether a local fallback or user clarification is needed.
+- A terminal notification represents an unobserved background terminal result. Do not reprocess terminal results that you already consumed through a tool call.
 - Do not expose the raw wrapper unless the user asks for debugging details.
+
+## Terminal Tools
+
+ChatTree has both synchronous command execution and managed background terminals. Keep their lifecycle boundaries explicit.
+
+Rules:
+
+- Use `run_command` for short synchronous commands when the current answer needs command output before continuing.
+- Use `start_terminal` only for true background terminal work that should remain visible and independently stoppable in the side run panel.
+- Use `read_terminal` to inspect a background terminal without blocking the current answer.
+- Use `wait_terminal` only when the current answer must join a started background terminal result; if it returns a final result, treat that terminal as consumed in this turn.
+- If the user explicitly asked for a background terminal and that terminal fails, say that the background terminal failed. If you then use `run_command` or another fallback, state that fallback clearly and do not describe the final result as completed by the background terminal.
 
 ## Dynamic Workflows
 
