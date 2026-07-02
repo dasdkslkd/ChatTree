@@ -961,12 +961,34 @@ class ChatManager:
                     )
                 )
                 event_get_task = asyncio.create_task(approval_events.get())
+                async def wait_controller_stop():
+                    while not await controller.is_stopped():
+                        await asyncio.sleep(0.05)
+                    return True
+                stop_task = asyncio.create_task(wait_controller_stop())
                 try:
                     while True:
                         done, _ = await asyncio.wait(
-                            {execute_task, event_get_task},
+                            {execute_task, event_get_task, stop_task},
                             return_when=asyncio.FIRST_COMPLETED,
                         )
+                        if stop_task in done and stop_task.result():
+                            generation_status = "stopped"
+                            round_status = "stopped"
+                            execute_task.cancel()
+                            with suppress(asyncio.CancelledError):
+                                await execute_task
+                            yield StreamChunk(
+                                status=StreamStatus.STOPPED,
+                                content="",
+                                node_id=new_node["id"],
+                                target_node_id=new_node["id"],
+                                conversation_id=conversation_id,
+                                run_id=run_id,
+                                error=None,
+                                tokens_used=tokens_used,
+                            )
+                            break
                         if event_get_task in done:
                             event = event_get_task.result()
                             if str(event.get("event_type", "")).startswith("tool_approval_"):
@@ -1004,10 +1026,16 @@ class ChatManager:
                         event_get_task.cancel()
                         with suppress(asyncio.CancelledError):
                             await event_get_task
+                    if not stop_task.done():
+                        stop_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await stop_task
                     if not execute_task.done():
                         execute_task.cancel()
                         with suppress(asyncio.CancelledError):
                             await execute_task
+                if round_status != "completed":
+                    break
                 model_tool_messages = self._apply_round_tool_result_budget(tool_messages)
                 messages.extend(model_tool_messages)
                 all_tool_calls.extend(round_tool_calls)
@@ -1017,7 +1045,6 @@ class ChatManager:
                     "tools": tool_messages,
                     "reasoning": round_reasoning or None,
                 })
-
                 for tool_msg in tool_messages:
                     yield StreamChunk(
                         status=StreamStatus.CONTENT,

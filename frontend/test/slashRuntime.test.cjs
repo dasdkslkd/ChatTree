@@ -137,6 +137,10 @@ function testForkWorkflowPendingSlashRunsRenderAsDrafts() {
   assert.equal(shouldRenderRunDraft(run({ kind: 'workflow', pendingUserMessage: '/workflow run' })), true);
 }
 
+function testRunningSubagentWithoutContentRendersAsDraft() {
+  assert.equal(shouldRenderRunDraft(run({ kind: 'subagent', status: 'streaming' })), true);
+}
+
 function testForkWorkflowPendingApprovalRunsRenderAsDrafts() {
   const pendingApprovals = {
     approval_1: { id: 'approval_1', status: 'pending', tool_name: 'shell_command' },
@@ -169,6 +173,13 @@ function testBackgroundWorkflowWithoutTranscriptStateDoesNotRenderAsDraft() {
   assert.equal(shouldRenderRunDraft(run({ kind: 'workflow' })), false);
 }
 
+function testWorkflowEventsRenderAsDraftState() {
+  assert.equal(shouldRenderRunDraft(run({
+    kind: 'workflow',
+    workflowEvents: [{ eventType: 'phase_start', eventIndex: 1, phase: '检查' }],
+  })), true);
+}
+
 testNonBlockingSlashDoesNotQueueBehindMainChat();
 testBlockingSlashStillQueuesBehindMainChat();
 testPlainMessageQueuesBehindMainChat();
@@ -179,11 +190,13 @@ testSlashCompletionStopsAfterCommandArgsBegin();
 testSlashCompletionAppliesCanonicalCommandAndPreservesArgs();
 testForkWorkflowErrorRunsRenderAsDrafts();
 testForkWorkflowPendingSlashRunsRenderAsDrafts();
+testRunningSubagentWithoutContentRendersAsDraft();
 testForkWorkflowPendingApprovalRunsRenderAsDrafts();
 testBtwSideQuestionRunsRenderAsDrafts();
 testDirectResponseRunsRenderAsDrafts();
 testSidePanelRunLabelsUseSlashNames();
 testUnknownBackgroundRunWithoutTranscriptStateDoesNotRenderAsDraft();
 testBackgroundWorkflowWithoutTranscriptStateDoesNotRenderAsDraft();
+testWorkflowEventsRenderAsDraftState();
 
 console.log('slashRuntime tests passed');

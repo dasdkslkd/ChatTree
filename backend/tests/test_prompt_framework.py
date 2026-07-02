@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from backend.api.dependencies import get_chat_manager, get_run_manager, get_subagent_executor, get_workflow_manager
 from backend.api.routes import messages as messages_route
+from backend.api.routes import runs as runs_route
 from backend.api.routes.messages import SendMessageRequest, detached_stream_event_generator
 from backend.core.agents.mailbox import AgentMailbox
 from backend.core.agents.runtime import AgentRuntime
@@ -35,7 +36,9 @@ from backend.core.prompts.catalog import (
     validate_prompt_catalog,
 )
 from backend.core.prompts.types import PromptBuildRequest
-from backend.core.runs import RunKind, RunManager, SyntheticInputQueue
+from backend.core.runs import RunKind, RunManager, RunStatus, SyntheticInputQueue
+from backend.core.runs.journal import RunJournal
+from backend.core.tools.agent_tools import StartSubagentTool, StartWorkflowTool
 from backend.core.workflows.workflow_manager import WorkflowManager
 from backend.core.slash.dispatcher import SlashCommandDispatcher
 from backend.core.slash.registry import SlashCommandRegistry
@@ -501,6 +504,36 @@ class SlashTemplateTests(unittest.TestCase):
         self.assertNotIn("${", result.model_input)
 
 
+class StreamChunkRoutingTests(unittest.TestCase):
+    def test_child_run_started_chunk_preserves_side_run_fields(self):
+        chunk = {
+            "status": StreamStatus.CONTENT,
+            "content": "",
+            "node_id": "node-1",
+            "target_node_id": "node-1",
+            "run_id": "run-parent",
+            "conversation_id": "conversation-1",
+            "event_type": "child_run_started",
+            "child_run_id": "run-child",
+            "child_kind": RunKind.SUBAGENT.value,
+            "child_status": "running",
+            "child_summary": "检查实现",
+            "payload": {
+                "run_id": "run-child",
+                "kind": RunKind.SUBAGENT.value,
+            },
+        }
+
+        payload = messages_route.build_stream_chunk_data(chunk, "conversation-1")
+
+        self.assertEqual(payload["event_type"], "child_run_started")
+        self.assertEqual(payload["child_run_id"], "run-child")
+        self.assertEqual(payload["child_kind"], RunKind.SUBAGENT.value)
+        self.assertEqual(payload["child_status"], "running")
+        self.assertEqual(payload["child_summary"], "检查实现")
+        self.assertEqual(payload["payload"]["run_id"], "run-child")
+
+
 class SlashRuntimeDispatchTests(unittest.IsolatedAsyncioTestCase):
     async def _collect_events(self, generator):
         events = []
@@ -700,6 +733,90 @@ class SyntheticInputQueueTests(unittest.TestCase):
         self.assertEqual(consumed["status"], "consumed")
         self.assertIsNotNone(consumed["consumed_at"])
         self.assertEqual(queue.list_pending("conversation-1"), [])
+
+
+class RunLifecycleContractTests(unittest.IsolatedAsyncioTestCase):
+    async def test_create_child_run_emits_standard_parent_child_event(self):
+        run_manager = RunManager()
+        parent = await run_manager.create_run(
+            conversation_id="conversation-1",
+            kind=RunKind.CHAT,
+            target_node_id="assistant-node-1",
+            summary="parent",
+        )
+
+        child = await run_manager.create_run(
+            conversation_id="conversation-1",
+            kind=RunKind.SUBAGENT,
+            anchor_node_id="assistant-node-1",
+            parent_run_id=parent.run_id,
+            summary="reviewer: inspect",
+            metadata={"agent_name": "reviewer"},
+        )
+
+        parent_events = [
+            event["payload"]
+            for event in run_manager.journal.read_events("conversation-1", parent.run_id)
+        ]
+        child_events = [
+            payload for payload in parent_events
+            if payload.get("event_type") == "child_run_started"
+        ]
+
+        self.assertEqual(len(child_events), 1)
+        self.assertEqual(child_events[0]["child_run_id"], child.run_id)
+        self.assertEqual(child_events[0]["child_kind"], RunKind.SUBAGENT.value)
+        self.assertEqual(child_events[0]["payload"]["parent_run_id"], parent.run_id)
+        self.assertEqual(child_events[0]["payload"]["metadata"]["agent_name"], "reviewer")
+
+    async def test_legacy_start_subagent_tool_preserves_parent_run_id(self):
+        class FakeSubagentExecutor:
+            def __init__(self):
+                self.kwargs = None
+
+            async def start(self, **kwargs):
+                self.kwargs = kwargs
+                return {"run_id": "run-child", "kind": RunKind.SUBAGENT.value, "status": "running"}
+
+        executor = FakeSubagentExecutor()
+        tool = StartSubagentTool(subagent_executor=executor)
+
+        await tool.execute(
+            task="检查实现",
+            agent_name="reviewer",
+            _runtime_context={
+                "run_id": "run-parent",
+                "run_kind": RunKind.CHAT.value,
+                "conversation_id": "conversation-1",
+                "node_id": "assistant-node-1",
+            },
+        )
+
+        self.assertEqual(executor.kwargs["parent_run_id"], "run-parent")
+
+    async def test_legacy_start_workflow_tool_preserves_parent_run_id(self):
+        class FakeWorkflowManager:
+            def __init__(self):
+                self.kwargs = None
+
+            async def start(self, **kwargs):
+                self.kwargs = kwargs
+                return {"run_id": "run-workflow", "kind": RunKind.WORKFLOW.value, "status": "running"}
+
+        manager = FakeWorkflowManager()
+        tool = StartWorkflowTool(workflow_manager=manager)
+
+        await tool.execute(
+            script="log('hello')",
+            _runtime_context={
+                "run_id": "run-parent",
+                "run_kind": RunKind.CHAT.value,
+                "conversation_id": "conversation-1",
+                "node_id": "assistant-node-1",
+            },
+        )
+
+        self.assertEqual(manager.kwargs["parent_run_id"], "run-parent")
 
 
 class SyntheticTaskNotificationTests(unittest.IsolatedAsyncioTestCase):
@@ -1470,22 +1587,35 @@ class DetachedSlashStopRouteTests(unittest.TestCase):
     class FakeSubagentExecutor:
         def __init__(self):
             self.stopped_run_id = None
+            self.stopped_run_ids: list[str] = []
 
         async def stop(self, run_id: str):
             self.stopped_run_id = run_id
+            self.stopped_run_ids.append(run_id)
             return True
 
     class FakeWorkflowManager:
         def __init__(self):
             self.stopped_run_id = None
+            self.stopped_run_ids: list[str] = []
 
         async def stop(self, run_id: str):
             self.stopped_run_id = run_id
+            self.stopped_run_ids.append(run_id)
             return True
 
     def _client(self, run_manager, chat_manager, subagent_executor, workflow_manager):
         app = FastAPI()
         app.include_router(messages_route.router)
+        app.dependency_overrides[get_run_manager] = lambda: run_manager
+        app.dependency_overrides[get_chat_manager] = lambda: chat_manager
+        app.dependency_overrides[get_subagent_executor] = lambda: subagent_executor
+        app.dependency_overrides[get_workflow_manager] = lambda: workflow_manager
+        return TestClient(app)
+
+    def _runs_client(self, run_manager, chat_manager, subagent_executor, workflow_manager):
+        app = FastAPI()
+        app.include_router(runs_route.router)
         app.dependency_overrides[get_run_manager] = lambda: run_manager
         app.dependency_overrides[get_chat_manager] = lambda: chat_manager
         app.dependency_overrides[get_subagent_executor] = lambda: subagent_executor
@@ -1535,6 +1665,90 @@ class DetachedSlashStopRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(workflow_manager.stopped_run_id, run.run_id)
         self.assertEqual(run_manager.get_run(run.run_id)["status"], "stopping")
+
+    def test_stop_stream_message_stops_workflow_step_by_anchor_node(self):
+        run_manager = RunManager()
+        run = asyncio.run(run_manager.create_run(
+            conversation_id="conversation-1",
+            kind=RunKind.WORKFLOW_STEP,
+            anchor_node_id="slash-node-1",
+            summary="step: inspect",
+        ))
+        subagent_executor = self.FakeSubagentExecutor()
+        client = self._client(
+            run_manager,
+            self.FakeChatManager(),
+            subagent_executor,
+            self.FakeWorkflowManager(),
+        )
+
+        response = client.post("/conversations/conversation-1/messages/slash-node-1/stream/stop")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(subagent_executor.stopped_run_id, run.run_id)
+        self.assertEqual(run_manager.get_run(run.run_id)["status"], "stopping")
+
+    def test_stop_stream_message_stops_child_subagent_by_parent_run_id(self):
+        run_manager = RunManager()
+        parent = asyncio.run(run_manager.create_run(
+            conversation_id="conversation-1",
+            kind=RunKind.CHAT,
+            target_node_id="assistant-node-1",
+            summary="parent chat",
+        ))
+        child = asyncio.run(run_manager.create_run(
+            conversation_id="conversation-1",
+            kind=RunKind.SUBAGENT,
+            anchor_node_id="assistant-node-1",
+            parent_run_id=parent.run_id,
+            summary="child agent",
+        ))
+        subagent_executor = self.FakeSubagentExecutor()
+        client = self._client(
+            run_manager,
+            self.FakeChatManager(),
+            subagent_executor,
+            self.FakeWorkflowManager(),
+        )
+
+        response = client.post("/conversations/conversation-1/messages/assistant-node-1/stream/stop")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(child.run_id, subagent_executor.stopped_run_ids)
+        self.assertEqual(run_manager.get_run(parent.run_id)["status"], "stopping")
+        self.assertEqual(run_manager.get_run(child.run_id)["status"], "stopping")
+
+    def test_stop_run_stops_child_subagent_by_parent_run_id(self):
+        run_manager = RunManager()
+        parent = asyncio.run(run_manager.create_run(
+            conversation_id="conversation-1",
+            kind=RunKind.CHAT,
+            target_node_id="assistant-node-1",
+            summary="parent chat",
+        ))
+        child = asyncio.run(run_manager.create_run(
+            conversation_id="conversation-1",
+            kind=RunKind.SUBAGENT,
+            anchor_node_id="assistant-node-1",
+            parent_run_id=parent.run_id,
+            summary="child agent",
+        ))
+        chat_manager = self.FakeChatManager()
+        subagent_executor = self.FakeSubagentExecutor()
+        client = self._runs_client(
+            run_manager,
+            chat_manager,
+            subagent_executor,
+            self.FakeWorkflowManager(),
+        )
+
+        response = client.post(f"/runs/{parent.run_id}/stop")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(chat_manager.stopped_nodes, ["assistant-node-1"])
+        self.assertIn(child.run_id, subagent_executor.stopped_run_ids)
+        self.assertEqual(run_manager.get_run(parent.run_id)["status"], "stopping")
+        self.assertEqual(run_manager.get_run(child.run_id)["status"], "stopping")
 
 
 class AgentRolePromptTests(unittest.TestCase):
@@ -1739,6 +1953,166 @@ class RuntimePolicyTests(unittest.TestCase):
 
         asyncio.run(run_case())
 
+    def test_agent_runtime_notifies_parent_run_when_subagent_starts(self):
+        async def run_case():
+            with tempfile.TemporaryDirectory() as tmpdir:
+                registry = CapabilityRegistry()
+                registry.add_agents([
+                    AgentDefinition(name="reviewer", system_prompt="Reviewer worker body")
+                ])
+                run_manager = RunManager(RunJournal(Path(tmpdir)))
+                parent = await run_manager.create_run(
+                    conversation_id="conversation-1",
+                    kind=RunKind.CHAT,
+                    anchor_node_id="node-1",
+                    target_node_id="assistant-node-1",
+                    summary="parent chat",
+                )
+
+                class FakeSubagentExecutor:
+                    async def start(self, **kwargs):
+                        child = await run_manager.create_run(
+                            conversation_id=kwargs["conversation_id"],
+                            kind=RunKind.SUBAGENT,
+                            anchor_node_id=kwargs.get("parent_node_id"),
+                            parent_run_id=kwargs.get("parent_run_id"),
+                            summary=kwargs.get("delegated_task") or "",
+                            metadata={"agent_name": kwargs.get("agent_name")},
+                        )
+                        return child.to_dict()
+
+                runtime = AgentRuntime(
+                    run_manager=run_manager,
+                    mailbox=AgentMailbox(),
+                    subagent_executor=FakeSubagentExecutor(),
+                    capability_registry=registry,
+                )
+
+                result = await runtime.spawn_agent(
+                    source=AgentSource(
+                        conversation_id="conversation-1",
+                        run_id=parent.run_id,
+                        run_kind=RunKind.CHAT.value,
+                        anchor_node_id="node-1",
+                    ),
+                    agent_name="reviewer",
+                    task="检查实现",
+                    context_mode="fresh",
+                )
+
+                payloads = [
+                    event["payload"]
+                    for event in run_manager.journal.read_events("conversation-1", parent.run_id)
+                ]
+                child_events = [
+                    payload for payload in payloads
+                    if payload.get("event_type") == "child_run_started"
+                ]
+                self.assertEqual(len(child_events), 1)
+                self.assertEqual(child_events[0]["child_run_id"], result["run_id"])
+                self.assertEqual(child_events[0]["child_kind"], RunKind.SUBAGENT.value)
+                self.assertIsNone(child_events[0].get("parent_run_id"))
+                self.assertEqual(child_events[0]["payload"]["parent_run_id"], parent.run_id)
+
+        asyncio.run(run_case())
+
+    def test_subagent_stop_cancels_registered_producer_task(self):
+        async def run_case():
+            registry = CapabilityRegistry()
+            registry.add_agents([
+                AgentDefinition(name="reviewer", system_prompt="Reviewer worker body")
+            ])
+            run_manager = RunManager()
+            executor = SubagentExecutor(
+                chat_manager=DummyChatManager(),
+                run_manager=run_manager,
+                capability_registry=registry,
+            )
+            run = await run_manager.create_run(
+                conversation_id="conversation-1",
+                kind=RunKind.SUBAGENT,
+                anchor_node_id="node-1",
+                summary="reviewer: inspect",
+            )
+            task = asyncio.create_task(asyncio.sleep(60))
+            executor._tasks[run.run_id] = task
+
+            stopped = await executor.stop(run.run_id)
+            await asyncio.sleep(0)
+
+            self.assertTrue(stopped)
+            self.assertTrue(task.cancelled())
+            self.assertEqual(run_manager.get_run(run.run_id)["status"], RunStatus.STOPPING.value)
+
+        asyncio.run(run_case())
+
+    def test_agent_runtime_close_interrupt_use_owner_stop(self):
+        async def run_case():
+            run_manager = RunManager()
+            run = await run_manager.create_run(
+                conversation_id="conversation-1",
+                kind=RunKind.SUBAGENT,
+                anchor_node_id="node-1",
+                summary="reviewer: inspect",
+            )
+
+            class FakeSubagentExecutor:
+                def __init__(self):
+                    self.stopped: list[str] = []
+
+                async def stop(self, run_id):
+                    self.stopped.append(run_id)
+                    await run_manager.request_stop(run_id)
+                    return True
+
+            executor = FakeSubagentExecutor()
+            runtime = AgentRuntime(
+                run_manager=run_manager,
+                mailbox=AgentMailbox(),
+                subagent_executor=executor,
+                capability_registry=CapabilityRegistry(),
+            )
+
+            await runtime.close_agent(run_id=run.run_id)
+            await runtime.interrupt_agent(run_id=run.run_id)
+
+            self.assertEqual(executor.stopped, [run.run_id, run.run_id])
+
+        asyncio.run(run_case())
+
+    def test_agent_runtime_close_uses_subagent_owner_for_workflow_step(self):
+        async def run_case():
+            run_manager = RunManager()
+            run = await run_manager.create_run(
+                conversation_id="conversation-1",
+                kind=RunKind.WORKFLOW_STEP,
+                anchor_node_id="node-1",
+                summary="workflow step",
+            )
+
+            class FakeSubagentExecutor:
+                def __init__(self):
+                    self.stopped: list[str] = []
+
+                async def stop(self, run_id):
+                    self.stopped.append(run_id)
+                    await run_manager.request_stop(run_id)
+                    return True
+
+            executor = FakeSubagentExecutor()
+            runtime = AgentRuntime(
+                run_manager=run_manager,
+                mailbox=AgentMailbox(),
+                subagent_executor=executor,
+                capability_registry=CapabilityRegistry(),
+            )
+
+            await runtime.close_agent(run_id=run.run_id)
+
+            self.assertEqual(executor.stopped, [run.run_id])
+
+        asyncio.run(run_case())
+
 class WorkflowRuntimeBridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_unnamed_workflow_agent_defaults_to_workflow_worker(self):
         class FakeSubagentExecutor:
@@ -1841,6 +2215,42 @@ class WorkflowRuntimeBridgeTests(unittest.IsolatedAsyncioTestCase):
             pass
 
         self.assertEqual(subagent_executor.stopped_run_id, "child-1")
+
+    async def test_workflow_manager_stop_stops_active_child_subagents(self):
+        run_manager = RunManager()
+        workflow = await run_manager.create_run(
+            conversation_id="conversation-1",
+            kind=RunKind.WORKFLOW,
+            anchor_node_id="node-1",
+            summary="workflow",
+        )
+        child = await run_manager.create_run(
+            conversation_id="conversation-1",
+            kind=RunKind.SUBAGENT,
+            anchor_node_id="node-1",
+            parent_run_id=workflow.run_id,
+            summary="child",
+        )
+
+        class FakeSubagentExecutor:
+            def __init__(self):
+                self.stopped: list[str] = []
+
+            async def stop(self, run_id):
+                self.stopped.append(run_id)
+                await run_manager.request_stop(run_id)
+                return True
+
+        subagent_executor = FakeSubagentExecutor()
+        manager = WorkflowManager(
+            run_manager=run_manager,
+            subagent_executor=subagent_executor,
+        )
+
+        await manager.stop(workflow.run_id)
+
+        self.assertEqual(subagent_executor.stopped, [child.run_id])
+        self.assertEqual(run_manager.get_run(child.run_id)["status"], RunStatus.STOPPING.value)
 
 
 class WorkflowRuntimeWorkerTests(unittest.TestCase):

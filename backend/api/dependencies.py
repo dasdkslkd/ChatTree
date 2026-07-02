@@ -145,6 +145,11 @@ def get_workflow_manager(request: Request):
         raise HTTPException(status_code=500, detail=f"依赖注入错误: {str(e)}")
 
 
+def get_terminal_executor(request: Request):
+    """获取 Terminal 执行器；未初始化时返回 None 以兼容旧测试/轻量路由。"""
+    return getattr(request.app.state, 'terminal_executor', None)
+
+
 def get_config_manager(request: Request):
     """获取配置管理器"""
     try:

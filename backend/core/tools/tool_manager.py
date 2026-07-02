@@ -16,6 +16,7 @@ from .code_tools import (
 from .connection_manager import ConnectionManager
 from .mcp_client import MCPClient, MCPClientError
 from .mcp_tools import MCPSearchTool, MCPUrlReadTool
+from .terminal_tools import ReadTerminalTool, StartTerminalTool, StopTerminalTool, WaitTerminalTool
 from .tool_arguments import normalize_tool_arguments
 from .tool_filter import ToolFilter
 from .web_search import FetchUrlTool, WebSearchTool
@@ -31,7 +32,7 @@ BUILTIN_CODE_TOOL_GROUPS = {
     "read": {"list_files", "read_file"},
     "search": {"search_files"},
     "edit": {"edit_file", "apply_patch"},
-    "shell": {"run_command"},
+    "shell": {"run_command", "start_terminal", "wait_terminal", "read_terminal", "stop_terminal"},
     "write": {"write_file"},
 }
 BUILTIN_LOCAL_TOOL_NAMES = (
@@ -45,6 +46,7 @@ BUILTIN_CODE_TOOL_CLASSES = {
     "search_files": SearchFilesTool,
     "edit_file": EditFileTool,
     "run_command": RunCommandTool,
+    "start_terminal": StartTerminalTool,
     "write_file": WriteFileTool,
     "apply_patch": ApplyPatchTool,
 }
@@ -77,6 +79,7 @@ class ToolManager:
         self._tools: Dict[str, BaseTool] = {}
         self._config = config
         self.tool_result_store = tool_result_store or ToolResultStorage()
+        self.terminal_executor: Any = None
         self._mcp_client: Optional[MCPClient] = None
         self._mcp_tools: Dict[str, BaseTool] = {}
         self._connection_manager = ConnectionManager()
@@ -170,6 +173,10 @@ class ToolManager:
             SearchFilesTool(code_tool_config),
             EditFileTool(code_tool_config),
             RunCommandTool(code_tool_config),
+            StartTerminalTool(code_tool_config),
+            WaitTerminalTool(),
+            ReadTerminalTool(),
+            StopTerminalTool(),
             WriteFileTool(code_tool_config),
             ApplyPatchTool(code_tool_config),
         ):
@@ -282,7 +289,10 @@ class ToolManager:
             logger.info(f"Executing tool: {name} with args: {json.dumps(arguments, ensure_ascii=False)[:200]}")
             execute_arguments = dict(arguments)
             if runtime_context is not None:
-                execute_arguments["_runtime_context"] = runtime_context
+                enriched_context = dict(runtime_context)
+                if self.terminal_executor is not None:
+                    enriched_context.setdefault("terminal_executor", self.terminal_executor)
+                execute_arguments["_runtime_context"] = enriched_context
             result = await tool.execute(**execute_arguments)
             logger.info(f"Tool {name} returned {len(result)} chars")
             return result

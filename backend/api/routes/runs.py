@@ -5,11 +5,12 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
-from backend.api.dependencies import get_chat_manager, get_run_manager, get_subagent_executor, get_workflow_manager
+from backend.api.dependencies import get_chat_manager, get_run_manager, get_subagent_executor, get_terminal_executor, get_workflow_manager
 from backend.core.agents import SubagentExecutor
 from backend.core.chat.chat_manager import ChatManager
-from backend.core.runs import RunKind, RunManager
+from backend.core.runs import RunManager
 from backend.core.workflows import WorkflowManager
+from .run_control import stop_run_tree
 
 router = APIRouter()
 
@@ -79,20 +80,20 @@ async def stop_run(
     run_manager: RunManager = Depends(get_run_manager),
     chat_manager: ChatManager = Depends(get_chat_manager),
     subagent_executor: SubagentExecutor = Depends(get_subagent_executor),
+    terminal_executor: Any = Depends(get_terminal_executor),
     workflow_manager: WorkflowManager = Depends(get_workflow_manager),
 ):
     run = run_manager.get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="运行不存在")
-    await run_manager.request_stop(run_id)
-    if run.get("kind") == RunKind.CHAT.value and run.get("target_node_id"):
-        await chat_manager.stop_stream(str(run["target_node_id"]))
-    elif run.get("kind") == RunKind.SIDE_QUESTION.value:
-        await chat_manager.stop_stream(run_id)
-    elif run.get("kind") == RunKind.SUBAGENT.value:
-        await subagent_executor.stop(run_id)
-    elif run.get("kind") == RunKind.WORKFLOW.value:
-        await workflow_manager.stop(run_id)
+    await stop_run_tree(
+        run_id,
+        run_manager=run_manager,
+        chat_manager=chat_manager,
+        subagent_executor=subagent_executor,
+        terminal_executor=terminal_executor,
+        workflow_manager=workflow_manager,
+    )
     return {"detail": "运行已请求停止"}
 
 
@@ -102,21 +103,22 @@ async def stop_conversation_runs(
     run_manager: RunManager = Depends(get_run_manager),
     chat_manager: ChatManager = Depends(get_chat_manager),
     subagent_executor: SubagentExecutor = Depends(get_subagent_executor),
+    terminal_executor: Any = Depends(get_terminal_executor),
     workflow_manager: WorkflowManager = Depends(get_workflow_manager),
 ):
     stopped: list[str] = []
+    seen: set[str] = set()
     for run in run_manager.list_active(conversation_id):
         run_id = str(run["run_id"])
-        await run_manager.request_stop(run_id)
-        if run.get("kind") == RunKind.CHAT.value and run.get("target_node_id"):
-            await chat_manager.stop_stream(str(run["target_node_id"]))
-        elif run.get("kind") == RunKind.SIDE_QUESTION.value:
-            await chat_manager.stop_stream(run_id)
-        elif run.get("kind") == RunKind.SUBAGENT.value:
-            await subagent_executor.stop(run_id)
-        elif run.get("kind") == RunKind.WORKFLOW.value:
-            await workflow_manager.stop(run_id)
-        stopped.append(run_id)
+        stopped.extend(await stop_run_tree(
+            run_id,
+            run_manager=run_manager,
+            chat_manager=chat_manager,
+            subagent_executor=subagent_executor,
+            terminal_executor=terminal_executor,
+            workflow_manager=workflow_manager,
+            _seen=seen,
+        ))
     return {"detail": "会话运行已请求停止", "run_ids": stopped}
 
 

@@ -21,6 +21,7 @@ const {
   isDetachedRunView,
   isRunVisibleInMainTranscript,
   isRunBlockingSelectedBranch,
+  isRunStoppableFromSelectedBranch,
   isRunVisibleInSelectedTranscript,
 } = require('../src/utils/runVisibility.ts');
 
@@ -139,6 +140,47 @@ function testDetachedChatRunStaysInMainTranscriptDuringPreTargetPhase() {
   assert.equal(isRunVisibleInMainTranscript(run, 'node-hello', new Set(['node-hello'])), true);
 }
 
+function testDetachedSubagentCanBeStoppedFromSelectedAnchorWithoutBlockingTranscript() {
+  const run = chatRun({
+    kind: 'subagent',
+    status: 'streaming',
+    anchorNodeId: 'node-hello',
+    nodeId: null,
+    targetNodeId: null,
+  });
+
+  assert.equal(isRunBlockingSelectedBranch(run, 'node-hello', new Set(['node-hello'])), false);
+  assert.equal(isRunStoppableFromSelectedBranch(run, 'node-hello', new Set(['node-hello'])), true);
+}
+
+function testTerminalRunIsSideViewAndStoppableFromAnchor() {
+  const run = chatRun({
+    kind: 'terminal',
+    status: 'streaming',
+    anchorNodeId: 'node-hello',
+    nodeId: null,
+    targetNodeId: null,
+  });
+
+  assert.equal(isDetachedRunView(run, 'node-hello'), true);
+  assert.equal(isRunVisibleInMainTranscript(run, 'node-hello', new Set(['node-hello'])), false);
+  assert.equal(isRunStoppableFromSelectedBranch(run, 'node-hello', new Set(['node-hello'])), true);
+}
+
+function testSubagentWithTargetNodeStillUsesSideView() {
+  const run = chatRun({
+    kind: 'subagent',
+    status: 'streaming',
+    anchorNodeId: 'node-hello',
+    nodeId: 'run-child-node',
+    targetNodeId: 'run-child-node',
+  });
+
+  assert.equal(isDetachedRunView(run, 'node-hello'), true);
+  assert.equal(isRunVisibleInMainTranscript(run, 'node-hello', new Set(['node-hello'])), false);
+  assert.equal(isRunStoppableFromSelectedBranch(run, 'node-hello', new Set(['node-hello'])), true);
+}
+
 testChildRunIsHiddenFromParentTranscript();
 testChildRunIsVisibleOnItsOwnBranch();
 testExistingBranchRunIsVisibleWhenTargetIsInHistory();
@@ -148,5 +190,8 @@ testDetachedBackgroundRunIsSideViewNotMainTranscript();
 testDirectResponseRunIsSideViewNotMainTranscriptWithoutNode();
 testDirectResponseRunNeverEntersMainTranscriptEvenWithTargetNode();
 testDetachedChatRunStaysInMainTranscriptDuringPreTargetPhase();
+testDetachedSubagentCanBeStoppedFromSelectedAnchorWithoutBlockingTranscript();
+testTerminalRunIsSideViewAndStoppableFromAnchor();
+testSubagentWithTargetNodeStillUsesSideView();
 
 console.log('runVisibility tests passed');

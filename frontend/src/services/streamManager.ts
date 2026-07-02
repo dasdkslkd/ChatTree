@@ -6,12 +6,13 @@ import type { RunEventPayload, RunRecord } from '../types/run';
 import { messageApi } from '../api/message';
 import { runsApi } from '../api/runs';
 import { slashRegistry } from './slashRegistry';
+import { isSideRunKind } from '../utils/sideRunSync';
 
 export const STREAM_DURATION_UPDATE_MS = 1000;
 
 export interface StreamState {
   runId: string;
-  status: 'idle' | 'streaming' | 'waiting_approval' | 'completed' | 'error' | 'stopped';
+  status: 'idle' | 'streaming' | 'waiting_approval' | 'stopping' | 'completed' | 'error' | 'stopped';
   content: string;
   reasoning: string;
   reasoningActive: boolean;
@@ -22,6 +23,12 @@ export interface StreamState {
   targetNodeId: string | null;
   conversationId: string;
   kind: string;
+  parentRunId: string | null;
+  summary: string;
+  metadata: Record<string, unknown>;
+  workflowEvents: WorkflowEventState[];
+  terminal: TerminalRunState;
+  sideRunNotifications: SideRunNotificationState[];
   tokensUsed: number;
   duration: number;
   errorMessage: string | null;
@@ -29,6 +36,48 @@ export interface StreamState {
   pendingUserMessage: string | null;
   eventCount: number;
   createdAt: number;
+}
+
+export interface TerminalRunState {
+  stdout: string;
+  stderr: string;
+  events: TerminalEventState[];
+  exitCode: number | null;
+  durationSeconds: number | null;
+  status: string | null;
+  pid: number | null;
+  command: string | null;
+  cwd: string | null;
+}
+
+export interface TerminalEventState {
+  eventIndex: number;
+  eventType: string;
+  channel: string | null;
+  content: string | null;
+  exitCode: number | null;
+  durationSeconds: number | null;
+  status: string | null;
+  pid: number | null;
+  command: string | null;
+  cwd: string | null;
+  error: string | null;
+}
+
+export interface WorkflowEventState {
+  eventIndex: number;
+  eventType: string;
+  phase: string | null;
+  childRunId: string | null;
+  childKind: string | null;
+  status: string | null;
+  content: string | null;
+  payload: unknown;
+}
+
+export interface SideRunNotificationState {
+  runId: string;
+  kind: string;
 }
 
 type StatusListener = (conversationId: string) => void;
@@ -144,9 +193,10 @@ function mergeApproval(
   };
 }
 
-function mapRunStatus(status: unknown): 'streaming' | 'waiting_approval' | 'completed' | 'error' | 'stopped' | null {
+function mapRunStatus(status: unknown): 'streaming' | 'waiting_approval' | 'stopping' | 'completed' | 'error' | 'stopped' | null {
   if (status === 'running' || status === 'content' || status === 'start') return 'streaming';
   if (status === 'waiting_approval') return 'waiting_approval';
+  if (status === 'stopping') return 'stopping';
   if (status === 'complete' || status === 'completed') return 'completed';
   if (status === 'error' || status === 'failed') return 'error';
   if (status === 'stopped' || status === 'cancelled') return 'stopped';
@@ -155,15 +205,115 @@ function mapRunStatus(status: unknown): 'streaming' | 'waiting_approval' | 'comp
 
 function mapRunRecordStatus(status: unknown): StreamState['status'] {
   if (status === 'waiting_approval') return 'waiting_approval';
+  if (status === 'stopping') return 'stopping';
   if (status === 'completed') return 'completed';
   if (status === 'failed') return 'error';
   if (status === 'cancelled') return 'stopped';
   return 'streaming';
 }
 
+function createTerminalState(): TerminalRunState {
+  return {
+    stdout: '',
+    stderr: '',
+    events: [],
+    exitCode: null,
+    durationSeconds: null,
+    status: null,
+    pid: null,
+    command: null,
+    cwd: null,
+  };
+}
+
 function getRequestRunKind(request: SendMessageRequest): string {
   const match = slashRegistry.match(request.content);
   return match?.command.run_kind || 'chat';
+}
+
+function normalizeTimestampMs(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  return value > 1_000_000_000_000 ? value : value * 1000;
+}
+
+function getStringOrNull(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function isWorkflowEvent(chunk: any): boolean {
+  return [
+    'workflow_start',
+    'workflow_log',
+    'phase_start',
+    'phase_end',
+    'workflow_child_event',
+    'workflow_result',
+    'workflow_cancelled',
+  ].includes(String(chunk?.event_type || ''));
+}
+
+function isTerminalEvent(chunk: any): boolean {
+  return typeof chunk.event_type === 'string' && chunk.event_type.startsWith('terminal_');
+}
+
+function toTerminalEvent(chunk: any): TerminalEventState {
+  return {
+    eventIndex: typeof chunk.event_index === 'number' ? chunk.event_index : -1,
+    eventType: String(chunk.event_type || ''),
+    channel: typeof chunk.channel === 'string' ? chunk.channel : null,
+    content: typeof chunk.content === 'string' ? chunk.content : null,
+    exitCode: typeof chunk.exit_code === 'number' ? chunk.exit_code : null,
+    durationSeconds: typeof chunk.duration_seconds === 'number' ? chunk.duration_seconds : null,
+    status: typeof chunk.terminal_status === 'string' ? chunk.terminal_status : null,
+    pid: typeof chunk.pid === 'number' ? chunk.pid : null,
+    command: typeof chunk.command === 'string' ? chunk.command : null,
+    cwd: typeof chunk.cwd === 'string' ? chunk.cwd : null,
+    error: typeof chunk.error === 'string' ? chunk.error : null,
+  };
+}
+
+function applyTerminalEvent(terminal: TerminalRunState, chunk: any): TerminalRunState {
+  const event = toTerminalEvent(chunk);
+  const existingIndex = terminal.events.findIndex((item) => item.eventIndex === event.eventIndex && event.eventIndex >= 0);
+  const events = existingIndex >= 0
+    ? terminal.events.map((item, index) => (index === existingIndex ? event : item))
+    : [...terminal.events, event].sort((a, b) => a.eventIndex - b.eventIndex);
+  return {
+    stdout: event.eventType === 'terminal_stdout' && event.content ? terminal.stdout + event.content : terminal.stdout,
+    stderr: event.eventType === 'terminal_stderr' && event.content ? terminal.stderr + event.content : terminal.stderr,
+    events,
+    exitCode: event.exitCode ?? terminal.exitCode,
+    durationSeconds: event.durationSeconds ?? terminal.durationSeconds,
+    status: event.status
+      ?? (event.eventType === 'terminal_exited' ? 'completed' : event.eventType === 'terminal_stopped' ? 'cancelled' : terminal.status),
+    pid: event.pid ?? terminal.pid,
+    command: event.command ?? terminal.command,
+    cwd: event.cwd ?? terminal.cwd,
+  };
+}
+
+function isAggregateResultEvent(chunk: any): boolean {
+  return ['subagent_result', 'workflow_result'].includes(String(chunk?.event_type || ''));
+}
+
+function toWorkflowEvent(chunk: any): WorkflowEventState {
+  return {
+    eventIndex: typeof chunk.event_index === 'number' ? chunk.event_index : -1,
+    eventType: String(chunk.event_type || ''),
+    phase: getStringOrNull(chunk.phase),
+    childRunId: getStringOrNull(chunk.child_run_id),
+    childKind: getStringOrNull(chunk.child_kind),
+    status: getStringOrNull(chunk.status),
+    content: getStringOrNull(chunk.content),
+    payload: chunk.payload,
+  };
+}
+
+function toSideRunNotification(chunk: any): SideRunNotificationState | null {
+  const runId = getStringOrNull(chunk.child_run_id);
+  const kind = getStringOrNull(chunk.child_kind);
+  if (!runId || !kind || !isSideRunKind(kind)) return null;
+  return { runId, kind };
 }
 
 export class StreamManager {
@@ -196,6 +346,11 @@ export class StreamManager {
       state.runId,
       state.kind,
       state.status,
+      state.parentRunId ?? '',
+      state.summary,
+      JSON.stringify(state.metadata || {}),
+      state.workflowEvents.length,
+      state.sideRunNotifications.map((notification) => `${notification.runId}:${notification.kind}`).join(','),
       state.anchorNodeId ?? '',
       state.nodeId ?? '',
       state.targetNodeId ?? '',
@@ -216,7 +371,7 @@ export class StreamManager {
 
   isStreaming(conversationId?: string): boolean {
     const states = conversationId ? this.getConversationStates(conversationId) : [...this.streams.values()];
-    return states.some((state) => state.status === 'streaming' || state.status === 'waiting_approval');
+    return states.some((state) => state.status === 'streaming' || state.status === 'waiting_approval' || state.status === 'stopping');
   }
 
   getStreamingConversationIds(): string[] {
@@ -224,7 +379,7 @@ export class StreamManager {
     for (const [conversationId, runIds] of this.runsByConversation.entries()) {
       if ([...runIds].some((runId) => {
         const status = this.streams.get(runId)?.status;
-        return status === 'streaming' || status === 'waiting_approval';
+        return status === 'streaming' || status === 'waiting_approval' || status === 'stopping';
       })) {
         ids.push(conversationId);
       }
@@ -326,7 +481,7 @@ export class StreamManager {
     return runIds.every((runId) => {
       const resolved = this.resolveRunId(runId);
       const status = this.streams.get(resolved)?.status;
-      return status !== 'streaming' && status !== 'waiting_approval';
+      return status !== 'streaming' && status !== 'waiting_approval' && status !== 'stopping';
     });
   }
 
@@ -344,6 +499,22 @@ export class StreamManager {
     if (chunk.kind) {
       next.kind = String(chunk.kind);
     }
+    if (chunk.parent_run_id !== undefined) {
+      next.parentRunId = chunk.parent_run_id || null;
+    }
+    if (typeof chunk.summary === 'string') {
+      next.summary = chunk.summary;
+    }
+    if (chunk.metadata && typeof chunk.metadata === 'object') {
+      next.metadata = {
+        ...next.metadata,
+        ...chunk.metadata,
+      };
+    }
+    const createdAt = normalizeTimestampMs(chunk.created_at);
+    if (createdAt !== null) {
+      next.createdAt = createdAt;
+    }
     if (chunk.anchor_node_id !== undefined && !next.targetNodeId) {
       next.anchorNodeId = chunk.anchor_node_id || null;
     }
@@ -355,7 +526,23 @@ export class StreamManager {
     if (typeof chunk.event_index === 'number') {
       next.eventCount = Math.max(next.eventCount, chunk.event_index + 1);
     }
-    if (chunk.content) {
+    if (isWorkflowEvent(chunk)) {
+      const workflowEvent = toWorkflowEvent(chunk);
+      const existingIndex = next.workflowEvents.findIndex((event) => event.eventIndex === workflowEvent.eventIndex);
+      next.workflowEvents = existingIndex >= 0
+        ? next.workflowEvents.map((event, index) => (index === existingIndex ? workflowEvent : event))
+        : [...next.workflowEvents, workflowEvent].sort((a, b) => a.eventIndex - b.eventIndex);
+    }
+    if (isTerminalEvent(chunk)) {
+      next.terminal = applyTerminalEvent(next.terminal, chunk);
+    }
+    if (chunk.event_type === 'child_run_started') {
+      const notification = toSideRunNotification(chunk);
+      if (notification && !next.sideRunNotifications.some((item) => item.runId === notification.runId)) {
+        next.sideRunNotifications = [...next.sideRunNotifications, notification];
+      }
+    }
+    if (chunk.content && !isAggregateResultEvent(chunk) && !isTerminalEvent(chunk)) {
       next.content += chunk.content;
       next.reasoningActive = false;
     }
@@ -399,6 +586,9 @@ export class StreamManager {
     } else if (mappedStatus === 'waiting_approval') {
       next.status = 'waiting_approval';
       next.reasoningActive = false;
+    } else if (mappedStatus === 'stopping') {
+      next.status = 'stopping';
+      next.reasoningActive = false;
     } else if (mappedStatus === 'streaming' && next.status === 'waiting_approval') {
       next.status = 'streaming';
     }
@@ -436,6 +626,12 @@ export class StreamManager {
       targetNodeId: nodeId,
       conversationId,
       kind,
+      parentRunId: null,
+      summary: '',
+      metadata: {},
+      workflowEvents: [],
+      terminal: createTerminalState(),
+      sideRunNotifications: [],
       tokensUsed: 0,
       duration: 0,
       errorMessage: null,
@@ -464,6 +660,12 @@ export class StreamManager {
       targetNodeId: record.target_node_id ?? null,
       conversationId: record.conversation_id,
       kind: record.kind,
+      parentRunId: record.parent_run_id ?? null,
+      summary: record.summary || '',
+      metadata: { ...(record.metadata || {}) },
+      workflowEvents: [],
+      terminal: createTerminalState(),
+      sideRunNotifications: [],
       tokensUsed: 0,
       duration,
       errorMessage: typeof record.metadata?.error === 'string' ? record.metadata.error : null,
@@ -488,6 +690,12 @@ export class StreamManager {
         errorMessage: restored.errorMessage ?? (typeof record.metadata?.error === 'string' ? record.metadata.error : null),
         abortController: null,
         reasoningActive: false,
+        parentRunId: record.parent_run_id ?? restored.parentRunId ?? null,
+        summary: record.summary || restored.summary || '',
+        metadata: {
+          ...(record.metadata || {}),
+          ...(restored.metadata || {}),
+        },
       });
     }
     this.notify(record.conversation_id, true);
@@ -612,11 +820,11 @@ export class StreamManager {
 
   async stopRun(runId: string): Promise<void> {
     const state = this.streams.get(runId);
-    if (!state || (state.status !== 'streaming' && state.status !== 'waiting_approval')) return;
-    this.streams.set(runId, { ...state, status: 'stopped', reasoningActive: false });
+    if (!state || (state.status !== 'streaming' && state.status !== 'waiting_approval' && state.status !== 'stopping')) return;
+    this.streams.set(runId, { ...state, status: 'stopping', reasoningActive: false });
     this.notify(state.conversationId, true);
     try {
-      if (runId.startsWith('run_')) await runsApi.stop(runId);
+      if (!runId.startsWith('client_') && !runId.startsWith('attach_')) await runsApi.stop(runId);
       else if (state.targetNodeId) await messageApi.stopStream(state.conversationId, state.targetNodeId);
       else state.abortController?.abort();
     } catch (_) {

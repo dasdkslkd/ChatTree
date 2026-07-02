@@ -80,7 +80,33 @@ class RunManager:
             "metadata": record.metadata,
             "created_at": record.created_at,
         })
+        if parent_run_id:
+            await self._append_child_started_event(parent_run_id, record)
         return record
+
+    async def _append_child_started_event(self, parent_run_id: str, child: RunRecord) -> None:
+        if not self.get_run(parent_run_id):
+            return
+        await self.append_event(parent_run_id, {
+            "type": "child_run_started",
+            "event_type": "child_run_started",
+            "status": "content",
+            "content": "",
+            "child_run_id": child.run_id,
+            "child_kind": child.kind.value,
+            "child_status": child.status.value,
+            "child_summary": child.summary,
+            "payload": {
+                "run_id": child.run_id,
+                "kind": child.kind.value,
+                "status": child.status.value,
+                "summary": child.summary,
+                "parent_run_id": parent_run_id,
+                "anchor_node_id": child.anchor_node_id,
+                "target_node_id": child.target_node_id,
+                "metadata": dict(child.metadata or {}),
+            },
+        })
 
     async def bind_target_node(self, run_id: str, target_node_id: str) -> RunRecord:
         async with self._lock:
@@ -260,6 +286,20 @@ class RunManager:
             record.to_dict()
             for record in self._runs.values()
             if record.status not in TERMINAL_RUN_STATUSES
+            and (conversation_id is None or record.conversation_id == conversation_id)
+        ]
+
+    def list_active_children(
+        self,
+        *,
+        parent_run_id: str,
+        conversation_id: Optional[str] = None,
+    ) -> list[Dict[str, Any]]:
+        return [
+            record.to_dict()
+            for record in self._runs.values()
+            if record.status not in TERMINAL_RUN_STATUSES
+            and record.parent_run_id == parent_run_id
             and (conversation_id is None or record.conversation_id == conversation_id)
         ]
 

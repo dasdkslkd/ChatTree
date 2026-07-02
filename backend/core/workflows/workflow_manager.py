@@ -80,6 +80,9 @@ class WorkflowManager:
 
     async def stop(self, run_id: str) -> bool:
         requested = await self.run_manager.request_stop(run_id)
+        for child in self.run_manager.list_active_children(parent_run_id=run_id):
+            if child.get("kind") in {RunKind.SUBAGENT.value, RunKind.WORKFLOW_STEP.value}:
+                await self.subagent_executor.stop(str(child["run_id"]))
         task = self._tasks.get(run_id)
         if task and not task.done():
             task.cancel()

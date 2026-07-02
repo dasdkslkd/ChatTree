@@ -415,7 +415,7 @@ async function testWaitingApprovalRunStaysBlockingAndCanBeStopped() {
       assert.equal(manager.areRunsInactive(['run_waiting']), false);
       await manager.stopRun('run_waiting');
       assert.deepEqual(stoppedRunIds, ['run_waiting']);
-      assert.equal(manager.getConversationStates('conv-1')[0].status, 'stopped');
+      assert.equal(manager.getConversationStates('conv-1')[0].status, 'stopping');
     } finally {
       await controlled.close();
       await runTimersUntil(running);
@@ -495,6 +495,194 @@ async function testRestoreCompletedSideRunFromBackendEvents() {
   });
 }
 
+async function testRestoreRunKeepsParentSummaryAndMetadata() {
+  await withManager(async (manager) => {
+    manager.restoreRunFromEvents(
+      {
+        run_id: 'run_step',
+        conversation_id: 'conv-1',
+        kind: 'workflow_step',
+        status: 'completed',
+        anchor_node_id: 'node-anchor',
+        target_node_id: null,
+        parent_run_id: 'run_workflow',
+        summary: '检查实现',
+        event_count: 1,
+        metadata: {
+          workflow_step_index: 1,
+          workflow_step_name: '检查实现',
+        },
+        created_at: 10,
+        updated_at: 11,
+        finished_at: 11,
+      },
+      [
+        {
+          type: 'run_started',
+          run_id: 'run_step',
+          conversation_id: 'conv-1',
+          kind: 'workflow_step',
+          status: 'running',
+          parent_run_id: 'run_workflow',
+          summary: '检查实现',
+          metadata: {
+            workflow_step_index: 1,
+            workflow_step_name: '检查实现',
+          },
+          event_index: 0,
+        },
+      ],
+    );
+
+    const state = manager.getConversationStates('conv-1')[0];
+    assert.equal(state.parentRunId, 'run_workflow');
+    assert.equal(state.summary, '检查实现');
+    assert.equal(state.metadata.workflow_step_index, 1);
+    assert.equal(state.metadata.workflow_step_name, '检查实现');
+  });
+}
+
+async function testSubagentResultDoesNotAppendAlreadyStreamedContent() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    runsApi.attach = controlled.stream;
+    const running = manager.resumeStream('conv-1', null, 'run_subagent', 0, 'node-anchor', 'subagent');
+
+    await controlled.push({
+      run_id: 'run_subagent',
+      conversation_id: 'conv-1',
+      kind: 'subagent',
+      status: 'content',
+      content: 'final answer',
+      event_index: 1,
+    });
+    await controlled.push({
+      run_id: 'run_subagent',
+      conversation_id: 'conv-1',
+      kind: 'subagent',
+      status: 'complete',
+      event_type: 'subagent_result',
+      content: 'final answer',
+      event_index: 2,
+    });
+
+    try {
+      const state = manager.getConversationStates('conv-1')[0];
+      assert.equal(state.content, 'final answer');
+      assert.equal(state.status, 'completed');
+    } finally {
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
+async function testWorkflowResultDoesNotAppendAggregateContentToRunBody() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    runsApi.attach = controlled.stream;
+    const running = manager.resumeStream('conv-1', null, 'run_workflow', 0, 'node-anchor', 'workflow');
+
+    await controlled.push({
+      run_id: 'run_workflow',
+      conversation_id: 'conv-1',
+      kind: 'workflow',
+      status: 'complete',
+      event_type: 'workflow_result',
+      content: 'workflow summary',
+      event_index: 1,
+    });
+
+    try {
+      const state = manager.getConversationStates('conv-1')[0];
+      assert.equal(state.content, '');
+      assert.equal(state.status, 'completed');
+      assert.equal(state.workflowEvents.length, 1);
+      assert.equal(state.workflowEvents[0].content, 'workflow summary');
+    } finally {
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
+async function testTerminalOutputUsesDedicatedBufferInsteadOfRunContent() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    runsApi.attach = controlled.stream;
+    const running = manager.resumeStream('conv-1', null, 'run_terminal', 0, 'node-anchor', 'terminal');
+
+    await controlled.push({
+      run_id: 'run_terminal',
+      conversation_id: 'conv-1',
+      kind: 'terminal',
+      status: 'content',
+      event_type: 'terminal_stdout',
+      content: 'stdout line\n',
+      event_index: 1,
+    });
+    await controlled.push({
+      run_id: 'run_terminal',
+      conversation_id: 'conv-1',
+      kind: 'terminal',
+      status: 'content',
+      event_type: 'terminal_stderr',
+      content: 'stderr line\n',
+      event_index: 2,
+    });
+    await controlled.push({
+      run_id: 'run_terminal',
+      conversation_id: 'conv-1',
+      kind: 'terminal',
+      status: 'content',
+      event_type: 'terminal_exited',
+      exit_code: 0,
+      event_index: 3,
+    });
+
+    try {
+      const state = manager.getConversationStates('conv-1')[0];
+      assert.equal(state.kind, 'terminal');
+      assert.equal(state.content, '');
+      assert.equal(state.terminal.stdout, 'stdout line\n');
+      assert.equal(state.terminal.stderr, 'stderr line\n');
+      assert.equal(state.terminal.exitCode, 0);
+      assert.equal(state.terminal.status, 'completed');
+    } finally {
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
+async function testChildRunStartedEventAddsSideRunNotification() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    messageApi.stream = controlled.stream;
+    const running = manager.startStream('conv-1', { content: 'hello' });
+
+    await controlled.push({
+      type: 'child_run_started',
+      event_type: 'child_run_started',
+      run_id: 'run-parent',
+      conversation_id: 'conv-1',
+      kind: 'chat',
+      status: 'content',
+      child_run_id: 'run-child',
+      child_kind: 'subagent',
+    });
+
+    try {
+      const state = manager.getConversationStates('conv-1')[0];
+      assert.deepEqual(state.sideRunNotifications, [{ runId: 'run-child', kind: 'subagent' }]);
+      assert.equal(state.parentRunId, null);
+    } finally {
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
 async function testGetStatePrefersActiveStreamingRunOverNewerError() {
   await withManager(async (manager) => {
     const oldStream = createControlledStream();
@@ -554,6 +742,59 @@ async function testStopUsesServerRunIdBeforeTargetNodeArrives() {
     try {
       await manager.stopRun('run_server_early');
       assert.deepEqual(stoppedRunIds, ['run_server_early']);
+    } finally {
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
+async function testStopUsesRunsApiForAnyServerRunId() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    const stoppedRunIds = [];
+    runsApi.attach = controlled.stream;
+    runsApi.stop = async (runId) => {
+      stoppedRunIds.push(runId);
+    };
+    const running = manager.resumeStream('conv-1', null, 'srv-child-1', 0, 'node-1', 'subagent');
+
+    await controlled.push({
+      type: 'run_started',
+      run_id: 'srv-child-1',
+      conversation_id: 'conv-1',
+      kind: 'subagent',
+      status: 'running',
+    });
+
+    try {
+      await manager.stopRun('srv-child-1');
+      assert.deepEqual(stoppedRunIds, ['srv-child-1']);
+    } finally {
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
+async function testStoppingStatusIsTrackedExplicitly() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    runsApi.attach = controlled.stream;
+    const running = manager.resumeStream('conv-1', null, 'run-stopping', 0, 'node-1', 'subagent');
+
+    await controlled.push({
+      type: 'run_stop_requested',
+      run_id: 'run-stopping',
+      conversation_id: 'conv-1',
+      kind: 'subagent',
+      status: 'stopping',
+    });
+
+    try {
+      const state = manager.getConversationStates('conv-1')[0];
+      assert.equal(state.status, 'stopping');
+      assert.equal(getStreamStatusText(state.status), '正在停止');
     } finally {
       await controlled.close();
       await runTimersUntil(running);
@@ -766,8 +1007,15 @@ async function main() {
   await testWaitingApprovalRunStaysBlockingAndCanBeStopped();
   await testResumeStreamPreservesAttachedRunKindBeforeFirstEvent();
   await testRestoreCompletedSideRunFromBackendEvents();
+  await testRestoreRunKeepsParentSummaryAndMetadata();
+  await testSubagentResultDoesNotAppendAlreadyStreamedContent();
+  await testWorkflowResultDoesNotAppendAggregateContentToRunBody();
+  await testTerminalOutputUsesDedicatedBufferInsteadOfRunContent();
+  await testChildRunStartedEventAddsSideRunNotification();
   await testGetStatePrefersActiveStreamingRunOverNewerError();
   await testStopUsesServerRunIdBeforeTargetNodeArrives();
+  await testStopUsesRunsApiForAnyServerRunId();
+  await testStoppingStatusIsTrackedExplicitly();
   await testRunFinishedFailedMapsToErrorState();
   await testRunFinishedCancelledMapsToStoppedState();
   await testCompletedDirectResponseCanBeArchivedAndRemovedFromActiveRuns();

@@ -8,12 +8,13 @@ import json
 import logging
 from ...core.agents import SubagentExecutor
 from ...core.chat.chat_manager import ChatManager
-from ..dependencies import get_chat_manager, get_run_manager, get_subagent_executor, get_workflow_manager
+from ..dependencies import get_chat_manager, get_run_manager, get_subagent_executor, get_terminal_executor, get_workflow_manager
 from ...core.config.types import Message, StreamChunk
 from ...core.runs import RunKind, RunManager, RunNotFoundError, RunStatus
 from ...core.slash import SlashCommandDispatcher, SlashDispatchKind, SlashCommandRegistry
 from ...core.slash.direct_response import build_direct_response_text
 from ...core.workflows import WorkflowManager
+from .run_control import stop_run_tree
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -27,6 +28,13 @@ _ACTIVE_MESSAGE_STREAM_KINDS = {
     RunKind.WORKFLOW.value,
     RunKind.WORKFLOW_STEP.value,
 }
+_ANCHOR_STOP_RUN_KINDS = (
+    RunKind.SIDE_QUESTION,
+    RunKind.DIRECT_RESPONSE,
+    RunKind.SUBAGENT,
+    RunKind.WORKFLOW,
+    RunKind.WORKFLOW_STEP,
+)
 
 
 def _wake_synthetic_followup_scheduler(request: Request, conversation_id: str) -> None:
@@ -93,7 +101,18 @@ def build_stream_chunk_data(chunk: StreamChunk, conversation_id: str) -> Dict[st
         "usage_info": chunk.get("usage_info")
     }
     # 仅在存在时转发可扩展字段，保持当前文本路径 JSON 形状不变
-    for opt_key in ("event_type", "reasoning", "tool_call", "tool_calls", "approval"):
+    for opt_key in (
+        "event_type",
+        "reasoning",
+        "tool_call",
+        "tool_calls",
+        "approval",
+        "child_run_id",
+        "child_kind",
+        "child_status",
+        "child_summary",
+        "payload",
+    ):
         val = chunk.get(opt_key)
         if val is not None:
             chunk_data[opt_key] = val
@@ -658,6 +677,7 @@ async def stream_message(
     chat_manager: ChatManager = Depends(get_chat_manager),
     run_manager: RunManager = Depends(get_run_manager),
     subagent_executor: SubagentExecutor = Depends(get_subagent_executor),
+    terminal_executor: Any = Depends(get_terminal_executor),
     workflow_manager: WorkflowManager = Depends(get_workflow_manager),
 ):
     """流式发送消息 - 返回 SSE 格式"""
@@ -735,6 +755,7 @@ async def stream_synthetic_input(
     chat_manager: ChatManager = Depends(get_chat_manager),
     run_manager: RunManager = Depends(get_run_manager),
     subagent_executor: SubagentExecutor = Depends(get_subagent_executor),
+    terminal_executor: Any = Depends(get_terminal_executor),
     workflow_manager: WorkflowManager = Depends(get_workflow_manager),
 ):
     item = run_manager.synthetic_inputs.get(conversation_id, input_id)
@@ -801,6 +822,7 @@ async def stop_stream_message(
     chat_manager: ChatManager = Depends(get_chat_manager),
     run_manager: RunManager = Depends(get_run_manager),
     subagent_executor: SubagentExecutor = Depends(get_subagent_executor),
+    terminal_executor: Any = Depends(get_terminal_executor),
     workflow_manager: WorkflowManager = Depends(get_workflow_manager),
 ):
     """停止流式消息"""
@@ -813,25 +835,29 @@ async def stop_stream_message(
             kind=RunKind.CHAT,
         )
         if run:
-            await run_manager.request_stop(str(run["run_id"]))
-        subagent_run = run_manager.find_active_by_anchor(
-            conversation_id=conversation_id,
-            anchor_node_id=node_id,
-            kind=RunKind.SUBAGENT,
-        )
-        if subagent_run:
-            await run_manager.request_stop(str(subagent_run["run_id"]))
-            if subagent_executor is not None and hasattr(subagent_executor, "stop"):
-                await subagent_executor.stop(str(subagent_run["run_id"]))
-        workflow_run = run_manager.find_active_by_anchor(
-            conversation_id=conversation_id,
-            anchor_node_id=node_id,
-            kind=RunKind.WORKFLOW,
-        )
-        if workflow_run:
-            await run_manager.request_stop(str(workflow_run["run_id"]))
-            if workflow_manager is not None and hasattr(workflow_manager, "stop"):
-                await workflow_manager.stop(str(workflow_run["run_id"]))
+            await stop_run_tree(
+                str(run["run_id"]),
+                run_manager=run_manager,
+                chat_manager=chat_manager,
+                subagent_executor=subagent_executor,
+                terminal_executor=terminal_executor,
+                workflow_manager=workflow_manager,
+            )
+        for run_kind in _ANCHOR_STOP_RUN_KINDS:
+            anchored_run = run_manager.find_active_by_anchor(
+                conversation_id=conversation_id,
+                anchor_node_id=node_id,
+                kind=run_kind,
+            )
+            if anchored_run:
+                await stop_run_tree(
+                    str(anchored_run["run_id"]),
+                    run_manager=run_manager,
+                    chat_manager=chat_manager,
+                    subagent_executor=subagent_executor,
+                    terminal_executor=terminal_executor,
+                    workflow_manager=workflow_manager,
+                )
         await chat_manager.stop_stream(node_id)
         return {"detail": "流式消息已停止"}
     except HTTPException:

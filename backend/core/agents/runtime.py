@@ -194,12 +194,21 @@ class AgentRuntime:
         return {"run_id": run_id, "status": run.get("status") if run else "missing"}
 
     async def close_agent(self, *, run_id: str) -> Dict[str, Any]:
-        await self.run_manager.request_stop(run_id)
+        await self._stop_owned_run(run_id)
         return {"run_id": run_id, "status": "close_requested"}
 
     async def interrupt_agent(self, *, run_id: str) -> Dict[str, Any]:
-        await self.run_manager.request_stop(run_id)
+        await self._stop_owned_run(run_id)
         return {"run_id": run_id, "status": "interrupt_requested"}
+
+    async def _stop_owned_run(self, run_id: str) -> bool:
+        run = self.run_manager.get_run(run_id) or {}
+        kind = run.get("kind")
+        if kind in {RunKind.SUBAGENT.value, RunKind.WORKFLOW_STEP.value} and self.subagent_executor is not None:
+            return bool(await self.subagent_executor.stop(run_id))
+        if kind == RunKind.WORKFLOW.value and self.workflow_manager is not None:
+            return bool(await self.workflow_manager.stop(run_id))
+        return bool(await self.run_manager.request_stop(run_id))
 
     def _result_messages_from_run_journal(self, conversation_id: str, run_id: str) -> list[Dict[str, Any]]:
         messages: list[Dict[str, Any]] = []

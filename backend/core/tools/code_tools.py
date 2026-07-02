@@ -494,6 +494,11 @@ class RunCommandTool(_CodeTool):
                 "command": {"type": "string"},
                 "cwd": {"type": "string", "default": "."},
                 "timeout_seconds": {"type": "integer", "minimum": 1},
+                "background": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Run the command as a managed background terminal run and return a terminal_run_id immediately.",
+                },
             },
             "required": ["command"],
         }
@@ -513,6 +518,37 @@ class RunCommandTool(_CodeTool):
                 self.config.command_timeout_seconds,
             ),
         )
+        if bool(kwargs.get("background", False)):
+            runtime_context = kwargs.get("_runtime_context")
+            if not isinstance(runtime_context, dict):
+                return _error("missing_runtime_context", "background run_command requires runtime context")
+            terminal_executor = runtime_context.get("terminal_executor")
+            if terminal_executor is None or not hasattr(terminal_executor, "start"):
+                return _error("missing_terminal_executor", "background run_command requires a terminal executor")
+            run = await terminal_executor.start(
+                conversation_id=str(runtime_context.get("conversation_id") or ""),
+                command=command,
+                cwd=str(cwd),
+                anchor_node_id=str(runtime_context.get("node_id") or "") or None,
+                parent_run_id=str(runtime_context.get("run_id") or "") or None,
+                summary=command[:80],
+                timeout_seconds=timeout,
+                metadata={
+                    "tool_name": self.name,
+                    "tool_call_id": runtime_context.get("tool_call_id"),
+                    "workspace_relative_cwd": self.workspace.relative(cwd),
+                },
+            )
+            return _json({
+                "command": command,
+                "cwd": self.workspace.relative(cwd),
+                "status": "running",
+                "kind": "terminal",
+                "terminal_run_id": run["run_id"],
+                "run_id": run["run_id"],
+                "background": True,
+                "message": "Command is running in the background. Use the terminal run detail or wait for the completion notification.",
+            })
         python_c_args = _windows_multiline_python_c_args(command)
         try:
             proc = await asyncio.to_thread(

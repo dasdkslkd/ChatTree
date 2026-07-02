@@ -10,6 +10,7 @@ class RunKind(str, Enum):
     CHAT = "chat"
     SIDE_QUESTION = "side_question"
     SUBAGENT = "subagent"
+    TERMINAL = "terminal"
     WORKFLOW = "workflow"
     WORKFLOW_STEP = "workflow_step"
     DIRECT_RESPONSE = "direct_response"

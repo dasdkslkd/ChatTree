@@ -59,15 +59,22 @@ export interface RunDraftLike {
   content?: string | null;
   reasoning?: string | null;
   toolInteractions?: unknown[] | null;
+  workflowEvents?: unknown[] | null;
+  terminal?: { stdout?: string | null; stderr?: string | null; events?: unknown[] | null } | null;
   pendingApprovals?: Record<string, { status?: string | null } | null | undefined> | null;
 }
 
 export function shouldRenderRunDraft(run: RunDraftLike): boolean {
   if (run.kind === 'chat' || run.kind === 'side_question' || run.kind === 'direct_response') return true;
+  if (run.kind === 'terminal' && (run.status === 'streaming' || run.status === 'stopping')) return true;
+  if (run.kind === 'subagent' && (run.status === 'streaming' || run.status === 'waiting_approval' || run.status === 'stopping')) return true;
   if (run.pendingUserMessage) return true;
-  if (run.status === 'error' || run.status === 'stopped') return true;
+  if (run.status === 'error' || run.status === 'stopped' || run.status === 'stopping') return true;
   if (run.content || run.reasoning) return true;
   if (Array.isArray(run.toolInteractions) && run.toolInteractions.length > 0) return true;
+  if (Array.isArray(run.workflowEvents) && run.workflowEvents.length > 0) return true;
+  if (run.terminal?.stdout || run.terminal?.stderr) return true;
+  if (Array.isArray(run.terminal?.events) && run.terminal.events.length > 0) return true;
   if (run.pendingApprovals && Object.values(run.pendingApprovals).some((approval) => approval?.status === 'pending')) return true;
   return false;
 }
@@ -75,6 +82,7 @@ export function shouldRenderRunDraft(run: RunDraftLike): boolean {
 export function getSlashRunLabel(kind: string, pendingUserMessage?: string | null): string {
   if (kind === 'side_question') return 'btw';
   if (kind === 'subagent') return 'fork';
+  if (kind === 'terminal') return 'terminal';
   if (kind === 'workflow') return 'workflow';
   if (kind === 'direct_response') {
     const match = pendingUserMessage?.match(/^\s*\/(status|help|capabilities)\b/i);

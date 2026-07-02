@@ -26,9 +26,7 @@ export function isDetachedRunView(
   run: BranchRunLike,
   selectedBranchTipId: string | null,
 ): boolean {
-  const targetNodeId = getRunTargetNodeId(run);
-  if (targetNodeId) return false;
-  if (!['side_question', 'subagent', 'workflow', 'direct_response'].includes(run.kind)) return false;
+  if (!['side_question', 'subagent', 'terminal', 'workflow', 'direct_response'].includes(run.kind)) return false;
   return !run.anchorNodeId || run.anchorNodeId === selectedBranchTipId;
 }
 
@@ -50,4 +48,14 @@ export function isRunBlockingSelectedBranch(
   return run.kind === 'chat'
     && (run.status === 'streaming' || run.status === 'waiting_approval')
     && isRunVisibleInSelectedTranscript(run, selectedBranchTipId, currentBranchNodeIds);
+}
+
+export function isRunStoppableFromSelectedBranch(
+  run: BranchRunLike,
+  selectedBranchTipId: string | null,
+  currentBranchNodeIds: Set<string>,
+): boolean {
+  if (run.status !== 'streaming' && run.status !== 'waiting_approval' && run.status !== 'stopping') return false;
+  if (isRunBlockingSelectedBranch(run, selectedBranchTipId, currentBranchNodeIds)) return true;
+  return isDetachedRunView(run, selectedBranchTipId);
 }

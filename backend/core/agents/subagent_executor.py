@@ -29,6 +29,7 @@ class SubagentExecutor:
         self.capability_registry = capability_registry
         self.mailbox = mailbox
         self._controllers: dict[str, StreamController] = {}
+        self._tasks: dict[str, asyncio.Task] = {}
 
     async def start(
         self,
@@ -70,7 +71,7 @@ class SubagentExecutor:
                 "context_mode": context_mode if context_mode in {"fresh", "fork"} else "fresh",
             },
         )
-        asyncio.create_task(self._produce(
+        task = asyncio.create_task(self._produce(
             run_id=run.run_id,
             conversation_id=conversation_id,
             agent_name=agent_name,
@@ -83,6 +84,7 @@ class SubagentExecutor:
             workspace=workspace,
             context_mode=context_mode,
         ))
+        self._tasks[run.run_id] = task
         return run.to_dict()
 
     async def stop(self, run_id: str) -> bool:
@@ -90,6 +92,11 @@ class SubagentExecutor:
         controller = self._controllers.get(run_id)
         if controller:
             await controller.stop()
+        task = self._tasks.get(run_id)
+        if task and not task.done():
+            task.cancel()
+            return True
+        if controller:
             return True
         return False
 
@@ -180,6 +187,7 @@ class SubagentExecutor:
             await self.run_manager.append_event(run_id, notification_payload)
         finally:
             self._controllers.pop(run_id, None)
+            self._tasks.pop(run_id, None)
             await self.run_manager.finish_run(run_id, final_status, final_error)
             if notification_payload and final_status in {RunStatus.COMPLETED, RunStatus.FAILED}:
                 source_status = "completed" if final_status == RunStatus.COMPLETED else "failed"

@@ -66,7 +66,7 @@ import {
 import {
   Plus, X, MoreHorizontal, ChevronRight, Square,
   Copy, Check, Pencil, Loader2, RotateCcw, Network, MessageSquare, Trash2, FileText, Download, FolderOpen, FolderPlus, Search, Settings,
-  PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Archive,
+  PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Archive, ArrowLeft,
 } from 'lucide-react';
 import { conversationApi } from '../api/conversation';
 import { messageApi, type ActiveStreamInfo, type ToolResultSlice } from '../api/message';
@@ -84,9 +84,20 @@ import { useRunManager } from '../hooks/useRunManager';
 import { streamManager, type StreamState } from '../services/streamManager';
 import { slashRegistry } from '../services/slashRegistry';
 import { getGenerationStatusText, getStreamStatusText as getStreamStatusLabel } from '../utils/generationStatus';
-import { isDetachedRunView, isRunBlockingSelectedBranch, isRunVisibleInMainTranscript } from '../utils/runVisibility';
+import { isDetachedRunView, isRunBlockingSelectedBranch, isRunStoppableFromSelectedBranch, isRunVisibleInMainTranscript } from '../utils/runVisibility';
 import { resolveSendNodeId, resolveSlashStreamNodeId, shouldSendSlashAnchorNode } from '../utils/sendTarget';
 import { getSlashRunLabel, shouldQueueForMainThread, shouldRenderRunDraft } from '../utils/slashRuntime';
+import {
+  groupDetachedSideRuns,
+  getWorkflowProgressSteps,
+  type SideRunGroupItem,
+} from '../utils/sideRunGrouping';
+import {
+  SIDE_RUN_KINDS,
+  getVisibleSideRunRecords,
+  isTerminalRunStatus,
+} from '../utils/sideRunSync';
+import { collectSideRunNotifications } from '../utils/sideRunNotifications';
 import { isTaskNotificationMessage, shouldExportMessage } from '../utils/taskNotificationVisibility';
 import {
   DEFAULT_TOOL_PERMISSION_MODE,
@@ -112,13 +123,13 @@ import {
   getStreamingTimelineFoldState,
   getTimelineFoldState,
   hasAssistantProcessHistory,
+  type StreamingTimelineFoldState,
 } from '../utils/assistantTimelineFolding';
 import {
   getActiveStreamPollingDelay,
   getConversationActiveStreamLookupLimit,
 } from '../utils/activeStreamPolling';
 import { ChatInput } from '../components/ChatInput';
-import { RunStatusPanel } from '../components/runs/RunStatusPanel';
 import TreeView from './TreeView';
 import {
   getVisibleProjectConversations,
@@ -142,8 +153,6 @@ import {
 const MarkdownContent = lazy(() => import('../components/MarkdownContent'));
 const MANUAL_PROJECTS_STORAGE_KEY = 'chattree.manualProjectWorkspaces';
 const PROJECT_ORDER_STORAGE_KEY = 'chattree.projectOrder';
-const SIDE_RUN_KINDS = new Set(['side_question', 'subagent', 'workflow', 'workflow_step', 'direct_response']);
-const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 
 type SidebarResizeSession = {
   side: SidebarResizeSide;
@@ -629,6 +638,16 @@ type AssistantTimelineBlock =
   | { type: 'content'; key: string; content: string }
   | { type: 'tools'; key: string; items: ToolRenderItem[] };
 
+type SideRunDraft = {
+  run: StreamState;
+  showPendingBubble: boolean;
+  showStreamBlock: boolean;
+  timeline: AssistantTimelineBlock[];
+  streamingFoldState: StreamingTimelineFoldState<AssistantTimelineBlock>;
+  activeReasoningIndex: number;
+  activeReasoningKey: string | null;
+};
+
 type QueuedMessage = {
   id: string;
   conversationId: string;
@@ -947,6 +966,7 @@ export default function ChatPage() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [outlineCollapsed, setOutlineCollapsed] = useState(false);
   const [rightPanelView, setRightPanelView] = useState<'outline' | 'side'>('outline');
+  const [selectedSideRunId, setSelectedSideRunId] = useState<string | null>(null);
   const [leftSidebarWidth, setLeftSidebarWidth] = useState(() =>
     readStoredSidebarWidth(getBrowserStorage(), LEFT_SIDEBAR_WIDTH_STORAGE_KEY, LEFT_SIDEBAR_WIDTH),
   );
@@ -964,6 +984,7 @@ export default function ChatPage() {
   const [attachedImageRefs, setAttachedImageRefs] = useState<Array<{ filename: string; mime_type?: string }>>([]);
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([]);
   const [hiddenSideRunIdsByConversation, setHiddenSideRunIdsByConversation] = useState<Record<string, string[]>>({});
+  const handledSideRunNotificationsRef = useRef<Set<string>>(new Set());
   const [toolPermissionDraft, setToolPermissionDraftState] = useState<ToolPermissionDraft>(() => createToolPermissionDraft());
   const [newConversationMultiAgentMode, setNewConversationMultiAgentMode] = useState<MultiAgentMode>('explicit_request_only');
   const [previewFile, setPreviewFile] = useState<{ name: string; content: string } | null>(null);
@@ -1292,6 +1313,18 @@ export default function ChatPage() {
   }, [activeRunStates]);
 
   useEffect(() => {
+    const activeKeys = new Set<string>();
+    for (const run of activeRunStates) {
+      for (const notification of collectSideRunNotifications(run.toolInteractions, run.sideRunNotifications)) {
+        activeKeys.add(`${run.conversationId}:${notification.runId}`);
+      }
+    }
+    for (const key of handledSideRunNotificationsRef.current) {
+      if (!activeKeys.has(key)) handledSideRunNotificationsRef.current.delete(key);
+    }
+  }, [activeRunStates]);
+
+  useEffect(() => {
     if (!selectedBranchTipId) return;
     for (const run of activeRunStates) {
       if (run.kind !== 'chat' || run.status !== 'streaming') continue;
@@ -1359,7 +1392,12 @@ export default function ChatPage() {
   const sideRunDrafts = useMemo(() => sidePanelRunStates
     .filter((run) => shouldRenderRunDraft(run))
     .map((run) => {
-      if (!isDetachedRunView(run, selectedBranchTipId)) return null;
+      const isWorkflowStep = run.kind === 'workflow_step'
+        && !run.targetNodeId
+        && !run.nodeId
+        && Boolean(run.parentRunId)
+        && (!run.anchorNodeId || run.anchorNodeId === selectedBranchTipId);
+      if (!isWorkflowStep && !isDetachedRunView(run, selectedBranchTipId)) return null;
       const timeline = getAssistantTimeline({
         content: run.content,
         reasoning: run.reasoning,
@@ -1396,10 +1434,36 @@ export default function ChatPage() {
         activeReasoningKey,
       };
     })
-    .filter((draft): draft is NonNullable<typeof draft> => Boolean(draft))
+    .filter((draft): draft is SideRunDraft => Boolean(draft))
     .filter((draft) => draft.showPendingBubble || draft.showStreamBlock),
     [selectedBranchTipId, sidePanelRunStates],
   );
+
+  const sideRunGroups = useMemo(
+    () => groupDetachedSideRuns(sideRunDrafts),
+    [sideRunDrafts],
+  );
+  const sideRunTopLevelCount = useMemo(
+    () => sideRunGroups.reduce((total, group) => total + group.runs.length, 0),
+    [sideRunGroups],
+  );
+  const selectedSideRunItem = useMemo((): SideRunGroupItem<SideRunDraft> | null => {
+    if (!selectedSideRunId) return null;
+    for (const group of sideRunGroups) {
+      for (const item of group.runs) {
+        if (item.run.runId === selectedSideRunId) return item;
+        const step = item.steps.find((candidate) => candidate.run.runId === selectedSideRunId);
+        if (step) {
+          return {
+            draft: step,
+            run: step.run,
+            steps: [],
+          };
+        }
+      }
+    }
+    return null;
+  }, [selectedSideRunId, sideRunGroups]);
 
   const sideRunActivity = useMemo(
     () => sideRunDrafts.map((draft) => [
@@ -1416,6 +1480,12 @@ export default function ChatPage() {
   const currentBranchStreamingRunIds = useMemo(
     () => activeRunStates
       .filter((run) => isRunBlockingSelectedBranch(run, selectedBranchTipId, currentBranchNodeIds))
+      .map((run) => run.runId),
+    [activeRunStates, currentBranchNodeIds, selectedBranchTipId],
+  );
+  const currentBranchStoppableRunIds = useMemo(
+    () => activeRunStates
+      .filter((run) => isRunStoppableFromSelectedBranch(run, selectedBranchTipId, currentBranchNodeIds))
       .map((run) => run.runId),
     [activeRunStates, currentBranchNodeIds, selectedBranchTipId],
   );
@@ -1441,10 +1511,16 @@ export default function ChatPage() {
   const pendingApprovalCount = pendingToolApprovalPrompts.length;
 
   useEffect(() => {
-    if (sideRunDrafts.length === 0) return;
+    if (sideRunTopLevelCount === 0) return;
     setOutlineCollapsed(false);
     setRightPanelView('side');
-  }, [sideRunActivity, sideRunDrafts.length]);
+  }, [sideRunActivity, sideRunTopLevelCount]);
+
+  useEffect(() => {
+    if (selectedSideRunId && !selectedSideRunItem) {
+      setSelectedSideRunId(null);
+    }
+  }, [selectedSideRunId, selectedSideRunItem]);
 
   const coveredToolMessages = useMemo(() => {
     const ids = new Set<string>();
@@ -1833,6 +1909,47 @@ export default function ChatPage() {
     await loadConversations();
   }, [hiddenSideRunIds, loadConversations, refreshMessages]);
 
+  const syncSelectedConversationSideRuns = useCallback(async (conversationId: string) => {
+    const runs = await runsApi.listConversation(conversationId);
+    const sideRuns = getVisibleSideRunRecords(runs, hiddenSideRunIds);
+    for (const run of sideRuns) {
+      if (streamManager.hasRun(run.run_id)) continue;
+      if (!isTerminalRunStatus(run.status)) {
+        void streamManager.resumeStream(
+          conversationId,
+          run.target_node_id ?? null,
+          run.run_id,
+          0,
+          run.anchor_node_id ?? null,
+          run.kind,
+        );
+        continue;
+      }
+      const events = await runsApi.events(run.run_id, 0);
+      if (hiddenSideRunIds.has(run.run_id)) continue;
+      streamManager.restoreRunFromEvents(run, events);
+    }
+  }, [hiddenSideRunIds]);
+
+  useEffect(() => {
+    for (const run of activeRunStates) {
+      const notifications = collectSideRunNotifications(run.toolInteractions, run.sideRunNotifications);
+      if (notifications.length === 0) continue;
+      const unseen = notifications.filter((notification) => {
+        const key = `${run.conversationId}:${notification.runId}`;
+        if (handledSideRunNotificationsRef.current.has(key)) return false;
+        return !hiddenSideRunIds.has(notification.runId);
+      });
+      if (unseen.length > 0) {
+        void syncSelectedConversationSideRuns(run.conversationId).then(() => {
+          for (const notification of unseen) {
+            handledSideRunNotificationsRef.current.add(`${run.conversationId}:${notification.runId}`);
+          }
+        });
+      }
+    }
+  }, [activeRunStates, hiddenSideRunIds, syncSelectedConversationSideRuns]);
+
   const handleToolApprovalDecision = useCallback<ToolApprovalDecisionHandler>(async (
     approvalId,
     decision,
@@ -1867,11 +1984,12 @@ export default function ChatPage() {
     }
     const conversationId = currentConversation?.id;
     void (async () => {
-      await Promise.allSettled(currentBranchStreamingRunIds.map((runId) => streamManager.stopRun(runId)));
       if (conversationId) {
+        const localStops = currentBranchStoppableRunIds.map((runId) => streamManager.stopRun(runId));
+        await Promise.allSettled(localStops);
         setBackendActiveStreamConversationCounts((current) => {
           const activeCount = streamManager.getConversationStates(conversationId)
-            .filter((state) => state.status === 'streaming' || state.status === 'waiting_approval')
+            .filter((state) => state.status === 'streaming' || state.status === 'waiting_approval' || state.status === 'stopping')
             .length;
           const next = new Map(current);
           if (activeCount > 0) next.set(conversationId, activeCount);
@@ -1881,7 +1999,7 @@ export default function ChatPage() {
         await refreshMessages(conversationId, { retries: 1 });
       }
     })();
-  }, [currentBranchStreamingRunIds, currentConversation?.id, refreshMessages, selectedBranchTipId, updateQueuedMessages]);
+  }, [currentBranchStoppableRunIds, currentConversation?.id, refreshMessages, selectedBranchTipId, updateQueuedMessages]);
 
   // 全局注册一次：任意对话的流结束（completed/error/stopped）时，
   // 从后端刷新真实消息，再清理 StreamManager 中该对话的临时状态。
@@ -1904,6 +2022,7 @@ export default function ChatPage() {
           streamManager.cleanupIfController(finishedId, controller, runId);
         }
         await loadConversations();
+        void syncSelectedConversationSideRuns(finishedId);
         const sentQueued = await sendNextQueuedMessage(finishedId);
         if (!sentQueued) void syncBackendScheduledFollowup(finishedId);
         return;
@@ -1920,6 +2039,7 @@ export default function ChatPage() {
                 : { awaitNodeId, retries: 6 },
             );
             await loadConversations();
+            void syncSelectedConversationSideRuns(finishedId);
             void syncBackendScheduledFollowup(finishedId);
           })();
         });
@@ -1953,6 +2073,7 @@ export default function ChatPage() {
       }
       // 同步对话列表（更新时间、标题等）
       await loadConversations();
+      void syncSelectedConversationSideRuns(finishedId);
       const sentQueued = await sendNextQueuedMessage(finishedId);
       if (!sentQueued) void syncBackendScheduledFollowup(finishedId);
     });
@@ -1961,6 +2082,7 @@ export default function ChatPage() {
     refreshMessages,
     patchAssistantMessageFromStream,
     loadConversations,
+    syncSelectedConversationSideRuns,
     sendNextQueuedMessage,
     syncBackendScheduledFollowup,
   ]);
@@ -2130,44 +2252,10 @@ export default function ChatPage() {
   useEffect(() => {
     const conversationId = currentConversation?.id;
     if (!conversationId) return;
-    let cancelled = false;
-
-    void (async () => {
-      try {
-        const runs = await runsApi.listConversation(conversationId);
-        if (cancelled) return;
-        const sideRuns = runs.filter((run) =>
-          SIDE_RUN_KINDS.has(run.kind)
-          && !hiddenSideRunIds.has(run.run_id)
-        );
-        for (const run of sideRuns) {
-          if (cancelled) return;
-          if (streamManager.hasRun(run.run_id)) continue;
-          if (!TERMINAL_RUN_STATUSES.has(run.status)) {
-            void streamManager.resumeStream(
-              conversationId,
-              run.target_node_id ?? null,
-              run.run_id,
-              0,
-              run.anchor_node_id ?? null,
-              run.kind,
-            );
-            continue;
-          }
-          const events = await runsApi.events(run.run_id, 0);
-          if (cancelled) return;
-          if (hiddenSideRunIds.has(run.run_id)) continue;
-          streamManager.restoreRunFromEvents(run, events);
-        }
-      } catch (_) {
-        // Side run history is best-effort UI state; active stream recovery above still handles live runs.
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [currentConversation?.id, hiddenSideRunIds]);
+    void syncSelectedConversationSideRuns(conversationId).catch(() => {
+      // Side run history is best-effort UI state; active stream recovery above still handles live runs.
+    });
+  }, [currentConversation?.id, syncSelectedConversationSideRuns]);
 
   const handleSelectConversation = async (id: string) => {
     if (currentConversation && historyRef.current) {
@@ -2563,6 +2651,266 @@ export default function ChatPage() {
         }}
       >
         <MarkdownView content={block.content} enableMermaid />
+      </div>
+    );
+  };
+
+  const getSideRunGroupLabel = (kind: string): string => {
+    if (kind === 'side_question') return '旁路问题';
+    if (kind === 'subagent') return '后台分支';
+    if (kind === 'terminal') return '后台终端';
+    if (kind === 'workflow') return 'Workflow';
+    if (kind === 'direct_response') return '命令响应';
+    return kind;
+  };
+
+  const getSideRunTitle = (run: StreamState): string => {
+    const metadata = run.metadata || {};
+    const candidates = [
+      run.summary,
+      typeof metadata.command === 'string' ? metadata.command : '',
+      typeof metadata.workflow_step_name === 'string' ? metadata.workflow_step_name : '',
+      typeof metadata.agent_name === 'string' ? metadata.agent_name : '',
+      typeof metadata.original_slash_input === 'string' ? metadata.original_slash_input : '',
+      typeof metadata.delegated_task === 'string' ? metadata.delegated_task : '',
+      run.pendingUserMessage,
+    ];
+    return candidates.find((value) => typeof value === 'string' && value.trim().length > 0)?.trim()
+      || `${getSlashRunLabel(run.kind, run.pendingUserMessage)} · ${run.runId.slice(0, 12)}`;
+  };
+
+  const getSideRunStatusText = (run: StreamState): string => {
+    if (run.status === 'streaming') return '运行中';
+    if (run.status === 'waiting_approval') return '等待审批';
+    if (run.status === 'completed') return '已完成';
+    if (run.status === 'error') return '出错';
+    if (run.status === 'stopped') return '已停止';
+    return run.status;
+  };
+
+  const getSideRunStatusColor = (run: StreamState): string => {
+    if (run.status === 'completed') return 'var(--fg-tertiary)';
+    if (run.status === 'error') return 'var(--destructive)';
+    if (run.status === 'stopped') return 'var(--fg-tertiary)';
+    if (run.status === 'waiting_approval') return 'var(--icon-accent)';
+    return 'var(--icon-accent)';
+  };
+
+  const renderSideRunActions = (draft: SideRunDraft) => (
+    <>
+      {(draft.run.status === 'streaming' || draft.run.status === 'waiting_approval') && (
+        <TextTooltip content="停止">
+          <button
+            type="button"
+            className="rounded border-0 bg-transparent p-1"
+            onClick={(event) => {
+              event.stopPropagation();
+              void streamManager.stopRun(draft.run.runId);
+            }}
+            style={{ color: 'var(--fg-tertiary)' }}
+            aria-label="停止"
+          >
+            <Square className="h-3.5 w-3.5" />
+          </button>
+        </TextTooltip>
+      )}
+      <TextTooltip content="关闭">
+        <button
+          type="button"
+          className="rounded border-0 bg-transparent p-1"
+          onClick={(event) => {
+            event.stopPropagation();
+            if (selectedSideRunId === draft.run.runId) setSelectedSideRunId(null);
+            if (currentConversation?.id) hideSideRun(currentConversation.id, draft.run.runId);
+            streamManager.cleanupRun(draft.run.runId);
+          }}
+          style={{ color: 'var(--fg-tertiary)' }}
+          aria-label="关闭"
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
+      </TextTooltip>
+    </>
+  );
+
+  const renderTerminalRunBody = (run: StreamState) => {
+    const output = [
+      run.terminal.stdout ? `$ stdout\n${run.terminal.stdout}` : '',
+      run.terminal.stderr ? `$ stderr\n${run.terminal.stderr}` : '',
+    ].filter(Boolean).join('\n');
+    const command = run.terminal.command
+      || (typeof run.metadata.command === 'string' ? run.metadata.command : '')
+      || run.summary
+      || run.runId;
+    const cwd = run.terminal.cwd || (typeof run.metadata.cwd === 'string' ? run.metadata.cwd : '');
+    return (
+      <div className="flex flex-col gap-2">
+        <div className="rounded border px-3 py-2 text-xs" style={{ borderColor: 'var(--border)', color: 'var(--fg-tertiary)' }}>
+          <div className="truncate">{command}</div>
+          {cwd && <div className="truncate">cwd: {cwd}</div>}
+          {(run.terminal.exitCode !== null || run.terminal.durationSeconds !== null) && (
+            <div>
+              {run.terminal.exitCode !== null ? `exit: ${run.terminal.exitCode}` : ''}
+              {run.terminal.durationSeconds !== null ? ` · ${run.terminal.durationSeconds}s` : ''}
+            </div>
+          )}
+        </div>
+        {output ? (
+          <div className="file-preview-code-shell custom-scrollbar">
+            <SyntaxHighlighter
+              language="powershell"
+              style={oneDark}
+              customStyle={{
+                margin: 0,
+                background: 'transparent',
+                fontSize: '12px',
+                lineHeight: '1.45',
+              }}
+              wrapLongLines
+            >
+              {output}
+            </SyntaxHighlighter>
+          </div>
+        ) : run.status === 'streaming' ? (
+          <div className="flex items-center gap-2 px-3 py-2 text-sm" style={{ color: 'var(--fg-tertiary)' }}>
+            <Loader2 className="h-4 w-4 animate-spin" style={{ color: 'var(--icon-accent)' }} />
+            <span>运行中...</span>
+          </div>
+        ) : null}
+        {getStreamStatusLabel(run.status, run.errorMessage) && (
+          <div className="text-xs text-destructive">
+            {getStreamStatusLabel(run.status, run.errorMessage)}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderSideRunBody = (draft: SideRunDraft) => (
+    <div className="flex flex-col gap-2">
+      {draft.showPendingBubble && (
+        <div
+          className="max-w-full rounded-lg px-3 py-2 text-sm prose prose-sm prose-invert max-w-none [&_p]:m-0"
+          style={{
+            background: 'linear-gradient(160deg, rgba(217,119,87,0.16), rgba(217,119,87,0.08))',
+            border: '0.5px solid rgba(217,119,87,0.28)',
+            color: 'var(--fg-85)',
+          }}
+        >
+          <MarkdownView content={draft.run.pendingUserMessage || ''} />
+        </div>
+      )}
+      {draft.run.kind === 'terminal' && renderTerminalRunBody(draft.run)}
+      {draft.showStreamBlock && draft.run.kind !== 'terminal' && (
+        <div className="min-w-0">
+          {draft.streamingFoldState.canFoldProcess ? (
+            <>
+              <div className="processed-fold expanded">
+                <div className="processed-fold-button" aria-expanded="true">
+                  <span>{draft.run.duration > 0 ? `已处理 ${formatProcessedDuration(draft.run.duration) ?? ''}`.trim() : '已处理'}</span>
+                  <ChevronRight className="processed-fold-chevron" />
+                </div>
+              </div>
+              <AnimatedProcessedBlocks
+                expanded
+                blocks={draft.streamingFoldState.visibleBlocks}
+                renderBlock={(block) => {
+                  if (block.type === 'reasoning') {
+                    return (
+                      <ThinkingBlock
+                        key={block.key}
+                        reasoning={block.reasoning}
+                        streaming={block.key === draft.activeReasoningKey}
+                      />
+                    );
+                  }
+                  if (block.type === 'tools') {
+                    return <ToolCallGroup key={block.key} items={block.items} />;
+                  }
+                  return renderAssistantTimelineBlock(block);
+                }}
+              />
+            </>
+          ) : (
+            draft.timeline.map((block, blockIndex) => {
+              if (block.type === 'reasoning') {
+                const reasoningStillOpen = blockIndex === draft.activeReasoningIndex;
+                return <ThinkingBlock key={block.key} reasoning={block.reasoning} streaming={reasoningStillOpen} />;
+              }
+              if (block.type === 'tools') {
+                return <ToolCallGroup key={block.key} items={block.items} />;
+              }
+              return (
+                <div
+                  key={block.key}
+                  className="max-w-full min-w-0 rounded-lg px-3 py-2 text-sm leading-relaxed prose prose-sm max-w-none [&_p]:m-0"
+                  style={{ color: 'var(--fg-secondary)' }}
+                >
+                  <MarkdownView content={block.content} />
+                </div>
+              );
+            })
+          )}
+          {draft.timeline.length === 0 && draft.run.status === 'streaming' && (
+            <div className="flex items-center gap-2 px-3 py-2 text-sm" style={{ color: 'var(--fg-tertiary)' }}>
+              <Loader2 className="h-4 w-4 animate-spin" style={{ color: 'var(--icon-accent)' }} />
+              <span>运行中...</span>
+            </div>
+          )}
+          {getStreamStatusLabel(draft.run.status, draft.run.errorMessage) && (
+            <div className="mt-1 text-xs text-destructive">
+              {getStreamStatusLabel(draft.run.status, draft.run.errorMessage)}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+
+  const renderWorkflowOverview = (item: SideRunGroupItem<SideRunDraft>) => {
+    const progressSteps = getWorkflowProgressSteps(item.run);
+    return (
+      <div className="flex flex-col gap-3">
+        <div className="rounded-lg border p-3" style={{ borderColor: 'var(--border)', background: 'var(--bg-elevated-secondary, rgba(255,255,255,0.03))' }}>
+          <div className="mb-2 text-xs font-semibold" style={{ color: 'var(--fg-secondary)' }}>流程进度</div>
+          {progressSteps.length === 0 ? (
+            <div className="text-sm" style={{ color: 'var(--fg-tertiary)' }}>等待 workflow 事件。</div>
+          ) : (
+            <div className="flex flex-col gap-2">
+              {progressSteps.map((step) => (
+                <div key={step.key} className="flex min-w-0 items-center gap-2 text-sm">
+                  <span
+                    className="h-2 w-2 shrink-0 rounded-full"
+                    style={{ background: step.status === 'completed' ? 'var(--fg-tertiary)' : step.status === 'error' ? 'var(--destructive)' : 'var(--icon-accent)' }}
+                  />
+                  <span className="min-w-0 flex-1 truncate" style={{ color: 'var(--fg-secondary)' }}>{step.label}</span>
+                  <span className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>{step.status}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="rounded-lg border p-3" style={{ borderColor: 'var(--border)', background: 'var(--bg-elevated-secondary, rgba(255,255,255,0.03))' }}>
+          <div className="mb-2 text-xs font-semibold" style={{ color: 'var(--fg-secondary)' }}>子步骤</div>
+          {item.steps.length === 0 ? (
+            <div className="text-sm" style={{ color: 'var(--fg-tertiary)' }}>暂无可展开的步骤详情。</div>
+          ) : (
+            <div className="flex flex-col gap-1.5">
+              {item.steps.map((step) => (
+                <button
+                  key={step.run.runId}
+                  type="button"
+                  className="flex min-w-0 items-center gap-2 rounded-lg border px-2.5 py-2 text-left transition-colors"
+                  style={{ borderColor: 'var(--border)', background: 'transparent', color: 'var(--fg-secondary)' }}
+                  onClick={() => setSelectedSideRunId(step.run.runId)}
+                >
+                  <span className="min-w-0 flex-1 truncate text-sm">{getSideRunTitle(step.run)}</span>
+                  <span className="text-xs" style={{ color: getSideRunStatusColor(step.run) }}>{getSideRunStatusText(step.run)}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     );
   };
@@ -3383,12 +3731,12 @@ export default function ChatPage() {
                 >
                   <MessageSquare className="h-3.5 w-3.5" />
                   <span className="min-w-0 truncate">运行</span>
-                  {sideRunDrafts.length > 0 && (
+                  {sideRunTopLevelCount > 0 && (
                     <span
                       className="ml-0.5 rounded-full px-1.5 py-0.5 text-[10px]"
                       style={{ background: 'var(--bg-button-tertiary-hover)', color: 'var(--fg-secondary)' }}
                     >
-                      {sideRunDrafts.length}
+                      {sideRunTopLevelCount}
                     </span>
                   )}
                 </Button>
@@ -3424,132 +3772,92 @@ export default function ChatPage() {
                       </div>
                     </TextTooltip>
                   ))}
-                  <RunStatusPanel conversationId={currentConversation?.id ?? null} runs={activeRunStates} />
                 </>
               ) : (
                 <div className="flex min-h-0 flex-1 flex-col gap-3 px-3 pb-4">
-                  {sideRunDrafts.length === 0 && (
+                  {selectedSideRunItem ? (
+                    <>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 px-2"
+                          onClick={() => setSelectedSideRunId(
+                            selectedSideRunItem.run.parentRunId || null,
+                          )}
+                        >
+                          <ArrowLeft className="h-3.5 w-3.5" />
+                        </Button>
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-sm font-semibold" style={{ color: 'var(--fg-secondary)' }}>
+                            {getSideRunTitle(selectedSideRunItem.run)}
+                          </div>
+                          <div className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>
+                            {getSlashRunLabel(selectedSideRunItem.run.kind, selectedSideRunItem.run.pendingUserMessage)} · {selectedSideRunItem.run.runId.slice(0, 12)}
+                          </div>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-1">
+                          {renderSideRunActions(selectedSideRunItem.draft)}
+                        </div>
+                      </div>
+                      {selectedSideRunItem.run.kind === 'workflow' && renderWorkflowOverview(selectedSideRunItem)}
+                      {selectedSideRunItem.run.kind !== 'workflow' && renderSideRunBody(selectedSideRunItem.draft)}
+                    </>
+                  ) : (
+                    <>
+                  {sideRunTopLevelCount === 0 && (
                     <div className="rounded-lg border px-3 py-4 text-sm" style={{ borderColor: 'var(--border)', color: 'var(--fg-tertiary)' }}>
                       暂无运行任务。
                     </div>
                   )}
-                  {sideRunDrafts.map((draft) => (
-                    <section
-                      key={draft.run.runId}
-                      className="rounded-lg border"
-                      style={{ borderColor: 'var(--border)', background: 'var(--bg-elevated-secondary, rgba(255,255,255,0.03))' }}
-                    >
-                      <div className="flex items-center gap-2 border-b px-3 py-2" style={{ borderColor: 'var(--border)' }}>
-                        <span className="min-w-0 flex-1 truncate text-xs font-semibold" style={{ color: 'var(--fg-secondary)' }}>
-                          {getSlashRunLabel(draft.run.kind, draft.run.pendingUserMessage)} · {draft.run.runId.slice(0, 12)}
-                        </span>
-                        {(draft.run.status === 'streaming' || draft.run.status === 'waiting_approval') && (
-                          <TextTooltip content="停止">
-                            <button
-                              type="button"
-                              className="rounded border-0 bg-transparent p-1"
-                              onClick={() => streamManager.stopRun(draft.run.runId)}
-                              style={{ color: 'var(--fg-tertiary)' }}
-                              aria-label="停止"
-                            >
-                              <Square className="h-3.5 w-3.5" />
-                            </button>
-                          </TextTooltip>
-                        )}
-                        <TextTooltip content="关闭">
-                          <button
-                            type="button"
-                            className="rounded border-0 bg-transparent p-1"
-                            onClick={() => {
-                              if (currentConversation?.id) hideSideRun(currentConversation.id, draft.run.runId);
-                              streamManager.cleanupRun(draft.run.runId);
-                            }}
-                            style={{ color: 'var(--fg-tertiary)' }}
-                            aria-label="关闭"
-                          >
-                            <X className="h-3.5 w-3.5" />
-                          </button>
-                        </TextTooltip>
+                  {sideRunGroups.map((group) => (
+                    <section key={group.kind} className="flex flex-col gap-2">
+                      <div className="px-1 text-xs font-semibold" style={{ color: 'var(--fg-tertiary)' }}>
+                        {getSideRunGroupLabel(group.kind)}
                       </div>
-                      <div className="flex flex-col gap-2 px-3 py-3">
-                        {draft.showPendingBubble && (
-                          <div
-                            className="max-w-full rounded-lg px-3 py-2 text-sm prose prose-sm prose-invert max-w-none [&_p]:m-0"
-                            style={{
-                              background: 'linear-gradient(160deg, rgba(217,119,87,0.16), rgba(217,119,87,0.08))',
-                              border: '0.5px solid rgba(217,119,87,0.28)',
-                              color: 'var(--fg-85)',
-                            }}
-                          >
-                            <MarkdownView content={draft.run.pendingUserMessage || ''} />
-                          </div>
-                        )}
-                        {draft.showStreamBlock && (
-                          <div className="min-w-0">
-                            {draft.streamingFoldState.canFoldProcess ? (
-                              <>
-                                <div className="processed-fold expanded">
-                                  <div className="processed-fold-button" aria-expanded="true">
-                                    <span>{draft.run.duration > 0 ? `已处理 ${formatProcessedDuration(draft.run.duration) ?? ''}`.trim() : '已处理'}</span>
-                                    <ChevronRight className="processed-fold-chevron" />
-                                  </div>
-                                </div>
-                                <AnimatedProcessedBlocks
-                                  expanded
-                                  blocks={draft.streamingFoldState.visibleBlocks}
-                                  renderBlock={(block) => {
-                                    if (block.type === 'reasoning') {
-                                      return (
-                                        <ThinkingBlock
-                                          key={block.key}
-                                          reasoning={block.reasoning}
-                                          streaming={block.key === draft.activeReasoningKey}
-                                        />
-                                      );
-                                    }
-                                    if (block.type === 'tools') {
-                                      return <ToolCallGroup key={block.key} items={block.items} />;
-                                    }
-                                    return renderAssistantTimelineBlock(block);
-                                  }}
-                                />
-                              </>
-                            ) : (
-                              draft.timeline.map((block, blockIndex) => {
-                                if (block.type === 'reasoning') {
-                                  const reasoningStillOpen = blockIndex === draft.activeReasoningIndex;
-                                  return <ThinkingBlock key={block.key} reasoning={block.reasoning} streaming={reasoningStillOpen} />;
-                                }
-                                if (block.type === 'tools') {
-                                  return <ToolCallGroup key={block.key} items={block.items} />;
-                                }
-                                return (
-                                  <div
-                                    key={block.key}
-                                    className="max-w-full min-w-0 rounded-lg px-3 py-2 text-sm leading-relaxed prose prose-sm max-w-none [&_p]:m-0"
-                                    style={{ color: 'var(--fg-secondary)' }}
-                                  >
-                                    <MarkdownView content={block.content} />
-                                  </div>
-                                );
-                              })
-                            )}
-                            {draft.timeline.length === 0 && draft.run.status === 'streaming' && (
-                              <div className="flex items-center gap-2 px-3 py-2 text-sm" style={{ color: 'var(--fg-tertiary)' }}>
-                                <Loader2 className="h-4 w-4 animate-spin" style={{ color: 'var(--icon-accent)' }} />
-                                <span>运行中...</span>
+                      {group.runs.map((item) => (
+                        <div
+                          key={item.run.runId}
+                          role="button"
+                          tabIndex={0}
+                          className="rounded-lg border p-0 text-left transition-colors"
+                          style={{ borderColor: 'var(--border)', background: 'var(--bg-elevated-secondary, rgba(255,255,255,0.03))' }}
+                          onClick={() => setSelectedSideRunId(item.run.runId)}
+                          onKeyDown={(event) => {
+                            if (event.key !== 'Enter' && event.key !== ' ') return;
+                            event.preventDefault();
+                            setSelectedSideRunId(item.run.runId);
+                          }}
+                        >
+                          <div className="flex items-center gap-2 px-3 py-2">
+                            <div className="min-w-0 flex-1">
+                              <div className="truncate text-sm font-semibold" style={{ color: 'var(--fg-secondary)' }}>
+                                {getSideRunTitle(item.run)}
                               </div>
-                            )}
-                            {getStreamStatusLabel(draft.run.status, draft.run.errorMessage) && (
-                              <div className="mt-1 text-xs text-destructive">
-                                {getStreamStatusLabel(draft.run.status, draft.run.errorMessage)}
+                              <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs" style={{ color: 'var(--fg-tertiary)' }}>
+                                <span className="truncate">{getSlashRunLabel(item.run.kind, item.run.pendingUserMessage)}</span>
+                                <span>·</span>
+                                <span>{item.run.runId.slice(0, 12)}</span>
                               </div>
-                            )}
+                            </div>
+                            <span className="shrink-0 text-xs" style={{ color: getSideRunStatusColor(item.run) }}>
+                              {getSideRunStatusText(item.run)}
+                            </span>
+                            <div className="flex shrink-0 items-center gap-1">
+                              {renderSideRunActions(item.draft)}
+                            </div>
                           </div>
-                        )}
-                      </div>
+                          {item.run.kind === 'workflow' && item.steps.length > 0 && (
+                            <div className="border-t px-3 py-2 text-xs" style={{ borderColor: 'var(--border)', color: 'var(--fg-tertiary)' }}>
+                              {item.steps.length} 个子步骤
+                            </div>
+                          )}
+                        </div>
+                      ))}
                     </section>
                   ))}
+                    </>
+                  )}
                 </div>
               )}
             </>
