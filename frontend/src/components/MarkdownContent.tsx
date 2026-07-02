@@ -1,8 +1,10 @@
 import { lazy, Suspense } from 'react';
-import ReactMarkdown, { type Components } from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import { type Components } from 'react-markdown';
+import MarkdownBasic from './markdown/MarkdownBasic';
+import { detectMarkdownFeatures } from '../utils/markdownFeatures';
 
-const MarkdownWithMermaid = lazy(() => import('./MarkdownWithMermaid'));
+const MarkdownRich = lazy(() => import('./markdown/MarkdownRich'));
+const MarkdownWithMermaid = lazy(() => import('./markdown/MarkdownWithMermaid'));
 
 interface MarkdownContentProps {
   children: string;
@@ -10,22 +12,27 @@ interface MarkdownContentProps {
   enableMermaid?: boolean;
 }
 
-const mermaidFencePattern = /(^|\n)(```|~~~)\s*mermaid\b/i;
-
 export default function MarkdownContent({ children, components, enableMermaid = false }: MarkdownContentProps) {
-  const shouldLoadMermaid = enableMermaid && mermaidFencePattern.test(children);
+  const features = detectMarkdownFeatures(children);
+  const shouldLoadMermaid = enableMermaid && features.hasMermaid;
 
   if (shouldLoadMermaid) {
     return (
-      <Suspense fallback={<ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>{children}</ReactMarkdown>}>
+      <Suspense fallback={<MarkdownBasic components={components}>{children}</MarkdownBasic>}>
         <MarkdownWithMermaid components={components}>{children}</MarkdownWithMermaid>
       </Suspense>
     );
   }
 
+  if (features.hasMath || features.hasRawHtml) {
+    return (
+      <Suspense fallback={<MarkdownBasic components={components}>{children}</MarkdownBasic>}>
+        <MarkdownRich components={components}>{children}</MarkdownRich>
+      </Suspense>
+    );
+  }
+
   return (
-    <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
-      {children}
-    </ReactMarkdown>
+    <MarkdownBasic components={components}>{children}</MarkdownBasic>
   );
 }

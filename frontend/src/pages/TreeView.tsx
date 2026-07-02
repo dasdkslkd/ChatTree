@@ -3,6 +3,7 @@ import dagre from 'dagre';
 import { useConversationStore, conversationStore } from '../store/conversationStore';
 import { useNavigationStore } from '../store/navigationStore';
 import { Button } from '@/components/ui/button';
+import { TextTooltip } from '@/components/ui/text-tooltip';
 import { ZoomIn, ZoomOut, Maximize2, ArrowDown, ArrowRight, Trash2 } from 'lucide-react';
 import type { TreeNode } from '../api/conversation';
 import { getTreeUserContent } from '../utils/taskNotificationVisibility';
@@ -380,50 +381,58 @@ export default function TreeView() {
 
       {/* Controls */}
       <div className="absolute bottom-4 right-4 flex flex-col gap-1.5 z-10">
-        <Button
-          variant="outline"
-          size="sm"
-          className="h-8 w-8 p-0 bg-background/80 backdrop-blur-sm"
-          onClick={() => setDirection(d => d === 'TB' ? 'LR' : 'TB')}
-          title={direction === 'TB' ? '切换为水平排列' : '切换为垂直排列'}
-        >
-          {direction === 'TB' ? (
-            <ArrowRight className="h-4 w-4" />
-          ) : (
-            <ArrowDown className="h-4 w-4" />
-          )}
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          className="h-8 w-8 p-0 bg-background/80 backdrop-blur-sm"
-          onClick={() =>
-            setTransform((prev) => ({ ...prev, scale: Math.min(prev.scale * 1.2, 3) }))
-          }
-          title="放大"
-        >
-          <ZoomIn className="h-4 w-4" />
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          className="h-8 w-8 p-0 bg-background/80 backdrop-blur-sm"
-          onClick={() =>
-            setTransform((prev) => ({ ...prev, scale: Math.max(prev.scale * 0.8, 0.1) }))
-          }
-          title="缩小"
-        >
-          <ZoomOut className="h-4 w-4" />
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          className="h-8 w-8 p-0 bg-background/80 backdrop-blur-sm"
-          onClick={fitToView}
-          title="适应视图"
-        >
-          <Maximize2 className="h-4 w-4" />
-        </Button>
+        <TextTooltip content={direction === 'TB' ? '切换为水平排列' : '切换为垂直排列'} side="left">
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 w-8 p-0 bg-background/80 backdrop-blur-sm"
+            onClick={() => setDirection(d => d === 'TB' ? 'LR' : 'TB')}
+            aria-label={direction === 'TB' ? '切换为水平排列' : '切换为垂直排列'}
+          >
+            {direction === 'TB' ? (
+              <ArrowRight className="h-4 w-4" />
+            ) : (
+              <ArrowDown className="h-4 w-4" />
+            )}
+          </Button>
+        </TextTooltip>
+        <TextTooltip content="放大" side="left">
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 w-8 p-0 bg-background/80 backdrop-blur-sm"
+            onClick={() =>
+              setTransform((prev) => ({ ...prev, scale: Math.min(prev.scale * 1.2, 3) }))
+            }
+            aria-label="放大"
+          >
+            <ZoomIn className="h-4 w-4" />
+          </Button>
+        </TextTooltip>
+        <TextTooltip content="缩小" side="left">
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 w-8 p-0 bg-background/80 backdrop-blur-sm"
+            onClick={() =>
+              setTransform((prev) => ({ ...prev, scale: Math.max(prev.scale * 0.8, 0.1) }))
+            }
+            aria-label="缩小"
+          >
+            <ZoomOut className="h-4 w-4" />
+          </Button>
+        </TextTooltip>
+        <TextTooltip content="适应视图" side="left">
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 w-8 p-0 bg-background/80 backdrop-blur-sm"
+            onClick={fitToView}
+            aria-label="适应视图"
+          >
+            <Maximize2 className="h-4 w-4" />
+          </Button>
+        </TextTooltip>
       </div>
     </div>
   );

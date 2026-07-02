@@ -3,6 +3,7 @@ import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { TextTooltip } from '@/components/ui/text-tooltip';
 import { Textarea } from '@/components/ui/textarea';
 import {
   Select,
@@ -211,15 +212,16 @@ export function SettingsPageView({ defaultSection = 'providers' }: { defaultSect
           })()}
         </div>
         <div className="app-sidebar-footer">
-          <button
-            type="button"
-            className="app-sidebar-action"
-            onClick={openChat}
-            title="返回对话"
-          >
-            <MessageSquare className="h-4 w-4 shrink-0" />
-            <span>返回对话</span>
-          </button>
+          <TextTooltip content="返回对话">
+            <button
+              type="button"
+              className="app-sidebar-action"
+              onClick={openChat}
+            >
+              <MessageSquare className="h-4 w-4 shrink-0" />
+              <span>返回对话</span>
+            </button>
+          </TextTooltip>
         </div>
       </nav>
 
@@ -675,14 +677,16 @@ function ProvidersSection() {
                           onMouseLeave={(e) => { if (!hidden) (e.currentTarget as HTMLElement).style.background = ''; }}
                         >
                           <span style={hidden ? { textDecoration: 'line-through', color: 'var(--fg-tertiary)' } : { color: 'var(--fg-85)' }}>{model}</span>
-                          <button
-                            className="w-6 h-6 flex items-center justify-center rounded cursor-pointer bg-transparent border-none"
-                            title={hidden ? '显示此模型' : '隐藏此模型'}
-                            onClick={() => toggleModelHidden(model)}
-                            style={{ color: 'var(--icon-tertiary)' }}
-                          >
-                            {hidden ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
-                          </button>
+                          <TextTooltip content={hidden ? '显示此模型' : '隐藏此模型'}>
+                            <button
+                              className="w-6 h-6 flex items-center justify-center rounded cursor-pointer bg-transparent border-none"
+                              onClick={() => toggleModelHidden(model)}
+                              style={{ color: 'var(--icon-tertiary)' }}
+                              aria-label={hidden ? '显示此模型' : '隐藏此模型'}
+                            >
+                              {hidden ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+                            </button>
+                          </TextTooltip>
                         </div>
                       );
                     })}
@@ -997,9 +1001,11 @@ function CapabilityItem({
           </div>
         )}
         {path && (
-          <div className="truncate text-[11px]" title={path} style={{ color: 'var(--fg-tertiary)' }}>
-            {path}
-          </div>
+          <TextTooltip content={path}>
+            <div className="truncate text-[11px]" style={{ color: 'var(--fg-tertiary)' }}>
+              {path}
+            </div>
+          </TextTooltip>
         )}
         {badges?.length ? (
           <div className="flex flex-wrap gap-1 pt-0.5">
@@ -1046,10 +1052,12 @@ function McpCapabilityItem({ server }: { server: McpServerStatus }) {
       <div className="min-w-0 flex-1 space-y-1">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <span className="min-w-0 truncate text-sm font-medium" style={{ color: 'var(--fg-85)' }}>{server.name}</span>
-          <span className="flex items-center gap-1.5 rounded px-1.5 py-0.5 text-xs" title={statusView.title} style={{ border: '0.5px solid var(--border)', color: statusView.color }}>
-            <span className="h-1.5 w-1.5 rounded-full" style={{ background: statusView.color }} />
-            {statusView.label}
-          </span>
+          <TextTooltip content={statusView.title}>
+            <span className="flex items-center gap-1.5 rounded px-1.5 py-0.5 text-xs" style={{ border: '0.5px solid var(--border)', color: statusView.color }}>
+              <span className="h-1.5 w-1.5 rounded-full" style={{ background: statusView.color }} />
+              {statusView.label}
+            </span>
+          </TextTooltip>
           <SourceBadge source={server.source || 'user'} />
           {server.plugin_name || server.plugin_id ? <PluginBadge pluginName={server.plugin_name} pluginId={server.plugin_id} /> : null}
         </div>
@@ -1064,9 +1072,11 @@ function McpCapabilityItem({ server }: { server: McpServerStatus }) {
           </span>
         </div>
         {server.error && (
-          <div className="truncate text-[11px]" title={server.error} style={{ color: 'var(--destructive, #ef4444)' }}>
-            {server.error}
-          </div>
+          <TextTooltip content={server.error}>
+            <div className="truncate text-[11px]" style={{ color: 'var(--destructive, #ef4444)' }}>
+              {server.error}
+            </div>
+          </TextTooltip>
         )}
       </div>
     </div>
@@ -1084,9 +1094,11 @@ function SourceBadge({ source }: { source: string }) {
 function PluginBadge({ pluginName, pluginId }: { pluginName?: string | null; pluginId?: string | null }) {
   const text = pluginName && pluginId ? `${pluginName} / ${pluginId}` : pluginName || pluginId || '';
   return (
-    <span className="max-w-[220px] truncate rounded px-1.5 py-0.5 text-xs" title={text} style={{ background: 'var(--bg-button-secondary)', color: 'var(--fg-secondary)' }}>
-      {text}
-    </span>
+    <TextTooltip content={text}>
+      <span className="max-w-[220px] truncate rounded px-1.5 py-0.5 text-xs" style={{ background: 'var(--bg-button-secondary)', color: 'var(--fg-secondary)' }}>
+        {text}
+      </span>
+    </TextTooltip>
   );
 }
 
@@ -1545,21 +1557,21 @@ function McpSection() {
                     const enabledGroups = toolsForm.builtin?.code?.groups || [];
                     const enabled = enabledGroups.includes(option.value);
                     return (
-                      <button
-                        key={option.value}
-                        type="button"
-                        className="rounded-lg px-2 py-2 text-left text-xs transition-colors"
-                        title={option.description}
-                        style={{
-                          border: '0.5px solid var(--border)',
-                          color: enabled ? 'var(--fg-85)' : 'var(--fg-tertiary)',
-                          background: enabled ? 'var(--bg-button-secondary)' : 'transparent',
-                        }}
-                        onClick={() => setBuiltinCodeGroup(option.value, !enabled)}
-                      >
-                        <div className="font-medium">{option.label}</div>
-                        <div className="truncate opacity-70">{option.description}</div>
-                      </button>
+                      <TextTooltip key={option.value} content={option.description}>
+                        <button
+                          type="button"
+                          className="rounded-lg px-2 py-2 text-left text-xs transition-colors"
+                          style={{
+                            border: '0.5px solid var(--border)',
+                            color: enabled ? 'var(--fg-85)' : 'var(--fg-tertiary)',
+                            background: enabled ? 'var(--bg-button-secondary)' : 'transparent',
+                          }}
+                          onClick={() => setBuiltinCodeGroup(option.value, !enabled)}
+                        >
+                          <div className="font-medium">{option.label}</div>
+                          <div className="truncate opacity-70">{option.description}</div>
+                        </button>
+                      </TextTooltip>
                     );
                   })}
                 </div>
@@ -1607,10 +1619,12 @@ function McpSection() {
                     <span className="text-xs px-1.5 py-0.5 rounded" style={{ border: '0.5px solid var(--border)', color: 'var(--fg-tertiary)' }}>
                       {server.transport === 'stdio' ? 'stdio' : 'HTTP'}
                     </span>
-                    <span className="flex items-center gap-1.5 text-xs" title={statusView.title} style={{ color: 'var(--fg-tertiary)' }}>
-                      <span className="h-2 w-2 rounded-full" style={{ background: statusView.color }} />
-                      {statusView.label}
-                    </span>
+                    <TextTooltip content={statusView.title}>
+                      <span className="flex items-center gap-1.5 text-xs" style={{ color: 'var(--fg-tertiary)' }}>
+                        <span className="h-2 w-2 rounded-full" style={{ background: statusView.color }} />
+                        {statusView.label}
+                      </span>
+                    </TextTooltip>
                     <Button
                       variant="outline"
                       size="sm"
@@ -1670,9 +1684,11 @@ function McpSection() {
                           {statusView.label}
                         </div>
                         {statusView.title && (
-                          <div className="mt-1 truncate text-xs" title={statusView.title} style={{ color: 'var(--fg-tertiary)' }}>
-                            {statusView.title}
-                          </div>
+                          <TextTooltip content={statusView.title}>
+                            <div className="mt-1 truncate text-xs" style={{ color: 'var(--fg-tertiary)' }}>
+                              {statusView.title}
+                            </div>
+                          </TextTooltip>
                         )}
                       </div>
                       <Button

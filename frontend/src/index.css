@@ -268,6 +268,7 @@
 
 /* App sidebar — neutral-first navigation with warm accent emphasis. */
 .app-sidebar {
+  position: relative;
   flex: 0 0 auto;
   min-width: 0;
   display: flex;
@@ -285,6 +286,62 @@
 
 .app-sidebar-collapsed {
   align-items: center;
+}
+
+.app-right-panel {
+  position: relative;
+}
+
+.app-sidebar.is-resizing,
+.app-right-panel.is-resizing {
+  transition: none;
+}
+
+.sidebar-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 30;
+  width: 10px;
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+}
+
+.sidebar-resize-handle-left {
+  right: -5px;
+}
+
+.sidebar-resize-handle-right {
+  left: -5px;
+}
+
+.sidebar-resize-handle::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  border-radius: 0;
+  background: transparent;
+  transform: translateX(-50%);
+  transition: width var(--transition-basic), background-color var(--transition-basic), box-shadow var(--transition-basic);
+}
+
+.sidebar-resize-handle:hover::after,
+.sidebar-resize-handle:focus-visible::after,
+.app-sidebar.is-resizing .sidebar-resize-handle::after,
+.app-right-panel.is-resizing .sidebar-resize-handle::after {
+  width: 2px;
+  background: color-mix(in srgb, var(--icon-accent) 74%, var(--border-heavy) 26%);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-soft) 40%, transparent);
+}
+
+.is-sidebar-resizing,
+.is-sidebar-resizing * {
+  cursor: col-resize !important;
+  user-select: none;
 }
 
 .app-sidebar-topbar {

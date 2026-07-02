@@ -9,6 +9,8 @@ import {
   useMemo,
   isValidElement,
   type DragEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
 } from 'react';
 import SyntaxHighlighter from 'react-syntax-highlighter/dist/esm/prism-light';
 import oneDark from 'react-syntax-highlighter/dist/esm/styles/prism/one-dark';
@@ -47,6 +49,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
+import { TextTooltip } from '@/components/ui/text-tooltip';
 import {
   Dialog,
   DialogContent,
@@ -123,12 +126,36 @@ import {
   groupConversationsByProject,
   encodeProjectId,
 } from '../utils/projectGroups';
+import {
+  LEFT_SIDEBAR_WIDTH,
+  LEFT_SIDEBAR_WIDTH_STORAGE_KEY,
+  RIGHT_PANEL_WIDTH,
+  RIGHT_PANEL_WIDTH_STORAGE_KEY,
+  getKeyboardResizedSidebarWidth,
+  getPointerResizedSidebarWidth,
+  readStoredSidebarWidth,
+  writeStoredSidebarWidth,
+  type SidebarResizeSide,
+  type SidebarWidthConfig,
+} from '../utils/sidebarResize';
 
 const MarkdownContent = lazy(() => import('../components/MarkdownContent'));
 const MANUAL_PROJECTS_STORAGE_KEY = 'chattree.manualProjectWorkspaces';
 const PROJECT_ORDER_STORAGE_KEY = 'chattree.projectOrder';
 const SIDE_RUN_KINDS = new Set(['side_question', 'subagent', 'workflow', 'workflow_step', 'direct_response']);
 const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled']);
+
+type SidebarResizeSession = {
+  side: SidebarResizeSide;
+  startClientX: number;
+  startWidth: number;
+  storageKey: string;
+  config: SidebarWidthConfig;
+};
+
+function getBrowserStorage(): Storage | null {
+  return typeof window === 'undefined' ? null : window.localStorage;
+}
 
 SyntaxHighlighter.registerLanguage('bash', bash);
 SyntaxHighlighter.registerLanguage('batch', bash);
@@ -920,6 +947,13 @@ export default function ChatPage() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [outlineCollapsed, setOutlineCollapsed] = useState(false);
   const [rightPanelView, setRightPanelView] = useState<'outline' | 'side'>('outline');
+  const [leftSidebarWidth, setLeftSidebarWidth] = useState(() =>
+    readStoredSidebarWidth(getBrowserStorage(), LEFT_SIDEBAR_WIDTH_STORAGE_KEY, LEFT_SIDEBAR_WIDTH),
+  );
+  const [rightPanelWidth, setRightPanelWidth] = useState(() =>
+    readStoredSidebarWidth(getBrowserStorage(), RIGHT_PANEL_WIDTH_STORAGE_KEY, RIGHT_PANEL_WIDTH),
+  );
+  const [resizingSidebar, setResizingSidebar] = useState<SidebarResizeSide | null>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [scrollPositions, setScrollPositions] = useState<Record<string, number>>({});
   const [isScrolling, setIsScrolling] = useState(false);
@@ -953,6 +987,7 @@ export default function ChatPage() {
   const pendingScrollId = useRef<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const assistantTimelineCacheRef = useRef<WeakMap<object, AssistantTimelineBlock[]>>(new WeakMap());
+  const sidebarResizeRef = useRef<SidebarResizeSession | null>(null);
 
   const userScrollingRef = useRef(false);
   const scrollEndTimeoutRef = useRef<number | null>(null);
@@ -960,6 +995,110 @@ export default function ChatPage() {
   const queuedMessagesRef = useRef<QueuedMessage[]>([]);
   const toolPermissionDraftRef = useRef<ToolPermissionDraft>(toolPermissionDraft);
   const [expandedProcessedMessageIds, setExpandedProcessedMessageIds] = useState<Set<string>>(() => new Set());
+
+  const beginSidebarResize = useCallback((
+    event: ReactPointerEvent<HTMLDivElement>,
+    side: SidebarResizeSide,
+  ) => {
+    if (event.button !== 0) return;
+
+    const session = side === 'left'
+      ? {
+          side,
+          startClientX: event.clientX,
+          startWidth: leftSidebarWidth,
+          storageKey: LEFT_SIDEBAR_WIDTH_STORAGE_KEY,
+          config: LEFT_SIDEBAR_WIDTH,
+        }
+      : {
+          side,
+          startClientX: event.clientX,
+          startWidth: rightPanelWidth,
+          storageKey: RIGHT_PANEL_WIDTH_STORAGE_KEY,
+          config: RIGHT_PANEL_WIDTH,
+        };
+
+    sidebarResizeRef.current = session;
+    setResizingSidebar(side);
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    event.preventDefault();
+  }, [leftSidebarWidth, rightPanelWidth]);
+
+  const adjustSidebarWidthFromKeyboard = useCallback((
+    event: ReactKeyboardEvent<HTMLDivElement>,
+    side: SidebarResizeSide,
+  ) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+
+    event.preventDefault();
+
+    if (side === 'left') {
+      const nextWidth = getKeyboardResizedSidebarWidth(side, event.key, leftSidebarWidth, LEFT_SIDEBAR_WIDTH);
+      setLeftSidebarWidth(writeStoredSidebarWidth(
+        getBrowserStorage(),
+        LEFT_SIDEBAR_WIDTH_STORAGE_KEY,
+        nextWidth,
+        LEFT_SIDEBAR_WIDTH,
+      ));
+      return;
+    }
+
+    const nextWidth = getKeyboardResizedSidebarWidth(side, event.key, rightPanelWidth, RIGHT_PANEL_WIDTH);
+    setRightPanelWidth(writeStoredSidebarWidth(
+      getBrowserStorage(),
+      RIGHT_PANEL_WIDTH_STORAGE_KEY,
+      nextWidth,
+      RIGHT_PANEL_WIDTH,
+    ));
+  }, [leftSidebarWidth, rightPanelWidth]);
+
+  useEffect(() => {
+    if (!resizingSidebar) return;
+
+    const applyWidth = (session: SidebarResizeSession, width: number) => {
+      const storedWidth = writeStoredSidebarWidth(getBrowserStorage(), session.storageKey, width, session.config);
+      if (session.side === 'left') {
+        setLeftSidebarWidth(storedWidth);
+      } else {
+        setRightPanelWidth(storedWidth);
+      }
+    };
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const session = sidebarResizeRef.current;
+      if (!session) return;
+
+      applyWidth(session, getPointerResizedSidebarWidth(
+        session.side,
+        session.startWidth,
+        session.startClientX,
+        event.clientX,
+        session.config,
+      ));
+    };
+
+    const finishResize = () => {
+      sidebarResizeRef.current = null;
+      setResizingSidebar(null);
+    };
+
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', finishResize);
+    window.addEventListener('pointercancel', finishResize);
+
+    return () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', finishResize);
+      window.removeEventListener('pointercancel', finishResize);
+    };
+  }, [resizingSidebar]);
 
   const { chatViewMode, toggleChatViewMode, openSettings } = useNavigationStore();
 
@@ -1530,17 +1669,19 @@ export default function ChatPage() {
 
   const projectSettingsSlot = (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          className="new-chat-setting-chip"
-          title={selectedProjectGroup?.path || selectedNewConversationWorkspace.cwd || '默认项目'}
-        >
-          <FolderOpen className="h-4 w-4" />
-          <span className="truncate">{selectedProjectGroup?.label || selectedNewConversationWorkspace.label || '默认项目'}</span>
-          <ChevronRight className="h-3.5 w-3.5 rotate-90 opacity-70" />
-        </button>
-      </DropdownMenuTrigger>
+      <TextTooltip content={selectedProjectGroup?.path || selectedNewConversationWorkspace.cwd || '默认项目'}>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            className="new-chat-setting-chip"
+            aria-label="选择项目"
+          >
+            <FolderOpen className="h-4 w-4" />
+            <span className="truncate">{selectedProjectGroup?.label || selectedNewConversationWorkspace.label || '默认项目'}</span>
+            <ChevronRight className="h-3.5 w-3.5 rotate-90 opacity-70" />
+          </button>
+        </DropdownMenuTrigger>
+      </TextTooltip>
       <DropdownMenuContent align="start" className="new-chat-project-menu">
         <div className="p-2">
           <Input
@@ -1552,25 +1693,25 @@ export default function ChatPage() {
         </div>
         <div className="max-h-[260px] overflow-y-auto custom-scrollbar px-1 pb-1">
           {filteredProjectGroups.map((group) => (
-            <button
-              type="button"
-              key={group.id}
-              className="new-chat-project-option"
-              onClick={() => {
-                setSelectedProjectId(group.id);
-                setProjectPickerSearch('');
-              }}
-              title={group.path}
-            >
-              <FolderOpen className="h-4 w-4 shrink-0" />
-              <span className="min-w-0 flex-1 text-left">
-                <span className="block truncate text-sm">{group.label}</span>
-                <span className="block truncate text-[11px]" style={{ color: 'var(--fg-tertiary)' }}>
-                  {group.path}
+            <TextTooltip key={group.id} content={group.path} side="right">
+              <button
+                type="button"
+                className="new-chat-project-option"
+                onClick={() => {
+                  setSelectedProjectId(group.id);
+                  setProjectPickerSearch('');
+                }}
+              >
+                <FolderOpen className="h-4 w-4 shrink-0" />
+                <span className="min-w-0 flex-1 text-left">
+                  <span className="block truncate text-sm">{group.label}</span>
+                  <span className="block truncate text-[11px]" style={{ color: 'var(--fg-tertiary)' }}>
+                    {group.path}
+                  </span>
                 </span>
-              </span>
-              {selectedProjectId === group.id && <Check className="h-4 w-4 shrink-0" />}
-            </button>
+                {selectedProjectId === group.id && <Check className="h-4 w-4 shrink-0" />}
+              </button>
+            </TextTooltip>
           ))}
           {filteredProjectGroups.length === 0 && (
             <div className="px-3 py-3 text-xs" style={{ color: 'var(--fg-tertiary)' }}>
@@ -2553,21 +2694,21 @@ export default function ChatPage() {
               {imageRefs.map((image) => {
                 const imageUrl = getImportAssetUrl(image.filename);
                 return (
-                  <button
-                    key={image.filename}
-                    type="button"
-                    className="h-24 w-24 overflow-hidden rounded-md border p-0 cursor-zoom-in transition-opacity hover:opacity-90"
-                    style={{ borderColor: 'var(--border)', background: 'var(--bg-button-tertiary-hover)' }}
-                    onClick={() => handlePreviewImage(image.filename)}
-                    title={image.filename}
-                  >
-                    <img
-                      src={imageUrl}
-                      alt={image.filename}
-                      className="h-full w-full object-cover"
-                      loading="lazy"
-                    />
-                  </button>
+                  <TextTooltip key={image.filename} content={image.filename}>
+                    <button
+                      type="button"
+                      className="h-24 w-24 overflow-hidden rounded-md border p-0 cursor-zoom-in transition-opacity hover:opacity-90"
+                      style={{ borderColor: 'var(--border)', background: 'var(--bg-button-tertiary-hover)' }}
+                      onClick={() => handlePreviewImage(image.filename)}
+                    >
+                      <img
+                        src={imageUrl}
+                        alt={image.filename}
+                        className="h-full w-full object-cover"
+                        loading="lazy"
+                      />
+                    </button>
+                  </TextTooltip>
                 );
               })}
             </div>
@@ -2668,45 +2809,48 @@ export default function ChatPage() {
               )}
             </Button>
             {m.role === 'user' && (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="opacity-0 group-hover:opacity-100 transition-opacity h-7 w-7 p-0"
-                onClick={() => handleEditUserMessage(m.node_id, m.parent_node_id, displayContent)}
-                aria-label="编辑"
-                title="编辑消息（创建新分支）"
-              >
-                <Pencil className="h-4 w-4" />
-              </Button>
+              <TextTooltip content="编辑消息（创建新分支）">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="opacity-0 group-hover:opacity-100 transition-opacity h-7 w-7 p-0"
+                  onClick={() => handleEditUserMessage(m.node_id, m.parent_node_id, displayContent)}
+                  aria-label="编辑"
+                >
+                  <Pencil className="h-4 w-4" />
+                </Button>
+              </TextTooltip>
             )}
             {m.role === 'user' && (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="opacity-0 group-hover:opacity-100 transition-opacity h-7 w-7 p-0 text-destructive hover:text-destructive"
-                onClick={() => handleDeleteBranch(m.node_id)}
-                aria-label="删除分支"
-                title="删除此消息及所有后续分支"
-              >
-                <Trash2 className="h-4 w-4" />
-              </Button>
+              <TextTooltip content="删除此消息及所有后续分支">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="opacity-0 group-hover:opacity-100 transition-opacity h-7 w-7 p-0 text-destructive hover:text-destructive"
+                  onClick={() => handleDeleteBranch(m.node_id)}
+                  aria-label="删除分支"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </TextTooltip>
             )}
             {m.role === 'assistant' && prevUserMessage && index === messages.length - 1 && (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="opacity-0 group-hover:opacity-100 transition-opacity h-7 w-7 p-0"
-                onClick={() => handleRetry(
-                  m.node_id,
-                  getUserDisplayContent(prevUserMessage),
-                  getUserImportFileNames(prevUserMessage),
-                  getUserImageRefs(prevUserMessage),
-                )}
-                aria-label="重试"
-                title="重试（删除当前回复并重新生成）"
-              >
-                <RotateCcw className="h-4 w-4" />
-              </Button>
+              <TextTooltip content="重试（删除当前回复并重新生成）">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="opacity-0 group-hover:opacity-100 transition-opacity h-7 w-7 p-0"
+                  onClick={() => handleRetry(
+                    m.node_id,
+                    getUserDisplayContent(prevUserMessage),
+                    getUserImportFileNames(prevUserMessage),
+                    getUserImageRefs(prevUserMessage),
+                  )}
+                  aria-label="重试"
+                >
+                  <RotateCcw className="h-4 w-4" />
+                </Button>
+              </TextTooltip>
             )}
           </div>
         </div>
@@ -2719,34 +2863,47 @@ export default function ChatPage() {
     [messages, expandedProcessedMessageIds, copiedMessageId, coveredToolMessages, currentConversation?.id],
   );
 
+  const activeRightPanelWidth = rightPanelWidth;
+  const activeRightPanelConfig = RIGHT_PANEL_WIDTH;
+
   return (
-    <div className="flex h-full" style={{ background: 'var(--bg-surface)' }}>
+    <div
+      className={cn('flex h-full', resizingSidebar && 'is-sidebar-resizing')}
+      style={{ background: 'var(--bg-surface)' }}
+    >
       {/* Left conversation list (collapsible) */}
       <nav
-        className={cn('app-sidebar', sidebarCollapsed && 'app-sidebar-collapsed')}
-        style={{ width: sidebarCollapsed ? '56px' : '300px' }}
+        className={cn(
+          'app-sidebar',
+          sidebarCollapsed && 'app-sidebar-collapsed',
+          resizingSidebar === 'left' && 'is-resizing',
+        )}
+        style={{ width: `${sidebarCollapsed ? 56 : leftSidebarWidth}px` }}
       >
         <div className="app-sidebar-topbar">
           {!sidebarCollapsed && (
-            <button
-              type="button"
-              className={cn('app-new-chat-action', !currentConversation && 'is-active')}
-              onClick={handleNewConversation}
-              title="新对话"
-            >
-              <Plus className="h-4 w-4 shrink-0" />
-              <span>新对话</span>
-            </button>
+            <TextTooltip content="新对话">
+              <button
+                type="button"
+                className={cn('app-new-chat-action', !currentConversation && 'is-active')}
+                onClick={handleNewConversation}
+              >
+                <Plus className="h-4 w-4 shrink-0" />
+                <span>新对话</span>
+              </button>
+            </TextTooltip>
           )}
-          <Button
-            variant="ghost"
-            size="sm"
-            className="app-panel-toggle"
-            onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-            title={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
-          >
-            {sidebarCollapsed ? <PanelLeftOpen className="h-5 w-5" /> : <PanelLeftClose className="h-5 w-5" />}
-          </Button>
+          <TextTooltip content={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="app-panel-toggle"
+              onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+              aria-label={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
+            >
+              {sidebarCollapsed ? <PanelLeftOpen className="h-5 w-5" /> : <PanelLeftClose className="h-5 w-5" />}
+            </Button>
+          </TextTooltip>
         </div>
 
         {!sidebarCollapsed && (
@@ -2777,29 +2934,30 @@ export default function ChatPage() {
                     onDragOver={(event) => handleProjectDragOver(event, group.id)}
                     onDrop={(event) => event.preventDefault()}
                   >
-                    <button
-                      type="button"
-                      className={cn('app-project-row', selectedProject && 'is-active')}
-                      draggable
-                      onDragStart={(event) => handleProjectDragStart(event, group.id)}
-                      onDragEnd={handleProjectDragEnd}
-                      onClick={(event) => {
-                        if (projectDragMovedRef.current) {
-                          event.preventDefault();
-                          return;
-                        }
-                        setSelectedProjectId(group.id);
-                        toggleProjectCollapsed(group.id);
-                      }}
-                      title={group.path}
-                    >
-                      <ChevronRight
-                        className={cn('h-3.5 w-3.5 shrink-0 transition-transform', !group.isCollapsed && 'rotate-90')}
-                      />
-                      <FolderOpen className="h-4 w-4 shrink-0" />
-                      <span className="app-project-name">{group.label}</span>
-                      <span className="app-project-count">{group.conversations.length}</span>
-                    </button>
+                    <TextTooltip content={group.path} side="right">
+                      <button
+                        type="button"
+                        className={cn('app-project-row', selectedProject && 'is-active')}
+                        draggable
+                        onDragStart={(event) => handleProjectDragStart(event, group.id)}
+                        onDragEnd={handleProjectDragEnd}
+                        onClick={(event) => {
+                          if (projectDragMovedRef.current) {
+                            event.preventDefault();
+                            return;
+                          }
+                          setSelectedProjectId(group.id);
+                          toggleProjectCollapsed(group.id);
+                        }}
+                      >
+                        <ChevronRight
+                          className={cn('h-3.5 w-3.5 shrink-0 transition-transform', !group.isCollapsed && 'rotate-90')}
+                        />
+                        <FolderOpen className="h-4 w-4 shrink-0" />
+                        <span className="app-project-name">{group.label}</span>
+                        <span className="app-project-count">{group.conversations.length}</span>
+                      </button>
+                    </TextTooltip>
                     {!group.isCollapsed && (
                       <div className="app-session-list">
                         {visible.items.map((c) => {
@@ -2807,48 +2965,48 @@ export default function ChatPage() {
                           const runningCount = activeStreamConversationCounts.get(c.id) ?? 0;
                           const isRunning = runningCount > 0;
                           return (
-                            <div
-                              key={c.id}
-                              className={cn('app-session-row', isSelected && 'is-active')}
-                              onClick={() => handleSelectConversation(c.id)}
-                              onMouseEnter={() => setHoveredId(c.id)}
-                              onMouseLeave={() => setHoveredId(null)}
-                              title={c.title || '未命名'}
-                            >
-                              <span className="app-session-title">{c.title || '未命名'}</span>
-                              {isRunning && (
-                                <span className="app-session-running inline-flex items-center gap-1" aria-label={`正在运行 ${runningCount} 个任务`}>
-                                  <Loader2 className="h-3.5 w-3.5" />
-                                  {runningCount > 1 && <span className="text-[10px] tabular-nums">{runningCount}</span>}
-                                </span>
-                              )}
-                              <span className="app-session-time">{formatConversationTime(c.updated_at)}</span>
-                              <DropdownMenu>
-                                <DropdownMenuTrigger asChild>
-                                  <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    className={cn(
-                                      'app-session-more',
-                                      hoveredId === c.id || isSelected ? 'opacity-100' : 'opacity-0'
-                                    )}
-                                    onClick={(e) => e.stopPropagation()}
-                                  >
-                                    <MoreHorizontal className="h-4 w-4" />
-                                  </Button>
-                                </DropdownMenuTrigger>
-                                <DropdownMenuContent>
-                                  <DropdownMenuItem onClick={() => handleRenameClick(c.id, c.title)}>
-                                    <Pencil className="h-4 w-4 mr-2" />
-                                    重命名
-                                  </DropdownMenuItem>
-                                  <DropdownMenuItem onClick={() => deleteConversation(c.id)}>
-                                    <X className="h-4 w-4 mr-2" />
-                                    删除对话
-                                  </DropdownMenuItem>
-                                </DropdownMenuContent>
-                              </DropdownMenu>
-                            </div>
+                            <TextTooltip key={c.id} content={c.title || '未命名'} side="right">
+                              <div
+                                className={cn('app-session-row', isSelected && 'is-active')}
+                                onClick={() => handleSelectConversation(c.id)}
+                                onMouseEnter={() => setHoveredId(c.id)}
+                                onMouseLeave={() => setHoveredId(null)}
+                              >
+                                <span className="app-session-title">{c.title || '未命名'}</span>
+                                {isRunning && (
+                                  <span className="app-session-running inline-flex items-center gap-1" aria-label={`正在运行 ${runningCount} 个任务`}>
+                                    <Loader2 className="h-3.5 w-3.5" />
+                                    {runningCount > 1 && <span className="text-[10px] tabular-nums">{runningCount}</span>}
+                                  </span>
+                                )}
+                                <span className="app-session-time">{formatConversationTime(c.updated_at)}</span>
+                                <DropdownMenu>
+                                  <DropdownMenuTrigger asChild>
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      className={cn(
+                                        'app-session-more',
+                                        hoveredId === c.id || isSelected ? 'opacity-100' : 'opacity-0'
+                                      )}
+                                      onClick={(e) => e.stopPropagation()}
+                                    >
+                                      <MoreHorizontal className="h-4 w-4" />
+                                    </Button>
+                                  </DropdownMenuTrigger>
+                                  <DropdownMenuContent>
+                                    <DropdownMenuItem onClick={() => handleRenameClick(c.id, c.title)}>
+                                      <Pencil className="h-4 w-4 mr-2" />
+                                      重命名
+                                    </DropdownMenuItem>
+                                    <DropdownMenuItem onClick={() => deleteConversation(c.id)}>
+                                      <X className="h-4 w-4 mr-2" />
+                                      删除对话
+                                    </DropdownMenuItem>
+                                  </DropdownMenuContent>
+                                </DropdownMenu>
+                              </div>
+                            </TextTooltip>
                           );
                         })}
                         {visible.canExpand && (
@@ -2879,16 +3037,31 @@ export default function ChatPage() {
         )}
 
         <div className="app-sidebar-footer">
-          <button
-            type="button"
-            className="app-sidebar-action"
-            onClick={() => openSettings('providers')}
-            title="设置"
-          >
-            <Settings className="h-4 w-4 shrink-0" />
-            {!sidebarCollapsed && <span>设置</span>}
-          </button>
+          <TextTooltip content="设置">
+            <button
+              type="button"
+              className="app-sidebar-action"
+              onClick={() => openSettings('providers')}
+            >
+              <Settings className="h-4 w-4 shrink-0" />
+              {!sidebarCollapsed && <span>设置</span>}
+            </button>
+          </TextTooltip>
         </div>
+        {!sidebarCollapsed && (
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="调整左侧栏宽度"
+            aria-valuemin={LEFT_SIDEBAR_WIDTH.minWidth}
+            aria-valuemax={LEFT_SIDEBAR_WIDTH.maxWidth}
+            aria-valuenow={leftSidebarWidth}
+            tabIndex={0}
+            className="sidebar-resize-handle sidebar-resize-handle-left"
+            onPointerDown={(event) => beginSidebarResize(event, 'left')}
+            onKeyDown={(event) => adjustSidebarWidthFromKeyboard(event, 'left')}
+          />
+        )}
       </nav>
 
       {/* Center: title bar + content (chat or tree) */}
@@ -2922,16 +3095,18 @@ export default function ChatPage() {
             </Tooltip>
           </div>
           <div className="flex items-center gap-1">
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-8 w-8 p-0"
-              onClick={handleExportMarkdown}
-              disabled={!messages.length}
-              title="导出为 Markdown"
-            >
-              <Download className="h-4 w-4" />
-            </Button>
+            <TextTooltip content="导出为 Markdown">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-8 w-8 p-0"
+                onClick={handleExportMarkdown}
+                disabled={!messages.length}
+                aria-label="导出为 Markdown"
+              >
+                <Download className="h-4 w-4" />
+              </Button>
+            </TextTooltip>
           </div>
         </div>
 
@@ -3085,19 +3260,21 @@ export default function ChatPage() {
                               if (!copyContent) return null;
                               return (
                                 <div className="mt-1 flex items-center gap-1 self-start">
-                                  <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    className="h-7 w-7 p-0"
-                                    onClick={() => handleCopy(copyContent, draft.run.runId)}
-                                    title="复制"
-                                  >
-                                    {copiedMessageId === draft.run.runId ? (
-                                      <Check className="h-4 w-4 text-green-500" />
-                                    ) : (
-                                      <Copy className="h-4 w-4" />
-                                    )}
-                                  </Button>
+                                  <TextTooltip content="复制">
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      className="h-7 w-7 p-0"
+                                      onClick={() => handleCopy(copyContent, draft.run.runId)}
+                                      aria-label="复制"
+                                    >
+                                      {copiedMessageId === draft.run.runId ? (
+                                        <Check className="h-4 w-4 text-green-500" />
+                                      ) : (
+                                        <Copy className="h-4 w-4" />
+                                      )}
+                                    </Button>
+                                  </TextTooltip>
                                 </div>
                               );
                             })()}
@@ -3160,13 +3337,30 @@ export default function ChatPage() {
       {/* Right outline (only in chat mode, collapsible) */}
       {chatViewMode === 'chat' && (
         <aside
-          className="flex flex-col transition-[width] duration-200 overflow-y-auto overflow-x-hidden custom-scrollbar"
+          className={cn(
+            'app-right-panel flex flex-col shrink-0 transition-[width] duration-200 overflow-y-auto overflow-x-hidden custom-scrollbar',
+            resizingSidebar === 'right' && 'is-resizing',
+          )}
           style={{
-            width: outlineCollapsed ? '56px' : rightPanelView === 'side' ? '420px' : '280px',
+            width: `${outlineCollapsed ? 56 : activeRightPanelWidth}px`,
             background: 'var(--bg-surface)',
             borderLeft: '0.5px solid var(--border)',
           }}
         >
+          {!outlineCollapsed && (
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="调整右侧栏宽度"
+              aria-valuemin={activeRightPanelConfig.minWidth}
+              aria-valuemax={activeRightPanelConfig.maxWidth}
+              aria-valuenow={activeRightPanelWidth}
+              tabIndex={0}
+              className="sidebar-resize-handle sidebar-resize-handle-right"
+              onPointerDown={(event) => beginSidebarResize(event, 'right')}
+              onKeyDown={(event) => adjustSidebarWidthFromKeyboard(event, 'right')}
+            />
+          )}
           <div className="flex justify-between items-center p-3 sticky top-0 z-[1] min-h-[56px]"
                style={{ background: 'var(--bg-surface)' }}>
             {!outlineCollapsed && (
@@ -3176,7 +3370,6 @@ export default function ChatPage() {
                   size="sm"
                   className="h-8 gap-1.5 px-2 text-xs"
                   onClick={() => setRightPanelView('outline')}
-                  title="大纲"
                 >
                   <FileText className="h-3.5 w-3.5" />
                   大纲
@@ -3186,7 +3379,6 @@ export default function ChatPage() {
                   size="sm"
                   className="h-8 min-w-0 gap-1.5 px-2 text-xs"
                   onClick={() => setRightPanelView('side')}
-                  title="运行"
                   aria-label="运行"
                 >
                   <MessageSquare className="h-3.5 w-3.5" />
@@ -3202,15 +3394,17 @@ export default function ChatPage() {
                 </Button>
               </div>
             )}
-            <Button
-              variant="ghost"
-              size="sm"
-              className="app-panel-toggle"
-              onClick={() => setOutlineCollapsed(!outlineCollapsed)}
-              title={outlineCollapsed ? '展开大纲' : '收起大纲'}
-            >
-              {outlineCollapsed ? <PanelRightOpen className="h-5 w-5" /> : <PanelRightClose className="h-5 w-5" />}
-            </Button>
+            <TextTooltip content={outlineCollapsed ? '展开大纲' : '收起大纲'}>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="app-panel-toggle"
+                onClick={() => setOutlineCollapsed(!outlineCollapsed)}
+                aria-label={outlineCollapsed ? '展开大纲' : '收起大纲'}
+              >
+                {outlineCollapsed ? <PanelRightOpen className="h-5 w-5" /> : <PanelRightClose className="h-5 w-5" />}
+              </Button>
+            </TextTooltip>
           </div>
 
           {!outlineCollapsed && (
@@ -3218,17 +3412,17 @@ export default function ChatPage() {
               {rightPanelView === 'outline' ? (
                 <>
                   {outline.map((item, idx) => (
-                    <div
-                      key={idx}
-                      className="flex items-center py-2 px-3 cursor-pointer rounded-lg mx-2 my-0.5 transition-colors"
-                      style={{ color: 'var(--fg-85)' }}
-                      title={item.text}
-                      onClick={() => handleJumpToMessage(item.originalIndex)}
-                      onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-hover)'; }}
-                      onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = ''; }}
-                    >
-                      <span className="truncate text-sm">{item.text}</span>
-                    </div>
+                    <TextTooltip key={idx} content={item.text} side="left">
+                      <div
+                        className="flex items-center py-2 px-3 cursor-pointer rounded-lg mx-2 my-0.5 transition-colors"
+                        style={{ color: 'var(--fg-85)' }}
+                        onClick={() => handleJumpToMessage(item.originalIndex)}
+                        onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-hover)'; }}
+                        onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = ''; }}
+                      >
+                        <span className="truncate text-sm">{item.text}</span>
+                      </div>
+                    </TextTooltip>
                   ))}
                   <RunStatusPanel conversationId={currentConversation?.id ?? null} runs={activeRunStates} />
                 </>
@@ -3250,28 +3444,32 @@ export default function ChatPage() {
                           {getSlashRunLabel(draft.run.kind, draft.run.pendingUserMessage)} · {draft.run.runId.slice(0, 12)}
                         </span>
                         {(draft.run.status === 'streaming' || draft.run.status === 'waiting_approval') && (
+                          <TextTooltip content="停止">
+                            <button
+                              type="button"
+                              className="rounded border-0 bg-transparent p-1"
+                              onClick={() => streamManager.stopRun(draft.run.runId)}
+                              style={{ color: 'var(--fg-tertiary)' }}
+                              aria-label="停止"
+                            >
+                              <Square className="h-3.5 w-3.5" />
+                            </button>
+                          </TextTooltip>
+                        )}
+                        <TextTooltip content="关闭">
                           <button
                             type="button"
                             className="rounded border-0 bg-transparent p-1"
-                            onClick={() => streamManager.stopRun(draft.run.runId)}
-                            title="停止"
+                            onClick={() => {
+                              if (currentConversation?.id) hideSideRun(currentConversation.id, draft.run.runId);
+                              streamManager.cleanupRun(draft.run.runId);
+                            }}
                             style={{ color: 'var(--fg-tertiary)' }}
+                            aria-label="关闭"
                           >
-                            <Square className="h-3.5 w-3.5" />
+                            <X className="h-3.5 w-3.5" />
                           </button>
-                        )}
-                        <button
-                          type="button"
-                          className="rounded border-0 bg-transparent p-1"
-                          onClick={() => {
-                            if (currentConversation?.id) hideSideRun(currentConversation.id, draft.run.runId);
-                            streamManager.cleanupRun(draft.run.runId);
-                          }}
-                          title="关闭"
-                          style={{ color: 'var(--fg-tertiary)' }}
-                        >
-                          <X className="h-3.5 w-3.5" />
-                        </button>
+                        </TextTooltip>
                       </div>
                       <div className="flex flex-col gap-2 px-3 py-3">
                         {draft.showPendingBubble && (

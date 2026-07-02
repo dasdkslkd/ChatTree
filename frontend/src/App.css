@@ -237,6 +237,33 @@
   color: rgba(255, 255, 255, 0.9);
 }
 
+/* ====== Math blocks (KaTeX) ====== */
+.prose .katex {
+  color: inherit;
+}
+
+.prose .katex-display {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 4px 0 6px;
+  margin: 0.75rem 0;
+}
+
+.prose .katex-display > .katex {
+  max-width: 100%;
+}
+
+.prose .katex .fbox {
+  border-color: rgba(217, 119, 87, 0.42) !important;
+  border-radius: 0.28em;
+  box-shadow: 0 0 0 2px rgba(217, 119, 87, 0.08);
+}
+
+.prose .katex .boxpad {
+  border-radius: 0.24em;
+}
+
 /* ====== File preview dialog ====== */
 .file-preview-panel {
   min-height: 0;

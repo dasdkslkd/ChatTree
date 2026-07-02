@@ -18,6 +18,9 @@ export default defineConfig({
           if (id.includes('react-syntax-highlighter') || id.includes('prismjs')) {
             return 'syntax';
           }
+          if (id.includes('katex')) {
+            return 'markdown-math';
+          }
           if (id.includes('react-markdown') || id.includes('remark-') || id.includes('rehype-') || id.includes('micromark') || id.includes('mdast') || id.includes('hast') || id.includes('unified')) {
             return 'markdown';
           }

@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
+import { TextTooltip } from '@/components/ui/text-tooltip';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent } from '@/components/ui/card';
@@ -526,15 +527,17 @@ export default function SettingsPage() {
                         <span className={hidden ? 'line-through text-muted-foreground' : ''}>
                           {model}
                         </span>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-6 w-6 p-0"
-                          title={hidden ? '显示此模型' : '隐藏此模型'}
-                          onClick={() => toggleModelHidden(model)}
-                        >
-                          {hidden ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
-                        </Button>
+                        <TextTooltip content={hidden ? '显示此模型' : '隐藏此模型'}>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-6 w-6 p-0"
+                            onClick={() => toggleModelHidden(model)}
+                            aria-label={hidden ? '显示此模型' : '隐藏此模型'}
+                          >
+                            {hidden ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+                          </Button>
+                        </TextTooltip>
                       </div>
                     );
                   })}

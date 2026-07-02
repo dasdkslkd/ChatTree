@@ -3,6 +3,7 @@ import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Switch } from '@/components/ui/switch'
+import { TextTooltip } from '@/components/ui/text-tooltip'
 import {
   Dialog,
   DialogContent,
@@ -636,29 +637,31 @@ export function ChatInput({
                       {message.content}
                     </span>
                   )}
-                  <button
-                    type="button"
-                    className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border-0 bg-transparent p-0 cursor-pointer"
-                    style={{ color: 'var(--fg-tertiary)' }}
-                    onClick={() => setEditingQueuedMessageId(isEditing ? null : message.id)}
-                    aria-label={`${isEditing ? '完成编辑' : '编辑'}排队消息 ${index + 1}`}
-                    title={isEditing ? '完成编辑' : '编辑'}
-                  >
-                    {isEditing ? <Check className="h-3.5 w-3.5" /> : <Pencil className="h-3.5 w-3.5" />}
-                  </button>
-                  <button
-                    type="button"
-                    className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border-0 bg-transparent p-0 cursor-pointer"
-                    style={{ color: 'var(--fg-tertiary)' }}
-                    onClick={() => {
-                      if (editingQueuedMessageId === message.id) setEditingQueuedMessageId(null);
-                      onDeleteQueuedMessage?.(message.id);
-                    }}
-                    aria-label={`删除排队消息 ${index + 1}`}
-                    title="删除"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
+                  <TextTooltip content={isEditing ? '完成编辑' : '编辑'}>
+                    <button
+                      type="button"
+                      className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border-0 bg-transparent p-0 cursor-pointer"
+                      style={{ color: 'var(--fg-tertiary)' }}
+                      onClick={() => setEditingQueuedMessageId(isEditing ? null : message.id)}
+                      aria-label={`${isEditing ? '完成编辑' : '编辑'}排队消息 ${index + 1}`}
+                    >
+                      {isEditing ? <Check className="h-3.5 w-3.5" /> : <Pencil className="h-3.5 w-3.5" />}
+                    </button>
+                  </TextTooltip>
+                  <TextTooltip content="删除">
+                    <button
+                      type="button"
+                      className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border-0 bg-transparent p-0 cursor-pointer"
+                      style={{ color: 'var(--fg-tertiary)' }}
+                      onClick={() => {
+                        if (editingQueuedMessageId === message.id) setEditingQueuedMessageId(null);
+                        onDeleteQueuedMessage?.(message.id);
+                      }}
+                      aria-label={`删除排队消息 ${index + 1}`}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </TextTooltip>
                 </div>
               );
             })}
@@ -672,18 +675,19 @@ export function ChatInput({
                 className="relative inline-flex h-14 w-14 overflow-hidden rounded-md"
                 style={{ border: '0.5px solid var(--border)', background: 'var(--bg-button-tertiary-hover)' }}
               >
-                <button
-                  type="button"
-                  className="h-full w-full cursor-zoom-in p-0 border-0 bg-transparent"
-                  onClick={() => onPreviewImage?.(image.filename)}
-                  title={image.filename}
-                >
-                  <img
-                    src={image.url}
-                    alt={image.filename}
-                    className="h-full w-full object-cover"
-                  />
-                </button>
+                <TextTooltip content={image.filename}>
+                  <button
+                    type="button"
+                    className="h-full w-full cursor-zoom-in p-0 border-0 bg-transparent"
+                    onClick={() => onPreviewImage?.(image.filename)}
+                  >
+                    <img
+                      src={image.url}
+                      alt={image.filename}
+                      className="h-full w-full object-cover"
+                    />
+                  </button>
+                </TextTooltip>
                 <button
                   type="button"
                   className="absolute right-0.5 top-0.5 flex h-4 w-4 items-center justify-center rounded-full border-0 p-0 cursor-pointer"
@@ -781,15 +785,17 @@ export function ChatInput({
               className="hidden"
               onChange={handleFileChange}
             />
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 w-7 p-0"
-              onClick={handleFilePick}
-              title="上传文件"
-            >
-              <Plus className="h-4 w-4" />
-            </Button>
+            <TextTooltip content="上传文件">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 w-7 p-0"
+                onClick={handleFilePick}
+                aria-label="上传文件"
+              >
+                <Plus className="h-4 w-4" />
+              </Button>
+            </TextTooltip>
             {settingsSlot}
             {/* 模型选择按钮 */}
             <button
@@ -810,14 +816,15 @@ export function ChatInput({
               <div className="flex items-center gap-1 px-2 py-0.5 rounded-full text-xs max-w-[260px]"
                    style={{ background: 'var(--accent-soft)', color: 'var(--icon-accent)' }}>
                 <StickyNote className="h-3 w-3" />
-                <button
-                  className="truncate bg-transparent border-none p-0 text-xs cursor-pointer"
-                  style={{ color: 'var(--icon-accent)' }}
-                  onClick={() => setPromptDialogOpen(true)}
-                  title="更换提示词"
-                >
-                  {selectedPromptTitle}
-                </button>
+                <TextTooltip content="更换提示词">
+                  <button
+                    className="truncate bg-transparent border-none p-0 text-xs cursor-pointer"
+                    style={{ color: 'var(--icon-accent)' }}
+                    onClick={() => setPromptDialogOpen(true)}
+                  >
+                    {selectedPromptTitle}
+                  </button>
+                </TextTooltip>
                 <span
                   className="rounded-full px-1.5 py-0.5"
                   style={{ background: 'var(--bg-surface)', color: 'var(--fg-secondary)' }}
@@ -851,7 +858,6 @@ export function ChatInput({
                   type="button"
                   className="flex items-center gap-1 text-xs font-normal h-7 px-2 rounded-full cursor-pointer transition-colors"
                   style={{ color: currentMultiAgentMode === 'none' ? 'var(--fg-tertiary)' : 'var(--icon-accent)' }}
-                  title={currentMultiAgentModeOption.title}
                   aria-label={`Agent 模式：${currentMultiAgentModeOption.label}`}
                   onMouseEnter={(e) => {
                     (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-hover)';
@@ -865,8 +871,9 @@ export function ChatInput({
               <DropdownMenuContent align="start" className="w-56">
                 <DropdownMenuRadioGroup value={currentMultiAgentMode} onValueChange={handleMultiAgentModeChange}>
                   {MULTI_AGENT_MODE_OPTIONS.map((option) => (
-                    <DropdownMenuRadioItem key={option.value} value={option.value} title={option.title}>
-                      {option.label}
+                    <DropdownMenuRadioItem key={option.value} value={option.value} className="flex-col items-start gap-0.5">
+                      <span>{option.label}</span>
+                      <span className="text-[11px] leading-4" style={{ color: 'var(--fg-tertiary)' }}>{option.title}</span>
                     </DropdownMenuRadioItem>
                   ))}
                 </DropdownMenuRadioGroup>
@@ -886,7 +893,6 @@ export function ChatInput({
                     background: 'color-mix(in srgb, var(--bg-input) 72%, transparent)',
                   }}
                   aria-label={`工具权限：${currentPermissionLabel}`}
-                  title={`工具权限：${currentPermissionLabel}`}
                 >
                   {currentPermissionLabel}
                 </button>

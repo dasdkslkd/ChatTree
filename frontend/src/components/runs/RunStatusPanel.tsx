@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Loader2, Play, Square } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { TextTooltip } from '@/components/ui/text-tooltip';
 import { capabilitiesApi, type CapabilityAgent } from '../../api/capabilities';
 import { agentsApi } from '../../api/agents';
 import { workflowsApi } from '../../api/workflows';
@@ -123,14 +124,16 @@ export function RunStatusPanel({ conversationId, runs }: Props) {
               {getRunKindLabel(run.kind)} · {getRunStatusLabel(run.status)}
             </span>
             {(run.status === 'streaming' || run.status === 'waiting_approval') && (
-              <button
-                type="button"
-                className="border-0 bg-transparent p-0"
-                onClick={() => streamManager.stopRun(run.runId)}
-                title="停止"
-              >
-                <Square className="h-3.5 w-3.5" />
-              </button>
+              <TextTooltip content="停止">
+                <button
+                  type="button"
+                  className="border-0 bg-transparent p-0"
+                  onClick={() => streamManager.stopRun(run.runId)}
+                  aria-label="停止"
+                >
+                  <Square className="h-3.5 w-3.5" />
+                </button>
+              </TextTooltip>
             )}
           </div>
         ))}

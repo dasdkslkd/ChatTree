@@ -1,5 +1,6 @@
 import './App.css'
 import { Toaster } from '@/components/ui/sonner'
+import { TextTooltip } from '@/components/ui/text-tooltip'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { Wifi, WifiOff } from 'lucide-react'
 import { SettingsPageView } from './components/SettingsDialog'
@@ -393,16 +394,17 @@ function App() {
             <div className="w-px h-3" style={{ background: 'var(--border)' }} />
 
             {/* Current model — click to open settings */}
-            <div
-              className="flex items-center gap-1.5 px-1.5 py-0.5 rounded cursor-pointer transition-opacity"
-              style={{ borderRadius: '6px' }}
-              onClick={() => openSettings('providers')}
-              title="点击打开设置"
-              onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-hover)'; }}
-              onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = ''; }}
-            >
-              <span>{getModelDisplay()}</span>
-            </div>
+            <TextTooltip content="点击打开设置">
+              <div
+                className="flex items-center gap-1.5 px-1.5 py-0.5 rounded cursor-pointer transition-opacity"
+                style={{ borderRadius: '6px' }}
+                onClick={() => openSettings('providers')}
+                onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-hover)'; }}
+                onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = ''; }}
+              >
+                <span>{getModelDisplay()}</span>
+              </div>
+            </TextTooltip>
           </footer>
         </div>
 
