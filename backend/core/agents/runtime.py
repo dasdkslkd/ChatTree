@@ -57,6 +57,7 @@ class AgentRuntime:
             input_data=task,
             parent_node_id=source.anchor_node_id,
             parent_run_id=parent_run_id or source.run_id,
+            context_mode=context_mode,
             provider_id=provider_id,
             model_id=model_id,
             permission_mode=normalize_permission_mode(permission_mode),

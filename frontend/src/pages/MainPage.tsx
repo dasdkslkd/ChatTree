@@ -72,7 +72,7 @@ import type {
   SendMessageRequest,
   ToolPermissionMode,
 } from '../types/message';
-import type { WorkspaceContext } from '../types/conversation';
+import type { MultiAgentMode, WorkspaceContext } from '../types/conversation';
 import { useConversationStore } from '../store/conversationStore';
 import { useModelStore } from '../store/modelStore';
 import { useNavigationStore } from '../store/navigationStore';
@@ -919,6 +919,7 @@ export default function ChatPage() {
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([]);
   const [archivedSideRunsByConversation, setArchivedSideRunsByConversation] = useState<Record<string, StreamState[]>>({});
   const [toolPermissionDraft, setToolPermissionDraftState] = useState<ToolPermissionDraft>(() => createToolPermissionDraft());
+  const [newConversationMultiAgentMode, setNewConversationMultiAgentMode] = useState<MultiAgentMode>('explicit_request_only');
   const [previewFile, setPreviewFile] = useState<{ name: string; content: string } | null>(null);
   const [previewImage, setPreviewImage] = useState<{ name: string; url: string } | null>(null);
   const [conversationSearch, setConversationSearch] = useState('');
@@ -1728,8 +1729,14 @@ export default function ChatPage() {
         )
       ));
     }
-    void Promise.all(currentBranchStreamingRunIds.map((runId) => streamManager.stopRun(runId)));
-  }, [currentBranchStreamingRunIds, currentConversation?.id, selectedBranchTipId, updateQueuedMessages]);
+    const conversationId = currentConversation?.id;
+    void (async () => {
+      await Promise.allSettled(currentBranchStreamingRunIds.map((runId) => streamManager.stopRun(runId)));
+      if (conversationId) {
+        await refreshMessages(conversationId, { retries: 1 });
+      }
+    })();
+  }, [currentBranchStreamingRunIds, currentConversation?.id, refreshMessages, selectedBranchTipId, updateQueuedMessages]);
 
   // 全局注册一次：任意对话的流结束（completed/error/stopped）时，
   // 从后端刷新真实消息，再清理 StreamManager 中该对话的临时状态。
@@ -2057,6 +2064,7 @@ export default function ChatPage() {
       const newConv = await createConversation({
         title: files[0]?.name?.slice(0, 20) || 'New',
         workspace: workspaceForCreateRequest(),
+        multi_agent_mode: newConversationMultiAgentMode,
       });
       if (!newConv) return;
       convId = newConv.id;
@@ -2115,6 +2123,7 @@ export default function ChatPage() {
     toolPermissionMode?: ToolPermissionMode,
     promptId?: string | null,
     promptMode?: 'override' | 'append',
+    multiAgentMode?: MultiAgentMode,
   ) => {
     if (!val.trim()) return;
     setShouldAutoScroll(true);
@@ -2176,6 +2185,7 @@ export default function ChatPage() {
         prompt_id: promptId || undefined,
         prompt_mode: promptId ? promptMode : undefined,
         workspace: workspaceForCreateRequest(),
+        multi_agent_mode: multiAgentMode ?? newConversationMultiAgentMode,
       });
       if (!newConv) {
         console.error('Failed to create conversation');
@@ -2905,6 +2915,8 @@ export default function ChatPage() {
                     toolPermissionDraft={toolPermissionDraft}
                     getToolPermissionDraft={getToolPermissionDraft}
                     onToolPermissionDraftChange={updateToolPermissionDraft}
+                    pendingMultiAgentMode={newConversationMultiAgentMode}
+                    onPendingMultiAgentModeChange={setNewConversationMultiAgentMode}
                   />
                 </div>
               </div>
@@ -3055,6 +3067,8 @@ export default function ChatPage() {
                   toolPermissionDraft={toolPermissionDraft}
                   getToolPermissionDraft={getToolPermissionDraft}
                   onToolPermissionDraftChange={updateToolPermissionDraft}
+                  pendingMultiAgentMode={newConversationMultiAgentMode}
+                  onPendingMultiAgentModeChange={setNewConversationMultiAgentMode}
                   pendingToolApprovals={pendingToolApprovalPrompts}
                   onToolApprovalDecision={handleToolApprovalDecision}
                 />

@@ -3,6 +3,7 @@ import { devtools, persist } from 'zustand/middleware';
 import type {
   Conversation,
   ConversationCreateRequest,
+  MultiAgentMode,
 } from '../types/conversation';
 import { conversationApi, type TreeData } from '../api/conversation';
 import type { Message } from '../types/message';
@@ -29,6 +30,7 @@ interface ConversationActions {
   selectConversation: (id: string) => Promise<void>;
   deleteConversation: (id: string) => Promise<void>;
   updateConversationTitle: (id: string, title: string) => Promise<void>;
+  updateMultiAgentMode: (id: string, mode: MultiAgentMode) => Promise<void>;
   clearCurrentConversation: () => void;
   switchNode: (nodeId: string) => Promise<void>;
   setCurrentNodeIdLocal: (nodeId: string) => void;
@@ -39,6 +41,23 @@ interface ConversationActions {
   clearPendingScroll: () => void;
   refreshMessages: (conversationId: string, opts?: { awaitNodeId?: string; awaitRole?: 'assistant' | 'user'; retries?: number }) => Promise<boolean>;
   patchAssistantMessageFromStream: (conversationId: string, message: Message, pendingUserContent?: string | null) => boolean;
+}
+
+function isActiveRunDeleteConflict(err: any): boolean {
+  const detail = err?.response?.data?.detail;
+  return err?.response?.status === 409
+    && detail != null
+    && Array.isArray(detail.active_run_ids)
+    && detail.active_run_ids.length > 0;
+}
+
+async function deleteNodeAllowingActiveRuns(conversationId: string, nodeId: string) {
+  try {
+    return await conversationApi.deleteNode(conversationId, nodeId);
+  } catch (err: any) {
+    if (!isActiveRunDeleteConflict(err)) throw err;
+    return await conversationApi.deleteNode(conversationId, nodeId, { force: true });
+  }
 }
 
 const useConversationStoreBase = create<ConversationState & ConversationActions>()(
@@ -179,6 +198,23 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
               currentConversation:
                 state.currentConversation?.id === id
                   ? { ...state.currentConversation, title }
+                  : state.currentConversation,
+            }));
+          } catch (err: any) {
+            set({ error: err.message });
+          }
+        },
+
+        updateMultiAgentMode: async (id, mode) => {
+          try {
+            await conversationApi.updateMultiAgentMode(id, mode);
+            set((state) => ({
+              conversations: state.conversations.map((conversation) =>
+                conversation.id === id ? { ...conversation, multi_agent_mode: mode } : conversation
+              ),
+              currentConversation:
+                state.currentConversation?.id === id
+                  ? { ...state.currentConversation, multi_agent_mode: mode }
                   : state.currentConversation,
             }));
           } catch (err: any) {
@@ -370,7 +406,7 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
           if (!currentConversation) return;
           set({ loading: true, error: null });
           try {
-            const result = await conversationApi.deleteNode(currentConversation.id, nodeId);
+            const result = await deleteNodeAllowingActiveRuns(currentConversation.id, nodeId);
             const [history, branches, treeData] = await Promise.all([
               messageApi.getHistory(currentConversation.id),
               conversationApi.getBranches(currentConversation.id),

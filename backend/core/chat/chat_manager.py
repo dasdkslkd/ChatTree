@@ -42,6 +42,31 @@ from ..tools.agent_tools import AGENT_TOOL_NAMES, LEGACY_AGENT_TOOL_NAMES
 
 logger = setup_logger('ChatManager')
 
+MULTI_AGENT_REJECTION_TOKENS = (
+    "不要用 subagent",
+    "不要使用subagent",
+    "不要使用 subagent",
+    "do not use subagent",
+    "without subagent",
+)
+
+MULTI_AGENT_REQUEST_TOKENS = (
+    "subagent",
+    "子agent",
+    "子代理",
+    "开agent",
+    "开 agent",
+    "派agent",
+    "派 agent",
+    "使用agent",
+    "使用 agent",
+    "delegate",
+    "parallel agent",
+    "fork agent",
+    "workflow",
+    "工作流",
+)
+
 class ChatManager:
     """延迟加载模型的聊天管理器"""
     
@@ -132,6 +157,7 @@ class ChatManager:
         prompt_id: Optional[str] = None,
         prompt_mode: str = "override",
         workspace: Optional[Dict[str, Any]] = None,
+        multi_agent_mode: Optional[str] = None,
     ) -> Conversation:
         """
         创建新对话（不实例化模型，只保存配置ID）
@@ -142,6 +168,7 @@ class ChatManager:
             build_default_workspace(cfg.data if isinstance(cfg.data, dict) else None),
         )
         conversation = Conversation(title=title, workspace=workspace_context)
+        conversation.metadata["multi_agent_mode"] = self._normalize_multi_agent_mode(multi_agent_mode)
         
         # 初始化系统消息
         conversation.initialize_with_system_message(None)
@@ -225,6 +252,22 @@ class ChatManager:
             data["metadata"]["provider_id"] = provider_id
             data["metadata"]["reasoning_effort"] = reasoning_effort
             data["metadata"]["thinking_enabled"] = thinking_enabled
+            data["metadata"]["updated_at"] = int(time())
+            self.storage.save(data)
+        return True
+
+    async def update_conversation_multi_agent_mode(
+        self,
+        conversation_id: str,
+        multi_agent_mode: str,
+    ) -> bool:
+        """更新对话的 multi-agent 工具暴露策略（锁内 load-modify-save）。"""
+        mode = self._normalize_multi_agent_mode(multi_agent_mode)
+        async with self._lock_for(conversation_id):
+            data = self.storage.load(conversation_id)
+            if not data:
+                return False
+            data["metadata"]["multi_agent_mode"] = mode
             data["metadata"]["updated_at"] = int(time())
             self.storage.save(data)
         return True
@@ -737,8 +780,8 @@ class ChatManager:
         )
 
         multi_agent_mode = self._resolve_multi_agent_mode(
-            model_content,
-            preview.metadata if preview is not None else {},
+            self._multi_agent_intent_text(conversation, model_content),
+            conversation.metadata if conversation is not None else (preview.metadata if preview is not None else {}),
         )
         tools = self.tool_manager.get_openai_tools() if self.tool_manager else []
         tools = self._filter_agent_tools_for_mode(tools, multi_agent_mode)
@@ -1161,7 +1204,7 @@ class ChatManager:
                 metadata={"runtime_mode": "side_question"},
             )
         multi_agent_mode = self._resolve_multi_agent_mode(
-            latest_user_content,
+            self._multi_agent_intent_text(conversation, latest_user_content),
             conversation.metadata if conversation is not None else {},
         )
         multi_agent_lines: list[str] = []
@@ -1197,45 +1240,59 @@ class ChatManager:
         content = message.get("content")
         return content if isinstance(content, str) else str(content or "")
 
+    def _multi_agent_intent_text(
+        self,
+        conversation: Optional[Conversation],
+        current_user_input: str = "",
+    ) -> str:
+        """Keep explicit delegation intent across short clarification turns."""
+        current = current_user_input if isinstance(current_user_input, str) else str(current_user_input or "")
+        parts = [current] if current.strip() else []
+        if conversation is None:
+            return "\n".join(parts)
+
+        seen = {current}
+        try:
+            chain = self._model_node_chain(conversation, include_messages_to_keep=False)
+        except Exception:
+            return "\n".join(parts)
+
+        for node in reversed(chain):
+            message = (node or {}).get("user_message") or {}
+            content = message.get("content")
+            text = content if isinstance(content, str) else str(content or "")
+            if not text.strip() or text in seen:
+                continue
+            lowered = text.lower()
+            if any(token in lowered for token in MULTI_AGENT_REQUEST_TOKENS) and not any(
+                token in lowered for token in MULTI_AGENT_REJECTION_TOKENS
+            ):
+                parts.append(text)
+                seen.add(text)
+            if len(parts) >= 6:
+                break
+        return "\n".join(parts)
+
     def _resolve_multi_agent_mode(
         self,
         user_input: str,
         conversation_metadata: Dict[str, Any],
     ) -> str:
-        configured = (
-            conversation_metadata.get("multi_agent_mode")
-            or (cfg.data.get("multi_agent_mode") if isinstance(cfg.data, dict) else None)
-            or ((cfg.data.get("tools", {}) or {}).get("multi_agent_mode") if isinstance(cfg.data, dict) else None)
-            or "explicit_request_only"
-        )
-        try:
-            mode = str(configured)
-        except Exception:
-            mode = "explicit_request_only"
-        if mode not in {"none", "explicit_request_only", "proactive"}:
-            mode = "explicit_request_only"
+        mode = self._normalize_multi_agent_mode(conversation_metadata.get("multi_agent_mode"))
         if mode in {"none", "proactive"}:
             return mode
         text = (user_input or "").lower()
-        if any(token in text for token in ("不要用 subagent", "不要使用subagent", "不要使用 subagent", "do not use subagent", "without subagent")):
+        if any(token in text for token in MULTI_AGENT_REJECTION_TOKENS):
             return "none"
-        explicit_tokens = (
-            "subagent",
-            "子agent",
-            "子代理",
-            "开agent",
-            "开 agent",
-            "派agent",
-            "派 agent",
-            "使用agent",
-            "使用 agent",
-            "delegate",
-            "parallel agent",
-            "fork agent",
-            "workflow",
-            "工作流",
-        )
-        return mode if any(token in text for token in explicit_tokens) else "none"
+        return mode if any(token in text for token in MULTI_AGENT_REQUEST_TOKENS) else "none"
+
+    @staticmethod
+    def _normalize_multi_agent_mode(mode: Any) -> str:
+        try:
+            value = str(mode or "explicit_request_only")
+        except Exception:
+            value = "explicit_request_only"
+        return value if value in {"none", "explicit_request_only", "proactive"} else "explicit_request_only"
 
     def _filter_agent_tools_for_mode(
         self,

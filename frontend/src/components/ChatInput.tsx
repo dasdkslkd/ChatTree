@@ -17,7 +17,7 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { SendHorizontal, Bot, StickyNote, X, Settings, Square, Plus, FileText, Pencil, Trash2, Check, Loader2 } from 'lucide-react'
+import { SendHorizontal, Bot, StickyNote, X, Settings, Square, Plus, FileText, Pencil, Trash2, Check, Loader2, Workflow } from 'lucide-react'
 import { useState, useEffect, useRef, type ReactNode } from 'react'
 import { useModelStore } from '../store/modelStore'
 import { usePromptStore } from '../store/promtStore'
@@ -26,6 +26,7 @@ import { useConversationStore } from '../store/conversationStore'
 import { conversationApi } from '../api/conversation'
 import { slashRegistry } from '../services/slashRegistry'
 import type { ToolApprovalDecision, ToolApprovalScope, ToolPermissionMode } from '../types/message'
+import type { MultiAgentMode } from '../types/conversation'
 import type { SlashCommandInfo } from '../types/slash'
 import type { PendingToolApprovalPrompt, ToolApprovalDecisionHandler } from '../utils/toolApprovals'
 import {
@@ -41,6 +42,12 @@ import {
 
 type SystemPromptMode = 'override' | 'append';
 
+const MULTI_AGENT_MODE_OPTIONS: Array<{ value: MultiAgentMode; label: string; title: string }> = [
+  { value: 'explicit_request_only', label: '显式', title: '显式请求时启用 subagent/workflow 工具' },
+  { value: 'proactive', label: '自动', title: '允许模型主动使用 subagent/workflow 工具' },
+  { value: 'none', label: '关闭', title: '不向模型提供 subagent/workflow 工具' },
+];
+
 interface Props {
   onSend: (
     value: string,
@@ -49,6 +56,7 @@ interface Props {
     toolPermissionMode?: ToolPermissionMode,
     promptId?: string | null,
     promptMode?: SystemPromptMode,
+    multiAgentMode?: MultiAgentMode,
   ) => Promise<void>;
   onStop?: () => void;
   isStreaming?: boolean;
@@ -70,6 +78,8 @@ interface Props {
   onToolPermissionDraftChange: (draft: ToolPermissionDraft) => void;
   pendingToolApprovals?: PendingToolApprovalPrompt[];
   onToolApprovalDecision?: ToolApprovalDecisionHandler;
+  pendingMultiAgentMode?: MultiAgentMode;
+  onPendingMultiAgentModeChange?: (mode: MultiAgentMode) => void;
   variant?: 'dock' | 'composer';
 }
 
@@ -95,6 +105,8 @@ export function ChatInput({
   onToolPermissionDraftChange,
   pendingToolApprovals = [],
   onToolApprovalDecision,
+  pendingMultiAgentMode = 'explicit_request_only',
+  onPendingMultiAgentModeChange,
   variant = 'dock',
 }: Props) {
   const { openSettings } = useNavigationStore();
@@ -138,6 +150,10 @@ export function ChatInput({
 
   const { prompts, loadPrompts, loadPrompt } = usePromptStore();
   const currentConversation = useConversationStore((s) => s.currentConversation);
+  const updateMultiAgentMode = useConversationStore((s) => s.updateMultiAgentMode);
+  const currentMultiAgentMode: MultiAgentMode = currentConversation?.multi_agent_mode ?? pendingMultiAgentMode;
+  const currentMultiAgentModeOption = MULTI_AGENT_MODE_OPTIONS.find((option) => option.value === currentMultiAgentMode)
+    ?? MULTI_AGENT_MODE_OPTIONS[0];
 
   // 初始加载（loadConfig/loadProviders 已在 App.tsx 中调用）
   useEffect(() => {
@@ -219,11 +235,21 @@ export function ChatInput({
       pendingToolPermissionMode,
       selectedPromptId,
       selectedPromptId ? selectedPromptMode : undefined,
+      currentMultiAgentMode,
     );
     onToolPermissionDraftChange(markToolPermissionModeSent(getToolPermissionDraft(), pendingToolPermissionMode));
   };
 
   const handleFilePick = () => { fileInputRef.current?.click(); };
+
+  const handleMultiAgentModeChange = (mode: string) => {
+    const nextMode = mode as MultiAgentMode;
+    if (!currentConversation) {
+      onPendingMultiAgentModeChange?.(nextMode);
+      return;
+    }
+    void updateMultiAgentMode(currentConversation.id, nextMode);
+  };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -818,6 +844,34 @@ export function ChatInput({
                 提示词
               </button>
             )}
+
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  className="flex items-center gap-1 text-xs font-normal h-7 px-2 rounded-full cursor-pointer transition-colors"
+                  style={{ color: currentMultiAgentMode === 'none' ? 'var(--fg-tertiary)' : 'var(--icon-accent)' }}
+                  title={currentMultiAgentModeOption.title}
+                  aria-label={`Agent 模式：${currentMultiAgentModeOption.label}`}
+                  onMouseEnter={(e) => {
+                    (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-hover)';
+                  }}
+                  onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = ''; }}
+                >
+                  <Workflow className="h-4 w-4 mr-1" />
+                  Agent {currentMultiAgentModeOption.label}
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-56">
+                <DropdownMenuRadioGroup value={currentMultiAgentMode} onValueChange={handleMultiAgentModeChange}>
+                  {MULTI_AGENT_MODE_OPTIONS.map((option) => (
+                    <DropdownMenuRadioItem key={option.value} value={option.value} title={option.title}>
+                      {option.label}
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
 
           <div className="flex items-center gap-1">

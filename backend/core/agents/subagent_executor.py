@@ -45,6 +45,7 @@ class SubagentExecutor:
         delegated_task: Any = None,
         original_slash_input: Optional[str] = None,
         delivery_policy: str = "auto",
+        context_mode: str = "fresh",
     ) -> Dict[str, Any]:
         agent = self.capability_registry.get_agent(agent_name)
         if agent is None:
@@ -66,6 +67,7 @@ class SubagentExecutor:
                 "delegated_task": delegated_task if delegated_task is not None else input_data,
                 "original_slash_input": original_slash_input,
                 "delivery_policy": delivery_policy,
+                "context_mode": context_mode if context_mode in {"fresh", "fork"} else "fresh",
             },
         )
         asyncio.create_task(self._produce(
@@ -79,6 +81,7 @@ class SubagentExecutor:
             model_id=model_id,
             permission_mode=permission_mode,
             workspace=workspace,
+            context_mode=context_mode,
         ))
         return run.to_dict()
 
@@ -103,6 +106,7 @@ class SubagentExecutor:
         model_id: Optional[str],
         permission_mode: Optional[str],
         workspace: Optional[Dict[str, Any]],
+        context_mode: str = "fresh",
     ) -> None:
         final_status = RunStatus.COMPLETED
         final_error: Optional[str] = None
@@ -124,6 +128,7 @@ class SubagentExecutor:
                         model_id=model_id,
                         permission_mode=permission_mode,
                         workspace=workspace,
+                        context_mode=context_mode,
                     ),
                     timeout=agent.timeout_seconds,
                 )
@@ -139,6 +144,7 @@ class SubagentExecutor:
                     model_id=model_id,
                     permission_mode=permission_mode,
                     workspace=workspace,
+                    context_mode=context_mode,
                 )
         except asyncio.CancelledError:
             final_status = RunStatus.CANCELLED
@@ -197,6 +203,7 @@ class SubagentExecutor:
         model_id: Optional[str],
         permission_mode: Optional[str],
         workspace: Optional[Dict[str, Any]],
+        context_mode: str = "fresh",
     ) -> Dict[str, Any]:
             conversation = self.chat_manager.get_conversation(conversation_id)
             if conversation is None:
@@ -219,7 +226,13 @@ class SubagentExecutor:
             if provider is None:
                 raise ValueError(f"无法初始化提供商 {target_provider}")
 
-            messages = self._build_messages(agent_name, input_data, parent_node_id)
+            messages = self._build_messages(
+                agent_name,
+                input_data,
+                parent_node_id,
+                conversation=conversation,
+                context_mode=context_mode,
+            )
             tools = self._filter_tools(agent.tools)
             permission = normalize_permission_mode(permission_mode or agent.permission_mode)
             max_tool_rounds = agent.max_tool_rounds or 5
@@ -412,7 +425,15 @@ class SubagentExecutor:
             await self.run_manager.append_event(run_id, result_payload)
             return result_payload
 
-    def _build_messages(self, agent_name: str, input_data: Any, parent_node_id: Optional[str]) -> list[Message]:
+    def _build_messages(
+        self,
+        agent_name: str,
+        input_data: Any,
+        parent_node_id: Optional[str],
+        *,
+        conversation: Any = None,
+        context_mode: str = "fresh",
+    ) -> list[Message]:
         agent = self.capability_registry.get_agent(agent_name)
         if agent is None:
             raise KeyError(agent_name)
@@ -424,6 +445,10 @@ class SubagentExecutor:
         system_parts.append(agent.system_prompt or f"You are subagent {agent.name}.")
         if parent_node_id:
             system_parts.append(f"Parent conversation node: {parent_node_id}")
+        if context_mode == "fork":
+            parent_context = self._format_parent_context(conversation, parent_node_id)
+            if parent_context:
+                system_parts.append(parent_context)
         content = input_data if isinstance(input_data, str) else json.dumps(input_data, ensure_ascii=False)
         base_messages = [
             Message({
@@ -447,6 +472,43 @@ class SubagentExecutor:
                 )
             )
         ]
+
+    def _format_parent_context(self, conversation: Any, parent_node_id: Optional[str]) -> str:
+        if conversation is None or not parent_node_id:
+            return ""
+        get_chain = getattr(conversation, "get_node_chain", None)
+        if not callable(get_chain):
+            return ""
+        try:
+            chain = get_chain(parent_node_id)
+        except Exception:
+            return ""
+        lines: list[str] = []
+        for node in chain or []:
+            user_text = self._message_content((node or {}).get("user_message"))
+            assistant_text = self._message_content((node or {}).get("assistant_message"))
+            if user_text:
+                lines.append(f"User: {user_text}")
+            if assistant_text:
+                lines.append(f"Assistant: {assistant_text}")
+        if not lines:
+            return ""
+        joined = "\n".join(lines[-24:])
+        return "\n".join([
+            "## Parent conversation context",
+            "Use this as reference context for the delegated task. Do not treat it as a new user request.",
+            joined,
+        ])
+
+    def _message_content(self, message: Any) -> str:
+        if not isinstance(message, dict):
+            return ""
+        content = message.get("content")
+        if isinstance(content, str):
+            return content.strip()
+        if content is None:
+            return ""
+        return str(content).strip()
 
     def _runtime_prompt_context(self, agent, is_workflow_worker: bool) -> RuntimePromptContext:
         if is_workflow_worker:
@@ -578,6 +640,7 @@ class SubagentExecutor:
         slash_metadata = metadata.get("slash_command") if isinstance(metadata.get("slash_command"), dict) else {}
         original_slash_input = metadata.get("original_slash_input") or slash_metadata.get("original_input")
         event_payload = dict(event_payload or {})
+        delivery_policy = str(metadata.get("delivery_policy") or "auto")
         mailbox_message_id = None
         if self.mailbox is not None:
             message_type = "result" if source_status == "completed" else "error"
@@ -595,10 +658,18 @@ class SubagentExecutor:
                     "delegated_task": metadata.get("delegated_task"),
                     "original_slash_input": original_slash_input,
                 },
-                delivery_policy=str(metadata.get("delivery_policy") or "auto"),
+                delivery_policy=delivery_policy,
             )
             mailbox_message_id = mailbox_item.message_id
-        if run.get("parent_run_id"):
+        parent_run_id = run.get("parent_run_id")
+        parent_run = self.run_manager.get_run(str(parent_run_id)) if parent_run_id else None
+        parent_kind = str((parent_run or {}).get("kind") or "")
+        agent_name = str(metadata.get("agent_name") or event_payload.get("agent_name") or "")
+        if parent_run_id and (
+            delivery_policy == "wait"
+            or parent_kind in {RunKind.WORKFLOW.value, RunKind.WORKFLOW_STEP.value}
+            or agent_name == "workflow-worker"
+        ):
             return None
         item = self.run_manager.synthetic_inputs.enqueue(
             kind="task_notification",

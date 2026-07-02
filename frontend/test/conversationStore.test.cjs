@@ -35,6 +35,13 @@ let historyResponse = [
 ];
 let branchesResponse = { 'node-1': [] };
 let switchNodeCalls = [];
+let updateMultiAgentModeCalls = [];
+let deleteNodeCalls = [];
+let deleteNodeHandler = async () => ({
+  deleted_node_id: 'node-2',
+  new_current_node_id: 'node-1',
+  parent_node_id: 'node-1',
+});
 
 const refreshedTree = {
   root_node_id: 'root',
@@ -77,11 +84,13 @@ require.cache[require.resolve(conversationApiModule)] = {
         switchNodeCalls.push({ conversationId, nodeId });
         return { current_node_id: nodeId };
       },
-      deleteNode: async () => ({
-        deleted_node_id: 'node-2',
-        new_current_node_id: 'node-1',
-        parent_node_id: 'node-1',
-      }),
+      updateMultiAgentMode: async (conversationId, mode) => {
+        updateMultiAgentModeCalls.push({ conversationId, mode });
+      },
+      deleteNode: async (...args) => {
+        deleteNodeCalls.push(args);
+        return deleteNodeHandler(...args);
+      },
       getBranches: async () => branchesResponse,
       getTree: async () => {
         getTreeCalls += 1;
@@ -120,6 +129,12 @@ const { useConversationStore } = require(storeModule);
 
 async function testDeleteNodeRefreshesTreeData() {
   getTreeCalls = 0;
+  deleteNodeCalls = [];
+  deleteNodeHandler = async () => ({
+    deleted_node_id: 'node-2',
+    new_current_node_id: 'node-1',
+    parent_node_id: 'node-1',
+  });
   const currentConversation = {
     id: 'conv-1',
     title: '树测试',
@@ -160,12 +175,68 @@ async function testDeleteNodeRefreshesTreeData() {
   await useConversationStore.getState().deleteNode('node-2');
 
   const state = useConversationStore.getState();
+  assert.deepEqual(deleteNodeCalls, [['conv-1', 'node-2']]);
   assert.equal(getTreeCalls, 1);
   assert.equal(state.currentNodeId, 'node-1');
   assert.equal(state.currentConversation.current_node_id, 'node-1');
   assert.equal(state.treeData.current_node_id, 'node-1');
   assert.deepEqual(state.treeData.nodes.map((node) => node.id), ['root', 'node-1']);
   assert.deepEqual(state.messages.map((message) => message.node_id), ['node-1', 'node-1']);
+}
+
+async function testDeleteNodeRetriesForceWhenActiveRunBlocksDeletion() {
+  getTreeCalls = 0;
+  deleteNodeCalls = [];
+  let attempts = 0;
+  deleteNodeHandler = async () => {
+    attempts += 1;
+    if (attempts === 1) {
+      const error = new Error('Conflict');
+      error.response = {
+        status: 409,
+        data: { detail: { message: 'active run', active_run_ids: ['run-1'] } },
+      };
+      throw error;
+    }
+    return {
+      deleted_node_id: 'node-2',
+      new_current_node_id: 'node-1',
+      parent_node_id: 'node-1',
+    };
+  };
+  const currentConversation = {
+    id: 'conv-1',
+    title: '强制删除测试',
+    created_at: 1,
+    updated_at: 1,
+    model: '',
+    model_id: '',
+    provider_id: '',
+    current_node_id: 'node-2',
+    total_tokens: {},
+  };
+
+  useConversationStore.setState({
+    conversations: [currentConversation],
+    currentConversation,
+    messages: [{ id: 'old', role: 'user', content: '待删除', node_id: 'node-2' }],
+    branches: {},
+    treeData: null,
+    currentNodeId: 'node-2',
+    loading: false,
+    error: null,
+  });
+
+  await useConversationStore.getState().deleteNode('node-2');
+
+  const state = useConversationStore.getState();
+  assert.deepEqual(deleteNodeCalls, [
+    ['conv-1', 'node-2'],
+    ['conv-1', 'node-2', { force: true }],
+  ]);
+  assert.equal(getTreeCalls, 1);
+  assert.equal(state.error, null);
+  assert.equal(state.currentNodeId, 'node-1');
 }
 
 async function testRefreshMessagesUsesHistoryTipInsteadOfStaleConversationList() {
@@ -240,6 +311,40 @@ async function testSwitchNodeUpdatesCurrentConversationSnapshot() {
   assert.deepEqual(switchNodeCalls, [{ conversationId: 'conv-1', nodeId: 'root' }]);
   assert.equal(state.currentNodeId, 'root');
   assert.equal(state.currentConversation.current_node_id, 'root');
+}
+
+async function testUpdateMultiAgentModeSyncsConversationSnapshots() {
+  updateMultiAgentModeCalls = [];
+  const currentConversation = {
+    id: 'conv-1',
+    title: 'agent 模式测试',
+    created_at: 1,
+    updated_at: 1,
+    model: '',
+    model_id: '',
+    provider_id: '',
+    current_node_id: 'node-hello',
+    multi_agent_mode: 'explicit_request_only',
+    total_tokens: {},
+  };
+
+  useConversationStore.setState({
+    conversations: [currentConversation, { ...currentConversation, id: 'conv-2' }],
+    currentConversation,
+    messages: [],
+    branches: {},
+    currentNodeId: 'node-hello',
+    loading: false,
+    error: null,
+  });
+
+  await useConversationStore.getState().updateMultiAgentMode('conv-1', 'proactive');
+
+  const state = useConversationStore.getState();
+  assert.deepEqual(updateMultiAgentModeCalls, [{ conversationId: 'conv-1', mode: 'proactive' }]);
+  assert.equal(state.currentConversation.multi_agent_mode, 'proactive');
+  assert.equal(state.conversations.find((conversation) => conversation.id === 'conv-1').multi_agent_mode, 'proactive');
+  assert.equal(state.conversations.find((conversation) => conversation.id === 'conv-2').multi_agent_mode, 'explicit_request_only');
 }
 
 function testSetCurrentNodeIdLocalKeepsSnapshotsInSync() {
@@ -338,8 +443,10 @@ function testPatchAssistantMessageFromStreamUpsertsCurrentNode() {
 
 async function main() {
   await testDeleteNodeRefreshesTreeData();
+  await testDeleteNodeRetriesForceWhenActiveRunBlocksDeletion();
   await testRefreshMessagesUsesHistoryTipInsteadOfStaleConversationList();
   await testSwitchNodeUpdatesCurrentConversationSnapshot();
+  await testUpdateMultiAgentModeSyncsConversationSnapshots();
   testSetCurrentNodeIdLocalKeepsSnapshotsInSync();
   testPatchAssistantMessageFromStreamUpsertsCurrentNode();
   console.log('conversationStore tests passed');

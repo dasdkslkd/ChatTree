@@ -1,5 +1,5 @@
 import { apiClient } from './client';
-import type { Conversation, ConversationCreateRequest, WorkspaceContext } from '../types/conversation';
+import type { Conversation, ConversationCreateRequest, MultiAgentMode, WorkspaceContext } from '../types/conversation';
 import type { NodeUsage, UsageInfo } from '../types/message';
 
 export interface TreeNode {
@@ -22,6 +22,10 @@ export interface TreeData {
   root_node_id: string;
   current_node_id: string;
   nodes: TreeNode[];
+}
+
+export interface DeleteNodeOptions {
+  force?: boolean;
 }
 
 export const conversationApi = {
@@ -89,6 +93,15 @@ export const conversationApi = {
     });
   },
 
+  updateMultiAgentMode: async (
+    id: string,
+    multiAgentMode: MultiAgentMode,
+  ): Promise<void> => {
+    await apiClient.patch(`/conversations/${id}/multi-agent-mode`, {
+      multi_agent_mode: multiAgentMode,
+    });
+  },
+
   compact: async (
     id: string,
     data: { custom_instructions?: string | null; model_id?: string | null; provider_id?: string | null; messages_to_keep?: number | null } = {},
@@ -122,8 +135,10 @@ export const conversationApi = {
     await apiClient.delete(`/conversations/${conversationId}/imports/${encodeURIComponent(filename)}`);
   },
 
-  deleteNode: async (conversationId: string, nodeId: string): Promise<{ deleted_node_id: string; new_current_node_id: string; parent_node_id: string }> => {
-    const response = await apiClient.delete(`/conversations/${conversationId}/nodes/${nodeId}`);
+  deleteNode: async (conversationId: string, nodeId: string, options: DeleteNodeOptions = {}): Promise<{ deleted_node_id: string; new_current_node_id: string; parent_node_id: string }> => {
+    const response = await apiClient.delete(`/conversations/${conversationId}/nodes/${nodeId}`, {
+      params: options.force ? { force: true } : undefined,
+    });
     return response.data;
   },
 };

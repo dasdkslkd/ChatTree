@@ -97,6 +97,7 @@ class ChatStorage(StorageInterface):
             "node_count": len(data["nodes"]),
             "model_id": data["metadata"].get("model_id", ""),
             "provider_id": data["metadata"].get("provider_id", ""),
+            "multi_agent_mode": data["metadata"].get("multi_agent_mode", "explicit_request_only"),
             "workspace": data["metadata"].get("workspace"),
             "current_node_id": data.get("current_node_id"),
         }
@@ -152,6 +153,7 @@ class ChatStorage(StorageInterface):
                 "node_count": str(info.get("node_count", 0)),
                 "model_id": info.get("model_id", ""),
                 "provider_id": info.get("provider_id", ""),
+                "multi_agent_mode": info.get("multi_agent_mode", "explicit_request_only"),
                 "workspace": info.get("workspace"),
                 "current_node_id": info.get("current_node_id"),
             })

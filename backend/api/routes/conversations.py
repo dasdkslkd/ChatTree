@@ -19,6 +19,7 @@ class ConversationCreateRequest(BaseModel):
     prompt_id: Optional[str] = None
     prompt_mode: str = "override"
     workspace: Optional[Dict[str, Any]] = None
+    multi_agent_mode: Optional[str] = None
 
 class ProjectFolderRequest(BaseModel):
     path: str
@@ -32,6 +33,9 @@ class ConversationModelUpdateRequest(BaseModel):
     provider_id: str
     reasoning_effort: Optional[str] = None
     thinking_enabled: Optional[bool] = None
+
+class ConversationMultiAgentModeUpdateRequest(BaseModel):
+    multi_agent_mode: str
 
 class ConversationCompactRequest(BaseModel):
     custom_instructions: Optional[str] = None
@@ -48,6 +52,7 @@ class ConversationResponse(BaseModel):
     model_id: str = ""
     provider_id: str = ""
     current_node_id: Optional[str] = None
+    multi_agent_mode: str = "explicit_request_only"
     workspace: Optional[Dict[str, Any]] = None
     total_tokens: Dict[str, int]
 
@@ -62,6 +67,7 @@ def _conversation_response(conversation) -> Dict[str, Any]:
         "provider_id": conversation.metadata.get("provider_id", "") or "",
         "reasoning_effort": conversation.metadata.get("reasoning_effort"),
         "thinking_enabled": conversation.metadata.get("thinking_enabled"),
+        "multi_agent_mode": conversation.metadata.get("multi_agent_mode", "explicit_request_only"),
         "current_node_id": conversation.current_node_id,
         "workspace": conversation.metadata.get("workspace"),
         "total_tokens": conversation.metadata.get("total_tokens", {}),
@@ -124,6 +130,7 @@ async def create_conversation(
             request.prompt_id,
             prompt_mode=request.prompt_mode,
             workspace=request.workspace,
+            multi_agent_mode=request.multi_agent_mode,
         )
         logger.info(f"对话创建成功并已保存: {conversation.metadata['id']}")
         return _conversation_response(conversation)
@@ -225,6 +232,28 @@ async def update_conversation_model(
         ):
             raise HTTPException(status_code=404, detail="对话不存在")
         return {"message": "对话模型已更新"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch("/conversations/{conversation_id}/multi-agent-mode")
+async def update_conversation_multi_agent_mode(
+    conversation_id: str,
+    request: ConversationMultiAgentModeUpdateRequest,
+    chat_manager: ChatManager = Depends(get_chat_manager)
+):
+    """更新对话级 multi-agent 工具暴露策略"""
+    try:
+        if request.multi_agent_mode not in {"none", "explicit_request_only", "proactive"}:
+            raise HTTPException(status_code=400, detail="无效的 multi-agent mode")
+        if not await chat_manager.update_conversation_multi_agent_mode(
+            conversation_id,
+            request.multi_agent_mode,
+        ):
+            raise HTTPException(status_code=404, detail="对话不存在")
+        return {"message": "multi-agent mode 已更新", "multi_agent_mode": request.multi_agent_mode}
     except HTTPException:
         raise
     except Exception as e:

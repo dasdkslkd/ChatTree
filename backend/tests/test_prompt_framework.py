@@ -13,7 +13,9 @@ from backend.api.dependencies import get_chat_manager, get_run_manager, get_suba
 from backend.api.routes import messages as messages_route
 from backend.api.routes.messages import SendMessageRequest, detached_stream_event_generator
 from backend.core.agents.mailbox import AgentMailbox
+from backend.core.agents.runtime import AgentRuntime
 from backend.core.agents.subagent_executor import SubagentExecutor
+from backend.core.agents.types import AgentSource
 from backend.core.capabilities.agent_loader import load_agent_roots
 from backend.core.capabilities.registry import CapabilityRegistry
 from backend.core.capabilities.types import (
@@ -23,7 +25,8 @@ from backend.core.capabilities.types import (
     CapabilitySource,
 )
 from backend.core.chat.chat_manager import ChatManager
-from backend.core.config.types import StreamStatus
+from backend.core.chat.node import NodeManager
+from backend.core.config.types import Message, Role, StreamStatus
 from backend.core.prompts import PromptBuilder
 from backend.core.prompts import types as prompt_types
 from backend.core.prompts.catalog import (
@@ -323,6 +326,112 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("wait_agent", messages[1]["content"])
         self.assertIn("Do not replace an explicit subagent request", messages[1]["content"])
         self.assertNotIn("start_subagent", messages[1]["content"])
+
+    def test_create_conversation_persists_initial_multi_agent_mode(self):
+        manager = ChatManager(
+            model_manager=None,
+            storage=self.FakeStorage(),
+            prompts=self.FakePromptStorage(),
+        )
+
+        conversation = manager.create_conversation("title", multi_agent_mode="proactive")
+
+        self.assertEqual(conversation.metadata["multi_agent_mode"], "proactive")
+        messages = manager._build_prompt_messages(conversation, [])
+        self.assertIn("You may proactively delegate", messages[1]["content"])
+
+    def test_clarification_turn_inherits_explicit_subagent_request(self):
+        manager = ChatManager(
+            model_manager=None,
+            storage=self.FakeStorage(),
+            prompts=self.FakePromptStorage(),
+        )
+        conversation = manager.create_conversation("title")
+        first = NodeManager.create_node(
+            Message({"role": Role.USER, "content": "开 subagent 计算几个积分"}),
+            parent_id=conversation.current_node_id,
+        )
+        conversation.add_node(first, parent_id=conversation.current_node_id)
+        second = NodeManager.create_node(
+            Message({"role": Role.USER, "content": "计算几个随机的积分"}),
+            parent_id=conversation.current_node_id,
+        )
+        conversation.add_node(second, parent_id=conversation.current_node_id)
+
+        messages = manager._build_prompt_messages(conversation, [])
+        inherited_text = manager._multi_agent_intent_text(conversation, "计算几个随机的积分")
+        mode = manager._resolve_multi_agent_mode(inherited_text, conversation.metadata)
+        tools = manager._filter_agent_tools_for_mode(
+            [
+                {"type": "function", "function": {"name": "spawn_agent"}},
+                {"type": "function", "function": {"name": "run_command"}},
+            ],
+            mode,
+        )
+
+        self.assertIn("spawn_agent", messages[1]["content"])
+        self.assertEqual(mode, "explicit_request_only")
+        self.assertEqual([tool["function"]["name"] for tool in tools], ["spawn_agent", "run_command"])
+
+    def test_short_confirmation_turn_inherits_explicit_subagent_request(self):
+        manager = ChatManager(
+            model_manager=None,
+            storage=self.FakeStorage(),
+            prompts=self.FakePromptStorage(),
+        )
+        conversation = manager.create_conversation("title")
+        first = NodeManager.create_node(
+            Message({"role": Role.USER, "content": "请用 subagent 检查这个实现"}),
+            parent_id=conversation.current_node_id,
+        )
+        conversation.add_node(first, parent_id=conversation.current_node_id)
+        first["assistant_message"] = Message({"role": Role.ASSISTANT, "content": "可以，具体检查什么？"})
+        second = NodeManager.create_node(
+            Message({"role": Role.USER, "content": "继续"}),
+            parent_id=conversation.current_node_id,
+        )
+        conversation.add_node(second, parent_id=conversation.current_node_id)
+
+        inherited_text = manager._multi_agent_intent_text(conversation, "继续")
+        mode = manager._resolve_multi_agent_mode(inherited_text, conversation.metadata)
+        tools = manager._filter_agent_tools_for_mode(
+            [
+                {"type": "function", "function": {"name": "spawn_agent"}},
+                {"type": "function", "function": {"name": "run_command"}},
+            ],
+            mode,
+        )
+
+        self.assertEqual(mode, "explicit_request_only")
+        self.assertEqual([tool["function"]["name"] for tool in tools], ["spawn_agent", "run_command"])
+
+    async def test_conversation_multi_agent_mode_can_be_set_to_proactive(self):
+        manager = ChatManager(
+            model_manager=None,
+            storage=self.FakeStorage(),
+            prompts=self.FakePromptStorage(),
+        )
+        conversation = manager.create_conversation("title")
+
+        ok = await manager.update_conversation_multi_agent_mode(
+            conversation.metadata["id"],
+            "proactive",
+        )
+        loaded = manager.get_conversation(conversation.metadata["id"])
+
+        self.assertTrue(ok)
+        self.assertIsNotNone(loaded)
+        self.assertEqual(loaded.metadata["multi_agent_mode"], "proactive")
+        messages = manager._build_prompt_messages(loaded, [])
+        self.assertIn("You may proactively delegate", messages[1]["content"])
+        tools = manager._filter_agent_tools_for_mode(
+            [
+                {"type": "function", "function": {"name": "spawn_agent"}},
+                {"type": "function", "function": {"name": "run_command"}},
+            ],
+            manager._resolve_multi_agent_mode("普通问题", loaded.metadata),
+        )
+        self.assertEqual([tool["function"]["name"] for tool in tools], ["spawn_agent", "run_command"])
 
     async def test_btw_builds_side_question_runtime_context(self):
         manager = ChatManager(
@@ -747,7 +856,7 @@ class SyntheticTaskNotificationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(run_manager.synthetic_inputs.list_pending("conversation-1"), [])
 
-    async def test_parented_subagent_publishes_mailbox_without_synthetic_notification(self):
+    async def test_parented_wait_subagent_publishes_mailbox_without_synthetic_notification(self):
         run_manager = RunManager()
         mailbox = AgentMailbox()
         executor = self._executor(run_manager, self.FakeProvider(), mailbox=mailbox)
@@ -781,6 +890,50 @@ class SyntheticTaskNotificationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run_manager.synthetic_inputs.list_pending("conversation-1"), [])
         self.assertEqual(len(messages), 1)
         self.assertEqual(messages[0]["content"], "subagent answer")
+
+    async def test_parented_auto_subagent_keeps_mailbox_and_synthetic_notification(self):
+        run_manager = RunManager()
+        mailbox = AgentMailbox()
+        executor = self._executor(run_manager, self.FakeProvider(), mailbox=mailbox)
+        parent = await run_manager.create_run(
+            conversation_id="conversation-1",
+            kind=RunKind.CHAT,
+            anchor_node_id="node-1",
+            summary="chat",
+        )
+        run = await run_manager.create_run(
+            conversation_id="conversation-1",
+            kind=RunKind.SUBAGENT,
+            anchor_node_id="node-1",
+            parent_run_id=parent.run_id,
+            summary="implementer: inspect",
+            metadata={"agent_name": "implementer", "delivery_policy": "auto"},
+        )
+
+        await executor._produce(
+            run_id=run.run_id,
+            conversation_id="conversation-1",
+            agent_name="implementer",
+            input_data="inspect",
+            parent_node_id="node-1",
+            parent_run_id=parent.run_id,
+            provider_id=None,
+            model_id=None,
+            permission_mode=None,
+            workspace=None,
+        )
+
+        messages = await mailbox.wait_for_run(
+            conversation_id="conversation-1",
+            run_id=run.run_id,
+            timeout_seconds=0.01,
+        )
+        pending = run_manager.synthetic_inputs.list_pending("conversation-1")
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["content"], "subagent answer")
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["source_run_id"], run.run_id)
+        self.assertEqual(pending[0]["metadata"]["mailbox_message_id"], messages[0]["message_id"])
 
     async def test_workflow_completion_enqueues_task_notification(self):
         class FakeRunner:
@@ -1479,6 +1632,96 @@ class RuntimePolicyTests(unittest.TestCase):
         self.assertIn("Runtime mode: subagent worker", messages[1]["content"])
         self.assertNotIn("# ChatTree Core Prompt", system_text)
 
+    def test_fork_context_mode_includes_parent_conversation_context(self):
+        registry = CapabilityRegistry()
+        registry.add_agents([
+            AgentDefinition(name="reviewer", system_prompt="Reviewer worker body")
+        ])
+
+        class ParentConversation:
+            def get_node_chain(self, node_id):
+                return [
+                    {
+                        "id": "root",
+                        "user_message": None,
+                        "assistant_message": None,
+                    },
+                    {
+                        "id": "node-1",
+                        "user_message": {"role": "user", "content": "父对话问题"},
+                        "assistant_message": {"role": "assistant", "content": "父对话回答"},
+                    },
+                ]
+
+        executor = SubagentExecutor(
+            chat_manager=DummyChatManager(),
+            run_manager=DummyRunManager(),
+            capability_registry=registry,
+        )
+
+        messages = executor._build_messages(
+            "reviewer",
+            "检查上述结论",
+            "node-1",
+            conversation=ParentConversation(),
+            context_mode="fork",
+        )
+
+        system_text = "\n\n".join(message["content"] for message in messages if message["role"] == "system")
+        self.assertIn("Parent conversation context", system_text)
+        self.assertIn("父对话问题", system_text)
+        self.assertIn("父对话回答", system_text)
+        self.assertEqual(messages[-1]["content"], "检查上述结论")
+
+    def test_agent_runtime_passes_fork_context_mode_to_executor(self):
+        async def run_case():
+            registry = CapabilityRegistry()
+            registry.add_agents([
+                AgentDefinition(name="reviewer", system_prompt="Reviewer worker body")
+            ])
+
+            class FakeSubagentExecutor:
+                def __init__(self):
+                    self.kwargs = None
+
+                async def start(self, **kwargs):
+                    self.kwargs = kwargs
+                    return {"run_id": "agent-run-1", "kind": "subagent", "status": "running", "metadata": {}}
+
+            class FakeRunManager:
+                def __init__(self):
+                    self.metadata = None
+
+                def add_finish_listener(self, listener):
+                    self.listener = listener
+
+                async def update_metadata(self, run_id, metadata):
+                    self.metadata = {"run_id": run_id, "metadata": metadata}
+
+            run_manager = FakeRunManager()
+            executor = FakeSubagentExecutor()
+            runtime = AgentRuntime(
+                run_manager=run_manager,
+                mailbox=AgentMailbox(),
+                subagent_executor=executor,
+                capability_registry=registry,
+            )
+
+            await runtime.spawn_agent(
+                source=AgentSource(
+                    conversation_id="conversation-1",
+                    run_id="chat-run-1",
+                    run_kind=RunKind.CHAT.value,
+                    anchor_node_id="node-1",
+                ),
+                agent_name="reviewer",
+                task="检查上述结论",
+                context_mode="fork",
+            )
+
+            self.assertEqual(executor.kwargs["context_mode"], "fork")
+
+        asyncio.run(run_case())
 
 class WorkflowRuntimeBridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_unnamed_workflow_agent_defaults_to_workflow_worker(self):
