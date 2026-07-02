@@ -2,6 +2,7 @@ import type {
   SendMessageRequest,
   ToolApprovalPayload,
 } from '../types/message';
+import type { RunEventPayload, RunRecord } from '../types/run';
 import { messageApi } from '../api/message';
 import { runsApi } from '../api/runs';
 import { slashRegistry } from './slashRegistry';
@@ -152,6 +153,14 @@ function mapRunStatus(status: unknown): 'streaming' | 'waiting_approval' | 'comp
   return null;
 }
 
+function mapRunRecordStatus(status: unknown): StreamState['status'] {
+  if (status === 'waiting_approval') return 'waiting_approval';
+  if (status === 'completed') return 'completed';
+  if (status === 'failed') return 'error';
+  if (status === 'cancelled') return 'stopped';
+  return 'streaming';
+}
+
 function getRequestRunKind(request: SendMessageRequest): string {
   const match = slashRegistry.match(request.content);
   return match?.command.run_kind || 'chat';
@@ -233,6 +242,10 @@ export class StreamManager {
     return () => this.finishListeners.delete(listener);
   }
 
+  hasRun(runId: string): boolean {
+    return this.streams.has(this.resolveRunId(runId));
+  }
+
   private emitNotify(conversationId: string) {
     this.listeners.forEach((listener) => listener(conversationId));
   }
@@ -312,7 +325,8 @@ export class StreamManager {
   areRunsInactive(runIds: string[]): boolean {
     return runIds.every((runId) => {
       const resolved = this.resolveRunId(runId);
-      return this.streams.get(resolved)?.status !== 'streaming';
+      const status = this.streams.get(resolved)?.status;
+      return status !== 'streaming' && status !== 'waiting_approval';
     });
   }
 
@@ -432,6 +446,53 @@ export class StreamManager {
     };
   }
 
+  restoreRunFromEvents(record: RunRecord, events: RunEventPayload[]): void {
+    const runId = record.run_id;
+    const createdAt = Number.isFinite(record.created_at) ? record.created_at * 1000 : Date.now();
+    const finishedAt = typeof record.finished_at === 'number' ? record.finished_at * 1000 : null;
+    const duration = finishedAt !== null ? Math.max(0, finishedAt - createdAt) : 0;
+    const initialState: StreamState = {
+      runId,
+      status: mapRunRecordStatus(record.status),
+      content: '',
+      reasoning: '',
+      reasoningActive: false,
+      toolInteractions: [],
+      pendingApprovals: {},
+      anchorNodeId: record.anchor_node_id ?? null,
+      nodeId: record.target_node_id ?? null,
+      targetNodeId: record.target_node_id ?? null,
+      conversationId: record.conversation_id,
+      kind: record.kind,
+      tokensUsed: 0,
+      duration,
+      errorMessage: typeof record.metadata?.error === 'string' ? record.metadata.error : null,
+      abortController: null,
+      pendingUserMessage: null,
+      eventCount: 0,
+      createdAt,
+    };
+    this.streams.set(runId, initialState);
+    this.addToConversation(record.conversation_id, runId);
+    const orderedEvents = [...events].sort((a, b) => (a.event_index ?? 0) - (b.event_index ?? 0));
+    for (const event of orderedEvents) {
+      this.applyChunk(runId, event);
+    }
+    const restored = this.streams.get(runId);
+    if (restored) {
+      this.streams.set(runId, {
+        ...restored,
+        status: mapRunRecordStatus(record.status),
+        eventCount: Math.max(restored.eventCount, record.event_count ?? restored.eventCount),
+        duration: restored.duration || duration,
+        errorMessage: restored.errorMessage ?? (typeof record.metadata?.error === 'string' ? record.metadata.error : null),
+        abortController: null,
+        reasoningActive: false,
+      });
+    }
+    this.notify(record.conversation_id, true);
+  }
+
   async startStream(
     conversationId: string,
     request: SendMessageRequest,
@@ -459,6 +520,7 @@ export class StreamManager {
     runId?: string,
     fromEvent = 0,
     anchorNodeId?: string | null,
+    kind = 'chat',
   ): Promise<void> {
     const existing = this.getConversationStates(conversationId)
       .find((state) => (runId && state.runId === runId) || (nodeId && state.targetNodeId === nodeId));
@@ -472,7 +534,7 @@ export class StreamManager {
       abortController,
       null,
       nodeId,
-      'chat',
+      kind,
       anchorNodeId,
     ));
     this.addToConversation(conversationId, resolvedRunId);
@@ -550,7 +612,7 @@ export class StreamManager {
 
   async stopRun(runId: string): Promise<void> {
     const state = this.streams.get(runId);
-    if (!state || state.status !== 'streaming') return;
+    if (!state || (state.status !== 'streaming' && state.status !== 'waiting_approval')) return;
     this.streams.set(runId, { ...state, status: 'stopped', reasoningActive: false });
     this.notify(state.conversationId, true);
     try {

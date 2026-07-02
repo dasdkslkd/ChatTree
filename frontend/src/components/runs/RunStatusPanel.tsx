@@ -12,6 +12,47 @@ interface Props {
   runs: StreamState[];
 }
 
+function isPanelRunVisible(run: StreamState): boolean {
+  return run.status === 'streaming'
+    || run.status === 'waiting_approval'
+    || run.status === 'stopped'
+    || run.status === 'error';
+}
+
+function getRunKindLabel(kind: string): string {
+  switch (kind) {
+    case 'chat':
+      return '主对话';
+    case 'subagent':
+      return 'Subagent';
+    case 'workflow':
+      return 'Workflow';
+    case 'workflow_step':
+      return 'Workflow Step';
+    case 'side_question':
+      return 'BTW';
+    case 'direct_response':
+      return 'Slash';
+    default:
+      return kind;
+  }
+}
+
+function getRunStatusLabel(status: StreamState['status']): string {
+  switch (status) {
+    case 'waiting_approval':
+      return '待审批';
+    case 'stopped':
+      return '已停止';
+    case 'error':
+      return '错误';
+    case 'completed':
+      return '已完成';
+    default:
+      return '运行中';
+  }
+}
+
 export function RunStatusPanel({ conversationId, runs }: Props) {
   const [agents, setAgents] = useState<CapabilityAgent[]>([]);
   const [agentName, setAgentName] = useState('');
@@ -34,7 +75,7 @@ export function RunStatusPanel({ conversationId, runs }: Props) {
   }, []);
 
   const activeRuns = useMemo(
-    () => runs.filter((run) => run.status === 'streaming' || run.status === 'stopped'),
+    () => runs.filter(isPanelRunVisible),
     [runs],
   );
 
@@ -43,7 +84,7 @@ export function RunStatusPanel({ conversationId, runs }: Props) {
     setBusy(true);
     try {
       const run = await agentsApi.startRun(conversationId, agentName, { input: agentInput });
-      void streamManager.resumeStream(conversationId, '', run.run_id, 0);
+      void streamManager.resumeStream(conversationId, '', run.run_id, 0, null, 'subagent');
       setAgentInput('');
     } finally {
       setBusy(false);
@@ -58,7 +99,7 @@ export function RunStatusPanel({ conversationId, runs }: Props) {
         script: workflowScript,
         args: {},
       });
-      void streamManager.resumeStream(conversationId, '', run.run_id, 0);
+      void streamManager.resumeStream(conversationId, '', run.run_id, 0, null, 'workflow');
     } finally {
       setBusy(false);
     }
@@ -77,16 +118,20 @@ export function RunStatusPanel({ conversationId, runs }: Props) {
             className="flex items-center gap-2 rounded-md px-2 py-1.5 text-xs"
             style={{ background: 'var(--bg-button-tertiary-hover)', color: 'var(--fg-secondary)' }}
           >
-            <Loader2 className="h-3.5 w-3.5 shrink-0" />
-            <span className="min-w-0 flex-1 truncate">{run.kind} · {run.runId.slice(0, 12)}</span>
-            <button
-              type="button"
-              className="border-0 bg-transparent p-0"
-              onClick={() => streamManager.stopRun(run.runId)}
-              title="停止"
-            >
-              <Square className="h-3.5 w-3.5" />
-            </button>
+            <Loader2 className={`h-3.5 w-3.5 shrink-0 ${run.status === 'streaming' ? 'animate-spin' : ''}`} />
+            <span className="min-w-0 flex-1 truncate">
+              {getRunKindLabel(run.kind)} · {getRunStatusLabel(run.status)}
+            </span>
+            {(run.status === 'streaming' || run.status === 'waiting_approval') && (
+              <button
+                type="button"
+                className="border-0 bg-transparent p-0"
+                onClick={() => streamManager.stopRun(run.runId)}
+                title="停止"
+              >
+                <Square className="h-3.5 w-3.5" />
+              </button>
+            )}
           </div>
         ))}
       </div>

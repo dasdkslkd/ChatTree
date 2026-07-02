@@ -1283,6 +1283,21 @@ class SyntheticInputRouteTests(unittest.TestCase):
         self.assertEqual(consume_response.json()["status"], "consumed")
         self.assertEqual(run_manager.synthetic_inputs.list_pending("conversation-1"), [])
 
+    def test_active_streams_include_subagent_runs(self):
+        run_manager = RunManager()
+        run = asyncio.run(run_manager.create_run(
+            conversation_id="conversation-1",
+            kind=RunKind.SUBAGENT,
+            anchor_node_id="node-1",
+            summary="subagent inspect",
+        ))
+
+        active = asyncio.run(messages_route.get_active_streams("conversation-1", run_manager))
+
+        self.assertEqual(len(active), 1)
+        self.assertEqual(active[0]["run_id"], run.run_id)
+        self.assertEqual(active[0]["kind"], RunKind.SUBAGENT.value)
+
     def test_start_synthetic_input_stream_wraps_notification_and_marks_origin(self):
         run_manager = RunManager()
         chat_manager = self.FakeChatManager()
@@ -1630,6 +1645,7 @@ class RuntimePolicyTests(unittest.TestCase):
         system_text = "\n\n".join(message["content"] for message in messages if message["role"] == "system")
         self.assertIn("Reviewer worker body", messages[0]["content"])
         self.assertIn("Runtime mode: subagent worker", messages[1]["content"])
+        self.assertIn("do not write report/output files", system_text.lower())
         self.assertNotIn("# ChatTree Core Prompt", system_text)
 
     def test_fork_context_mode_includes_parent_conversation_context(self):

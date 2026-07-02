@@ -380,6 +380,121 @@ async function testBlockingRunAliasesFollowServerRunId() {
   });
 }
 
+async function testWaitingApprovalRunStaysBlockingAndCanBeStopped() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    const stoppedRunIds = [];
+    runsApi.attach = controlled.stream;
+    runsApi.stop = async (runId) => {
+      stoppedRunIds.push(runId);
+    };
+    const running = manager.resumeStream('conv-1', null, 'run_waiting', 0);
+
+    await controlled.push({
+      type: 'run_started',
+      run_id: 'run_waiting',
+      conversation_id: 'conv-1',
+      kind: 'subagent',
+      status: 'running',
+    });
+    await controlled.push({
+      run_id: 'run_waiting',
+      conversation_id: 'conv-1',
+      kind: 'subagent',
+      status: 'waiting_approval',
+      event_type: 'tool_approval_request',
+      approval: {
+        id: 'approval-1',
+        status: 'pending',
+        tool_name: 'run_command',
+      },
+    });
+
+    try {
+      assert.equal(manager.getConversationStates('conv-1')[0].status, 'waiting_approval');
+      assert.equal(manager.areRunsInactive(['run_waiting']), false);
+      await manager.stopRun('run_waiting');
+      assert.deepEqual(stoppedRunIds, ['run_waiting']);
+      assert.equal(manager.getConversationStates('conv-1')[0].status, 'stopped');
+    } finally {
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
+async function testResumeStreamPreservesAttachedRunKindBeforeFirstEvent() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    runsApi.attach = controlled.stream;
+    const running = manager.resumeStream('conv-1', null, 'run_subagent', 0, null, 'subagent');
+
+    try {
+      const state = manager.getConversationStates('conv-1')[0];
+      assert.equal(state.runId, 'run_subagent');
+      assert.equal(state.kind, 'subagent');
+    } finally {
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
+async function testRestoreCompletedSideRunFromBackendEvents() {
+  await withManager(async (manager) => {
+    manager.restoreRunFromEvents(
+      {
+        run_id: 'run_restored',
+        conversation_id: 'conv-1',
+        kind: 'subagent',
+        status: 'completed',
+        anchor_node_id: 'node-anchor',
+        target_node_id: null,
+        event_count: 3,
+        created_at: 10,
+        updated_at: 13,
+        finished_at: 13,
+      },
+      [
+        {
+          type: 'run_started',
+          run_id: 'run_restored',
+          conversation_id: 'conv-1',
+          kind: 'subagent',
+          status: 'running',
+          anchor_node_id: 'node-anchor',
+          target_node_id: null,
+          event_index: 0,
+        },
+        {
+          run_id: 'run_restored',
+          conversation_id: 'conv-1',
+          kind: 'subagent',
+          status: 'content',
+          content: 'restored result',
+          event_index: 1,
+        },
+        {
+          type: 'run_finished',
+          run_id: 'run_restored',
+          conversation_id: 'conv-1',
+          kind: 'subagent',
+          status: 'completed',
+          event_index: 2,
+        },
+      ],
+    );
+
+    const state = manager.getConversationStates('conv-1')[0];
+    assert.equal(state.runId, 'run_restored');
+    assert.equal(state.kind, 'subagent');
+    assert.equal(state.status, 'completed');
+    assert.equal(state.content, 'restored result');
+    assert.equal(state.anchorNodeId, 'node-anchor');
+    assert.equal(state.abortController, null);
+  });
+}
+
 async function testGetStatePrefersActiveStreamingRunOverNewerError() {
   await withManager(async (manager) => {
     const oldStream = createControlledStream();
@@ -648,6 +763,9 @@ async function main() {
   await testToolCallDeltaUpdatesRunningPlaceholder();
   await testStreamErrorStatePreservesRealMessage();
   await testBlockingRunAliasesFollowServerRunId();
+  await testWaitingApprovalRunStaysBlockingAndCanBeStopped();
+  await testResumeStreamPreservesAttachedRunKindBeforeFirstEvent();
+  await testRestoreCompletedSideRunFromBackendEvents();
   await testGetStatePrefersActiveStreamingRunOverNewerError();
   await testStopUsesServerRunIdBeforeTargetNodeArrives();
   await testRunFinishedFailedMapsToErrorState();

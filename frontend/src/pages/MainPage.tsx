@@ -67,6 +67,7 @@ import {
 } from 'lucide-react';
 import { conversationApi } from '../api/conversation';
 import { messageApi, type ActiveStreamInfo, type ToolResultSlice } from '../api/message';
+import { runsApi } from '../api/runs';
 import type {
   Message,
   SendMessageRequest,
@@ -126,6 +127,8 @@ import {
 const MarkdownContent = lazy(() => import('../components/MarkdownContent'));
 const MANUAL_PROJECTS_STORAGE_KEY = 'chattree.manualProjectWorkspaces';
 const PROJECT_ORDER_STORAGE_KEY = 'chattree.projectOrder';
+const SIDE_RUN_KINDS = new Set(['side_question', 'subagent', 'workflow', 'workflow_step', 'direct_response']);
+const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 
 SyntaxHighlighter.registerLanguage('bash', bash);
 SyntaxHighlighter.registerLanguage('batch', bash);
@@ -644,6 +647,15 @@ function createAssistantMessageFromStream(run: StreamState): Message | null {
   };
 }
 
+function getDraftCopyContent(timeline: AssistantTimelineBlock[], fallbackContent: string): string {
+  const timelineContent = timeline
+    .filter((block): block is Extract<AssistantTimelineBlock, { type: 'content' }> => block.type === 'content')
+    .map((block) => block.content.trim())
+    .filter(Boolean)
+    .join('\n\n');
+  return (timelineContent || fallbackContent).trim();
+}
+
 function scheduleIdleTask(task: () => void, timeout = 1200): () => void {
   const win = window as typeof window & {
     requestIdleCallback?: (callback: () => void, options?: { timeout?: number }) => number;
@@ -917,7 +929,7 @@ export default function ChatPage() {
   const [attachedFiles, setAttachedFiles] = useState<string[]>([]);
   const [attachedImageRefs, setAttachedImageRefs] = useState<Array<{ filename: string; mime_type?: string }>>([]);
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([]);
-  const [archivedSideRunsByConversation, setArchivedSideRunsByConversation] = useState<Record<string, StreamState[]>>({});
+  const [hiddenSideRunIdsByConversation, setHiddenSideRunIdsByConversation] = useState<Record<string, string[]>>({});
   const [toolPermissionDraft, setToolPermissionDraftState] = useState<ToolPermissionDraft>(() => createToolPermissionDraft());
   const [newConversationMultiAgentMode, setNewConversationMultiAgentMode] = useState<MultiAgentMode>('explicit_request_only');
   const [previewFile, setPreviewFile] = useState<{ name: string; content: string } | null>(null);
@@ -1054,45 +1066,23 @@ export default function ChatPage() {
 
   const activeRunStates = useRunManager(currentConversation?.id ?? null);
   const autoFollowedRunIdsRef = useRef<Set<string>>(new Set());
-  const archivedSideRunStates = useMemo(() => {
+  const hiddenSideRunIds = useMemo(() => {
     const conversationId = currentConversation?.id;
-    return conversationId ? archivedSideRunsByConversation[conversationId] ?? [] : [];
-  }, [archivedSideRunsByConversation, currentConversation?.id]);
-  const archivedSideRunIds = useMemo(
-    () => new Set(archivedSideRunStates.map((run) => run.runId)),
-    [archivedSideRunStates],
-  );
+    return new Set(conversationId ? hiddenSideRunIdsByConversation[conversationId] ?? [] : []);
+  }, [currentConversation?.id, hiddenSideRunIdsByConversation]);
   const sidePanelRunStates = useMemo(
-    () => [
-      ...archivedSideRunStates,
-      ...activeRunStates.filter((run) => !archivedSideRunIds.has(run.runId)),
-    ],
-    [activeRunStates, archivedSideRunIds, archivedSideRunStates],
+    () => activeRunStates.filter((run) => !hiddenSideRunIds.has(run.runId)),
+    [activeRunStates, hiddenSideRunIds],
   );
 
-  const addArchivedSideRun = useCallback((conversationId: string, run: StreamState) => {
-    setArchivedSideRunsByConversation((current) => {
+  const hideSideRun = useCallback((conversationId: string, runId: string) => {
+    setHiddenSideRunIdsByConversation((current) => {
       const existing = current[conversationId] ?? [];
+      if (existing.includes(runId)) return current;
       return {
         ...current,
-        [conversationId]: [
-          ...existing.filter((item) => item.runId !== run.runId),
-          run,
-        ],
+        [conversationId]: [...existing, runId],
       };
-    });
-  }, []);
-
-  const removeArchivedSideRun = useCallback((conversationId: string, runId: string) => {
-    setArchivedSideRunsByConversation((current) => {
-      const existing = current[conversationId] ?? [];
-      if (!existing.some((run) => run.runId === runId)) return current;
-      const next = existing.filter((run) => run.runId !== runId);
-      if (next.length > 0) {
-        return { ...current, [conversationId]: next };
-      }
-      const { [conversationId]: _removed, ...rest } = current;
-      return rest;
     });
   }, []);
   useEffect(() => {
@@ -1259,7 +1249,6 @@ export default function ChatPage() {
       }
       return {
         run,
-        archived: archivedSideRunIds.has(run.runId),
         showPendingBubble: !!run.pendingUserMessage,
         showStreamBlock: run.status !== 'idle',
         timeline,
@@ -1270,7 +1259,7 @@ export default function ChatPage() {
     })
     .filter((draft): draft is NonNullable<typeof draft> => Boolean(draft))
     .filter((draft) => draft.showPendingBubble || draft.showStreamBlock),
-    [archivedSideRunIds, selectedBranchTipId, sidePanelRunStates],
+    [selectedBranchTipId, sidePanelRunStates],
   );
 
   const sideRunActivity = useMemo(
@@ -1669,7 +1658,11 @@ export default function ChatPage() {
     for (let attempt = 0; attempt < 12; attempt += 1) {
       try {
         const activeStreams = await messageApi.getActiveStreams(conversationId);
-        const attachable = activeStreams.filter((item) => !item.done && (item.node_id || item.run_id));
+        const attachable = activeStreams.filter((item) =>
+          !item.done
+          && (item.node_id || item.run_id)
+          && !(item.run_id && item.kind && SIDE_RUN_KINDS.has(item.kind) && hiddenSideRunIds.has(item.run_id))
+        );
         if (attachable.length > 0) {
           await Promise.all(attachable
             .filter((active) => active.node_id)
@@ -1685,6 +1678,7 @@ export default function ChatPage() {
               active.run_id ?? undefined,
               0,
               active.anchor_node_id ?? null,
+              active.kind ?? 'chat',
             );
           }
           return;
@@ -1696,7 +1690,7 @@ export default function ChatPage() {
       await new Promise((resolve) => window.setTimeout(resolve, 500));
     }
     await loadConversations();
-  }, [loadConversations, refreshMessages]);
+  }, [hiddenSideRunIds, loadConversations, refreshMessages]);
 
   const handleToolApprovalDecision = useCallback<ToolApprovalDecisionHandler>(async (
     approvalId,
@@ -1714,6 +1708,7 @@ export default function ChatPage() {
       runId,
       run?.eventCount ?? 0,
       run?.anchorNodeId ?? null,
+      run?.kind ?? 'chat',
     );
     await refreshMessages(conversationId, { retries: 0 });
   }, [activeRunStates, currentConversation?.id, refreshMessages]);
@@ -1733,6 +1728,15 @@ export default function ChatPage() {
     void (async () => {
       await Promise.allSettled(currentBranchStreamingRunIds.map((runId) => streamManager.stopRun(runId)));
       if (conversationId) {
+        setBackendActiveStreamConversationCounts((current) => {
+          const activeCount = streamManager.getConversationStates(conversationId)
+            .filter((state) => state.status === 'streaming' || state.status === 'waiting_approval')
+            .length;
+          const next = new Map(current);
+          if (activeCount > 0) next.set(conversationId, activeCount);
+          else next.delete(conversationId);
+          return next;
+        });
         await refreshMessages(conversationId, { retries: 1 });
       }
     })();
@@ -1755,12 +1759,7 @@ export default function ChatPage() {
       );
 
       if (!targetNodeId && !nodeId) {
-        const archivedRun = finishedRun && shouldRenderRunDraft(finishedRun)
-          ? streamManager.archiveRun(runId)
-          : null;
-        if (archivedRun) {
-          addArchivedSideRun(finishedId, archivedRun);
-        } else {
+        if (!finishedRun || !shouldRenderRunDraft(finishedRun)) {
           streamManager.cleanupIfController(finishedId, controller, runId);
         }
         await loadConversations();
@@ -1818,7 +1817,6 @@ export default function ChatPage() {
     });
     return unsubscribe;
   }, [
-    addArchivedSideRun,
     refreshMessages,
     patchAssistantMessageFromStream,
     loadConversations,
@@ -1855,7 +1853,9 @@ export default function ChatPage() {
     const updateLocalStreamingIds = () => {
       const counts = new Map<string, number>();
       for (const conversationId of streamManager.getStreamingConversationIds()) {
-        const count = streamManager.getConversationStates(conversationId).filter((state) => state.status === 'streaming').length;
+        const count = streamManager.getConversationStates(conversationId)
+          .filter((state) => state.status === 'streaming' || state.status === 'waiting_approval')
+          .length;
         if (count > 0) counts.set(conversationId, count);
       }
       setLocalStreamingConversationCounts(counts);
@@ -1941,12 +1941,20 @@ export default function ChatPage() {
         for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
           activeStreams = await messageApi.getActiveStreams(conversationId);
           if (cancelled) return;
-          if (activeStreams.some((item) => !item.done && (item.node_id || item.run_id))) break;
+          if (activeStreams.some((item) =>
+            !item.done
+            && (item.node_id || item.run_id)
+            && !(item.run_id && item.kind && SIDE_RUN_KINDS.has(item.kind) && hiddenSideRunIds.has(item.run_id))
+          )) break;
           if (attempt + 1 >= maxAttempts) break;
           await new Promise((resolve) => window.setTimeout(resolve, 500));
         }
         if (cancelled) return;
-        const attachable = activeStreams.filter((item) => !item.done && (item.node_id || item.run_id));
+        const attachable = activeStreams.filter((item) =>
+          !item.done
+          && (item.node_id || item.run_id)
+          && !(item.run_id && item.kind && SIDE_RUN_KINDS.has(item.kind) && hiddenSideRunIds.has(item.run_id))
+        );
         if (attachable.length === 0) {
           return;
         }
@@ -1965,6 +1973,7 @@ export default function ChatPage() {
             active.run_id ?? undefined,
             0,
             active.anchor_node_id ?? null,
+            active.kind ?? 'chat',
           );
         }
       } catch (_) {
@@ -1975,7 +1984,49 @@ export default function ChatPage() {
     return () => {
       cancelled = true;
     };
-  }, [currentBackendActiveStreamHintCount, currentConversation?.id, refreshMessages]);
+  }, [currentBackendActiveStreamHintCount, currentConversation?.id, hiddenSideRunIds, refreshMessages]);
+
+  useEffect(() => {
+    const conversationId = currentConversation?.id;
+    if (!conversationId) return;
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const runs = await runsApi.listConversation(conversationId);
+        if (cancelled) return;
+        const sideRuns = runs.filter((run) =>
+          SIDE_RUN_KINDS.has(run.kind)
+          && !hiddenSideRunIds.has(run.run_id)
+        );
+        for (const run of sideRuns) {
+          if (cancelled) return;
+          if (streamManager.hasRun(run.run_id)) continue;
+          if (!TERMINAL_RUN_STATUSES.has(run.status)) {
+            void streamManager.resumeStream(
+              conversationId,
+              run.target_node_id ?? null,
+              run.run_id,
+              0,
+              run.anchor_node_id ?? null,
+              run.kind,
+            );
+            continue;
+          }
+          const events = await runsApi.events(run.run_id, 0);
+          if (cancelled) return;
+          if (hiddenSideRunIds.has(run.run_id)) continue;
+          streamManager.restoreRunFromEvents(run, events);
+        }
+      } catch (_) {
+        // Side run history is best-effort UI state; active stream recovery above still handles live runs.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentConversation?.id, hiddenSideRunIds]);
 
   const handleSelectConversation = async (id: string) => {
     if (currentConversation && historyRef.current) {
@@ -3029,6 +3080,27 @@ export default function ChatPage() {
                                 <span className="text-destructive">{getStreamStatusLabel(draft.run.status, draft.run.errorMessage)}</span>
                               </div>
                             )}
+                            {draft.run.status !== 'streaming' && (() => {
+                              const copyContent = getDraftCopyContent(draft.timeline, draft.run.content);
+                              if (!copyContent) return null;
+                              return (
+                                <div className="mt-1 flex items-center gap-1 self-start">
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-7 w-7 p-0"
+                                    onClick={() => handleCopy(copyContent, draft.run.runId)}
+                                    title="复制"
+                                  >
+                                    {copiedMessageId === draft.run.runId ? (
+                                      <Check className="h-4 w-4 text-green-500" />
+                                    ) : (
+                                      <Copy className="h-4 w-4" />
+                                    )}
+                                  </Button>
+                                </div>
+                              );
+                            })()}
                           </div>
                         </div>
                       )}
@@ -3114,11 +3186,11 @@ export default function ChatPage() {
                   size="sm"
                   className="h-8 min-w-0 gap-1.5 px-2 text-xs"
                   onClick={() => setRightPanelView('side')}
-                  title="侧边运行：/btw /fork /workflow /status /help /capabilities"
-                  aria-label="侧边运行：/btw /fork /workflow /status /help /capabilities"
+                  title="运行"
+                  aria-label="运行"
                 >
                   <MessageSquare className="h-3.5 w-3.5" />
-                  <span className="min-w-0 truncate">/btw /fork /workflow /status /help /capabilities</span>
+                  <span className="min-w-0 truncate">运行</span>
                   {sideRunDrafts.length > 0 && (
                     <span
                       className="ml-0.5 rounded-full px-1.5 py-0.5 text-[10px]"
@@ -3164,7 +3236,7 @@ export default function ChatPage() {
                 <div className="flex min-h-0 flex-1 flex-col gap-3 px-3 pb-4">
                   {sideRunDrafts.length === 0 && (
                     <div className="rounded-lg border px-3 py-4 text-sm" style={{ borderColor: 'var(--border)', color: 'var(--fg-tertiary)' }}>
-                      暂无侧边运行。发送 <code>/btw</code>、<code>/fork</code>、<code>/workflow</code>、<code>/status</code>、<code>/help</code> 或 <code>/capabilities</code> 后会显示在这里。
+                      暂无运行任务。
                     </div>
                   )}
                   {sideRunDrafts.map((draft) => (
@@ -3177,7 +3249,7 @@ export default function ChatPage() {
                         <span className="min-w-0 flex-1 truncate text-xs font-semibold" style={{ color: 'var(--fg-secondary)' }}>
                           {getSlashRunLabel(draft.run.kind, draft.run.pendingUserMessage)} · {draft.run.runId.slice(0, 12)}
                         </span>
-                        {draft.run.status === 'streaming' && (
+                        {(draft.run.status === 'streaming' || draft.run.status === 'waiting_approval') && (
                           <button
                             type="button"
                             className="rounded border-0 bg-transparent p-1"
@@ -3192,11 +3264,8 @@ export default function ChatPage() {
                           type="button"
                           className="rounded border-0 bg-transparent p-1"
                           onClick={() => {
-                            if (draft.archived && currentConversation?.id) {
-                              removeArchivedSideRun(currentConversation.id, draft.run.runId);
-                            } else {
-                              streamManager.cleanupRun(draft.run.runId);
-                            }
+                            if (currentConversation?.id) hideSideRun(currentConversation.id, draft.run.runId);
+                            streamManager.cleanupRun(draft.run.runId);
                           }}
                           title="关闭"
                           style={{ color: 'var(--fg-tertiary)' }}

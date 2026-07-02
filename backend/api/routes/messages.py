@@ -23,6 +23,9 @@ _ACTIVE_MESSAGE_STREAM_KINDS = {
     RunKind.CHAT.value,
     RunKind.SIDE_QUESTION.value,
     RunKind.DIRECT_RESPONSE.value,
+    RunKind.SUBAGENT.value,
+    RunKind.WORKFLOW.value,
+    RunKind.WORKFLOW_STEP.value,
 }
 
 
