@@ -1,4 +1,4 @@
-export const SIDE_RUN_GROUP_ORDER = ['side_question', 'subagent', 'terminal', 'workflow', 'direct_response'] as const;
+export const SIDE_RUN_GROUP_ORDER = ['side_question', 'subagent', 'command', 'workflow', 'direct_response'] as const;
 
 export type SideRunGroupKind = typeof SIDE_RUN_GROUP_ORDER[number];
 

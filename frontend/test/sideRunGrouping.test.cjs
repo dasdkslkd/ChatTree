@@ -48,18 +48,18 @@ function testTopLevelRunsAreGroupedInDefinitionOrderAndSortedNewestFirst() {
     run({ runId: 'workflow-step-a', kind: 'workflow_step', parentRunId: 'workflow-1', createdAt: 7000 }),
     run({ runId: 'workflow-old', kind: 'workflow', createdAt: 1000 }),
     run({ runId: 'fork-old', kind: 'subagent', createdAt: 2000 }),
-    run({ runId: 'terminal-new', kind: 'terminal', createdAt: 6500 }),
+    run({ runId: 'command-new', kind: 'command', createdAt: 6500 }),
     run({ runId: 'status-new', kind: 'direct_response', createdAt: 8000 }),
     run({ runId: 'btw-new', kind: 'side_question', createdAt: 6000 }),
     run({ runId: 'fork-new', kind: 'subagent', createdAt: 5000 }),
     run({ runId: 'workflow-new', kind: 'workflow', createdAt: 4000 }),
   ]);
 
-  assert.deepEqual(SIDE_RUN_GROUP_ORDER, ['side_question', 'subagent', 'terminal', 'workflow', 'direct_response']);
-  assert.deepEqual(groups.map((group) => group.kind), ['side_question', 'subagent', 'terminal', 'workflow', 'direct_response']);
+  assert.deepEqual(SIDE_RUN_GROUP_ORDER, ['side_question', 'subagent', 'command', 'workflow', 'direct_response']);
+  assert.deepEqual(groups.map((group) => group.kind), ['side_question', 'subagent', 'command', 'workflow', 'direct_response']);
   assert.deepEqual(groups[0].runs.map((draft) => draft.run.runId), ['btw-new']);
   assert.deepEqual(groups[1].runs.map((draft) => draft.run.runId), ['fork-new', 'fork-old']);
-  assert.deepEqual(groups[2].runs.map((draft) => draft.run.runId), ['terminal-new']);
+  assert.deepEqual(groups[2].runs.map((draft) => draft.run.runId), ['command-new']);
   assert.deepEqual(groups[3].runs.map((draft) => draft.run.runId), ['workflow-new', 'workflow-old']);
   assert.deepEqual(groups[4].runs.map((draft) => draft.run.runId), ['status-new']);
 }

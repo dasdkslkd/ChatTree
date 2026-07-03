@@ -8,7 +8,7 @@ from typing import Any, AsyncIterator, Callable, Dict, Iterable, Optional
 
 from .journal import RunJournal
 from .synthetic_inputs import SyntheticInputQueue
-from .types import TERMINAL_RUN_STATUSES, RunKind, RunRecord, RunStatus
+from .types import FINISHED_RUN_STATUSES, RunKind, RunRecord, RunStatus
 
 
 class RunNotFoundError(Exception):
@@ -161,12 +161,12 @@ class RunManager:
                     raise RunNotFoundError(run_id)
                 events = self._events.setdefault(run_id, [])
                 condition = self._conditions.setdefault(run_id, asyncio.Condition())
-                terminal = record.status in TERMINAL_RUN_STATUSES
+                finished = record.status in FINISHED_RUN_STATUSES
                 if index < len(events):
                     event = events[index]
                     index += 1
                     payload = deepcopy(event["payload"])
-                elif terminal:
+                elif finished:
                     break
                 else:
                     payload = None
@@ -183,11 +183,11 @@ class RunManager:
         error: Optional[str] = None,
     ) -> RunRecord:
         run_status = status if isinstance(status, RunStatus) else RunStatus(str(status))
-        if run_status not in TERMINAL_RUN_STATUSES:
-            raise ValueError(f"finish_run requires terminal status, got {run_status}")
+        if run_status not in FINISHED_RUN_STATUSES:
+            raise ValueError(f"finish_run requires finished status, got {run_status}")
         async with self._lock:
             record = self._require_run_locked(run_id)
-            if record.status in TERMINAL_RUN_STATUSES:
+            if record.status in FINISHED_RUN_STATUSES:
                 return deepcopy(record)
             record.status = run_status
             record.finished_at = time()
@@ -229,7 +229,7 @@ class RunManager:
     async def request_stop(self, run_id: str) -> bool:
         async with self._lock:
             record = self._runs.get(run_id)
-            if not record or record.status in TERMINAL_RUN_STATUSES:
+            if not record or record.status in FINISHED_RUN_STATUSES:
                 return False
             record.status = RunStatus.STOPPING
             record.updated_at = time()
@@ -244,11 +244,11 @@ class RunManager:
 
     async def update_status(self, run_id: str, status: RunStatus | str) -> RunRecord:
         run_status = status if isinstance(status, RunStatus) else RunStatus(str(status))
-        if run_status in TERMINAL_RUN_STATUSES:
-            raise ValueError(f"update_status requires non-terminal status, got {run_status}")
+        if run_status in FINISHED_RUN_STATUSES:
+            raise ValueError(f"update_status requires non-finished status, got {run_status}")
         async with self._lock:
             record = self._require_run_locked(run_id)
-            if record.status in TERMINAL_RUN_STATUSES:
+            if record.status in FINISHED_RUN_STATUSES:
                 return deepcopy(record)
             if record.status == run_status:
                 return deepcopy(record)
@@ -285,7 +285,7 @@ class RunManager:
         return [
             record.to_dict()
             for record in self._runs.values()
-            if record.status not in TERMINAL_RUN_STATUSES
+            if record.status not in FINISHED_RUN_STATUSES
             and (conversation_id is None or record.conversation_id == conversation_id)
         ]
 
@@ -298,7 +298,7 @@ class RunManager:
         return [
             record.to_dict()
             for record in self._runs.values()
-            if record.status not in TERMINAL_RUN_STATUSES
+            if record.status not in FINISHED_RUN_STATUSES
             and record.parent_run_id == parent_run_id
             and (conversation_id is None or record.conversation_id == conversation_id)
         ]
@@ -319,7 +319,7 @@ class RunManager:
     ) -> Optional[Dict[str, Any]]:
         expected_kind = kind if isinstance(kind, RunKind) or kind is None else RunKind(str(kind))
         for record in self._runs.values():
-            if record.status in TERMINAL_RUN_STATUSES:
+            if record.status in FINISHED_RUN_STATUSES:
                 continue
             if record.conversation_id != conversation_id:
                 continue
@@ -339,7 +339,7 @@ class RunManager:
     ) -> Optional[Dict[str, Any]]:
         expected_kind = kind if isinstance(kind, RunKind) or kind is None else RunKind(str(kind))
         for record in self._runs.values():
-            if record.status in TERMINAL_RUN_STATUSES:
+            if record.status in FINISHED_RUN_STATUSES:
                 continue
             if record.conversation_id != conversation_id:
                 continue
@@ -360,7 +360,7 @@ class RunManager:
         return [
             record.to_dict()
             for record in self._runs.values()
-            if record.status not in TERMINAL_RUN_STATUSES
+            if record.status not in FINISHED_RUN_STATUSES
             and record.conversation_id == conversation_id
             and record.target_node_id in targets
         ]
@@ -379,7 +379,7 @@ class RunManager:
         existing = self._writers_by_node.get(target_node_id)
         if existing and existing != run_id:
             existing_record = self._runs.get(existing)
-            if existing_record and existing_record.status not in TERMINAL_RUN_STATUSES:
+            if existing_record and existing_record.status not in FINISHED_RUN_STATUSES:
                 raise RunWriterConflictError(
                     f"target node {target_node_id} already has active writer {existing}"
                 )

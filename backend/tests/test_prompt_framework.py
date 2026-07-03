@@ -54,17 +54,19 @@ class PromptCatalogTests(unittest.TestCase):
         self.assertNotIn("Codex", text)
         self.assertGreaterEqual(len(text), 3000)
 
-    def test_core_prompt_defines_terminal_tool_boundaries(self):
+    def test_core_prompt_defines_command_tool_boundaries(self):
         text = load_prompt_template("core")
         self.assertIn("run_command", text)
         self.assertIn("start_background_command", text)
         self.assertIn("wait_command", text)
-        self.assertIn("Legacy command and terminal names", text)
         self.assertIn("Use `run_command` for command execution that should start foreground", text)
         self.assertIn("Use `start_background_command` only for true background command work", text)
         self.assertIn("Use `wait_command` only when the current answer must join", text)
         self.assertIn("auto-background", text)
-        self.assertIn("If the user explicitly asked for a background command or terminal and it fails", text)
+        self.assertIn("active shell declared by the command tool description", text)
+        self.assertNotIn("start_terminal", text)
+        self.assertNotIn("wait_terminal", text)
+        self.assertIn("If the user explicitly asked for a background command and it fails", text)
         self.assertIn("do not describe the final result as completed by the background run", text)
 
     def test_core_prompt_distinguishes_fresh_subagents_from_forks(self):

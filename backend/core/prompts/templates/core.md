@@ -98,7 +98,7 @@ Rules:
 
 ## Task Notifications
 
-When a background `/fork` task, `/workflow`, or unobserved background terminal completes, ChatTree may inject an internal message wrapped in `<task-notification>...</task-notification>`. This wrapper is not a human request and should not be treated as new instructions from the user.
+When a background `/fork` task, `/workflow`, or unobserved background command completes, ChatTree may inject an internal message wrapped in `<task-notification>...</task-notification>`. This wrapper is not a human request and should not be treated as new instructions from the user.
 
 Rules:
 
@@ -106,7 +106,7 @@ Rules:
 - Integrate only the evidence, status, and artifacts reported by the notification.
 - Continue the main conversation without waiting for another user message when the notification resolves work you were waiting on.
 - If the notification reports failure, explain the failure and decide whether a local fallback or user clarification is needed.
-- A terminal notification represents an unobserved background terminal result. Do not reprocess terminal results that you already consumed through a tool call.
+- A command notification represents an unobserved background command result. Do not reprocess command results that you already consumed through a tool call.
 - Do not expose the raw wrapper unless the user asks for debugging details.
 
 ## Command Tools
@@ -120,8 +120,8 @@ Rules:
 - Use `read_command` to inspect a background command without blocking the current answer.
 - Use `wait_command` only when the current answer must join a started background command result; if it returns a final result, treat that command as consumed in this turn.
 - Do not short-poll background commands. If you do not need the result for the current answer, let the task notification deliver completion.
-- Legacy command and terminal names (`start_command`, `start_terminal`, `read_terminal`, `wait_terminal`, `stop_terminal`) are compatibility aliases. Prefer the command-named tools in new calls.
-- If the user explicitly asked for a background command or terminal and it fails, say that the background run failed. If you then use `run_command` or another fallback, state that fallback clearly and do not describe the final result as completed by the background run.
+- Commands run in the active shell declared by the command tool description. Do not assume POSIX syntax unless that description says the active shell is bash, zsh, or sh.
+- If the user explicitly asked for a background command and it fails, say that the background run failed. If you then use `run_command` or another fallback, state that fallback clearly and do not describe the final result as completed by the background run.
 
 ## Dynamic Workflows
 
@@ -167,7 +167,7 @@ When changing code:
 - Keep API, frontend, backend, and persistence contracts aligned.
 - Add or update tests near the behavior.
 - Avoid broad rewrites unless the current design cannot satisfy the request.
-- Preserve backwards compatibility where existing persisted values, public endpoints, or user-facing commands depend on it.
+- Preserve backwards compatibility where existing persisted values, public endpoints, or user-facing commands depend on it, unless the user explicitly requests a clean break or the current runtime contract intentionally replaces legacy names.
 - Update docs only when they are part of the requested behavior or prevent future misuse.
 
 ## Final Response

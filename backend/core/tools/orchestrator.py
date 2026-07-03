@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from backend.core.config.types import Message, Role
+from backend.core.shell_profile import ShellProfileResolver
 from backend.core.tools.security.approval import ApprovalManager, ApprovalRequest
 from backend.core.tools.security.command_policy import CommandPolicy
 from backend.core.tools.security.logical_sandbox import LogicalSandbox, SandboxViolation
@@ -64,7 +65,6 @@ COMMAND_TOOL_NAME_TOKENS = {
     "shell",
     "bash",
     "powershell",
-    "terminal",
     "exec",
     "run",
 }
@@ -390,7 +390,8 @@ def _command_policy_decision(tool_name: str, arguments: Dict[str, Any]):
     if command is None:
         return None
 
-    return CommandPolicy.default().classify(command)
+    shell_id = ShellProfileResolver().resolve().id
+    return CommandPolicy.default().classify(command, shell_id=shell_id)
 
 
 def _command_policy_ask_applies(command_decision: Any, permission_mode: PermissionMode) -> bool:

@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
-from backend.api.dependencies import get_chat_manager, get_run_manager, get_subagent_executor, get_terminal_executor, get_workflow_manager
+from backend.api.dependencies import get_chat_manager, get_run_manager, get_subagent_executor, get_command_executor, get_workflow_manager
 from backend.core.agents import SubagentExecutor
 from backend.core.chat.chat_manager import ChatManager
 from backend.core.runs import RunManager
@@ -80,7 +80,7 @@ async def stop_run(
     run_manager: RunManager = Depends(get_run_manager),
     chat_manager: ChatManager = Depends(get_chat_manager),
     subagent_executor: SubagentExecutor = Depends(get_subagent_executor),
-    terminal_executor: Any = Depends(get_terminal_executor),
+    command_executor: Any = Depends(get_command_executor),
     workflow_manager: WorkflowManager = Depends(get_workflow_manager),
 ):
     run = run_manager.get_run(run_id)
@@ -91,7 +91,7 @@ async def stop_run(
         run_manager=run_manager,
         chat_manager=chat_manager,
         subagent_executor=subagent_executor,
-        terminal_executor=terminal_executor,
+        command_executor=command_executor,
         workflow_manager=workflow_manager,
     )
     return {"detail": "运行已请求停止"}
@@ -103,7 +103,7 @@ async def stop_conversation_runs(
     run_manager: RunManager = Depends(get_run_manager),
     chat_manager: ChatManager = Depends(get_chat_manager),
     subagent_executor: SubagentExecutor = Depends(get_subagent_executor),
-    terminal_executor: Any = Depends(get_terminal_executor),
+    command_executor: Any = Depends(get_command_executor),
     workflow_manager: WorkflowManager = Depends(get_workflow_manager),
 ):
     stopped: list[str] = []
@@ -115,7 +115,7 @@ async def stop_conversation_runs(
             run_manager=run_manager,
             chat_manager=chat_manager,
             subagent_executor=subagent_executor,
-            terminal_executor=terminal_executor,
+            command_executor=command_executor,
             workflow_manager=workflow_manager,
             _seen=seen,
         ))

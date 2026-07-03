@@ -26,7 +26,7 @@ export function isDetachedRunView(
   run: BranchRunLike,
   selectedBranchTipId: string | null,
 ): boolean {
-  if (!['side_question', 'subagent', 'terminal', 'workflow', 'direct_response'].includes(run.kind)) return false;
+  if (!['side_question', 'subagent', 'command', 'workflow', 'direct_response'].includes(run.kind)) return false;
   return !run.anchorNodeId || run.anchorNodeId === selectedBranchTipId;
 }
 

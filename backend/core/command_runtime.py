@@ -1,16 +1,18 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import locale
 import os
 import subprocess
+import signal
 from collections import deque
 from pathlib import Path
 from time import time
 from typing import Any, Deque, Dict, Optional
 
 from .runs import RunKind, RunManager, RunStatus
-from .runs.types import TERMINAL_RUN_STATUSES
+from .runs.types import FINISHED_RUN_STATUSES
+from .shell_profile import ShellProfile, ShellProfileResolver
 
 
 def _decode_bytes(value: bytes) -> str:
@@ -33,13 +35,26 @@ def _command_env() -> Dict[str, str]:
     return env
 
 
-class TerminalExecutor:
-    """Managed background shell/process runs backed by RunManager events."""
+def _subprocess_group_kwargs() -> Dict[str, Any]:
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
 
-    def __init__(self, run_manager: RunManager, *, max_tail_chars: int = 12000) -> None:
+
+class CommandExecutor:
+    """Managed command runs backed by RunManager events."""
+
+    def __init__(
+        self,
+        run_manager: RunManager,
+        *,
+        max_tail_chars: int = 12000,
+        shell_profile: Optional[ShellProfile] = None,
+    ) -> None:
         self.run_manager = run_manager
         self.max_tail_chars = max(1000, int(max_tail_chars))
-        self._processes: Dict[str, asyncio.subprocess.Process] = {}
+        self.shell_profile = shell_profile or ShellProfileResolver().resolve()
+        self._processes: Dict[str, Any] = {}
         self._tasks: Dict[str, asyncio.Task[None]] = {}
         self._stdout_tail: Dict[str, Deque[str]] = {}
         self._stderr_tail: Dict[str, Deque[str]] = {}
@@ -59,15 +74,19 @@ class TerminalExecutor:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         cwd_path = str(Path(cwd).expanduser().resolve())
+        shell_snapshot = self.shell_profile.snapshot()
         run = await self.run_manager.create_run(
             conversation_id=conversation_id,
-            kind=RunKind.TERMINAL,
+            kind=RunKind.COMMAND,
             anchor_node_id=anchor_node_id,
             parent_run_id=parent_run_id,
             summary=summary or command[:80],
             metadata={
                 "command": command,
                 "cwd": cwd_path,
+                "shell": shell_snapshot,
+                "shell_id": self.shell_profile.id,
+                "platform": self.shell_profile.platform,
                 "timeout_seconds": timeout_seconds,
                 **dict(metadata or {}),
             },
@@ -79,6 +98,7 @@ class TerminalExecutor:
             conversation_id=conversation_id,
             command=command,
             cwd=cwd_path,
+            shell_snapshot=shell_snapshot,
             timeout_seconds=timeout_seconds,
             anchor_node_id=anchor_node_id,
         ))
@@ -100,24 +120,24 @@ class TerminalExecutor:
         via: str,
     ) -> Optional[Dict[str, Any]]:
         run = self.run_manager.get_run(run_id)
-        if not run or run.get("kind") != RunKind.TERMINAL.value:
+        if not run or run.get("kind") != RunKind.COMMAND.value:
             return None
-        if run.get("status") not in TERMINAL_RUN_STATUSES:
+        if run.get("status") not in FINISHED_RUN_STATUSES:
             return run
         observer = observer_run_id or ""
         metadata = {
-            "terminal_observed_at": time(),
-            "terminal_observed_via": via,
-            "terminal_notification_state": "observed",
-            "notification_suppressed_reason": f"terminal result observed via {via}",
+            "command_observed_at": time(),
+            "command_observed_via": via,
+            "command_notification_state": "observed",
+            "notification_suppressed_reason": f"Command result observed via {via}",
         }
         if observer:
-            metadata["terminal_observed_by_run_id"] = observer
+            metadata["command_observed_by_run_id"] = observer
         updated = await self.run_manager.update_metadata(run_id, metadata)
         self.run_manager.synthetic_inputs.mark_consumed_by_source(
             conversation_id=str(run.get("conversation_id") or ""),
             kind="task_notification",
-            source_run_kind=RunKind.TERMINAL.value,
+            source_run_kind=RunKind.COMMAND.value,
             source_run_id=run_id,
         )
         return updated.to_dict()
@@ -128,7 +148,7 @@ class TerminalExecutor:
             return None
         exit_code = None
         duration_seconds = None
-        terminal_status = run.get("status")
+        command_status = run.get("status")
         error = (run.get("metadata") or {}).get("error")
         events = self.run_manager.journal.read_from_index(str(run.get("conversation_id") or ""), run_id, 0)
         stdout_parts: list[str] = []
@@ -136,26 +156,28 @@ class TerminalExecutor:
         for event in events:
             payload = event.get("payload") or {}
             event_type = payload.get("event_type")
-            if event_type == "terminal_stdout":
+            if event_type == "command_stdout":
                 stdout_parts.append(str(payload.get("content") or ""))
-            elif event_type == "terminal_stderr":
+            elif event_type == "command_stderr":
                 stderr_parts.append(str(payload.get("content") or ""))
-            elif event_type in {"terminal_exited", "terminal_stopped", "terminal_error"}:
+            elif event_type in {"command_exited", "command_stopped", "command_error"}:
                 exit_code = payload.get("exit_code", exit_code)
                 duration_seconds = payload.get("duration_seconds", duration_seconds)
-                terminal_status = payload.get("terminal_status", terminal_status)
+                command_status = payload.get("command_status", command_status)
                 error = payload.get("error", error)
         stdout = "".join(stdout_parts)
         stderr = "".join(stderr_parts)
         return {
-            "terminal_run_id": run_id,
             "command_run_id": run_id,
             "run_id": run_id,
             "status": run.get("status"),
-            "terminal_status": terminal_status,
+            "command_status": command_status,
             "kind": run.get("kind"),
             "command": (run.get("metadata") or {}).get("command"),
             "cwd": (run.get("metadata") or {}).get("cwd"),
+            "shell": (run.get("metadata") or {}).get("shell"),
+            "shell_id": (run.get("metadata") or {}).get("shell_id"),
+            "platform": (run.get("metadata") or {}).get("platform"),
             "exit_code": exit_code,
             "duration_seconds": duration_seconds,
             "stdout": stdout,
@@ -184,6 +206,7 @@ class TerminalExecutor:
         conversation_id: str,
         command: str,
         cwd: str,
+        shell_snapshot: Dict[str, Any],
         timeout_seconds: Optional[int],
         anchor_node_id: Optional[str],
     ) -> None:
@@ -191,14 +214,16 @@ class TerminalExecutor:
         error: str | None = None
         exit_code: int | None = None
         started_at = time()
+        argv = self.shell_profile.command_argv(command)
         try:
             try:
-                process = await asyncio.create_subprocess_shell(
-                    command,
+                process = await asyncio.create_subprocess_exec(
+                    *argv,
                     cwd=cwd,
                     env=_command_env(),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    **_subprocess_group_kwargs(),
                 )
             except NotImplementedError:
                 await self._run_process_with_popen(
@@ -206,6 +231,7 @@ class TerminalExecutor:
                     conversation_id=conversation_id,
                     command=command,
                     cwd=cwd,
+                    shell=shell_snapshot,
                     timeout_seconds=timeout_seconds,
                     started_at=started_at,
                     anchor_node_id=anchor_node_id,
@@ -216,11 +242,13 @@ class TerminalExecutor:
                 return
             self._processes[run_id] = process
             await self.run_manager.append_event(run_id, {
-                "event_type": "terminal_started",
+                "event_type": "command_started",
                 "status": "content",
                 "content": "",
                 "command": command,
                 "cwd": cwd,
+                "shell": shell_snapshot,
+                "shell_id": self.shell_profile.id,
                 "pid": process.pid,
             })
             if await self.run_manager.is_stop_requested(run_id):
@@ -250,13 +278,15 @@ class TerminalExecutor:
                 stderr_tail = self._tail_text(run_id, "stderr").strip()
                 error = stderr_tail or f"command exited with code {exit_code}"
             await self.run_manager.append_event(run_id, {
-                "event_type": "terminal_stopped" if final_status == RunStatus.CANCELLED else "terminal_exited",
+                "event_type": "command_stopped" if final_status == RunStatus.CANCELLED else "command_exited",
                 "status": "stopped" if final_status == RunStatus.CANCELLED else "content",
                 "content": "",
                 "exit_code": exit_code,
                 "duration_seconds": round(time() - started_at, 3),
-                "terminal_status": final_status.value,
+                "command_status": final_status.value,
                 "error": error,
+                "shell": shell_snapshot,
+                "shell_id": self.shell_profile.id,
             })
             self._enqueue_completion(
                 run_id=run_id,
@@ -270,14 +300,16 @@ class TerminalExecutor:
             )
         except Exception as exc:
             final_status = RunStatus.FAILED
-            error = f"{type(exc).__name__}: {exc} while starting terminal command {command!r} in {cwd}"
+            error = f"{type(exc).__name__}: {exc} while starting Command {command!r} in {cwd}"
             await self.run_manager.append_event(run_id, {
-                "event_type": "terminal_error",
+                "event_type": "command_error",
                 "status": "error",
                 "content": "",
                 "error": error,
                 "command": command,
                 "cwd": cwd,
+                "shell": shell_snapshot,
+                "shell_id": self.shell_profile.id,
             })
             self._enqueue_completion(
                 run_id=run_id,
@@ -309,7 +341,7 @@ class TerminalExecutor:
             text = _decode_bytes(chunk)
             self._append_tail(run_id, channel, text)
             await self.run_manager.append_event(run_id, {
-                "event_type": f"terminal_{channel}",
+                "event_type": f"command_{channel}",
                 "status": "content",
                 "content": text,
                 "channel": channel,
@@ -322,26 +354,31 @@ class TerminalExecutor:
         conversation_id: str,
         command: str,
         cwd: str,
+        shell: Dict[str, Any],
         timeout_seconds: Optional[int],
         started_at: float,
         anchor_node_id: Optional[str],
     ) -> None:
+        argv = self.shell_profile.command_argv(command)
         process = await asyncio.to_thread(
             subprocess.Popen,
-            command,
+            argv,
             cwd=cwd,
             env=_command_env(),
-            shell=True,
+            shell=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            **_subprocess_group_kwargs(),
         )
         self._processes[run_id] = process
         await self.run_manager.append_event(run_id, {
-            "event_type": "terminal_started",
+            "event_type": "command_started",
             "status": "content",
             "content": "",
             "command": command,
             "cwd": cwd,
+            "shell": shell,
+            "shell_id": self.shell_profile.id,
             "pid": process.pid,
             "backend": "popen",
         })
@@ -379,13 +416,15 @@ class TerminalExecutor:
             stderr_tail = self._tail_text(run_id, "stderr").strip()
             error = stderr_tail or f"command exited with code {exit_code}"
         await self.run_manager.append_event(run_id, {
-            "event_type": "terminal_stopped" if final_status == RunStatus.CANCELLED else "terminal_exited",
+            "event_type": "command_stopped" if final_status == RunStatus.CANCELLED else "command_exited",
             "status": "stopped" if final_status == RunStatus.CANCELLED else "content",
             "content": "",
             "exit_code": exit_code,
             "duration_seconds": round(time() - started_at, 3),
-            "terminal_status": final_status.value,
+            "command_status": final_status.value,
             "error": error,
+            "shell": shell,
+            "shell_id": self.shell_profile.id,
             "backend": "popen",
         })
         self._enqueue_completion(
@@ -415,7 +454,7 @@ class TerminalExecutor:
             text = _decode_bytes(chunk)
             self._append_tail(run_id, channel, text)
             await self.run_manager.append_event(run_id, {
-                "event_type": f"terminal_{channel}",
+                "event_type": f"command_{channel}",
                 "status": "content",
                 "content": text,
                 "channel": channel,
@@ -449,31 +488,34 @@ class TerminalExecutor:
     ) -> None:
         run = self.run_manager.get_run(run_id) or {}
         metadata = dict(run.get("metadata") or {})
-        if metadata.get("terminal_observed_at"):
+        if metadata.get("command_observed_at"):
             self._record_notification_metadata(run_id, {
-                "terminal_notification_state": "observed",
-                "notification_suppressed_reason": "terminal result already observed",
+                "command_notification_state": "observed",
+                "notification_suppressed_reason": "Command result already observed",
             })
             return
-        if metadata.get("terminal_notification_state") == "sent":
+        if metadata.get("command_notification_state") == "sent":
             return
         parent_run_id = run.get("parent_run_id")
         parent_run = self.run_manager.get_run(str(parent_run_id)) if parent_run_id else None
-        if parent_run and parent_run.get("status") not in TERMINAL_RUN_STATUSES:
+        if parent_run and parent_run.get("status") not in FINISHED_RUN_STATUSES:
             self._record_notification_metadata(run_id, {
-                "terminal_notification_state": "deferred",
+                "command_notification_state": "deferred",
                 "notification_suppressed_reason": "parent run is still active",
             })
             return
         status_text = final_status.value
-        summary = f"Terminal command {status_text}"
+        summary = f"Command {status_text}"
         if exit_code is not None:
             summary += f" (exit code {exit_code})"
         payload = {
-            "terminal_run_id": run_id,
+            "command_run_id": run_id,
             "status": status_text,
             "command": command,
             "cwd": cwd,
+            "shell": metadata.get("shell"),
+            "shell_id": metadata.get("shell_id"),
+            "platform": metadata.get("platform"),
             "exit_code": exit_code,
             "stdout_tail": self._tail_text(run_id, "stdout"),
             "stderr_tail": self._tail_text(run_id, "stderr"),
@@ -484,18 +526,18 @@ class TerminalExecutor:
             conversation_id=conversation_id,
             anchor_node_id=anchor_node_id,
             source_run_id=run_id,
-            source_run_kind=RunKind.TERMINAL.value,
+            source_run_kind=RunKind.COMMAND.value,
             summary=summary,
             content=json_dumps(payload),
             metadata={
                 "source_status": status_text,
-                "terminal_run_id": run_id,
+                "command_run_id": run_id,
                 "exit_code": exit_code,
             },
         )
         self._record_notification_metadata(run_id, {
-            "terminal_notification_state": "sent",
-            "terminal_notification_sent_at": time(),
+            "command_notification_state": "sent",
+            "command_notification_sent_at": time(),
             "notification_suppressed_reason": None,
         })
 
@@ -504,20 +546,20 @@ class TerminalExecutor:
         if not parent_run_id:
             return
         for child in self.run_manager.list_runs(str(run.get("conversation_id") or "")):
-            if child.get("kind") != RunKind.TERMINAL.value:
+            if child.get("kind") != RunKind.COMMAND.value:
                 continue
             if child.get("parent_run_id") != parent_run_id:
                 continue
-            if child.get("status") not in TERMINAL_RUN_STATUSES:
+            if child.get("status") not in FINISHED_RUN_STATUSES:
                 continue
             metadata = dict(child.get("metadata") or {})
-            if metadata.get("terminal_observed_at") or metadata.get("terminal_notification_state") == "sent":
+            if metadata.get("command_observed_at") or metadata.get("command_notification_state") == "sent":
                 continue
             snapshot = self.snapshot(str(child.get("run_id") or ""))
             if not snapshot:
                 continue
             status = snapshot.get("status")
-            if status not in TERMINAL_RUN_STATUSES:
+            if status not in FINISHED_RUN_STATUSES:
                 continue
             self._enqueue_completion(
                 run_id=str(child["run_id"]),
@@ -541,23 +583,27 @@ class TerminalExecutor:
         if process.returncode is not None:
             return
         if os.name == "nt":
+            pid = process.pid
             await asyncio.to_thread(
                 subprocess.run,
-                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,
             )
             try:
-                await self._wait_process(process, timeout=5)
+                await self._wait_process(process, timeout=2)
             except asyncio.TimeoutError:
-                process.kill()
+                with suppress_process_lookup():
+                    process.kill()
             return
-        process.terminate()
+        with suppress_process_lookup():
+            os.killpg(process.pid, signal.SIGTERM)
         try:
             await self._wait_process(process, timeout=2)
         except asyncio.TimeoutError:
-            process.kill()
+            with suppress_process_lookup():
+                os.killpg(process.pid, signal.SIGKILL)
 
     async def _wait_process(self, process: Any, *, timeout: float) -> None:
         if isinstance(process, asyncio.subprocess.Process):
@@ -570,3 +616,12 @@ def json_dumps(payload: Dict[str, Any]) -> str:
     import json
 
     return json.dumps(payload, ensure_ascii=False)
+
+
+class suppress_process_lookup:
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return exc_type in {ProcessLookupError}
+

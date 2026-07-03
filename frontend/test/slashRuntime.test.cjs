@@ -180,30 +180,30 @@ function testWorkflowEventsRenderAsDraftState() {
   })), true);
 }
 
-function testObservedCompletedTerminalDoesNotRenderAsDraftState() {
+function testObservedCompletedCommandDoesNotRenderAsDraftState() {
   assert.equal(shouldRenderRunDraft(run({
-    kind: 'terminal',
+    kind: 'command',
     status: 'completed',
-    terminal: { stdout: 'short command output\n', stderr: '', events: [] },
-    metadata: { terminal_notification_state: 'observed' },
+    command: { stdout: 'short command output\n', stderr: '', events: [] },
+    metadata: { command_notification_state: 'observed' },
   })), false);
 }
 
-function testObservedFailedTerminalDoesNotRenderAsDraftState() {
+function testObservedFailedCommandDoesNotRenderAsDraftState() {
   assert.equal(shouldRenderRunDraft(run({
-    kind: 'terminal',
+    kind: 'command',
     status: 'failed',
-    terminal: { stdout: '', stderr: 'command failed\n', events: [] },
-    metadata: { terminal_notification_state: 'observed' },
+    command: { stdout: '', stderr: 'command failed\n', events: [] },
+    metadata: { command_notification_state: 'observed' },
   })), false);
 }
 
-function testObservedCancelledTerminalDoesNotRenderAsDraftState() {
+function testObservedCancelledCommandDoesNotRenderAsDraftState() {
   assert.equal(shouldRenderRunDraft(run({
-    kind: 'terminal',
+    kind: 'command',
     status: 'cancelled',
-    terminal: { stdout: 'stopped\n', stderr: '', events: [] },
-    metadata: { terminal_notification_state: 'observed' },
+    command: { stdout: 'stopped\n', stderr: '', events: [] },
+    metadata: { command_notification_state: 'observed' },
   })), false);
 }
 
@@ -225,8 +225,8 @@ testSidePanelRunLabelsUseSlashNames();
 testUnknownBackgroundRunWithoutTranscriptStateDoesNotRenderAsDraft();
 testBackgroundWorkflowWithoutTranscriptStateDoesNotRenderAsDraft();
 testWorkflowEventsRenderAsDraftState();
-testObservedCompletedTerminalDoesNotRenderAsDraftState();
-testObservedFailedTerminalDoesNotRenderAsDraftState();
-testObservedCancelledTerminalDoesNotRenderAsDraftState();
+testObservedCompletedCommandDoesNotRenderAsDraftState();
+testObservedFailedCommandDoesNotRenderAsDraftState();
+testObservedCancelledCommandDoesNotRenderAsDraftState();
 
 console.log('slashRuntime tests passed');

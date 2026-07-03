@@ -199,8 +199,8 @@ function testSummarizesCommonToolCalls() {
     '后台运行 npm run dev',
   );
   assert.equal(
-    summarizeToolCall('wait_command', '{"command_run_id":"run-terminal-1"}'),
-    '等待命令 run-terminal-1',
+    summarizeToolCall('wait_command', '{"command_run_id":"run-command-1"}'),
+    '等待命令 run-command-1',
   );
   assert.equal(
     summarizeToolCall('edit_file', '{"path":"a.py","old_string":"x","new_string":"y"}'),

@@ -153,9 +153,9 @@ function testDetachedSubagentCanBeStoppedFromSelectedAnchorWithoutBlockingTransc
   assert.equal(isRunStoppableFromSelectedBranch(run, 'node-hello', new Set(['node-hello'])), true);
 }
 
-function testTerminalRunIsSideViewAndStoppableFromAnchor() {
+function testCommandRunIsSideViewAndStoppableFromAnchor() {
   const run = chatRun({
-    kind: 'terminal',
+    kind: 'command',
     status: 'streaming',
     anchorNodeId: 'node-hello',
     nodeId: null,
@@ -191,7 +191,7 @@ testDirectResponseRunIsSideViewNotMainTranscriptWithoutNode();
 testDirectResponseRunNeverEntersMainTranscriptEvenWithTargetNode();
 testDetachedChatRunStaysInMainTranscriptDuringPreTargetPhase();
 testDetachedSubagentCanBeStoppedFromSelectedAnchorWithoutBlockingTranscript();
-testTerminalRunIsSideViewAndStoppableFromAnchor();
+testCommandRunIsSideViewAndStoppableFromAnchor();
 testSubagentWithTargetNodeStillUsesSideView();
 
 console.log('runVisibility tests passed');

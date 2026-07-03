@@ -47,7 +47,7 @@ class CommandPolicy:
             CommandRule("ask-pip-install", "ask", "pip install*", "dependency installation mutates environment"),
         ])
 
-    def classify(self, command: str) -> CommandDecision:
+    def classify(self, command: str, *, shell_id: str = "") -> CommandDecision:
         normalized = command.strip()
         if not normalized:
             return CommandDecision("deny", "empty command")
@@ -57,16 +57,19 @@ class CommandPolicy:
             return CommandDecision("deny", deny.reason, deny)
 
         if self._SHELL_SUBSTITUTION_RE.search(normalized):
-            return CommandDecision("ask", "shell command substitution requires approval")
+            shell = f" in {shell_id}" if shell_id else ""
+            return CommandDecision("ask", f"shell command substitution{shell} requires approval")
 
         if self._COMPOUND_OR_REDIRECT_RE.search(normalized):
-            return CommandDecision("ask", "compound, piped, or redirected command requires approval")
+            shell = f" in {shell_id}" if shell_id else ""
+            return CommandDecision("ask", f"compound, piped, or redirected command{shell} requires approval")
 
         rule = self._first_matching_rule(normalized)
         if rule:
             return CommandDecision(rule.behavior, rule.reason, rule)
 
-        return CommandDecision("ask", "unclassified command requires approval")
+        shell = f" for {shell_id}" if shell_id else ""
+        return CommandDecision("ask", f"unclassified command{shell} requires approval")
 
     def _first_matching_rule(
         self,

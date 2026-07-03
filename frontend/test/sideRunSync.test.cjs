@@ -19,9 +19,9 @@ require.extensions['.ts'] = function loadTs(module, filename) {
 
 const {
   SIDE_RUN_KINDS,
-  TERMINAL_RUN_STATUSES,
+  COMMAND_RUN_STATUSES,
   getVisibleSideRunRecords,
-  isTerminalRunStatus,
+  isCommandRunStatus,
 } = require(path.join(__dirname, '../src/utils/sideRunSync.ts'));
 
 function run(overrides = {}) {
@@ -41,8 +41,8 @@ function run(overrides = {}) {
 }
 
 function testSideRunKindSetIncludesDetachedRunTypes() {
-  assert.deepEqual([...SIDE_RUN_KINDS], ['side_question', 'subagent', 'terminal', 'workflow', 'workflow_step', 'direct_response']);
-  assert.deepEqual([...TERMINAL_RUN_STATUSES], ['completed', 'failed', 'cancelled']);
+  assert.deepEqual([...SIDE_RUN_KINDS], ['side_question', 'subagent', 'command', 'workflow', 'workflow_step', 'direct_response']);
+  assert.deepEqual([...COMMAND_RUN_STATUSES], ['completed', 'failed', 'cancelled']);
 }
 
 function testVisibleSideRunsIncludeToolSpawnedParentedSubagents() {
@@ -50,10 +50,10 @@ function testVisibleSideRunsIncludeToolSpawnedParentedSubagents() {
     run({ run_id: 'main-chat', kind: 'chat', parent_run_id: null }),
     run({ run_id: 'tool-spawned-subagent', kind: 'subagent', parent_run_id: 'run-main-chat' }),
     run({ run_id: 'workflow-child', kind: 'subagent', parent_run_id: 'run-workflow', metadata: { source_run_id: 'run-workflow' } }),
-    run({ run_id: 'terminal-child', kind: 'terminal', parent_run_id: 'run-main-chat' }),
+    run({ run_id: 'command-child', kind: 'command', parent_run_id: 'run-main-chat' }),
   ], new Set());
 
-  assert.deepEqual(visible.map((item) => item.run_id), ['tool-spawned-subagent', 'workflow-child', 'terminal-child']);
+  assert.deepEqual(visible.map((item) => item.run_id), ['tool-spawned-subagent', 'workflow-child', 'command-child']);
 }
 
 function testVisibleSideRunsExcludeHiddenRuns() {
@@ -65,17 +65,17 @@ function testVisibleSideRunsExcludeHiddenRuns() {
   assert.deepEqual(visible.map((item) => item.run_id), ['visible-subagent']);
 }
 
-function testTerminalStatusDetectionMatchesBackendRunStatuses() {
-  assert.equal(isTerminalRunStatus('running'), false);
-  assert.equal(isTerminalRunStatus('waiting_approval'), false);
-  assert.equal(isTerminalRunStatus('completed'), true);
-  assert.equal(isTerminalRunStatus('failed'), true);
-  assert.equal(isTerminalRunStatus('cancelled'), true);
+function testCommandStatusDetectionMatchesBackendRunStatuses() {
+  assert.equal(isCommandRunStatus('running'), false);
+  assert.equal(isCommandRunStatus('waiting_approval'), false);
+  assert.equal(isCommandRunStatus('completed'), true);
+  assert.equal(isCommandRunStatus('failed'), true);
+  assert.equal(isCommandRunStatus('cancelled'), true);
 }
 
 testSideRunKindSetIncludesDetachedRunTypes();
 testVisibleSideRunsIncludeToolSpawnedParentedSubagents();
 testVisibleSideRunsExcludeHiddenRuns();
-testTerminalStatusDetectionMatchesBackendRunStatuses();
+testCommandStatusDetectionMatchesBackendRunStatuses();
 
 console.log('sideRunSync tests passed');

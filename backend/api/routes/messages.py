@@ -8,7 +8,7 @@ import json
 import logging
 from ...core.agents import SubagentExecutor
 from ...core.chat.chat_manager import ChatManager
-from ..dependencies import get_chat_manager, get_run_manager, get_subagent_executor, get_terminal_executor, get_workflow_manager
+from ..dependencies import get_chat_manager, get_run_manager, get_subagent_executor, get_command_executor, get_workflow_manager
 from ...core.config.types import Message, StreamChunk
 from ...core.runs import RunKind, RunManager, RunNotFoundError, RunStatus
 from ...core.slash import SlashCommandDispatcher, SlashDispatchKind, SlashCommandRegistry
@@ -677,7 +677,7 @@ async def stream_message(
     chat_manager: ChatManager = Depends(get_chat_manager),
     run_manager: RunManager = Depends(get_run_manager),
     subagent_executor: SubagentExecutor = Depends(get_subagent_executor),
-    terminal_executor: Any = Depends(get_terminal_executor),
+    command_executor: Any = Depends(get_command_executor),
     workflow_manager: WorkflowManager = Depends(get_workflow_manager),
 ):
     """流式发送消息 - 返回 SSE 格式"""
@@ -755,7 +755,7 @@ async def stream_synthetic_input(
     chat_manager: ChatManager = Depends(get_chat_manager),
     run_manager: RunManager = Depends(get_run_manager),
     subagent_executor: SubagentExecutor = Depends(get_subagent_executor),
-    terminal_executor: Any = Depends(get_terminal_executor),
+    command_executor: Any = Depends(get_command_executor),
     workflow_manager: WorkflowManager = Depends(get_workflow_manager),
 ):
     item = run_manager.synthetic_inputs.get(conversation_id, input_id)
@@ -822,7 +822,7 @@ async def stop_stream_message(
     chat_manager: ChatManager = Depends(get_chat_manager),
     run_manager: RunManager = Depends(get_run_manager),
     subagent_executor: SubagentExecutor = Depends(get_subagent_executor),
-    terminal_executor: Any = Depends(get_terminal_executor),
+    command_executor: Any = Depends(get_command_executor),
     workflow_manager: WorkflowManager = Depends(get_workflow_manager),
 ):
     """停止流式消息"""
@@ -840,7 +840,7 @@ async def stop_stream_message(
                 run_manager=run_manager,
                 chat_manager=chat_manager,
                 subagent_executor=subagent_executor,
-                terminal_executor=terminal_executor,
+                command_executor=command_executor,
                 workflow_manager=workflow_manager,
             )
         for run_kind in _ANCHOR_STOP_RUN_KINDS:
@@ -855,7 +855,7 @@ async def stop_stream_message(
                     run_manager=run_manager,
                     chat_manager=chat_manager,
                     subagent_executor=subagent_executor,
-                    terminal_executor=terminal_executor,
+                    command_executor=command_executor,
                     workflow_manager=workflow_manager,
                 )
         await chat_manager.stop_stream(node_id)

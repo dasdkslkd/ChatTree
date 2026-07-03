@@ -27,7 +27,7 @@ export interface StreamState {
   summary: string;
   metadata: Record<string, unknown>;
   workflowEvents: WorkflowEventState[];
-  terminal: TerminalRunState;
+  command: CommandRunState;
   sideRunNotifications: SideRunNotificationState[];
   tokensUsed: number;
   duration: number;
@@ -38,10 +38,10 @@ export interface StreamState {
   createdAt: number;
 }
 
-export interface TerminalRunState {
+export interface CommandRunState {
   stdout: string;
   stderr: string;
-  events: TerminalEventState[];
+  events: CommandEventState[];
   exitCode: number | null;
   durationSeconds: number | null;
   status: string | null;
@@ -50,7 +50,7 @@ export interface TerminalRunState {
   cwd: string | null;
 }
 
-export interface TerminalEventState {
+export interface CommandEventState {
   eventIndex: number;
   eventType: string;
   channel: string | null;
@@ -212,7 +212,7 @@ function mapRunRecordStatus(status: unknown): StreamState['status'] {
   return 'streaming';
 }
 
-function createTerminalState(): TerminalRunState {
+function createCommandState(): CommandRunState {
   return {
     stdout: '',
     stderr: '',
@@ -252,11 +252,11 @@ function isWorkflowEvent(chunk: any): boolean {
   ].includes(String(chunk?.event_type || ''));
 }
 
-function isTerminalEvent(chunk: any): boolean {
-  return typeof chunk.event_type === 'string' && chunk.event_type.startsWith('terminal_');
+function isCommandEvent(chunk: any): boolean {
+  return typeof chunk.event_type === 'string' && chunk.event_type.startsWith('command_');
 }
 
-function toTerminalEvent(chunk: any): TerminalEventState {
+function toCommandEvent(chunk: any): CommandEventState {
   return {
     eventIndex: typeof chunk.event_index === 'number' ? chunk.event_index : -1,
     eventType: String(chunk.event_type || ''),
@@ -264,7 +264,7 @@ function toTerminalEvent(chunk: any): TerminalEventState {
     content: typeof chunk.content === 'string' ? chunk.content : null,
     exitCode: typeof chunk.exit_code === 'number' ? chunk.exit_code : null,
     durationSeconds: typeof chunk.duration_seconds === 'number' ? chunk.duration_seconds : null,
-    status: typeof chunk.terminal_status === 'string' ? chunk.terminal_status : null,
+    status: typeof chunk.command_status === 'string' ? chunk.command_status : null,
     pid: typeof chunk.pid === 'number' ? chunk.pid : null,
     command: typeof chunk.command === 'string' ? chunk.command : null,
     cwd: typeof chunk.cwd === 'string' ? chunk.cwd : null,
@@ -272,23 +272,23 @@ function toTerminalEvent(chunk: any): TerminalEventState {
   };
 }
 
-function applyTerminalEvent(terminal: TerminalRunState, chunk: any): TerminalRunState {
-  const event = toTerminalEvent(chunk);
-  const existingIndex = terminal.events.findIndex((item) => item.eventIndex === event.eventIndex && event.eventIndex >= 0);
+function applyCommandEvent(commandState: CommandRunState, chunk: any): CommandRunState {
+  const event = toCommandEvent(chunk);
+  const existingIndex = commandState.events.findIndex((item) => item.eventIndex === event.eventIndex && event.eventIndex >= 0);
   const events = existingIndex >= 0
-    ? terminal.events.map((item, index) => (index === existingIndex ? event : item))
-    : [...terminal.events, event].sort((a, b) => a.eventIndex - b.eventIndex);
+    ? commandState.events.map((item, index) => (index === existingIndex ? event : item))
+    : [...commandState.events, event].sort((a, b) => a.eventIndex - b.eventIndex);
   return {
-    stdout: event.eventType === 'terminal_stdout' && event.content ? terminal.stdout + event.content : terminal.stdout,
-    stderr: event.eventType === 'terminal_stderr' && event.content ? terminal.stderr + event.content : terminal.stderr,
+    stdout: event.eventType === 'command_stdout' && event.content ? commandState.stdout + event.content : commandState.stdout,
+    stderr: event.eventType === 'command_stderr' && event.content ? commandState.stderr + event.content : commandState.stderr,
     events,
-    exitCode: event.exitCode ?? terminal.exitCode,
-    durationSeconds: event.durationSeconds ?? terminal.durationSeconds,
+    exitCode: event.exitCode ?? commandState.exitCode,
+    durationSeconds: event.durationSeconds ?? commandState.durationSeconds,
     status: event.status
-      ?? (event.eventType === 'terminal_exited' ? 'completed' : event.eventType === 'terminal_stopped' ? 'cancelled' : terminal.status),
-    pid: event.pid ?? terminal.pid,
-    command: event.command ?? terminal.command,
-    cwd: event.cwd ?? terminal.cwd,
+      ?? (event.eventType === 'command_exited' ? 'completed' : event.eventType === 'command_stopped' ? 'cancelled' : commandState.status),
+    pid: event.pid ?? commandState.pid,
+    command: event.command ?? commandState.command,
+    cwd: event.cwd ?? commandState.cwd,
   };
 }
 
@@ -533,8 +533,8 @@ export class StreamManager {
         ? next.workflowEvents.map((event, index) => (index === existingIndex ? workflowEvent : event))
         : [...next.workflowEvents, workflowEvent].sort((a, b) => a.eventIndex - b.eventIndex);
     }
-    if (isTerminalEvent(chunk)) {
-      next.terminal = applyTerminalEvent(next.terminal, chunk);
+    if (isCommandEvent(chunk)) {
+      next.command = applyCommandEvent(next.command, chunk);
     }
     if (chunk.event_type === 'child_run_started') {
       const notification = toSideRunNotification(chunk);
@@ -542,7 +542,7 @@ export class StreamManager {
         next.sideRunNotifications = [...next.sideRunNotifications, notification];
       }
     }
-    if (chunk.content && !isAggregateResultEvent(chunk) && !isTerminalEvent(chunk)) {
+    if (chunk.content && !isAggregateResultEvent(chunk) && !isCommandEvent(chunk)) {
       next.content += chunk.content;
       next.reasoningActive = false;
     }
@@ -630,7 +630,7 @@ export class StreamManager {
       summary: '',
       metadata: {},
       workflowEvents: [],
-      terminal: createTerminalState(),
+      command: createCommandState(),
       sideRunNotifications: [],
       tokensUsed: 0,
       duration: 0,
@@ -664,7 +664,7 @@ export class StreamManager {
       summary: record.summary || '',
       metadata: { ...(record.metadata || {}) },
       workflowEvents: [],
-      terminal: createTerminalState(),
+      command: createCommandState(),
       sideRunNotifications: [],
       tokensUsed: 0,
       duration,

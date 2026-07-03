@@ -11,7 +11,7 @@ async def stop_run_tree(
     run_manager: RunManager,
     chat_manager: Any = None,
     subagent_executor: Any = None,
-    terminal_executor: Any = None,
+    command_executor: Any = None,
     workflow_manager: Any = None,
     _seen: Optional[set[str]] = None,
 ) -> list[str]:
@@ -36,9 +36,9 @@ async def stop_run_tree(
     elif kind in {RunKind.SUBAGENT.value, RunKind.WORKFLOW_STEP.value}:
         if subagent_executor is not None and hasattr(subagent_executor, "stop"):
             await subagent_executor.stop(run_id)
-    elif kind == RunKind.TERMINAL.value:
-        if terminal_executor is not None and hasattr(terminal_executor, "stop"):
-            await terminal_executor.stop(run_id)
+    elif kind == RunKind.COMMAND.value:
+        if command_executor is not None and hasattr(command_executor, "stop"):
+            await command_executor.stop(run_id)
     elif kind == RunKind.WORKFLOW.value:
         if workflow_manager is not None and hasattr(workflow_manager, "stop"):
             await workflow_manager.stop(run_id)
@@ -52,7 +52,7 @@ async def stop_run_tree(
             run_manager=run_manager,
             chat_manager=chat_manager,
             subagent_executor=subagent_executor,
-            terminal_executor=terminal_executor,
+            command_executor=command_executor,
             workflow_manager=workflow_manager,
             _seen=seen,
         ))

@@ -95,7 +95,7 @@ import {
 import {
   SIDE_RUN_KINDS,
   getVisibleSideRunRecords,
-  isTerminalRunStatus,
+  isCommandRunStatus,
 } from '../utils/sideRunSync';
 import { collectSideRunNotifications } from '../utils/sideRunNotifications';
 import { isTaskNotificationMessage, shouldExportMessage } from '../utils/taskNotificationVisibility';
@@ -1914,7 +1914,7 @@ export default function ChatPage() {
     const sideRuns = getVisibleSideRunRecords(runs, hiddenSideRunIds);
     for (const run of sideRuns) {
       if (streamManager.hasRun(run.run_id)) continue;
-      if (!isTerminalRunStatus(run.status)) {
+      if (!isCommandRunStatus(run.status)) {
         void streamManager.resumeStream(
           conversationId,
           run.target_node_id ?? null,
@@ -2658,7 +2658,7 @@ export default function ChatPage() {
   const getSideRunGroupLabel = (kind: string): string => {
     if (kind === 'side_question') return '旁路问题';
     if (kind === 'subagent') return '后台分支';
-    if (kind === 'terminal') return '后台终端';
+    if (kind === 'command') return '后台命令';
     if (kind === 'workflow') return 'Workflow';
     if (kind === 'direct_response') return '命令响应';
     return kind;
@@ -2733,32 +2733,38 @@ export default function ChatPage() {
     </>
   );
 
-  const renderTerminalRunBody = (run: StreamState) => {
+  const renderCommandRunBody = (run: StreamState) => {
+    const shell = run.metadata?.shell && typeof run.metadata.shell === 'object'
+      ? run.metadata.shell as Record<string, unknown>
+      : null;
+    const commandLanguage = typeof shell?.highlighter_language === 'string'
+      ? shell.highlighter_language
+      : 'bash';
     const output = [
-      run.terminal.stdout ? `$ stdout\n${run.terminal.stdout}` : '',
-      run.terminal.stderr ? `$ stderr\n${run.terminal.stderr}` : '',
+      run.command.stdout ? `$ stdout\n${run.command.stdout}` : '',
+      run.command.stderr ? `$ stderr\n${run.command.stderr}` : '',
     ].filter(Boolean).join('\n');
-    const command = run.terminal.command
+    const command = run.command.command
       || (typeof run.metadata.command === 'string' ? run.metadata.command : '')
       || run.summary
       || run.runId;
-    const cwd = run.terminal.cwd || (typeof run.metadata.cwd === 'string' ? run.metadata.cwd : '');
+    const cwd = run.command.cwd || (typeof run.metadata.cwd === 'string' ? run.metadata.cwd : '');
     return (
       <div className="flex flex-col gap-2">
         <div className="rounded border px-3 py-2 text-xs" style={{ borderColor: 'var(--border)', color: 'var(--fg-tertiary)' }}>
           <div className="truncate">{command}</div>
           {cwd && <div className="truncate">cwd: {cwd}</div>}
-          {(run.terminal.exitCode !== null || run.terminal.durationSeconds !== null) && (
+          {(run.command.exitCode !== null || run.command.durationSeconds !== null) && (
             <div>
-              {run.terminal.exitCode !== null ? `exit: ${run.terminal.exitCode}` : ''}
-              {run.terminal.durationSeconds !== null ? ` · ${run.terminal.durationSeconds}s` : ''}
+              {run.command.exitCode !== null ? `exit: ${run.command.exitCode}` : ''}
+              {run.command.durationSeconds !== null ? ` · ${run.command.durationSeconds}s` : ''}
             </div>
           )}
         </div>
         {output ? (
           <div className="file-preview-code-shell custom-scrollbar">
             <SyntaxHighlighter
-              language="powershell"
+              language={commandLanguage}
               style={oneDark}
               customStyle={{
                 margin: 0,
@@ -2800,8 +2806,8 @@ export default function ChatPage() {
           <MarkdownView content={draft.run.pendingUserMessage || ''} />
         </div>
       )}
-      {draft.run.kind === 'terminal' && renderTerminalRunBody(draft.run)}
-      {draft.showStreamBlock && draft.run.kind !== 'terminal' && (
+      {draft.run.kind === 'command' && renderCommandRunBody(draft.run)}
+      {draft.showStreamBlock && draft.run.kind !== 'command' && (
         <div className="min-w-0">
           {draft.streamingFoldState.canFoldProcess ? (
             <>
@@ -3982,12 +3988,3 @@ export default function ChatPage() {
     </div>
   );
 }
-
-
-
-
-
-
-
-
-

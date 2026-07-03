@@ -10,7 +10,7 @@ class RunKind(str, Enum):
     CHAT = "chat"
     SIDE_QUESTION = "side_question"
     SUBAGENT = "subagent"
-    TERMINAL = "terminal"
+    COMMAND = "command"
     WORKFLOW = "workflow"
     WORKFLOW_STEP = "workflow_step"
     DIRECT_RESPONSE = "direct_response"
@@ -26,7 +26,7 @@ class RunStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
-TERMINAL_RUN_STATUSES = {
+FINISHED_RUN_STATUSES = {
     RunStatus.COMPLETED,
     RunStatus.FAILED,
     RunStatus.CANCELLED,

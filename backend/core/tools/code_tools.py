@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from .base import BaseTool
 from .security.logical_sandbox import DEFAULT_PROTECTED_PATHS
+from ..shell_profile import ShellProfileResolver, render_command_tool_guidance
 
 
 DEFAULT_CODE_WORKSPACE = r"D:\Workspace\ChatTree\tmp"
@@ -486,10 +487,12 @@ class RunCommandTool(_CodeTool):
 
     @property
     def description(self) -> str:
+        profile = ShellProfileResolver().resolve()
         return (
             "Run a synchronous-compatible development command in the code workspace. "
             "When ChatTree runtime context is available, the command starts foreground, returns stdout/stderr/exit_code if it finishes within the initial wait window, "
-            "and auto-backgrounds with a command_run_id if it keeps running."
+            "and auto-backgrounds with a command_run_id if it keeps running.\n\n"
+            f"{render_command_tool_guidance(profile)}"
         )
 
     def parameters_schema(self) -> Dict[str, Any]:
@@ -500,11 +503,6 @@ class RunCommandTool(_CodeTool):
                 "command": {"type": "string"},
                 "cwd": {"type": "string", "default": "."},
                 "timeout_seconds": {"type": "integer", "minimum": 1},
-                "background": {
-                    "type": "boolean",
-                    "default": False,
-                    "description": "compatibility alias for starting a managed background command immediately. Prefer start_background_command for new true background command work.",
-                },
             },
             "required": ["command"],
         }
@@ -525,22 +523,20 @@ class RunCommandTool(_CodeTool):
             ),
         )
         runtime_context = kwargs.get("_runtime_context")
-        if isinstance(runtime_context, dict) and runtime_context.get("terminal_executor") is not None:
+        if isinstance(runtime_context, dict) and runtime_context.get("command_executor") is not None:
             return await self._execute_managed(
                 command=command,
                 cwd=cwd,
                 timeout=timeout,
-                background=bool(kwargs.get("background", False)),
                 runtime_context=runtime_context,
             )
-        if bool(kwargs.get("background", False)):
-            return _error("missing_terminal_executor", "background run_command requires a terminal executor")
         python_c_args = _windows_multiline_python_c_args(command)
+        profile = ShellProfileResolver().resolve()
         try:
             proc = await asyncio.to_thread(
                 subprocess.run,
-                args=python_c_args or command,
-                shell=python_c_args is None,
+                args=python_c_args or profile.command_argv(command),
+                shell=False,
                 cwd=str(cwd),
                 env=_run_command_env(),
                 capture_output=True,
@@ -578,13 +574,12 @@ class RunCommandTool(_CodeTool):
         command: str,
         cwd: Path,
         timeout: int,
-        background: bool,
         runtime_context: Dict[str, Any],
     ) -> str:
-        terminal_executor = runtime_context.get("terminal_executor")
-        if terminal_executor is None or not hasattr(terminal_executor, "start"):
-            return _error("missing_terminal_executor", "managed run_command requires a terminal executor")
-        run = await terminal_executor.start(
+        command_executor = runtime_context.get("command_executor")
+        if command_executor is None or not hasattr(command_executor, "start"):
+            return _error("missing_command_executor", "managed run_command requires a command executor")
+        run = await command_executor.start(
             conversation_id=str(runtime_context.get("conversation_id") or ""),
             command=command,
             cwd=str(cwd),
@@ -597,31 +592,27 @@ class RunCommandTool(_CodeTool):
                 "tool_call_id": runtime_context.get("tool_call_id"),
                 "workspace_relative_cwd": self.workspace.relative(cwd),
                 "run_command_managed": True,
-                "run_command_background_requested": background,
             },
         )
         run_id = str(run["run_id"])
-        if background:
-            snapshot = terminal_executor.snapshot(run_id) or {}
-            return _json(self._managed_background_payload(command, cwd, run_id, snapshot, auto_backgrounded=False))
 
         initial_wait = max(0.0, float(self.config.run_command_initial_wait_seconds))
         try:
-            await terminal_executor.wait(run_id, timeout=initial_wait)
+            await command_executor.wait(run_id, timeout=initial_wait)
         except asyncio.TimeoutError:
-            snapshot = terminal_executor.snapshot(run_id) or {}
+            snapshot = command_executor.snapshot(run_id) or {}
             return _json(self._managed_background_payload(command, cwd, run_id, snapshot, auto_backgrounded=True))
 
-        snapshot = terminal_executor.snapshot(run_id)
+        snapshot = command_executor.snapshot(run_id)
         if snapshot is None:
             return _error("not_found", "managed command run not found", command=command)
-        if snapshot.get("status") in {"completed", "failed", "cancelled"} and hasattr(terminal_executor, "mark_observed"):
-            await terminal_executor.mark_observed(
+        if snapshot.get("status") in {"completed", "failed", "cancelled"} and hasattr(command_executor, "mark_observed"):
+            await command_executor.mark_observed(
                 run_id,
                 observer_run_id=str(runtime_context.get("run_id") or "") or None,
                 via=self.name,
             )
-            snapshot = terminal_executor.snapshot(run_id) or snapshot
+            snapshot = command_executor.snapshot(run_id) or snapshot
         return _json({
             "command": command,
             "cwd": self.workspace.relative(cwd),
@@ -631,11 +622,11 @@ class RunCommandTool(_CodeTool):
             "timed_out": False,
             "background": False,
             "managed": True,
-            "kind": "terminal",
+            "kind": "command",
             "command_run_id": run_id,
-            "terminal_run_id": run_id,
             "run_id": run_id,
             "status": snapshot.get("status"),
+            "shell": snapshot.get("shell"),
         })
 
     def _managed_background_payload(
@@ -652,13 +643,13 @@ class RunCommandTool(_CodeTool):
             "command": command,
             "cwd": self.workspace.relative(cwd),
             "status": "running",
-            "kind": "terminal",
+            "kind": "command",
             "command_run_id": run_id,
-            "terminal_run_id": run_id,
             "run_id": run_id,
             "background": True,
             "managed": True,
             "auto_backgrounded": auto_backgrounded,
+            "shell": snapshot.get("shell"),
             "stdout_tail": snapshot.get("stdout_tail") or "",
             "stderr_tail": snapshot.get("stderr_tail") or "",
             "message": (

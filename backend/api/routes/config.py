@@ -13,7 +13,7 @@ from ...core.tools.security.approval import ApprovalManager
 from ...core.tools.security.logical_sandbox import LogicalSandbox
 from ...core.tools.security.permissions import PermissionEngine
 from ...core.tools.tool_manager import ToolManager
-from ...core.terminal import TerminalExecutor
+from ...core.command_runtime import CommandExecutor
 from ..dependencies import get_config_manager, get_tool_manager
 
 router = APIRouter()
@@ -76,11 +76,11 @@ def _sync_runtime_managers(app, config_data: Dict[str, Any], model_manager, tool
         chat_manager.capability_registry = capability_registry
     subagent_executor = getattr(app.state, 'subagent_executor', None)
     run_manager = getattr(app.state, 'run_manager', None)
-    terminal_executor = getattr(app.state, 'terminal_executor', None)
-    if terminal_executor is None and run_manager is not None:
-        terminal_executor = TerminalExecutor(run_manager)
-        app.state.terminal_executor = terminal_executor
-    tool_manager.terminal_executor = terminal_executor
+    command_executor = getattr(app.state, 'command_executor', None)
+    if command_executor is None and run_manager is not None:
+        command_executor = CommandExecutor(run_manager)
+        app.state.command_executor = command_executor
+    tool_manager.command_executor = command_executor
     agent_mailbox = getattr(app.state, 'agent_mailbox', None)
     if agent_mailbox is None:
         agent_mailbox = AgentMailbox()

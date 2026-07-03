@@ -16,16 +16,11 @@ from .code_tools import (
 from .connection_manager import ConnectionManager
 from .mcp_client import MCPClient, MCPClientError
 from .mcp_tools import MCPSearchTool, MCPUrlReadTool
-from .terminal_tools import (
+from .command_tools import (
     ReadCommandTool,
-    ReadTerminalTool,
     StartBackgroundCommandTool,
-    StartCommandTool,
-    StartTerminalTool,
     StopCommandTool,
-    StopTerminalTool,
     WaitCommandTool,
-    WaitTerminalTool,
 )
 from .tool_arguments import normalize_tool_arguments
 from .tool_filter import ToolFilter
@@ -45,12 +40,10 @@ BUILTIN_CODE_TOOL_GROUPS = {
     "shell": {"run_command", "start_background_command", "wait_command", "read_command", "stop_command"},
     "write": {"write_file"},
 }
-BUILTIN_LEGACY_TOOL_NAMES = {"start_command", "start_terminal", "wait_terminal", "read_terminal", "stop_terminal"}
 BUILTIN_LOCAL_TOOL_NAMES = (
     BUILTIN_UTILITY_TOOLS
     | BUILTIN_WEB_TOOLS
     | set().union(*BUILTIN_CODE_TOOL_GROUPS.values())
-    | BUILTIN_LEGACY_TOOL_NAMES
 )
 BUILTIN_CODE_TOOL_CLASSES = {
     "list_files": ListFilesTool,
@@ -59,8 +52,6 @@ BUILTIN_CODE_TOOL_CLASSES = {
     "edit_file": EditFileTool,
     "run_command": RunCommandTool,
     "start_background_command": StartBackgroundCommandTool,
-    "start_command": StartCommandTool,
-    "start_terminal": StartTerminalTool,
     "write_file": WriteFileTool,
     "apply_patch": ApplyPatchTool,
 }
@@ -93,7 +84,7 @@ class ToolManager:
         self._tools: Dict[str, BaseTool] = {}
         self._config = config
         self.tool_result_store = tool_result_store or ToolResultStorage()
-        self.terminal_executor: Any = None
+        self.command_executor: Any = None
         self._mcp_client: Optional[MCPClient] = None
         self._mcp_tools: Dict[str, BaseTool] = {}
         self._connection_manager = ConnectionManager()
@@ -107,6 +98,7 @@ class ToolManager:
         )
         self._model_visible_builtin_tools = self._resolve_model_visible_builtin_tools(tools_config)
         self._code_tools_config: Dict[str, Any] = {}
+        self._command_tools_config: Dict[str, Any] = {}
         if self._enabled:
             self._register_tools(config)
             self.register(ReadToolResultTool(self.tool_result_store, tools_config))
@@ -174,31 +166,49 @@ class ToolManager:
             logger.info("Registered built-in web_search and fetch_url tools")
 
         code_config = tools_config.get("code", {})
-        if code_config.get("enabled", True):
-            self._register_code_tools(code_config)
+        command_config = tools_config.get("command", {})
+        code_enabled = code_config.get("enabled", True)
+        command_enabled = command_config.get("enabled", code_enabled)
+        if code_enabled or command_enabled:
+            self._register_code_tools(
+                code_config,
+                command_config,
+                include_code=code_enabled,
+                include_command=command_enabled,
+            )
 
-    def _register_code_tools(self, code_config: Dict[str, Any]):
+    def _register_code_tools(
+        self,
+        code_config: Dict[str, Any],
+        command_config: Optional[Dict[str, Any]] = None,
+        *,
+        include_code: bool = True,
+        include_command: bool = True,
+    ):
         """Register built-in code browsing and modification tools."""
         self._code_tools_config = dict(code_config)
+        self._command_tools_config = {**dict(code_config), **dict(command_config or {})}
         code_tool_config = CodeToolConfig.from_dict(code_config)
-        for tool in (
-            ListFilesTool(code_tool_config),
-            ReadFileTool(code_tool_config),
-            SearchFilesTool(code_tool_config),
-            EditFileTool(code_tool_config),
-            RunCommandTool(code_tool_config),
-            StartBackgroundCommandTool(code_tool_config),
-            StartCommandTool(code_tool_config),
-            StartTerminalTool(code_tool_config),
-            WaitCommandTool(),
-            WaitTerminalTool(),
-            ReadCommandTool(),
-            ReadTerminalTool(),
-            StopCommandTool(),
-            StopTerminalTool(),
-            WriteFileTool(code_tool_config),
-            ApplyPatchTool(code_tool_config),
-        ):
+        command_tool_config = CodeToolConfig.from_dict(self._command_tools_config)
+        tools: list[BaseTool] = []
+        if include_code:
+            tools.extend([
+                ListFilesTool(code_tool_config),
+                ReadFileTool(code_tool_config),
+                SearchFilesTool(code_tool_config),
+                EditFileTool(code_tool_config),
+                WriteFileTool(code_tool_config),
+                ApplyPatchTool(code_tool_config),
+            ])
+        if include_command:
+            tools.extend([
+                RunCommandTool(command_tool_config),
+                StartBackgroundCommandTool(command_tool_config),
+                WaitCommandTool(),
+                ReadCommandTool(),
+                StopCommandTool(),
+            ])
+        for tool in tools:
             self.register(tool)
         logger.info("Registered built-in code tools")
 
@@ -309,8 +319,8 @@ class ToolManager:
             execute_arguments = dict(arguments)
             if runtime_context is not None:
                 enriched_context = dict(runtime_context)
-                if self.terminal_executor is not None:
-                    enriched_context.setdefault("terminal_executor", self.terminal_executor)
+                if self.command_executor is not None:
+                    enriched_context.setdefault("command_executor", self.command_executor)
                 execute_arguments["_runtime_context"] = enriched_context
             result = await tool.execute(**execute_arguments)
             logger.info(f"Tool {name} returned {len(result)} chars")
@@ -322,7 +332,8 @@ class ToolManager:
 
     def _tool_for_execution(self, name: str, workspace: Optional[Dict[str, Any]]) -> Optional[BaseTool]:
         if workspace and name in BUILTIN_CODE_TOOL_CLASSES:
-            config = CodeToolConfig.for_workspace(self._code_tools_config, workspace)
+            source_config = self._command_tools_config if name in BUILTIN_CODE_TOOL_GROUPS["shell"] else self._code_tools_config
+            config = CodeToolConfig.for_workspace(source_config, workspace)
             return BUILTIN_CODE_TOOL_CLASSES[name](config)
         return self._tools.get(name)
 

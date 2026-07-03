@@ -48,7 +48,7 @@ def _compact_argument_for_tool(tool_name: str, raw: str) -> Dict[str, Any] | Non
         return {"path": raw}
     if name == "search_files":
         return {"query": raw}
-    if name in {"run_command", "start_background_command", "start_command", "start_terminal"}:
+    if name in {"run_command", "start_background_command"}:
         return {"command": raw}
     if name == "apply_patch":
         return {"patch": raw}

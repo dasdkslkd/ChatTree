@@ -32,7 +32,7 @@ from backend.core.tools.security.approval import ApprovalManager
 from backend.core.tools.security.logical_sandbox import LogicalSandbox
 from backend.core.tools.security.permissions import PermissionEngine
 from backend.core.tools.tool_manager import ToolManager
-from backend.core.terminal import TerminalExecutor
+from backend.core.command_runtime import CommandExecutor
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
@@ -78,8 +78,8 @@ async def startup_event():
     await tool_manager.init()
     approval_manager = ApprovalManager()
     run_manager = RunManager()
-    terminal_executor = TerminalExecutor(run_manager)
-    tool_manager.terminal_executor = terminal_executor
+    command_executor = CommandExecutor(run_manager)
+    tool_manager.command_executor = command_executor
     agent_mailbox = AgentMailbox()
     run_manager.agent_mailbox = agent_mailbox
     logical_sandbox = LogicalSandbox.for_config(runtime_config, Path.cwd())
@@ -130,7 +130,7 @@ async def startup_event():
     app.state.tool_manager = tool_manager
     app.state.approval_manager = approval_manager
     app.state.run_manager = run_manager
-    app.state.terminal_executor = terminal_executor
+    app.state.command_executor = command_executor
     app.state.agent_mailbox = agent_mailbox
     app.state.agent_runtime = agent_runtime
     app.state.tool_orchestrator = tool_orchestrator

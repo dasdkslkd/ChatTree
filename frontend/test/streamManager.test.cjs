@@ -606,48 +606,48 @@ async function testWorkflowResultDoesNotAppendAggregateContentToRunBody() {
   });
 }
 
-async function testTerminalOutputUsesDedicatedBufferInsteadOfRunContent() {
+async function testCommandOutputUsesDedicatedBufferInsteadOfRunContent() {
   await withManager(async (manager) => {
     const controlled = createControlledStream();
     runsApi.attach = controlled.stream;
-    const running = manager.resumeStream('conv-1', null, 'run_terminal', 0, 'node-anchor', 'terminal');
+    const running = manager.resumeStream('conv-1', null, 'run_command', 0, 'node-anchor', 'command');
 
     await controlled.push({
-      run_id: 'run_terminal',
+      run_id: 'run_command',
       conversation_id: 'conv-1',
-      kind: 'terminal',
+      kind: 'command',
       status: 'content',
-      event_type: 'terminal_stdout',
+      event_type: 'command_stdout',
       content: 'stdout line\n',
       event_index: 1,
     });
     await controlled.push({
-      run_id: 'run_terminal',
+      run_id: 'run_command',
       conversation_id: 'conv-1',
-      kind: 'terminal',
+      kind: 'command',
       status: 'content',
-      event_type: 'terminal_stderr',
+      event_type: 'command_stderr',
       content: 'stderr line\n',
       event_index: 2,
     });
     await controlled.push({
-      run_id: 'run_terminal',
+      run_id: 'run_command',
       conversation_id: 'conv-1',
-      kind: 'terminal',
+      kind: 'command',
       status: 'content',
-      event_type: 'terminal_exited',
+      event_type: 'command_exited',
       exit_code: 0,
       event_index: 3,
     });
 
     try {
       const state = manager.getConversationStates('conv-1')[0];
-      assert.equal(state.kind, 'terminal');
+      assert.equal(state.kind, 'command');
       assert.equal(state.content, '');
-      assert.equal(state.terminal.stdout, 'stdout line\n');
-      assert.equal(state.terminal.stderr, 'stderr line\n');
-      assert.equal(state.terminal.exitCode, 0);
-      assert.equal(state.terminal.status, 'completed');
+      assert.equal(state.command.stdout, 'stdout line\n');
+      assert.equal(state.command.stderr, 'stderr line\n');
+      assert.equal(state.command.exitCode, 0);
+      assert.equal(state.command.status, 'completed');
     } finally {
       await controlled.close();
       await runTimersUntil(running);
@@ -1010,7 +1010,7 @@ async function main() {
   await testRestoreRunKeepsParentSummaryAndMetadata();
   await testSubagentResultDoesNotAppendAlreadyStreamedContent();
   await testWorkflowResultDoesNotAppendAggregateContentToRunBody();
-  await testTerminalOutputUsesDedicatedBufferInsteadOfRunContent();
+  await testCommandOutputUsesDedicatedBufferInsteadOfRunContent();
   await testChildRunStartedEventAddsSideRunNotification();
   await testGetStatePrefersActiveStreamingRunOverNewerError();
   await testStopUsesServerRunIdBeforeTargetNodeArrives();

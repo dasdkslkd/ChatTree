@@ -23,7 +23,7 @@ import {
 import { Switch } from '@/components/ui/switch';
 import {
   Settings, StickyNote, Plus, Trash2, Eye, EyeOff,
-  Loader2, Save, Pencil, Server, Wrench, Terminal, Link2, RefreshCw,
+  Loader2, Save, Pencil, Server, Wrench, Link2, RefreshCw,
   Boxes, Sparkles, Bot, Package, MessageSquare,
 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -1595,7 +1595,7 @@ function McpSection() {
             <div className="flex-1 overflow-y-auto custom-scrollbar divide-y" style={{ '--tw-divide-color': 'var(--border-light, rgba(255,247,240,0.05))' } as React.CSSProperties}>
               {serverIds.length > 0 ? serverIds.map((id) => {
                 const server = servers[id];
-                const Icon = server.transport === 'stdio' ? Terminal : Link2;
+                const Icon = server.transport === 'stdio' ? Wrench : Link2;
                 const statusView = getServerStatusView(id, server);
                 const isConnecting = connectingServerId === id;
                 return (
