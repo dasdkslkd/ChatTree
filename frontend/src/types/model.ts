@@ -85,8 +85,18 @@ export interface BuiltinToolsConfig {
   exposure?: BuiltinToolExposure;
   model_visible_tools?: string[];
   hidden_tools?: string[];
-  web_search?: Record<string, unknown>;
   code?: BuiltinCodeToolsConfig;
+}
+
+export interface WebSearchConfig {
+  enabled?: boolean;
+  searxng?: {
+    searxng_url?: string;
+    engines?: string;
+    language?: string;
+    max_results?: number;
+    timeout?: number;
+  };
 }
 
 export interface ToolsConfig {
@@ -96,10 +106,20 @@ export interface ToolsConfig {
   enabled_tools?: string[] | null;
   disabled_tools?: string[];
   builtin?: BuiltinToolsConfig;
+  web_search?: WebSearchConfig;
+  fetch_url?: Record<string, unknown>;
   mcp?: {
     enabled?: boolean;
     servers?: Record<string, McpServerConfig>;
   };
+}
+
+export interface BuiltinWebStatus {
+  enabled: boolean;
+  searxng_url: string;
+  available: boolean;
+  status_code?: number | null;
+  error?: string | null;
 }
 
 export interface McpServerStatus {

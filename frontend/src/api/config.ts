@@ -1,5 +1,5 @@
 import { apiClient } from './client';
-import type { ConfigData, ConfigUpdateRequest, AddProviderRequest, ToolInventoryStatus, CapabilityInventory } from '../types/model';
+import type { BuiltinWebStatus, ConfigData, ConfigUpdateRequest, AddProviderRequest, ToolInventoryStatus, CapabilityInventory } from '../types/model';
 
 export const configApi = {
   // 获取配置
@@ -28,6 +28,11 @@ export const configApi = {
 
   getMcpStatus: async (): Promise<ToolInventoryStatus> => {
     const response = await apiClient.get('/tools/mcp/status');
+    return response.data;
+  },
+
+  getBuiltinWebStatus: async (): Promise<BuiltinWebStatus> => {
+    const response = await apiClient.get('/tools/builtin/web/status');
     return response.data;
   },
 

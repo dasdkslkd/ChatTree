@@ -109,9 +109,9 @@ class ToolManager:
         tools_config = config.get("tools", {})
         mcp_config = tools_config.get("mcp", {})
         servers = mcp_config.get("servers") or {}
+        builtin_config = self._builtin_runtime_config(tools_config)
 
         if mcp_config.get("enabled", False) and servers:
-            builtin_config = tools_config.get("builtin", tools_config)
             if builtin_config.get("enabled", True) is not False:
                 self._register_builtin_tools(builtin_config)
             self._mcp_servers_config = servers
@@ -121,9 +121,17 @@ class ToolManager:
             self._register_legacy_mcp_tools(mcp_config)
             return
 
-        builtin_config = tools_config.get("builtin", tools_config)
         if builtin_config.get("enabled", True) is not False:
             self._register_builtin_tools(builtin_config)
+
+    def _builtin_runtime_config(self, tools_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Build the config shape consumed by built-in tool registration."""
+        builtin_config = dict(tools_config.get("builtin") or tools_config)
+        if "web_search" not in builtin_config and "web_search" in tools_config:
+            builtin_config["web_search"] = tools_config["web_search"]
+        if "fetch_url" not in builtin_config and "fetch_url" in tools_config:
+            builtin_config["fetch_url"] = tools_config["fetch_url"]
+        return builtin_config
 
     def _register_legacy_mcp_tools(self, mcp_config: Dict[str, Any]):
         """Register compatibility adapters for the old single-server MCP config."""

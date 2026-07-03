@@ -155,6 +155,25 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(legacy_name, visible)
             self.assertIsNone(manager.get_tool(legacy_name))
 
+    async def test_builtin_web_search_uses_top_level_web_search_config(self):
+        manager = ToolManager({
+            "tools": {
+                "builtin": {
+                    "code": {"enabled": False},
+                },
+                "web_search": {
+                    "enabled": True,
+                    "searxng": {
+                        "searxng_url": "http://searxng.example.test",
+                    },
+                },
+            },
+        })
+
+        web_search = manager.get_tool("web_search")
+        self.assertIsNotNone(web_search)
+        self.assertEqual(web_search.searxng_url, "http://searxng.example.test")
+
     async def test_command_control_tools_wait_read_and_stop(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_manager = RunManager()

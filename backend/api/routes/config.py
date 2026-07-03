@@ -162,6 +162,46 @@ async def get_mcp_status(tool_manager: ToolManager = Depends(get_tool_manager)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/tools/builtin/web/status", response_model=Dict[str, Any])
+async def get_builtin_web_status(config_manager: Config = Depends(get_config_manager)):
+    """获取内置联网工具配置和 SearXNG 可用性"""
+    tools = config_manager.data.get("tools") or {}
+    builtin = tools.get("builtin") or {}
+    web_search = tools.get("web_search") or builtin.get("web_search") or {}
+    searxng = web_search.get("searxng") or web_search.get("searxng_config") or {}
+    enabled = (
+        tools.get("enabled", True) is not False
+        and builtin.get("enabled", True) is not False
+        and web_search.get("enabled", True) is not False
+    )
+    searxng_url = str(searxng.get("searxng_url") or "http://localhost:8888").rstrip("/")
+    result: Dict[str, Any] = {
+        "enabled": enabled,
+        "searxng_url": searxng_url,
+        "available": False,
+        "status_code": None,
+        "error": None,
+    }
+    if not enabled:
+        result["error"] = "web_search is disabled"
+        return result
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=3) as client:
+            response = await client.get(
+                f"{searxng_url}/search",
+                params={"q": "ChatTree", "format": "json", "language": searxng.get("language") or "zh-CN"},
+                headers={"Accept": "application/json"},
+            )
+        result["status_code"] = response.status_code
+        result["available"] = response.status_code < 400
+        if not result["available"]:
+            result["error"] = f"HTTP {response.status_code}"
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+
 @router.post("/tools/mcp/servers/{server_name}/connect", response_model=Dict[str, Any])
 async def connect_mcp_server(
     server_name: str,

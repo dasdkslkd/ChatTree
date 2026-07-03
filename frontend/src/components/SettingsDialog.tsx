@@ -41,20 +41,23 @@ import type {
   McpTransport,
   ToolsConfig,
   ToolInventoryStatus,
+  BuiltinWebStatus,
   CapabilityInventory,
   CapabilityPlugin,
-  McpServerStatus,
 } from '../types/model';
 import type { Prompt, PromptResponse } from '../types/prompt';
 
 /* ─── Constants ─── */
 
-type SettingsSection = 'providers' | 'prompts' | 'mcp' | 'capabilities';
+type SettingsSection = 'providers' | 'prompts' | 'builtin_tools' | 'skills' | 'mcp' | 'agents' | 'plugins';
 
 const SETTINGS_NAV: { key: SettingsSection; label: string; icon: typeof Settings; group: string }[] = [
   { key: 'providers', label: '供应商', icon: Server, group: '应用' },
-  { key: 'mcp', label: 'MCP', icon: Wrench, group: '应用' },
-  { key: 'capabilities', label: '能力', icon: Boxes, group: '应用' },
+  { key: 'builtin_tools', label: '内置工具', icon: Wrench, group: '工具与能力' },
+  { key: 'skills', label: 'Skill', icon: Sparkles, group: '工具与能力' },
+  { key: 'mcp', label: 'MCP', icon: Link2, group: '工具与能力' },
+  { key: 'agents', label: 'Agent', icon: Bot, group: '工具与能力' },
+  { key: 'plugins', label: '插件', icon: Package, group: '工具与能力' },
   { key: 'prompts', label: '提示词', icon: StickyNote, group: '应用' },
 ];
 
@@ -127,6 +130,15 @@ const DEFAULT_TOOLS_CONFIG: ToolsConfig = {
     code: {
       enabled: true,
       groups: ['read', 'search', 'edit', 'shell'],
+    },
+  },
+  web_search: {
+    enabled: true,
+    searxng: {
+      searxng_url: 'http://localhost:8888',
+      language: 'zh-CN',
+      max_results: 10,
+      timeout: 15,
     },
   },
   mcp: {
@@ -228,8 +240,11 @@ export function SettingsPageView({ defaultSection = 'providers' }: { defaultSect
       {/* Content */}
       <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
         {section === 'providers' && <ProvidersSection />}
+        {section === 'builtin_tools' && <BuiltinToolsSection />}
+        {section === 'skills' && <CapabilitiesSection view="skills" />}
         {section === 'mcp' && <McpSection />}
-        {section === 'capabilities' && <CapabilitiesSection />}
+        {section === 'agents' && <CapabilitiesSection view="agents" />}
+        {section === 'plugins' && <CapabilitiesSection view="plugins" />}
         {section === 'prompts' && <PromptsSection />}
       </div>
     </div>
@@ -753,27 +768,41 @@ function ProvidersSection() {
 
 /* ─── Capabilities Section ─── */
 
-function CapabilitiesSection() {
+function CapabilitiesSection({ view }: { view: 'skills' | 'agents' | 'plugins' }) {
   const [inventory, setInventory] = useState<CapabilityInventory | null>(null);
-  const [mcpStatus, setMcpStatus] = useState<ToolInventoryStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [reloading, setReloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const meta = {
+    skills: {
+      title: 'Skill',
+      description: '查看当前可用的技能',
+      icon: Sparkles,
+      empty: '暂无 Skill',
+    },
+    agents: {
+      title: 'Agent',
+      description: '查看当前可用的代理',
+      icon: Bot,
+      empty: '暂无 Agent',
+    },
+    plugins: {
+      title: '插件',
+      description: '查看当前可用的插件',
+      icon: Package,
+      empty: '暂无插件',
+    },
+  }[view];
 
   const loadCapabilities = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
-      const [nextInventory, nextMcpStatus] = await Promise.all([
-        configApi.getCapabilities(),
-        configApi.getMcpStatus(),
-      ]);
+      const nextInventory = await configApi.getCapabilities();
       setInventory(nextInventory);
-      setMcpStatus(nextMcpStatus);
     } catch (err) {
       setError(err instanceof Error ? err.message : '加载能力信息失败');
       setInventory(null);
-      setMcpStatus(null);
     } finally {
       setLoading(false);
     }
@@ -786,9 +815,7 @@ function CapabilitiesSection() {
       setReloading(true);
       setError(null);
       const nextInventory = await configApi.reloadCapabilities();
-      const nextMcpStatus = await configApi.getMcpStatus();
       setInventory(nextInventory);
-      setMcpStatus(nextMcpStatus);
       toast.success('能力已重载');
     } catch (err) {
       const message = err instanceof Error ? err.message : '重载能力失败';
@@ -814,8 +841,8 @@ function CapabilitiesSection() {
         <div className="flex-shrink-0 px-6 pt-6 pb-4">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
-              <h1 className="text-2xl font-semibold mb-1" style={{ color: 'var(--fg-85)' }}>能力</h1>
-              <p className="text-sm" style={{ color: 'var(--fg-secondary)' }}>查看当前可用的技能、代理、插件和 MCP Server</p>
+              <h1 className="text-2xl font-semibold mb-1" style={{ color: 'var(--fg-85)' }}>{meta.title}</h1>
+              <p className="text-sm" style={{ color: 'var(--fg-secondary)' }}>{meta.description}</p>
             </div>
             <Button variant="outline" size="sm" className="mt-2 mr-10" onClick={reloadCapabilities} disabled={reloading}>
               <RefreshCw className={cn('h-3.5 w-3.5 mr-1', reloading && 'animate-spin')} />
@@ -841,16 +868,16 @@ function CapabilitiesSection() {
   const skills = inventory?.skills || [];
   const agents = inventory?.agents || [];
   const plugins = inventory?.plugins || [];
-  const mcpServers = mcpStatus?.mcp_servers || [];
-  const hasAnyCapability = skills.length + agents.length + plugins.length + mcpServers.length > 0;
+  const count = view === 'skills' ? skills.length : view === 'agents' ? agents.length : plugins.length;
+  const EmptyIcon = meta.icon;
 
   return (
     <div className="flex flex-col h-full" style={{ fontFamily: 'var(--font-sans)' }}>
       <div className="flex-shrink-0 px-6 pt-6 pb-4">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <h1 className="text-2xl font-semibold mb-1" style={{ color: 'var(--fg-85)' }}>能力</h1>
-            <p className="text-sm" style={{ color: 'var(--fg-secondary)' }}>查看当前可用的技能、代理、插件和 MCP Server</p>
+            <h1 className="text-2xl font-semibold mb-1" style={{ color: 'var(--fg-85)' }}>{meta.title}</h1>
+            <p className="text-sm" style={{ color: 'var(--fg-secondary)' }}>{meta.description}</p>
           </div>
           <Button variant="outline" size="sm" onClick={reloadCapabilities} disabled={reloading}>
             <RefreshCw className={cn('h-3.5 w-3.5 mr-1', reloading && 'animate-spin')} />
@@ -860,22 +887,18 @@ function CapabilitiesSection() {
       </div>
 
       <div className="flex-1 overflow-y-auto custom-scrollbar min-h-0 px-6 pb-6 space-y-4">
-        <div className="grid grid-cols-4 gap-3">
-          <CapabilityCountCard label="Skills" value={skills.length} icon={Sparkles} />
-          <CapabilityCountCard label="Agents" value={agents.length} icon={Bot} />
-          <CapabilityCountCard label="Plugins" value={plugins.length} icon={Package} />
-          <CapabilityCountCard label="MCP Servers" value={mcpServers.length} icon={Link2} />
+        <div className="grid grid-cols-1 gap-3">
+          <CapabilityCountCard label={meta.title} value={count} icon={meta.icon} />
         </div>
 
-        {!hasAnyCapability ? (
+        {count === 0 ? (
           <div className="rounded-xl px-4 py-10 text-center" style={{ border: '0.5px solid var(--border)' }}>
-            <Boxes className="mx-auto mb-3 h-9 w-9" style={{ color: 'var(--icon-tertiary)' }} />
-            <div className="text-sm font-medium" style={{ color: 'var(--fg-85)' }}>暂无能力</div>
-            <div className="mt-1 text-xs" style={{ color: 'var(--fg-tertiary)' }}>当前项目还没有发现 Skills、Agents、Plugins 或 MCP Servers。</div>
+            <EmptyIcon className="mx-auto mb-3 h-9 w-9" style={{ color: 'var(--icon-tertiary)' }} />
+            <div className="text-sm font-medium" style={{ color: 'var(--fg-85)' }}>{meta.empty}</div>
           </div>
         ) : (
           <>
-            <CapabilityGroup title="Skills" count={skills.length} emptyText="暂无 Skills">
+            {view === 'skills' && <CapabilityGroup title="Skill" count={skills.length} emptyText="暂无 Skill">
               {skills.map(skill => (
                 <CapabilityItem
                   key={`${skill.source}:${skill.name}:${skill.path || ''}`}
@@ -889,9 +912,9 @@ function CapabilitiesSection() {
                   badges={skill.allowed_tools?.slice(0, 3)}
                 />
               ))}
-            </CapabilityGroup>
+            </CapabilityGroup>}
 
-            <CapabilityGroup title="Agents" count={agents.length} emptyText="暂无 Agents">
+            {view === 'agents' && <CapabilityGroup title="Agent" count={agents.length} emptyText="暂无 Agent">
               {agents.map(agent => (
                 <CapabilityItem
                   key={`${agent.source}:${agent.name}:${agent.path || ''}`}
@@ -905,19 +928,13 @@ function CapabilitiesSection() {
                   badges={[...(agent.skills || []), ...(agent.tools || [])].slice(0, 3)}
                 />
               ))}
-            </CapabilityGroup>
+            </CapabilityGroup>}
 
-            <CapabilityGroup title="Plugins" count={plugins.length} emptyText="暂无 Plugins">
+            {view === 'plugins' && <CapabilityGroup title="插件" count={plugins.length} emptyText="暂无插件">
               {plugins.map(plugin => (
                 <PluginCapabilityItem key={plugin.plugin_id} plugin={plugin} />
               ))}
-            </CapabilityGroup>
-
-            <CapabilityGroup title="MCP Servers" count={mcpServers.length} emptyText="暂无 MCP Servers">
-              {mcpServers.map(server => (
-                <McpCapabilityItem key={server.name} server={server} />
-              ))}
-            </CapabilityGroup>
+            </CapabilityGroup>}
           </>
         )}
       </div>
@@ -1044,45 +1061,6 @@ function PluginCapabilityItem({ plugin }: { plugin: CapabilityPlugin }) {
   );
 }
 
-function McpCapabilityItem({ server }: { server: McpServerStatus }) {
-  const statusView = getMcpRuntimeStatusView(server);
-  return (
-    <div className="flex gap-3 px-4 py-3">
-      <Link2 className="mt-0.5 h-4 w-4 flex-shrink-0" style={{ color: 'var(--icon-tertiary)' }} />
-      <div className="min-w-0 flex-1 space-y-1">
-        <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <span className="min-w-0 truncate text-sm font-medium" style={{ color: 'var(--fg-85)' }}>{server.name}</span>
-          <TextTooltip content={statusView.title}>
-            <span className="flex items-center gap-1.5 rounded px-1.5 py-0.5 text-xs" style={{ border: '0.5px solid var(--border)', color: statusView.color }}>
-              <span className="h-1.5 w-1.5 rounded-full" style={{ background: statusView.color }} />
-              {statusView.label}
-            </span>
-          </TextTooltip>
-          <SourceBadge source={server.source || 'user'} />
-          {server.plugin_name || server.plugin_id ? <PluginBadge pluginName={server.plugin_name} pluginId={server.plugin_id} /> : null}
-        </div>
-        <div className="flex flex-wrap gap-1 pt-0.5">
-          {server.transport && (
-            <span className="rounded px-1.5 py-0.5 text-[11px]" style={{ border: '0.5px solid var(--border)', color: 'var(--fg-tertiary)' }}>
-              {server.transport === 'stdio' ? 'stdio' : 'HTTP'}
-            </span>
-          )}
-          <span className="rounded px-1.5 py-0.5 text-[11px]" style={{ border: '0.5px solid var(--border)', color: 'var(--fg-tertiary)' }}>
-            工具 {server.tools_count ?? 0}
-          </span>
-        </div>
-        {server.error && (
-          <TextTooltip content={server.error}>
-            <div className="truncate text-[11px]" style={{ color: 'var(--destructive, #ef4444)' }}>
-              {server.error}
-            </div>
-          </TextTooltip>
-        )}
-      </div>
-    </div>
-  );
-}
-
 function SourceBadge({ source }: { source: string }) {
   return (
     <span className="rounded px-1.5 py-0.5 text-xs" style={{ border: '0.5px solid var(--border)', color: 'var(--fg-tertiary)' }}>
@@ -1112,19 +1090,6 @@ function sourceLabel(source: string): string {
   }
 }
 
-function getMcpRuntimeStatusView(server: McpServerStatus) {
-  if (server.enabled === false) {
-    return { label: '已禁用', color: 'var(--fg-tertiary)', title: '此 Server 已禁用' };
-  }
-  if (server.connected) {
-    return { label: '已连接', color: 'var(--accent-green)', title: `已连接，${server.tools_count ?? 0} 个工具` };
-  }
-  if (server.error) {
-    return { label: '连接失败', color: 'var(--destructive, #ef4444)', title: server.error };
-  }
-  return { label: '未连接', color: 'var(--fg-tertiary)', title: '尚未建立运行时连接' };
-}
-
 /* ─── MCP Section ─── */
 
 function normalizeToolsConfig(raw?: ToolsConfig): ToolsConfig {
@@ -1139,12 +1104,354 @@ function normalizeToolsConfig(raw?: ToolsConfig): ToolsConfig {
         ...(raw?.builtin?.code || {}),
       },
     },
+    web_search: {
+      ...(DEFAULT_TOOLS_CONFIG.web_search || {}),
+      ...(raw?.web_search || {}),
+      searxng: {
+        ...(DEFAULT_TOOLS_CONFIG.web_search?.searxng || {}),
+        ...(raw?.web_search?.searxng || {}),
+      },
+    },
     mcp: {
       ...(DEFAULT_TOOLS_CONFIG.mcp || {}),
       ...(raw?.mcp || {}),
       servers: { ...(raw?.mcp?.servers || {}) },
     },
   };
+}
+
+function BuiltinToolsSection() {
+  const [config, setConfig] = useState<ConfigData | null>(null);
+  const [toolsForm, setToolsForm] = useState<ToolsConfig>(normalizeToolsConfig());
+  const [runtimeStatus, setRuntimeStatus] = useState<ToolInventoryStatus | null>(null);
+  const [webStatus, setWebStatus] = useState<BuiltinWebStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [checkingWeb, setCheckingWeb] = useState(false);
+
+  const updateTools = (updater: (current: ToolsConfig) => ToolsConfig) => {
+    setToolsForm(current => normalizeToolsConfig(updater(normalizeToolsConfig(current))));
+  };
+
+  const loadRuntimeStatus = useCallback(async (options: { checkWeb?: boolean } = {}) => {
+    try {
+      const inventory = await configApi.getMcpStatus();
+      setRuntimeStatus(inventory);
+    } catch {
+      setRuntimeStatus(null);
+    }
+    if (options.checkWeb === false) return;
+    try {
+      const web = await configApi.getBuiltinWebStatus();
+      setWebStatus(web);
+    } catch {
+      setWebStatus(null);
+    }
+  }, []);
+
+  const loadConfig = useCallback(async () => {
+    try {
+      setLoading(true);
+      const data = await configApi.get();
+      setConfig(data);
+      setToolsForm(normalizeToolsConfig(data.tools));
+      void loadRuntimeStatus({ checkWeb: true });
+    } catch {
+      toast.error('加载内置工具配置失败');
+    } finally {
+      setLoading(false);
+    }
+  }, [loadRuntimeStatus]);
+
+  useEffect(() => {
+    loadConfig();
+    const timer = window.setInterval(() => { void loadRuntimeStatus({ checkWeb: false }); }, 5000);
+    return () => window.clearInterval(timer);
+  }, [loadConfig, loadRuntimeStatus]);
+
+  const setBuiltinExposure = (exposure: BuiltinToolExposure) => {
+    updateTools(current => ({
+      ...current,
+      builtin: {
+        ...(current.builtin || {}),
+        exposure,
+      },
+    }));
+  };
+
+  const setBuiltinCodeEnabled = (enabled: boolean) => {
+    updateTools(current => ({
+      ...current,
+      builtin: {
+        ...(current.builtin || {}),
+        code: {
+          ...(current.builtin?.code || {}),
+          enabled,
+        },
+      },
+    }));
+  };
+
+  const setBuiltinCodeGroup = (group: BuiltinCodeToolGroup, enabled: boolean) => {
+    updateTools(current => {
+      const groups = new Set(current.builtin?.code?.groups || []);
+      if (enabled) groups.add(group);
+      else groups.delete(group);
+      return {
+        ...current,
+        builtin: {
+          ...(current.builtin || {}),
+          code: {
+            ...(current.builtin?.code || {}),
+            groups: Array.from(groups),
+          },
+        },
+      };
+    });
+  };
+
+  const setWebSearchEnabled = (enabled: boolean) => {
+    updateTools(current => ({
+      ...current,
+      web_search: {
+        ...(current.web_search || {}),
+        enabled,
+      },
+    }));
+  };
+
+  const setSearxngField = (key: 'searxng_url' | 'language' | 'engines' | 'max_results' | 'timeout', value: string | number) => {
+    updateTools(current => ({
+      ...current,
+      web_search: {
+        ...(current.web_search || {}),
+        searxng: {
+          ...(current.web_search?.searxng || {}),
+          [key]: value,
+        },
+      },
+    }));
+  };
+
+  const handleSave = async () => {
+    try {
+      setSaving(true);
+      const committedTools = normalizeToolsConfig(toolsForm);
+      setToolsForm(committedTools);
+      await configApi.update({ tools: committedTools });
+      toast.success('内置工具配置已保存');
+      await loadConfig();
+    } catch (err) {
+      toast.error('保存失败: ' + (err instanceof Error ? err.message : ''));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleCheckWeb = async () => {
+    try {
+      setCheckingWeb(true);
+      const committedTools = normalizeToolsConfig(toolsForm);
+      await configApi.update({ tools: committedTools });
+      setToolsForm(committedTools);
+      const nextStatus = await configApi.getBuiltinWebStatus();
+      setWebStatus(nextStatus);
+      if (nextStatus.available) toast.success('SearXNG 连接可用');
+      else toast.error(nextStatus.error || 'SearXNG 不可用');
+    } catch (err) {
+      toast.error('检查失败: ' + (err instanceof Error ? err.message : ''));
+    } finally {
+      setCheckingWeb(false);
+    }
+  };
+
+  const webView = getBuiltinWebStatusView(webStatus, toolsForm);
+  const searxng = toolsForm.web_search?.searxng || {};
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-full">
+        <Loader2 className="h-5 w-5 animate-spin mr-2" style={{ color: 'var(--icon-accent)' }} />
+        <span style={{ color: 'var(--fg-tertiary)' }}>加载内置工具配置中...</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col h-full" style={{ fontFamily: 'var(--font-sans)' }}>
+      <div className="flex-shrink-0 px-6 pt-6 pb-4">
+        <h1 className="text-2xl font-semibold mb-1" style={{ color: 'var(--fg-85)' }}>内置工具</h1>
+        <p className="text-sm" style={{ color: 'var(--fg-secondary)' }}>配置本地内置工具、代码工具分组和联网搜索能力</p>
+      </div>
+
+      <div className="flex-1 overflow-y-auto custom-scrollbar min-h-0 px-6 pb-6 space-y-4">
+        <div className="rounded-xl overflow-hidden" style={{ border: '0.5px solid var(--border)' }}>
+          <div className="grid grid-cols-3 gap-4 px-4 py-3">
+            <div className="flex items-center justify-between gap-3">
+              <Label>工具系统</Label>
+              <Switch checked={toolsForm.enabled !== false} onCheckedChange={(checked) => updateTools(current => ({ ...current, enabled: checked }))} />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs">最大轮次</Label>
+              <Input type="number" min={1} value={toolsForm.max_rounds ?? 5} onChange={(e) => updateTools(current => ({ ...current, max_rounds: parseNumber(e.target.value, 5) }))} />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs">结果上限</Label>
+              <Input type="number" min={1000} value={toolsForm.max_result_length ?? 8000} onChange={(e) => updateTools(current => ({ ...current, max_result_length: parseNumber(e.target.value, 8000) }))} />
+            </div>
+          </div>
+        </div>
+
+        <div className="rounded-xl overflow-hidden" style={{ border: '0.5px solid var(--border)' }}>
+          <div className="flex items-center justify-between px-4 py-2.5" style={{ borderBottom: '0.5px solid var(--border)' }}>
+            <div>
+              <div className="text-sm font-medium" style={{ color: 'var(--fg-85)' }}>本地工具暴露</div>
+              <div className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>
+                可见 {runtimeStatus?.model_visible_tools?.length ?? 0} 个
+                {runtimeStatus?.hidden_local_tools?.length ? `，隐藏 ${runtimeStatus.hidden_local_tools.length} 个` : ''}
+              </div>
+            </div>
+            <Switch
+              checked={toolsForm.builtin?.enabled !== false}
+              onCheckedChange={(checked) => updateTools(current => ({
+                ...current,
+                builtin: { ...(current.builtin || {}), enabled: checked },
+              }))}
+            />
+          </div>
+          <div className="grid grid-cols-[220px_1fr] gap-4 px-4 py-3">
+            <div className="space-y-2">
+              <Label className="text-xs">暴露模式</Label>
+              <Select
+                value={toolsForm.builtin?.exposure || 'coding'}
+                onValueChange={(value) => setBuiltinExposure(value as BuiltinToolExposure)}
+              >
+                <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {BUILTIN_EXPOSURE_OPTIONS.map(option => (
+                    <SelectItem key={option.value} value={option.value} textValue={option.label}>
+                      <div className="flex flex-col">
+                        <span>{option.label}</span>
+                        <span className="text-xs opacity-70">{option.description}</span>
+                      </div>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <Label className="text-xs">代码工具分组</Label>
+                <Switch
+                  checked={toolsForm.builtin?.code?.enabled !== false}
+                  onCheckedChange={setBuiltinCodeEnabled}
+                />
+              </div>
+              <div className="grid grid-cols-5 gap-2">
+                {BUILTIN_CODE_GROUP_OPTIONS.map(option => {
+                  const enabledGroups = toolsForm.builtin?.code?.groups || [];
+                  const enabled = enabledGroups.includes(option.value);
+                  return (
+                    <TextTooltip key={option.value} content={option.description}>
+                      <button
+                        type="button"
+                        className="rounded-lg px-2 py-2 text-left text-xs transition-colors"
+                        style={{
+                          border: '0.5px solid var(--border)',
+                          color: enabled ? 'var(--fg-85)' : 'var(--fg-tertiary)',
+                          background: enabled ? 'var(--bg-button-secondary)' : 'transparent',
+                        }}
+                        onClick={() => setBuiltinCodeGroup(option.value, !enabled)}
+                      >
+                        <div className="font-medium">{option.label}</div>
+                        <div className="truncate opacity-70">{option.description}</div>
+                      </button>
+                    </TextTooltip>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="rounded-xl overflow-hidden" style={{ border: '0.5px solid var(--border)' }}>
+          <div className="flex items-center justify-between px-4 py-2.5" style={{ borderBottom: '0.5px solid var(--border)' }}>
+            <div>
+              <div className="text-sm font-medium" style={{ color: 'var(--fg-85)' }}>联网工具</div>
+              <div className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>web_search / fetch_url</div>
+            </div>
+            <div className="flex items-center gap-3">
+              <TextTooltip content={webView.title}>
+                <span className="flex items-center gap-1.5 text-xs" style={{ color: 'var(--fg-tertiary)' }}>
+                  <span className="h-2 w-2 rounded-full" style={{ background: webView.color }} />
+                  {webView.label}
+                </span>
+              </TextTooltip>
+              <Switch checked={toolsForm.web_search?.enabled !== false} onCheckedChange={setWebSearchEnabled} />
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-4 px-4 py-3">
+            <div className="space-y-2 col-span-2">
+              <Label>SearXNG URL</Label>
+              <Input
+                value={searxng.searxng_url || ''}
+                onChange={(e) => setSearxngField('searxng_url', e.target.value)}
+                placeholder="http://localhost:8888"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>语言</Label>
+              <Input value={searxng.language || 'zh-CN'} onChange={(e) => setSearxngField('language', e.target.value)} />
+            </div>
+            <div className="space-y-2">
+              <Label>搜索引擎</Label>
+              <Input value={searxng.engines || ''} onChange={(e) => setSearxngField('engines', e.target.value)} placeholder="留空使用 SearXNG 默认" />
+            </div>
+            <div className="space-y-2">
+              <Label>最大结果数</Label>
+              <Input type="number" min={1} max={20} value={searxng.max_results ?? 10} onChange={(e) => setSearxngField('max_results', parseNumber(e.target.value, 10))} />
+            </div>
+            <div className="space-y-2">
+              <Label>超时秒数</Label>
+              <Input type="number" min={1} value={searxng.timeout ?? 15} onChange={(e) => setSearxngField('timeout', parseNumber(e.target.value, 15))} />
+            </div>
+            {webStatus?.error && (
+              <TextTooltip content={webStatus.error}>
+                <div className="col-span-2 truncate text-xs" style={{ color: webStatus.available ? 'var(--fg-tertiary)' : 'var(--destructive, #ef4444)' }}>
+                  {webStatus.error}
+                </div>
+              </TextTooltip>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="flex-shrink-0 flex justify-end gap-2 px-6 pb-5">
+        <Button variant="outline" onClick={loadConfig} disabled={saving || checkingWeb}>重置</Button>
+        <Button variant="outline" onClick={handleCheckWeb} disabled={saving || checkingWeb || !config}>
+          {checkingWeb ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <RefreshCw className="h-4 w-4 mr-1" />}
+          检查联网
+        </Button>
+        <Button onClick={handleSave} disabled={saving || !config}>
+          {saving ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Save className="h-4 w-4 mr-1" />}
+          保存
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function getBuiltinWebStatusView(webStatus: BuiltinWebStatus | null, toolsForm: ToolsConfig) {
+  if (toolsForm.enabled === false || toolsForm.builtin?.enabled === false || toolsForm.web_search?.enabled === false) {
+    return { label: '已禁用', color: 'var(--fg-tertiary)', title: '联网工具已禁用' };
+  }
+  if (!webStatus) {
+    return { label: '未检查', color: 'var(--fg-tertiary)', title: '尚未获取 SearXNG 状态' };
+  }
+  if (webStatus.available) {
+    return { label: '可用', color: 'var(--accent-green)', title: `${webStatus.searxng_url} 可用` };
+  }
+  return { label: '不可用', color: 'var(--destructive, #ef4444)', title: webStatus.error || `${webStatus.searxng_url} 不可用` };
 }
 
 function parseNumber(value: string, fallback: number): number {
@@ -1294,50 +1601,6 @@ function McpSection() {
     }));
   };
 
-  const setBuiltinExposure = (exposure: BuiltinToolExposure) => {
-    updateTools(current => ({
-      ...current,
-      builtin: {
-        ...(current.builtin || {}),
-        exposure,
-      },
-    }));
-  };
-
-  const setBuiltinCodeEnabled = (enabled: boolean) => {
-    updateTools(current => ({
-      ...current,
-      builtin: {
-        ...(current.builtin || {}),
-        code: {
-          ...(current.builtin?.code || {}),
-          enabled,
-        },
-      },
-    }));
-  };
-
-  const setBuiltinCodeGroup = (group: BuiltinCodeToolGroup, enabled: boolean) => {
-    updateTools(current => {
-      const groups = new Set(current.builtin?.code?.groups || []);
-      if (enabled) {
-        groups.add(group);
-      } else {
-        groups.delete(group);
-      }
-      return {
-        ...current,
-        builtin: {
-          ...(current.builtin || {}),
-          code: {
-            ...(current.builtin?.code || {}),
-            groups: Array.from(groups),
-          },
-        },
-      };
-    });
-  };
-
   const setServerField = <K extends keyof McpServerConfig>(key: K, value: McpServerConfig[K]) => {
     if (!selectedServerId) return;
     updateTools(current => ({
@@ -1481,99 +1744,30 @@ function McpSection() {
     <div className="flex flex-col h-full" style={{ fontFamily: 'var(--font-sans)' }}>
       <div className="flex-shrink-0 px-6 pt-6 pb-4">
         <h1 className="text-2xl font-semibold mb-1" style={{ color: 'var(--fg-85)' }}>MCP</h1>
-        <p className="text-sm" style={{ color: 'var(--fg-secondary)' }}>配置工具服务器</p>
+        <p className="text-sm" style={{ color: 'var(--fg-secondary)' }}>配置 MCP Server 与连接状态</p>
       </div>
 
       <div className="flex-1 overflow-hidden px-6 pb-6">
         <div className="flex h-full min-h-0 flex-col gap-4">
           <div className="rounded-xl overflow-hidden" style={{ border: '0.5px solid var(--border)' }}>
-            <div className="grid grid-cols-4 gap-4 px-4 py-3">
+            <div className="grid grid-cols-3 gap-4 px-4 py-3">
               <div className="flex items-center justify-between gap-3">
-                <Label>工具系统</Label>
-                <Switch checked={toolsForm.enabled !== false} onCheckedChange={(checked) => updateTools(current => ({ ...current, enabled: checked }))} />
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <Label>MCP</Label>
+                <div>
+                  <div className="text-sm font-medium" style={{ color: 'var(--fg-85)' }}>MCP</div>
+                  <div className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>启用 MCP Server 工具</div>
+                </div>
                 <Switch checked={toolsForm.mcp?.enabled === true} onCheckedChange={setMcpEnabled} />
               </div>
-              <div className="space-y-1">
-                <Label className="text-xs">最大轮次</Label>
-                <Input type="number" min={1} value={toolsForm.max_rounds ?? 5} onChange={(e) => updateTools(current => ({ ...current, max_rounds: parseNumber(e.target.value, 5) }))} />
-              </div>
-              <div className="space-y-1">
-                <Label className="text-xs">结果上限</Label>
-                <Input type="number" min={1000} value={toolsForm.max_result_length ?? 8000} onChange={(e) => updateTools(current => ({ ...current, max_result_length: parseNumber(e.target.value, 8000) }))} />
-              </div>
-            </div>
-          </div>
-
-          <div className="rounded-xl overflow-hidden" style={{ border: '0.5px solid var(--border)' }}>
-            <div className="flex items-center justify-between px-4 py-2.5" style={{ borderBottom: '0.5px solid var(--border)' }}>
-              <div>
-                <div className="text-sm font-medium" style={{ color: 'var(--fg-85)' }}>内置工具</div>
-                <div className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>
-                  可见 {runtimeStatus?.model_visible_tools?.length ?? 0} 个
-                  {runtimeStatus?.hidden_local_tools?.length ? `，隐藏 ${runtimeStatus.hidden_local_tools.length} 个` : ''}
+              <div className="rounded-lg px-3 py-2" style={{ border: '0.5px solid var(--border)' }}>
+                <div className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>工具系统</div>
+                <div className="mt-1 text-sm font-medium" style={{ color: toolsForm.enabled === false ? 'var(--destructive, #ef4444)' : 'var(--fg-85)' }}>
+                  {toolsForm.enabled === false ? '已禁用' : '已启用'}
                 </div>
               </div>
-              <Switch
-                checked={toolsForm.builtin?.enabled !== false}
-                onCheckedChange={(checked) => updateTools(current => ({
-                  ...current,
-                  builtin: { ...(current.builtin || {}), enabled: checked },
-                }))}
-              />
-            </div>
-            <div className="grid grid-cols-[220px_1fr] gap-4 px-4 py-3">
-              <div className="space-y-2">
-                <Label className="text-xs">暴露模式</Label>
-                <Select
-                  value={toolsForm.builtin?.exposure || 'coding'}
-                  onValueChange={(value) => setBuiltinExposure(value as BuiltinToolExposure)}
-                >
-                  <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {BUILTIN_EXPOSURE_OPTIONS.map(option => (
-                      <SelectItem key={option.value} value={option.value} textValue={option.label}>
-                        <div className="flex flex-col">
-                          <span>{option.label}</span>
-                          <span className="text-xs opacity-70">{option.description}</span>
-                        </div>
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <Label className="text-xs">代码工具分组</Label>
-                  <Switch
-                    checked={toolsForm.builtin?.code?.enabled !== false}
-                    onCheckedChange={setBuiltinCodeEnabled}
-                  />
-                </div>
-                <div className="grid grid-cols-5 gap-2">
-                  {BUILTIN_CODE_GROUP_OPTIONS.map(option => {
-                    const enabledGroups = toolsForm.builtin?.code?.groups || [];
-                    const enabled = enabledGroups.includes(option.value);
-                    return (
-                      <TextTooltip key={option.value} content={option.description}>
-                        <button
-                          type="button"
-                          className="rounded-lg px-2 py-2 text-left text-xs transition-colors"
-                          style={{
-                            border: '0.5px solid var(--border)',
-                            color: enabled ? 'var(--fg-85)' : 'var(--fg-tertiary)',
-                            background: enabled ? 'var(--bg-button-secondary)' : 'transparent',
-                          }}
-                          onClick={() => setBuiltinCodeGroup(option.value, !enabled)}
-                        >
-                          <div className="font-medium">{option.label}</div>
-                          <div className="truncate opacity-70">{option.description}</div>
-                        </button>
-                      </TextTooltip>
-                    );
-                  })}
+              <div className="rounded-lg px-3 py-2" style={{ border: '0.5px solid var(--border)' }}>
+                <div className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>连接状态</div>
+                <div className="mt-1 text-sm font-medium" style={{ color: 'var(--fg-85)' }}>
+                  {(runtimeStatus?.mcp_servers || []).filter(server => server.connected).length} / {serverIds.length} 已连接
                 </div>
               </div>
             </div>
