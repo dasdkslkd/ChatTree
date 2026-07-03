@@ -18,7 +18,9 @@ require.extensions['.ts'] = function loadTs(module, filename) {
 };
 
 const {
+  getTaskNotificationSummary,
   getTreeUserContent,
+  isRenderableTaskNotificationMessage,
   isTaskNotificationMessage,
   shouldExportMessage,
 } = require(path.join(__dirname, '../src/utils/taskNotificationVisibility.ts'));
@@ -30,10 +32,36 @@ const notificationMessage = {
 };
 
 assert.equal(isTaskNotificationMessage(notificationMessage), true);
+assert.equal(isRenderableTaskNotificationMessage(notificationMessage), true);
 assert.equal(shouldExportMessage(notificationMessage), false);
+assert.deepEqual(getTaskNotificationSummary({
+  role: 'user',
+  subtype: 'task_notification',
+  content: `<task-notification>
+{
+  "kind": "task_notification",
+  "source_run_kind": "command",
+  "source_status": "completed",
+  "original_slash_input": "/command npm run build",
+  "content": "{\\"command\\":\\"npm run build -- --mode production\\",\\"stdout_tail\\":\\"build completed successfully\\\\n\\",\\"stderr_tail\\":\\"\\"}"
+}
+</task-notification>`,
+}), {
+  title: '后台命令 已完成',
+  detail: 'npm run build -- --mode production',
+  command: 'npm run build -- --mode production',
+  output: 'build completed successfully',
+  status: '已完成',
+  kind: '后台命令',
+});
 assert.equal(shouldExportMessage({
   role: 'assistant',
   metadata: { message_kind: 'task_notification' },
+  content: 'secret',
+}), false);
+assert.equal(isRenderableTaskNotificationMessage({
+  role: 'user',
+  metadata: { display: 'hidden' },
   content: 'secret',
 }), false);
 assert.equal(shouldExportMessage({

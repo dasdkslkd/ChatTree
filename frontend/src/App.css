@@ -360,17 +360,17 @@
   width: min(100%, 760px);
   display: flex;
   align-items: center;
-  margin: 8px 0 2px;
+  margin: 4px 0 0;
   color: var(--fg-tertiary, rgba(251,247,244,0.55));
   font-size: 13px;
-  line-height: 20px;
+  line-height: 18px;
 }
 
 .processed-fold-button {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  min-height: 24px;
+  min-height: 20px;
   padding: 0;
   border: 0;
   background: transparent;
@@ -409,7 +409,7 @@
 .processed-blocks-shell.expanded {
   grid-template-rows: 1fr;
   opacity: 1;
-  margin: 6px 0 8px;
+  margin: 3px 0 4px;
 }
 
 .processed-blocks-inner {
@@ -423,9 +423,9 @@
 
 .processed-answer-divider {
   width: min(100%, 760px);
-  height: 0.5px;
-  margin: 8px 0 14px;
-  background: var(--border-light, rgba(255,247,240,0.05));
+  height: 1px;
+  margin: 4px 0 6px;
+  background: var(--border-heavy, rgba(255,247,240,0.17));
 }
 
 /* ====== Tool calls (reference/gui components.css) ====== */

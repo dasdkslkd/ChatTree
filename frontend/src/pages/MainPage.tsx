@@ -66,7 +66,7 @@ import {
 import {
   Plus, X, MoreHorizontal, ChevronRight, Square,
   Copy, Check, Pencil, Loader2, RotateCcw, Network, MessageSquare, Trash2, FileText, Download, FolderOpen, FolderPlus, Search, Settings,
-  PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Archive, ArrowLeft,
+  PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Archive, ArrowLeft, BellRing,
 } from 'lucide-react';
 import { conversationApi } from '../api/conversation';
 import { messageApi, type ActiveStreamInfo, type ToolResultSlice } from '../api/message';
@@ -98,7 +98,12 @@ import {
   isCommandRunStatus,
 } from '../utils/sideRunSync';
 import { collectSideRunNotifications } from '../utils/sideRunNotifications';
-import { isTaskNotificationMessage, shouldExportMessage } from '../utils/taskNotificationVisibility';
+import {
+  getTaskNotificationSummary,
+  isRenderableTaskNotificationMessage,
+  isTaskNotificationMessage,
+  shouldExportMessage,
+} from '../utils/taskNotificationVisibility';
 import {
   DEFAULT_TOOL_PERMISSION_MODE,
   createToolPermissionDraft,
@@ -2655,6 +2660,40 @@ export default function ChatPage() {
     );
   };
 
+  const renderTaskNotificationMessage = (m: typeof messages[0], index: number) => {
+    const summary = getTaskNotificationSummary(m);
+    return (
+      <div
+        key={m.id}
+        id={`message-${index}`}
+        className="w-full my-1 flex justify-center"
+      >
+        <div
+          className="flex max-w-[760px] min-w-0 items-center gap-2 rounded-md px-2.5 py-1 text-xs"
+          style={{
+            border: '0.5px solid var(--border)',
+            background: 'var(--bg-button-tertiary-hover)',
+            color: 'var(--fg-tertiary)',
+          }}
+        >
+          <BellRing className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--icon-accent)' }} />
+          <span className="shrink-0 font-medium" style={{ color: 'var(--fg-secondary)' }}>{summary.title}</span>
+          {(summary.command || summary.detail) && (
+            <span className="min-w-[80px] truncate font-mono" title={summary.command || summary.detail}>
+              {summary.command || summary.detail}
+            </span>
+          )}
+          {summary.output && (
+            <>
+              <span className="shrink-0" style={{ color: 'var(--fg-tertiary)' }}>{'->'}</span>
+              <span className="min-w-[120px] truncate" title={summary.output}>{summary.output}</span>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   const getSideRunGroupLabel = (kind: string): string => {
     if (kind === 'side_question') return '旁路问题';
     if (kind === 'subagent') return '后台分支';
@@ -2978,7 +3017,9 @@ export default function ChatPage() {
     }
 
     if (isTaskNotificationMessage(m)) {
-      return null;
+      return isRenderableTaskNotificationMessage(m)
+        ? renderTaskNotificationMessage(m, index)
+        : null;
     }
 
     if (m.role === 'tool') {
@@ -3146,20 +3187,24 @@ export default function ChatPage() {
             </div>
           )}
           <div className={cn(
-            'flex items-center gap-1 mt-1',
+            'flex items-center gap-1',
+            m.role === 'assistant' ? 'mt-0.5' : 'mt-1',
             m.role === 'user' ? 'self-end justify-end' : 'self-start justify-start',
           )}>
             <Button
               variant="ghost"
               size="sm"
-              className="opacity-0 group-hover:opacity-100 transition-opacity h-7 w-7 p-0"
+              className={cn(
+                'opacity-0 group-hover:opacity-100 transition-opacity p-0',
+                m.role === 'assistant' ? 'h-5 w-5' : 'h-7 w-7',
+              )}
               onClick={() => handleCopy(displayContent, m.id)}
               aria-label="复制消息"
             >
               {copiedMessageId === m.id ? (
-                <Check className="h-4 w-4" />
+                <Check className={m.role === 'assistant' ? 'h-3.5 w-3.5' : 'h-4 w-4'} />
               ) : (
-                <Copy className="h-4 w-4" />
+                <Copy className={m.role === 'assistant' ? 'h-3.5 w-3.5' : 'h-4 w-4'} />
               )}
             </Button>
             {m.role === 'user' && (
@@ -3613,19 +3658,19 @@ export default function ChatPage() {
                               const copyContent = getDraftCopyContent(draft.timeline, draft.run.content);
                               if (!copyContent) return null;
                               return (
-                                <div className="mt-1 flex items-center gap-1 self-start">
+                                <div className="mt-0.5 flex items-center gap-1 self-start">
                                   <TextTooltip content="复制">
                                     <Button
                                       variant="ghost"
                                       size="sm"
-                                      className="h-7 w-7 p-0"
+                                      className="h-5 w-5 p-0"
                                       onClick={() => handleCopy(copyContent, draft.run.runId)}
                                       aria-label="复制"
                                     >
                                       {copiedMessageId === draft.run.runId ? (
-                                        <Check className="h-4 w-4 text-green-500" />
+                                        <Check className="h-3.5 w-3.5 text-green-500" />
                                       ) : (
-                                        <Copy className="h-4 w-4" />
+                                        <Copy className="h-3.5 w-3.5" />
                                       )}
                                     </Button>
                                   </TextTooltip>
