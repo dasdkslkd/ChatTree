@@ -2679,7 +2679,7 @@ export default function ChatPage() {
       <div
         key={m.id}
         id={`message-${index}`}
-        className="w-full my-1 flex justify-center"
+        className="task-notification-row w-full my-1 flex flex-col items-start"
       >
         <div
           className="flex max-w-[760px] min-w-0 items-center gap-2 rounded-md px-2.5 py-1 text-xs"
