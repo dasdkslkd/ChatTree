@@ -39,6 +39,7 @@ from backend.core.prompts.types import PromptBuildRequest
 from backend.core.runs import RunKind, RunManager, RunStatus, SyntheticInputQueue
 from backend.core.runs.journal import RunJournal
 from backend.core.tools.agent_tools import StartSubagentTool, StartWorkflowTool
+from backend.core.tasks import TaskLedger, TaskStatus
 from backend.core.workflows.workflow_manager import WorkflowManager
 from backend.core.slash.dispatcher import SlashCommandDispatcher
 from backend.core.slash.registry import SlashCommandRegistry
@@ -330,6 +331,117 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Runtime mode: main chat", messages[1]["content"])
         self.assertNotIn("start_subagent", messages[1]["content"])
         self.assertNotIn("spawn_agent", messages[1]["content"])
+
+    async def test_main_runtime_context_lists_open_tasks(self):
+        task_ledger = TaskLedger()
+        manager = ChatManager(
+            model_manager=None,
+            storage=self.FakeStorage(),
+            prompts=self.FakePromptStorage(),
+            task_ledger=task_ledger,
+        )
+        conversation = manager.create_conversation("title")
+        task = await task_ledger.create_task(
+            conversation_id=conversation.metadata["id"],
+            title="检查 reference 中的 plan 模式",
+            detail="x" * 260,
+            created_by_run_id="run-1",
+        )
+        await task_ledger.bind_run(
+            conversation_id=conversation.metadata["id"],
+            task_id=task.task_id,
+            run_id="run-subagent",
+            owner_type="subagent",
+        )
+
+        messages = manager._build_prompt_messages(conversation, [])
+
+        self.assertIn("Open Tasks:", messages[1]["content"])
+        self.assertIn(task.task_id, messages[1]["content"])
+        self.assertIn("run-subagent", messages[1]["content"])
+        self.assertIn("Before final response", messages[1]["content"])
+        self.assertNotIn("x" * 200, messages[1]["content"])
+
+    async def test_task_completion_guard_requires_nudge_for_unresolved_task(self):
+        task_ledger = TaskLedger()
+        manager = ChatManager(
+            model_manager=None,
+            storage=self.FakeStorage(),
+            prompts=self.FakePromptStorage(),
+            task_ledger=task_ledger,
+        )
+        conversation = manager.create_conversation("title")
+        await task_ledger.create_task(
+            conversation_id=conversation.metadata["id"],
+            title="检查实现",
+            created_by_run_id="run-1",
+        )
+
+        needs_nudge, open_tasks = await manager._needs_task_completion_nudge(
+            conversation.metadata["id"],
+            "已经完成。",
+        )
+
+        self.assertTrue(needs_nudge)
+        self.assertEqual(len(open_tasks), 1)
+
+    async def test_task_completion_guard_allows_reported_blocked_tasks(self):
+        task_ledger = TaskLedger()
+        manager = ChatManager(
+            model_manager=None,
+            storage=self.FakeStorage(),
+            prompts=self.FakePromptStorage(),
+            task_ledger=task_ledger,
+        )
+        conversation = manager.create_conversation("title")
+        task = await task_ledger.create_task(
+            conversation_id=conversation.metadata["id"],
+            title="联网验证",
+            created_by_run_id="run-1",
+        )
+        await task_ledger.update_task(
+            conversation_id=conversation.metadata["id"],
+            task_id=task.task_id,
+            status=TaskStatus.BLOCKED,
+            evidence_summary="searxng connection refused",
+        )
+
+        needs_nudge, open_tasks = await manager._needs_task_completion_nudge(
+            conversation.metadata["id"],
+            f"{task.task_id} 已阻塞：searxng connection refused",
+        )
+
+        self.assertFalse(needs_nudge)
+        self.assertEqual(len(open_tasks), 1)
+
+    async def test_task_completion_guard_allows_blocked_tasks_with_evidence_without_restatement(self):
+        task_ledger = TaskLedger()
+        manager = ChatManager(
+            model_manager=None,
+            storage=self.FakeStorage(),
+            prompts=self.FakePromptStorage(),
+            task_ledger=task_ledger,
+        )
+        conversation = manager.create_conversation("title")
+        task = await task_ledger.create_task(
+            conversation_id=conversation.metadata["id"],
+            title="联网验证",
+            created_by_run_id="run-1",
+        )
+        await task_ledger.update_task(
+            conversation_id=conversation.metadata["id"],
+            task_id=task.task_id,
+            status=TaskStatus.BLOCKED,
+            evidence_summary="searxng connection refused",
+        )
+
+        needs_nudge, open_tasks = await manager._needs_task_completion_nudge(
+            conversation.metadata["id"],
+            "该验证无法继续，已按失败路径收口。",
+        )
+
+        self.assertFalse(needs_nudge)
+        self.assertEqual(len(open_tasks), 1)
 
     def test_explicit_subagent_request_builds_multi_agent_runtime_context(self):
         manager = ChatManager(
@@ -904,6 +1016,7 @@ class SyntheticTaskNotificationTests(unittest.IsolatedAsyncioTestCase):
             metadata={
                 "agent_name": "implementer",
                 "delegated_task": "inspect",
+                "task_id": "task_abc123",
                 "slash_command": {"original_input": "/fork inspect"},
             },
         )
@@ -931,11 +1044,15 @@ class SyntheticTaskNotificationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pending[0]["metadata"]["origin"], "task_notification")
         self.assertEqual(pending[0]["metadata"]["source_status"], "completed")
         self.assertEqual(pending[0]["metadata"]["delegated_task"], "inspect")
+        self.assertEqual(pending[0]["metadata"]["task_id"], "task_abc123")
         self.assertEqual(pending[0]["metadata"]["original_slash_input"], "/fork inspect")
         self.assertIn("subagent answer", pending[0]["content"])
         wrapped = messages_route.build_task_notification_content(pending[0])
         self.assertIn('"delegated_task": "inspect"', wrapped)
+        self.assertIn('"task_id": "task_abc123"', wrapped)
         self.assertIn('"/fork inspect"', wrapped)
+        request = messages_route.build_synthetic_message_request(pending[0])
+        self.assertEqual(request.synthetic_metadata["task_id"], "task_abc123")
 
     async def test_failed_subagent_enqueues_failed_task_notification(self):
         run_manager = RunManager()
@@ -2033,6 +2150,156 @@ class RuntimePolicyTests(unittest.TestCase):
                 self.assertEqual(child_events[0]["child_kind"], RunKind.SUBAGENT.value)
                 self.assertIsNone(child_events[0].get("parent_run_id"))
                 self.assertEqual(child_events[0]["payload"]["parent_run_id"], parent.run_id)
+
+        asyncio.run(run_case())
+
+    def test_agent_runtime_auto_creates_and_completes_subagent_task(self):
+        async def run_case():
+            registry = CapabilityRegistry()
+            registry.add_agents([
+                AgentDefinition(name="reviewer", system_prompt="Reviewer worker body")
+            ])
+            run_manager = RunManager()
+            task_ledger = TaskLedger()
+            task_ledger.install_run_finish_listener(run_manager)
+
+            class FakeSubagentExecutor:
+                async def start(self, **kwargs):
+                    return (await run_manager.create_run(
+                        conversation_id=kwargs["conversation_id"],
+                        kind=RunKind.SUBAGENT,
+                        anchor_node_id=kwargs.get("parent_node_id"),
+                        parent_run_id=kwargs.get("parent_run_id"),
+                        summary=kwargs.get("delegated_task") or "",
+                        metadata={"agent_name": kwargs.get("agent_name")},
+                    )).to_dict()
+
+            runtime = AgentRuntime(
+                run_manager=run_manager,
+                mailbox=AgentMailbox(),
+                subagent_executor=FakeSubagentExecutor(),
+                capability_registry=registry,
+                task_ledger=task_ledger,
+            )
+
+            result = await runtime.spawn_agent(
+                source=AgentSource(
+                    conversation_id="conversation-1",
+                    run_id="chat-run-1",
+                    run_kind=RunKind.CHAT.value,
+                    anchor_node_id="node-1",
+                ),
+                agent_name="reviewer",
+                task="检查实现",
+            )
+
+            self.assertTrue(str(result.get("task_id") or "").startswith("task_"))
+            task = await task_ledger.get_task("conversation-1", result["task_id"])
+            self.assertEqual(task.status, TaskStatus.IN_PROGRESS)
+            self.assertEqual(task.owner_run_id, result["run_id"])
+
+            await run_manager.finish_run(result["run_id"], RunStatus.COMPLETED)
+            await asyncio.sleep(0)
+            completed = await task_ledger.get_task("conversation-1", result["task_id"])
+            self.assertEqual(completed.status, TaskStatus.COMPLETED)
+            self.assertEqual(completed.evidence_run_id, result["run_id"])
+
+        asyncio.run(run_case())
+
+    def test_agent_runtime_binds_existing_workflow_task_and_blocks_on_failure(self):
+        async def run_case():
+            registry = CapabilityRegistry()
+            run_manager = RunManager()
+            task_ledger = TaskLedger()
+            task_ledger.install_run_finish_listener(run_manager)
+            created = await task_ledger.create_task(
+                conversation_id="conversation-1",
+                title="运行 workflow",
+                created_by_run_id="chat-run-1",
+            )
+
+            class FakeWorkflowManager:
+                async def start(self, **kwargs):
+                    return (await run_manager.create_run(
+                        conversation_id=kwargs["conversation_id"],
+                        kind=RunKind.WORKFLOW,
+                        anchor_node_id=kwargs.get("parent_node_id"),
+                        parent_run_id=kwargs.get("parent_run_id"),
+                        summary="workflow",
+                        metadata={"delegated_task": kwargs.get("delegated_task")},
+                    )).to_dict()
+
+            runtime = AgentRuntime(
+                run_manager=run_manager,
+                mailbox=AgentMailbox(),
+                subagent_executor=object(),
+                workflow_manager=FakeWorkflowManager(),
+                capability_registry=registry,
+                task_ledger=task_ledger,
+            )
+
+            result = await runtime.start_workflow(
+                source=AgentSource(
+                    conversation_id="conversation-1",
+                    run_id="chat-run-1",
+                    run_kind=RunKind.CHAT.value,
+                    anchor_node_id="node-1",
+                ),
+                script="throw new Error('boom')",
+                task_id=created.task_id,
+            )
+
+            self.assertEqual(result["task_id"], created.task_id)
+            bound = await task_ledger.get_task("conversation-1", created.task_id)
+            self.assertEqual(bound.status, TaskStatus.IN_PROGRESS)
+            self.assertEqual(bound.owner_run_id, result["run_id"])
+
+            await run_manager.finish_run(result["run_id"], RunStatus.FAILED, "boom")
+            await asyncio.sleep(0)
+            blocked = await task_ledger.get_task("conversation-1", created.task_id)
+            self.assertEqual(blocked.status, TaskStatus.BLOCKED)
+            self.assertIn("boom", blocked.evidence_summary)
+
+        asyncio.run(run_case())
+
+    def test_agent_runtime_rejects_missing_task_id_before_spawning(self):
+        async def run_case():
+            registry = CapabilityRegistry()
+            registry.add_agents([
+                AgentDefinition(name="reviewer", system_prompt="Reviewer worker body")
+            ])
+            run_manager = RunManager()
+            task_ledger = TaskLedger()
+            starts = 0
+
+            class FakeSubagentExecutor:
+                async def start(self, **kwargs):
+                    nonlocal starts
+                    starts += 1
+                    return {"run_id": "agent-run-1", "kind": "subagent", "status": "running", "metadata": {}}
+
+            runtime = AgentRuntime(
+                run_manager=run_manager,
+                mailbox=AgentMailbox(),
+                subagent_executor=FakeSubagentExecutor(),
+                capability_registry=registry,
+                task_ledger=task_ledger,
+            )
+
+            with self.assertRaises(Exception):
+                await runtime.spawn_agent(
+                    source=AgentSource(
+                        conversation_id="conversation-1",
+                        run_id="chat-run-1",
+                        run_kind=RunKind.CHAT.value,
+                        anchor_node_id="node-1",
+                    ),
+                    agent_name="reviewer",
+                    task="检查实现",
+                    task_id="task_missing",
+                )
+
+            self.assertEqual(starts, 0)
 
         asyncio.run(run_case())
 

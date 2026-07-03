@@ -71,11 +71,13 @@ import {
 import { conversationApi } from '../api/conversation';
 import { messageApi, type ActiveStreamInfo, type ToolResultSlice } from '../api/message';
 import { runsApi } from '../api/runs';
+import { taskLedgerService } from '../services/tasks';
 import type {
   Message,
   SendMessageRequest,
   ToolPermissionMode,
 } from '../types/message';
+import type { TaskRecord } from '../types/task';
 import type { MultiAgentMode, WorkspaceContext } from '../types/conversation';
 import { useConversationStore } from '../store/conversationStore';
 import { useModelStore } from '../store/modelStore';
@@ -104,6 +106,13 @@ import {
   isTaskNotificationMessage,
   shouldExportMessage,
 } from '../utils/taskNotificationVisibility';
+import {
+  compactTaskTitle,
+  isOpenTask,
+  sortTasksForDisplay,
+  taskOwnerLabel,
+  taskStatusLabel,
+} from '../utils/taskLedger';
 import {
   DEFAULT_TOOL_PERMISSION_MODE,
   createToolPermissionDraft,
@@ -1231,6 +1240,9 @@ export default function ChatPage() {
   };
 
   const activeRunStates = useRunManager(currentConversation?.id ?? null);
+  const [taskLedgerTasks, setTaskLedgerTasks] = useState<TaskRecord[]>([]);
+  const currentConversationIdRef = useRef<string | null>(null);
+  currentConversationIdRef.current = currentConversation?.id ?? null;
   const autoFollowedRunIdsRef = useRef<Set<string>>(new Set());
   const hiddenSideRunIds = useMemo(() => {
     const conversationId = currentConversation?.id;
@@ -1265,6 +1277,20 @@ export default function ChatPage() {
     },
     [],
   );
+  const refreshTaskLedger = useCallback(async (conversationId: string | null | undefined) => {
+    if (!conversationId) {
+      if (!currentConversationIdRef.current) setTaskLedgerTasks([]);
+      return;
+    }
+    if (conversationId !== currentConversationIdRef.current) return;
+    try {
+      const tasks = await taskLedgerService.fetchConversationTasks(conversationId, false);
+      if (conversationId !== currentConversationIdRef.current) return;
+      setTaskLedgerTasks(sortTasksForDisplay(tasks).filter(isOpenTask));
+    } catch (_) {
+      if (conversationId === currentConversationIdRef.current) setTaskLedgerTasks([]);
+    }
+  }, []);
   const [localStreamingConversationCounts, setLocalStreamingConversationCounts] = useState<Map<string, number>>(() => new Map());
   const [backendActiveStreamConversationCounts, setBackendActiveStreamConversationCounts] = useState<Map<string, number>>(() => new Map());
   const activeStreamConversationCounts = useMemo(() => {
@@ -2040,6 +2066,7 @@ export default function ChatPage() {
           streamManager.cleanupIfController(finishedId, controller, runId);
         }
         await loadConversations();
+        void refreshTaskLedger(finishedId);
         void syncSelectedConversationSideRuns(finishedId);
         const sentQueued = await sendNextQueuedMessage(finishedId);
         if (!sentQueued) void syncBackendScheduledFollowup(finishedId);
@@ -2057,6 +2084,7 @@ export default function ChatPage() {
                 : { awaitNodeId, retries: 6 },
             );
             await loadConversations();
+            void refreshTaskLedger(finishedId);
             void syncSelectedConversationSideRuns(finishedId);
             void syncBackendScheduledFollowup(finishedId);
           })();
@@ -2091,6 +2119,7 @@ export default function ChatPage() {
       }
       // 同步对话列表（更新时间、标题等）
       await loadConversations();
+      void refreshTaskLedger(finishedId);
       void syncSelectedConversationSideRuns(finishedId);
       const sentQueued = await sendNextQueuedMessage(finishedId);
       if (!sentQueued) void syncBackendScheduledFollowup(finishedId);
@@ -2100,6 +2129,7 @@ export default function ChatPage() {
     refreshMessages,
     patchAssistantMessageFromStream,
     loadConversations,
+    refreshTaskLedger,
     syncSelectedConversationSideRuns,
     sendNextQueuedMessage,
     syncBackendScheduledFollowup,
@@ -2210,7 +2240,10 @@ export default function ChatPage() {
 
   useEffect(() => {
     const conversationId = currentConversation?.id;
-    if (!conversationId) return;
+    if (!conversationId) {
+      void refreshTaskLedger(null);
+      return;
+    }
 
     let cancelled = false;
     (async () => {
@@ -2273,7 +2306,8 @@ export default function ChatPage() {
     void syncSelectedConversationSideRuns(conversationId).catch(() => {
       // Side run history is best-effort UI state; active stream recovery above still handles live runs.
     });
-  }, [currentConversation?.id, syncSelectedConversationSideRuns]);
+    void refreshTaskLedger(conversationId);
+  }, [currentConversation?.id, refreshTaskLedger, syncSelectedConversationSideRuns]);
 
   const handleSelectConversation = async (id: string) => {
     if (currentConversation && historyRef.current) {
@@ -2691,6 +2725,11 @@ export default function ChatPage() {
         >
           <BellRing className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--icon-accent)' }} />
           <span className="shrink-0 font-medium" style={{ color: 'var(--fg-secondary)' }}>{summary.title}</span>
+          {summary.taskId && (
+            <span className="max-w-[96px] shrink truncate font-mono" title={summary.taskId}>
+              {summary.taskId}
+            </span>
+          )}
           {(summary.command || summary.detail) && (
             <span className="min-w-[80px] truncate font-mono" title={summary.command || summary.detail}>
               {summary.command || summary.detail}
@@ -2703,6 +2742,52 @@ export default function ChatPage() {
             </>
           )}
         </div>
+      </div>
+    );
+  };
+
+  const renderTaskLedgerStrip = () => {
+    if (taskLedgerTasks.length === 0) return null;
+    return (
+      <div className="task-ledger-strip w-full my-1 flex flex-col items-start gap-1">
+        {taskLedgerTasks.slice(0, 8).map((task) => {
+          const title = compactTaskTitle(task, 120);
+          const evidence = task.status === 'blocked' && task.evidence_summary
+            ? task.evidence_summary
+            : '';
+          return (
+            <div
+              key={task.task_id}
+              className="flex max-w-[760px] min-w-0 items-center gap-2 rounded-md px-2.5 py-1 text-xs"
+              style={{
+                border: '0.5px solid var(--border)',
+                background: 'var(--bg-button-tertiary-hover)',
+                color: 'var(--fg-tertiary)',
+              }}
+              title={evidence || task.detail || title}
+            >
+              <BellRing className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--icon-accent)' }} />
+              <span
+                className="shrink-0 rounded-sm px-1.5 py-0.5 font-medium"
+                style={{ color: 'var(--fg-secondary)', background: 'var(--bg-secondary)' }}
+              >
+                {taskStatusLabel(task.status)}
+              </span>
+              <span className="shrink-0" style={{ color: 'var(--fg-tertiary)' }}>
+                {taskOwnerLabel(task.owner_type)}
+              </span>
+              <span className="min-w-[120px] truncate" style={{ color: 'var(--fg-secondary)' }}>
+                {title}
+              </span>
+              {evidence && (
+                <>
+                  <span className="shrink-0" style={{ color: 'var(--fg-tertiary)' }}>{'->'}</span>
+                  <span className="min-w-[120px] truncate">{evidence}</span>
+                </>
+              )}
+            </div>
+          );
+        })}
       </div>
     );
   };
@@ -3081,6 +3166,7 @@ export default function ChatPage() {
     const processedDuration = m.role === 'assistant'
       ? formatProcessedDuration(m.generation_info?.duration_ms)
       : null;
+    const taskGuard = m.role === 'assistant' ? m.generation_info?.task_guard : null;
     const hasDisplayContent = displayContent.trim().length > 0;
 
     return (
@@ -3197,6 +3283,20 @@ export default function ChatPage() {
                   {getGenerationStatusText(m.generation_info)}
                 </span>
               )}
+            </div>
+          )}
+          {m.role === 'assistant' && taskGuard && (taskGuard.open_task_count ?? 0) > 0 && (
+            <div
+              className="mt-1 flex max-w-[760px] items-center gap-2 rounded-md px-2.5 py-1 text-xs"
+              style={{
+                border: '0.5px solid var(--border)',
+                background: 'var(--bg-button-tertiary-hover)',
+                color: 'var(--fg-tertiary)',
+              }}
+            >
+              <BellRing className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--icon-accent)' }} />
+              <span style={{ color: 'var(--fg-secondary)' }}>仍有未完成任务</span>
+              <span>{taskGuard.open_task_count} 项</span>
             </div>
           )}
           <div className={cn(
@@ -3571,6 +3671,7 @@ export default function ChatPage() {
               >
                 <div className="w-[800px] max-w-full flex flex-col px-4">
                   {renderedMessages}
+                  {renderTaskLedgerStrip()}
                   {activeRunDrafts.map((draft) => (
                     <div key={draft.run.runId} className="contents">
                       {draft.showPendingBubble && (

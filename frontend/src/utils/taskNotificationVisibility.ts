@@ -15,6 +15,7 @@ export interface TaskNotificationSummary {
   output: string;
   status: string;
   kind: string;
+  taskId: string;
 }
 
 function containsTaskNotificationTag(value: unknown): boolean {
@@ -92,6 +93,7 @@ export function getTaskNotificationSummary(message: MessageLike): TaskNotificati
   const embedded = parseJsonObject(payload.content) || {};
   const kind = payload.source_run_kind || payload.kind;
   const status = payload.source_status;
+  const taskId = typeof payload.task_id === 'string' ? payload.task_id : '';
   const kindLabel = taskKindLabel(kind);
   const statusLabel = taskStatusLabel(status);
   const command = compactText(
@@ -123,6 +125,7 @@ export function getTaskNotificationSummary(message: MessageLike): TaskNotificati
     output,
     status: statusLabel,
     kind: kindLabel,
+    taskId,
   };
 }
 

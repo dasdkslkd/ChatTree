@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional
 
 from backend.core.capabilities.registry import CapabilityRegistry
 from backend.core.runs import RunKind, RunManager
+from backend.core.tasks import TaskLedger, TaskOwnerType
 from backend.core.tools.security.permissions import normalize_permission_mode
 
 from .mailbox import AgentMailbox
@@ -23,12 +24,14 @@ class AgentRuntime:
         subagent_executor: SubagentExecutor,
         workflow_manager: Any = None,
         capability_registry: CapabilityRegistry,
+        task_ledger: TaskLedger | None = None,
     ) -> None:
         self.run_manager = run_manager
         self.mailbox = mailbox
         self.subagent_executor = subagent_executor
         self.workflow_manager = workflow_manager
         self.capability_registry = capability_registry
+        self.task_ledger = task_ledger
         self.run_manager.add_finish_listener(self._handle_run_finished)
 
     async def spawn_agent(
@@ -44,6 +47,8 @@ class AgentRuntime:
         model_id: Optional[str] = None,
         permission_mode: Optional[str] = None,
         workspace: Optional[Dict[str, Any]] = None,
+        task_id: Optional[str] = None,
+        auto_create_task: bool = True,
     ) -> Dict[str, Any]:
         agent_name = (agent_name or "implementer").strip() or "implementer"
         task = (task or "").strip()
@@ -51,6 +56,7 @@ class AgentRuntime:
             raise ValueError("task is required")
         if self.capability_registry.get_agent(agent_name) is None:
             raise KeyError(agent_name)
+        await self._validate_existing_task(source.conversation_id, task_id)
         run = await self.subagent_executor.start(
             conversation_id=source.conversation_id,
             agent_name=agent_name,
@@ -65,6 +71,16 @@ class AgentRuntime:
             delegated_task=task,
             original_slash_input=None,
             delivery_policy=delivery_policy,
+            task_id=task_id,
+        )
+        run_id = str(run.get("run_id") or "")
+        task_id = await self._bind_task_for_run(
+            source=source,
+            run_id=run_id,
+            owner_type=TaskOwnerType.SUBAGENT,
+            task_id=task_id,
+            auto_create_task=auto_create_task,
+            title=task,
         )
         metadata = dict(run.get("metadata") or {})
         metadata.update({
@@ -75,13 +91,16 @@ class AgentRuntime:
             "root_run_id": source.root_run_id or source.run_id,
             "source_run_id": source.run_id,
         })
-        await self.run_manager.update_metadata(str(run.get("run_id") or ""), metadata)
+        if task_id:
+            metadata["task_id"] = task_id
+        await self.run_manager.update_metadata(run_id, metadata)
         return {
-            "run_id": run.get("run_id"),
+            "run_id": run_id,
             "kind": run.get("kind", RunKind.SUBAGENT.value),
             "status": run.get("status"),
             "agent_name": agent_name,
             "task": task,
+            "task_id": task_id,
             "context_mode": context_mode,
             "delivery_policy": delivery_policy,
             "message": "Agent spawned.",
@@ -95,9 +114,12 @@ class AgentRuntime:
         args: Optional[Dict[str, Any]] = None,
         delivery_policy: str = "auto",
         permission_mode: Optional[str] = None,
+        task_id: Optional[str] = None,
+        auto_create_task: bool = True,
     ) -> Dict[str, Any]:
         if self.workflow_manager is None:
             raise RuntimeError("workflow manager is not configured")
+        await self._validate_existing_task(source.conversation_id, task_id)
         run = await self.workflow_manager.start(
             conversation_id=source.conversation_id,
             script=script,
@@ -107,13 +129,72 @@ class AgentRuntime:
             permission_mode=normalize_permission_mode(permission_mode),
             delegated_task=script,
             delivery_policy=delivery_policy,
+            task_id=task_id,
         )
-        await self.run_manager.update_metadata(str(run.get("run_id") or ""), {
+        run_id = str(run.get("run_id") or "")
+        task_id = await self._bind_task_for_run(
+            source=source,
+            run_id=run_id,
+            owner_type=TaskOwnerType.WORKFLOW,
+            task_id=task_id,
+            auto_create_task=auto_create_task,
+            title=script,
+        )
+        metadata = {
                 "delivery_policy": delivery_policy,
                 "root_run_id": source.root_run_id or source.run_id,
                 "source_run_id": source.run_id,
-        })
+        }
+        if task_id:
+            metadata["task_id"] = task_id
+        await self.run_manager.update_metadata(run_id, metadata)
+        run["task_id"] = task_id
         return run
+
+    async def _bind_task_for_run(
+        self,
+        *,
+        source: AgentSource,
+        run_id: str,
+        owner_type: TaskOwnerType,
+        task_id: Optional[str],
+        auto_create_task: bool,
+        title: str,
+    ) -> Optional[str]:
+        if self.task_ledger is None or not run_id:
+            return task_id
+        resolved_task_id = str(task_id or "").strip()
+        if not resolved_task_id and auto_create_task:
+            task = await self.task_ledger.create_task(
+                conversation_id=source.conversation_id,
+                title=(title or owner_type.value)[:160],
+                detail=title or "",
+                created_by_run_id=source.run_id,
+                owner_type=owner_type,
+                metadata={
+                    "source_run_id": source.run_id,
+                    "source_run_kind": source.run_kind,
+                },
+            )
+            resolved_task_id = task.task_id
+        if resolved_task_id:
+            await self.task_ledger.bind_run(
+                conversation_id=source.conversation_id,
+                task_id=resolved_task_id,
+                run_id=run_id,
+                owner_type=owner_type,
+            )
+        return resolved_task_id or None
+
+    async def _validate_existing_task(self, conversation_id: str, task_id: Optional[str]) -> None:
+        if self.task_ledger is None:
+            return
+        resolved_task_id = str(task_id or "").strip()
+        if not resolved_task_id:
+            return
+        task = await self.task_ledger.get_task(conversation_id, resolved_task_id)
+        if task is None:
+            raise KeyError(resolved_task_id)
 
     async def wait_agent(
         self,

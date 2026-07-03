@@ -59,6 +59,7 @@ class StartBackgroundCommandTool(BaseTool):
                 "command": {"type": "string"},
                 "cwd": {"type": "string", "default": "."},
                 "timeout_seconds": {"type": "integer", "minimum": 1},
+                "task_id": {"type": "string", "description": "Optional TaskLedger task id to bind this command run."},
             },
             "required": ["command"],
         }
@@ -94,6 +95,7 @@ class StartBackgroundCommandTool(BaseTool):
                 "tool_name": self.name,
                 "tool_call_id": context.get("tool_call_id"),
                 "workspace_relative_cwd": self.workspace.relative(cwd),
+                "task_id": kwargs.get("task_id") or context.get("task_id"),
             },
         )
         snapshot = executor.snapshot(str(run["run_id"])) or {}

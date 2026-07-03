@@ -39,6 +39,7 @@ from ..slash import (
 )
 from ..tools.security.permissions import PermissionMode, normalize_permission_mode
 from ..tools.agent_tools import AGENT_TOOL_NAMES, LEGACY_AGENT_TOOL_NAMES
+from ..tasks import TaskRecord, TaskStatus
 
 logger = setup_logger('ChatManager')
 
@@ -70,11 +71,12 @@ MULTI_AGENT_REQUEST_TOKENS = (
 class ChatManager:
     """延迟加载模型的聊天管理器"""
     
-    def __init__(self, model_manager: ModelManager, storage: ChatStorage, prompts: PromptStorage, tool_manager=None):
+    def __init__(self, model_manager: ModelManager, storage: ChatStorage, prompts: PromptStorage, tool_manager=None, task_ledger=None):
         self.model_manager = model_manager
         self.storage = storage
         self.prompts = prompts
         self.tool_manager = tool_manager
+        self.task_ledger = task_ledger
         self.tool_orchestrator = None
         self.capability_registry = None
         self.slash_dispatcher = SlashCommandDispatcher()
@@ -799,6 +801,7 @@ class ChatManager:
         error_message = None
         final_content = ""
         final_reasoning = ""
+        persisted_final_content: Optional[str] = None
 
         try:
             all_tool_calls: List[Dict[str, Any]] = []
@@ -806,6 +809,8 @@ class ChatManager:
             tool_interactions: List[Dict[str, Any]] = []
             all_approval_events: List[Dict[str, Any]] = []
             tool_round = 0
+            task_guard_nudge_count = 0
+            max_task_guard_nudges = self._max_task_guard_nudges(cfg.data)
 
             while True:
                 if await controller.is_stopped():
@@ -827,6 +832,8 @@ class ChatManager:
                 round_status = "completed"
                 complete_chunk = None
                 round_tool_calls: List[Dict[str, Any]] = []
+                defer_round_content = await self._has_open_tasks(conversation_id)
+                deferred_content_chunks: List[Dict[str, Any]] = []
 
                 # provider 引用已在循环前捕获（见上方 get_model）。即便此刻 config 变更
                 # 重建了 model_manager，在途流仍用这个局部 provider，不受影响。
@@ -871,7 +878,10 @@ class ChatManager:
                     chunk["conversation_id"] = conversation_id
                     if run_id:
                         chunk["run_id"] = run_id
-                    yield chunk
+                    if defer_round_content and chunk.get("content"):
+                        deferred_content_chunks.append(dict(chunk))
+                    else:
+                        yield chunk
 
                 if round_status != "completed":
                     final_content = round_content
@@ -884,7 +894,37 @@ class ChatManager:
                     break
 
                 if not round_tool_calls:
-                    final_content = round_content
+                    needs_task_nudge, open_tasks = await self._needs_task_completion_nudge(
+                        conversation_id,
+                        round_content,
+                    )
+                    if needs_task_nudge and tools and task_guard_nudge_count < max_task_guard_nudges:
+                        task_guard_nudge_count += 1
+                        messages.append({
+                            "role": "system",
+                            "content": self._task_completion_nudge(open_tasks, attempt=task_guard_nudge_count),
+                        })
+                        continue
+                    if needs_task_nudge:
+                        guard_message = self._task_guard_blocked_message(open_tasks)
+                        final_content = guard_message
+                        persisted_final_content = guard_message
+                        total_content = guard_message
+                        yield StreamChunk(
+                            status=StreamStatus.CONTENT,
+                            content=guard_message,
+                            node_id=new_node["id"],
+                            target_node_id=new_node["id"],
+                            conversation_id=conversation_id,
+                            run_id=run_id,
+                            error=None,
+                            tokens_used=0,
+                        )
+                    else:
+                        for deferred_chunk in deferred_content_chunks:
+                            yield deferred_chunk
+                        final_content = round_content
+                        persisted_final_content = round_content
                     final_reasoning = round_reasoning
                     if complete_chunk:
                         complete_chunk["conversation_id"] = conversation_id
@@ -895,7 +935,10 @@ class ChatManager:
 
                 if not self.tool_manager:
                     logger.warning("Model requested tools but no ToolManager is configured")
+                    for deferred_chunk in deferred_content_chunks:
+                        yield deferred_chunk
                     final_content = round_content
+                    persisted_final_content = round_content
                     final_reasoning = round_reasoning
                     if complete_chunk:
                         complete_chunk["conversation_id"] = conversation_id
@@ -919,6 +962,8 @@ class ChatManager:
                     )
                     break
 
+                for deferred_chunk in deferred_content_chunks:
+                    yield deferred_chunk
                 tool_round += 1
                 assistant_tool_message = {
                     "role": "assistant",
@@ -1100,12 +1145,22 @@ class ChatManager:
                 "tokens_used": tokens_used,
                 "usage_info": usage_info
             }
+            needs_final_task_nudge, final_open_tasks = await self._needs_task_completion_nudge(
+                conversation_id,
+                persisted_final_content if persisted_final_content is not None else (final_content if tool_interactions else total_content),
+            )
+            if needs_final_task_nudge or task_guard_nudge_count > 0:
+                generation_info["task_guard"] = {
+                    "open_task_count": len(final_open_tasks),
+                    "nudged": task_guard_nudge_count > 0,
+                    "nudge_count": task_guard_nudge_count,
+                }
 
             # 助手消息（包含生成信息）
             assistant_msg = Message({
                 "id": str(uuid.uuid4()),
                 "role": Role.ASSISTANT,
-                "content": final_content if tool_interactions else total_content,
+                "content": persisted_final_content if persisted_final_content is not None else (final_content if tool_interactions else total_content),
                 "name": None,
                 "tool_calls": all_tool_calls or None,
                 "tool_call_id": None,
@@ -1246,6 +1301,7 @@ class ChatManager:
                 multi_agent_lines.append("- You may proactively delegate independent multi-step investigation or verification work to subagents.")
             else:
                 multi_agent_lines.append("- Do not proactively spawn agents unless the user explicitly requested agent delegation.")
+        task_lines = self._format_open_tasks_for_prompt(conversation)
         return RuntimePromptContext(
             name="main",
                 content="\n".join([
@@ -1256,10 +1312,115 @@ class ChatManager:
                     "- This is the primary persisted conversation branch.",
                     "- Use tools only when they are provided for this call and follow the active permission mode.",
                     *multi_agent_lines,
+                    *task_lines,
                     "- Preserve selected system prompt semantics: default core prompt, override custom prompt, or appended custom prompt.",
             ]),
             metadata={"runtime_mode": "main"},
         )
+
+    def _format_open_tasks_for_prompt(self, conversation: Optional[Conversation]) -> list[str]:
+        task_ledger = getattr(self, "task_ledger", None)
+        if conversation is None or task_ledger is None:
+            return []
+        conversation_id = str((conversation.metadata or {}).get("id") or "")
+        if not conversation_id:
+            return []
+        try:
+            tasks = task_ledger.list_open_tasks_snapshot(conversation_id, limit=8)
+        except Exception:
+            logger.exception("Failed to snapshot open tasks for prompt")
+            return []
+        if not tasks:
+            return []
+        lines = ["", "Open Tasks:"]
+        for task in tasks:
+            owner = f"{task.owner_type.value}"
+            if task.owner_run_id:
+                owner += f" {task.owner_run_id}"
+            evidence = f" blocked: {self._compact_task_text(task.evidence_summary, 90)}" if task.status == TaskStatus.BLOCKED and task.evidence_summary else ""
+            title = self._compact_task_text(task.title or task.detail or task.task_id, 120)
+            lines.append(f"- {task.task_id} [{task.status.value}] {title} (owner: {owner}){evidence}")
+        lines.extend([
+            "",
+            "TaskLedger rules:",
+            "- If you create a task, update it to completed, blocked, or cancelled.",
+            "- Before final response, all open tasks must be resolved or explicitly marked blocked with evidence.",
+        ])
+        return lines
+
+    @staticmethod
+    def _compact_task_text(value: Any, max_chars: int) -> str:
+        text = " ".join(str(value or "").split())
+        if len(text) <= max_chars:
+            return text
+        return text[: max(0, max_chars - 3)].rstrip() + "..."
+
+    @staticmethod
+    def _max_task_guard_nudges(config_data: Any) -> int:
+        if not isinstance(config_data, dict):
+            return 3
+        tasks_config = config_data.get("tasks", {})
+        if not isinstance(tasks_config, dict):
+            return 3
+        try:
+            return max(1, int(tasks_config.get("max_guard_nudges", 3)))
+        except (TypeError, ValueError):
+            return 3
+
+    async def _needs_task_completion_nudge(self, conversation_id: str, assistant_text: str) -> tuple[bool, list[TaskRecord]]:
+        task_ledger = getattr(self, "task_ledger", None)
+        if task_ledger is None or not conversation_id:
+            return False, []
+        try:
+            open_tasks = await task_ledger.list_open_tasks(conversation_id)
+        except Exception:
+            logger.exception("Failed to list open tasks for completion guard")
+            return False, []
+        if not open_tasks:
+            return False, []
+        for task in open_tasks:
+            if task.status != TaskStatus.BLOCKED:
+                return True, open_tasks
+            evidence = (task.evidence_summary or "").strip()
+            if not (task.evidence_run_id or evidence):
+                return True, open_tasks
+        return False, open_tasks
+
+    async def _has_open_tasks(self, conversation_id: str) -> bool:
+        task_ledger = getattr(self, "task_ledger", None)
+        if task_ledger is None or not conversation_id:
+            return False
+        try:
+            return bool(await task_ledger.list_open_tasks(conversation_id))
+        except Exception:
+            logger.exception("Failed to check open tasks for stream guard")
+            return False
+
+    def _task_completion_nudge(self, open_tasks: list[TaskRecord], *, attempt: int = 1) -> str:
+        task_lines = [
+            f"- {task.task_id} [{task.status.value}] {self._compact_task_text(task.title or task.detail, 120)}"
+            for task in open_tasks[:8]
+        ]
+        return "\n".join([
+            "<system-reminder>",
+            "Previous final response was discarded: TaskLedger still has unresolved work.",
+            "Continue the task. Use tools to complete open tasks, or mark them blocked with evidence before replying.",
+            f"Attempt: {attempt}",
+            "Open tasks:",
+            *task_lines,
+            "</system-reminder>",
+        ])
+
+    def _task_guard_blocked_message(self, open_tasks: list[TaskRecord]) -> str:
+        task_lines = [
+            f"- {task.task_id}: {self._compact_task_text(task.title or task.detail, 120)}"
+            for task in open_tasks[:8]
+        ]
+        return "\n".join([
+            "仍有未完成任务，当前无法直接给出最终回复。",
+            "需要先通过 TaskLedger 将任务标记为 completed、blocked 或 cancelled，并提供证据。",
+            *task_lines,
+        ])
 
     def _latest_user_content(self, conversation: Conversation) -> str:
         node = conversation.nodes.get(conversation.current_node_id or "")

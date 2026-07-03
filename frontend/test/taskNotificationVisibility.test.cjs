@@ -42,6 +42,7 @@ assert.deepEqual(getTaskNotificationSummary({
   "kind": "task_notification",
   "source_run_kind": "command",
   "source_status": "completed",
+  "task_id": "task_abc123",
   "original_slash_input": "/command npm run build",
   "content": "{\\"command\\":\\"npm run build -- --mode production\\",\\"stdout_tail\\":\\"build completed successfully\\\\n\\",\\"stderr_tail\\":\\"\\"}"
 }
@@ -53,6 +54,7 @@ assert.deepEqual(getTaskNotificationSummary({
   output: 'build completed successfully',
   status: '已完成',
   kind: '后台命令',
+  taskId: 'task_abc123',
 });
 assert.equal(shouldExportMessage({
   role: 'assistant',

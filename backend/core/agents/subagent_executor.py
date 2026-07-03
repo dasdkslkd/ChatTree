@@ -47,6 +47,7 @@ class SubagentExecutor:
         original_slash_input: Optional[str] = None,
         delivery_policy: str = "auto",
         context_mode: str = "fresh",
+        task_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         agent = self.capability_registry.get_agent(agent_name)
         if agent is None:
@@ -69,6 +70,7 @@ class SubagentExecutor:
                 "original_slash_input": original_slash_input,
                 "delivery_policy": delivery_policy,
                 "context_mode": context_mode if context_mode in {"fresh", "fork"} else "fresh",
+                "task_id": task_id,
             },
         )
         task = asyncio.create_task(self._produce(
@@ -365,6 +367,7 @@ class SubagentExecutor:
                             "conversation_id": conversation_id,
                             "node_id": run_id,
                             "agent_name": agent_name,
+                            "task_id": ((self.run_manager.get_run(run_id) or {}).get("metadata") or {}).get("task_id"),
                             "task_summary": str(input_data)[:160],
                         },
                     )
@@ -667,6 +670,7 @@ class SubagentExecutor:
                     "agent_name": metadata.get("agent_name") or event_payload.get("agent_name"),
                     "delegated_task": metadata.get("delegated_task"),
                     "original_slash_input": original_slash_input,
+                    "task_id": metadata.get("task_id"),
                 },
                 delivery_policy=delivery_policy,
             )
@@ -698,6 +702,7 @@ class SubagentExecutor:
                 "delegated_task": metadata.get("delegated_task"),
                 "original_slash_input": original_slash_input,
                 "mailbox_message_id": mailbox_message_id,
+                "task_id": metadata.get("task_id"),
             },
         )
         return item.to_dict()

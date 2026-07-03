@@ -503,6 +503,7 @@ class RunCommandTool(_CodeTool):
                 "command": {"type": "string"},
                 "cwd": {"type": "string", "default": "."},
                 "timeout_seconds": {"type": "integer", "minimum": 1},
+                "task_id": {"type": "string", "description": "Optional TaskLedger task id to bind this command run."},
             },
             "required": ["command"],
         }
@@ -528,7 +529,10 @@ class RunCommandTool(_CodeTool):
                 command=command,
                 cwd=cwd,
                 timeout=timeout,
-                runtime_context=runtime_context,
+                runtime_context={
+                    **runtime_context,
+                    "task_id": kwargs.get("task_id") or runtime_context.get("task_id"),
+                },
             )
         python_c_args = _windows_multiline_python_c_args(command)
         profile = ShellProfileResolver().resolve()
@@ -592,6 +596,7 @@ class RunCommandTool(_CodeTool):
                 "tool_call_id": runtime_context.get("tool_call_id"),
                 "workspace_relative_cwd": self.workspace.relative(cwd),
                 "run_command_managed": True,
+                "task_id": runtime_context.get("task_id"),
             },
         )
         run_id = str(run["run_id"])

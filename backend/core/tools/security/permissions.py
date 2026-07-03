@@ -186,7 +186,7 @@ class PermissionEngine:
 
     def _allow_reason(self, rule: PermissionRule) -> str:
         if rule.source == "default" and rule.target_type == "tool":
-            return f"Allowed by default built-in read tool rule {rule.id}"
+            return f"Allowed by default tool rule {rule.id}"
         return f"Allowed by rule {rule.id}"
 
 
@@ -208,6 +208,9 @@ def default_permission_rules() -> List[PermissionRule]:
         PermissionRule("default-allow-resume-agent", "allow", "tool", "resume_agent", source="default"),
         PermissionRule("default-allow-close-agent", "allow", "tool", "close_agent", source="default"),
         PermissionRule("default-allow-interrupt-agent", "allow", "tool", "interrupt_agent", source="default"),
+        PermissionRule("default-allow-create-task", "allow", "tool", "create_task", source="default"),
+        PermissionRule("default-allow-update-task", "allow", "tool", "update_task", source="default"),
+        PermissionRule("default-allow-list-tasks", "allow", "tool", "list_tasks", source="default"),
         PermissionRule("default-allow-list-files", "allow", "tool", "list_files", source="default"),
         PermissionRule("default-allow-read-file", "allow", "tool", "read_file", source="default"),
         PermissionRule("default-allow-search-files", "allow", "tool", "search_files", source="default"),

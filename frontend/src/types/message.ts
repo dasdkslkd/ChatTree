@@ -6,6 +6,10 @@ export interface GenerationInfo {
   error_message?: string | null;  // 错误信息
   tokens_used?: number;  // 使用的token数
   usage_info?: UsageInfo | null;
+  task_guard?: {
+    open_task_count?: number;
+    nudged?: boolean;
+  } | null;
 }
 
 export interface UsageInfo {

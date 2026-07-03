@@ -43,6 +43,7 @@ class WorkflowManager:
         delegated_task: Any = None,
         original_slash_input: Optional[str] = None,
         delivery_policy: str = "auto",
+        task_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         budget = {
             "max_seconds": 600,
@@ -63,6 +64,7 @@ class WorkflowManager:
                 "delegated_task": delegated_task if delegated_task is not None else script,
                 "original_slash_input": original_slash_input,
                 "delivery_policy": delivery_policy,
+                "task_id": task_id,
             },
         )
         task = asyncio.create_task(self._produce(
@@ -200,6 +202,7 @@ class WorkflowManager:
                     "event_type": event_payload.get("event_type"),
                     "delegated_task": metadata.get("delegated_task"),
                     "original_slash_input": original_slash_input,
+                    "task_id": metadata.get("task_id"),
                 },
                 delivery_policy=str(metadata.get("delivery_policy") or "auto"),
             )
@@ -220,6 +223,7 @@ class WorkflowManager:
                 "delegated_task": metadata.get("delegated_task"),
                 "original_slash_input": original_slash_input,
                 "mailbox_message_id": mailbox_message_id,
+                "task_id": metadata.get("task_id"),
             },
         )
         return item.to_dict()

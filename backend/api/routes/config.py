@@ -7,8 +7,10 @@ from ...core.capabilities.bootstrap import build_runtime_config_with_plugin_mcp
 from ...core.agents import AgentMailbox, AgentRuntime
 from ...core.config.config import Config, cfg
 from ...core.model.model_manager import ModelManager
+from ...core.tasks import TaskLedger
 from ...core.tools.orchestrator import ToolOrchestrator
 from ...core.tools.agent_tools import register_agent_management_tools
+from ...core.tools.task_tools import register_task_tools
 from ...core.tools.security.approval import ApprovalManager
 from ...core.tools.security.logical_sandbox import LogicalSandbox
 from ...core.tools.security.permissions import PermissionEngine
@@ -76,10 +78,20 @@ def _sync_runtime_managers(app, config_data: Dict[str, Any], model_manager, tool
         chat_manager.capability_registry = capability_registry
     subagent_executor = getattr(app.state, 'subagent_executor', None)
     run_manager = getattr(app.state, 'run_manager', None)
+    task_ledger = getattr(app.state, 'task_ledger', None)
+    if task_ledger is None:
+        task_ledger = TaskLedger()
+        app.state.task_ledger = task_ledger
+    if run_manager is not None:
+        task_ledger.install_run_finish_listener(run_manager)
+    if chat_manager is not None:
+        chat_manager.task_ledger = task_ledger
     command_executor = getattr(app.state, 'command_executor', None)
     if command_executor is None and run_manager is not None:
-        command_executor = CommandExecutor(run_manager)
+        command_executor = CommandExecutor(run_manager, task_ledger=task_ledger)
         app.state.command_executor = command_executor
+    elif command_executor is not None and hasattr(command_executor, "__dict__"):
+        command_executor.task_ledger = task_ledger
     tool_manager.command_executor = command_executor
     agent_mailbox = getattr(app.state, 'agent_mailbox', None)
     if agent_mailbox is None:
@@ -108,6 +120,7 @@ def _sync_runtime_managers(app, config_data: Dict[str, Any], model_manager, tool
             subagent_executor=subagent_executor,
             workflow_manager=workflow_manager,
             capability_registry=capability_registry,
+            task_ledger=task_ledger,
         )
         app.state.agent_runtime = agent_runtime
     elif agent_runtime is not None:
@@ -116,6 +129,7 @@ def _sync_runtime_managers(app, config_data: Dict[str, Any], model_manager, tool
         agent_runtime.subagent_executor = subagent_executor
         agent_runtime.workflow_manager = workflow_manager
         agent_runtime.capability_registry = capability_registry
+        agent_runtime.task_ledger = task_ledger
     if workflow_manager is not None:
         workflow_manager.agent_runtime = agent_runtime
     register_agent_management_tools(
@@ -124,6 +138,7 @@ def _sync_runtime_managers(app, config_data: Dict[str, Any], model_manager, tool
         subagent_executor=subagent_executor,
         workflow_manager=workflow_manager,
     )
+    register_task_tools(tool_manager, task_ledger)
 
 
 def _runtime_config_for_app(app, config_data: Dict[str, Any]) -> Dict[str, Any]:

@@ -1,5 +1,6 @@
 from pathlib import Path
 import asyncio
+import json
 import sys
 
 sys.path.insert(0, ".")
@@ -16,6 +17,7 @@ from backend.core.config.types import StreamChunk, StreamController, StreamStatu
 from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
 from backend.core.slash import SlashCommandDispatcher, SlashDispatchKind
+from backend.core.tasks import TaskLedger
 
 
 def make_manager(registry=None):
@@ -66,15 +68,17 @@ def test_chat_manager_build_prompt_messages_uses_unified_builder(tmp_path: Path)
     messages = manager._build_prompt_messages(conversation, ["review"])
 
     assert messages[0]["content"] == "base system"
-    assert "## Available Capabilities" in messages[1]["content"]
-    assert "<name>review</name>" in messages[2]["content"]
-    assert "检查代码" in messages[2]["content"]
+    contents = [str(message.get("content") or "") for message in messages]
+    assert any("## Available Capabilities" in content for content in contents)
+    assert any("<name>review</name>" in content for content in contents)
+    assert any("检查代码" in content for content in contents)
 
 
 class CapturingProvider:
     def __init__(self):
         self.messages = None
         self.kwargs = None
+        self.calls = []
 
     async def generate_response_stream(
         self,
@@ -85,6 +89,7 @@ class CapturingProvider:
     ):
         self.messages = messages
         self.kwargs = kwargs
+        self.calls.append({"messages": messages, "kwargs": kwargs})
         yield StreamChunk(
             status=StreamStatus.CONTENT,
             content="ok",
@@ -122,6 +127,109 @@ class CapturingModelManager:
 
     def get_model_metadata(self, provider_id, model_name):
         return {}
+
+
+class FakeToolManager:
+    def __init__(self, task_ledger=None):
+        self.task_ledger = task_ledger
+
+    def get_openai_tools(self, include_disabled=False):
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "update_task",
+                    "description": "Update a task",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+
+    async def execute_tool(self, name, arguments, workspace=None, runtime_context=None):
+        if name == "update_task" and self.task_ledger is not None:
+            task = await self.task_ledger.update_task(
+                conversation_id=runtime_context["conversation_id"],
+                task_id=arguments["task_id"],
+                status=arguments.get("status"),
+                evidence_summary=arguments.get("evidence_summary"),
+                evidence_run_id=runtime_context.get("run_id"),
+            )
+            return json.dumps({"task_id": task.task_id, "status": task.status.value}, ensure_ascii=False)
+        return json.dumps({"ok": True}, ensure_ascii=False)
+
+
+class ResolvingAfterGuardProvider(CapturingProvider):
+    def __init__(self, task_id):
+        super().__init__()
+        self.task_id = task_id
+
+    async def generate_response_stream(
+        self,
+        model,
+        messages,
+        stream_controller: StreamController = None,
+        **kwargs,
+    ):
+        self.messages = messages
+        self.kwargs = kwargs
+        self.calls.append({"messages": list(messages), "kwargs": kwargs})
+        call_number = len(self.calls)
+        if call_number < 3:
+            yield StreamChunk(
+                status=StreamStatus.CONTENT,
+                content=f"premature final {call_number}",
+                node_id=stream_controller.node_id,
+                conversation_id=stream_controller.conversation_id,
+                error=None,
+                tokens_used=1,
+            )
+        elif call_number == 3:
+            yield StreamChunk(
+                status=StreamStatus.CONTENT,
+                content="",
+                node_id=stream_controller.node_id,
+                conversation_id=stream_controller.conversation_id,
+                error=None,
+                tokens_used=1,
+                tool_calls=[
+                    {
+                        "id": "call_update_task",
+                        "type": "function",
+                        "function": {
+                            "name": "update_task",
+                            "arguments": json.dumps({
+                                "task_id": self.task_id,
+                                "status": "completed",
+                                "evidence_summary": "resolved after TaskLedger reminder",
+                            }),
+                        },
+                    }
+                ],
+            )
+        else:
+            yield StreamChunk(
+                status=StreamStatus.CONTENT,
+                content="task resolved",
+                node_id=stream_controller.node_id,
+                conversation_id=stream_controller.conversation_id,
+                error=None,
+                tokens_used=1,
+            )
+        yield StreamChunk(
+            status=StreamStatus.COMPLETE,
+            content=None,
+            node_id=stream_controller.node_id,
+            conversation_id=stream_controller.conversation_id,
+            error=None,
+            tokens_used=1,
+            usage_info={
+                "input_tokens": 1,
+                "output_tokens": 0,
+                "total_tokens": 1,
+                "source": "test",
+                "raw": {},
+            },
+        )
 
 
 async def collect_chunks(stream):
@@ -162,11 +270,90 @@ def test_send_message_stream_expands_review_slash_prompt(tmp_path: Path):
         for message in model_manager.provider.messages
         if message.get("role") == "user"
     ]
-    assert "Review focus on auth" in sent_user_messages[-1]["content"]
+    assert "Review target: focus on auth" in sent_user_messages[-1]["content"]
     reloaded = manager.get_conversation(conversation.metadata["id"])
     current = reloaded.nodes[reloaded.current_node_id]
     assert current["user_message"]["slash_command"]["command"] == "review"
     assert current["user_message"]["slash_command"]["original_input"] == "/review focus on auth"
+
+
+def test_send_message_stream_task_guard_suppresses_unresolved_final_text(tmp_path: Path):
+    manager, _model_manager = make_stream_manager(tmp_path)
+    task_ledger = TaskLedger()
+    manager.task_ledger = task_ledger
+    conversation = manager.create_conversation("task guard")
+    asyncio.run(task_ledger.create_task(
+        conversation_id=conversation.metadata["id"],
+        title="未完成任务",
+    ))
+
+    chunks = asyncio.run(
+        collect_chunks(
+            manager.send_message_stream(
+                conversation.metadata["id"],
+                "直接回答",
+                model_id="fake-model",
+            )
+        )
+    )
+
+    content_chunks = [chunk.get("content") for chunk in chunks if chunk.get("content")]
+    assert "ok" not in content_chunks
+    assert any("仍有未完成任务" in str(content) for content in content_chunks)
+    reloaded = manager.get_conversation(conversation.metadata["id"])
+    assistant = reloaded.nodes[reloaded.current_node_id]["assistant_message"]
+    assert "仍有未完成任务" in assistant["content"]
+    assert assistant["generation_info"]["task_guard"]["open_task_count"] == 1
+
+
+def test_send_message_stream_task_guard_continues_after_tool_retry(tmp_path: Path):
+    manager, model_manager = make_stream_manager(tmp_path)
+    task_ledger = TaskLedger()
+    manager.tool_manager = FakeToolManager(task_ledger)
+    manager.task_ledger = task_ledger
+    conversation = manager.create_conversation("task guard retry")
+    task = asyncio.run(task_ledger.create_task(
+        conversation_id=conversation.metadata["id"],
+        title="仍未完成",
+    ))
+    model_manager.provider = ResolvingAfterGuardProvider(task.task_id)
+
+    chunks = asyncio.run(
+        collect_chunks(
+            manager.send_message_stream(
+                conversation.metadata["id"],
+                "直接回答",
+                model_id="fake-model",
+            )
+        )
+    )
+
+    assert len(model_manager.provider.calls) == 4
+    content_chunks = [chunk.get("content") for chunk in chunks if chunk.get("content")]
+    assert "premature final 1" not in content_chunks
+    assert "premature final 2" not in content_chunks
+    assert not any("仍有未完成任务" in str(content) for content in content_chunks)
+    assert "task resolved" in content_chunks
+    assert any(
+        message.get("role") == "system"
+        and "<system-reminder>" in str(message.get("content") or "")
+        and "TaskLedger" in str(message.get("content") or "")
+        for call in model_manager.provider.calls
+        for message in call["messages"]
+    )
+    reminder_text = "\n".join(
+        str(message.get("content") or "")
+        for call in model_manager.provider.calls
+        for message in call["messages"]
+        if message.get("role") == "system" and "<system-reminder>" in str(message.get("content") or "")
+    )
+    assert "Previous final response was discarded: TaskLedger still has unresolved work." in reminder_text
+    assert "Use tools to complete open tasks, or mark them blocked with evidence before replying." in reminder_text
+    assert "Use the available tools to inspect, run commands, delegate, or update TaskLedger." not in reminder_text
+    reloaded = manager.get_conversation(conversation.metadata["id"])
+    assistant = reloaded.nodes[reloaded.current_node_id]["assistant_message"]
+    assert assistant["content"] == "task resolved"
+    assert assistant["generation_info"]["task_guard"]["nudged"] is True
 
 
 def test_send_message_stream_btw_runs_isolated_side_question_without_tools(tmp_path: Path):
@@ -215,8 +402,8 @@ def test_send_message_stream_btw_runs_isolated_side_question_without_tools(tmp_p
     full_prompt = "\n\n".join(str(message.get("content") or "") for message in model_manager.provider.messages)
     assert "## Available Capabilities" not in full_prompt
     assert "This injected skill mentions run_command" not in full_prompt
-    assert "separate, lightweight agent" in sent_user_messages[-1]["content"]
-    assert "NO tools available" in sent_user_messages[-1]["content"]
+    assert "Claude Code-style side question" in sent_user_messages[-1]["content"]
+    assert "Do not call tools" in sent_user_messages[-1]["content"]
     assert "what changed here?" in sent_user_messages[-1]["content"]
     reloaded = manager.get_conversation(conversation.metadata["id"])
     assert reloaded.current_node_id == original_current_node_id

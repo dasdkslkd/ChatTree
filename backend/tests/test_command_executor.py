@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 from backend.api.routes.run_control import stop_run_tree
 from backend.core.command_runtime import CommandExecutor
 from backend.core.runs import RunKind, RunManager, RunStatus
+from backend.core.tasks import TaskLedger, TaskStatus
 from backend.core.tools.code_tools import CodeToolConfig, RunCommandTool
 from backend.core.tools.command_tools import (
     ReadCommandTool,
@@ -257,6 +258,116 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("terminal_run_id", payload)
             self.assertIn("hello-command", payload["stdout_tail"])
             self.assertEqual(seen_notifications, ["conv_1"])
+
+    async def test_background_command_auto_creates_task_for_standalone_notification(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_manager = RunManager()
+            task_ledger = TaskLedger()
+            task_ledger.install_run_finish_listener(run_manager)
+            command_executor = CommandExecutor(run_manager, task_ledger=task_ledger)
+
+            run = await command_executor.start(
+                conversation_id="conv_1",
+                command=f"{sys.executable} -c \"print('task-command')\"",
+                cwd=tmpdir,
+                anchor_node_id="node_1",
+                summary="task command",
+            )
+            await command_executor.wait(run["run_id"], timeout=5)
+
+            tasks = await task_ledger.list_tasks("conv_1")
+            self.assertEqual(len(tasks), 1)
+            self.assertEqual(tasks[0].owner_run_id, run["run_id"])
+            self.assertEqual(tasks[0].status, TaskStatus.COMPLETED)
+            record = run_manager.get_run(run["run_id"])
+            self.assertEqual(record["metadata"]["task_id"], tasks[0].task_id)
+            pending = run_manager.synthetic_inputs.list_pending("conv_1")
+            self.assertEqual(pending[0]["metadata"]["task_id"], tasks[0].task_id)
+
+    async def test_command_binds_existing_task_id_from_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_manager = RunManager()
+            task_ledger = TaskLedger()
+            task_ledger.install_run_finish_listener(run_manager)
+            command_executor = CommandExecutor(run_manager, task_ledger=task_ledger)
+            task = await task_ledger.create_task(
+                conversation_id="conv_1",
+                title="已有命令任务",
+                created_by_run_id="chat-run-1",
+            )
+
+            run = await command_executor.start(
+                conversation_id="conv_1",
+                command=f"{sys.executable} -c \"print('bound-command')\"",
+                cwd=tmpdir,
+                anchor_node_id="node_1",
+                metadata={"task_id": task.task_id},
+            )
+            await command_executor.wait(run["run_id"], timeout=5)
+
+            updated = await task_ledger.get_task("conv_1", task.task_id)
+            self.assertEqual(updated.owner_run_id, run["run_id"])
+            self.assertEqual(updated.status, TaskStatus.COMPLETED)
+
+    async def test_command_rejects_missing_task_id_before_creating_run(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_manager = RunManager()
+            task_ledger = TaskLedger()
+            command_executor = CommandExecutor(run_manager, task_ledger=task_ledger)
+
+            with self.assertRaises(Exception):
+                await command_executor.start(
+                    conversation_id="conv_1",
+                    command=f"{sys.executable} -c \"print('no-run')\"",
+                    cwd=tmpdir,
+                    anchor_node_id="node_1",
+                    metadata={"task_id": "task_missing"},
+                )
+
+            self.assertEqual(run_manager.list_runs("conv_1"), [])
+
+    async def test_command_tools_pass_explicit_task_id(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_manager = RunManager()
+            task_ledger = TaskLedger()
+            task_ledger.install_run_finish_listener(run_manager)
+            command_executor = CommandExecutor(run_manager, task_ledger=task_ledger)
+            task = await task_ledger.create_task(conversation_id="conv_1", title="命令任务")
+            config = CodeToolConfig.from_dict({
+                "workspace_roots": [tmpdir],
+                "command_timeout_seconds": 10,
+                "run_command_initial_wait_seconds": 5,
+            })
+
+            result = json.loads(await RunCommandTool(config).execute(
+                command=f"{sys.executable} -c \"print('explicit-task')\"",
+                task_id=task.task_id,
+                _runtime_context={
+                    "conversation_id": "conv_1",
+                    "node_id": "node_1",
+                    "run_id": "chat-run-1",
+                    "command_executor": command_executor,
+                },
+            ))
+
+            updated = await task_ledger.get_task("conv_1", task.task_id)
+            self.assertEqual(updated.owner_run_id, result["run_id"])
+            self.assertEqual(updated.status, TaskStatus.COMPLETED)
+
+            other = await task_ledger.create_task(conversation_id="conv_1", title="后台命令任务")
+            started = json.loads(await StartBackgroundCommandTool(config).execute(
+                command=f"{sys.executable} -c \"import time; time.sleep(0.1); print('background-task')\"",
+                task_id=other.task_id,
+                _runtime_context={
+                    "conversation_id": "conv_1",
+                    "node_id": "node_1",
+                    "run_id": "chat-run-1",
+                    "command_executor": command_executor,
+                },
+            ))
+            await command_executor.wait(started["run_id"], timeout=5)
+            other_updated = await task_ledger.get_task("conv_1", other.task_id)
+            self.assertEqual(other_updated.owner_run_id, started["run_id"])
 
     async def test_wait_command_marks_final_result_observed_and_suppresses_notification(self):
         with tempfile.TemporaryDirectory() as tmpdir:

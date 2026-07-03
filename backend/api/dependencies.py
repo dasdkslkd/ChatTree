@@ -89,6 +89,20 @@ def get_run_manager(request: Request):
         raise HTTPException(status_code=500, detail=f"依赖注入错误: {str(e)}")
 
 
+def get_task_ledger(request: Request):
+    """获取 TaskLedger"""
+    try:
+        if not hasattr(request.app.state, 'task_ledger'):
+            logger.error("❌ task_ledger 未在 app.state 中初始化")
+            raise HTTPException(status_code=500, detail="TaskLedger 未初始化")
+        return request.app.state.task_ledger
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ 获取 task_ledger 失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"依赖注入错误: {str(e)}")
+
+
 def get_subagent_executor(request: Request):
     """获取 Subagent 执行器"""
     try:

@@ -110,6 +110,14 @@ class SpawnAgentTool(AgentRuntimeTool):
                     "enum": ["auto", "wait", "notify", "both"],
                     "description": "auto lets the runtime choose; wait means call wait_agent; notify delivers completion asynchronously.",
                 },
+                "task_id": {
+                    "type": "string",
+                    "description": "Optional existing TaskLedger task id to bind to the spawned agent.",
+                },
+                "auto_create_task": {
+                    "type": "boolean",
+                    "description": "Whether to create and bind a TaskLedger task when task_id is omitted. Defaults to true.",
+                },
             },
             "required": ["agent_name", "task"],
         }
@@ -133,6 +141,8 @@ class SpawnAgentTool(AgentRuntimeTool):
                 model_id=context.get("model_id"),
                 permission_mode=_context_permission_mode(context),
                 workspace=context.get("workspace"),
+                task_id=str(kwargs.get("task_id") or "") or None,
+                auto_create_task=bool(kwargs.get("auto_create_task", True)),
             )
             return json.dumps(result, ensure_ascii=False)
         except Exception as exc:
@@ -390,6 +400,14 @@ class StartSubagentTool(BaseTool):
                     "type": "string",
                     "description": "Role agent to use. Common roles: explorer, planner, implementer, reviewer, verifier.",
                 },
+                "task_id": {
+                    "type": "string",
+                    "description": "Optional existing TaskLedger task id to bind to the spawned agent.",
+                },
+                "auto_create_task": {
+                    "type": "boolean",
+                    "description": "Whether to create and bind a TaskLedger task when task_id is omitted. Defaults to true.",
+                },
             },
             "required": ["task"],
         }
@@ -414,6 +432,8 @@ class StartSubagentTool(BaseTool):
                 model_id=context.get("model_id"),
                 permission_mode=_context_permission_mode(context),
                 workspace=context.get("workspace"),
+                task_id=str(kwargs.get("task_id") or "") or None,
+                auto_create_task=bool(kwargs.get("auto_create_task", True)),
             )
             result["replacement_tool"] = "spawn_agent"
             return json.dumps(result, ensure_ascii=False)
@@ -463,6 +483,11 @@ class StartWorkflowTool(BaseTool):
             "properties": {
                 "script": {"type": "string", "description": "Dynamic workflow JavaScript script body to run."},
                 "args": {"type": "object", "description": "Optional workflow arguments object."},
+                "task_id": {"type": "string", "description": "Optional existing TaskLedger task id to bind to the workflow."},
+                "auto_create_task": {
+                    "type": "boolean",
+                    "description": "Whether to create and bind a TaskLedger task when task_id is omitted. Defaults to true.",
+                },
             },
             "required": ["script"],
         }
@@ -482,6 +507,8 @@ class StartWorkflowTool(BaseTool):
                 args=args,
                 delivery_policy="auto",
                 permission_mode=_context_permission_mode(context),
+                task_id=str(kwargs.get("task_id") or "") or None,
+                auto_create_task=bool(kwargs.get("auto_create_task", True)),
             )
         elif self._workflow_manager is not None:
             run = await self._workflow_manager.start(
@@ -500,6 +527,7 @@ class StartWorkflowTool(BaseTool):
             "run_id": run.get("run_id"),
             "kind": run.get("kind", "workflow"),
             "status": run.get("status"),
+            "task_id": run.get("task_id"),
             "replacement_tool": "spawn_agent",
             "message": "Workflow started. Its result will be delivered back to this conversation when complete.",
         }, ensure_ascii=False)
