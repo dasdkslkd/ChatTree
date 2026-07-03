@@ -57,13 +57,20 @@ class PromptCatalogTests(unittest.TestCase):
     def test_core_prompt_defines_terminal_tool_boundaries(self):
         text = load_prompt_template("core")
         self.assertIn("run_command", text)
-        self.assertIn("start_terminal", text)
-        self.assertIn("wait_terminal", text)
-        self.assertIn("Use `run_command` for short synchronous commands", text)
-        self.assertIn("Use `start_terminal` only for true background terminal work", text)
-        self.assertIn("Use `wait_terminal` only when the current answer must join", text)
-        self.assertIn("If the user explicitly asked for a background terminal and that terminal fails", text)
-        self.assertIn("do not describe the final result as completed by the background terminal", text)
+        self.assertIn("start_background_command", text)
+        self.assertIn("wait_command", text)
+        self.assertIn("Legacy command and terminal names", text)
+        self.assertIn("Use `run_command` for command execution that should start foreground", text)
+        self.assertIn("Use `start_background_command` only for true background command work", text)
+        self.assertIn("Use `wait_command` only when the current answer must join", text)
+        self.assertIn("auto-background", text)
+        self.assertIn("If the user explicitly asked for a background command or terminal and it fails", text)
+        self.assertIn("do not describe the final result as completed by the background run", text)
+
+    def test_core_prompt_distinguishes_fresh_subagents_from_forks(self):
+        text = load_prompt_template("core")
+        self.assertIn("Fresh subagents start without the current conversation context", text)
+        self.assertIn("A fork inherits the current conversation context", text)
 
     def test_side_prompt_is_not_registered(self):
         self.assertNotIn("side", PROMPT_SOURCES)

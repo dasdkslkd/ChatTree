@@ -80,6 +80,7 @@ export function summarizeToolCall(toolName: string, rawArguments: unknown): stri
   const args = normalizeToolArgs(name, rawArguments);
   const path = stringArg(args, 'path');
   const command = stringArg(args, 'command');
+  const commandRunId = stringArg(args, 'command_run_id') || stringArg(args, 'terminal_run_id');
   const query = stringArg(args, 'query');
 
   switch (name) {
@@ -97,6 +98,19 @@ export function summarizeToolCall(toolName: string, rawArguments: unknown): stri
       return summarizePatch(args);
     case 'run_command':
       return command ? `运行 ${compact(command, 80)}` : '运行命令';
+    case 'start_background_command':
+    case 'start_command':
+    case 'start_terminal':
+      return command ? `后台运行 ${compact(command, 80)}` : '后台运行命令';
+    case 'read_command':
+    case 'read_terminal':
+      return commandRunId ? `读取命令 ${commandRunId}` : '读取命令';
+    case 'wait_command':
+    case 'wait_terminal':
+      return commandRunId ? `等待命令 ${commandRunId}` : '等待命令';
+    case 'stop_command':
+    case 'stop_terminal':
+      return commandRunId ? `停止命令 ${commandRunId}` : '停止命令';
     case 'web_search':
       return query ? `搜索网页 "${compact(query, 60)}"` : '搜索网页';
     case 'fetch_url':
@@ -133,7 +147,7 @@ function normalizeToolArgs(toolName: string, rawArguments: unknown): Record<stri
 }
 
 function compactRecordForTool(toolName: string, value: string): Record<string, unknown> {
-  if (toolName === 'run_command') return { command: value };
+  if (toolName === 'run_command' || toolName === 'start_background_command' || toolName === 'start_command' || toolName === 'start_terminal') return { command: value };
   if (toolName === 'read_file' || toolName === 'list_files') return { path: value };
   if (toolName === 'search_files' || toolName === 'web_search') return { query: value };
   if (toolName === 'apply_patch') return { patch: value };

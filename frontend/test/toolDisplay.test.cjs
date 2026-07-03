@@ -195,6 +195,14 @@ function testSummarizesCommonToolCalls() {
     '运行 pytest -q',
   );
   assert.equal(
+    summarizeToolCall('start_background_command', '{"command":"npm run dev"}'),
+    '后台运行 npm run dev',
+  );
+  assert.equal(
+    summarizeToolCall('wait_command', '{"command_run_id":"run-terminal-1"}'),
+    '等待命令 run-terminal-1',
+  );
+  assert.equal(
     summarizeToolCall('edit_file', '{"path":"a.py","old_string":"x","new_string":"y"}'),
     '编辑 a.py · 精确替换',
   );
@@ -225,6 +233,10 @@ function testSummarizesPatchAndCompactArguments() {
   assert.equal(
     summarizeToolCall('run_command', 'pytest test/test_code_tools.py -q'),
     '运行 pytest test/test_code_tools.py -q',
+  );
+  assert.equal(
+    summarizeToolCall('start_background_command', 'npm run dev'),
+    '后台运行 npm run dev',
   );
 }
 

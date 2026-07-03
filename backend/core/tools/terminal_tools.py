@@ -28,6 +28,10 @@ def _missing_executor() -> str:
     return _json({"error": {"type": "missing_terminal_executor", "message": "Terminal executor is not available"}})
 
 
+def _terminal_run_id(kwargs: Dict[str, Any]) -> str:
+    return str(kwargs.get("command_run_id") or kwargs.get("terminal_run_id") or "")
+
+
 class WaitTerminalTool(BaseTool):
     @property
     def name(self) -> str:
@@ -56,7 +60,7 @@ class WaitTerminalTool(BaseTool):
         executor = _terminal_executor(kwargs)
         if executor is None:
             return _missing_executor()
-        run_id = str(kwargs.get("terminal_run_id") or "")
+        run_id = _terminal_run_id(kwargs)
         if not run_id:
             return _json({"error": {"type": "invalid_arguments", "message": "terminal_run_id is required"}})
         timeout = max(1, min(int(kwargs.get("timeout_seconds") or 30), 3600))
@@ -143,15 +147,54 @@ class StartTerminalTool(BaseTool):
                 "workspace_relative_cwd": self.workspace.relative(cwd),
             },
         )
+        if self.name in {"start_background_command", "start_command"}:
+            message = (
+                "Command is running in the background as a managed side run. "
+                "Use read_command to inspect it, wait_command only when this answer must join the result, "
+                "or stop_command to cancel it."
+            )
+        else:
+            message = (
+                "Terminal command is running in the background. "
+                "Use read_terminal to inspect it, wait_terminal only when this answer must join the result, "
+                "or stop_terminal to cancel it."
+            )
         return _json({
             "command": command,
             "cwd": self.workspace.relative(cwd),
             "status": "running",
             "kind": "terminal",
+            "command_run_id": run["run_id"],
             "terminal_run_id": run["run_id"],
             "run_id": run["run_id"],
-            "message": "Terminal command is running in the background. Use read_terminal to inspect it, wait_terminal only when this answer must join the result, or stop_terminal to cancel it.",
+            "message": message,
         })
+
+
+class StartBackgroundCommandTool(StartTerminalTool):
+    @property
+    def name(self) -> str:
+        return "start_background_command"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Start a true background command in the code workspace and return a command_run_id immediately. "
+            "Use run_command for foreground command execution; it auto-backgrounds commands that keep running past the initial wait window."
+        )
+
+
+class StartCommandTool(StartBackgroundCommandTool):
+    @property
+    def name(self) -> str:
+        return "start_command"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Compatibility alias for start_background_command. "
+            "Prefer start_background_command for new true background command work."
+        )
 
 
 class ReadTerminalTool(BaseTool):
@@ -180,7 +223,7 @@ class ReadTerminalTool(BaseTool):
         executor = _terminal_executor(kwargs)
         if executor is None:
             return _missing_executor()
-        run_id = str(kwargs.get("terminal_run_id") or "")
+        run_id = _terminal_run_id(kwargs)
         if not run_id:
             return _json({"error": {"type": "invalid_arguments", "message": "terminal_run_id is required"}})
         snapshot = executor.snapshot(run_id)
@@ -220,10 +263,78 @@ class StopTerminalTool(BaseTool):
         executor = _terminal_executor(kwargs)
         if executor is None:
             return _missing_executor()
-        run_id = str(kwargs.get("terminal_run_id") or "")
+        run_id = _terminal_run_id(kwargs)
         if not run_id:
             return _json({"error": {"type": "invalid_arguments", "message": "terminal_run_id is required"}})
         stopped = await executor.stop(run_id)
         snapshot = executor.snapshot(run_id) or {"terminal_run_id": run_id}
+        snapshot["command_run_id"] = run_id
         snapshot["stopped"] = bool(stopped)
         return _json(snapshot)
+
+
+class WaitCommandTool(WaitTerminalTool):
+    @property
+    def name(self) -> str:
+        return "wait_command"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Join a managed background command and return its final status and output. "
+            "Use this only when the current answer must consume the command result; final results are marked observed."
+        )
+
+    def parameters_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "command_run_id": {"type": "string"},
+                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600, "default": 30},
+            },
+            "required": ["command_run_id"],
+        }
+
+
+class ReadCommandTool(ReadTerminalTool):
+    @property
+    def name(self) -> str:
+        return "read_command"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Read stdout, stderr, status, and metadata for a managed command without blocking. "
+            "A final read marks the command result observed and suppresses later task notification."
+        )
+
+    def parameters_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "command_run_id": {"type": "string"},
+            },
+            "required": ["command_run_id"],
+        }
+
+
+class StopCommandTool(StopTerminalTool):
+    @property
+    def name(self) -> str:
+        return "stop_command"
+
+    @property
+    def description(self) -> str:
+        return "Stop a running managed background command."
+
+    def parameters_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "command_run_id": {"type": "string"},
+            },
+            "required": ["command_run_id"],
+        }

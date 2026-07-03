@@ -149,6 +149,7 @@ class TerminalExecutor:
         stderr = "".join(stderr_parts)
         return {
             "terminal_run_id": run_id,
+            "command_run_id": run_id,
             "run_id": run_id,
             "status": run.get("status"),
             "terminal_status": terminal_status,

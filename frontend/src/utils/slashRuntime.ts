@@ -62,10 +62,18 @@ export interface RunDraftLike {
   workflowEvents?: unknown[] | null;
   terminal?: { stdout?: string | null; stderr?: string | null; events?: unknown[] | null } | null;
   pendingApprovals?: Record<string, { status?: string | null } | null | undefined> | null;
+  metadata?: Record<string, unknown> | null;
 }
 
 export function shouldRenderRunDraft(run: RunDraftLike): boolean {
   if (run.kind === 'chat' || run.kind === 'side_question' || run.kind === 'direct_response') return true;
+  if (
+    run.kind === 'terminal'
+    && ['completed', 'failed', 'cancelled', 'stopped', 'error'].includes(run.status)
+    && run.metadata?.terminal_notification_state === 'observed'
+  ) {
+    return false;
+  }
   if (run.kind === 'terminal' && (run.status === 'streaming' || run.status === 'stopping')) return true;
   if (run.kind === 'subagent' && (run.status === 'streaming' || run.status === 'waiting_approval' || run.status === 'stopping')) return true;
   if (run.pendingUserMessage) return true;

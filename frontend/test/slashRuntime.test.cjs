@@ -180,6 +180,33 @@ function testWorkflowEventsRenderAsDraftState() {
   })), true);
 }
 
+function testObservedCompletedTerminalDoesNotRenderAsDraftState() {
+  assert.equal(shouldRenderRunDraft(run({
+    kind: 'terminal',
+    status: 'completed',
+    terminal: { stdout: 'short command output\n', stderr: '', events: [] },
+    metadata: { terminal_notification_state: 'observed' },
+  })), false);
+}
+
+function testObservedFailedTerminalDoesNotRenderAsDraftState() {
+  assert.equal(shouldRenderRunDraft(run({
+    kind: 'terminal',
+    status: 'failed',
+    terminal: { stdout: '', stderr: 'command failed\n', events: [] },
+    metadata: { terminal_notification_state: 'observed' },
+  })), false);
+}
+
+function testObservedCancelledTerminalDoesNotRenderAsDraftState() {
+  assert.equal(shouldRenderRunDraft(run({
+    kind: 'terminal',
+    status: 'cancelled',
+    terminal: { stdout: 'stopped\n', stderr: '', events: [] },
+    metadata: { terminal_notification_state: 'observed' },
+  })), false);
+}
+
 testNonBlockingSlashDoesNotQueueBehindMainChat();
 testBlockingSlashStillQueuesBehindMainChat();
 testPlainMessageQueuesBehindMainChat();
@@ -198,5 +225,8 @@ testSidePanelRunLabelsUseSlashNames();
 testUnknownBackgroundRunWithoutTranscriptStateDoesNotRenderAsDraft();
 testBackgroundWorkflowWithoutTranscriptStateDoesNotRenderAsDraft();
 testWorkflowEventsRenderAsDraftState();
+testObservedCompletedTerminalDoesNotRenderAsDraftState();
+testObservedFailedTerminalDoesNotRenderAsDraftState();
+testObservedCancelledTerminalDoesNotRenderAsDraftState();
 
 console.log('slashRuntime tests passed');

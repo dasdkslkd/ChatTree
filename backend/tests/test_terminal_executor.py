@@ -10,7 +10,18 @@ from unittest.mock import AsyncMock, patch
 from backend.core.runs import RunKind, RunManager, RunStatus
 from backend.core.terminal import TerminalExecutor
 from backend.core.tools.code_tools import CodeToolConfig, RunCommandTool
-from backend.core.tools.terminal_tools import ReadTerminalTool, StartTerminalTool, StopTerminalTool, WaitTerminalTool
+from backend.core.tools.terminal_tools import (
+    ReadCommandTool,
+    ReadTerminalTool,
+    StartBackgroundCommandTool,
+    StartCommandTool,
+    StartTerminalTool,
+    StopCommandTool,
+    StopTerminalTool,
+    WaitCommandTool,
+    WaitTerminalTool,
+)
+from backend.core.tools.tool_manager import ToolManager
 from backend.api.routes.run_control import stop_run_tree
 
 
@@ -28,8 +39,174 @@ class TerminalExecutorTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertIn("synchronous", run_tool.description)
             self.assertIn("compatibility alias", background_description)
-            self.assertIn("start_terminal", background_description)
+            self.assertIn("start_background_command", background_description)
+            self.assertIn("auto-background", run_tool.description)
             self.assertIn("true background terminal", start_tool.description)
+
+    async def test_run_command_short_managed_command_returns_sync_output_and_suppresses_notification(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_manager = RunManager()
+            terminal = TerminalExecutor(run_manager)
+            parent = await run_manager.create_run(
+                conversation_id="conv_1",
+                kind=RunKind.CHAT,
+                anchor_node_id="node_1",
+                target_node_id="node_2",
+            )
+            tool = RunCommandTool(CodeToolConfig.from_dict({
+                "workspace_roots": [tmpdir],
+                "command_timeout_seconds": 10,
+                "run_command_initial_wait_seconds": 5,
+            }))
+
+            raw = await tool.execute(
+                command=f"{sys.executable} -c \"print('managed-short')\"",
+                cwd=".",
+                _runtime_context={
+                    "conversation_id": "conv_1",
+                    "node_id": "node_1",
+                    "run_id": parent.run_id,
+                    "terminal_executor": terminal,
+                },
+            )
+            payload = json.loads(raw)
+            await run_manager.finish_run(parent.run_id, RunStatus.COMPLETED)
+
+            self.assertEqual(payload["exit_code"], 0)
+            self.assertEqual(payload["timed_out"], False)
+            self.assertEqual(payload["background"], False)
+            self.assertIn("managed-short", payload["stdout"])
+            self.assertIn("command_run_id", payload)
+            self.assertEqual(run_manager.synthetic_inputs.list_pending("conv_1"), [])
+
+    async def test_run_command_short_managed_command_truncates_output(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_manager = RunManager()
+            terminal = TerminalExecutor(run_manager)
+            tool = RunCommandTool(CodeToolConfig.from_dict({
+                "workspace_roots": [tmpdir],
+                "command_timeout_seconds": 10,
+                "run_command_initial_wait_seconds": 5,
+                "max_output_chars": 20,
+            }))
+
+            raw = await tool.execute(
+                command=f"{sys.executable} -c \"import sys; print('x' * 200); sys.stderr.write('y' * 200)\"",
+                cwd=".",
+                _runtime_context={
+                    "conversation_id": "conv_1",
+                    "node_id": "node_1",
+                    "run_id": "parent_run_1",
+                    "terminal_executor": terminal,
+                },
+            )
+            payload = json.loads(raw)
+
+            self.assertEqual(payload["exit_code"], 0)
+            self.assertEqual(len(payload["stdout"]), 20)
+            self.assertEqual(len(payload["stderr"]), 20)
+            self.assertEqual(payload["stdout"], "x" * 20)
+            self.assertEqual(payload["stderr"], "y" * 20)
+
+    async def test_run_command_long_managed_command_auto_backgrounds(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_manager = RunManager()
+            terminal = TerminalExecutor(run_manager)
+            tool = RunCommandTool(CodeToolConfig.from_dict({
+                "workspace_roots": [tmpdir],
+                "command_timeout_seconds": 10,
+                "run_command_initial_wait_seconds": 0.1,
+            }))
+
+            raw = await tool.execute(
+                command=f"{sys.executable} -c \"import time; print('managed-started', flush=True); time.sleep(30)\"",
+                cwd=".",
+                _runtime_context={
+                    "conversation_id": "conv_1",
+                    "node_id": "node_1",
+                    "run_id": "parent_run_1",
+                    "terminal_executor": terminal,
+                },
+            )
+            payload = json.loads(raw)
+
+            self.assertEqual(payload["status"], "running")
+            self.assertEqual(payload["kind"], RunKind.TERMINAL.value)
+            self.assertEqual(payload["background"], True)
+            self.assertEqual(payload["auto_backgrounded"], True)
+            self.assertIn("command_run_id", payload)
+            self.assertEqual(payload["command_run_id"], payload["terminal_run_id"])
+            self.assertIn("managed-started", payload["stdout_tail"])
+
+            await terminal.stop(payload["command_run_id"])
+            await terminal.wait(payload["command_run_id"], timeout=5)
+            self.assertEqual(run_manager.get_run(payload["command_run_id"])["status"], RunStatus.CANCELLED.value)
+
+    async def test_command_named_tools_are_model_visible_and_terminal_names_are_legacy(self):
+        manager = ToolManager({
+            "tools": {
+                "builtin": {
+                    "code": {
+                        "enabled": True,
+                        "workspace_roots": [tempfile.gettempdir()],
+                    },
+                },
+            },
+        })
+
+        visible = set(manager.list_tools())
+        self.assertTrue({"run_command", "start_background_command", "read_command", "wait_command", "stop_command"} <= visible)
+        self.assertNotIn("start_command", visible)
+        self.assertFalse({"start_terminal", "read_terminal", "wait_terminal", "stop_terminal"} & visible)
+        self.assertIsNotNone(manager.get_tool("start_background_command"))
+        self.assertIsNotNone(manager.get_tool("start_terminal"))
+        self.assertIsNotNone(manager.get_tool("start_command"))
+
+    async def test_command_named_control_tools_accept_command_run_id(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_manager = RunManager()
+            terminal = TerminalExecutor(run_manager)
+            start_tool = StartBackgroundCommandTool(CodeToolConfig.from_dict({
+                "workspace_roots": [tmpdir],
+                "command_timeout_seconds": 10,
+            }))
+
+            started = json.loads(await start_tool.execute(
+                command=f"{sys.executable} -c \"print('command-alias')\"",
+                cwd=".",
+                _runtime_context={
+                    "conversation_id": "conv_1",
+                    "node_id": "node_1",
+                    "run_id": "parent_run_1",
+                    "terminal_executor": terminal,
+                },
+            ))
+            waited = json.loads(await WaitCommandTool().execute(
+                command_run_id=started["command_run_id"],
+                timeout_seconds=5,
+                _runtime_context={
+                    "terminal_executor": terminal,
+                    "run_id": "parent_run_1",
+                },
+            ))
+            read = json.loads(await ReadCommandTool().execute(
+                command_run_id=started["command_run_id"],
+                _runtime_context={
+                    "terminal_executor": terminal,
+                    "run_id": "parent_run_1",
+                },
+            ))
+            stopped = json.loads(await StopCommandTool().execute(
+                command_run_id=started["command_run_id"],
+                _runtime_context={"terminal_executor": terminal},
+            ))
+
+            self.assertEqual(started["command_run_id"], started["terminal_run_id"])
+            self.assertIn("read_command", started["message"])
+            self.assertNotIn("read_terminal", started["message"])
+            self.assertEqual(waited["status"], RunStatus.COMPLETED.value)
+            self.assertIn("command-alias", read["stdout"])
+            self.assertFalse(stopped["stopped"])
 
     async def test_run_command_background_starts_terminal_run_and_returns_handle(self):
         with tempfile.TemporaryDirectory() as tmpdir:
