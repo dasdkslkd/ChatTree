@@ -995,6 +995,7 @@ export default function ChatPage() {
   const [previewFile, setPreviewFile] = useState<{ name: string; content: string } | null>(null);
   const [previewImage, setPreviewImage] = useState<{ name: string; url: string } | null>(null);
   const [conversationSearch, setConversationSearch] = useState('');
+  const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [projectPickerSearch, setProjectPickerSearch] = useState('');
   const [collapsedProjectIds, setCollapsedProjectIds] = useState<Set<string>>(() => new Set());
   const [expandedHistoryProjectIds, setExpandedHistoryProjectIds] = useState<Set<string>>(() => new Set());
@@ -1741,15 +1742,20 @@ export default function ChatPage() {
   };
 
   const selectedProjectGroup = allProjectGroups.find((group) => group.id === selectedProjectId) || allProjectGroups[0] || null;
+  const newChatProjectLabel = selectedNewConversationWorkspace.label || '默认项目';
   const filteredProjectGroups = projectPickerSearch.trim()
     ? allProjectGroups.filter((group) => {
         const query = projectPickerSearch.trim().toLowerCase();
         return `${group.label} ${group.path}`.toLowerCase().includes(query);
       })
     : allProjectGroups;
+  const handleProjectPickerOpenChange = (open: boolean) => {
+    setProjectPickerOpen(open);
+    if (!open) setProjectPickerSearch('');
+  };
 
   const projectSettingsSlot = (
-    <DropdownMenu>
+    <DropdownMenu open={projectPickerOpen} onOpenChange={handleProjectPickerOpenChange}>
       <TextTooltip content={selectedProjectGroup?.path || selectedNewConversationWorkspace.cwd || '默认项目'}>
         <DropdownMenuTrigger asChild>
           <button
@@ -1781,6 +1787,7 @@ export default function ChatPage() {
                 onClick={() => {
                   setSelectedProjectId(group.id);
                   setProjectPickerSearch('');
+                  setProjectPickerOpen(false);
                 }}
               >
                 <FolderOpen className="h-4 w-4 shrink-0" />
@@ -1804,7 +1811,10 @@ export default function ChatPage() {
           <button
             type="button"
             className="new-chat-project-option"
-            onClick={() => openProjectFolderDialog('create')}
+            onClick={() => {
+              setProjectPickerOpen(false);
+              openProjectFolderDialog('create');
+            }}
           >
             <FolderPlus className="h-4 w-4 shrink-0" />
             <span className="min-w-0 flex-1 text-left">
@@ -1817,7 +1827,10 @@ export default function ChatPage() {
           <button
             type="button"
             className="new-chat-project-option"
-            onClick={() => openProjectFolderDialog('existing')}
+            onClick={() => {
+              setProjectPickerOpen(false);
+              openProjectFolderDialog('existing');
+            }}
           >
             <FolderOpen className="h-4 w-4 shrink-0" />
             <span className="min-w-0 flex-1 text-left">
@@ -3514,7 +3527,7 @@ export default function ChatPage() {
           !currentConversation && messages.length === 0 ? (
             <div className="new-chat-stage">
               <div className="new-chat-center">
-                <h1 className="new-chat-title">我们应该在 ChatTree 中构建什么？</h1>
+                <h1 className="new-chat-title">{`我们应该在 ${newChatProjectLabel} 中做些什么？`}</h1>
                 <div className="new-chat-composer-wrap">
                   <ChatInput
                     variant="composer"

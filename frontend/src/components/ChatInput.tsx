@@ -18,7 +18,7 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { SendHorizontal, Bot, StickyNote, X, Settings, Square, Plus, FileText, Pencil, Trash2, Check, Loader2, Workflow } from 'lucide-react'
+import { ArrowRight, Bot, StickyNote, X, Settings, Square, Plus, FileText, Pencil, Trash2, Check, Loader2, Workflow } from 'lucide-react'
 import { useState, useEffect, useRef, type ReactNode } from 'react'
 import { useModelStore } from '../store/modelStore'
 import { usePromptStore } from '../store/promtStore'
@@ -928,14 +928,13 @@ export function ChatInput({
               </button>
             ) : (
               <button
-                className="w-7 h-7 rounded-full flex items-center justify-center cursor-pointer transition-all"
+                className="w-7 h-7 rounded-full flex items-center justify-center cursor-pointer transition-colors"
                 style={{
                   background: sendDisabled
-                    ? 'var(--muted)'
-                    : 'linear-gradient(160deg, var(--accent-hover), var(--accent-active))',
-                  color: sendDisabled ? 'var(--fg-tertiary)' : '#fff5ef',
-                  border: 'none',
-                  boxShadow: sendDisabled ? 'none' : 'var(--glow-accent), inset 0 1px 0 rgba(255,255,255,0.25)',
+                    ? 'var(--bg-button-secondary)'
+                    : 'var(--accent-active)',
+                  color: sendDisabled ? 'var(--fg-tertiary)' : '#fff',
+                  border: '0.5px solid var(--border)',
                   opacity: sendDisabled ? 0.35 : 1,
                 }}
                 onClick={handleSend}
@@ -943,16 +942,14 @@ export function ChatInput({
                 aria-label={isStreaming ? '加入发送队列' : '发送消息'}
                 onMouseEnter={(e) => {
                   if (!sendDisabled) {
-                    (e.currentTarget as HTMLElement).style.filter = 'brightness(1.08)';
-                    (e.currentTarget as HTMLElement).style.transform = 'scale(1.06)';
+                    (e.currentTarget as HTMLElement).style.background = 'var(--accent-hover)';
                   }
                 }}
                 onMouseLeave={(e) => {
-                  (e.currentTarget as HTMLElement).style.filter = '';
-                  (e.currentTarget as HTMLElement).style.transform = '';
+                  (e.currentTarget as HTMLElement).style.background = sendDisabled ? 'var(--bg-button-secondary)' : 'var(--accent-active)';
                 }}
               >
-                <SendHorizontal className="h-4 w-4" />
+                <ArrowRight className="h-4 w-4" style={{ transform: 'scaleX(1.14)' }} />
               </button>
             )}
           </div>
