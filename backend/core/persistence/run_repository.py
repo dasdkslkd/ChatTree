@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import gzip
+import hashlib
 import json
+import os
 import uuid
 from typing import Any
 
 from .blob_store import BlobStore
-from .content import store_text_content
+from .content import INLINE_TEXT_LIMIT, StoredText
 from .database import SQLitePersistence
 
 
-FINISHED_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
+FINISHED_STATUSES = {"completed", "failed", "cancelled", "interrupted", "stopped"}
 
 
 class SQLiteRunRepository:
@@ -74,8 +77,17 @@ class SQLiteRunRepository:
         return self._run_from_row(row)
 
     def append_event(self, run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        while True:
-            run = self.get_run(run_id)
+        event_row = None
+        with self.persistence.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            run = conn.execute(
+                """
+                SELECT conversation_id, kind, target_node_id, event_count
+                FROM runs
+                WHERE id = ?
+                """,
+                (run_id,),
+            ).fetchone()
             if run is None:
                 raise KeyError(run_id)
 
@@ -87,7 +99,7 @@ class SQLiteRunRepository:
             event_payload.setdefault("target_node_id", run["target_node_id"])
             event_payload["event_index"] = event_index
             payload_json = self._json_field(event_payload) or "{}"
-            stored = store_text_content(self.persistence, payload_json)
+            stored = self._store_text_content(conn, payload_json)
             event_type = (
                 str(
                     event_payload.get("type")
@@ -97,65 +109,49 @@ class SQLiteRunRepository:
                 )
             )
 
-            event_row = None
-            with self.persistence.connect() as conn:
-                conn.execute("BEGIN IMMEDIATE")
-                current = conn.execute(
-                    """
-                    SELECT conversation_id, event_count
-                    FROM runs
-                    WHERE id = ?
-                    """,
-                    (run_id,),
-                ).fetchone()
-                if current is None:
-                    raise KeyError(run_id)
-                if int(current["event_count"]) != event_index:
-                    continue
-                conn.execute(
-                    """
-                    INSERT INTO run_events (
-                      run_id,
-                      conversation_id,
-                      event_index,
-                      event_type,
-                      payload_inline,
-                      payload_blob_id,
-                      created_at
-                    )
-                    VALUES (
-                      ?, ?, ?, ?, ?, ?,
-                      strftime('%s', 'now')
-                    )
-                    """,
-                    (
-                        run_id,
-                        current["conversation_id"],
-                        event_index,
-                        event_type,
-                        stored.inline,
-                        stored.blob_id,
-                    ),
+            conn.execute(
+                """
+                INSERT INTO run_events (
+                  run_id,
+                  conversation_id,
+                  event_index,
+                  event_type,
+                  payload_inline,
+                  payload_blob_id,
+                  created_at
                 )
-                conn.execute(
-                    """
-                    UPDATE runs
-                    SET event_count = event_count + 1,
-                        updated_at = strftime('%s', 'now')
-                    WHERE id = ?
-                    """,
-                    (run_id,),
+                VALUES (
+                  ?, ?, ?, ?, ?, ?,
+                  strftime('%s', 'now')
                 )
-                row = conn.execute(
-                    """
-                    SELECT *
-                    FROM run_events
-                    WHERE run_id = ? AND event_index = ?
-                    """,
-                    (run_id, event_index),
-                ).fetchone()
-                event_row = row
-            return self._event_from_row(event_row)
+                """,
+                (
+                    run_id,
+                    run["conversation_id"],
+                    event_index,
+                    event_type,
+                    stored.inline,
+                    stored.blob_id,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE runs
+                SET event_count = event_count + 1,
+                    updated_at = strftime('%s', 'now')
+                WHERE id = ?
+                """,
+                (run_id,),
+            )
+            event_row = conn.execute(
+                """
+                SELECT *
+                FROM run_events
+                WHERE run_id = ? AND event_index = ?
+                """,
+                (run_id, event_index),
+            ).fetchone()
+        return self._event_from_row(event_row)
 
     def read_events(self, run_id: str, from_event: int = 0) -> list[dict[str, Any]]:
         with self.persistence.connect() as conn:
@@ -327,3 +323,91 @@ class SQLiteRunRepository:
         if not value:
             return None
         return json.loads(value)
+
+    def _store_text_content(
+        self,
+        conn: Any,
+        text: str,
+        *,
+        preview_limit: int = 4096,
+        inline_limit: int = INLINE_TEXT_LIMIT,
+    ) -> StoredText:
+        value = text or ""
+        preview = value[:preview_limit]
+        data = value.encode("utf-8")
+        size = len(data)
+        if size <= inline_limit:
+            return StoredText(
+                inline=value,
+                blob_id=None,
+                preview=preview,
+                size=size,
+            )
+
+        blob_id = hashlib.sha256(data).hexdigest()
+        relative_path = f"blobs/{blob_id[:2]}/{blob_id}.gz"
+        final_path = self.persistence.blobs_dir / blob_id[:2] / f"{blob_id}.gz"
+        compressed = gzip.compress(data)
+        row = conn.execute(
+            """
+            SELECT id
+            FROM blobs
+            WHERE id = ?
+            """,
+            (blob_id,),
+        ).fetchone()
+        if row:
+            conn.execute(
+                """
+                UPDATE blobs
+                SET ref_count = ref_count + 1,
+                    last_accessed_at = strftime('%s', 'now')
+                WHERE id = ?
+                """,
+                (blob_id,),
+            )
+        else:
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+            self.persistence.tmp_dir.mkdir(parents=True, exist_ok=True)
+            tmp_path = (
+                self.persistence.tmp_dir
+                / f"{blob_id}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+            )
+            tmp_path.write_bytes(compressed)
+            try:
+                os.replace(tmp_path, final_path)
+            finally:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            conn.execute(
+                """
+                INSERT INTO blobs (
+                  id,
+                  path,
+                  mime_type,
+                  compression,
+                  byte_size,
+                  stored_size,
+                  char_count,
+                  ref_count,
+                  created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1, strftime('%s', 'now'))
+                """,
+                (
+                    blob_id,
+                    relative_path,
+                    "text/plain; charset=utf-8",
+                    "gzip",
+                    size,
+                    len(compressed),
+                    len(value),
+                ),
+            )
+
+        return StoredText(
+            inline=None,
+            blob_id=blob_id,
+            preview=preview,
+            size=size,
+        )

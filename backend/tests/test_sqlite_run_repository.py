@@ -1,4 +1,5 @@
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 from backend.core.persistence.blob_store import BlobStore
 from backend.core.persistence.content import INLINE_TEXT_LIMIT
@@ -53,6 +54,24 @@ def test_run_repository_marks_interrupted_runs_on_startup(tmp_path):
     assert runs.get_run(run_id)["status"] == "interrupted"
 
 
+def test_run_repository_does_not_interrupt_stopped_runs_on_startup(tmp_path):
+    persistence, _chat, runs, conv_id, node_id = _repositories(tmp_path)
+    stopped_id = runs.create_run(conv_id, kind="chat", target_node_id=node_id)
+    running_id = runs.create_run(conv_id, kind="chat", target_node_id=node_id)
+    with persistence.connect() as conn:
+        conn.execute(
+            "UPDATE runs SET status = 'stopped' WHERE id = ?",
+            (stopped_id,),
+        )
+
+    interrupted = runs.mark_unfinished_as_interrupted()
+
+    assert stopped_id not in interrupted
+    assert running_id in interrupted
+    assert runs.get_run(stopped_id)["status"] == "stopped"
+    assert runs.get_run(running_id)["status"] == "interrupted"
+
+
 def test_run_repository_stores_large_payloads_as_blobs(tmp_path):
     persistence, _chat, runs, conv_id, node_id = _repositories(tmp_path)
     run_id = runs.create_run(conv_id, kind="chat", target_node_id=node_id)
@@ -73,6 +92,41 @@ def test_run_repository_stores_large_payloads_as_blobs(tmp_path):
     assert row["payload_blob_id"]
     assert BlobStore(persistence).get_text(row["payload_blob_id"]).startswith("{")
     assert runs.read_events(run_id)[0]["payload"]["content"] == content
+
+
+def test_run_repository_concurrent_large_payload_events_do_not_leak_blobs(tmp_path):
+    persistence, _chat, runs, conv_id, node_id = _repositories(tmp_path)
+    run_id = runs.create_run(conv_id, kind="chat", target_node_id=node_id)
+    call_count = 24
+
+    def append(index):
+        return runs.append_event(
+            run_id,
+            {
+                "status": "content",
+                "content": f"{index}-" + ("x" * (INLINE_TEXT_LIMIT + 1024)),
+            },
+        )
+
+    with ThreadPoolExecutor(max_workers=call_count) as executor:
+        returned_events = list(executor.map(append, range(call_count)))
+
+    run = runs.get_run(run_id)
+    stored_events = runs.read_events(run_id)
+    returned_indexes = sorted(event["event_index"] for event in returned_events)
+    stored_indexes = [event["event_index"] for event in stored_events]
+
+    assert run["event_count"] == call_count
+    assert returned_indexes == list(range(call_count))
+    assert stored_indexes == list(range(call_count))
+    assert [event["payload"]["event_index"] for event in stored_events] == list(
+        range(call_count)
+    )
+    assert all(event["payload_blob_id"] for event in stored_events)
+    with persistence.connect() as conn:
+        blob_rows = conn.execute("SELECT id, ref_count FROM blobs").fetchall()
+    assert len(blob_rows) == call_count
+    assert [row["ref_count"] for row in blob_rows] == [1] * call_count
 
 
 def test_run_repository_finish_and_stop_update_status(tmp_path):
