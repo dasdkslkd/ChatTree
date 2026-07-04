@@ -65,21 +65,21 @@ import {
 } from '@/components/ui/dropdown-menu';
 import {
   Plus, X, MoreHorizontal, ChevronRight, Square,
-  Copy, Check, Pencil, Loader2, RotateCcw, Network, MessageSquare, Trash2, FileText, Download, FolderOpen, FolderPlus, Search, Settings,
-  PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Archive, ArrowLeft, BellRing, ClipboardList,
+  Copy, Check, Pencil, Loader2, Network, MessageSquare, FileText, Download, FolderOpen, FolderPlus, Search, Settings,
+  PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, ArrowLeft,
 } from 'lucide-react';
 import { conversationApi } from '../api/conversation';
 import { messageApi, type ActiveStreamInfo, type ToolResultSlice } from '../api/message';
 import { runsApi } from '../api/runs';
-import { taskLedgerService } from '../services/tasks';
 import { plansService } from '../services/plans';
+import { transcriptService } from '../services/transcript';
 import type {
   Message,
   SendMessageRequest,
   ToolPermissionMode,
 } from '../types/message';
-import type { TaskRecord } from '../types/task';
 import type { PlanSession } from '../types/plan';
+import type { TranscriptItem } from '../types/transcript';
 import type { MultiAgentMode, WorkspaceContext } from '../types/conversation';
 import { useConversationStore } from '../store/conversationStore';
 import { useModelStore } from '../store/modelStore';
@@ -87,8 +87,8 @@ import { useNavigationStore } from '../store/navigationStore';
 import { useRunManager } from '../hooks/useRunManager';
 import { streamManager, type StreamState } from '../services/streamManager';
 import { slashRegistry } from '../services/slashRegistry';
-import { getGenerationStatusText, getStreamStatusText as getStreamStatusLabel } from '../utils/generationStatus';
-import { isDetachedRunView, isRunBlockingSelectedBranch, isRunStoppableFromSelectedBranch, isRunVisibleInMainTranscript } from '../utils/runVisibility';
+import { getStreamStatusText as getStreamStatusLabel } from '../utils/generationStatus';
+import { isDetachedRunView, isRunBlockingSelectedBranch, isRunStoppableFromSelectedBranch } from '../utils/runVisibility';
 import { resolveSendNodeId, resolveSlashStreamNodeId, shouldSendSlashAnchorNode } from '../utils/sendTarget';
 import { getSlashRunLabel, shouldQueueForMainThread, shouldRenderRunDraft } from '../utils/slashRuntime';
 import {
@@ -103,24 +103,12 @@ import {
 } from '../utils/sideRunSync';
 import { collectSideRunNotifications } from '../utils/sideRunNotifications';
 import {
-  getTaskNotificationSummary,
-  isRenderableTaskNotificationMessage,
   isTaskNotificationMessage,
   shouldExportMessage,
 } from '../utils/taskNotificationVisibility';
 import {
-  compactTaskTitle,
-  isOpenTask,
-  sortTasksForDisplay,
-  taskOwnerLabel,
-  taskStatusLabel,
-} from '../utils/taskLedger';
-import {
-  getPlanApprovalMarkdown,
   getPlanQuestionText,
-  shouldShowPlanApproval,
   shouldShowPlanQuestion,
-  shouldShowPlanSummary,
 } from '../utils/planApproval';
 import {
   DEFAULT_TOOL_PERMISSION_MODE,
@@ -144,8 +132,6 @@ import {
   formatProcessedDuration,
   getAssistantFoldedContentBlocks,
   getStreamingTimelineFoldState,
-  getTimelineFoldState,
-  hasAssistantProcessHistory,
   type StreamingTimelineFoldState,
 } from '../utils/assistantTimelineFolding';
 import {
@@ -153,6 +139,7 @@ import {
   getConversationActiveStreamLookupLimit,
 } from '../utils/activeStreamPolling';
 import { ChatInput } from '../components/ChatInput';
+import { TranscriptList } from '../components/transcript/TranscriptList';
 import TreeView from './TreeView';
 import {
   getVisibleProjectConversations,
@@ -172,6 +159,7 @@ import {
   type SidebarResizeSide,
   type SidebarWidthConfig,
 } from '../utils/sidebarResize';
+import { normalizeTranscriptItems } from '../utils/transcriptItems';
 
 const MarkdownContent = lazy(() => import('../components/MarkdownContent'));
 const MANUAL_PROJECTS_STORAGE_KEY = 'chattree.manualProjectWorkspaces';
@@ -379,103 +367,6 @@ function MarkdownView({ content, enableMermaid = false }: { content: string; ena
         {content}
       </MarkdownContent>
     </Suspense>
-  );
-}
-
-const languageByExtension: Record<string, string> = {
-  bash: 'bash',
-  bat: 'batch',
-  c: 'c',
-  cmd: 'batch',
-  conf: 'ini',
-  cpp: 'cpp',
-  cs: 'csharp',
-  css: 'css',
-  csv: 'csv',
-  dockerfile: 'docker',
-  env: 'ini',
-  ex: 'elixir',
-  exs: 'elixir',
-  fish: 'fish',
-  go: 'go',
-  h: 'c',
-  hpp: 'cpp',
-  html: 'html',
-  htm: 'html',
-  ini: 'ini',
-  java: 'java',
-  js: 'javascript',
-  json: 'json',
-  jsx: 'jsx',
-  kt: 'kotlin',
-  less: 'less',
-  log: 'text',
-  lua: 'lua',
-  md: 'markdown',
-  perl: 'perl',
-  php: 'php',
-  pl: 'perl',
-  properties: 'properties',
-  ps1: 'powershell',
-  py: 'python',
-  r: 'r',
-  rb: 'ruby',
-  rs: 'rust',
-  sass: 'sass',
-  scala: 'scala',
-  scss: 'scss',
-  sh: 'bash',
-  sql: 'sql',
-  svelte: 'svelte',
-  swift: 'swift',
-  toml: 'toml',
-  ts: 'typescript',
-  tsx: 'tsx',
-  txt: 'text',
-  vue: 'vue',
-  xml: 'xml',
-  yaml: 'yaml',
-  yml: 'yaml',
-  zsh: 'bash',
-};
-
-function inferPreviewLanguage(filename: string) {
-  const normalized = filename.toLowerCase();
-  const base = normalized.split(/[\\/]/).pop() || normalized;
-  if (base === 'dockerfile') return 'docker';
-  if (base === 'makefile') return 'makefile';
-  if (base === '.gitignore') return 'gitignore';
-  const ext = base.includes('.') ? base.split('.').pop() || '' : '';
-  return languageByExtension[ext] || 'text';
-}
-
-function FilePreviewCode({ name, content }: { name: string; content: string }) {
-  const language = inferPreviewLanguage(name);
-
-  return (
-    <div className="file-preview-code-shell custom-scrollbar">
-      <SyntaxHighlighter
-        language={language}
-        style={oneDark}
-        customStyle={{
-          margin: 0,
-          minHeight: '100%',
-          background: 'transparent',
-          padding: '14px 16px',
-        }}
-        codeTagProps={{
-          style: {
-            fontFamily: 'var(--font-mono)',
-            fontSize: '13px',
-            lineHeight: '20px',
-          },
-        }}
-        wrapLongLines={false}
-        showLineNumbers={content.includes('\n') && content.split('\n').length > 12}
-      >
-        {content}
-      </SyntaxHighlighter>
-    </div>
   );
 }
 
@@ -717,15 +608,6 @@ function createAssistantMessageFromStream(run: StreamState): Message | null {
   };
 }
 
-function getDraftCopyContent(timeline: AssistantTimelineBlock[], fallbackContent: string): string {
-  const timelineContent = timeline
-    .filter((block): block is Extract<AssistantTimelineBlock, { type: 'content' }> => block.type === 'content')
-    .map((block) => block.content.trim())
-    .filter(Boolean)
-    .join('\n\n');
-  return (timelineContent || fallbackContent).trim();
-}
-
 function scheduleIdleTask(task: () => void, timeout = 1200): () => void {
   const win = window as typeof window & {
     requestIdleCallback?: (callback: () => void, options?: { timeout?: number }) => number;
@@ -823,18 +705,6 @@ function getAssistantTimeline(message: {
   if (toolItems.length > 0) blocks.push({ type: 'tools', key: 'tools', items: toolItems });
   if (content.trim()) blocks.push({ type: 'content', key: 'content', content });
   return blocks;
-}
-
-function isToolMessageCovered(
-  toolMessage: ToolMessageLike,
-  previousMessages: Array<{ role?: string; tool_interactions?: unknown[]; tool_calls?: unknown[]; tool_results?: unknown[] }>,
-): boolean {
-  return previousMessages.some((message) => {
-    if (message.role !== 'assistant') return false;
-    const items = getAssistantToolItems(message);
-    if (toolMessage.tool_call_id && items.some((item) => item.key === toolMessage.tool_call_id)) return true;
-    return !toolMessage.tool_call_id && items.some((item) => item.name === (toolMessage.name || 'tool'));
-  });
 }
 
 function ToolCallCard({ item }: { item: ToolRenderItem }) {
@@ -998,7 +868,6 @@ export default function ChatPage() {
     readStoredSidebarWidth(getBrowserStorage(), RIGHT_PANEL_WIDTH_STORAGE_KEY, RIGHT_PANEL_WIDTH),
   );
   const [resizingSidebar, setResizingSidebar] = useState<SidebarResizeSide | null>(null);
-  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [scrollPositions, setScrollPositions] = useState<Record<string, number>>({});
   const [isScrolling, setIsScrolling] = useState(false);
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
@@ -1008,10 +877,10 @@ export default function ChatPage() {
   const [attachedImageRefs, setAttachedImageRefs] = useState<Array<{ filename: string; mime_type?: string }>>([]);
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([]);
   const [hiddenSideRunIdsByConversation, setHiddenSideRunIdsByConversation] = useState<Record<string, string[]>>({});
+  const [transcriptItems, setTranscriptItems] = useState<TranscriptItem[]>([]);
   const handledSideRunNotificationsRef = useRef<Set<string>>(new Set());
   const [toolPermissionDraft, setToolPermissionDraftState] = useState<ToolPermissionDraft>(() => createToolPermissionDraft());
   const [newConversationMultiAgentMode, setNewConversationMultiAgentMode] = useState<MultiAgentMode>('explicit_request_only');
-  const [previewFile, setPreviewFile] = useState<{ name: string; content: string } | null>(null);
   const [previewImage, setPreviewImage] = useState<{ name: string; url: string } | null>(null);
   const [conversationSearch, setConversationSearch] = useState('');
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
@@ -1032,7 +901,6 @@ export default function ChatPage() {
   const conversationSearchInputRef = useRef<HTMLInputElement>(null);
   const pendingScrollId = useRef<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const assistantTimelineCacheRef = useRef<WeakMap<object, AssistantTimelineBlock[]>>(new WeakMap());
   const sidebarResizeRef = useRef<SidebarResizeSession | null>(null);
 
   const userScrollingRef = useRef(false);
@@ -1040,7 +908,7 @@ export default function ChatPage() {
   const programmaticScrollRef = useRef(false);
   const queuedMessagesRef = useRef<QueuedMessage[]>([]);
   const toolPermissionDraftRef = useRef<ToolPermissionDraft>(toolPermissionDraft);
-  const [expandedProcessedMessageIds, setExpandedProcessedMessageIds] = useState<Set<string>>(() => new Set());
+  const transcriptRequestSeqRef = useRef(0);
 
   const beginSidebarResize = useCallback((
     event: ReactPointerEvent<HTMLDivElement>,
@@ -1155,26 +1023,6 @@ export default function ChatPage() {
 
   const getToolPermissionDraft = useCallback(() => toolPermissionDraftRef.current, []);
 
-  const getCachedAssistantTimeline = useCallback((message: typeof messages[0]) => {
-    const cached = assistantTimelineCacheRef.current.get(message);
-    if (cached) return cached;
-    const timeline = getAssistantTimeline(message);
-    assistantTimelineCacheRef.current.set(message, timeline);
-    return timeline;
-  }, []);
-
-  const toggleProcessedBlocks = useCallback((messageId: string) => {
-    setExpandedProcessedMessageIds((current) => {
-      const next = new Set(current);
-      if (next.has(messageId)) {
-        next.delete(messageId);
-      } else {
-        next.add(messageId);
-      }
-      return next;
-    });
-  }, []);
-
   const updateQueuedMessages = useCallback((updater: (messages: QueuedMessage[]) => QueuedMessage[]) => {
     const next = updater(queuedMessagesRef.current);
     queuedMessagesRef.current = next;
@@ -1221,7 +1069,6 @@ export default function ChatPage() {
     currentNodeId, pendingScrollNodeId, clearPendingScroll,
     createConversation, selectConversation, deleteConversation, loadConversations,
     clearCurrentConversation, updateConversationTitle, refreshMessages, patchAssistantMessageFromStream,
-    deleteNode, switchNode,
   } = useConversationStore();
 
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
@@ -1250,15 +1097,33 @@ export default function ChatPage() {
   };
 
   const activeRunStates = useRunManager(currentConversation?.id ?? null);
-  const [taskLedgerTasks, setTaskLedgerTasks] = useState<TaskRecord[]>([]);
   const [activePlan, setActivePlan] = useState<PlanSession | null>(null);
   const [planActionPending, setPlanActionPending] = useState<'approve' | 'reject' | 'answer' | null>(null);
-  const [planRejectOpen, setPlanRejectOpen] = useState(false);
   const [planRejectFeedback, setPlanRejectFeedback] = useState('');
   const [planQuestionAnswer, setPlanQuestionAnswer] = useState('');
   const [planError, setPlanError] = useState<string | null>(null);
   const currentConversationIdRef = useRef<string | null>(null);
   currentConversationIdRef.current = currentConversation?.id ?? null;
+  const refreshTranscript = useCallback(async (
+    conversationId: string | null | undefined,
+    nodeId?: string | null,
+  ) => {
+    const requestSeq = ++transcriptRequestSeqRef.current;
+    if (!conversationId) {
+      setTranscriptItems([]);
+      return;
+    }
+
+    try {
+      const items = await transcriptService.fetchTranscript(conversationId, nodeId);
+      if (requestSeq !== transcriptRequestSeqRef.current) return;
+      if (conversationId !== currentConversationIdRef.current) return;
+      setTranscriptItems(normalizeTranscriptItems(items));
+    } catch (_) {
+      if (requestSeq !== transcriptRequestSeqRef.current) return;
+      if (conversationId === currentConversationIdRef.current) setTranscriptItems([]);
+    }
+  }, []);
   const hiddenSideRunIds = useMemo(() => {
     const conversationId = currentConversation?.id;
     return new Set(conversationId ? hiddenSideRunIdsByConversation[conversationId] ?? [] : []);
@@ -1293,20 +1158,6 @@ export default function ChatPage() {
     },
     [],
   );
-  const refreshTaskLedger = useCallback(async (conversationId: string | null | undefined) => {
-    if (!conversationId) {
-      if (!currentConversationIdRef.current) setTaskLedgerTasks([]);
-      return;
-    }
-    if (conversationId !== currentConversationIdRef.current) return;
-    try {
-      const tasks = await taskLedgerService.fetchConversationTasks(conversationId, false);
-      if (conversationId !== currentConversationIdRef.current) return;
-      setTaskLedgerTasks(sortTasksForDisplay(tasks).filter(isOpenTask));
-    } catch (_) {
-      if (conversationId === currentConversationIdRef.current) setTaskLedgerTasks([]);
-    }
-  }, []);
   const refreshActivePlan = useCallback(async (conversationId: string | null | undefined) => {
     if (!conversationId) {
       if (!currentConversationIdRef.current) setActivePlan(null);
@@ -1379,55 +1230,6 @@ export default function ChatPage() {
       if (!activeKeys.has(key)) handledSideRunNotificationsRef.current.delete(key);
     }
   }, [activeRunStates]);
-
-  const activeRunDrafts = useMemo(() => activeRunStates
-    .filter((run) => shouldRenderRunDraft(run))
-    .map((run) => {
-      const nodeId = run.targetNodeId || run.nodeId;
-      if (!isRunVisibleInMainTranscript(run, selectedBranchTipId, currentBranchNodeIds)) return null;
-      const userLanded = nodeId != null && messages.some((m) => m.node_id === nodeId && m.role === 'user');
-      const assistantLanded = nodeId != null && messages.some((m) => m.node_id === nodeId && m.role === 'assistant');
-      const timeline = getAssistantTimeline({
-        content: run.content,
-        reasoning: run.reasoning,
-        tool_interactions: run.toolInteractions,
-      });
-      const streamingFoldedContentBlocks = getAssistantFoldedContentBlocks({
-        content: run.content,
-        reasoning: run.reasoning,
-        tool_interactions: run.toolInteractions,
-      });
-      const streamingFoldState = getStreamingTimelineFoldState(
-        timeline,
-        streamingFoldedContentBlocks.map((block) => block.key),
-      );
-      let activeReasoningIndex = -1;
-      let activeReasoningKey: string | null = null;
-      if (run.status === 'streaming') {
-        for (let i = timeline.length - 1; i >= 0; i -= 1) {
-          if (timeline[i].type === 'reasoning') {
-            const hasLaterBlock = timeline.slice(i + 1).some((block) => block.type !== 'reasoning');
-            activeReasoningIndex = run.reasoningActive || !hasLaterBlock ? i : -1;
-            activeReasoningKey = activeReasoningIndex >= 0 ? timeline[activeReasoningIndex].key : null;
-            break;
-          }
-        }
-      }
-      return {
-        run,
-        nodeId,
-        showPendingBubble: !!run.pendingUserMessage && !userLanded,
-        showStreamBlock: run.status !== 'idle' && !assistantLanded,
-        timeline,
-        streamingFoldState,
-        activeReasoningIndex,
-        activeReasoningKey,
-      };
-    })
-    .filter((draft): draft is NonNullable<typeof draft> => Boolean(draft))
-    .filter((draft) => draft.showPendingBubble || draft.showStreamBlock),
-    [activeRunStates, currentBranchNodeIds, messages, selectedBranchTipId],
-  );
 
   const sideRunDrafts = useMemo(() => sidePanelRunStates
     .filter((run) => shouldRenderRunDraft(run))
@@ -1531,24 +1333,42 @@ export default function ChatPage() {
   );
   const currentBranchHasStreamingChat = currentBranchStreamingRunIds.length > 0;
   const currentBranchStreamActivity = useMemo(
-    () => activeRunDrafts.map((draft) => [
-      draft.run.runId,
-      draft.run.status,
-      draft.run.content.length,
-      draft.run.reasoning.length,
-      draft.run.toolInteractions.length,
-      Object.keys(draft.run.pendingApprovals).length,
-      draft.run.pendingUserMessage?.length ?? 0,
+    () => activeRunStates
+      .filter((run) => isRunBlockingSelectedBranch(run, selectedBranchTipId, currentBranchNodeIds))
+      .map((run) => [
+      run.runId,
+      run.status,
+      run.content.length,
+      run.reasoning.length,
+      run.toolInteractions.length,
+      Object.keys(run.pendingApprovals).length,
+      run.pendingUserMessage?.length ?? 0,
     ].join(':')).join('|'),
-    [activeRunDrafts],
+    [activeRunStates, currentBranchNodeIds, selectedBranchTipId],
   );
-  const currentBranchHasPendingUserMessage = activeRunDrafts.some((draft) => draft.showPendingBubble);
+  const currentBranchHasPendingUserMessage = useMemo(
+    () => activeRunStates.some((run) =>
+      shouldRenderRunDraft(run)
+      && Boolean(run.pendingUserMessage)
+      && isRunBlockingSelectedBranch(run, selectedBranchTipId, currentBranchNodeIds)
+    ),
+    [activeRunStates, currentBranchNodeIds, selectedBranchTipId],
+  );
   const approvalPromptRunStates = sidePanelRunStates;
   const pendingToolApprovalPrompts = useMemo(
     () => collectPendingToolApprovalPrompts(approvalPromptRunStates),
     [approvalPromptRunStates],
   );
   const pendingApprovalCount = pendingToolApprovalPrompts.length;
+
+  useEffect(() => {
+    const conversationId = currentConversation?.id;
+    if (!conversationId) {
+      setTranscriptItems([]);
+      return;
+    }
+    void refreshTranscript(conversationId, selectedBranchTipId);
+  }, [currentConversation?.id, currentBranchStreamActivity, refreshTranscript, selectedBranchTipId]);
 
   useEffect(() => {
     if (sideRunTopLevelCount === 0) return;
@@ -1562,18 +1382,6 @@ export default function ChatPage() {
     }
   }, [selectedSideRunId, selectedSideRunItem]);
 
-  const coveredToolMessages = useMemo(() => {
-    const ids = new Set<string>();
-    const names = new Set<string>();
-    for (const message of messages) {
-      if (message.role !== 'assistant') continue;
-      for (const item of getAssistantToolItems(message)) {
-        if (item.key) ids.add(item.key);
-        if (item.name) names.add(item.name);
-      }
-    }
-    return { ids, names };
-  }, [messages]);
   const visibleQueuedMessages = useMemo(
     () => queuedMessages
       .filter((message) =>
@@ -2022,7 +1830,8 @@ export default function ChatPage() {
       run?.kind ?? 'chat',
     );
     await refreshMessages(conversationId, { retries: 0 });
-  }, [activeRunStates, currentConversation?.id, refreshMessages]);
+    await refreshTranscript(conversationId, run?.targetNodeId ?? run?.nodeId ?? selectedBranchTipId);
+  }, [activeRunStates, currentConversation?.id, refreshMessages, refreshTranscript, selectedBranchTipId]);
 
   const handleApprovePlan = useCallback(async () => {
     if (!activePlan) return;
@@ -2042,7 +1851,10 @@ export default function ChatPage() {
           thinking_enabled: currentThinkingEnabled,
         },
         selectedBranchTipId,
-      ).then(() => refreshActivePlan(conversationId)).catch((error) => {
+      ).then(async () => {
+        await refreshActivePlan(conversationId);
+        await refreshTranscript(conversationId, selectedBranchTipId);
+      }).catch((error) => {
         console.error('Failed to approve plan:', error);
         setPlanError('批准失败，请稍后重试');
       });
@@ -2052,7 +1864,7 @@ export default function ChatPage() {
     } finally {
       setPlanActionPending(null);
     }
-  }, [activePlan, currentConversation?.id, refreshActivePlan, selectedBranchTipId]);
+  }, [activePlan, currentConversation?.id, refreshActivePlan, refreshTranscript, selectedBranchTipId]);
 
   const handleRejectPlan = useCallback(async () => {
     if (!activePlan) return;
@@ -2065,16 +1877,18 @@ export default function ChatPage() {
     try {
       const updated = await plansService.reject(conversationId, activePlan.plan_id || activePlan.id || '', feedback);
       setActivePlan(updated || { ...activePlan, feedback });
-      setPlanRejectOpen(false);
       setPlanRejectFeedback('');
-      if (conversationId) await refreshActivePlan(conversationId);
+      if (conversationId) {
+        await refreshActivePlan(conversationId);
+        await refreshTranscript(conversationId, selectedBranchTipId);
+      }
     } catch (error) {
       console.error('Failed to reject plan:', error);
       setPlanError('提交修改意见失败，请稍后重试');
     } finally {
       setPlanActionPending(null);
     }
-  }, [activePlan, currentConversation?.id, planRejectFeedback, refreshActivePlan]);
+  }, [activePlan, currentConversation?.id, planRejectFeedback, refreshActivePlan, refreshTranscript, selectedBranchTipId]);
 
   const handleAnswerPlanQuestion = useCallback(async (answerOverride?: string) => {
     if (!activePlan) return;
@@ -2098,7 +1912,10 @@ export default function ChatPage() {
           thinking_enabled: currentThinkingEnabled,
         },
         selectedBranchTipId,
-      ).then(() => refreshActivePlan(conversationId)).catch((error) => {
+      ).then(async () => {
+        await refreshActivePlan(conversationId);
+        await refreshTranscript(conversationId, selectedBranchTipId);
+      }).catch((error) => {
         console.error('Failed to answer plan question:', error);
         setPlanError('提交回答失败，请稍后重试');
       });
@@ -2108,7 +1925,7 @@ export default function ChatPage() {
     } finally {
       setPlanActionPending(null);
     }
-  }, [activePlan, currentConversation?.id, planQuestionAnswer, refreshActivePlan, selectedBranchTipId]);
+  }, [activePlan, currentConversation?.id, planQuestionAnswer, refreshActivePlan, refreshTranscript, selectedBranchTipId]);
 
   const handleStopStreaming = useCallback(() => {
     if (currentConversation?.id) {
@@ -2136,9 +1953,10 @@ export default function ChatPage() {
           return next;
         });
         await refreshMessages(conversationId, { retries: 1 });
+        await refreshTranscript(conversationId, selectedBranchTipId);
       }
     })();
-  }, [currentBranchStoppableRunIds, currentConversation?.id, refreshMessages, selectedBranchTipId, updateQueuedMessages]);
+  }, [currentBranchStoppableRunIds, currentConversation?.id, refreshMessages, refreshTranscript, selectedBranchTipId, updateQueuedMessages]);
 
   // 全局注册一次：任意对话的流结束（completed/error/stopped）时，
   // 从后端刷新真实消息，再清理 StreamManager 中该对话的临时状态。
@@ -2161,7 +1979,7 @@ export default function ChatPage() {
           streamManager.cleanupIfController(finishedId, controller, runId);
         }
         await loadConversations();
-        void refreshTaskLedger(finishedId);
+        await refreshTranscript(finishedId, awaitNodeId ?? null);
         void syncSelectedConversationSideRuns(finishedId);
         const sentQueued = await sendNextQueuedMessage(finishedId);
         if (!sentQueued) void syncBackendScheduledFollowup(finishedId);
@@ -2178,8 +1996,8 @@ export default function ChatPage() {
                 ? (awaitNodeId ? { awaitNodeId, retries: 0 } : undefined)
                 : { awaitNodeId, retries: 6 },
             );
+            await refreshTranscript(finishedId, awaitNodeId ?? null);
             await loadConversations();
-            void refreshTaskLedger(finishedId);
             void syncSelectedConversationSideRuns(finishedId);
             void syncBackendScheduledFollowup(finishedId);
           })();
@@ -2199,6 +2017,7 @@ export default function ChatPage() {
           ? (awaitNodeId ? { awaitNodeId, retries: 0 } : undefined)
           : { awaitNodeId, retries: 6 },
       );
+      await refreshTranscript(finishedId, awaitNodeId ?? null);
       // 仅当确认真实消息已落地，才清理临时流状态（移除乐观气泡）。
       // 身份校验：若 await 期间用户对同一对话发起了新流，controller 已被替换则跳过。
       if (drained || confirmed) {
@@ -2208,13 +2027,13 @@ export default function ChatPage() {
         // 成功后再清理，彻底避免用户消息闪失。
         setTimeout(async () => {
           await refreshMessages(finishedId, { awaitNodeId, retries: 6 });
+          await refreshTranscript(finishedId, awaitNodeId ?? null);
           // 无论是否确认，这是最后兜底：清理临时状态，避免气泡永久残留。
           streamManager.cleanupIfController(finishedId, controller, runId);
         }, 800);
       }
       // 同步对话列表（更新时间、标题等）
       await loadConversations();
-      void refreshTaskLedger(finishedId);
       void syncSelectedConversationSideRuns(finishedId);
       const sentQueued = await sendNextQueuedMessage(finishedId);
       if (!sentQueued) void syncBackendScheduledFollowup(finishedId);
@@ -2224,7 +2043,7 @@ export default function ChatPage() {
     refreshMessages,
     patchAssistantMessageFromStream,
     loadConversations,
-    refreshTaskLedger,
+    refreshTranscript,
     syncSelectedConversationSideRuns,
     sendNextQueuedMessage,
     syncBackendScheduledFollowup,
@@ -2336,7 +2155,6 @@ export default function ChatPage() {
   useEffect(() => {
     const conversationId = currentConversation?.id;
     if (!conversationId) {
-      void refreshTaskLedger(null);
       return;
     }
 
@@ -2401,8 +2219,7 @@ export default function ChatPage() {
     void syncSelectedConversationSideRuns(conversationId).catch(() => {
       // Side run history is best-effort UI state; active stream recovery above still handles live runs.
     });
-    void refreshTaskLedger(conversationId);
-  }, [currentConversation?.id, refreshTaskLedger, syncSelectedConversationSideRuns]);
+  }, [currentConversation?.id, syncSelectedConversationSideRuns]);
 
   const latestMessageId = messages.length > 0 ? messages[messages.length - 1]?.id : null;
   useEffect(() => {
@@ -2531,17 +2348,6 @@ export default function ChatPage() {
     setAttachedImageRefs(prev => prev.filter(ref => ref.filename !== filename));
   };
 
-  const handlePreviewFile = async (filename: string) => {
-    if (!currentConversation) return;
-    try {
-      const resp = await fetch(`/api/conversations/${currentConversation.id}/imports/${encodeURIComponent(filename)}`);
-      if (resp.ok) {
-        const text = await resp.text();
-        setPreviewFile({ name: filename, content: text });
-      }
-    } catch (_) {}
-  };
-
   const getImportAssetUrl = (filename: string, conversationId = currentConversation?.id) => {
     if (!conversationId) return '';
     return `/api/conversations/${conversationId}/imports/${encodeURIComponent(filename)}`;
@@ -2654,73 +2460,6 @@ export default function ChatPage() {
     }
   };
 
-  const handleCopy = async (content: string, messageId: string) => {
-    try {
-      await navigator.clipboard.writeText(content);
-      setCopiedMessageId(messageId);
-      setTimeout(() => setCopiedMessageId(null), 2000);
-    } catch {
-      // ignore
-    }
-  };
-
-  const handleDeleteBranch = async (nodeId: string) => {
-    if (!currentConversation) return;
-    if (!confirm('确定删除该消息及其所有后续分支？')) return;
-    try {
-      await deleteNode(nodeId);
-    } catch (err) {
-      console.error('删除失败:', err);
-    }
-  };
-
-  const handleRetry = async (
-    assistantNodeId: string,
-    userContent: string,
-    importFileNames: string[] = [],
-    imageRefs: Array<{ filename: string; mime_type?: string }> = [],
-  ) => {
-    if (!currentConversation) return;
-    const convId = currentConversation.id;
-    try {
-      await conversationApi.deleteNode(convId, assistantNodeId);
-      await selectConversation(convId);
-      setShouldAutoScroll(true);
-      const { currentReasoningEffort, currentThinkingEnabled } = useModelStore.getState();
-      const retryParentNodeId = useConversationStore.getState().currentNodeId || undefined;
-      await startStreaming(
-        convId,
-        {
-          content: userContent,
-          reasoning_effort: currentReasoningEffort,
-          thinking_enabled: currentThinkingEnabled,
-          import_files: importFileNames.length > 0
-            ? importFileNames.map(filename => ({ filename }))
-            : undefined,
-          image_refs: imageRefs.length > 0 ? imageRefs : undefined,
-        },
-        userContent,
-        retryParentNodeId,
-        retryParentNodeId ?? null,
-      );
-    } catch (err) {
-      console.error('重试失败:', err);
-      await selectConversation(convId);
-    }
-  };
-
-  const handleEditUserMessage = async (_nodeId: string, parentNodeId: string | undefined, userContent: string) => {
-    if (!currentConversation) return;
-    if (!parentNodeId) return;
-    try {
-      await switchNode(parentNodeId);
-      setEditTargetNodeId(parentNodeId);
-      setEditValue(userContent);
-    } catch (err) {
-      console.error('编辑失败:', err);
-    }
-  };
-
   const parseFileMention = (content: string): { fileNames: string[]; cleanContent: string } | null => {
     const match = content.match(/^'''USER MENTIONED FILES:\s+(.*?)\s+'''\n\n[\s\S]*?\n---\n\n/s);
     if (!match) return null;
@@ -2753,28 +2492,8 @@ export default function ChatPage() {
     return parseFileMention(message.content)?.cleanContent ?? message.content;
   };
 
-  const isCompactBoundaryMessage = (message: typeof messages[0]) =>
-    message.role === 'system' && message.subtype === 'compact_boundary';
-
   const isCompactSummaryMessage = (message: typeof messages[0]) =>
     message.is_compact_summary === true;
-
-  const formatCompactTokens = (tokens?: number) => {
-    if (!tokens || tokens <= 0) return null;
-    if (tokens >= 1000) return `${Math.round(tokens / 1000)}k tokens`;
-    return `${tokens} tokens`;
-  };
-
-  const formatCompactTrigger = (trigger?: string) => {
-    if (trigger === 'auto') return '自动压缩';
-    if (trigger === 'manual') return '手动压缩';
-    return '上下文压缩';
-  };
-
-  const formatRestoredFiles = (count?: number) => {
-    if (!count) return null;
-    return `恢复 ${count} 个文件`;
-  };
 
   const outline = messages
     .map((m, index) => ({ ...m, originalIndex: index }))
@@ -2786,16 +2505,6 @@ export default function ChatPage() {
         originalIndex: m.originalIndex,
       };
     });
-
-  const formatDuration = (ms: number): string => {
-    if (ms < 1000) return `${ms}ms`;
-    const seconds = Math.floor(ms / 1000);
-    const remainingMs = ms % 1000;
-    if (seconds < 60) return remainingMs > 0 ? `${seconds}.${Math.floor(remainingMs / 100)}s` : `${seconds}s`;
-    const minutes = Math.floor(seconds / 60);
-    const remainingSeconds = seconds % 60;
-    return `${minutes}m ${remainingSeconds}s`;
-  };
 
   const renderAssistantTimelineBlock = (block: AssistantTimelineBlock) => {
     if (block.type === 'reasoning') {
@@ -2815,150 +2524,6 @@ export default function ChatPage() {
         }}
       >
         <MarkdownView content={block.content} enableMermaid />
-      </div>
-    );
-  };
-
-  const renderTaskNotificationMessage = (m: typeof messages[0], index: number) => {
-    const summary = getTaskNotificationSummary(m);
-    return (
-      <div
-        key={m.id}
-        id={`message-${index}`}
-        className="task-notification-row w-full my-1 flex flex-col items-start"
-      >
-        <div
-          className="flex max-w-[760px] min-w-0 items-center gap-2 rounded-md px-2.5 py-1 text-xs"
-          style={{
-            border: '0.5px solid var(--border)',
-            background: 'var(--bg-button-tertiary-hover)',
-            color: 'var(--fg-tertiary)',
-          }}
-        >
-          <BellRing className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--icon-accent)' }} />
-          <span className="shrink-0 font-medium" style={{ color: 'var(--fg-secondary)' }}>{summary.title}</span>
-          {summary.taskId && (
-            <span className="max-w-[96px] shrink truncate font-mono" title={summary.taskId}>
-              {summary.taskId}
-            </span>
-          )}
-          {(summary.command || summary.detail) && (
-            <span className="min-w-[80px] truncate font-mono" title={summary.command || summary.detail}>
-              {summary.command || summary.detail}
-            </span>
-          )}
-          {summary.output && (
-            <>
-              <span className="shrink-0" style={{ color: 'var(--fg-tertiary)' }}>{'->'}</span>
-              <span className="min-w-[120px] truncate" title={summary.output}>{summary.output}</span>
-            </>
-          )}
-        </div>
-      </div>
-    );
-  };
-
-  const renderPlanApprovalCard = () => {
-    if (!shouldShowPlanApproval(activePlan)) return null;
-    const markdown = getPlanApprovalMarkdown(activePlan);
-    const rejecting = planActionPending === 'reject';
-    const approving = planActionPending === 'approve';
-    return (
-      <div className="plan-approval-row w-full my-2 flex flex-col items-start">
-        <div
-          className="plan-approval-card flex max-w-[760px] w-full min-w-0 flex-col gap-3 rounded-md px-3 py-3 text-sm"
-          style={{
-            border: '0.5px solid var(--border)',
-            background: 'var(--bg-secondary)',
-            color: 'var(--fg-secondary)',
-          }}
-        >
-          <div className="flex items-center gap-2 text-xs font-medium" style={{ color: 'var(--fg-tertiary)' }}>
-            <ClipboardList className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--icon-accent)' }} />
-            <span>计划待审批</span>
-          </div>
-          <div
-            className="plan-markdown-panel min-w-0 rounded-sm px-2.5 py-2 prose prose-sm max-w-none [&_p]:m-0 [&_p:not(:last-child)]:mb-2"
-            style={{
-              border: '0.5px solid var(--border)',
-              background: 'var(--bg-input)',
-              color: 'var(--fg-secondary)',
-              fontSize: 'var(--codex-chat-font-size)',
-              lineHeight: 'calc(var(--codex-chat-font-size) + 8px)',
-            }}
-          >
-            <MarkdownView content={markdown} enableMermaid />
-          </div>
-          {planRejectOpen && (
-            <textarea
-              value={planRejectFeedback}
-              onChange={(event) => setPlanRejectFeedback(event.target.value)}
-              placeholder="写下需要修改的地方"
-              className="min-h-[72px] w-full resize-none rounded-md px-2.5 py-2 text-sm outline-none"
-              style={{
-                border: '0.5px solid var(--border)',
-                background: 'var(--bg-input)',
-                color: 'var(--fg-primary)',
-              }}
-            />
-          )}
-          {planError && (
-            <div className="text-xs" style={{ color: 'var(--destructive)' }}>{planError}</div>
-          )}
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              type="button"
-              size="sm"
-              className="h-7 gap-1 px-2 text-xs"
-              onClick={handleApprovePlan}
-              disabled={planActionPending !== null}
-            >
-              {approving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
-              批准并开始实现
-            </Button>
-            {planRejectOpen ? (
-              <>
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  className="h-7 gap-1 px-2 text-xs"
-                  onClick={handleRejectPlan}
-                  disabled={planActionPending !== null || !planRejectFeedback.trim()}
-                >
-                  {rejecting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Pencil className="h-3.5 w-3.5" />}
-                  提交修改意见
-                </Button>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  className="h-7 px-2 text-xs"
-                  onClick={() => {
-                    setPlanRejectOpen(false);
-                    setPlanRejectFeedback('');
-                    setPlanError(null);
-                  }}
-                  disabled={planActionPending !== null}
-                >
-                  取消
-                </Button>
-              </>
-            ) : (
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                className="h-7 gap-1 px-2 text-xs"
-                onClick={() => setPlanRejectOpen(true)}
-                disabled={planActionPending !== null}
-              >
-                <Pencil className="h-3.5 w-3.5" />
-                要求修改
-              </Button>
-            )}
-          </div>
-        </div>
       </div>
     );
   };
@@ -3034,86 +2599,6 @@ export default function ChatPage() {
             </Button>
           </div>
         </div>
-      </div>
-    );
-  };
-
-  const renderPlanSummaryCard = () => {
-    if (!shouldShowPlanSummary(activePlan)) return null;
-    const markdown = getPlanApprovalMarkdown(activePlan);
-    return (
-      <div className="plan-summary-row w-full my-2 flex flex-col items-start">
-        <div
-          className="plan-summary-card flex max-w-[760px] w-full min-w-0 flex-col gap-3 rounded-md px-3 py-3 text-sm"
-          style={{
-            border: '0.5px solid var(--border)',
-            background: 'var(--bg-secondary)',
-            color: 'var(--fg-secondary)',
-          }}
-        >
-          <div className="flex items-center gap-2 text-xs font-medium" style={{ color: 'var(--fg-tertiary)' }}>
-            <Check className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--icon-accent)' }} />
-            <span>计划已批准</span>
-          </div>
-          <div
-            className="plan-markdown-panel min-w-0 rounded-sm px-2.5 py-2 prose prose-sm max-w-none [&_p]:m-0 [&_p:not(:last-child)]:mb-2"
-            style={{
-              border: '0.5px solid var(--border)',
-              background: 'var(--bg-input)',
-              color: 'var(--fg-secondary)',
-              fontSize: 'var(--codex-chat-font-size)',
-              lineHeight: 'calc(var(--codex-chat-font-size) + 8px)',
-            }}
-          >
-            <MarkdownView content={markdown} enableMermaid />
-          </div>
-        </div>
-      </div>
-    );
-  };
-
-  const renderTaskLedgerStrip = () => {
-    if (taskLedgerTasks.length === 0) return null;
-    return (
-      <div className="task-ledger-strip w-full my-1 flex flex-col items-start gap-1">
-        {taskLedgerTasks.slice(0, 8).map((task) => {
-          const title = compactTaskTitle(task, 120);
-          const evidence = task.status === 'blocked' && task.evidence_summary
-            ? task.evidence_summary
-            : '';
-          return (
-            <div
-              key={task.task_id}
-              className="flex max-w-[760px] min-w-0 items-center gap-2 rounded-md px-2.5 py-1 text-xs"
-              style={{
-                border: '0.5px solid var(--border)',
-                background: 'var(--bg-button-tertiary-hover)',
-                color: 'var(--fg-tertiary)',
-              }}
-              title={evidence || task.detail || title}
-            >
-              <BellRing className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--icon-accent)' }} />
-              <span
-                className="shrink-0 rounded-sm px-1.5 py-0.5 font-medium"
-                style={{ color: 'var(--fg-secondary)', background: 'var(--bg-secondary)' }}
-              >
-                {taskStatusLabel(task.status)}
-              </span>
-              <span className="shrink-0" style={{ color: 'var(--fg-tertiary)' }}>
-                {taskOwnerLabel(task.owner_type)}
-              </span>
-              <span className="min-w-[120px] truncate" style={{ color: 'var(--fg-secondary)' }}>
-                {title}
-              </span>
-              {evidence && (
-                <>
-                  <span className="shrink-0" style={{ color: 'var(--fg-tertiary)' }}>{'->'}</span>
-                  <span className="min-w-[120px] truncate">{evidence}</span>
-                </>
-              )}
-            </div>
-          );
-        })}
       </div>
     );
   };
@@ -3383,323 +2868,6 @@ export default function ChatPage() {
       </div>
     );
   };
-
-  // Parse '''USER MENTIONED FILES: ...''' prefix from message content
-
-  const renderMsg = (m: typeof messages[0], index: number) => {
-    if (isCompactBoundaryMessage(m)) {
-      const trigger = formatCompactTrigger(m.compact_metadata?.trigger);
-      const tokens = formatCompactTokens(m.compact_metadata?.pre_tokens);
-      const restoredFiles = formatRestoredFiles(m.compact_metadata?.restored_files?.length);
-      return (
-        <div
-          key={m.id}
-          id={`message-${index}`}
-          className="w-full my-4 flex items-center justify-center"
-        >
-          <div
-            className="flex items-center gap-2 px-3 py-1.5 rounded-full text-xs"
-            style={{
-              color: 'var(--fg-tertiary)',
-              border: '0.5px solid var(--border)',
-              background: 'var(--bg-button-tertiary-hover)',
-            }}
-          >
-            <Archive className="h-3.5 w-3.5" />
-            <span>{trigger}</span>
-            {tokens && <span style={{ color: 'var(--fg-tertiary)' }}>{tokens}</span>}
-            {restoredFiles && <span style={{ color: 'var(--fg-tertiary)' }}>{restoredFiles}</span>}
-          </div>
-        </div>
-      );
-    }
-
-    if (isCompactSummaryMessage(m)) {
-      return (
-        <div
-          key={m.id}
-          id={`message-${index}`}
-          className="w-full my-2 flex flex-col items-center"
-        >
-          <details
-            className="w-full max-w-[720px] rounded-lg px-3 py-2 text-sm"
-            style={{
-              border: '0.5px solid var(--border)',
-              background: 'var(--bg-secondary)',
-              color: 'var(--fg-secondary)',
-            }}
-          >
-            <summary className="cursor-pointer text-xs font-medium" style={{ color: 'var(--fg-tertiary)' }}>
-              压缩摘要（transcript）
-            </summary>
-            <div className="mt-2 prose prose-sm max-w-none [&_p]:m-0 [&_p:not(:last-child)]:mb-2">
-              <MarkdownView content={m.content} enableMermaid />
-            </div>
-          </details>
-        </div>
-      );
-    }
-
-    if (isTaskNotificationMessage(m)) {
-      return isRenderableTaskNotificationMessage(m)
-        ? renderTaskNotificationMessage(m, index)
-        : null;
-    }
-
-    if (m.role === 'tool') {
-      const coveredById = m.tool_call_id ? coveredToolMessages.ids.has(m.tool_call_id) : false;
-      const coveredByName = !m.tool_call_id && m.name ? coveredToolMessages.names.has(m.name) : false;
-      if (coveredById || coveredByName || isToolMessageCovered(m, messages.slice(0, index))) return null;
-      return (
-        <div
-          key={m.id}
-          id={`message-${index}`}
-          className="w-full my-2 flex flex-col group items-start"
-        >
-          <div className="flex flex-col items-start max-w-full">
-            <ToolCallGroup items={[makeToolItem(null, m, `standalone-${m.id}`)]} />
-          </div>
-        </div>
-      );
-    }
-
-    const prevUserMessage = index > 0
-      && messages[index - 1]?.role === 'user'
-      && !isTaskNotificationMessage(messages[index - 1])
-      ? messages[index - 1]
-      : null;
-    const fileNames = m.role === 'user' ? getUserImportFileNames(m) : [];
-    const imageRefs = m.role === 'user' ? getUserImageRefs(m) : [];
-    const displayContent = m.role === 'user' ? getUserDisplayContent(m) : m.content;
-    const processedBlocksExpanded = m.role === 'assistant' && expandedProcessedMessageIds.has(m.id);
-    const assistantHasProcessHistory = m.role === 'assistant' && hasAssistantProcessHistory(m);
-    const foldedAssistantContentBlocks = m.role === 'assistant' && assistantHasProcessHistory
-      ? getAssistantFoldedContentBlocks(m)
-      : [];
-    const assistantCanFoldProcess = assistantHasProcessHistory && foldedAssistantContentBlocks.length > 0;
-    const assistantTimeline = m.role === 'assistant' && (!assistantCanFoldProcess || processedBlocksExpanded)
-      ? getCachedAssistantTimeline(m)
-      : [];
-    const assistantFoldState = m.role === 'assistant' && (!assistantCanFoldProcess || processedBlocksExpanded)
-      ? getTimelineFoldState(assistantTimeline, {
-          processExpanded: processedBlocksExpanded,
-          finalContentKeys: foldedAssistantContentBlocks.map((block) => block.key),
-        })
-      : null;
-    const visibleAssistantContentBlocks = processedBlocksExpanded
-      ? assistantFoldState?.contentBlocks ?? []
-      : foldedAssistantContentBlocks;
-    const processedDuration = m.role === 'assistant'
-      ? formatProcessedDuration(m.generation_info?.duration_ms)
-      : null;
-    const taskGuard = m.role === 'assistant' ? m.generation_info?.task_guard : null;
-    const hasDisplayContent = displayContent.trim().length > 0;
-
-    return (
-      <div
-        key={m.id}
-        id={`message-${index}`}
-        className={cn(
-          'chat-message-row w-full my-2 flex flex-col group',
-          m.role === 'user' ? 'items-end' : 'items-start',
-        )}
-      >
-        <div className={cn(
-          'flex flex-col max-w-full',
-          m.role === 'user' ? 'items-end' : 'items-start',
-          m.role === 'assistant' && 'w-full',
-        )}>
-          {imageRefs.length > 0 && (
-            <div className="mb-1.5 flex max-w-full flex-wrap gap-2">
-              {imageRefs.map((image) => {
-                const imageUrl = getImportAssetUrl(image.filename);
-                return (
-                  <TextTooltip key={image.filename} content={image.filename}>
-                    <button
-                      type="button"
-                      className="h-24 w-24 overflow-hidden rounded-md border p-0 cursor-zoom-in transition-opacity hover:opacity-90"
-                      style={{ borderColor: 'var(--border)', background: 'var(--bg-button-tertiary-hover)' }}
-                      onClick={() => handlePreviewImage(image.filename)}
-                    >
-                      <img
-                        src={imageUrl}
-                        alt={image.filename}
-                        className="h-full w-full object-cover"
-                        loading="lazy"
-                      />
-                    </button>
-                  </TextTooltip>
-                );
-              })}
-            </div>
-          )}
-          {fileNames.length > 0 && (
-            <div className="max-w-full w-fit mb-1 px-2.5 py-1.5 rounded-lg text-xs flex flex-wrap items-center gap-1.5"
-                 style={{ background: 'var(--accent-soft)', border: '0.5px solid var(--border)', color: 'var(--fg-tertiary)' }}>
-              <FileText className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--icon-accent)' }} />
-              {fileNames.map((fn, fi) => (
-                <span key={fi} className="px-1.5 py-0.5 rounded text-[11px] font-medium cursor-pointer transition-colors"
-                      style={{ background: 'var(--accent-soft)', color: 'var(--icon-accent)' }}
-                      onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-active)'; }}
-                      onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--accent-soft)'; }}
-                      onClick={() => handlePreviewFile(fn)}>{fn}</span>
-              ))}
-            </div>
-          )}
-          {m.role === 'assistant' && assistantCanFoldProcess && (
-            <div className={cn('processed-fold', processedBlocksExpanded && 'expanded')}>
-              <button
-                type="button"
-                className="processed-fold-button"
-                aria-expanded={processedBlocksExpanded}
-                onClick={() => toggleProcessedBlocks(m.id)}
-              >
-                <span>{processedDuration ? `已处理 ${processedDuration}` : '已处理'}</span>
-                <ChevronRight className="processed-fold-chevron" />
-              </button>
-            </div>
-          )}
-          {m.role === 'assistant' && assistantCanFoldProcess && (
-            <>
-              <AnimatedProcessedBlocks
-                expanded={processedBlocksExpanded}
-                blocks={processedBlocksExpanded ? assistantFoldState?.processBlocks ?? [] : []}
-                renderBlock={renderAssistantTimelineBlock}
-              />
-              <div className="processed-answer-divider" />
-              {visibleAssistantContentBlocks.map(renderAssistantTimelineBlock)}
-            </>
-          )}
-          {m.role === 'assistant' && !assistantCanFoldProcess && assistantFoldState?.visibleBlocks.map(renderAssistantTimelineBlock)}
-          {m.role !== 'assistant' && hasDisplayContent && (
-            <div
-              className={cn(
-                'max-w-full w-fit px-3 py-2 rounded-2xl leading-relaxed prose prose-sm max-w-none [&_p]:m-0 [&_p:not(:last-child)]:mb-2',
-                m.role === 'user'
-                  ? 'prose-invert rounded-br-sm'
-                  : ''
-              )}
-              style={
-                m.role === 'user'
-                  ? {
-                      background: 'linear-gradient(160deg, rgba(217,119,87,0.16), rgba(217,119,87,0.08))',
-                      border: '0.5px solid rgba(217,119,87,0.28)',
-                      boxShadow: 'var(--highlight-top)',
-                      color: 'var(--fg-85)',
-                      fontSize: 'var(--codex-chat-font-size)',
-                      lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
-                    }
-                  : {
-                      color: 'var(--fg-secondary)',
-                      fontSize: 'var(--codex-chat-font-size)',
-                      lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
-                    }
-              }
-            >
-              <MarkdownView content={displayContent} enableMermaid />
-            </div>
-          )}
-          {m.role === 'assistant' && m.generation_info && (!assistantCanFoldProcess || m.generation_info.status !== 'completed') && (
-            <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
-              {!assistantCanFoldProcess && <span>{formatDuration(m.generation_info.duration_ms)}</span>}
-              {m.generation_info.status !== 'completed' && (
-                <span className={cn(
-                  m.generation_info.status === 'error' ? 'text-destructive' : 'text-amber-500'
-                )}>
-                  {getGenerationStatusText(m.generation_info)}
-                </span>
-              )}
-            </div>
-          )}
-          {m.role === 'assistant' && taskGuard && (taskGuard.open_task_count ?? 0) > 0 && (
-            <div
-              className="mt-1 flex max-w-[760px] items-center gap-2 rounded-md px-2.5 py-1 text-xs"
-              style={{
-                border: '0.5px solid var(--border)',
-                background: 'var(--bg-button-tertiary-hover)',
-                color: 'var(--fg-tertiary)',
-              }}
-            >
-              <BellRing className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--icon-accent)' }} />
-              <span style={{ color: 'var(--fg-secondary)' }}>仍有未完成任务</span>
-              <span>{taskGuard.open_task_count} 项</span>
-            </div>
-          )}
-          <div className={cn(
-            'flex items-center gap-1',
-            m.role === 'assistant' ? 'mt-0.5' : 'mt-1',
-            m.role === 'user' ? 'self-end justify-end' : 'self-start justify-start',
-          )}>
-            <Button
-              variant="ghost"
-              size="sm"
-              className={cn(
-                'opacity-0 group-hover:opacity-100 transition-opacity p-0',
-                m.role === 'assistant' ? 'h-5 w-5' : 'h-7 w-7',
-              )}
-              onClick={() => handleCopy(displayContent, m.id)}
-              aria-label="复制消息"
-            >
-              {copiedMessageId === m.id ? (
-                <Check className={m.role === 'assistant' ? 'h-3.5 w-3.5' : 'h-4 w-4'} />
-              ) : (
-                <Copy className={m.role === 'assistant' ? 'h-3.5 w-3.5' : 'h-4 w-4'} />
-              )}
-            </Button>
-            {m.role === 'user' && (
-              <TextTooltip content="编辑消息（创建新分支）">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="opacity-0 group-hover:opacity-100 transition-opacity h-7 w-7 p-0"
-                  onClick={() => handleEditUserMessage(m.node_id, m.parent_node_id, displayContent)}
-                  aria-label="编辑"
-                >
-                  <Pencil className="h-4 w-4" />
-                </Button>
-              </TextTooltip>
-            )}
-            {m.role === 'user' && (
-              <TextTooltip content="删除此消息及所有后续分支">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="opacity-0 group-hover:opacity-100 transition-opacity h-7 w-7 p-0 text-destructive hover:text-destructive"
-                  onClick={() => handleDeleteBranch(m.node_id)}
-                  aria-label="删除分支"
-                >
-                  <Trash2 className="h-4 w-4" />
-                </Button>
-              </TextTooltip>
-            )}
-            {m.role === 'assistant' && prevUserMessage && index === messages.length - 1 && (
-              <TextTooltip content="重试（删除当前回复并重新生成）">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="opacity-0 group-hover:opacity-100 transition-opacity h-7 w-7 p-0"
-                  onClick={() => handleRetry(
-                    m.node_id,
-                    getUserDisplayContent(prevUserMessage),
-                    getUserImportFileNames(prevUserMessage),
-                    getUserImageRefs(prevUserMessage),
-                  )}
-                  aria-label="重试"
-                >
-                  <RotateCcw className="h-4 w-4" />
-                </Button>
-              </TextTooltip>
-            )}
-          </div>
-        </div>
-      </div>
-    );
-  };
-
-  const renderedMessages = useMemo(
-    () => messages.map((m, index) => renderMsg(m, index)),
-    [messages, expandedProcessedMessageIds, copiedMessageId, coveredToolMessages, currentConversation?.id],
-  );
 
   const activeRightPanelWidth = rightPanelWidth;
   const activeRightPanelConfig = RIGHT_PANEL_WIDTH;
@@ -3995,136 +3163,12 @@ export default function ChatPage() {
                 )}
                 onScroll={handleScroll}
               >
-                <div className="w-[800px] max-w-full flex flex-col px-4">
-                  {renderedMessages}
+                <div
+                  className="w-[800px] max-w-full flex flex-col px-4"
+                  data-plan-actions={Boolean(handleApprovePlan) && Boolean(handleRejectPlan)}
+                >
+                  <TranscriptList items={transcriptItems} />
                   {renderPlanQuestionCard()}
-                  {renderPlanApprovalCard()}
-                  {renderPlanSummaryCard()}
-                  {renderTaskLedgerStrip()}
-                  {activeRunDrafts.map((draft) => (
-                    <div key={draft.run.runId} className="contents">
-                      {draft.showPendingBubble && (
-                        <div className="w-full my-2 flex flex-col items-end">
-                          <div className="flex flex-col items-start max-w-full">
-                            <div
-                              className="max-w-full w-fit px-3 py-2 rounded-2xl rounded-br-sm leading-relaxed prose prose-sm prose-invert max-w-none [&_p]:m-0"
-                              style={{
-                                background: 'linear-gradient(160deg, rgba(217,119,87,0.16), rgba(217,119,87,0.08))',
-                                border: '0.5px solid rgba(217,119,87,0.28)',
-                                boxShadow: 'var(--highlight-top)',
-                                color: 'var(--fg-85)',
-                                fontSize: 'var(--codex-chat-font-size)',
-                                lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
-                              }}
-                            >
-                              <MarkdownView content={draft.run.pendingUserMessage || ''} />
-                            </div>
-                          </div>
-                        </div>
-                      )}
-                      {draft.showStreamBlock && (
-                        <div className="w-full my-2 flex flex-col items-start">
-                          <div className="flex flex-col items-start max-w-full w-full min-w-0">
-                            {draft.streamingFoldState.canFoldProcess ? (
-                              <>
-                                <div className="processed-fold expanded">
-                                  <div className="processed-fold-button" aria-expanded="true">
-                                    <span>{draft.run.duration > 0 ? `已处理 ${formatProcessedDuration(draft.run.duration) ?? ''}`.trim() : '已处理'}</span>
-                                    <ChevronRight className="processed-fold-chevron" />
-                                  </div>
-                                </div>
-                                <AnimatedProcessedBlocks
-                                  expanded
-                                  blocks={draft.streamingFoldState.visibleBlocks}
-                                  renderBlock={(block) => {
-                                    if (block.type === 'reasoning') {
-                                      return (
-                                        <ThinkingBlock
-                                          key={block.key}
-                                          reasoning={block.reasoning}
-                                          streaming={block.key === draft.activeReasoningKey}
-                                        />
-                                      );
-                                    }
-                                    if (block.type === 'tools') {
-                                      return <ToolCallGroup key={block.key} items={block.items} />;
-                                    }
-                                    return renderAssistantTimelineBlock(block);
-                                  }}
-                                />
-                              </>
-                            ) : (
-                              draft.timeline.map((block, blockIndex) => {
-                                if (block.type === 'reasoning') {
-                                  const reasoningStillOpen = blockIndex === draft.activeReasoningIndex;
-                                  return <ThinkingBlock key={block.key} reasoning={block.reasoning} streaming={reasoningStillOpen} />;
-                                }
-                                if (block.type === 'tools') {
-                                  return <ToolCallGroup key={block.key} items={block.items} />;
-                                }
-                                return (
-                                  <div
-                                    key={block.key}
-                                    className="max-w-full w-full min-w-0 px-3 py-2 rounded-2xl rounded-bl-sm leading-relaxed prose prose-sm max-w-none [&_p]:m-0"
-                                    style={{
-                                      color: 'var(--fg-secondary)',
-                                      fontSize: 'var(--codex-chat-font-size)',
-                                      lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
-                                    }}
-                                  >
-                                    <MarkdownView content={block.content} />
-                                  </div>
-                                );
-                              })
-                            )}
-                            {draft.timeline.length === 0 && draft.run.status === 'streaming' && (
-                              <div
-                                className="max-w-full w-fit px-3 py-2 rounded-2xl rounded-bl-sm leading-relaxed prose prose-sm max-w-none [&_p]:m-0"
-                                style={{
-                                  color: 'var(--fg-secondary)',
-                                  fontSize: 'var(--codex-chat-font-size)',
-                                  lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
-                                }}
-                              >
-                                <div className="flex items-center gap-2">
-                                  <Loader2 className="h-4 w-4 animate-spin" style={{ color: 'var(--icon-accent)' }} />
-                                  <span className="text-sm" style={{ color: 'var(--fg-tertiary)' }}>思考中...</span>
-                                </div>
-                              </div>
-                            )}
-                            {getStreamStatusLabel(draft.run.status, draft.run.errorMessage) && (
-                              <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
-                                <span className="text-destructive">{getStreamStatusLabel(draft.run.status, draft.run.errorMessage)}</span>
-                              </div>
-                            )}
-                            {draft.run.status !== 'streaming' && (() => {
-                              const copyContent = getDraftCopyContent(draft.timeline, draft.run.content);
-                              if (!copyContent) return null;
-                              return (
-                                <div className="mt-0.5 flex items-center gap-1 self-start">
-                                  <TextTooltip content="复制">
-                                    <Button
-                                      variant="ghost"
-                                      size="sm"
-                                      className="h-5 w-5 p-0"
-                                      onClick={() => handleCopy(copyContent, draft.run.runId)}
-                                      aria-label="复制"
-                                    >
-                                      {copiedMessageId === draft.run.runId ? (
-                                        <Check className="h-3.5 w-3.5 text-green-500" />
-                                      ) : (
-                                        <Copy className="h-3.5 w-3.5" />
-                                      )}
-                                    </Button>
-                                  </TextTooltip>
-                                </div>
-                              );
-                            })()}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  ))}
                   <div ref={messagesEndRef} />
                 </div>
               </div>
@@ -4432,26 +3476,6 @@ export default function ChatPage() {
               确认
             </Button>
           </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* File preview dialog */}
-      <Dialog open={!!previewFile} onOpenChange={(open) => { if (!open) setPreviewFile(null); }}>
-        <DialogContent
-          className="max-w-[92vw] sm:max-w-[92vw] max-h-[86vh] flex flex-col"
-          style={{ width: 'min(1120px, 92vw)' }}
-        >
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <FileText className="h-4 w-4" />
-              {previewFile?.name}
-            </DialogTitle>
-          </DialogHeader>
-          <div className="file-preview-panel">
-            {previewFile && (
-              <FilePreviewCode name={previewFile.name} content={previewFile.content} />
-            )}
-          </div>
         </DialogContent>
       </Dialog>
 
