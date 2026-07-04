@@ -71,13 +71,29 @@ MULTI_AGENT_REQUEST_TOKENS = (
 class ChatManager:
     """延迟加载模型的聊天管理器"""
     
-    def __init__(self, model_manager: ModelManager, storage: ChatStorage, prompts: PromptStorage, tool_manager=None, task_ledger=None, plan_ledger=None):
+    def __init__(
+        self,
+        model_manager: ModelManager,
+        storage: ChatStorage,
+        prompts: PromptStorage,
+        tool_manager=None,
+        task_ledger=None,
+        plan_ledger=None,
+        chat_repository=None,
+        transcript_projection=None,
+    ):
         self.model_manager = model_manager
         self.storage = storage
         self.prompts = prompts
         self.tool_manager = tool_manager
         self.task_ledger = task_ledger
         self.plan_ledger = plan_ledger
+        self.chat_repository = chat_repository
+        self.transcript_projection = transcript_projection
+        if chat_repository is not None:
+            store = getattr(tool_manager, "tool_result_store", None)
+            if store is not None and getattr(store, "sqlite_repository", None) is None:
+                store.sqlite_repository = chat_repository
         self.tool_orchestrator = None
         self.capability_registry = None
         self.slash_dispatcher = SlashCommandDispatcher()
@@ -312,6 +328,317 @@ class ChatManager:
             int(conversation.metadata.get("updated_at") or 0),
             updated_at,
         )
+
+    def _sqlite_enabled(self) -> bool:
+        return self.chat_repository is not None and self.transcript_projection is not None
+
+    def _role_value(self, role: Any) -> str:
+        return str(getattr(role, "value", role))
+
+    def _sqlite_ensure_branch(
+        self,
+        conversation: Conversation,
+        node_id: str,
+        *,
+        provider_id: Optional[str],
+        model_id: Optional[str],
+    ) -> None:
+        if not self._sqlite_enabled():
+            return
+        repo = self.chat_repository
+        metadata = conversation.metadata
+        repo.ensure_conversation(
+            metadata["id"],
+            title=str(metadata.get("title") or ""),
+            provider_id=provider_id or metadata.get("provider_id"),
+            model_id=model_id or metadata.get("model_id"),
+            workspace=metadata.get("workspace") if isinstance(metadata.get("workspace"), dict) else None,
+        )
+        chain = conversation.get_node_chain(node_id)
+        for item in chain:
+            parent_id = item.get("parent_id")
+            if parent_id == "None":
+                parent_id = None
+            child_order = 0
+            if parent_id and parent_id in conversation.nodes:
+                siblings = conversation.nodes[parent_id].get("children_ids") or []
+                with suppress(ValueError):
+                    child_order = siblings.index(item["id"])
+            repo.ensure_node(
+                metadata["id"],
+                item["id"],
+                parent_id,
+                child_order=child_order,
+                model_id=item.get("model_id") or model_id,
+                provider_id=provider_id,
+                tool_permission_mode=item.get("tool_permission_mode"),
+            )
+
+    def _persist_sqlite_user_turn(
+        self,
+        *,
+        conversation: Conversation,
+        node: Dict[str, Any],
+        user_msg: Message,
+        provider_id: Optional[str],
+        model_id: Optional[str],
+        run_id: Optional[str],
+    ) -> None:
+        if not self._sqlite_enabled():
+            return
+        conversation_id = conversation.metadata["id"]
+        node_id = node["id"]
+        try:
+            self._sqlite_ensure_branch(
+                conversation,
+                node_id,
+                provider_id=provider_id,
+                model_id=model_id,
+            )
+            message_id = self.chat_repository.add_message(
+                conversation_id,
+                node_id,
+                role=self._role_value(user_msg.get("role") or Role.USER),
+                content=str(user_msg.get("content") or ""),
+                subtype=user_msg.get("subtype"),
+                hidden=bool(user_msg.get("is_hidden_from_transcript")),
+                metadata={
+                    key: value
+                    for key, value in dict(user_msg).items()
+                    if key not in {"id", "role", "content", "subtype"}
+                },
+                message_id=user_msg.get("id"),
+            )
+            if not user_msg.get("is_hidden_from_transcript"):
+                self.transcript_projection.upsert_message_item(
+                    conversation_id,
+                    node_id,
+                    message_id,
+                    "user_message",
+                    local_order=10,
+                )
+            if run_id:
+                self.transcript_projection.upsert_run_draft(
+                    conversation_id,
+                    node_id,
+                    run_id=run_id,
+                    status="running",
+                    preview="",
+                    local_order=20,
+                )
+        except Exception as exc:
+            logger.warning("SQLite transcript user turn write failed: %s", exc, exc_info=True)
+
+    def _assistant_process_preview(
+        self,
+        *,
+        tool_interactions: List[Dict[str, Any]],
+        reasoning: str,
+    ) -> str:
+        parts: list[str] = []
+        for interaction in tool_interactions:
+            assistant = interaction.get("assistant") or {}
+            for call in assistant.get("tool_calls") or []:
+                fn = call.get("function") or {}
+                name = fn.get("name")
+                if name:
+                    parts.append(f"tool: {name}")
+            for tool_message in interaction.get("tools") or []:
+                name = tool_message.get("name")
+                if name and f"tool: {name}" not in parts:
+                    parts.append(f"tool: {name}")
+        if reasoning:
+            parts.append(reasoning[:300])
+        return "\n".join(parts)[:4096] or "Assistant process"
+
+    def _plan_cards_from_tool_messages(self, tool_messages: List[Message]) -> list[dict[str, Any]]:
+        cards: list[dict[str, Any]] = []
+        for message in tool_messages:
+            name = str(message.get("name") or "")
+            if name not in {"exit_plan_mode", "ask_user_question"}:
+                continue
+            payload = self._json_tool_payload(message.get("raw_content") or message.get("content"))
+            status = str(payload.get("status") or "")
+            if status not in {"awaiting_approval", "awaiting_question"}:
+                continue
+            plan_id = str(payload.get("plan_id") or "")
+            if not plan_id:
+                continue
+            if name == "exit_plan_mode":
+                preview = str(payload.get("plan") or payload.get("message") or "")
+            else:
+                question = payload.get("question") if isinstance(payload.get("question"), dict) else {}
+                preview = str(question.get("question") or payload.get("message") or "")
+            cards.append({
+                "plan_id": plan_id,
+                "status": status,
+                "preview": preview[:4096],
+                "props": payload,
+            })
+        return cards
+
+    def _persist_sqlite_tool_metadata(
+        self,
+        *,
+        conversation_id: str,
+        node_id: str,
+        run_id: Optional[str],
+        assistant_message_id: Optional[str],
+        tool_calls: List[Dict[str, Any]],
+        tool_messages: List[Message],
+    ) -> None:
+        if self.chat_repository is None:
+            return
+        for index, call in enumerate(tool_calls):
+            fn = call.get("function") or {}
+            self.chat_repository.add_tool_call(
+                conversation_id,
+                node_id,
+                tool_call_id=call.get("id"),
+                name=str(fn.get("name") or ""),
+                arguments=fn.get("arguments"),
+                call_index=index,
+                status="complete",
+                run_id=run_id,
+                assistant_message_id=assistant_message_id,
+            )
+        for message in tool_messages:
+            raw_output = str(message.get("raw_content") or message.get("content") or "")
+            tool_call_id = message.get("tool_call_id")
+            if tool_call_id:
+                self.chat_repository.add_tool_call(
+                    conversation_id,
+                    node_id,
+                    tool_call_id=tool_call_id,
+                    name=str(message.get("name") or ""),
+                    arguments=None,
+                    call_index=0,
+                    status="complete",
+                    run_id=run_id,
+                    assistant_message_id=assistant_message_id,
+                )
+            self.chat_repository.add_tool_result(
+                conversation_id,
+                node_id,
+                tool_result_id=message.get("tool_result_id"),
+                tool_call_id=tool_call_id,
+                output=raw_output,
+                status="complete",
+                run_id=run_id,
+                metadata={
+                    "tool_name": message.get("name"),
+                    "tool_result_id": message.get("tool_result_id"),
+                    "model_visible_content": message.get("model_visible_content"),
+                },
+            )
+
+    def _persist_sqlite_assistant_turn(
+        self,
+        *,
+        conversation: Conversation,
+        node: Dict[str, Any],
+        assistant_msg: Message,
+        provider_id: Optional[str],
+        model_id: Optional[str],
+        run_id: Optional[str],
+        generation_status: str,
+        tool_interactions: List[Dict[str, Any]],
+        tool_messages: List[Message],
+        tool_calls: List[Dict[str, Any]],
+    ) -> None:
+        if not self._sqlite_enabled():
+            return
+        conversation_id = conversation.metadata["id"]
+        node_id = node["id"]
+        try:
+            self._sqlite_ensure_branch(
+                conversation,
+                node_id,
+                provider_id=provider_id,
+                model_id=model_id,
+            )
+            content = str(assistant_msg.get("content") or "")
+            assistant_message_id: Optional[str] = None
+            if content:
+                assistant_message_id = self.chat_repository.add_message(
+                    conversation_id,
+                    node_id,
+                    role=self._role_value(assistant_msg.get("role") or Role.ASSISTANT),
+                    content=content,
+                    metadata={
+                        key: value
+                        for key, value in dict(assistant_msg).items()
+                        if key not in {"id", "role", "content"}
+                    },
+                    message_id=assistant_msg.get("id"),
+                )
+            if tool_calls or tool_messages:
+                self._persist_sqlite_tool_metadata(
+                    conversation_id=conversation_id,
+                    node_id=node_id,
+                    run_id=run_id,
+                    assistant_message_id=assistant_message_id,
+                    tool_calls=tool_calls,
+                    tool_messages=tool_messages,
+                )
+            process_preview = self._assistant_process_preview(
+                tool_interactions=tool_interactions,
+                reasoning=str(assistant_msg.get("reasoning") or ""),
+            )
+            if tool_interactions or assistant_msg.get("reasoning"):
+                process_message_id = self.chat_repository.add_message(
+                    conversation_id,
+                    node_id,
+                    role="assistant",
+                    content=process_preview,
+                    subtype="assistant_process",
+                    hidden=False,
+                    metadata={
+                        "tool_interactions": tool_interactions,
+                        "reasoning": assistant_msg.get("reasoning"),
+                    },
+                    message_id=f"{assistant_msg.get('id')}:process",
+                )
+                self.transcript_projection.upsert_message_item(
+                    conversation_id,
+                    node_id,
+                    process_message_id,
+                    "assistant_process",
+                    local_order=25,
+                    status=generation_status,
+                    preview=process_preview,
+                )
+            plan_control_only = self._plan_tool_paused_turn(tool_messages)
+            if content and not plan_control_only and assistant_message_id:
+                self.transcript_projection.upsert_message_item(
+                    conversation_id,
+                    node_id,
+                    assistant_message_id,
+                    "assistant_answer",
+                    local_order=30,
+                    status=generation_status,
+                )
+            for card in self._plan_cards_from_tool_messages(tool_messages):
+                self.transcript_projection.upsert_plan_card(
+                    conversation_id,
+                    node_id,
+                    plan_id=card["plan_id"],
+                    status=card["status"],
+                    preview=card["preview"],
+                    local_order=40,
+                    props=card["props"],
+                )
+            if run_id:
+                self.transcript_projection.upsert_run_draft(
+                    conversation_id,
+                    node_id,
+                    run_id=run_id,
+                    status=generation_status,
+                    preview=content[:4096],
+                    local_order=20,
+                )
+        except Exception as exc:
+            logger.warning("SQLite transcript assistant turn write failed: %s", exc, exc_info=True)
 
     def _provider_for_model(self, model_id: Optional[str]) -> Optional[str]:
         if not model_id:
@@ -793,6 +1120,14 @@ class ChatManager:
                 model_context_window=meta.get("context_length"),
             )
             self._save(conversation)
+            self._persist_sqlite_user_turn(
+                conversation=conversation,
+                node=new_node,
+                user_msg=user_msg,
+                provider_id=target_provider,
+                model_id=target_model,
+                run_id=run_id,
+            )
 
         # 创建流控制器（在锁外，避免把网络流式包进锁里阻塞同对话其他分支）
         controller = StreamController(
@@ -1318,6 +1653,21 @@ class ChatManager:
                         "current_node_id": conversation.current_node_id,
                         "root_node_id": conversation.root_node_id,
                     })
+
+            latest_for_transcript = self.get_conversation(conversation_id)
+            if latest_for_transcript is not None:
+                self._persist_sqlite_assistant_turn(
+                    conversation=latest_for_transcript,
+                    node=latest_for_transcript.nodes.get(new_node["id"], new_node),
+                    assistant_msg=assistant_msg,
+                    provider_id=target_provider,
+                    model_id=target_model,
+                    run_id=run_id,
+                    generation_status=generation_status,
+                    tool_interactions=tool_interactions,
+                    tool_messages=all_tool_messages,
+                    tool_calls=all_tool_calls,
+                )
 
             # 清理控制器
             if new_node["id"] in self._active_controllers:

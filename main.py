@@ -118,6 +118,8 @@ async def startup_event():
         tool_manager,
         task_ledger=task_ledger,
         plan_ledger=plan_ledger,
+        chat_repository=chat_repository,
+        transcript_projection=transcript_projection,
     )
     chat_manager.plan_ledger = plan_ledger
     chat_manager.capability_registry = capability_registry
