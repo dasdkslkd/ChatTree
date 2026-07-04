@@ -22,7 +22,8 @@ class PlanNotFoundError(PlanLedgerError):
 class PlanLedger:
     """Process-local per-conversation plan-mode ledger."""
 
-    def __init__(self) -> None:
+    def __init__(self, repository=None) -> None:
+        self._repository = repository
         self._plans_by_conversation: Dict[str, Dict[str, PlanSession]] = {}
         self._pending_context_by_conversation: Dict[str, list[PlanContextInjection]] = {}
         self._lock = asyncio.Lock()
@@ -42,6 +43,20 @@ class PlanLedger:
             previous_mode = "modify_only"
         now = time()
         async with self._lock:
+            if self._repository is not None:
+                current = self._repository.get_active_or_awaiting(conversation_id)
+                if current is not None:
+                    return self._session_from_record(current)
+                plan_id = self._repository.create_plan(
+                    conversation_id,
+                    entered_node_id=node_id,
+                    previous_permission_mode=previous_mode,
+                    entered_run_id=run_id,
+                )
+                created = self._repository.get_plan(conversation_id, plan_id)
+                if created is None:
+                    raise PlanNotFoundError(plan_id)
+                return self._session_from_record(created)
             current = self._active_or_awaiting_locked(conversation_id)
             if current is not None:
                 return deepcopy(current)
@@ -71,6 +86,18 @@ class PlanLedger:
         if not plan_text:
             raise ValueError("plan is required")
         async with self._lock:
+            if self._repository is not None:
+                record = self._repository.get_active_or_awaiting(conversation_id)
+                if record is None or record.get("status") != PlanStatus.ACTIVE.value:
+                    raise ValueError("active plan session is required")
+                updated = self._repository.submit_plan(
+                    conversation_id,
+                    record["plan_id"],
+                    plan=plan_text,
+                    submitted_node_id=node_id,
+                    submitted_run_id=run_id,
+                )
+                return self._session_from_record(updated)
             record = self._active_or_awaiting_locked(conversation_id)
             if record is None or record.status != PlanStatus.ACTIVE:
                 raise ValueError("active plan session is required")
@@ -99,6 +126,26 @@ class PlanLedger:
             raise ValueError("question is required")
         now = time()
         async with self._lock:
+            if self._repository is not None:
+                record = self._repository.get_active_or_awaiting(conversation_id)
+                if record is None or record.get("status") not in (
+                    PlanStatus.ACTIVE.value,
+                    PlanStatus.AWAITING_QUESTION.value,
+                ):
+                    raise ValueError("active plan session is required")
+                payload = {
+                    "question": question_text,
+                    "options": self._normalize_question_options(options),
+                    "asked_node_id": node_id,
+                    "asked_run_id": run_id,
+                    "created_at": now,
+                }
+                updated = self._repository.ask_question(
+                    conversation_id,
+                    record["plan_id"],
+                    question=payload,
+                )
+                return self._session_from_record(updated)
             record = self._active_or_awaiting_locked(conversation_id)
             if record is None or record.status not in (PlanStatus.ACTIVE, PlanStatus.AWAITING_QUESTION):
                 raise ValueError("active plan session is required")
@@ -126,6 +173,30 @@ class PlanLedger:
         if not answer_text:
             raise ValueError("answer is required")
         async with self._lock:
+            if self._repository is not None:
+                record = self._repository.get_plan(conversation_id, plan_id)
+                if record is None:
+                    raise PlanNotFoundError(plan_id)
+                if record.get("status") != PlanStatus.AWAITING_QUESTION.value:
+                    raise ValueError("plan must be awaiting question")
+                updated_record = self._repository.answer_question(
+                    conversation_id,
+                    plan_id,
+                    answer=answer_text,
+                )
+                updated = self._session_from_record(updated_record)
+                self._repository.append_pending_context(
+                    conversation_id,
+                    plan_id,
+                    PlanContextInjection(
+                        kind="plan_question_answer",
+                        conversation_id=conversation_id,
+                        plan_id=plan_id,
+                        content=self._question_answer_content(updated),
+                        permission_mode="plan",
+                    ).to_dict(),
+                )
+                return deepcopy(updated)
             record = self._require_plan_locked(conversation_id, plan_id)
             if record.status != PlanStatus.AWAITING_QUESTION:
                 raise ValueError("plan must be awaiting question")
@@ -157,6 +228,26 @@ class PlanLedger:
 
     async def approve_plan(self, *, conversation_id: str, plan_id: str) -> PlanSession:
         async with self._lock:
+            if self._repository is not None:
+                record = self._repository.get_plan(conversation_id, plan_id)
+                if record is None:
+                    raise PlanNotFoundError(plan_id)
+                if record.get("status") != PlanStatus.AWAITING_APPROVAL.value:
+                    raise ValueError("plan must be awaiting approval")
+                updated_record = self._repository.approve_plan(conversation_id, plan_id)
+                updated = self._session_from_record(updated_record)
+                self._repository.append_pending_context(
+                    conversation_id,
+                    plan_id,
+                    PlanContextInjection(
+                        kind="approved_plan",
+                        conversation_id=conversation_id,
+                        plan_id=plan_id,
+                        content=self._approved_plan_content(updated),
+                        permission_mode=updated.previous_permission_mode,
+                    ).to_dict(),
+                )
+                return deepcopy(updated)
             record = self._require_plan_locked(conversation_id, plan_id)
             if record.status != PlanStatus.AWAITING_APPROVAL:
                 raise ValueError("plan must be awaiting approval")
@@ -178,6 +269,30 @@ class PlanLedger:
 
     async def reject_plan(self, *, conversation_id: str, plan_id: str, feedback: str = "") -> PlanSession:
         async with self._lock:
+            if self._repository is not None:
+                record = self._repository.get_plan(conversation_id, plan_id)
+                if record is None:
+                    raise PlanNotFoundError(plan_id)
+                if record.get("status") != PlanStatus.AWAITING_APPROVAL.value:
+                    raise ValueError("plan must be awaiting approval")
+                updated_record = self._repository.reject_plan(
+                    conversation_id,
+                    plan_id,
+                    feedback=feedback,
+                )
+                updated = self._session_from_record(updated_record)
+                self._repository.append_pending_context(
+                    conversation_id,
+                    plan_id,
+                    PlanContextInjection(
+                        kind="plan_feedback",
+                        conversation_id=conversation_id,
+                        plan_id=plan_id,
+                        content=self._feedback_content(updated),
+                        permission_mode="plan",
+                    ).to_dict(),
+                )
+                return deepcopy(updated)
             record = self._require_plan_locked(conversation_id, plan_id)
             if record.status != PlanStatus.AWAITING_APPROVAL:
                 raise ValueError("plan must be awaiting approval")
@@ -201,16 +316,25 @@ class PlanLedger:
 
     async def get_plan(self, conversation_id: str, plan_id: str) -> Optional[PlanSession]:
         async with self._lock:
+            if self._repository is not None:
+                record = self._repository.get_plan(conversation_id, plan_id)
+                return self._session_from_record(record) if record else None
             record = self._plans_by_conversation.get(conversation_id, {}).get(plan_id)
             return deepcopy(record) if record else None
 
     async def get_active_or_awaiting(self, conversation_id: str) -> Optional[PlanSession]:
         async with self._lock:
+            if self._repository is not None:
+                record = self._repository.get_active_or_awaiting(conversation_id)
+                return self._session_from_record(record) if record else None
             record = self._active_or_awaiting_locked(conversation_id)
             return deepcopy(record) if record else None
 
     async def get_latest(self, conversation_id: str) -> Optional[PlanSession]:
         async with self._lock:
+            if self._repository is not None:
+                record = self._repository.get_latest(conversation_id)
+                return self._session_from_record(record) if record else None
             records = list(self._plans_by_conversation.get(conversation_id, {}).values())
             if not records:
                 return None
@@ -219,6 +343,9 @@ class PlanLedger:
 
     async def consume_pending_context(self, conversation_id: str) -> list[PlanContextInjection]:
         async with self._lock:
+            if self._repository is not None:
+                pending = self._repository.consume_pending_context(conversation_id)
+                return [PlanContextInjection.from_dict(dict(item)) for item in pending]
             pending = self._pending_context_by_conversation.pop(conversation_id, [])
             return [deepcopy(item) for item in pending]
 
@@ -288,6 +415,25 @@ class PlanLedger:
         if record is None:
             raise PlanNotFoundError(plan_id)
         return record
+
+    def _session_from_record(self, record: Dict[str, Any]) -> PlanSession:
+        return PlanSession.from_dict({
+            "plan_id": record.get("plan_id") or record.get("id"),
+            "conversation_id": record.get("conversation_id"),
+            "status": record.get("status", PlanStatus.ACTIVE.value),
+            "previous_permission_mode": record.get("previous_permission_mode", "modify_only"),
+            "plan": record.get("plan") or "",
+            "question": record.get("question") if isinstance(record.get("question"), dict) else None,
+            "feedback": list(record.get("feedback") or []),
+            "entered_node_id": record.get("entered_node_id"),
+            "entered_run_id": record.get("entered_run_id"),
+            "submitted_node_id": record.get("submitted_node_id"),
+            "submitted_run_id": record.get("submitted_run_id"),
+            "approved_at": record.get("approved_at"),
+            "rejected_at": record.get("rejected_at"),
+            "created_at": record.get("created_at", time()),
+            "updated_at": record.get("updated_at", time()),
+        })
 
     def _approved_plan_content(self, session: PlanSession) -> str:
         return (

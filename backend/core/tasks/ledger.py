@@ -37,7 +37,8 @@ def _owner_type(value: TaskOwnerType | str) -> TaskOwnerType:
 class TaskLedger:
     """Process-local per-conversation task ledger."""
 
-    def __init__(self) -> None:
+    def __init__(self, repository=None) -> None:
+        self._repository = repository
         self._tasks_by_conversation: Dict[str, Dict[str, TaskRecord]] = {}
         self._lock = asyncio.Lock()
         self._listener_run_managers: set[int] = set()
@@ -58,6 +59,20 @@ class TaskLedger:
         if not title:
             raise ValueError("title is required")
         now = time()
+        if self._repository is not None:
+            async with self._lock:
+                task_id = self._repository.create_task(
+                    conversation_id,
+                    title=title,
+                    detail=detail,
+                    created_by_run_id=created_by_run_id,
+                    owner_type=owner_type,
+                    metadata=dict(metadata or {}),
+                )
+                task = self._repository.get_task(conversation_id, task_id)
+                if task is None:
+                    raise TaskNotFoundError(task_id)
+                return self._record_from_row(task)
         record = TaskRecord(
             task_id=f"task_{uuid.uuid4().hex}",
             conversation_id=conversation_id,
@@ -87,6 +102,50 @@ class TaskLedger:
     ) -> TaskRecord:
         next_status = _status(status)
         async with self._lock:
+            if self._repository is not None:
+                record_row = self._repository.get_task(conversation_id, task_id)
+                if record_row is None:
+                    raise TaskNotFoundError(task_id)
+                updated = deepcopy(self._record_from_row(record_row))
+                if title is not None:
+                    stripped_title = title.strip()
+                    if not stripped_title:
+                        raise ValueError("title must not be empty")
+                    updated.title = stripped_title
+                if detail is not None:
+                    updated.detail = detail
+                if next_status is not None:
+                    updated.status = next_status
+                if evidence_run_id is not None:
+                    updated.evidence_run_id = evidence_run_id
+                if evidence_summary is not None:
+                    updated.evidence_summary = evidence_summary
+                if metadata_patch:
+                    updated.metadata.update(dict(metadata_patch))
+                if (
+                    updated.status in {TaskStatus.COMPLETED, TaskStatus.BLOCKED}
+                    and not (updated.evidence_run_id or updated.evidence_summary.strip())
+                ):
+                    raise ValueError(f"{updated.status.value} task requires evidence_run_id or evidence_summary")
+                if updated.status in FINISHED_TASK_STATUSES:
+                    updated.finished_at = updated.finished_at or time()
+                elif updated.status in OPEN_TASK_STATUSES:
+                    updated.finished_at = None
+                updated.updated_at = time()
+                persisted = self._repository.update_task(
+                    conversation_id,
+                    task_id,
+                    status=updated.status,
+                    title=updated.title,
+                    detail=updated.detail,
+                    owner_type=updated.owner_type,
+                    owner_run_id=updated.owner_run_id,
+                    evidence_run_id=updated.evidence_run_id,
+                    evidence_summary=updated.evidence_summary,
+                    metadata=updated.metadata,
+                    finished_at=updated.finished_at,
+                )
+                return self._record_from_row(persisted)
             record = self._require_task_locked(conversation_id, task_id)
             updated = deepcopy(record)
             if title is not None:
@@ -129,6 +188,31 @@ class TaskLedger:
         if not run_id:
             raise ValueError("run_id is required")
         async with self._lock:
+            if self._repository is not None:
+                record_row = self._repository.get_task(conversation_id, task_id)
+                if record_row is None:
+                    raise TaskNotFoundError(task_id)
+                record = self._record_from_row(record_row)
+                record.owner_run_id = run_id
+                record.owner_type = _owner_type(owner_type)
+                record.status = _status(status) or TaskStatus.IN_PROGRESS
+                if record.status in OPEN_TASK_STATUSES:
+                    record.finished_at = None
+                record.updated_at = time()
+                persisted = self._repository.update_task(
+                    conversation_id,
+                    task_id,
+                    status=record.status,
+                    title=record.title,
+                    detail=record.detail,
+                    owner_type=record.owner_type,
+                    owner_run_id=record.owner_run_id,
+                    evidence_run_id=record.evidence_run_id,
+                    evidence_summary=record.evidence_summary,
+                    metadata=record.metadata,
+                    finished_at=record.finished_at,
+                )
+                return self._record_from_row(persisted)
             record = self._require_task_locked(conversation_id, task_id)
             record.owner_run_id = run_id
             record.owner_type = _owner_type(owner_type)
@@ -140,6 +224,9 @@ class TaskLedger:
 
     async def get_task(self, conversation_id: str, task_id: str) -> Optional[TaskRecord]:
         async with self._lock:
+            if self._repository is not None:
+                record = self._repository.get_task(conversation_id, task_id)
+                return self._record_from_row(record) if record else None
             record = self._tasks_by_conversation.get(conversation_id, {}).get(task_id)
             return deepcopy(record) if record else None
 
@@ -151,6 +238,13 @@ class TaskLedger:
     ) -> list[TaskRecord]:
         status_filter = {_status(value) for value in statuses} if statuses is not None else None
         async with self._lock:
+            if self._repository is not None:
+                records = self._repository.list_tasks(
+                    conversation_id,
+                    statuses=status_filter,
+                    include_finished=include_finished,
+                )
+                return [self._record_from_row(record) for record in records]
             records = list(self._tasks_by_conversation.get(conversation_id, {}).values())
             result = []
             for record in records:
@@ -169,6 +263,13 @@ class TaskLedger:
         )
 
     def list_open_tasks_snapshot(self, conversation_id: str, *, limit: int = 8) -> list[TaskRecord]:
+        if self._repository is not None:
+            records = [
+                self._record_from_row(record)
+                for record in self._repository.list_open_tasks(conversation_id)
+            ]
+            records.sort(key=lambda task: (task.updated_at, task.created_at, task.task_id), reverse=True)
+            return [deepcopy(record) for record in records[: max(0, int(limit or 0))]]
         records = [
             record
             for record in self._tasks_by_conversation.get(conversation_id, {}).values()
@@ -179,6 +280,12 @@ class TaskLedger:
 
     async def find_by_owner_run(self, conversation_id: str, run_id: str) -> Optional[TaskRecord]:
         async with self._lock:
+            if self._repository is not None:
+                for record in self._repository.list_tasks(conversation_id):
+                    task = self._record_from_row(record)
+                    if task.owner_run_id == run_id:
+                        return task
+                return None
             for record in self._tasks_by_conversation.get(conversation_id, {}).values():
                 if record.owner_run_id == run_id:
                     return deepcopy(record)
@@ -249,6 +356,24 @@ class TaskLedger:
         if record is None:
             raise TaskNotFoundError(task_id)
         return record
+
+    def _record_from_row(self, row: Dict[str, Any]) -> TaskRecord:
+        return TaskRecord.from_dict({
+            "task_id": row.get("task_id") or row.get("id"),
+            "conversation_id": row.get("conversation_id"),
+            "title": row.get("title") or "",
+            "status": row.get("status", TaskStatus.PENDING.value),
+            "detail": row.get("detail") or "",
+            "owner_type": row.get("owner_type", TaskOwnerType.ASSISTANT.value),
+            "owner_run_id": row.get("owner_run_id"),
+            "created_by_run_id": row.get("created_by_run_id"),
+            "evidence_run_id": row.get("evidence_run_id"),
+            "evidence_summary": row.get("evidence_summary") or "",
+            "metadata": dict(row.get("metadata") or {}),
+            "created_at": row.get("created_at", time()),
+            "updated_at": row.get("updated_at", time()),
+            "finished_at": row.get("finished_at"),
+        })
 
     def _run_evidence_summary(self, run: Dict[str, Any], status: TaskStatus) -> str:
         summary = str(run.get("summary") or "").strip()
