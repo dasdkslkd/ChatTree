@@ -39,6 +39,7 @@ function testMainPageDelegatesTranscriptOrderingToTranscriptList() {
   assert.match(source, /<TranscriptList/);
   assert.doesNotMatch(source, /renderTaskLedgerStrip\(\)/);
   assert.doesNotMatch(source, /renderPlanApprovalCard\(\)/);
+  assert.doesNotMatch(source, /renderPlanQuestionCard/);
   assert.doesNotMatch(source, /activeRunDrafts\.map\(/);
 }
 
@@ -56,6 +57,18 @@ function testPlanActionsAreRealCallbacks() {
   assert.match(planCard, /onRejectPlan/);
   assert.match(planCard, /onClick=\{\(\) => onApprovePlan\?\.\(item\)\}/);
   assert.match(planCard, /onClick=\{\(\) => onRejectPlan\?\.\(item\)\}/);
+}
+
+function testPlanQuestionIsRenderedAndAnsweredFromTranscriptItem() {
+  const mainPage = fs.readFileSync(path.join(__dirname, '../src/pages/MainPage.tsx'), 'utf8');
+  const renderer = fs.readFileSync(path.join(__dirname, '../src/components/transcript/TranscriptItemRenderer.tsx'), 'utf8');
+  const planCard = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/PlanCardItem.tsx'), 'utf8');
+
+  assert.match(mainPage, /<TranscriptList[\s\S]*onAnswerPlanQuestion=\{handleAnswerPlanQuestion\}/);
+  assert.doesNotMatch(mainPage, /\{renderPlanQuestionCard\(\)\}/);
+  assert.match(renderer, /onAnswerPlanQuestion/);
+  assert.match(planCard, /status === 'awaiting_question'/);
+  assert.match(planCard, /onAnswerPlanQuestion\?\.\(item,\s*answer\)/);
 }
 
 function testTranscriptRefreshUsesPerConversationRequestGuardsAndVisibleErrors() {
@@ -87,6 +100,18 @@ function testPlanActionsUseTranscriptItemPlanIdInsteadOfActivePlanFallback() {
   assert.doesNotMatch(source, /const planId = activePlan\.plan_id \|\| activePlan\.id \|\| ''/);
 }
 
+function testPlanQuestionAnswerUsesTranscriptItemPlanIdInsteadOfActivePlanFallback() {
+  const source = fs.readFileSync(path.join(__dirname, '../src/pages/MainPage.tsx'), 'utf8');
+  const handlerMatch = source.match(/const handleAnswerPlanQuestion = useCallback\(async \(item: TranscriptItem,\s*answerOverride\?: string\) => \{[\s\S]*?\n  \}, \[/);
+
+  assert.ok(handlerMatch, 'handleAnswerPlanQuestion handler should accept the transcript item');
+  assert.match(handlerMatch[0], /isTranscriptItemVisibleNow\(item,\s*currentConversation\?\.id \?\? null,\s*selectedBranchTipId\)/);
+  assert.match(handlerMatch[0], /const planId = item\.plan_id \|\| ''/);
+  assert.match(handlerMatch[0], /const actionNodeId = getTranscriptItemNodeId\(item\) \|\| selectedBranchTipId/);
+  assert.doesNotMatch(handlerMatch[0], /activePlan/);
+  assert.doesNotMatch(handlerMatch[0], /selectedBranchTipId,\s*\)/);
+}
+
 function testTranscriptFallbackAndCopySurfacesAreVisible() {
   const renderer = fs.readFileSync(path.join(__dirname, '../src/components/transcript/TranscriptItemRenderer.tsx'), 'utf8');
   const list = fs.readFileSync(path.join(__dirname, '../src/components/transcript/TranscriptList.tsx'), 'utf8');
@@ -109,8 +134,10 @@ testNormalizeKeepsBackendOrderAndFiltersHidden();
 testNormalizeOnlyKeepsMainVisibilityInOrder();
 testMainPageDelegatesTranscriptOrderingToTranscriptList();
 testPlanActionsAreRealCallbacks();
+testPlanQuestionIsRenderedAndAnsweredFromTranscriptItem();
 testTranscriptRefreshUsesPerConversationRequestGuardsAndVisibleErrors();
 testTranscriptRefreshGuardsCurrentVisibleNodeBeforeWriting();
 testPlanActionsUseTranscriptItemPlanIdInsteadOfActivePlanFallback();
+testPlanQuestionAnswerUsesTranscriptItemPlanIdInsteadOfActivePlanFallback();
 testTranscriptFallbackAndCopySurfacesAreVisible();
 console.log('transcriptItems tests passed');

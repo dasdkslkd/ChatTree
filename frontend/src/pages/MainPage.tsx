@@ -107,10 +107,6 @@ import {
   shouldExportMessage,
 } from '../utils/taskNotificationVisibility';
 import {
-  getPlanQuestionText,
-  shouldShowPlanQuestion,
-} from '../utils/planApproval';
-import {
   DEFAULT_TOOL_PERMISSION_MODE,
   createToolPermissionDraft,
   syncToolPermissionDraftFromBranch,
@@ -1118,10 +1114,9 @@ export default function ChatPage() {
   };
 
   const activeRunStates = useRunManager(currentConversation?.id ?? null);
-  const [activePlan, setActivePlan] = useState<PlanSession | null>(null);
+  const [, setActivePlan] = useState<PlanSession | null>(null);
   const [planActionPending, setPlanActionPending] = useState<'approve' | 'reject' | 'answer' | null>(null);
   const [planRejectFeedback, setPlanRejectFeedback] = useState('');
-  const [planQuestionAnswer, setPlanQuestionAnswer] = useState('');
   const [planError, setPlanError] = useState<string | null>(null);
   const currentConversationIdRef = useRef<string | null>(null);
   const currentVisibleTranscriptKeyRef = useRef<string | null>(null);
@@ -1220,7 +1215,6 @@ export default function ChatPage() {
     setPlanActionPending(null);
     setPlanError(null);
     setPlanRejectFeedback('');
-    setPlanQuestionAnswer('');
   }, [currentConversation?.id]);
   const [localStreamingConversationCounts, setLocalStreamingConversationCounts] = useState<Map<string, number>>(() => new Map());
   const [backendActiveStreamConversationCounts, setBackendActiveStreamConversationCounts] = useState<Map<string, number>>(() => new Map());
@@ -1965,31 +1959,39 @@ export default function ChatPage() {
     }
   }, [currentConversation?.id, planRejectFeedback, refreshActivePlan, refreshTranscript, selectedBranchTipId]);
 
-  const handleAnswerPlanQuestion = useCallback(async (answerOverride?: string) => {
-    if (!activePlan) return;
-    const answer = (answerOverride ?? planQuestionAnswer).trim();
+  const handleAnswerPlanQuestion = useCallback(async (item: TranscriptItem, answerOverride?: string) => {
+    if (!isTranscriptItemVisibleNow(item, currentConversation?.id ?? null, selectedBranchTipId)) return;
+    const answer = (answerOverride ?? '').trim();
     if (!answer) return;
-    const conversationId = activePlan.conversation_id || currentConversation?.id;
+    const conversationId = item.conversation_id || currentConversation?.id;
+    const planId = item.plan_id || '';
+    const actionNodeId = getTranscriptItemNodeId(item) || selectedBranchTipId;
     if (!conversationId) return;
+    if (!planId) return;
     setPlanActionPending('answer');
     setPlanError(null);
     try {
-      setActivePlan({ ...activePlan, status: 'active', question: { ...(activePlan.question || {}), answer } });
-      setPlanQuestionAnswer('');
+      setActivePlan((current) => {
+        if (!current) return current;
+        const currentPlanId = current.plan_id || current.id || '';
+        return currentPlanId === planId
+          ? { ...current, status: 'active', question: { ...(current.question || {}), answer } }
+          : current;
+      });
       const { currentReasoningEffort, currentThinkingEnabled } = useModelStore.getState();
       setShouldAutoScroll(true);
       void streamManager.startPlanAnswerStream(
         conversationId,
-        activePlan.plan_id || activePlan.id || '',
+        planId,
         answer,
         {
           reasoning_effort: currentReasoningEffort,
           thinking_enabled: currentThinkingEnabled,
         },
-        selectedBranchTipId,
+        actionNodeId,
       ).then(async () => {
         await refreshActivePlan(conversationId);
-        await refreshTranscript(conversationId, selectedBranchTipId);
+        await refreshTranscript(conversationId, actionNodeId);
       }).catch((error) => {
         console.error('Failed to answer plan question:', error);
         setPlanError('提交回答失败，请稍后重试');
@@ -2000,7 +2002,7 @@ export default function ChatPage() {
     } finally {
       setPlanActionPending(null);
     }
-  }, [activePlan, currentConversation?.id, planQuestionAnswer, refreshActivePlan, refreshTranscript, selectedBranchTipId]);
+  }, [currentConversation?.id, refreshActivePlan, refreshTranscript, selectedBranchTipId]);
 
   const handleStopStreaming = useCallback(() => {
     if (currentConversation?.id) {
@@ -2603,81 +2605,6 @@ export default function ChatPage() {
     );
   };
 
-  const renderPlanQuestionCard = () => {
-    if (!shouldShowPlanQuestion(activePlan)) return null;
-    const question = getPlanQuestionText(activePlan);
-    const options = (activePlan?.question?.options || [])
-      .filter((option) => (option?.label || '').trim().length > 0);
-    const answering = planActionPending === 'answer';
-    return (
-      <div className="plan-question-row w-full my-2 flex flex-col items-start">
-        <div
-          className="plan-question-card flex max-w-[760px] w-full min-w-0 flex-col gap-3 rounded-md px-3 py-3 text-sm"
-          style={{
-            border: '0.5px solid var(--border)',
-            background: 'var(--bg-secondary)',
-            color: 'var(--fg-secondary)',
-          }}
-        >
-          <div className="flex items-center gap-2 text-xs font-medium" style={{ color: 'var(--fg-tertiary)' }}>
-            <MessageSquare className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--icon-accent)' }} />
-            <span>计划澄清</span>
-          </div>
-          <div className="text-sm leading-6" style={{ color: 'var(--fg-primary)' }}>{question}</div>
-          {options.length > 0 && (
-            <div className="flex flex-wrap gap-2">
-              {options.map((option, index) => {
-                const label = (option.label || '').trim();
-                const description = (option.description || '').trim();
-                return (
-                  <Button
-                    key={`${label}-${index}`}
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    className="h-auto min-h-7 max-w-full justify-start gap-1 px-2 py-1 text-left text-xs"
-                    title={description || label}
-                    onClick={() => setPlanQuestionAnswer(label)}
-                    disabled={planActionPending !== null}
-                  >
-                    {planQuestionAnswer.trim() === label ? <Check className="h-3.5 w-3.5 shrink-0" /> : <span className="h-3.5 w-3.5 shrink-0" />}
-                    <span className="min-w-0 truncate">{label}</span>
-                  </Button>
-                );
-              })}
-            </div>
-          )}
-          <textarea
-            value={planQuestionAnswer}
-            onChange={(event) => setPlanQuestionAnswer(event.target.value)}
-            placeholder="输入回答"
-            className="min-h-[64px] w-full resize-none rounded-md px-2.5 py-2 text-sm outline-none"
-            style={{
-              border: '0.5px solid var(--border)',
-              background: 'var(--bg-input)',
-              color: 'var(--fg-primary)',
-            }}
-          />
-          {planError && (
-            <div className="text-xs" style={{ color: 'var(--destructive)' }}>{planError}</div>
-          )}
-          <div className="flex items-center gap-2">
-            <Button
-              type="button"
-              size="sm"
-              className="h-7 gap-1 px-2 text-xs"
-              onClick={() => handleAnswerPlanQuestion()}
-              disabled={planActionPending !== null || !planQuestionAnswer.trim()}
-            >
-              {answering ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
-              提交回答
-            </Button>
-          </div>
-        </div>
-      </div>
-    );
-  };
-
   const getSideRunGroupLabel = (kind: string): string => {
     if (kind === 'side_question') return '旁路问题';
     if (kind === 'subagent') return '后台分支';
@@ -3247,9 +3174,11 @@ export default function ChatPage() {
                     transcriptError={transcriptError}
                     onApprovePlan={handleApprovePlan}
                     onRejectPlan={handleRejectPlan}
+                    onAnswerPlanQuestion={handleAnswerPlanQuestion}
                     onCopyItem={handleCopyTranscriptItem}
+                    planActionPending={planActionPending}
+                    planError={planError}
                   />
-                  {renderPlanQuestionCard()}
                   <div ref={messagesEndRef} />
                 </div>
               </div>

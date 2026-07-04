@@ -44,6 +44,7 @@ from backend.core.tools.security.approval import ApprovalManager
 from backend.core.tools.security.logical_sandbox import LogicalSandbox
 from backend.core.tools.security.permissions import PermissionEngine
 from backend.core.tools.tool_manager import ToolManager
+from backend.core.storage.tool_result_storage import ToolResultStorage
 from backend.core.command_runtime import CommandExecutor
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -90,10 +91,15 @@ async def startup_event():
         config_manager.data,
         capability_registry,
     )
+    interrupted_run_ids = run_repository.mark_unfinished_as_interrupted()
     model_manager = ModelManager()
-    chat_storage = ChatStorage()
-    prompt_storage = PromptStorage()
-    tool_manager = ToolManager(runtime_config)
+    chat_storage = ChatStorage(str(persistence.home / "conversations"))
+    prompt_storage = PromptStorage(str(persistence.home / "prompts"))
+    tool_result_store = ToolResultStorage(
+        str(persistence.home / "tool_results"),
+        sqlite_repository=chat_repository,
+    )
+    tool_manager = ToolManager(runtime_config, tool_result_store=tool_result_store)
     await tool_manager.init()
     approval_manager = ApprovalManager()
     run_manager = RunManager(repository=run_repository)
@@ -162,6 +168,7 @@ async def startup_event():
     app.state.chat_repository = chat_repository
     app.state.transcript_projection = transcript_projection
     app.state.run_repository = run_repository
+    app.state.interrupted_run_ids = interrupted_run_ids
     app.state.plan_repository = plan_repository
     app.state.task_repository = task_repository
     app.state.config_manager = config_manager

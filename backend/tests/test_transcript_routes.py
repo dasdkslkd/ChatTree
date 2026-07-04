@@ -69,6 +69,20 @@ def test_conversation_transcript_route_returns_404_for_unknown_conversation(tmp_
     assert response.status_code == 404
 
 
+def test_conversation_transcript_route_returns_empty_items_for_empty_conversation(tmp_path):
+    persistence = SQLitePersistence(tmp_path)
+    persistence.initialize()
+    repository = ChatRepository(persistence)
+    projection = TranscriptProjection(persistence)
+    conversation_id = repository.create_conversation(title="Empty")
+    client = client_for(projection)
+
+    response = client.get(f"/conversations/{conversation_id}/transcript")
+
+    assert response.status_code == 200
+    assert response.json() == {"items": []}
+
+
 def test_tool_result_route_falls_back_to_sqlite_blob_result(tmp_path):
     persistence = SQLitePersistence(tmp_path)
     persistence.initialize()

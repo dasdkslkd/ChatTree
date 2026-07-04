@@ -236,6 +236,9 @@ class ChatManager:
     def delete_conversation(self, conversation_id: str):
         """删除对话"""
         self.storage.delete(conversation_id)
+        if self.chat_repository is not None:
+            with suppress(Exception):
+                self.chat_repository.delete_conversation(conversation_id)
         if self.current_conversation and self.current_conversation.metadata["id"] == conversation_id:
             self.current_conversation = None
     
@@ -312,6 +315,13 @@ class ChatManager:
             parent_id = node.get("parent_id") if node else None
             conversation.del_node(node_id)
             self._save(conversation)
+            if self.chat_repository is not None:
+                with suppress(Exception):
+                    self.chat_repository.delete_node(
+                        conversation_id,
+                        node_id,
+                        new_current_node_id=conversation.current_node_id,
+                    )
             return {
                 "deleted_node_id": node_id,
                 "new_current_node_id": conversation.current_node_id,
@@ -321,6 +331,7 @@ class ChatManager:
     def _save(self, conversation: Conversation):
         """保存一个 Conversation 并清空其待删集合。"""
         self.storage.save(conversation.to_dict())
+        self._sqlite_ensure_conversation(conversation)
         conversation._deleted_node_ids.clear()
 
     def _mark_conversation_updated_at(self, conversation: Conversation, updated_at: int):
@@ -331,6 +342,21 @@ class ChatManager:
 
     def _sqlite_enabled(self) -> bool:
         return self.chat_repository is not None and self.transcript_projection is not None
+
+    def _sqlite_ensure_conversation(self, conversation: Conversation) -> None:
+        if self.chat_repository is None:
+            return
+        metadata = conversation.metadata
+        try:
+            self.chat_repository.ensure_conversation(
+                metadata["id"],
+                title=str(metadata.get("title") or ""),
+                provider_id=metadata.get("provider_id"),
+                model_id=metadata.get("model_id"),
+                workspace=metadata.get("workspace") if isinstance(metadata.get("workspace"), dict) else None,
+            )
+        except Exception as exc:
+            logger.warning("SQLite conversation ensure failed: %s", exc, exc_info=True)
 
     def _role_value(self, role: Any) -> str:
         return str(getattr(role, "value", role))

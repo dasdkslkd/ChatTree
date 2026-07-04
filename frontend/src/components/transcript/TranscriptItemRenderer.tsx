@@ -37,7 +37,10 @@ export function TranscriptItemRenderer({
   item,
   onApprovePlan,
   onRejectPlan,
+  onAnswerPlanQuestion,
   onCopyItem,
+  planActionPending,
+  planError,
 }: TranscriptItemRendererProps) {
   switch (item.type) {
     case 'user_message':
@@ -49,7 +52,16 @@ export function TranscriptItemRenderer({
     case 'tool_group':
       return <ToolGroupItem item={item} />;
     case 'plan_card':
-      return <PlanCardItem item={item} onApprovePlan={onApprovePlan} onRejectPlan={onRejectPlan} />;
+      return (
+        <PlanCardItem
+          item={item}
+          onApprovePlan={onApprovePlan}
+          onRejectPlan={onRejectPlan}
+          onAnswerPlanQuestion={onAnswerPlanQuestion}
+          planActionPending={planActionPending}
+          planError={planError}
+        />
+      );
     case 'task_notification':
       return <TaskNotificationItem item={item} />;
     case 'task_progress':

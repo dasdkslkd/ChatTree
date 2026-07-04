@@ -37,6 +37,7 @@ class RunManager:
         self._stop_events: Dict[str, asyncio.Event] = {}
         self._finish_listeners: list[Callable[[Dict[str, Any]], None]] = []
         self._lock = asyncio.Lock()
+        self._hydrate_active_runs()
 
     def add_finish_listener(self, listener: Callable[[Dict[str, Any]], None]) -> None:
         self._finish_listeners.append(listener)
@@ -205,9 +206,10 @@ class RunManager:
         index = max(0, int(from_event or 0))
         while True:
             async with self._lock:
-                record = self._runs.get(run_id)
+                record = self._runs.get(run_id) or self._hydrate_run_locked(run_id)
                 if not record:
                     raise RunNotFoundError(run_id)
+                self._ensure_events_loaded_locked(run_id)
                 events = self._events.setdefault(run_id, [])
                 condition = self._conditions.setdefault(run_id, asyncio.Condition())
                 finished = record.status in FINISHED_RUN_STATUSES
@@ -390,6 +392,11 @@ class RunManager:
         return self.stop_event(run_id).is_set()
 
     def list_active(self, conversation_id: Optional[str] = None) -> list[Dict[str, Any]]:
+        if self.repository and hasattr(self.repository, "list_active"):
+            return [
+                self._normalize_repository_run(run)
+                for run in self.repository.list_active(conversation_id)
+            ]
         return [
             record.to_dict()
             for record in self._runs.values()
@@ -403,6 +410,15 @@ class RunManager:
         parent_run_id: str,
         conversation_id: Optional[str] = None,
     ) -> list[Dict[str, Any]]:
+        if self.repository and hasattr(self.repository, "list_active"):
+            return [
+                run
+                for run in (
+                    self._normalize_repository_run(item)
+                    for item in self.repository.list_active(conversation_id)
+                )
+                if run.get("parent_run_id") == parent_run_id
+            ]
         return [
             record.to_dict()
             for record in self._runs.values()
@@ -412,6 +428,11 @@ class RunManager:
         ]
 
     def list_runs(self, conversation_id: Optional[str] = None) -> list[Dict[str, Any]]:
+        if self.repository and hasattr(self.repository, "list_runs"):
+            return [
+                self._normalize_repository_run(run)
+                for run in self.repository.list_runs(conversation_id)
+            ]
         return [
             record.to_dict()
             for record in self._runs.values()
@@ -425,6 +446,18 @@ class RunManager:
         target_node_id: str,
         kind: Optional[RunKind | str] = None,
     ) -> Optional[Dict[str, Any]]:
+        if self.repository and hasattr(self.repository, "list_active"):
+            expected_kind_value = (
+                kind.value if isinstance(kind, RunKind) else str(kind) if kind is not None else None
+            )
+            for run in self.repository.list_active(conversation_id):
+                normalized = self._normalize_repository_run(run)
+                if normalized.get("target_node_id") != target_node_id:
+                    continue
+                if expected_kind_value is not None and normalized.get("kind") != expected_kind_value:
+                    continue
+                return normalized
+            return None
         expected_kind = kind if isinstance(kind, RunKind) or kind is None else RunKind(str(kind))
         for record in self._runs.values():
             if record.status in FINISHED_RUN_STATUSES:
@@ -445,6 +478,18 @@ class RunManager:
         anchor_node_id: str,
         kind: Optional[RunKind | str] = None,
     ) -> Optional[Dict[str, Any]]:
+        if self.repository and hasattr(self.repository, "list_active"):
+            expected_kind_value = (
+                kind.value if isinstance(kind, RunKind) else str(kind) if kind is not None else None
+            )
+            for run in self.repository.list_active(conversation_id):
+                normalized = self._normalize_repository_run(run)
+                if normalized.get("anchor_node_id") != anchor_node_id:
+                    continue
+                if expected_kind_value is not None and normalized.get("kind") != expected_kind_value:
+                    continue
+                return normalized
+            return None
         expected_kind = kind if isinstance(kind, RunKind) or kind is None else RunKind(str(kind))
         for record in self._runs.values():
             if record.status in FINISHED_RUN_STATUSES:
@@ -465,6 +510,15 @@ class RunManager:
         target_node_ids: Iterable[str],
     ) -> list[Dict[str, Any]]:
         targets = set(target_node_ids)
+        if self.repository and hasattr(self.repository, "list_active"):
+            return [
+                run
+                for run in (
+                    self._normalize_repository_run(item)
+                    for item in self.repository.list_active(conversation_id)
+                )
+                if run.get("target_node_id") in targets
+            ]
         return [
             record.to_dict()
             for record in self._runs.values()
@@ -475,10 +529,34 @@ class RunManager:
 
     def get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
         record = self._runs.get(run_id)
-        return record.to_dict() if record else None
+        if record:
+            return record.to_dict()
+        if self.repository and hasattr(self.repository, "get_run"):
+            run = self.repository.get_run(run_id)
+            if run:
+                normalized = self._normalize_repository_run(run)
+                if normalized["status"] not in {status.value for status in FINISHED_RUN_STATUSES}:
+                    self._hydrate_record(run)
+                return normalized
+        return None
+
+    def read_events(self, run_id: str, from_event: int = 0) -> list[Dict[str, Any]]:
+        if self.repository and hasattr(self.repository, "read_events"):
+            if not self.get_run(run_id):
+                raise RunNotFoundError(run_id)
+            return [
+                deepcopy(event["payload"])
+                for event in self.repository.read_events(run_id, from_event)
+            ]
+        record = self._runs.get(run_id)
+        if not record:
+            raise RunNotFoundError(run_id)
+        events = self._events.get(run_id, [])
+        start = max(0, int(from_event or 0))
+        return [deepcopy(event["payload"]) for event in events[start:]]
 
     def _require_run_locked(self, run_id: str) -> RunRecord:
-        record = self._runs.get(run_id)
+        record = self._runs.get(run_id) or self._hydrate_run_locked(run_id)
         if not record:
             raise RunNotFoundError(run_id)
         return record
@@ -492,3 +570,83 @@ class RunManager:
                     f"target node {target_node_id} already has active writer {existing}"
                 )
         self._writers_by_node[target_node_id] = run_id
+
+    def _hydrate_active_runs(self) -> None:
+        if not self.repository or not hasattr(self.repository, "list_active"):
+            return
+        for run in self.repository.list_active():
+            self._hydrate_record(run)
+
+    def _hydrate_run_locked(self, run_id: str) -> Optional[RunRecord]:
+        if not self.repository or not hasattr(self.repository, "get_run"):
+            return None
+        run = self.repository.get_run(run_id)
+        if not run:
+            return None
+        return self._hydrate_record(run)
+
+    def _hydrate_record(self, run: Dict[str, Any]) -> RunRecord:
+        run_id = str(run.get("run_id") or run.get("id"))
+        existing = self._runs.get(run_id)
+        status = RunStatus(str(run.get("status") or RunStatus.RUNNING.value))
+        kind = RunKind(str(run.get("kind") or RunKind.CHAT.value))
+        if existing:
+            existing.status = status
+            existing.event_count = int(run.get("event_count") or existing.event_count or 0)
+            existing.updated_at = float(run.get("updated_at") or existing.updated_at)
+            existing.finished_at = (
+                float(run["finished_at"]) if run.get("finished_at") is not None else None
+            )
+            existing.metadata = dict(run.get("metadata") or {})
+            record = existing
+        else:
+            record = RunRecord(
+                run_id=run_id,
+                conversation_id=str(run.get("conversation_id") or ""),
+                kind=kind,
+                status=status,
+                anchor_node_id=run.get("anchor_node_id"),
+                target_node_id=run.get("target_node_id"),
+                parent_run_id=run.get("parent_run_id"),
+                summary=str(run.get("summary") or ""),
+                event_count=int(run.get("event_count") or 0),
+                metadata=dict(run.get("metadata") or {}),
+                created_at=float(run.get("created_at") or time()),
+                updated_at=float(run.get("updated_at") or time()),
+                finished_at=(
+                    float(run["finished_at"]) if run.get("finished_at") is not None else None
+                ),
+            )
+            self._runs[run_id] = record
+            self._conditions.setdefault(run_id, asyncio.Condition())
+            self._stop_events.setdefault(run_id, asyncio.Event())
+        if record.target_node_id and record.status not in FINISHED_RUN_STATUSES:
+            self._writers_by_node[record.target_node_id] = run_id
+        return record
+
+    def _ensure_events_loaded_locked(self, run_id: str) -> None:
+        if not self.repository or not hasattr(self.repository, "read_events"):
+            return
+        record = self._runs.get(run_id)
+        if not record:
+            return
+        cached = self._events.get(run_id)
+        if cached is not None and len(cached) >= record.event_count:
+            return
+        self._events[run_id] = [
+            {
+                "run_id": event["run_id"],
+                "event_index": event["event_index"],
+                "payload": deepcopy(event["payload"]),
+                "created_at": event["created_at"],
+            }
+            for event in self.repository.read_events(run_id, 0)
+        ]
+
+    def _normalize_repository_run(self, run: Dict[str, Any]) -> Dict[str, Any]:
+        data = dict(run)
+        data["run_id"] = str(data.get("run_id") or data.get("id"))
+        data["kind"] = str(data.get("kind") or RunKind.CHAT.value)
+        data["status"] = str(data.get("status") or RunStatus.RUNNING.value)
+        data["metadata"] = dict(data.get("metadata") or {})
+        return data

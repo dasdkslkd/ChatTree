@@ -76,6 +76,42 @@ class SQLiteRunRepository:
             return None
         return self._run_from_row(row)
 
+    def list_runs(self, conversation_id: str | None = None) -> list[dict[str, Any]]:
+        if conversation_id is None:
+            sql = "SELECT * FROM runs ORDER BY created_at, id"
+            params: tuple[Any, ...] = ()
+        else:
+            sql = """
+                SELECT *
+                FROM runs
+                WHERE conversation_id = ?
+                ORDER BY created_at, id
+            """
+            params = (conversation_id,)
+        with self.persistence.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [self._run_from_row(row) for row in rows]
+
+    def list_active(self, conversation_id: str | None = None) -> list[dict[str, Any]]:
+        placeholders = ",".join("?" for _ in FINISHED_STATUSES)
+        params: list[Any] = list(sorted(FINISHED_STATUSES))
+        conversation_clause = ""
+        if conversation_id is not None:
+            conversation_clause = "AND conversation_id = ?"
+            params.append(conversation_id)
+        with self.persistence.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT *
+                FROM runs
+                WHERE status NOT IN ({placeholders})
+                  {conversation_clause}
+                ORDER BY created_at, id
+                """,
+                tuple(params),
+            ).fetchall()
+        return [self._run_from_row(row) for row in rows]
+
     def append_event(self, run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         event_row = None
         with self.persistence.connect() as conn:

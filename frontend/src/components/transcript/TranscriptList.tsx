@@ -14,7 +14,10 @@ export function TranscriptList({
   transcriptError = null,
   onApprovePlan,
   onRejectPlan,
+  onAnswerPlanQuestion,
   onCopyItem,
+  planActionPending,
+  planError,
 }: TranscriptListProps) {
   const normalizedItems = normalizeTranscriptItems(items);
 
@@ -46,7 +49,10 @@ export function TranscriptList({
           item={item}
           onApprovePlan={onApprovePlan}
           onRejectPlan={onRejectPlan}
+          onAnswerPlanQuestion={onAnswerPlanQuestion}
           onCopyItem={onCopyItem}
+          planActionPending={planActionPending}
+          planError={planError}
         />
       ))}
     </div>

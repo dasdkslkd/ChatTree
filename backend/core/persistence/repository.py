@@ -96,6 +96,14 @@ class ChatRepository:
             raise KeyError(conversation_id)
         return dict(row)
 
+    def delete_conversation(self, conversation_id: str) -> bool:
+        with self.persistence.connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM conversations WHERE id = ?",
+                (conversation_id,),
+            )
+        return cursor.rowcount > 0
+
     def create_node(
         self,
         conversation_id: str,
@@ -253,6 +261,46 @@ class ChatRepository:
             node_id=node_id,
             **fields,
         )
+
+    def delete_node(
+        self,
+        conversation_id: str,
+        node_id: str,
+        *,
+        new_current_node_id: str | None = None,
+    ) -> bool:
+        with self.persistence.connect() as conn:
+            existing = conn.execute(
+                """
+                SELECT id
+                FROM nodes
+                WHERE conversation_id = ? AND id = ?
+                """,
+                (conversation_id, node_id),
+            ).fetchone()
+            if existing is None:
+                return False
+            conn.execute(
+                """
+                UPDATE conversations
+                SET current_node_id = ?,
+                    root_node_id = CASE
+                      WHEN root_node_id = ? THEN NULL
+                      ELSE root_node_id
+                    END,
+                    updated_at = strftime('%s', 'now')
+                WHERE id = ?
+                """,
+                (new_current_node_id, node_id, conversation_id),
+            )
+            conn.execute(
+                """
+                DELETE FROM nodes
+                WHERE conversation_id = ? AND id = ?
+                """,
+                (conversation_id, node_id),
+            )
+        return True
 
     def add_message(
         self,

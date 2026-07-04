@@ -55,10 +55,10 @@ function testApprovedPlanSummaryRemainsVisible() {
   assert.equal(shouldShowPlanSummary({ status: 'approved', plan: '# Plan' }), true);
 }
 
-function testMainPageOptionClickOnlySelectsDraftAnswer() {
-  const mainPageSource = fs.readFileSync(path.join(__dirname, '../src/pages/MainPage.tsx'), 'utf8');
-  assert.match(mainPageSource, /onClick=\{\(\) => setPlanQuestionAnswer\(label\)\}/);
-  assert.doesNotMatch(mainPageSource, /onClick=\{\(\) => handleAnswerPlanQuestion\(label\)\}/);
+function testPlanQuestionOptionClickOnlySelectsDraftAnswer() {
+  const planCardSource = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/PlanCardItem.tsx'), 'utf8');
+  assert.match(planCardSource, /onClick=\{\(\) => setDraftAnswer\(label\)\}/);
+  assert.doesNotMatch(planCardSource, /onClick=\{\(\) => onAnswerPlanQuestion\?\.\(item,\s*label\)\}/);
 }
 
 function testApprovePlanStartsStructuredControlStream() {
@@ -74,11 +74,13 @@ function testApprovePlanStartsStructuredControlStream() {
 
 function testAnswerPlanQuestionStartsStructuredControlStream() {
   const mainPageSource = fs.readFileSync(path.join(__dirname, '../src/pages/MainPage.tsx'), 'utf8');
-  const handlerMatch = mainPageSource.match(/const handleAnswerPlanQuestion = useCallback\(async \(answerOverride\?: string\) => \{[\s\S]*?\n  \}, \[/);
+  const handlerMatch = mainPageSource.match(/const handleAnswerPlanQuestion = useCallback\(async \(item: TranscriptItem,\s*answerOverride\?: string\) => \{[\s\S]*?\n  \}, \[/);
   assert.ok(handlerMatch, 'handleAnswerPlanQuestion handler should be present');
   assert.doesNotMatch(handlerMatch[0], /void startStreaming\(/);
   assert.match(handlerMatch[0], /void streamManager\.startPlanAnswerStream\(/);
   assert.match(handlerMatch[0], /answer,/);
+  assert.match(handlerMatch[0], /planId,/);
+  assert.match(handlerMatch[0], /actionNodeId,\s*\)/);
 }
 
 function testChatInputDoesNotExposePlanAsManualPermissionMode() {
@@ -91,7 +93,7 @@ function main() {
   testMarkdownFallsBackAcrossBackendFieldNames();
   testQuestionOnlyVisibleWhenAwaitingQuestion();
   testApprovedPlanSummaryRemainsVisible();
-  testMainPageOptionClickOnlySelectsDraftAnswer();
+  testPlanQuestionOptionClickOnlySelectsDraftAnswer();
   testApprovePlanStartsStructuredControlStream();
   testAnswerPlanQuestionStartsStructuredControlStream();
   testChatInputDoesNotExposePlanAsManualPermissionMode();

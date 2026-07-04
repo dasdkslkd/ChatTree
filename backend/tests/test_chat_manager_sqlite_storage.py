@@ -53,6 +53,70 @@ def _make_manager(tmp_path: Path):
     return manager, repository, projection
 
 
+def test_create_empty_conversation_writes_sqlite_conversation(tmp_path: Path):
+    manager, repository, projection = _make_manager(tmp_path)
+
+    conversation = manager.create_conversation("empty sqlite")
+
+    stored = repository.get_conversation(conversation.metadata["id"])
+    assert stored["title"] == "empty sqlite"
+    assert projection.list_for_branch(conversation.metadata["id"], None) == []
+
+
+def test_delete_conversation_removes_sqlite_transcript_projection(tmp_path: Path):
+    manager, _repository, projection = _make_manager(tmp_path)
+    conversation = manager.create_conversation("delete sqlite")
+    chunks = asyncio.run(
+        collect_chunks(
+            manager.send_message_stream(
+                conversation.metadata["id"],
+                "to delete",
+                model_id="fake-model",
+            )
+        )
+    )
+    assert chunks[-1]["status"] == "complete"
+    reloaded = manager.get_conversation(conversation.metadata["id"])
+    assert projection.list_for_branch(conversation.metadata["id"], reloaded.current_node_id)
+
+    manager.delete_conversation(conversation.metadata["id"])
+
+    try:
+        projection.list_for_branch(conversation.metadata["id"], reloaded.current_node_id)
+    except KeyError:
+        pass
+    else:
+        raise AssertionError("deleted conversation transcript should not remain")
+
+
+def test_delete_node_removes_sqlite_branch_items(tmp_path: Path):
+    manager, _repository, projection = _make_manager(tmp_path)
+    conversation = manager.create_conversation("delete node")
+    chunks = asyncio.run(
+        collect_chunks(
+            manager.send_message_stream(
+                conversation.metadata["id"],
+                "delete node content",
+                model_id="fake-model",
+            )
+        )
+    )
+    assert chunks[-1]["status"] == "complete"
+    reloaded = manager.get_conversation(conversation.metadata["id"])
+    node_id = reloaded.current_node_id
+    assert projection.list_for_branch(conversation.metadata["id"], node_id)
+
+    result = asyncio.run(manager.delete_node(conversation.metadata["id"], node_id))
+
+    assert result["deleted_node_id"] == node_id
+    try:
+        projection.list_for_branch(conversation.metadata["id"], node_id)
+    except KeyError:
+        pass
+    else:
+        raise AssertionError("deleted node transcript should not remain")
+
+
 def test_send_message_stream_writes_transcript_projection(tmp_path: Path):
     manager, _repository, projection = _make_manager(tmp_path)
     conversation = manager.create_conversation("sqlite transcript")
