@@ -53,6 +53,9 @@ CREATE TABLE IF NOT EXISTS nodes (
 
 CREATE INDEX IF NOT EXISTS idx_nodes_conversation_parent
   ON nodes(conversation_id, parent_id, child_order);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_single_root_per_conversation
+  ON nodes(conversation_id)
+  WHERE parent_id IS NULL;
 CREATE INDEX IF NOT EXISTS idx_nodes_conversation_depth
   ON nodes(conversation_id, depth);
 CREATE INDEX IF NOT EXISTS idx_nodes_conversation_updated

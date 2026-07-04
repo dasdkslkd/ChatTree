@@ -88,6 +88,32 @@ def test_nodes_parent_id_rejects_cross_conversation_reference(tmp_path: Path):
             raise AssertionError("cross-conversation parent_id was accepted")
 
 
+def test_nodes_rejects_second_root_in_same_conversation(tmp_path: Path):
+    persistence = SQLitePersistence(tmp_path)
+    persistence.initialize()
+
+    with persistence.connect() as conn:
+        _insert_conversation(conn, "conversation-a")
+        conn.execute(
+            """
+            INSERT INTO nodes (id, conversation_id, created_at, updated_at)
+            VALUES ('root-a', 'conversation-a', 1, 1)
+            """
+        )
+
+        try:
+            conn.execute(
+                """
+                INSERT INTO nodes (id, conversation_id, created_at, updated_at)
+                VALUES ('root-b', 'conversation-a', 1, 1)
+                """
+            )
+        except sqlite3.IntegrityError:
+            pass
+        else:
+            raise AssertionError("second root node in conversation was accepted")
+
+
 def test_transcript_message_id_rejects_cross_conversation_reference(tmp_path: Path):
     persistence = SQLitePersistence(tmp_path)
     persistence.initialize()
