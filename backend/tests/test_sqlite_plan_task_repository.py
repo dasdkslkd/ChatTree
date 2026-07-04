@@ -5,6 +5,8 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from threading import Barrier
 
+import pytest
+
 from backend.core.persistence.database import SQLitePersistence
 from backend.core.persistence.content import INLINE_TEXT_LIMIT
 from backend.core.persistence.plan_repository import SQLitePlanRepository
@@ -182,6 +184,43 @@ async def _plan_ledger_repository_loads_long_snapshot_case(tmp_path):
 
 def test_plan_ledger_repository_loads_long_snapshot_without_locking(tmp_path):
     run(_plan_ledger_repository_loads_long_snapshot_case(tmp_path))
+
+
+def test_plan_repository_rejects_snapshot_pending_context_from_other_conversation(tmp_path):
+    persistence = SQLitePersistence(tmp_path)
+    persistence.initialize()
+    chat = ChatRepository(persistence)
+    repository = SQLitePlanRepository(persistence)
+    conv_id = chat.create_conversation(title="Plans")
+    other_conv_id = chat.create_conversation(title="Other plans")
+    plan_id = "plan_owned_by_snapshot"
+    plan = PlanSession(
+        plan_id=plan_id,
+        conversation_id=conv_id,
+        status=PlanStatus.AWAITING_APPROVAL,
+        previous_permission_mode="modify_only",
+        plan="1. Keep ownership tight",
+        created_at=10.0,
+        updated_at=11.0,
+    )
+
+    with pytest.raises(ValueError):
+        repository.replace_snapshot(
+            conv_id,
+            plans=[plan.to_dict()],
+            pending_context=[
+                {
+                    "kind": "approved_plan",
+                    "conversation_id": other_conv_id,
+                    "plan_id": plan_id,
+                    "content": "This context belongs elsewhere",
+                    "permission_mode": "modify_only",
+                    "created_at": 12.0,
+                }
+            ],
+        )
+
+    assert repository.peek_pending_context(conv_id) == []
 
 
 class _BarrierCursor:

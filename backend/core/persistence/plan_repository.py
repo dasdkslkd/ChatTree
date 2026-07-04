@@ -355,6 +355,11 @@ class SQLitePlanRepository:
                 plan_ids.add(plan_id)
             for item in pending_context:
                 payload = dict(item)
+                payload_conversation_id = payload.get("conversation_id")
+                if payload_conversation_id is None or payload_conversation_id == "":
+                    payload["conversation_id"] = conversation_id
+                elif str(payload_conversation_id) != conversation_id:
+                    raise ValueError("snapshot context conversation_id mismatch")
                 plan_id = str(payload.get("plan_id") or "")
                 if not plan_id or plan_id not in plan_ids:
                     raise KeyError(plan_id)
