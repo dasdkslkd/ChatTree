@@ -177,6 +177,10 @@ function getBrowserStorage(): Storage | null {
   return typeof window === 'undefined' ? null : window.localStorage;
 }
 
+function getTranscriptRequestKey(conversationId: string, nodeId?: string | null): string {
+  return `${conversationId}:${nodeId || ''}`;
+}
+
 SyntaxHighlighter.registerLanguage('bash', bash);
 SyntaxHighlighter.registerLanguage('batch', bash);
 SyntaxHighlighter.registerLanguage('c', c);
@@ -878,6 +882,8 @@ export default function ChatPage() {
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([]);
   const [hiddenSideRunIdsByConversation, setHiddenSideRunIdsByConversation] = useState<Record<string, string[]>>({});
   const [transcriptItems, setTranscriptItems] = useState<TranscriptItem[]>([]);
+  const [transcriptLoading, setTranscriptLoading] = useState(false);
+  const [transcriptError, setTranscriptError] = useState<string | null>(null);
   const handledSideRunNotificationsRef = useRef<Set<string>>(new Set());
   const [toolPermissionDraft, setToolPermissionDraftState] = useState<ToolPermissionDraft>(() => createToolPermissionDraft());
   const [newConversationMultiAgentMode, setNewConversationMultiAgentMode] = useState<MultiAgentMode>('explicit_request_only');
@@ -908,7 +914,7 @@ export default function ChatPage() {
   const programmaticScrollRef = useRef(false);
   const queuedMessagesRef = useRef<QueuedMessage[]>([]);
   const toolPermissionDraftRef = useRef<ToolPermissionDraft>(toolPermissionDraft);
-  const transcriptRequestSeqRef = useRef(0);
+  const transcriptRequestTokensRef = useRef<Map<string, symbol>>(new Map());
 
   const beginSidebarResize = useCallback((
     event: ReactPointerEvent<HTMLDivElement>,
@@ -1108,20 +1114,40 @@ export default function ChatPage() {
     conversationId: string | null | undefined,
     nodeId?: string | null,
   ) => {
-    const requestSeq = ++transcriptRequestSeqRef.current;
     if (!conversationId) {
       setTranscriptItems([]);
+      setTranscriptError(null);
+      setTranscriptLoading(false);
       return;
+    }
+
+    const requestKey = getTranscriptRequestKey(conversationId, nodeId);
+    const requestToken = Symbol(requestKey);
+    transcriptRequestTokensRef.current.set(requestKey, requestToken);
+    const isCurrentVisibleConversation = () => conversationId === currentConversationIdRef.current;
+    if (isCurrentVisibleConversation()) {
+      setTranscriptLoading(true);
+      setTranscriptError(null);
     }
 
     try {
       const items = await transcriptService.fetchTranscript(conversationId, nodeId);
-      if (requestSeq !== transcriptRequestSeqRef.current) return;
-      if (conversationId !== currentConversationIdRef.current) return;
+      if (transcriptRequestTokensRef.current.get(requestKey) !== requestToken) return;
+      if (!isCurrentVisibleConversation()) return;
       setTranscriptItems(normalizeTranscriptItems(items));
+      setTranscriptError(null);
     } catch (_) {
-      if (requestSeq !== transcriptRequestSeqRef.current) return;
-      if (conversationId === currentConversationIdRef.current) setTranscriptItems([]);
+      if (transcriptRequestTokensRef.current.get(requestKey) !== requestToken) return;
+      if (isCurrentVisibleConversation()) {
+        setTranscriptError('对话 transcript 刷新失败，已保留当前内容');
+      }
+    } finally {
+      if (transcriptRequestTokensRef.current.get(requestKey) === requestToken) {
+        transcriptRequestTokensRef.current.delete(requestKey);
+        if (isCurrentVisibleConversation()) {
+          setTranscriptLoading(false);
+        }
+      }
     }
   }, []);
   const hiddenSideRunIds = useMemo(() => {
@@ -1833,10 +1859,20 @@ export default function ChatPage() {
     await refreshTranscript(conversationId, run?.targetNodeId ?? run?.nodeId ?? selectedBranchTipId);
   }, [activeRunStates, currentConversation?.id, refreshMessages, refreshTranscript, selectedBranchTipId]);
 
+  const handleCopyTranscriptItem = useCallback(async (_item: TranscriptItem, text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (error) {
+      console.error('Failed to copy transcript item:', error);
+    }
+  }, []);
+
   const handleApprovePlan = useCallback(async () => {
     if (!activePlan) return;
     const conversationId = activePlan.conversation_id || currentConversation?.id;
+    const planId = activePlan.plan_id || activePlan.id || '';
     if (!conversationId) return;
+    if (!planId) return;
     setPlanActionPending('approve');
     setPlanError(null);
     try {
@@ -1845,7 +1881,7 @@ export default function ChatPage() {
       setShouldAutoScroll(true);
       void streamManager.startPlanApprovalStream(
         conversationId,
-        activePlan.plan_id || activePlan.id || '',
+        planId,
         {
           reasoning_effort: currentReasoningEffort,
           thinking_enabled: currentThinkingEnabled,
@@ -1868,14 +1904,15 @@ export default function ChatPage() {
 
   const handleRejectPlan = useCallback(async () => {
     if (!activePlan) return;
-    const feedback = planRejectFeedback.trim();
-    if (!feedback) return;
+    const feedback = planRejectFeedback.trim() || '请修改计划。';
     const conversationId = activePlan.conversation_id || currentConversation?.id;
+    const planId = activePlan.plan_id || activePlan.id || '';
     if (!conversationId) return;
+    if (!planId) return;
     setPlanActionPending('reject');
     setPlanError(null);
     try {
-      const updated = await plansService.reject(conversationId, activePlan.plan_id || activePlan.id || '', feedback);
+      const updated = await plansService.reject(conversationId, planId, feedback);
       setActivePlan(updated || { ...activePlan, feedback });
       setPlanRejectFeedback('');
       if (conversationId) {
@@ -3165,9 +3202,15 @@ export default function ChatPage() {
               >
                 <div
                   className="w-[800px] max-w-full flex flex-col px-4"
-                  data-plan-actions={Boolean(handleApprovePlan) && Boolean(handleRejectPlan)}
                 >
-                  <TranscriptList items={transcriptItems} />
+                  <TranscriptList
+                    items={transcriptItems}
+                    isLoading={transcriptLoading}
+                    transcriptError={transcriptError}
+                    onApprovePlan={handleApprovePlan}
+                    onRejectPlan={handleRejectPlan}
+                    onCopyItem={handleCopyTranscriptItem}
+                  />
                   {renderPlanQuestionCard()}
                   <div ref={messagesEndRef} />
                 </div>

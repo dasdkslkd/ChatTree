@@ -33,3 +33,12 @@ export interface TranscriptItem {
   created_at?: number | string | null;
   updated_at?: number | string | null;
 }
+
+export type TranscriptPlanActionHandler = (item: TranscriptItem) => void | Promise<void>;
+export type TranscriptCopyHandler = (item: TranscriptItem, text: string) => void | Promise<void>;
+
+export interface TranscriptActionHandlers {
+  onApprovePlan?: TranscriptPlanActionHandler;
+  onRejectPlan?: TranscriptPlanActionHandler;
+  onCopyItem?: TranscriptCopyHandler;
+}

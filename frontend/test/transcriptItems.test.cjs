@@ -42,7 +42,54 @@ function testMainPageDelegatesTranscriptOrderingToTranscriptList() {
   assert.doesNotMatch(source, /activeRunDrafts\.map\(/);
 }
 
+function testPlanActionsAreRealCallbacks() {
+  const mainPage = fs.readFileSync(path.join(__dirname, '../src/pages/MainPage.tsx'), 'utf8');
+  const renderer = fs.readFileSync(path.join(__dirname, '../src/components/transcript/TranscriptItemRenderer.tsx'), 'utf8');
+  const planCard = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/PlanCardItem.tsx'), 'utf8');
+
+  assert.match(mainPage, /<TranscriptList[\s\S]*onApprovePlan=\{handleApprovePlan\}/);
+  assert.match(mainPage, /<TranscriptList[\s\S]*onRejectPlan=\{handleRejectPlan\}/);
+  assert.doesNotMatch(mainPage, /data-plan-actions/);
+  assert.match(renderer, /onApprovePlan/);
+  assert.match(renderer, /onRejectPlan/);
+  assert.match(planCard, /onApprovePlan/);
+  assert.match(planCard, /onRejectPlan/);
+  assert.match(planCard, /onClick=\{\(\) => onApprovePlan\?\.\(item\)\}/);
+  assert.match(planCard, /onClick=\{\(\) => onRejectPlan\?\.\(item\)\}/);
+}
+
+function testTranscriptRefreshUsesPerConversationRequestGuardsAndVisibleErrors() {
+  const source = fs.readFileSync(path.join(__dirname, '../src/pages/MainPage.tsx'), 'utf8');
+
+  assert.doesNotMatch(source, /transcriptRequestSeqRef/);
+  assert.match(source, /transcriptRequestTokensRef/);
+  assert.match(source, /getTranscriptRequestKey/);
+  assert.match(source, /setTranscriptError/);
+  assert.match(source, /transcriptError=\{transcriptError\}/);
+}
+
+function testTranscriptFallbackAndCopySurfacesAreVisible() {
+  const renderer = fs.readFileSync(path.join(__dirname, '../src/components/transcript/TranscriptItemRenderer.tsx'), 'utf8');
+  const list = fs.readFileSync(path.join(__dirname, '../src/components/transcript/TranscriptList.tsx'), 'utf8');
+  const userMessage = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/UserMessageItem.tsx'), 'utf8');
+  const assistantAnswer = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/AssistantAnswerItem.tsx'), 'utf8');
+  const mainPage = fs.readFileSync(path.join(__dirname, '../src/pages/MainPage.tsx'), 'utf8');
+
+  assert.doesNotMatch(renderer, /default:\s*return null/);
+  assert.match(renderer, /UnknownTranscriptItem/);
+  assert.match(list, /transcript-empty/);
+  assert.match(list, /transcript-error/);
+  assert.match(userMessage, /onCopy/);
+  assert.match(userMessage, /aria-label="复制消息"/);
+  assert.match(assistantAnswer, /onCopy/);
+  assert.match(assistantAnswer, /aria-label="复制消息"/);
+  assert.match(mainPage, /onCopyItem=\{handleCopyTranscriptItem\}/);
+}
+
 testNormalizeKeepsBackendOrderAndFiltersHidden();
 testNormalizeOnlyKeepsMainVisibilityInOrder();
 testMainPageDelegatesTranscriptOrderingToTranscriptList();
+testPlanActionsAreRealCallbacks();
+testTranscriptRefreshUsesPerConversationRequestGuardsAndVisibleErrors();
+testTranscriptFallbackAndCopySurfacesAreVisible();
 console.log('transcriptItems tests passed');
