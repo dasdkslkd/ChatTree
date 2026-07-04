@@ -196,7 +196,7 @@ function normalizeBackendTimelineBlock(rawBlock: unknown, index: number): Proces
   }
 
   if (type === 'tool_call') {
-    const item = makeToolItem(normalizeTimelineToolCall(record), null, key);
+    const item = makeToolItem(normalizeTimelineToolCall(record), normalizeTimelineToolMessage(record), key);
     return { type: 'tools', key, items: [item] };
   }
 

@@ -343,6 +343,15 @@ function testAssistantProcessRendersIntermediateTextButNoCopy() {
   assert.match(assistantAnswer, /aria-label="复制消息"/);
 }
 
+function testAssistantProcessUsesToolResultOnToolCallTimelineBlocks() {
+  const assistantProcess = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/AssistantProcessItem.tsx'), 'utf8');
+
+  assert.match(
+    assistantProcess,
+    /type === 'tool_call'[\s\S]*makeToolItem\(\s*normalizeTimelineToolCall\(record\),\s*normalizeTimelineToolMessage\(record\),\s*key\s*\)/,
+  );
+}
+
 function testStreamStateContentStaysFinalAnswerOnly() {
   const streamManager = fs.readFileSync(path.join(__dirname, '../src/services/streamManager.ts'), 'utf8');
   assert.match(streamManager, /if \(chunk\.content && !isAggregateResultEvent\(chunk\) && !isCommandEvent\(chunk\)\) \{\s*next\.content \+= chunk\.content;\s*next\.reasoningActive = false;\s*\}/);
@@ -397,6 +406,7 @@ testPlanQuestionAnswerUsesTranscriptItemPlanIdInsteadOfActivePlanFallback();
 testTranscriptFallbackAndCopySurfacesAreVisible();
 testTranscriptMessageItemsUseLegacyChatBubbleStyling();
 testAssistantProcessRendersIntermediateTextButNoCopy();
+testAssistantProcessUsesToolResultOnToolCallTimelineBlocks();
 testStreamStateContentStaysFinalAnswerOnly();
 testPlanApprovalDoesNotRenderControlEvents();
 testCopyHandlerOnlyReachesRealTranscriptMessages();

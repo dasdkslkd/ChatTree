@@ -7,6 +7,7 @@ from ...core.capabilities.bootstrap import build_runtime_config_with_plugin_mcp
 from ...core.agents import AgentMailbox, AgentRuntime
 from ...core.config.config import Config, cfg
 from ...core.model.model_manager import ModelManager
+from ...core.persistence import SQLitePlanRepository
 from ...core.plans import PlanLedger
 from ...core.tasks import TaskLedger
 from ...core.tools.orchestrator import ToolOrchestrator
@@ -82,7 +83,12 @@ def _sync_runtime_managers(app, config_data: Dict[str, Any], model_manager, tool
     run_manager = getattr(app.state, 'run_manager', None)
     plan_ledger = getattr(app.state, 'plan_ledger', None)
     if plan_ledger is None:
-        plan_ledger = PlanLedger()
+        plan_repository = getattr(app.state, 'plan_repository', None)
+        persistence = getattr(app.state, 'persistence', None)
+        if plan_repository is None and persistence is not None:
+            plan_repository = SQLitePlanRepository(persistence)
+            app.state.plan_repository = plan_repository
+        plan_ledger = PlanLedger(repository=plan_repository)
         app.state.plan_ledger = plan_ledger
     task_ledger = getattr(app.state, 'task_ledger', None)
     if task_ledger is None:

@@ -6,8 +6,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from backend.api.dependencies import get_chat_manager, get_plan_ledger, get_run_manager
+from backend.api.routes.config import _sync_runtime_managers
 from backend.api.routes import plans as plans_route
 from backend.core.chat.conversation import Conversation
+from backend.core.persistence.database import SQLitePersistence
+from backend.core.persistence.repository import ChatRepository
 from backend.core.plans import PlanLedger, PlanStatus
 from backend.core.runs import RunManager
 
@@ -59,6 +62,20 @@ class FakePlanChatManager:
         }
 
 
+class RestoringPlanChatManager(FakePlanChatManager):
+    def __init__(self, conversation: Conversation, ledger: PlanLedger):
+        super().__init__()
+        self.conversation = conversation
+        self.plan_ledger = ledger
+
+    async def restore_plan_snapshot(self, conversation_id: str) -> None:
+        if conversation_id != self.conversation.metadata["id"]:
+            return
+        snapshot = self.conversation.metadata.get("plan_ledger")
+        if snapshot:
+            await self.plan_ledger.load_snapshot(conversation_id, snapshot)
+
+
 class SnapshotChatManager:
     def __init__(self, conversation: Conversation, ledger: PlanLedger):
         self.conversation = conversation
@@ -85,10 +102,20 @@ def client_for_plan_stream(
 ) -> TestClient:
     app = FastAPI()
     app.include_router(plans_route.router)
+    app.state.chat_manager = chat_manager
     app.dependency_overrides[get_chat_manager] = lambda: chat_manager
     app.dependency_overrides[get_run_manager] = lambda: run_manager
     app.dependency_overrides[get_plan_ledger] = lambda: ledger
     return TestClient(app)
+
+
+class FakeToolManager:
+    def __init__(self) -> None:
+        self.tools = {}
+        self.command_executor = None
+
+    def register(self, tool) -> None:
+        self.tools[tool.name] = tool
 
 
 def test_plan_route_returns_null_when_no_active_or_awaiting_plan():
@@ -271,6 +298,39 @@ def test_plan_route_answer_question_keeps_plan_active_with_context():
     assert "默认显示" in pending_context.json()["context"][0]["content"]
 
 
+def test_sync_runtime_managers_creates_sqlite_backed_plan_ledger(tmp_path):
+    persistence = SQLitePersistence(tmp_path)
+    persistence.initialize()
+    chat = ChatRepository(persistence)
+    conversation_id = chat.create_conversation(title="sqlite plan runtime")
+    node_id = chat.create_node(conversation_id, parent_id=None, node_id="node-1")
+    app = type("App", (), {})()
+    app.state = type("State", (), {})()
+    app.state.persistence = persistence
+
+    _sync_runtime_managers(app, {}, object(), FakeToolManager())
+
+    ledger = app.state.plan_ledger
+    run(ledger.enter_plan_mode(conversation_id=conversation_id, node_id=node_id))
+    awaiting = run(
+        ledger.submit_plan(
+            conversation_id=conversation_id,
+            plan="Persist this proposal",
+            node_id=node_id,
+            run_id="run-1",
+            tool_call_id="call-1",
+        )
+    )
+    reloaded = PlanLedger(repository=app.state.plan_repository)
+
+    current = run(reloaded.get_active_or_awaiting(conversation_id))
+
+    assert current is not None
+    assert current.plan_id == awaiting.plan_id
+    assert current.plan == "Persist this proposal"
+    assert current.proposals[0].tool_call_id == "call-1"
+
+
 def test_plan_approve_stream_uses_tool_result_continuation():
     ledger = PlanLedger()
     run(ledger.enter_plan_mode(
@@ -303,6 +363,37 @@ def test_plan_approve_stream_uses_tool_result_continuation():
     assert "User has approved your plan" in chat_manager.calls[0]["tool_result_content"]
 
 
+def test_plan_approve_stream_restores_snapshot_before_decision():
+    original_ledger = PlanLedger()
+    conversation = Conversation(title="approve stream persisted plan")
+    conversation.initialize_with_system_message(None)
+    run(original_ledger.enter_plan_mode(
+        conversation_id=conversation.metadata["id"],
+        node_id="node-current",
+        previous_permission_mode="modify_only",
+    ))
+    awaiting = run(original_ledger.submit_plan(
+        conversation_id=conversation.metadata["id"],
+        plan="## Plan\nApprove after restart.",
+        node_id="node-current",
+        run_id="run-plan",
+        tool_call_id="call-exit-1",
+    ))
+    conversation.metadata["plan_ledger"] = run(original_ledger.snapshot(conversation.metadata["id"]))
+    restored_ledger = PlanLedger()
+    chat_manager = RestoringPlanChatManager(conversation, restored_ledger)
+    client = client_for_plan_stream(chat_manager, RunManager(), restored_ledger)
+
+    response = client.post(
+        f"/conversations/{conversation.metadata['id']}/plans/{awaiting.plan_id}/approve/stream",
+        json={"node_id": "node-current"},
+    )
+
+    assert response.status_code == 200
+    assert "node-generated" in response.text
+    assert chat_manager.calls[0]["plan_id"] == awaiting.plan_id
+
+
 def test_plan_answer_stream_uses_tool_result_continuation():
     ledger = PlanLedger()
     run(ledger.enter_plan_mode(
@@ -332,6 +423,38 @@ def test_plan_answer_stream_uses_tool_result_continuation():
     assert "默认显示" in chat_manager.calls[0]["tool_result_content"]
 
 
+def test_plan_answer_stream_restores_snapshot_before_decision():
+    original_ledger = PlanLedger()
+    conversation = Conversation(title="answer stream persisted question")
+    conversation.initialize_with_system_message(None)
+    run(original_ledger.enter_plan_mode(
+        conversation_id=conversation.metadata["id"],
+        node_id="node-current",
+        previous_permission_mode="modify_only",
+    ))
+    question = run(original_ledger.ask_user_question(
+        conversation_id=conversation.metadata["id"],
+        question="项目栏默认显示吗？",
+        node_id="node-current",
+        run_id="run-plan",
+        tool_call_id="call-question-1",
+    ))
+    conversation.metadata["plan_ledger"] = run(original_ledger.snapshot(conversation.metadata["id"]))
+    restored_ledger = PlanLedger()
+    chat_manager = RestoringPlanChatManager(conversation, restored_ledger)
+    client = client_for_plan_stream(chat_manager, RunManager(), restored_ledger)
+
+    response = client.post(
+        f"/conversations/{conversation.metadata['id']}/plans/{question.plan_id}/answer/stream",
+        json={"node_id": "node-current", "answer": "默认显示"},
+    )
+
+    assert response.status_code == 200
+    assert "node-generated" in response.text
+    assert chat_manager.calls[0]["tool_name"] == "ask_user_question"
+    assert "默认显示" in chat_manager.calls[0]["tool_result_content"]
+
+
 def test_reject_plan_stream_without_feedback_uses_tool_result_continuation():
     ledger = PlanLedger()
     run(ledger.enter_plan_mode(
@@ -357,6 +480,38 @@ def test_reject_plan_stream_without_feedback_uses_tool_result_continuation():
     assert chat_manager.calls[-1]["tool_call_id"] == "call-exit-1"
     assert "did not provide specific feedback" in chat_manager.calls[-1]["tool_result_content"]
     assert "message_subtype" not in chat_manager.calls[-1]
+
+
+def test_plan_reject_stream_restores_snapshot_before_decision():
+    original_ledger = PlanLedger()
+    conversation = Conversation(title="reject stream persisted plan")
+    conversation.initialize_with_system_message(None)
+    run(original_ledger.enter_plan_mode(
+        conversation_id=conversation.metadata["id"],
+        node_id="node-current",
+        previous_permission_mode="modify_only",
+    ))
+    awaiting = run(original_ledger.submit_plan(
+        conversation_id=conversation.metadata["id"],
+        plan="## Plan\nReject after restart.",
+        node_id="node-current",
+        run_id="run-plan",
+        tool_call_id="call-exit-1",
+    ))
+    conversation.metadata["plan_ledger"] = run(original_ledger.snapshot(conversation.metadata["id"]))
+    restored_ledger = PlanLedger()
+    chat_manager = RestoringPlanChatManager(conversation, restored_ledger)
+    client = client_for_plan_stream(chat_manager, RunManager(), restored_ledger)
+
+    response = client.post(
+        f"/conversations/{conversation.metadata['id']}/plans/{awaiting.plan_id}/reject/stream",
+        json={"feedback": "需要缩小范围"},
+    )
+
+    assert response.status_code == 200
+    assert "node-generated" in response.text
+    assert chat_manager.calls[0]["tool_call_id"] == "call-exit-1"
+    assert "需要缩小范围" in chat_manager.calls[0]["tool_result_content"]
 
 
 def test_plan_route_returns_404_for_missing_plan_decision():

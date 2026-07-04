@@ -283,6 +283,7 @@ async def _plan_action_stream(
 
 @router.post("/conversations/{conversation_id}/plans/{plan_id}/approve/stream")
 async def approve_plan_stream(
+    request_context: Request,
     conversation_id: str,
     plan_id: str,
     request: Optional[PlanActionStreamRequest] = Body(None),
@@ -290,6 +291,7 @@ async def approve_plan_stream(
     run_manager: RunManager = Depends(get_run_manager),
     plan_ledger: PlanLedger = Depends(get_plan_ledger),
 ):
+    await _restore_plan_snapshot_if_available(request_context, conversation_id)
     stream_request = request or PlanActionStreamRequest()
     return StreamingResponse(
         _plan_action_stream(
@@ -313,6 +315,7 @@ async def approve_plan_stream(
 
 @router.post("/conversations/{conversation_id}/plans/{plan_id}/reject/stream")
 async def reject_plan_stream(
+    request_context: Request,
     conversation_id: str,
     plan_id: str,
     request: Optional[PlanRejectStreamRequest] = Body(None),
@@ -320,6 +323,7 @@ async def reject_plan_stream(
     run_manager: RunManager = Depends(get_run_manager),
     plan_ledger: PlanLedger = Depends(get_plan_ledger),
 ):
+    await _restore_plan_snapshot_if_available(request_context, conversation_id)
     stream_request = request or PlanRejectStreamRequest()
     feedback = stream_request.feedback or ""
     return StreamingResponse(
@@ -344,6 +348,7 @@ async def reject_plan_stream(
 
 @router.post("/conversations/{conversation_id}/plans/{plan_id}/answer/stream")
 async def answer_plan_question_stream(
+    request_context: Request,
     conversation_id: str,
     plan_id: str,
     request: PlanAnswerStreamRequest,
@@ -351,6 +356,7 @@ async def answer_plan_question_stream(
     run_manager: RunManager = Depends(get_run_manager),
     plan_ledger: PlanLedger = Depends(get_plan_ledger),
 ):
+    await _restore_plan_snapshot_if_available(request_context, conversation_id)
     return StreamingResponse(
         _plan_action_stream(
             conversation_id=conversation_id,
