@@ -1,3 +1,5 @@
+import pytest
+
 from backend.core.persistence.database import SQLitePersistence
 from backend.core.persistence.repository import ChatRepository
 
@@ -40,3 +42,18 @@ def test_repository_stores_large_message_as_blob(tmp_path):
     assert message["content_blob_id"]
     assert message["preview"] == content[:4096]
     assert repo.get_message_content(message_id) == content
+
+
+def test_repository_rejects_second_root_without_moving_current_node(tmp_path):
+    persistence = SQLitePersistence(tmp_path)
+    persistence.initialize()
+    repo = ChatRepository(persistence)
+    conv_id = repo.create_conversation(title="Single root")
+    root_id = repo.create_node(conv_id, parent_id=None, child_order=0)
+
+    with pytest.raises(ValueError):
+        repo.create_node(conv_id, parent_id=None, child_order=1)
+
+    conversation = repo.get_conversation(conv_id)
+    assert conversation["root_node_id"] == root_id
+    assert conversation["current_node_id"] == root_id

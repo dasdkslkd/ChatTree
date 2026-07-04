@@ -1,3 +1,5 @@
+import pytest
+
 from backend.core.persistence.database import SQLitePersistence
 from backend.core.persistence.repository import ChatRepository
 from backend.core.persistence.transcript import TranscriptProjection
@@ -70,3 +72,34 @@ def test_transcript_branch_excludes_sibling_items(tmp_path):
     items = projection.list_for_branch(conv_id, tip_node_id=left)
 
     assert [item["plan_id"] for item in items] == ["left-plan"]
+
+
+def test_transcript_rejects_message_item_on_sibling_node(tmp_path):
+    persistence = SQLitePersistence(tmp_path)
+    persistence.initialize()
+    repo = ChatRepository(persistence)
+    projection = TranscriptProjection(persistence)
+    conv_id = repo.create_conversation(title="Message ownership")
+    root = repo.create_node(conv_id, parent_id=None, child_order=0)
+    left = repo.create_node(conv_id, parent_id=root, child_order=0)
+    right = repo.create_node(conv_id, parent_id=root, child_order=1)
+    message_id = repo.add_message(conv_id, left, role="assistant", content="left")
+
+    with pytest.raises((KeyError, ValueError)):
+        projection.upsert_message_item(
+            conv_id, right, message_id, "assistant_answer", local_order=10
+        )
+
+    assert projection.list_for_branch(conv_id, tip_node_id=right) == []
+
+
+def test_transcript_missing_tip_node_raises_key_error(tmp_path):
+    persistence = SQLitePersistence(tmp_path)
+    persistence.initialize()
+    repo = ChatRepository(persistence)
+    projection = TranscriptProjection(persistence)
+    conv_id = repo.create_conversation(title="Missing tip")
+    repo.create_node(conv_id, parent_id=None, child_order=0)
+
+    with pytest.raises(KeyError):
+        projection.list_for_branch(conv_id, tip_node_id="missing-tip")

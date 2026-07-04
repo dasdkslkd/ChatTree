@@ -29,7 +29,7 @@ class TranscriptProjection:
         with self.persistence.connect() as conn:
             message = conn.execute(
                 """
-                SELECT preview
+                SELECT preview, node_id
                 FROM messages
                 WHERE conversation_id = ? AND id = ?
                 """,
@@ -37,6 +37,10 @@ class TranscriptProjection:
             ).fetchone()
             if message is None:
                 raise KeyError(message_id)
+            if message["node_id"] != node_id:
+                raise ValueError(
+                    f"Message {message_id} belongs to node {message['node_id']}"
+                )
             return self._upsert_item(
                 conn,
                 lookup_sql="""
@@ -206,6 +210,17 @@ class TranscriptProjection:
                 )
                 if tip_node_id is None:
                     return []
+            else:
+                tip = conn.execute(
+                    """
+                    SELECT id
+                    FROM nodes
+                    WHERE conversation_id = ? AND id = ?
+                    """,
+                    (conversation_id, tip_node_id),
+                ).fetchone()
+                if tip is None:
+                    raise KeyError(tip_node_id)
 
             rows = conn.execute(
                 """

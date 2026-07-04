@@ -49,6 +49,21 @@ class ChatRepository:
     ) -> str:
         node_id = str(uuid.uuid4())
         with self.persistence.connect() as conn:
+            conversation = conn.execute(
+                """
+                SELECT root_node_id
+                FROM conversations
+                WHERE id = ?
+                """,
+                (conversation_id,),
+            ).fetchone()
+            if conversation is None:
+                raise KeyError(conversation_id)
+            if parent_id is None and conversation["root_node_id"] is not None:
+                raise ValueError(
+                    f"Conversation {conversation_id} already has a root node"
+                )
+
             parent = None
             if parent_id is not None:
                 parent = conn.execute(
@@ -116,17 +131,7 @@ class ChatRepository:
                 ),
             )
 
-            conversation = conn.execute(
-                """
-                SELECT root_node_id
-                FROM conversations
-                WHERE id = ?
-                """,
-                (conversation_id,),
-            ).fetchone()
-            if conversation is None:
-                raise KeyError(conversation_id)
-            if conversation["root_node_id"] is None:
+            if parent_id is None:
                 conn.execute(
                     """
                     UPDATE conversations
