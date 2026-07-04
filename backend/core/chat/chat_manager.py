@@ -71,13 +71,29 @@ MULTI_AGENT_REQUEST_TOKENS = (
 class ChatManager:
     """延迟加载模型的聊天管理器"""
     
-    def __init__(self, model_manager: ModelManager, storage: ChatStorage, prompts: PromptStorage, tool_manager=None, task_ledger=None, plan_ledger=None):
+    def __init__(
+        self,
+        model_manager: ModelManager,
+        storage: ChatStorage,
+        prompts: PromptStorage,
+        tool_manager=None,
+        task_ledger=None,
+        plan_ledger=None,
+        chat_repository=None,
+        transcript_projection=None,
+    ):
         self.model_manager = model_manager
         self.storage = storage
         self.prompts = prompts
         self.tool_manager = tool_manager
         self.task_ledger = task_ledger
         self.plan_ledger = plan_ledger
+        self.chat_repository = chat_repository
+        self.transcript_projection = transcript_projection
+        if chat_repository is not None:
+            store = getattr(tool_manager, "tool_result_store", None)
+            if store is not None and getattr(store, "sqlite_repository", None) is None:
+                store.sqlite_repository = chat_repository
         self.tool_orchestrator = None
         self.capability_registry = None
         self.slash_dispatcher = SlashCommandDispatcher()
@@ -220,6 +236,9 @@ class ChatManager:
     def delete_conversation(self, conversation_id: str):
         """删除对话"""
         self.storage.delete(conversation_id)
+        if self.chat_repository is not None:
+            with suppress(Exception):
+                self.chat_repository.delete_conversation(conversation_id)
         if self.current_conversation and self.current_conversation.metadata["id"] == conversation_id:
             self.current_conversation = None
     
@@ -296,6 +315,13 @@ class ChatManager:
             parent_id = node.get("parent_id") if node else None
             conversation.del_node(node_id)
             self._save(conversation)
+            if self.chat_repository is not None:
+                with suppress(Exception):
+                    self.chat_repository.delete_node(
+                        conversation_id,
+                        node_id,
+                        new_current_node_id=conversation.current_node_id,
+                    )
             return {
                 "deleted_node_id": node_id,
                 "new_current_node_id": conversation.current_node_id,
@@ -305,6 +331,7 @@ class ChatManager:
     def _save(self, conversation: Conversation):
         """保存一个 Conversation 并清空其待删集合。"""
         self.storage.save(conversation.to_dict())
+        self._sqlite_ensure_conversation(conversation)
         conversation._deleted_node_ids.clear()
 
     def _mark_conversation_updated_at(self, conversation: Conversation, updated_at: int):
@@ -312,6 +339,390 @@ class ChatManager:
             int(conversation.metadata.get("updated_at") or 0),
             updated_at,
         )
+
+    def _sqlite_enabled(self) -> bool:
+        return self.chat_repository is not None and self.transcript_projection is not None
+
+    def _sqlite_ensure_conversation(self, conversation: Conversation) -> None:
+        if self.chat_repository is None:
+            return
+        metadata = conversation.metadata
+        try:
+            self.chat_repository.ensure_conversation(
+                metadata["id"],
+                title=str(metadata.get("title") or ""),
+                provider_id=metadata.get("provider_id"),
+                model_id=metadata.get("model_id"),
+                workspace=metadata.get("workspace") if isinstance(metadata.get("workspace"), dict) else None,
+            )
+        except Exception as exc:
+            logger.warning("SQLite conversation ensure failed: %s", exc, exc_info=True)
+
+    def _role_value(self, role: Any) -> str:
+        return str(getattr(role, "value", role))
+
+    def _sqlite_ensure_branch(
+        self,
+        conversation: Conversation,
+        node_id: str,
+        *,
+        provider_id: Optional[str],
+        model_id: Optional[str],
+    ) -> None:
+        if not self._sqlite_enabled():
+            return
+        repo = self.chat_repository
+        metadata = conversation.metadata
+        repo.ensure_conversation(
+            metadata["id"],
+            title=str(metadata.get("title") or ""),
+            provider_id=provider_id or metadata.get("provider_id"),
+            model_id=model_id or metadata.get("model_id"),
+            workspace=metadata.get("workspace") if isinstance(metadata.get("workspace"), dict) else None,
+        )
+        chain = conversation.get_node_chain(node_id)
+        for item in chain:
+            parent_id = item.get("parent_id")
+            if parent_id == "None":
+                parent_id = None
+            child_order = 0
+            if parent_id and parent_id in conversation.nodes:
+                siblings = conversation.nodes[parent_id].get("children_ids") or []
+                with suppress(ValueError):
+                    child_order = siblings.index(item["id"])
+            repo.ensure_node(
+                metadata["id"],
+                item["id"],
+                parent_id,
+                child_order=child_order,
+                model_id=item.get("model_id") or model_id,
+                provider_id=provider_id,
+                tool_permission_mode=item.get("tool_permission_mode"),
+            )
+
+    def _persist_sqlite_user_turn(
+        self,
+        *,
+        conversation: Conversation,
+        node: Dict[str, Any],
+        user_msg: Message,
+        provider_id: Optional[str],
+        model_id: Optional[str],
+        run_id: Optional[str],
+    ) -> None:
+        if not self._sqlite_enabled():
+            return
+        conversation_id = conversation.metadata["id"]
+        node_id = node["id"]
+        try:
+            self._sqlite_ensure_branch(
+                conversation,
+                node_id,
+                provider_id=provider_id,
+                model_id=model_id,
+            )
+            message_id = self.chat_repository.add_message(
+                conversation_id,
+                node_id,
+                role=self._role_value(user_msg.get("role") or Role.USER),
+                content=str(user_msg.get("content") or ""),
+                subtype=user_msg.get("subtype"),
+                hidden=bool(user_msg.get("is_hidden_from_transcript")),
+                metadata={
+                    key: value
+                    for key, value in dict(user_msg).items()
+                    if key not in {"id", "role", "content", "subtype"}
+                },
+                message_id=user_msg.get("id"),
+            )
+            if not user_msg.get("is_hidden_from_transcript"):
+                self.transcript_projection.upsert_message_item(
+                    conversation_id,
+                    node_id,
+                    message_id,
+                    "user_message",
+                    local_order=10,
+                )
+            if run_id:
+                self.transcript_projection.upsert_run_draft(
+                    conversation_id,
+                    node_id,
+                    run_id=run_id,
+                    status="running",
+                    preview="",
+                    local_order=20,
+                )
+        except Exception as exc:
+            logger.warning("SQLite transcript user turn write failed: %s", exc, exc_info=True)
+
+    def _persist_sqlite_control_event_turn(
+        self,
+        *,
+        conversation: Conversation,
+        node: Dict[str, Any],
+        control_event: Dict[str, Any],
+        provider_id: Optional[str],
+        model_id: Optional[str],
+        run_id: Optional[str],
+    ) -> None:
+        if not self._sqlite_enabled():
+            return
+        conversation_id = conversation.metadata["id"]
+        node_id = node["id"]
+        try:
+            self._sqlite_ensure_branch(
+                conversation,
+                node_id,
+                provider_id=provider_id,
+                model_id=model_id,
+            )
+            self.transcript_projection.upsert_control_event(
+                conversation_id,
+                node_id,
+                event_type=str(control_event.get("event_type") or "control_event"),
+                plan_id=control_event.get("plan_id"),
+                run_id=run_id,
+                status=control_event.get("status"),
+                preview=str(control_event.get("preview") or "")[:4096],
+                local_order=15,
+                visibility="hidden",
+                anchor_node_id=node.get("parent_id"),
+                props={
+                    key: value
+                    for key, value in dict(control_event).items()
+                    if key not in {"preview"}
+                },
+            )
+            if run_id:
+                self.transcript_projection.upsert_run_draft(
+                    conversation_id,
+                    node_id,
+                    run_id=run_id,
+                    status="running",
+                    preview="",
+                    local_order=20,
+                    anchor_node_id=node.get("parent_id"),
+                    props={
+                        "after_control_event": True,
+                        "plan_id": control_event.get("plan_id"),
+                    },
+                )
+        except Exception as exc:
+            logger.warning("SQLite transcript control event write failed: %s", exc, exc_info=True)
+
+    def _assistant_process_preview(
+        self,
+        *,
+        tool_interactions: List[Dict[str, Any]],
+        reasoning: str,
+    ) -> str:
+        parts: list[str] = []
+        for interaction in tool_interactions:
+            assistant = interaction.get("assistant") or {}
+            for call in assistant.get("tool_calls") or []:
+                fn = call.get("function") or {}
+                name = fn.get("name")
+                if name:
+                    parts.append(f"tool: {name}")
+            for tool_message in interaction.get("tools") or []:
+                name = tool_message.get("name")
+                if name and f"tool: {name}" not in parts:
+                    parts.append(f"tool: {name}")
+        if reasoning:
+            parts.append(reasoning[:300])
+        return "\n".join(parts)[:4096] or "Assistant process"
+
+    def _plan_cards_from_tool_messages(self, tool_messages: List[Message]) -> list[dict[str, Any]]:
+        cards: list[dict[str, Any]] = []
+        for message in tool_messages:
+            name = str(message.get("name") or "")
+            if name not in {"exit_plan_mode", "ask_user_question"}:
+                continue
+            payload = self._json_tool_payload(message.get("raw_content") or message.get("content"))
+            status = str(payload.get("status") or "")
+            if status not in {"awaiting_approval", "awaiting_question"}:
+                continue
+            plan_id = str(payload.get("plan_id") or "")
+            if not plan_id:
+                continue
+            if name == "exit_plan_mode":
+                preview = str(payload.get("plan") or payload.get("message") or "")
+            else:
+                question = payload.get("question") if isinstance(payload.get("question"), dict) else {}
+                preview = str(question.get("question") or payload.get("message") or "")
+            cards.append({
+                "plan_id": plan_id,
+                "status": status,
+                "preview": preview[:4096],
+                "props": payload,
+            })
+        return cards
+
+    def _persist_sqlite_tool_metadata(
+        self,
+        *,
+        conversation_id: str,
+        node_id: str,
+        run_id: Optional[str],
+        assistant_message_id: Optional[str],
+        tool_calls: List[Dict[str, Any]],
+        tool_messages: List[Message],
+    ) -> None:
+        if self.chat_repository is None:
+            return
+        for index, call in enumerate(tool_calls):
+            fn = call.get("function") or {}
+            self.chat_repository.add_tool_call(
+                conversation_id,
+                node_id,
+                tool_call_id=call.get("id"),
+                name=str(fn.get("name") or ""),
+                arguments=fn.get("arguments"),
+                call_index=index,
+                status="complete",
+                run_id=run_id,
+                assistant_message_id=assistant_message_id,
+            )
+        for message in tool_messages:
+            raw_output = str(message.get("raw_content") or message.get("content") or "")
+            tool_call_id = message.get("tool_call_id")
+            if tool_call_id and not self.chat_repository.tool_call_exists(
+                conversation_id,
+                str(tool_call_id),
+            ):
+                self.chat_repository.add_tool_call(
+                    conversation_id,
+                    node_id,
+                    tool_call_id=tool_call_id,
+                    name=str(message.get("name") or ""),
+                    arguments=None,
+                    call_index=0,
+                    status="complete",
+                    run_id=run_id,
+                    assistant_message_id=assistant_message_id,
+                )
+            self.chat_repository.add_tool_result(
+                conversation_id,
+                node_id,
+                tool_result_id=message.get("tool_result_id"),
+                tool_call_id=tool_call_id,
+                output=raw_output,
+                status="complete",
+                run_id=run_id,
+                metadata={
+                    "tool_name": message.get("name"),
+                    "tool_result_id": message.get("tool_result_id"),
+                    "model_visible_content": message.get("model_visible_content"),
+                },
+            )
+
+    def _persist_sqlite_assistant_turn(
+        self,
+        *,
+        conversation: Conversation,
+        node: Dict[str, Any],
+        assistant_msg: Message,
+        provider_id: Optional[str],
+        model_id: Optional[str],
+        run_id: Optional[str],
+        generation_status: str,
+        tool_interactions: List[Dict[str, Any]],
+        tool_messages: List[Message],
+        tool_calls: List[Dict[str, Any]],
+    ) -> None:
+        if not self._sqlite_enabled():
+            return
+        conversation_id = conversation.metadata["id"]
+        node_id = node["id"]
+        try:
+            self._sqlite_ensure_branch(
+                conversation,
+                node_id,
+                provider_id=provider_id,
+                model_id=model_id,
+            )
+            content = str(assistant_msg.get("content") or "")
+            assistant_message_id: Optional[str] = None
+            if content:
+                assistant_message_id = self.chat_repository.add_message(
+                    conversation_id,
+                    node_id,
+                    role=self._role_value(assistant_msg.get("role") or Role.ASSISTANT),
+                    content=content,
+                    metadata={
+                        key: value
+                        for key, value in dict(assistant_msg).items()
+                        if key not in {"id", "role", "content"}
+                    },
+                    message_id=assistant_msg.get("id"),
+                )
+            if tool_calls or tool_messages:
+                self._persist_sqlite_tool_metadata(
+                    conversation_id=conversation_id,
+                    node_id=node_id,
+                    run_id=run_id,
+                    assistant_message_id=assistant_message_id,
+                    tool_calls=tool_calls,
+                    tool_messages=tool_messages,
+                )
+            process_preview = self._assistant_process_preview(
+                tool_interactions=tool_interactions,
+                reasoning=str(assistant_msg.get("reasoning") or ""),
+            )
+            if tool_interactions or assistant_msg.get("reasoning"):
+                process_message_id = self.chat_repository.add_message(
+                    conversation_id,
+                    node_id,
+                    role="assistant",
+                    content=process_preview,
+                    subtype="assistant_process",
+                    hidden=False,
+                    metadata={
+                        "tool_interactions": tool_interactions,
+                        "reasoning": assistant_msg.get("reasoning"),
+                    },
+                    message_id=f"{assistant_msg.get('id')}:process",
+                )
+                self.transcript_projection.upsert_message_item(
+                    conversation_id,
+                    node_id,
+                    process_message_id,
+                    "assistant_process",
+                    local_order=25,
+                    status=generation_status,
+                    preview=process_preview,
+                )
+            plan_control_only = self._plan_tool_paused_turn(tool_messages)
+            if content and not plan_control_only and assistant_message_id:
+                self.transcript_projection.upsert_message_item(
+                    conversation_id,
+                    node_id,
+                    assistant_message_id,
+                    "assistant_answer",
+                    local_order=30,
+                    status=generation_status,
+                )
+            for card in self._plan_cards_from_tool_messages(tool_messages):
+                self.transcript_projection.upsert_plan_card(
+                    conversation_id,
+                    node_id,
+                    plan_id=card["plan_id"],
+                    status=card["status"],
+                    preview=card["preview"],
+                    local_order=40,
+                    props=card["props"],
+                )
+            if run_id:
+                self.transcript_projection.upsert_run_draft(
+                    conversation_id,
+                    node_id,
+                    run_id=run_id,
+                    status=generation_status,
+                    preview=content[:4096],
+                    local_order=20,
+                )
+        except Exception as exc:
+            logger.warning("SQLite transcript assistant turn write failed: %s", exc, exc_info=True)
 
     def _provider_for_model(self, model_id: Optional[str]) -> Optional[str]:
         if not model_id:
@@ -525,6 +936,7 @@ class ChatManager:
         message_subtype: Optional[str] = None,
         hidden_user_message: bool = False,
         run_id: Optional[str] = None,
+        control_event: Optional[Dict[str, Any]] = None,
     ) -> AsyncIterator[StreamChunk]:
         """
         异步流式发送消息
@@ -683,27 +1095,31 @@ class ChatManager:
             if active_parent:
                 requested_parent_node_id = active_parent
 
-        # 创建用户消息
-        user_msg = Message({
-            "id": str(uuid.uuid4()),
-            "role": Role.USER,
-            "content": model_content,
-            "name": None,
-            "tool_calls": None,
-            "tool_call_id": None,
-            "timestamp": int(time())
-        })
-        if message_subtype:
-            user_msg["subtype"] = message_subtype
-        if hidden_user_message:
-            user_msg["is_hidden_from_transcript"] = True
-        if slash_result.kind == SlashDispatchKind.MAIN_PROMPT:
-            user_msg["slash_command"] = self._slash_command_metadata(slash_result)
+        control_event_payload = dict(control_event or {})
+        is_control_event_turn = bool(control_event_payload)
+        user_msg: Optional[Message] = None
+        if not is_control_event_turn:
+            # 创建用户消息
+            user_msg = Message({
+                "id": str(uuid.uuid4()),
+                "role": Role.USER,
+                "content": model_content,
+                "name": None,
+                "tool_calls": None,
+                "tool_call_id": None,
+                "timestamp": int(time())
+            })
+            if message_subtype:
+                user_msg["subtype"] = message_subtype
+            if hidden_user_message:
+                user_msg["is_hidden_from_transcript"] = True
+            if slash_result.kind == SlashDispatchKind.MAIN_PROMPT:
+                user_msg["slash_command"] = self._slash_command_metadata(slash_result)
         normalized_import_files = self._normalize_import_file_refs(import_files)
-        if normalized_import_files:
+        if user_msg is not None and normalized_import_files:
             user_msg["import_files"] = normalized_import_files
         normalized_image_refs = self._normalize_image_refs(image_refs)
-        if normalized_image_refs:
+        if user_msg is not None and normalized_image_refs:
             user_msg["image_refs"] = normalized_image_refs
 
         skill_names: list[str] = []
@@ -765,7 +1181,7 @@ class ChatManager:
                 if requested_tool_permission_mode
                 else plan_context_permission_mode or active_plan_permission_mode or parent_tool_permission_mode or "ask_always"
             )
-            if self.capability_registry is not None and not hidden_user_message:
+            if self.capability_registry is not None and not hidden_user_message and not is_control_event_turn:
                 skill_names = collect_skill_injection_names(
                     model_content,
                     self.capability_registry,
@@ -793,6 +1209,24 @@ class ChatManager:
                 model_context_window=meta.get("context_length"),
             )
             self._save(conversation)
+            if is_control_event_turn:
+                self._persist_sqlite_control_event_turn(
+                    conversation=conversation,
+                    node=new_node,
+                    control_event=control_event_payload,
+                    provider_id=target_provider,
+                    model_id=target_model,
+                    run_id=run_id,
+                )
+            elif user_msg is not None:
+                self._persist_sqlite_user_turn(
+                    conversation=conversation,
+                    node=new_node,
+                    user_msg=user_msg,
+                    provider_id=target_provider,
+                    model_id=target_model,
+                    run_id=run_id,
+                )
 
         # 创建流控制器（在锁外，避免把网络流式包进锁里阻塞同对话其他分支）
         controller = StreamController(
@@ -1319,6 +1753,21 @@ class ChatManager:
                         "root_node_id": conversation.root_node_id,
                     })
 
+            latest_for_transcript = self.get_conversation(conversation_id)
+            if latest_for_transcript is not None:
+                self._persist_sqlite_assistant_turn(
+                    conversation=latest_for_transcript,
+                    node=latest_for_transcript.nodes.get(new_node["id"], new_node),
+                    assistant_msg=assistant_msg,
+                    provider_id=target_provider,
+                    model_id=target_model,
+                    run_id=run_id,
+                    generation_status=generation_status,
+                    tool_interactions=tool_interactions,
+                    tool_messages=all_tool_messages,
+                    tool_calls=all_tool_calls,
+                )
+
             # 清理控制器
             if new_node["id"] in self._active_controllers:
                 del self._active_controllers[new_node["id"]]
@@ -1360,23 +1809,42 @@ class ChatManager:
             if plan_id and current.plan_id != plan_id:
                 raise ValueError("plan not found")
             status = getattr(getattr(current, "status", None), "value", getattr(current, "status", None))
+            projection_context: Dict[str, Any] = {}
             if message_subtype == "plan_approval_response":
                 if status != "awaiting_approval":
                     raise ValueError("plan must be awaiting approval")
-                await plan_ledger.approve_plan(
+                approved_plan = await plan_ledger.approve_plan(
                     conversation_id=conversation_id,
                     plan_id=current.plan_id,
                 )
+                projection_context = self._persist_sqlite_plan_action_projection(
+                    conversation_id=conversation_id,
+                    plan=approved_plan,
+                    action="approved",
+                    fallback_node_id=node_id or getattr(current, "submitted_node_id", None),
+                    run_id=run_id,
+                )
                 model_content = "Plan mode approval response received. Continue with the approved plan."
+                control_event_type = "plan_approved"
+                control_status = "approved"
             elif message_subtype == "plan_question_response":
                 if status != "awaiting_question":
                     raise ValueError("plan must be awaiting question")
-                await plan_ledger.answer_question(
+                answered_plan = await plan_ledger.answer_question(
                     conversation_id=conversation_id,
                     plan_id=current.plan_id,
                     answer=content,
                 )
+                projection_context = self._persist_sqlite_plan_action_projection(
+                    conversation_id=conversation_id,
+                    plan=answered_plan,
+                    action="question_answered",
+                    fallback_node_id=node_id or getattr(current, "submitted_node_id", None),
+                    run_id=run_id,
+                )
                 model_content = "Plan mode clarification response received. Continue planning with the user's answer."
+                control_event_type = "plan_question_answered"
+                control_status = "active"
             else:
                 raise ValueError("unsupported plan action response")
         except Exception as exc:
@@ -1403,8 +1871,16 @@ class ChatManager:
             image_refs=None,
             tool_permission_mode=tool_permission_mode,
             message_subtype=message_subtype,
-            hidden_user_message=True,
             run_id=run_id,
+            control_event={
+                "event_type": control_event_type,
+                "plan_id": current.plan_id,
+                "message_subtype": message_subtype,
+                "status": control_status,
+                "preview": model_content,
+                "content": model_content,
+                **projection_context,
+            },
         ):
             yield chunk
 
@@ -1683,6 +2159,68 @@ class ChatManager:
                 ]),
             }))
         return messages
+
+    def _persist_sqlite_plan_action_projection(
+        self,
+        *,
+        conversation_id: str,
+        plan: Any,
+        action: str,
+        fallback_node_id: Optional[str],
+        run_id: Optional[str],
+    ) -> Dict[str, Any]:
+        if not self._sqlite_enabled():
+            return {}
+        plan_id = str(getattr(plan, "plan_id", "") or "")
+        if not plan_id:
+            return {}
+        if action == "approved":
+            plan_node_id = (
+                getattr(plan, "submitted_node_id", None)
+                or fallback_node_id
+            )
+            status = "approved"
+            preview = str(getattr(plan, "plan", "") or "")
+            summary = "Plan approved"
+        elif action == "question_answered":
+            question = getattr(plan, "question", None) or {}
+            plan_node_id = (
+                question.get("asked_node_id")
+                or getattr(plan, "submitted_node_id", None)
+                or fallback_node_id
+            )
+            status = "active"
+            preview = str(question.get("question") or question.get("answer") or "")
+            summary = "Plan question answered"
+        else:
+            plan_node_id = fallback_node_id
+            status = str(getattr(getattr(plan, "status", None), "value", getattr(plan, "status", "")) or "")
+            preview = str(getattr(plan, "plan", "") or "")
+            summary = f"Plan {action}"
+        if not plan_node_id:
+            return {}
+        props = plan.to_dict() if hasattr(plan, "to_dict") else {}
+        props.update({"control_action": action, "run_id": run_id})
+        try:
+            item_id = self.transcript_projection.upsert_plan_card(
+                conversation_id,
+                plan_node_id,
+                plan_id=plan_id,
+                status=status,
+                preview=preview[:4096],
+                local_order=40,
+                summary=summary,
+                props=props,
+            )
+            return {
+                "plan_card_item_id": item_id,
+                "plan_node_id": plan_node_id,
+                "plan_id": plan_id,
+                "plan_status": status,
+            }
+        except Exception as exc:
+            logger.warning("SQLite plan action projection write failed: %s", exc, exc_info=True)
+            return {}
 
     def _permission_mode_after_plan_tools(self, tool_messages: list[Message], current_mode: str) -> str:
         mode = normalize_permission_mode(current_mode)

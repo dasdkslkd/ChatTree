@@ -24,12 +24,16 @@ class RunStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    INTERRUPTED = "interrupted"
+    STOPPED = "stopped"
 
 
 FINISHED_RUN_STATUSES = {
     RunStatus.COMPLETED,
     RunStatus.FAILED,
     RunStatus.CANCELLED,
+    RunStatus.INTERRUPTED,
+    RunStatus.STOPPED,
 }
 
 

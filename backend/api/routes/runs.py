@@ -8,7 +8,7 @@ from fastapi.responses import StreamingResponse
 from backend.api.dependencies import get_chat_manager, get_run_manager, get_subagent_executor, get_command_executor, get_workflow_manager
 from backend.core.agents import SubagentExecutor
 from backend.core.chat.chat_manager import ChatManager
-from backend.core.runs import RunManager
+from backend.core.runs import RunManager, RunNotFoundError
 from backend.core.workflows import WorkflowManager
 from .run_control import stop_run_tree
 
@@ -131,9 +131,7 @@ async def get_run_events(
     run = run_manager.get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="运行不存在")
-    events = run_manager.journal.read_from_index(
-        str(run["conversation_id"]),
-        run_id,
-        from_event,
-    )
-    return [event["payload"] for event in events]
+    try:
+        return run_manager.read_events(run_id, from_event)
+    except RunNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="运行不存在") from exc

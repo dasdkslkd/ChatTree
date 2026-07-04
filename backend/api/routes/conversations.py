@@ -2,11 +2,13 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
+import json
 import logging
 from pathlib import Path
 
-from backend.api.dependencies import get_chat_manager, get_run_manager
+from backend.api.dependencies import get_chat_manager, get_run_manager, get_transcript_projection
 from backend.core.chat.chat_manager import ChatManager
+from backend.core.persistence.transcript import TranscriptProjection
 from backend.core.runs import RunManager
 from backend.core.workspace import normalize_workspace
 
@@ -72,6 +74,27 @@ def _conversation_response(conversation) -> Dict[str, Any]:
         "workspace": conversation.metadata.get("workspace"),
         "total_tokens": conversation.metadata.get("total_tokens", {}),
     }
+
+
+def to_transcript_item_dto(item: Dict[str, Any]) -> Dict[str, Any]:
+    props_json = item.get("props_json")
+    props: Dict[str, Any] = {}
+    if props_json:
+        try:
+            loaded_props = json.loads(props_json)
+            if isinstance(loaded_props, dict):
+                props = loaded_props
+        except (TypeError, json.JSONDecodeError):
+            props = {}
+
+    dto = {
+        key: value
+        for key, value in item.items()
+        if key != "props_json"
+    }
+    dto["type"] = item.get("item_type")
+    dto["props"] = props
+    return dto
 
 
 def _workspace_from_project_path(path_value: str, label: Optional[str], create: bool) -> Dict[str, Any]:
@@ -159,6 +182,24 @@ async def delete_conversation(
     try:
         chat_manager.delete_conversation(conversation_id)
         return {"message": "对话已删除"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/conversations/{conversation_id}/transcript")
+async def get_conversation_transcript(
+    conversation_id: str,
+    node_id: Optional[str] = None,
+    projection: TranscriptProjection = Depends(get_transcript_projection),
+):
+    """获取当前分支的后端 transcript 投影。"""
+    try:
+        items = projection.list_for_branch(conversation_id, node_id)
+        return {"items": [to_transcript_item_dto(item) for item in items]}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Transcript branch not found") from exc
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
