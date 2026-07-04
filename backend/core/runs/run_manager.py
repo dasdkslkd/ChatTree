@@ -22,8 +22,13 @@ class RunWriterConflictError(Exception):
 class RunManager:
     """In-memory active run registry with durable event replay."""
 
-    def __init__(self, journal: Optional[RunJournal] = None) -> None:
+    def __init__(
+        self,
+        journal: Optional[RunJournal] = None,
+        repository: Optional[Any] = None,
+    ) -> None:
         self.journal = journal or RunJournal()
+        self.repository = repository
         self.synthetic_inputs = SyntheticInputQueue()
         self._runs: Dict[str, RunRecord] = {}
         self._events: Dict[str, list[Dict[str, Any]]] = {}
@@ -48,21 +53,50 @@ class RunManager:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> RunRecord:
         run_kind = kind if isinstance(kind, RunKind) else RunKind(str(kind))
-        run_id = f"run_{uuid.uuid4().hex}"
-        record = RunRecord(
-            run_id=run_id,
-            conversation_id=conversation_id,
-            kind=run_kind,
-            status=RunStatus.RUNNING,
-            anchor_node_id=anchor_node_id,
-            target_node_id=target_node_id,
-            parent_run_id=parent_run_id,
-            summary=summary,
-            metadata=dict(metadata or {}),
-        )
         async with self._lock:
             if target_node_id:
-                self._acquire_writer_locked(target_node_id, run_id)
+                existing = self._writers_by_node.get(target_node_id)
+                if existing:
+                    existing_record = self._runs.get(existing)
+                    if (
+                        existing_record
+                        and existing_record.status not in FINISHED_RUN_STATUSES
+                    ):
+                        raise RunWriterConflictError(
+                            f"target node {target_node_id} already has active writer {existing}"
+                        )
+            if self.repository:
+                run_id = self.repository.create_run(
+                    conversation_id,
+                    kind=run_kind.value,
+                    anchor_node_id=anchor_node_id,
+                    target_node_id=target_node_id,
+                    parent_run_id=parent_run_id,
+                    summary=summary,
+                    metadata=metadata,
+                )
+                stored_run = self.repository.get_run(run_id) or {}
+                created_at = float(stored_run.get("created_at") or time())
+                updated_at = float(stored_run.get("updated_at") or created_at)
+            else:
+                run_id = f"run_{uuid.uuid4().hex}"
+                created_at = time()
+                updated_at = created_at
+            record = RunRecord(
+                run_id=run_id,
+                conversation_id=conversation_id,
+                kind=run_kind,
+                status=RunStatus.RUNNING,
+                anchor_node_id=anchor_node_id,
+                target_node_id=target_node_id,
+                parent_run_id=parent_run_id,
+                summary=summary,
+                metadata=dict(metadata or {}),
+                created_at=created_at,
+                updated_at=updated_at,
+            )
+            if target_node_id:
+                self._writers_by_node[target_node_id] = run_id
             self._runs[run_id] = record
             self._events[run_id] = []
             self._conditions[run_id] = asyncio.Condition()
@@ -127,6 +161,9 @@ class RunManager:
         return snapshot
 
     async def append_event(self, run_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        persist_event: Optional[Dict[str, Any]] = None
+        journal_event: Optional[Dict[str, Any]] = None
+        journal_conversation_id: Optional[str] = None
         async with self._lock:
             record = self._require_run_locked(run_id)
             event_index = record.event_count
@@ -136,18 +173,30 @@ class RunManager:
             payload.setdefault("kind", record.kind.value)
             payload.setdefault("target_node_id", record.target_node_id)
             payload["event_index"] = event_index
-            event = {
-                "run_id": run_id,
-                "event_index": event_index,
-                "payload": payload,
-                "created_at": time(),
-            }
-            record.event_count += 1
+            if self.repository:
+                persist_event = self.repository.append_event(run_id, payload)
+                payload = deepcopy(persist_event["payload"])
+                event = {
+                    "run_id": run_id,
+                    "event_index": persist_event["event_index"],
+                    "payload": payload,
+                    "created_at": persist_event["created_at"],
+                }
+            else:
+                event = {
+                    "run_id": run_id,
+                    "event_index": event_index,
+                    "payload": payload,
+                    "created_at": time(),
+                }
+                journal_event = event
+                journal_conversation_id = record.conversation_id
+            record.event_count = max(record.event_count, event["event_index"] + 1)
             record.updated_at = event["created_at"]
             self._events.setdefault(run_id, []).append(event)
             condition = self._conditions.setdefault(run_id, asyncio.Condition())
-            conversation_id = record.conversation_id
-        self.journal.append_event(conversation_id, run_id, event)
+        if journal_event is not None and journal_conversation_id is not None:
+            self.journal.append_event(journal_conversation_id, run_id, journal_event)
         async with condition:
             condition.notify_all()
         return payload
@@ -185,10 +234,13 @@ class RunManager:
         run_status = status if isinstance(status, RunStatus) else RunStatus(str(status))
         if run_status not in FINISHED_RUN_STATUSES:
             raise ValueError(f"finish_run requires finished status, got {run_status}")
+        journal_event: Optional[Dict[str, Any]] = None
+        journal_conversation_id: Optional[str] = None
         async with self._lock:
             record = self._require_run_locked(run_id)
             if record.status in FINISHED_RUN_STATUSES:
                 return deepcopy(record)
+            event_index = record.event_count
             record.status = run_status
             record.finished_at = time()
             record.updated_at = record.finished_at
@@ -197,28 +249,62 @@ class RunManager:
             if record.target_node_id and self._writers_by_node.get(record.target_node_id) == run_id:
                 self._writers_by_node.pop(record.target_node_id, None)
             condition = self._conditions.setdefault(run_id, asyncio.Condition())
-            event_index = record.event_count
-            payload = {
-                "type": "run_finished",
-                "run_id": run_id,
-                "conversation_id": record.conversation_id,
-                "kind": record.kind.value,
-                "target_node_id": record.target_node_id,
-                "status": run_status.value,
-                "error": error,
-                "finished_at": record.finished_at,
-                "event_index": event_index,
-            }
-            event = {
-                "run_id": run_id,
-                "event_index": event_index,
-                "payload": payload,
-                "created_at": record.finished_at,
-            }
-            record.event_count += 1
+            if self.repository:
+                persisted_run = self.repository.finish_run(run_id, run_status.value, error)
+                persisted_events = self.repository.read_events(run_id, event_index)
+                if persisted_events:
+                    event = {
+                        "run_id": run_id,
+                        "event_index": persisted_events[0]["event_index"],
+                        "payload": deepcopy(persisted_events[0]["payload"]),
+                        "created_at": persisted_events[0]["created_at"],
+                    }
+                else:
+                    payload = {
+                        "type": "run_finished",
+                        "run_id": run_id,
+                        "conversation_id": record.conversation_id,
+                        "kind": record.kind.value,
+                        "target_node_id": record.target_node_id,
+                        "status": run_status.value,
+                        "error": error,
+                        "finished_at": record.finished_at,
+                        "event_index": event_index,
+                    }
+                    event = {
+                        "run_id": run_id,
+                        "event_index": event_index,
+                        "payload": payload,
+                        "created_at": record.finished_at,
+                    }
+                record.event_count = int(persisted_run.get("event_count", event["event_index"] + 1))
+                record.finished_at = float(persisted_run.get("finished_at") or record.finished_at)
+                record.updated_at = float(persisted_run.get("updated_at") or record.updated_at)
+            else:
+                payload = {
+                    "type": "run_finished",
+                    "run_id": run_id,
+                    "conversation_id": record.conversation_id,
+                    "kind": record.kind.value,
+                    "target_node_id": record.target_node_id,
+                    "status": run_status.value,
+                    "error": error,
+                    "finished_at": record.finished_at,
+                    "event_index": event_index,
+                }
+                event = {
+                    "run_id": run_id,
+                    "event_index": event_index,
+                    "payload": payload,
+                    "created_at": record.finished_at,
+                }
+                record.event_count += 1
+                journal_event = event
+                journal_conversation_id = record.conversation_id
             self._events.setdefault(run_id, []).append(event)
             snapshot = deepcopy(record)
-        self.journal.append_event(snapshot.conversation_id, run_id, event)
+        if journal_event is not None and journal_conversation_id is not None:
+            self.journal.append_event(journal_conversation_id, run_id, journal_event)
         async with condition:
             condition.notify_all()
         snapshot_dict = snapshot.to_dict()
@@ -227,14 +313,36 @@ class RunManager:
         return snapshot
 
     async def request_stop(self, run_id: str) -> bool:
+        repository_event: Optional[Dict[str, Any]] = None
         async with self._lock:
             record = self._runs.get(run_id)
             if not record or record.status in FINISHED_RUN_STATUSES:
                 return False
+            event_index = record.event_count
             record.status = RunStatus.STOPPING
             record.updated_at = time()
             stop_event = self._stop_events.setdefault(run_id, asyncio.Event())
             stop_event.set()
+            condition = self._conditions.setdefault(run_id, asyncio.Condition())
+            if self.repository:
+                if not self.repository.request_stop(run_id):
+                    return False
+                persisted_run = self.repository.get_run(run_id) or {}
+                persisted_events = self.repository.read_events(run_id, event_index)
+                record.event_count = int(persisted_run.get("event_count", record.event_count))
+                record.updated_at = float(persisted_run.get("updated_at") or record.updated_at)
+                if persisted_events:
+                    repository_event = {
+                        "run_id": run_id,
+                        "event_index": persisted_events[0]["event_index"],
+                        "payload": deepcopy(persisted_events[0]["payload"]),
+                        "created_at": persisted_events[0]["created_at"],
+                    }
+                    self._events.setdefault(run_id, []).append(repository_event)
+        if repository_event is not None:
+            async with condition:
+                condition.notify_all()
+            return True
         await self.append_event(run_id, {
             "type": "run_stop_requested",
             "run_id": run_id,
