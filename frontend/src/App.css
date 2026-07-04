@@ -237,6 +237,20 @@
   color: rgba(255, 255, 255, 0.9);
 }
 
+.plan-markdown-panel {
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+.plan-markdown-panel :not(pre) > code {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  border-radius: 0.34em;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
 /* ====== Math blocks (KaTeX) ====== */
 .prose .katex {
   color: inherit;

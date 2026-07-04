@@ -71,12 +71,13 @@ MULTI_AGENT_REQUEST_TOKENS = (
 class ChatManager:
     """延迟加载模型的聊天管理器"""
     
-    def __init__(self, model_manager: ModelManager, storage: ChatStorage, prompts: PromptStorage, tool_manager=None, task_ledger=None):
+    def __init__(self, model_manager: ModelManager, storage: ChatStorage, prompts: PromptStorage, tool_manager=None, task_ledger=None, plan_ledger=None):
         self.model_manager = model_manager
         self.storage = storage
         self.prompts = prompts
         self.tool_manager = tool_manager
         self.task_ledger = task_ledger
+        self.plan_ledger = plan_ledger
         self.tool_orchestrator = None
         self.capability_registry = None
         self.slash_dispatcher = SlashCommandDispatcher()
@@ -522,6 +523,7 @@ class ChatManager:
         image_refs: Optional[List[Dict[str, Any]]] = None,
         tool_permission_mode: Optional[str] = None,
         message_subtype: Optional[str] = None,
+        hidden_user_message: bool = False,
         run_id: Optional[str] = None,
     ) -> AsyncIterator[StreamChunk]:
         """
@@ -693,6 +695,8 @@ class ChatManager:
         })
         if message_subtype:
             user_msg["subtype"] = message_subtype
+        if hidden_user_message:
+            user_msg["is_hidden_from_transcript"] = True
         if slash_result.kind == SlashDispatchKind.MAIN_PROMPT:
             user_msg["slash_command"] = self._slash_command_metadata(slash_result)
         normalized_import_files = self._normalize_import_file_refs(import_files)
@@ -703,6 +707,32 @@ class ChatManager:
             user_msg["image_refs"] = normalized_image_refs
 
         skill_names: list[str] = []
+        await self._restore_plan_snapshot_from_conversation(preview)
+        pending_plan_context = await self._consume_plan_context(conversation_id)
+        plan_context_permission_mode = self._plan_context_permission_mode(pending_plan_context)
+        active_plan_permission_mode = await self._active_plan_permission_mode(conversation_id)
+        plan_snapshot_after_context = await self._plan_snapshot_for_metadata(conversation_id)
+        requested_tool_permission_mode = (
+            normalize_permission_mode(tool_permission_mode)
+            if tool_permission_mode not in (None, "")
+            else None
+        )
+        if (
+            requested_tool_permission_mode == "plan"
+            and plan_context_permission_mode != "plan"
+            and active_plan_permission_mode != "plan"
+        ):
+            yield StreamChunk(
+                status=StreamStatus.ERROR,
+                content="",
+                node_id=None,
+                conversation_id=conversation_id,
+                run_id=run_id,
+                error="计划模式必须通过 enter_plan_mode 创建 PlanSession，不能作为普通工具权限直接发送。",
+                tokens_used=0,
+            )
+            return
+
         # ── 临界区 1（锁内）：重新加载最新快照 + 建节点 + 立即保存 user 消息 ──
         # 锁内重载确保看到其他并发流刚提交的兄弟节点，add_node 不会丢失 root 引用。
         # 立即落盘是为了让前端的 userMsgLanded 判定能尽快看到真实 user 消息。
@@ -724,12 +754,18 @@ class ChatManager:
             parent_tool_permission_mode = None
             if current_node_id and current_node_id in conversation.nodes:
                 parent_tool_permission_mode = conversation.nodes[current_node_id].get("tool_permission_mode")
+            if (
+                parent_tool_permission_mode == "plan"
+                and plan_context_permission_mode != "plan"
+                and active_plan_permission_mode != "plan"
+            ):
+                parent_tool_permission_mode = None
             eff_tool_permission_mode = normalize_permission_mode(
-                tool_permission_mode
-                if tool_permission_mode not in (None, "")
-                else parent_tool_permission_mode or "ask_always"
+                requested_tool_permission_mode
+                if requested_tool_permission_mode
+                else plan_context_permission_mode or active_plan_permission_mode or parent_tool_permission_mode or "ask_always"
             )
-            if self.capability_registry is not None:
+            if self.capability_registry is not None and not hidden_user_message:
                 skill_names = collect_skill_injection_names(
                     model_content,
                     self.capability_registry,
@@ -749,6 +785,8 @@ class ChatManager:
                 provider_id=target_provider,
                 model_id=target_model,
             )
+            if plan_snapshot_after_context is not None:
+                conversation.metadata["plan_ledger"] = plan_snapshot_after_context
             self._update_branch_usage_for_node(
                 conversation,
                 new_node["id"],
@@ -775,6 +813,7 @@ class ChatManager:
 
         # 准备消息链（使用锁内加载的最新 conversation）
         messages = self._build_prompt_messages(conversation, skill_names)
+        messages.extend(self._plan_context_messages(pending_plan_context))
 
         workspace_context = normalize_workspace(
             preview.metadata.get("workspace"),
@@ -810,7 +849,9 @@ class ChatManager:
             all_approval_events: List[Dict[str, Any]] = []
             tool_round = 0
             task_guard_nudge_count = 0
+            plan_guard_nudge_count = 0
             max_task_guard_nudges = self._max_task_guard_nudges(cfg.data)
+            max_plan_guard_nudges = 3
 
             while True:
                 if await controller.is_stopped():
@@ -832,7 +873,10 @@ class ChatManager:
                 round_status = "completed"
                 complete_chunk = None
                 round_tool_calls: List[Dict[str, Any]] = []
-                defer_round_content = await self._has_open_tasks(conversation_id)
+                defer_round_content = (
+                    await self._has_open_tasks(conversation_id)
+                    or await self._has_active_plan_mode(conversation_id, new_node.get("tool_permission_mode"))
+                )
                 deferred_content_chunks: List[Dict[str, Any]] = []
 
                 # provider 引用已在循环前捕获（见上方 get_model）。即便此刻 config 变更
@@ -894,6 +938,39 @@ class ChatManager:
                     break
 
                 if not round_tool_calls:
+                    needs_plan_nudge = await self._needs_plan_mode_nudge(
+                        conversation_id,
+                        new_node.get("tool_permission_mode") or "default",
+                    )
+                    if needs_plan_nudge and tools and plan_guard_nudge_count < max_plan_guard_nudges:
+                        plan_guard_nudge_count += 1
+                        messages.append({
+                            "role": "system",
+                            "content": self._plan_mode_nudge(attempt=plan_guard_nudge_count),
+                        })
+                        continue
+                    if needs_plan_nudge:
+                        guard_message = self._plan_guard_blocked_message()
+                        final_content = guard_message
+                        persisted_final_content = guard_message
+                        total_content = guard_message
+                        yield StreamChunk(
+                            status=StreamStatus.CONTENT,
+                            content=guard_message,
+                            node_id=new_node["id"],
+                            target_node_id=new_node["id"],
+                            conversation_id=conversation_id,
+                            run_id=run_id,
+                            error=None,
+                            tokens_used=0,
+                        )
+                        final_reasoning = round_reasoning
+                        if complete_chunk:
+                            complete_chunk["conversation_id"] = conversation_id
+                            complete_chunk["run_id"] = run_id
+                            complete_chunk["target_node_id"] = new_node["id"]
+                            yield complete_chunk
+                        break
                     needs_task_nudge, open_tasks = await self._needs_task_completion_nudge(
                         conversation_id,
                         round_content,
@@ -1065,6 +1142,12 @@ class ChatManager:
                                     conversation_id=conversation_id,
                                 )
                             tool_messages = await execute_task
+                            next_permission_mode = self._permission_mode_after_plan_tools(
+                                tool_messages,
+                                new_node.get("tool_permission_mode") or "default",
+                            )
+                            if next_permission_mode != new_node.get("tool_permission_mode"):
+                                new_node["tool_permission_mode"] = next_permission_mode
                             break
                 finally:
                     if not event_get_task.done():
@@ -1110,6 +1193,16 @@ class ChatManager:
                             "tool_result_id": tool_msg.get("tool_result_id"),
                         },
                     )
+                if self._plan_tool_paused_turn(tool_messages):
+                    final_content = ""
+                    persisted_final_content = ""
+                    final_reasoning = round_reasoning
+                    if complete_chunk:
+                        complete_chunk["conversation_id"] = conversation_id
+                        complete_chunk["run_id"] = run_id
+                        complete_chunk["target_node_id"] = new_node["id"]
+                        yield complete_chunk
+                    break
 
             # 检查是否被手动停止
             if await controller.is_stopped():
@@ -1136,6 +1229,7 @@ class ChatManager:
                 usage_info = estimated_usage(tokens_used)
             tokens_used = usage_total(usage_info, tokens_used)
             completion_timestamp = int(time())
+            plan_snapshot_for_save = await self._plan_snapshot_for_metadata(conversation_id)
 
             # 创建生成信息（tokens_used 来自流中捕获的最终值）
             generation_info: GenerationInfo = {
@@ -1179,6 +1273,7 @@ class ChatManager:
             async with self._lock_for(conversation_id):
                 latest = self.get_conversation(conversation_id)
                 if latest is not None and new_node["id"] in latest.nodes:
+                    latest.nodes[new_node["id"]]["tool_permission_mode"] = new_node.get("tool_permission_mode")
                     NodeManager.add_assistant_message(latest.nodes[new_node["id"]], assistant_msg)
                     if all_tool_messages:
                         NodeManager.add_tool_messages(latest.nodes[new_node["id"]], all_tool_messages)
@@ -1187,6 +1282,8 @@ class ChatManager:
                         provider_id=target_provider,
                         model_id=target_model,
                     )
+                    if plan_snapshot_for_save is not None:
+                        latest.metadata["plan_ledger"] = plan_snapshot_for_save
                     self._update_token_stats_for_conversation(latest, target_provider, tokens_used)
                     self._update_branch_usage_for_node(
                         latest,
@@ -1212,6 +1309,8 @@ class ChatManager:
                         provider_id=target_provider,
                         model_id=target_model,
                     )
+                    if plan_snapshot_for_save is not None:
+                        conversation.metadata["plan_ledger"] = plan_snapshot_for_save
                     self._mark_conversation_updated_at(conversation, completion_timestamp)
                     self.storage.save({
                         "metadata": conversation.metadata,
@@ -1223,6 +1322,91 @@ class ChatManager:
             # 清理控制器
             if new_node["id"] in self._active_controllers:
                 del self._active_controllers[new_node["id"]]
+
+    async def continue_plan_action_stream(
+        self,
+        *,
+        conversation_id: str,
+        content: str,
+        model_id: Optional[str] = None,
+        provider_id: Optional[str] = None,
+        node_id: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
+        thinking_enabled: Optional[bool] = None,
+        tool_permission_mode: Optional[str] = None,
+        message_subtype: str,
+        plan_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+    ) -> AsyncIterator[StreamChunk]:
+        """Continue after a structured plan-mode response, without a visible user turn."""
+        plan_ledger = getattr(self, "plan_ledger", None)
+        if plan_ledger is None:
+            yield StreamChunk(
+                status=StreamStatus.ERROR,
+                node_id=None,
+                conversation_id=conversation_id,
+                run_id=run_id,
+                content="",
+                error="Plan ledger is not configured",
+                tokens_used=0,
+            )
+            return
+
+        await self._restore_plan_snapshot_from_conversation(self.get_conversation(conversation_id))
+        try:
+            current = await plan_ledger.get_active_or_awaiting(conversation_id)
+            if current is None:
+                raise ValueError("active plan session is required")
+            if plan_id and current.plan_id != plan_id:
+                raise ValueError("plan not found")
+            status = getattr(getattr(current, "status", None), "value", getattr(current, "status", None))
+            if message_subtype == "plan_approval_response":
+                if status != "awaiting_approval":
+                    raise ValueError("plan must be awaiting approval")
+                await plan_ledger.approve_plan(
+                    conversation_id=conversation_id,
+                    plan_id=current.plan_id,
+                )
+                model_content = "Plan mode approval response received. Continue with the approved plan."
+            elif message_subtype == "plan_question_response":
+                if status != "awaiting_question":
+                    raise ValueError("plan must be awaiting question")
+                await plan_ledger.answer_question(
+                    conversation_id=conversation_id,
+                    plan_id=current.plan_id,
+                    answer=content,
+                )
+                model_content = "Plan mode clarification response received. Continue planning with the user's answer."
+            else:
+                raise ValueError("unsupported plan action response")
+        except Exception as exc:
+            yield StreamChunk(
+                status=StreamStatus.ERROR,
+                node_id=None,
+                conversation_id=conversation_id,
+                run_id=run_id,
+                content="",
+                error=str(exc),
+                tokens_used=0,
+            )
+            return
+
+        async for chunk in self.send_message_stream(
+            conversation_id=conversation_id,
+            content=model_content,
+            model_id=model_id,
+            provider_id=provider_id,
+            node_id=node_id,
+            reasoning_effort=reasoning_effort,
+            thinking_enabled=thinking_enabled,
+            import_files=None,
+            image_refs=None,
+            tool_permission_mode=tool_permission_mode,
+            message_subtype=message_subtype,
+            hidden_user_message=True,
+            run_id=run_id,
+        ):
+            yield chunk
 
     async def stop_stream(self, node_id: str) -> bool:
         """终止指定节点的流式生成（同步置位停止标志，不用 fire-and-forget task）。"""
@@ -1302,6 +1486,7 @@ class ChatManager:
             else:
                 multi_agent_lines.append("- Do not proactively spawn agents unless the user explicitly requested agent delegation.")
         task_lines = self._format_open_tasks_for_prompt(conversation)
+        plan_lines = self._plan_mode_runtime_lines(conversation)
         return RuntimePromptContext(
             name="main",
                 content="\n".join([
@@ -1313,10 +1498,36 @@ class ChatManager:
                     "- Use tools only when they are provided for this call and follow the active permission mode.",
                     *multi_agent_lines,
                     *task_lines,
+                    *plan_lines,
                     "- Preserve selected system prompt semantics: default core prompt, override custom prompt, or appended custom prompt.",
             ]),
             metadata={"runtime_mode": "main"},
         )
+
+    def _plan_mode_runtime_lines(self, conversation: Optional[Conversation]) -> list[str]:
+        if getattr(self, "plan_ledger", None) is None:
+            return []
+        active_mode = self._current_node_permission_mode(conversation)
+        if active_mode == "plan":
+            return [
+                "",
+                "Plan mode is active:",
+                "- You are in a read-only planning phase. Inspect, search, compare approaches, and reason only with read-only tools.",
+                "- Do not edit files, run implementation commands, start implementation work, change configuration, commit, or claim changes were made.",
+                "- Your turn must end with exactly one structured plan-mode action: call `ask_user_question` if a genuine user decision is required, or call `exit_plan_mode` with the complete plan when ready for approval.",
+                "- Do not ask whether the plan is acceptable in text; `exit_plan_mode` is the only plan-approval path.",
+                "- If the user changes direction while you are in plan mode, update the plan-mode work instead of implementing until a plan is approved.",
+            ]
+        return [
+            "",
+            "Plan mode rules:",
+            "- Use `enter_plan_mode` only when the user explicitly asks for planning/exploration before implementation, or when the implementation approach has genuine ambiguity and user sign-off would prevent significant rework.",
+            "- Do not enter plan mode merely because the task is large. If the path is clear, even across multiple files, proceed with implementation using the existing codebase patterns.",
+            "- When the user asks you to implement now, directly execute, or complete the change, start working instead of planning unless continuing would violate safety or permission rules.",
+            "- Prefer direct implementation for small fixes, clear bug fixes after diagnosis, specific instructions, and features that follow an obvious existing pattern.",
+            "- Use `ask_user_question` in plan mode only for genuine user decisions that block planning; do not use it to ask whether the completed plan is acceptable.",
+            "- When plan mode is active and the plan is ready, call `exit_plan_mode` with the plan and wait for user approval before implementing.",
+        ]
 
     def _format_open_tasks_for_prompt(self, conversation: Optional[Conversation]) -> list[str]:
         task_ledger = getattr(self, "task_ledger", None)
@@ -1354,6 +1565,159 @@ class ChatManager:
         if len(text) <= max_chars:
             return text
         return text[: max(0, max_chars - 3)].rstrip() + "..."
+
+    async def _consume_plan_context(self, conversation_id: str) -> list[Dict[str, Any]]:
+        plan_ledger = getattr(self, "plan_ledger", None)
+        if plan_ledger is None or not conversation_id:
+            return []
+        try:
+            items = await plan_ledger.consume_pending_context(conversation_id)
+        except Exception:
+            logger.exception("Failed to consume plan context")
+            return []
+        return [item.to_dict() if hasattr(item, "to_dict") else dict(item) for item in items]
+
+    async def _restore_plan_snapshot_from_conversation(self, conversation: Optional[Conversation]) -> None:
+        plan_ledger = getattr(self, "plan_ledger", None)
+        if plan_ledger is None or conversation is None:
+            return
+        conversation_id = str((conversation.metadata or {}).get("id") or "")
+        snapshot = (conversation.metadata or {}).get("plan_ledger")
+        if not conversation_id or not isinstance(snapshot, dict):
+            return
+        try:
+            current = await plan_ledger.snapshot(conversation_id)
+            if current.get("plans") or current.get("pending_context"):
+                return
+            await plan_ledger.load_snapshot(conversation_id, snapshot)
+        except Exception:
+            logger.exception("Failed to restore plan ledger snapshot")
+
+    async def restore_plan_snapshot(self, conversation_id: str) -> None:
+        await self._restore_plan_snapshot_from_conversation(self.get_conversation(conversation_id))
+
+    async def _answer_pending_plan_question_from_user_message(self, conversation_id: str, content: Any) -> None:
+        plan_ledger = getattr(self, "plan_ledger", None)
+        answer = str(content or "").strip()
+        if plan_ledger is None or not conversation_id or not answer:
+            return
+        try:
+            current = await plan_ledger.get_active_or_awaiting(conversation_id)
+            if current is None or getattr(current.status, "value", current.status) != "awaiting_question":
+                return
+            await plan_ledger.answer_question(
+                conversation_id=conversation_id,
+                plan_id=current.plan_id,
+                answer=answer,
+            )
+        except Exception:
+            logger.exception("Failed to answer pending plan question from user message")
+
+    async def _approve_pending_plan_from_user_message(self, conversation_id: str, content: Any) -> None:
+        plan_ledger = getattr(self, "plan_ledger", None)
+        message = str(content or "").strip()
+        if plan_ledger is None or not conversation_id or message != "继续实现已批准的计划。":
+            return
+        try:
+            current = await plan_ledger.get_active_or_awaiting(conversation_id)
+            if current is None or getattr(current.status, "value", current.status) != "awaiting_approval":
+                return
+            await plan_ledger.approve_plan(
+                conversation_id=conversation_id,
+                plan_id=current.plan_id,
+            )
+        except Exception:
+            logger.exception("Failed to approve pending plan from user message")
+
+    async def _plan_snapshot_for_metadata(self, conversation_id: str) -> Optional[Dict[str, Any]]:
+        plan_ledger = getattr(self, "plan_ledger", None)
+        if plan_ledger is None or not conversation_id:
+            return None
+        try:
+            return await plan_ledger.snapshot(conversation_id)
+        except Exception:
+            logger.exception("Failed to snapshot plan ledger")
+            return None
+
+    async def persist_plan_snapshot(self, conversation_id: str) -> None:
+        snapshot = await self._plan_snapshot_for_metadata(conversation_id)
+        if snapshot is None:
+            return
+        async with self._lock_for(conversation_id):
+            conversation = self.get_conversation(conversation_id)
+            if conversation is None:
+                return
+            conversation.metadata["plan_ledger"] = snapshot
+            self._save(conversation)
+
+    def _plan_context_permission_mode(self, context_items: list[Dict[str, Any]]) -> Optional[str]:
+        for item in reversed(context_items):
+            mode = item.get("permission_mode")
+            if mode:
+                return normalize_permission_mode(mode)
+        return None
+
+    async def _active_plan_permission_mode(self, conversation_id: str) -> Optional[str]:
+        plan_ledger = getattr(self, "plan_ledger", None)
+        if plan_ledger is None or not conversation_id:
+            return None
+        try:
+            current = await plan_ledger.get_active_or_awaiting(conversation_id)
+        except Exception:
+            logger.exception("Failed to inspect active plan permission mode")
+            return None
+        return "plan" if current is not None else None
+
+    def _plan_context_messages(self, context_items: list[Dict[str, Any]]) -> list[Message]:
+        messages: list[Message] = []
+        for item in context_items:
+            content = str(item.get("content") or "").strip()
+            if not content:
+                continue
+            messages.append(Message({
+                "role": "system",
+                "content": "\n".join([
+                    "<system-reminder>",
+                    content,
+                    "</system-reminder>",
+                ]),
+            }))
+        return messages
+
+    def _permission_mode_after_plan_tools(self, tool_messages: list[Message], current_mode: str) -> str:
+        mode = normalize_permission_mode(current_mode)
+        for message in tool_messages:
+            name = str(message.get("name") or "")
+            payload = self._json_tool_payload(message.get("raw_content") or message.get("content"))
+            if name == "enter_plan_mode" and payload.get("permission_mode") == "plan":
+                mode = "plan"
+            elif name == "exit_plan_mode" and payload.get("status") == "awaiting_approval":
+                mode = "plan"
+            elif name == "ask_user_question" and payload.get("status") == "awaiting_question":
+                mode = "plan"
+        return mode
+
+    def _plan_tool_paused_turn(self, tool_messages: list[Message]) -> bool:
+        for message in tool_messages:
+            name = str(message.get("name") or "")
+            if name not in {"exit_plan_mode", "ask_user_question"}:
+                continue
+            payload = self._json_tool_payload(message.get("raw_content") or message.get("content"))
+            if payload.get("status") in {"awaiting_approval", "awaiting_question"}:
+                return True
+        return False
+
+    @staticmethod
+    def _json_tool_payload(value: Any) -> Dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        if not isinstance(value, str):
+            return {}
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return payload if isinstance(payload, dict) else {}
 
     @staticmethod
     def _max_task_guard_nudges(config_data: Any) -> int:
@@ -1395,6 +1759,42 @@ class ChatManager:
         except Exception:
             logger.exception("Failed to check open tasks for stream guard")
             return False
+
+    async def _has_active_plan_mode(self, conversation_id: str, permission_mode: Any) -> bool:
+        needs_nudge = await self._needs_plan_mode_nudge(conversation_id, permission_mode)
+        return needs_nudge
+
+    async def _needs_plan_mode_nudge(self, conversation_id: str, permission_mode: Any) -> bool:
+        if normalize_permission_mode(permission_mode) != "plan":
+            return False
+        plan_ledger = getattr(self, "plan_ledger", None)
+        if plan_ledger is None or not conversation_id:
+            return False
+        try:
+            current = await plan_ledger.get_active_or_awaiting(conversation_id)
+        except Exception:
+            logger.exception("Failed to inspect active plan mode")
+            return False
+        return bool(current is not None and getattr(current.status, "value", current.status) == "active")
+
+    def _plan_mode_nudge(self, *, attempt: int = 1) -> str:
+        return "\n".join([
+            "<system-reminder>",
+            "Plan mode final response was discarded because plan mode can only end by calling a plan-mode tool.",
+            "You are already in plan mode. Continue read-only planning.",
+            "At the end of this turn, you MUST call exactly one of these tools:",
+            "- ask_user_question: only when a genuine user decision is required to continue planning.",
+            "- exit_plan_mode: when the plan is ready for user approval.",
+            "Do not ask for plan approval in plain text. Do not edit files, run implementation commands, or claim the plan is approved.",
+            f"Attempt: {attempt}",
+            "</system-reminder>",
+        ])
+
+    def _plan_guard_blocked_message(self) -> str:
+        return "\n".join([
+            "计划模式仍在等待模型调用 `ask_user_question` 或 `exit_plan_mode`。",
+            "已丢弃普通最终回复，避免绕过计划审批流程。",
+        ])
 
     def _task_completion_nudge(self, open_tasks: list[TaskRecord], *, attempt: int = 1) -> str:
         task_lines = [
@@ -1509,14 +1909,22 @@ class ChatManager:
         workspace_roots = workspace.get("workspace_roots") or []
         cwd = workspace.get("cwd") or ""
         mode = self._normalize_selected_system_prompt_mode(str(prompt.get("mode") or "override")) if prompt else "none"
+        permission_mode = self._current_node_permission_mode(conversation)
         return [
             f"- Conversation id: {metadata.get('id') or ''}",
             f"- Current node id: {conversation.current_node_id or ''}",
+            f"- Current tool permission mode: {permission_mode}",
             f"- Provider/model: {(metadata.get('provider_id') or conversation.current_provider or '')}/{(metadata.get('model_id') or conversation.current_model or '')}",
             f"- Workspace cwd: {cwd}",
             f"- Workspace roots: {', '.join(map(str, workspace_roots[:3])) if workspace_roots else 'none'}",
             f"- Selected system prompt mode: {mode}",
         ]
+
+    def _current_node_permission_mode(self, conversation: Optional[Conversation]) -> str:
+        if conversation is None:
+            return "default"
+        node = conversation.nodes.get(conversation.current_node_id or "") or {}
+        return normalize_permission_mode(node.get("tool_permission_mode") or "default")
 
     @staticmethod
     def _normalize_selected_system_prompt_mode(mode: str) -> str:
@@ -2263,6 +2671,7 @@ class ChatManager:
         run_context: Optional[Dict[str, Any]] = None,
     ) -> List[Message]:
         results: List[Message] = []
+        current_permission_mode = permission_mode
         for tool_call in tool_calls:
             fn = tool_call.get("function") or {}
             name = fn.get("name", "")
@@ -2276,7 +2685,7 @@ class ChatManager:
                         node_id,
                         emit_event=emit_event,
                         workspace=workspace,
-                        permission_mode=permission_mode,
+                        permission_mode=current_permission_mode,
                         run_context=run_context,
                     )
                 except TypeError as exc:
@@ -2288,7 +2697,7 @@ class ChatManager:
                             node_id,
                             emit_event=emit_event,
                             workspace=workspace,
-                            permission_mode=permission_mode,
+                            permission_mode=current_permission_mode,
                         )
                     elif "unexpected keyword argument 'permission_mode'" in error_text:
                         message = await tool_orchestrator.execute_tool_call(
@@ -2307,14 +2716,17 @@ class ChatManager:
                         )
                     else:
                         raise
-                results.append(
-                    self._model_visible_tool_message(
-                        message,
-                        name=name,
-                        conversation_id=conversation_id,
-                        node_id=node_id,
-                        tool_call_id=tool_call.get("id"),
-                    )
+                model_message = self._model_visible_tool_message(
+                    message,
+                    name=name,
+                    conversation_id=conversation_id,
+                    node_id=node_id,
+                    tool_call_id=tool_call.get("id"),
+                )
+                results.append(model_message)
+                current_permission_mode = self._permission_mode_after_plan_tools(
+                    [model_message],
+                    current_permission_mode,
                 )
                 continue
 
@@ -2332,23 +2744,26 @@ class ChatManager:
                     if "unexpected keyword argument 'workspace'" not in str(exc):
                         raise
                     raw_result = await self.tool_manager.execute_tool(name, arguments)
-            results.append(
-                self._model_visible_tool_message(
-                    Message({
-                        "id": str(uuid.uuid4()),
-                        "role": Role.TOOL,
-                        "content": raw_result,
-                        "name": name,
-                        "tool_calls": None,
-                        "tool_call_id": tool_call.get("id"),
-                        "node_id": node_id,
-                        "timestamp": int(time()),
-                    }),
-                    name=name,
-                    conversation_id=conversation_id,
-                    node_id=node_id,
-                    tool_call_id=tool_call.get("id"),
-                )
+            model_message = self._model_visible_tool_message(
+                Message({
+                    "id": str(uuid.uuid4()),
+                    "role": Role.TOOL,
+                    "content": raw_result,
+                    "name": name,
+                    "tool_calls": None,
+                    "tool_call_id": tool_call.get("id"),
+                    "node_id": node_id,
+                    "timestamp": int(time()),
+                }),
+                name=name,
+                conversation_id=conversation_id,
+                node_id=node_id,
+                tool_call_id=tool_call.get("id"),
+            )
+            results.append(model_message)
+            current_permission_mode = self._permission_mode_after_plan_tools(
+                [model_message],
+                current_permission_mode,
             )
         return results
 

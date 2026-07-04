@@ -154,6 +154,8 @@ async function withManager(run) {
   resetTimers();
   installWindowTimers();
   const originalStream = messageApi.stream;
+  const originalStreamPlanApproval = messageApi.streamPlanApproval;
+  const originalStreamPlanAnswer = messageApi.streamPlanAnswer;
   const originalAttach = runsApi.attach;
   const originalStop = runsApi.stop;
   const manager = new StreamManager();
@@ -161,6 +163,8 @@ async function withManager(run) {
     await run(manager);
   } finally {
     messageApi.stream = originalStream;
+    messageApi.streamPlanApproval = originalStreamPlanApproval;
+    messageApi.streamPlanAnswer = originalStreamPlanAnswer;
     runsApi.attach = originalAttach;
     runsApi.stop = originalStop;
     manager.resetAll();
@@ -349,6 +353,115 @@ async function testStreamErrorStatePreservesRealMessage() {
       await controlled.close();
       await runTimersUntil(running);
     }
+  });
+}
+
+async function testRequestNodeAndUiAnchorAreIndependent() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    let streamArgs = null;
+    messageApi.stream = (...args) => {
+      streamArgs = args;
+      return controlled.stream();
+    };
+
+    const running = manager.startStream(
+      'conv-1',
+      { content: '继续实现已批准的计划。' },
+      '继续实现已批准的计划。',
+      undefined,
+      'node-current',
+    );
+
+    await tick();
+    let state = manager.getConversationStates('conv-1')[0];
+    assert.equal(streamArgs[2], undefined);
+    assert.equal(state.anchorNodeId, 'node-current');
+    assert.equal(state.nodeId, null);
+    assert.equal(state.targetNodeId, null);
+
+    await controlled.push(chunk({
+      status: 'start',
+      content: null,
+      node_id: 'node-new',
+      target_node_id: 'node-new',
+    }));
+
+    state = manager.getConversationStates('conv-1')[0];
+    assert.equal(state.anchorNodeId, 'node-current');
+    assert.equal(state.nodeId, 'node-new');
+    assert.equal(state.targetNodeId, 'node-new');
+
+    await controlled.close();
+    await runTimersUntil(running);
+  });
+}
+
+async function testPlanApprovalUsesControlStreamWithoutPendingUserMessage() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    let streamArgs = null;
+    messageApi.streamPlanApproval = (...args) => {
+      streamArgs = args;
+      return controlled.stream();
+    };
+
+    const running = manager.startPlanApprovalStream(
+      'conv-1',
+      'plan-1',
+      { reasoning_effort: 'medium', thinking_enabled: true },
+      'node-current',
+    );
+
+    await tick();
+    let state = manager.getConversationStates('conv-1')[0];
+    assert.equal(streamArgs[0], 'conv-1');
+    assert.equal(streamArgs[1], 'plan-1');
+    assert.equal(streamArgs[2].node_id, 'node-current');
+    assert.equal(state.pendingUserMessage, null);
+    assert.equal(state.anchorNodeId, 'node-current');
+    assert.equal(state.metadata.origin, 'plan_approval');
+
+    await controlled.push(chunk({
+      status: 'start',
+      content: null,
+      node_id: 'node-new',
+      target_node_id: 'node-new',
+    }));
+
+    state = manager.getConversationStates('conv-1')[0];
+    assert.equal(state.targetNodeId, 'node-new');
+    await controlled.close();
+    await runTimersUntil(running);
+  });
+}
+
+async function testPlanQuestionAnswerUsesControlStreamWithoutPendingUserMessage() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    let streamArgs = null;
+    messageApi.streamPlanAnswer = (...args) => {
+      streamArgs = args;
+      return controlled.stream();
+    };
+
+    const running = manager.startPlanAnswerStream(
+      'conv-1',
+      'plan-1',
+      '默认显示',
+      {},
+      'node-current',
+    );
+
+    await tick();
+    const state = manager.getConversationStates('conv-1')[0];
+    assert.equal(streamArgs[2].answer, '默认显示');
+    assert.equal(streamArgs[2].node_id, 'node-current');
+    assert.equal(state.pendingUserMessage, null);
+    assert.equal(state.metadata.origin, 'plan_question_answer');
+
+    await controlled.close();
+    await runTimersUntil(running);
   });
 }
 
@@ -1003,6 +1116,9 @@ async function main() {
   await testToolCallStartCreatesRunningPlaceholder();
   await testToolCallDeltaUpdatesRunningPlaceholder();
   await testStreamErrorStatePreservesRealMessage();
+  await testRequestNodeAndUiAnchorAreIndependent();
+  await testPlanApprovalUsesControlStreamWithoutPendingUserMessage();
+  await testPlanQuestionAnswerUsesControlStreamWithoutPendingUserMessage();
   await testBlockingRunAliasesFollowServerRunId();
   await testWaitingApprovalRunStaysBlockingAndCanBeStopped();
   await testResumeStreamPreservesAttachedRunKindBeforeFirstEvent();

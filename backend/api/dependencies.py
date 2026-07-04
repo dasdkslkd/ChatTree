@@ -103,6 +103,20 @@ def get_task_ledger(request: Request):
         raise HTTPException(status_code=500, detail=f"依赖注入错误: {str(e)}")
 
 
+def get_plan_ledger(request: Request):
+    """获取 PlanLedger"""
+    try:
+        if not hasattr(request.app.state, 'plan_ledger'):
+            logger.error("❌ plan_ledger 未在 app.state 中初始化")
+            raise HTTPException(status_code=500, detail="PlanLedger 未初始化")
+        return request.app.state.plan_ledger
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ 获取 plan_ledger 失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"依赖注入错误: {str(e)}")
+
+
 def get_subagent_executor(request: Request):
     """获取 Subagent 执行器"""
     try:

@@ -7,9 +7,11 @@ from ...core.capabilities.bootstrap import build_runtime_config_with_plugin_mcp
 from ...core.agents import AgentMailbox, AgentRuntime
 from ...core.config.config import Config, cfg
 from ...core.model.model_manager import ModelManager
+from ...core.plans import PlanLedger
 from ...core.tasks import TaskLedger
 from ...core.tools.orchestrator import ToolOrchestrator
 from ...core.tools.agent_tools import register_agent_management_tools
+from ...core.tools.plan_tools import register_plan_tools
 from ...core.tools.task_tools import register_task_tools
 from ...core.tools.security.approval import ApprovalManager
 from ...core.tools.security.logical_sandbox import LogicalSandbox
@@ -78,6 +80,10 @@ def _sync_runtime_managers(app, config_data: Dict[str, Any], model_manager, tool
         chat_manager.capability_registry = capability_registry
     subagent_executor = getattr(app.state, 'subagent_executor', None)
     run_manager = getattr(app.state, 'run_manager', None)
+    plan_ledger = getattr(app.state, 'plan_ledger', None)
+    if plan_ledger is None:
+        plan_ledger = PlanLedger()
+        app.state.plan_ledger = plan_ledger
     task_ledger = getattr(app.state, 'task_ledger', None)
     if task_ledger is None:
         task_ledger = TaskLedger()
@@ -86,6 +92,7 @@ def _sync_runtime_managers(app, config_data: Dict[str, Any], model_manager, tool
         task_ledger.install_run_finish_listener(run_manager)
     if chat_manager is not None:
         chat_manager.task_ledger = task_ledger
+        chat_manager.plan_ledger = plan_ledger
     command_executor = getattr(app.state, 'command_executor', None)
     if command_executor is None and run_manager is not None:
         command_executor = CommandExecutor(run_manager, task_ledger=task_ledger)
@@ -138,6 +145,7 @@ def _sync_runtime_managers(app, config_data: Dict[str, Any], model_manager, tool
         subagent_executor=subagent_executor,
         workflow_manager=workflow_manager,
     )
+    register_plan_tools(tool_manager, plan_ledger)
     register_task_tools(tool_manager, task_ledger)
 
 

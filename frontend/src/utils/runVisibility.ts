@@ -4,6 +4,8 @@ export interface BranchRunLike {
   anchorNodeId: string | null;
   nodeId: string | null;
   targetNodeId: string | null;
+  pendingUserMessage?: string | null;
+  anchorUntilTargetLands?: boolean;
 }
 
 export function getRunTargetNodeId(run: BranchRunLike): string | null {
@@ -18,6 +20,18 @@ export function isRunVisibleInSelectedTranscript(
   const targetNodeId = getRunTargetNodeId(run);
   if (!targetNodeId) {
     return !run.anchorNodeId || run.anchorNodeId === selectedBranchTipId;
+  }
+  if (
+    run.kind === 'chat'
+    && (run.pendingUserMessage || run.anchorUntilTargetLands)
+    && (run.status === 'streaming' || run.status === 'waiting_approval' || run.status === 'stopping')
+    && (
+      (run.anchorNodeId && run.anchorNodeId === selectedBranchTipId)
+      || (!run.anchorNodeId && selectedBranchTipId === null && currentBranchNodeIds.size === 0)
+    )
+    && !currentBranchNodeIds.has(targetNodeId)
+  ) {
+    return true;
   }
   return targetNodeId === selectedBranchTipId || currentBranchNodeIds.has(targetNodeId);
 }

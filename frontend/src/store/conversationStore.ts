@@ -358,6 +358,9 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
               if (get().currentConversation?.id !== conversationId) return false;
               const ok = landed(history);
               if (ok || attempt === retries) {
+                if (!ok && awaitNodeId) {
+                  return false;
+                }
                 // 写入最新结果以保持一致。ok=true 时返回 true 让调用方清理乐观气泡；
                 // 重试用尽仍未落地则返回 false，调用方保留气泡、择机再刷新。
                 const conv = get().conversations.find((c) => c.id === conversationId);

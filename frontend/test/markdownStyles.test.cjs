@@ -28,6 +28,20 @@ function testMathBlocksAreConstrainedInsideMessageWidth() {
   assert.match(katexDisplay, /overflow-y:\s*hidden/);
 }
 
+function testPlanMarkdownInlineCodeCanWrapInsideCard() {
+  const planPanel = ruleBody('.plan-markdown-panel');
+  const inlineCode = ruleBody('.plan-markdown-panel :not(pre) > code');
+
+  assert.match(planPanel, /max-width:\s*100%/);
+  assert.match(planPanel, /overflow-x:\s*hidden/);
+  assert.match(inlineCode, /white-space:\s*normal/);
+  assert.match(inlineCode, /overflow-wrap:\s*anywhere/);
+  assert.match(inlineCode, /word-break:\s*break-word/);
+  assert.match(inlineCode, /box-decoration-break:\s*clone/);
+  assert.match(inlineCode, /-webkit-box-decoration-break:\s*clone/);
+  assert.match(inlineCode, /border-radius:\s*0\.34em/);
+}
+
 function testBoxedMathUsesSoftThemeStyling() {
   const fbox = ruleBody('.prose .katex .fbox');
   const boxpad = ruleBody('.prose .katex .boxpad');
@@ -41,6 +55,7 @@ function testBoxedMathUsesSoftThemeStyling() {
 function main() {
   testCodeBlocksAreConstrainedInsideMessageWidth();
   testMathBlocksAreConstrainedInsideMessageWidth();
+  testPlanMarkdownInlineCodeCanWrapInsideCard();
   testBoxedMathUsesSoftThemeStyling();
   console.log('markdownStyles tests passed');
 }

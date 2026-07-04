@@ -2,6 +2,7 @@ import type {
   SendMessageRequest,
   ToolApprovalPayload,
 } from '../types/message';
+import type { PlanActionStreamRequest, PlanAnswerStreamRequest } from '../api/message';
 import type { RunEventPayload, RunRecord } from '../types/run';
 import { messageApi } from '../api/message';
 import { runsApi } from '../api/runs';
@@ -34,6 +35,7 @@ export interface StreamState {
   errorMessage: string | null;
   abortController: AbortController | null;
   pendingUserMessage: string | null;
+  anchorUntilTargetLands: boolean;
   eventCount: number;
   createdAt: number;
 }
@@ -362,6 +364,7 @@ export class StreamManager {
       state.toolInteractions.length,
       state.errorMessage ?? '',
       state.pendingUserMessage ?? '',
+      state.anchorUntilTargetLands ? 'anchor' : '',
     ].join(':')).join('|');
     const cached = this.conversationSnapshots.get(conversationId);
     if (cached?.signature === signature) return cached.states;
@@ -515,7 +518,7 @@ export class StreamManager {
     if (createdAt !== null) {
       next.createdAt = createdAt;
     }
-    if (chunk.anchor_node_id !== undefined && !next.targetNodeId) {
+    if (chunk.anchor_node_id !== undefined) {
       next.anchorNodeId = chunk.anchor_node_id || null;
     }
     if (chunk.node_id || chunk.target_node_id) {
@@ -637,6 +640,7 @@ export class StreamManager {
       errorMessage: null,
       abortController: controller,
       pendingUserMessage,
+      anchorUntilTargetLands: false,
       eventCount: 0,
       createdAt: Date.now(),
     };
@@ -671,6 +675,7 @@ export class StreamManager {
       errorMessage: typeof record.metadata?.error === 'string' ? record.metadata.error : null,
       abortController: null,
       pendingUserMessage: null,
+      anchorUntilTargetLands: false,
       eventCount: 0,
       createdAt,
     };
@@ -705,7 +710,8 @@ export class StreamManager {
     conversationId: string,
     request: SendMessageRequest,
     pendingUserMessage: string | null = null,
-    nodeId?: string,
+    requestNodeId?: string,
+    anchorNodeId?: string | null,
   ): Promise<void> {
     let runId = `client_${Date.now()}_${this.tempSeq++}`;
     const abortController = new AbortController();
@@ -714,12 +720,70 @@ export class StreamManager {
       conversationId,
       abortController,
       pendingUserMessage,
-      nodeId ?? null,
+      null,
       getRequestRunKind(request),
+      anchorNodeId ?? requestNodeId ?? null,
     ));
     this.addToConversation(conversationId, runId);
     this.notify(conversationId, true);
-    await this.consume(runId, () => messageApi.stream(conversationId, request, nodeId, abortController.signal));
+    await this.consume(runId, () => messageApi.stream(conversationId, request, requestNodeId, abortController.signal));
+  }
+
+  async startPlanApprovalStream(
+    conversationId: string,
+    planId: string,
+    request: PlanActionStreamRequest = {},
+    anchorNodeId?: string | null,
+  ): Promise<void> {
+    const runId = `client_${Date.now()}_${this.tempSeq++}`;
+    const abortController = new AbortController();
+    const payload = { ...request, node_id: anchorNodeId ?? request.node_id ?? null };
+    const state = this.createState(
+      runId,
+      conversationId,
+      abortController,
+      null,
+      null,
+      'chat',
+      anchorNodeId ?? request.node_id ?? null,
+    );
+    state.metadata = { origin: 'plan_approval', plan_id: planId };
+    state.anchorUntilTargetLands = true;
+    this.streams.set(runId, state);
+    this.addToConversation(conversationId, runId);
+    this.notify(conversationId, true);
+    await this.consume(runId, () => messageApi.streamPlanApproval(conversationId, planId, payload, abortController.signal));
+  }
+
+  async startPlanAnswerStream(
+    conversationId: string,
+    planId: string,
+    answer: string,
+    request: PlanActionStreamRequest = {},
+    anchorNodeId?: string | null,
+  ): Promise<void> {
+    const runId = `client_${Date.now()}_${this.tempSeq++}`;
+    const abortController = new AbortController();
+    const payload: PlanAnswerStreamRequest = {
+      ...request,
+      answer,
+      node_id: anchorNodeId ?? request.node_id ?? null,
+    };
+    const state = this.createState(
+      runId,
+      conversationId,
+      abortController,
+      null,
+      null,
+      'chat',
+      anchorNodeId ?? request.node_id ?? null,
+    );
+    state.metadata = { origin: 'plan_question_answer', plan_id: planId };
+    state.anchorUntilTargetLands = true;
+    this.streams.set(runId, state);
+    this.addToConversation(conversationId, runId);
+    this.notify(conversationId, true);
+    await this.consume(runId, () => messageApi.streamPlanAnswer(conversationId, planId, payload, abortController.signal));
   }
 
   async resumeStream(

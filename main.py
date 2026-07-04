@@ -11,7 +11,7 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 # ---------- 导入路由 ----------
-from backend.api.routes import agents, capabilities, config, conversations, messages, models, prompts, runs, slash, tasks, tool_approvals, tool_results, workflows
+from backend.api.routes import agents, capabilities, config, conversations, messages, models, plans, prompts, runs, slash, tasks, tool_approvals, tool_results, workflows
 
 # ---------- 导入核心 ----------
 from backend.core.chat.chat_manager import ChatManager
@@ -23,12 +23,14 @@ from backend.core.model.model_manager import ModelManager
 from backend.core.config.config import Config
 from backend.core.agents import AgentMailbox, AgentRuntime, SubagentExecutor
 from backend.core.runs import RunManager
+from backend.core.plans import PlanLedger
 from backend.core.tasks import TaskLedger
 from backend.core.workflows import WorkflowManager
 from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
 from backend.core.tools.orchestrator import ToolOrchestrator
 from backend.core.tools.agent_tools import register_agent_management_tools
+from backend.core.tools.plan_tools import register_plan_tools
 from backend.core.tools.task_tools import register_task_tools
 from backend.core.tools.security.approval import ApprovalManager
 from backend.core.tools.security.logical_sandbox import LogicalSandbox
@@ -80,6 +82,7 @@ async def startup_event():
     await tool_manager.init()
     approval_manager = ApprovalManager()
     run_manager = RunManager()
+    plan_ledger = PlanLedger()
     task_ledger = TaskLedger()
     task_ledger.install_run_finish_listener(run_manager)
     command_executor = CommandExecutor(run_manager, task_ledger=task_ledger)
@@ -93,7 +96,15 @@ async def startup_event():
         approval_manager=approval_manager,
         logical_sandbox=logical_sandbox,
     )
-    chat_manager = ChatManager(model_manager, chat_storage, prompt_storage, tool_manager, task_ledger=task_ledger)
+    chat_manager = ChatManager(
+        model_manager,
+        chat_storage,
+        prompt_storage,
+        tool_manager,
+        task_ledger=task_ledger,
+        plan_ledger=plan_ledger,
+    )
+    chat_manager.plan_ledger = plan_ledger
     chat_manager.capability_registry = capability_registry
     chat_manager.tool_orchestrator = tool_orchestrator
     subagent_executor = SubagentExecutor(
@@ -122,6 +133,7 @@ async def startup_event():
         subagent_executor=subagent_executor,
         workflow_manager=workflow_manager,
     )
+    register_plan_tools(tool_manager, plan_ledger)
     register_task_tools(tool_manager, task_ledger)
     synthetic_followup_scheduler = messages.SyntheticFollowupScheduler(
         chat_manager=chat_manager,
@@ -136,6 +148,7 @@ async def startup_event():
     app.state.tool_manager = tool_manager
     app.state.approval_manager = approval_manager
     app.state.run_manager = run_manager
+    app.state.plan_ledger = plan_ledger
     app.state.task_ledger = task_ledger
     app.state.command_executor = command_executor
     app.state.agent_mailbox = agent_mailbox
@@ -162,6 +175,7 @@ app.include_router(tool_approvals.router, prefix="", tags=["工具审批"])
 app.include_router(tool_results.router, prefix="", tags=["工具结果"])
 app.include_router(capabilities.router, prefix="", tags=["能力"])
 app.include_router(runs.router, prefix="", tags=["运行"])
+app.include_router(plans.router, prefix="", tags=["计划"])
 app.include_router(tasks.router, prefix="", tags=["任务"])
 app.include_router(slash.router, prefix="", tags=["Slash"])
 app.include_router(agents.router, prefix="", tags=["Agent"])

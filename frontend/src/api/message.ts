@@ -18,6 +18,19 @@ export type ToolResultSlice = {
   content: string;
 };
 
+export type PlanActionStreamRequest = {
+  node_id?: string | null;
+  model_id?: string | null;
+  provider_id?: string | null;
+  reasoning_effort?: string | null;
+  thinking_enabled?: boolean | null;
+  tool_permission_mode?: string | null;
+};
+
+export type PlanAnswerStreamRequest = PlanActionStreamRequest & {
+  answer: string;
+};
+
 export interface ActiveStreamInfo {
   run_id?: string | null;
   conversation_id: string;
@@ -137,6 +150,42 @@ export const messageApi = {
     const response = await fetch(
       `/api/conversations/${conversationId}/messages/${nodeId}/stream/attach?from_event=${fromEvent}`,
       { signal },
+    );
+    yield* parseSseResponse(response);
+  },
+
+  streamPlanApproval: async function* (
+    conversationId: string,
+    planId: string,
+    data: PlanActionStreamRequest,
+    signal?: AbortSignal,
+  ): AsyncGenerator<StreamChunk, void> {
+    const response = await fetch(
+      `/api/conversations/${encodeURIComponent(conversationId)}/plans/${encodeURIComponent(planId)}/approve/stream`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+        signal,
+      },
+    );
+    yield* parseSseResponse(response);
+  },
+
+  streamPlanAnswer: async function* (
+    conversationId: string,
+    planId: string,
+    data: PlanAnswerStreamRequest,
+    signal?: AbortSignal,
+  ): AsyncGenerator<StreamChunk, void> {
+    const response = await fetch(
+      `/api/conversations/${encodeURIComponent(conversationId)}/plans/${encodeURIComponent(planId)}/answer/stream`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+        signal,
+      },
     );
     yield* parseSseResponse(response);
   },

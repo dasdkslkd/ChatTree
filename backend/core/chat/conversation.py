@@ -188,7 +188,7 @@ class Conversation:
         }
         
         # 添加消息摘要
-        if node["user_message"]:
+        if node["user_message"] and not node["user_message"].get("is_hidden_from_transcript"):
             content = node["user_message"]["content"][:50] + "..."
             display_info["user_content"] = content
         

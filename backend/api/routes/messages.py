@@ -334,7 +334,11 @@ def slim_message_for_ui(message: Message | Dict[str, Any]) -> Message:
 
 
 def slim_messages_for_ui(messages: List[Message]) -> List[Message]:
-    return [slim_message_for_ui(message) for message in messages]
+    return [
+        slim_message_for_ui(message)
+        for message in messages
+        if not message.get("is_hidden_from_transcript")
+    ]
 
 
 async def _subscribe_sse(run_manager: RunManager, run_id: str, from_event: int = 0) -> AsyncIterator[str]:

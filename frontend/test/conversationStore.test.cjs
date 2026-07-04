@@ -279,6 +279,50 @@ async function testRefreshMessagesUsesHistoryTipInsteadOfStaleConversationList()
   assert.equal(state.currentConversation.current_node_id, 'node-hello');
 }
 
+async function testRefreshMessagesKeepsOptimisticMessagesUntilAwaitedUserLands() {
+  const currentConversation = {
+    id: 'conv-1',
+    title: '乐观消息刷新测试',
+    created_at: 1,
+    updated_at: 1,
+    model: '',
+    model_id: '',
+    provider_id: '',
+    current_node_id: 'node-old',
+    total_tokens: {},
+  };
+  historyResponse = [
+    { id: 'msg-old-user', role: 'user', content: '旧问题', node_id: 'node-old' },
+    { id: 'msg-old-assistant', role: 'assistant', content: '旧回答', node_id: 'node-old' },
+  ];
+  branchesResponse = {};
+
+  useConversationStore.setState({
+    conversations: [currentConversation],
+    currentConversation,
+    messages: [
+      ...historyResponse,
+      { id: 'stream-user-node-new', role: 'user', content: '新问题', node_id: 'node-new' },
+    ],
+    branches: {},
+    currentNodeId: 'node-new',
+    loading: false,
+    error: null,
+  });
+
+  const ok = await useConversationStore.getState().refreshMessages('conv-1', {
+    awaitNodeId: 'node-new',
+    awaitRole: 'user',
+    retries: 0,
+  });
+
+  const state = useConversationStore.getState();
+  assert.equal(ok, false);
+  assert.equal(state.currentNodeId, 'node-new');
+  assert.equal(state.messages.some((message) => message.id === 'stream-user-node-new'), true);
+  assert.equal(state.messages.some((message) => message.content === '新问题'), true);
+}
+
 async function testSwitchNodeUpdatesCurrentConversationSnapshot() {
   switchNodeCalls = [];
   historyResponse = [];
@@ -445,6 +489,7 @@ async function main() {
   await testDeleteNodeRefreshesTreeData();
   await testDeleteNodeRetriesForceWhenActiveRunBlocksDeletion();
   await testRefreshMessagesUsesHistoryTipInsteadOfStaleConversationList();
+  await testRefreshMessagesKeepsOptimisticMessagesUntilAwaitedUserLands();
   await testSwitchNodeUpdatesCurrentConversationSnapshot();
   await testUpdateMultiAgentModeSyncsConversationSnapshots();
   testSetCurrentNodeIdLocalKeepsSnapshotsInSync();

@@ -39,6 +39,7 @@ from backend.core.prompts.types import PromptBuildRequest
 from backend.core.runs import RunKind, RunManager, RunStatus, SyntheticInputQueue
 from backend.core.runs.journal import RunJournal
 from backend.core.tools.agent_tools import StartSubagentTool, StartWorkflowTool
+from backend.core.plans import PlanLedger
 from backend.core.tasks import TaskLedger, TaskStatus
 from backend.core.workflows.workflow_manager import WorkflowManager
 from backend.core.slash.dispatcher import SlashCommandDispatcher
@@ -331,6 +332,42 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Runtime mode: main chat", messages[1]["content"])
         self.assertNotIn("start_subagent", messages[1]["content"])
         self.assertNotIn("spawn_agent", messages[1]["content"])
+
+    def test_main_runtime_context_includes_plan_mode_rules_when_enabled(self):
+        manager = ChatManager(
+            model_manager=None,
+            storage=self.FakeStorage(),
+            prompts=self.FakePromptStorage(),
+            plan_ledger=PlanLedger(),
+        )
+        conversation = manager.create_conversation("title")
+
+        messages = manager._build_prompt_messages(conversation, [])
+
+        self.assertIn("Plan mode rules:", messages[1]["content"])
+        self.assertIn("Use `enter_plan_mode` only when", messages[1]["content"])
+        self.assertIn("genuine ambiguity", messages[1]["content"])
+        self.assertIn("Do not enter plan mode merely because the task is large", messages[1]["content"])
+        self.assertIn("When the user asks you to implement now", messages[1]["content"])
+        self.assertIn("call `exit_plan_mode` with the plan", messages[1]["content"])
+
+    def test_active_plan_mode_prompt_requires_structured_exit_or_question(self):
+        manager = ChatManager(
+            model_manager=None,
+            storage=self.FakeStorage(),
+            prompts=self.FakePromptStorage(),
+            plan_ledger=PlanLedger(),
+        )
+        conversation = manager.create_conversation("title")
+        root = conversation.nodes[conversation.current_node_id]
+        root["tool_permission_mode"] = "plan"
+
+        messages = manager._build_prompt_messages(conversation, [])
+
+        self.assertIn("Plan mode is active:", messages[1]["content"])
+        self.assertIn("read-only planning phase", messages[1]["content"])
+        self.assertIn("must end with exactly one structured plan-mode action", messages[1]["content"])
+        self.assertIn("Do not ask whether the plan is acceptable in text", messages[1]["content"])
 
     async def test_main_runtime_context_lists_open_tasks(self):
         task_ledger = TaskLedger()

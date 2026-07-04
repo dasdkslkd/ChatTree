@@ -66,18 +66,20 @@ import {
 import {
   Plus, X, MoreHorizontal, ChevronRight, Square,
   Copy, Check, Pencil, Loader2, RotateCcw, Network, MessageSquare, Trash2, FileText, Download, FolderOpen, FolderPlus, Search, Settings,
-  PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Archive, ArrowLeft, BellRing,
+  PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Archive, ArrowLeft, BellRing, ClipboardList,
 } from 'lucide-react';
 import { conversationApi } from '../api/conversation';
 import { messageApi, type ActiveStreamInfo, type ToolResultSlice } from '../api/message';
 import { runsApi } from '../api/runs';
 import { taskLedgerService } from '../services/tasks';
+import { plansService } from '../services/plans';
 import type {
   Message,
   SendMessageRequest,
   ToolPermissionMode,
 } from '../types/message';
 import type { TaskRecord } from '../types/task';
+import type { PlanSession } from '../types/plan';
 import type { MultiAgentMode, WorkspaceContext } from '../types/conversation';
 import { useConversationStore } from '../store/conversationStore';
 import { useModelStore } from '../store/modelStore';
@@ -113,6 +115,13 @@ import {
   taskOwnerLabel,
   taskStatusLabel,
 } from '../utils/taskLedger';
+import {
+  getPlanApprovalMarkdown,
+  getPlanQuestionText,
+  shouldShowPlanApproval,
+  shouldShowPlanQuestion,
+  shouldShowPlanSummary,
+} from '../utils/planApproval';
 import {
   DEFAULT_TOOL_PERMISSION_MODE,
   createToolPermissionDraft,
@@ -666,6 +675,7 @@ type QueuedMessage = {
   id: string;
   conversationId: string;
   nodeId?: string | null;
+  anchorNodeId?: string | null;
   blockingRunIds?: string[];
   content: string;
   request: SendMessageRequest;
@@ -730,7 +740,7 @@ function scheduleIdleTask(task: () => void, timeout = 1200): () => void {
 }
 
 function normalizeToolPermissionMode(value: unknown): ToolPermissionMode | undefined {
-  return value === 'auto_approve' || value === 'modify_only' || value === 'ask_always'
+  return value === 'auto_approve' || value === 'modify_only' || value === 'ask_always' || value === 'plan'
     ? value
     : undefined;
 }
@@ -1211,7 +1221,7 @@ export default function ChatPage() {
     currentNodeId, pendingScrollNodeId, clearPendingScroll,
     createConversation, selectConversation, deleteConversation, loadConversations,
     clearCurrentConversation, updateConversationTitle, refreshMessages, patchAssistantMessageFromStream,
-    deleteNode, switchNode, setCurrentNodeIdLocal,
+    deleteNode, switchNode,
   } = useConversationStore();
 
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
@@ -1241,9 +1251,14 @@ export default function ChatPage() {
 
   const activeRunStates = useRunManager(currentConversation?.id ?? null);
   const [taskLedgerTasks, setTaskLedgerTasks] = useState<TaskRecord[]>([]);
+  const [activePlan, setActivePlan] = useState<PlanSession | null>(null);
+  const [planActionPending, setPlanActionPending] = useState<'approve' | 'reject' | 'answer' | null>(null);
+  const [planRejectOpen, setPlanRejectOpen] = useState(false);
+  const [planRejectFeedback, setPlanRejectFeedback] = useState('');
+  const [planQuestionAnswer, setPlanQuestionAnswer] = useState('');
+  const [planError, setPlanError] = useState<string | null>(null);
   const currentConversationIdRef = useRef<string | null>(null);
   currentConversationIdRef.current = currentConversation?.id ?? null;
-  const autoFollowedRunIdsRef = useRef<Set<string>>(new Set());
   const hiddenSideRunIds = useMemo(() => {
     const conversationId = currentConversation?.id;
     return new Set(conversationId ? hiddenSideRunIdsByConversation[conversationId] ?? [] : []);
@@ -1271,9 +1286,10 @@ export default function ChatPage() {
       convId: string,
       request: SendMessageRequest,
       pending: string | null = null,
-      nodeId?: string,
+      requestNodeId?: string,
+      anchorNodeId?: string | null,
     ) => {
-      await streamManager.startStream(convId, request, pending, nodeId);
+      await streamManager.startStream(convId, request, pending, requestNodeId, anchorNodeId);
     },
     [],
   );
@@ -1289,6 +1305,21 @@ export default function ChatPage() {
       setTaskLedgerTasks(sortTasksForDisplay(tasks).filter(isOpenTask));
     } catch (_) {
       if (conversationId === currentConversationIdRef.current) setTaskLedgerTasks([]);
+    }
+  }, []);
+  const refreshActivePlan = useCallback(async (conversationId: string | null | undefined) => {
+    if (!conversationId) {
+      if (!currentConversationIdRef.current) setActivePlan(null);
+      return;
+    }
+    if (conversationId !== currentConversationIdRef.current) return;
+    try {
+      const plan = await plansService.fetchActive(conversationId);
+      if (conversationId !== currentConversationIdRef.current) return;
+      setActivePlan(plan);
+      setPlanError(null);
+    } catch (_) {
+      if (conversationId === currentConversationIdRef.current) setActivePlan(null);
     }
   }, []);
   const [localStreamingConversationCounts, setLocalStreamingConversationCounts] = useState<Map<string, number>>(() => new Map());
@@ -1338,13 +1369,6 @@ export default function ChatPage() {
   }, [currentConversation, updateToolPermissionDraft]);
 
   useEffect(() => {
-    const activeRunIds = new Set(activeRunStates.map((run) => run.runId));
-    for (const runId of autoFollowedRunIdsRef.current) {
-      if (!activeRunIds.has(runId)) autoFollowedRunIdsRef.current.delete(runId);
-    }
-  }, [activeRunStates]);
-
-  useEffect(() => {
     const activeKeys = new Set<string>();
     for (const run of activeRunStates) {
       for (const notification of collectSideRunNotifications(run.toolInteractions, run.sideRunNotifications)) {
@@ -1355,22 +1379,6 @@ export default function ChatPage() {
       if (!activeKeys.has(key)) handledSideRunNotificationsRef.current.delete(key);
     }
   }, [activeRunStates]);
-
-  useEffect(() => {
-    if (!selectedBranchTipId) return;
-    for (const run of activeRunStates) {
-      if (run.kind !== 'chat' || run.status !== 'streaming') continue;
-      if (!run.pendingUserMessage) continue;
-      if (run.anchorNodeId !== selectedBranchTipId) continue;
-      if (autoFollowedRunIdsRef.current.has(run.runId)) continue;
-      const targetNodeId = run.targetNodeId || run.nodeId;
-      if (!targetNodeId || targetNodeId === selectedBranchTipId) continue;
-
-      autoFollowedRunIdsRef.current.add(run.runId);
-      setCurrentNodeIdLocal(targetNodeId);
-      break;
-    }
-  }, [activeRunStates, selectedBranchTipId, setCurrentNodeIdLocal]);
 
   const activeRunDrafts = useMemo(() => activeRunStates
     .filter((run) => shouldRenderRunDraft(run))
@@ -1901,6 +1909,7 @@ export default function ChatPage() {
       },
       nextMessage.content,
       nextMessage.nodeId || undefined,
+      nextMessage.anchorNodeId ?? nextMessage.nodeId ?? null,
     );
     return true;
   }, [startStreaming, updateQueuedMessages]);
@@ -2014,6 +2023,92 @@ export default function ChatPage() {
     );
     await refreshMessages(conversationId, { retries: 0 });
   }, [activeRunStates, currentConversation?.id, refreshMessages]);
+
+  const handleApprovePlan = useCallback(async () => {
+    if (!activePlan) return;
+    const conversationId = activePlan.conversation_id || currentConversation?.id;
+    if (!conversationId) return;
+    setPlanActionPending('approve');
+    setPlanError(null);
+    try {
+      setActivePlan({ ...activePlan, status: 'approved' });
+      const { currentReasoningEffort, currentThinkingEnabled } = useModelStore.getState();
+      setShouldAutoScroll(true);
+      void streamManager.startPlanApprovalStream(
+        conversationId,
+        activePlan.plan_id || activePlan.id || '',
+        {
+          reasoning_effort: currentReasoningEffort,
+          thinking_enabled: currentThinkingEnabled,
+        },
+        selectedBranchTipId,
+      ).then(() => refreshActivePlan(conversationId)).catch((error) => {
+        console.error('Failed to approve plan:', error);
+        setPlanError('批准失败，请稍后重试');
+      });
+    } catch (error) {
+      console.error('Failed to approve plan:', error);
+      setPlanError('批准失败，请稍后重试');
+    } finally {
+      setPlanActionPending(null);
+    }
+  }, [activePlan, currentConversation?.id, refreshActivePlan, selectedBranchTipId]);
+
+  const handleRejectPlan = useCallback(async () => {
+    if (!activePlan) return;
+    const feedback = planRejectFeedback.trim();
+    if (!feedback) return;
+    const conversationId = activePlan.conversation_id || currentConversation?.id;
+    if (!conversationId) return;
+    setPlanActionPending('reject');
+    setPlanError(null);
+    try {
+      const updated = await plansService.reject(conversationId, activePlan.plan_id || activePlan.id || '', feedback);
+      setActivePlan(updated || { ...activePlan, feedback });
+      setPlanRejectOpen(false);
+      setPlanRejectFeedback('');
+      if (conversationId) await refreshActivePlan(conversationId);
+    } catch (error) {
+      console.error('Failed to reject plan:', error);
+      setPlanError('提交修改意见失败，请稍后重试');
+    } finally {
+      setPlanActionPending(null);
+    }
+  }, [activePlan, currentConversation?.id, planRejectFeedback, refreshActivePlan]);
+
+  const handleAnswerPlanQuestion = useCallback(async (answerOverride?: string) => {
+    if (!activePlan) return;
+    const answer = (answerOverride ?? planQuestionAnswer).trim();
+    if (!answer) return;
+    const conversationId = activePlan.conversation_id || currentConversation?.id;
+    if (!conversationId) return;
+    setPlanActionPending('answer');
+    setPlanError(null);
+    try {
+      setActivePlan({ ...activePlan, status: 'active', question: { ...(activePlan.question || {}), answer } });
+      setPlanQuestionAnswer('');
+      const { currentReasoningEffort, currentThinkingEnabled } = useModelStore.getState();
+      setShouldAutoScroll(true);
+      void streamManager.startPlanAnswerStream(
+        conversationId,
+        activePlan.plan_id || activePlan.id || '',
+        answer,
+        {
+          reasoning_effort: currentReasoningEffort,
+          thinking_enabled: currentThinkingEnabled,
+        },
+        selectedBranchTipId,
+      ).then(() => refreshActivePlan(conversationId)).catch((error) => {
+        console.error('Failed to answer plan question:', error);
+        setPlanError('提交回答失败，请稍后重试');
+      });
+    } catch (error) {
+      console.error('Failed to answer plan question:', error);
+      setPlanError('提交回答失败，请稍后重试');
+    } finally {
+      setPlanActionPending(null);
+    }
+  }, [activePlan, currentConversation?.id, planQuestionAnswer, refreshActivePlan, selectedBranchTipId]);
 
   const handleStopStreaming = useCallback(() => {
     if (currentConversation?.id) {
@@ -2309,6 +2404,16 @@ export default function ChatPage() {
     void refreshTaskLedger(conversationId);
   }, [currentConversation?.id, refreshTaskLedger, syncSelectedConversationSideRuns]);
 
+  const latestMessageId = messages.length > 0 ? messages[messages.length - 1]?.id : null;
+  useEffect(() => {
+    const conversationId = currentConversation?.id;
+    if (!conversationId) {
+      setActivePlan(null);
+      return;
+    }
+    void refreshActivePlan(conversationId);
+  }, [currentConversation?.id, latestMessageId, refreshActivePlan]);
+
   const handleSelectConversation = async (id: string) => {
     if (currentConversation && historyRef.current) {
       setScrollPositions(prev => ({
@@ -2503,6 +2608,7 @@ export default function ChatPage() {
           id: createQueuedMessageId(),
           conversationId: queuedConversationId,
           nodeId: streamNodeId ?? null,
+          anchorNodeId: sendNodeId ?? null,
           blockingRunIds: currentBranchStreamingRunIds,
           content: val,
           request,
@@ -2530,12 +2636,15 @@ export default function ChatPage() {
     setEditTargetNodeId(null);
     // 第三个参数是乐观渲染的用户气泡文本（显示用户输入的原文）。
     // 推理设置从 modelStore 的当前值读取（已确认值），随请求透传。
-    await startStreaming(
+    void startStreaming(
       conversationId,
       request,
       val,
       streamNodeId,
-    );
+      sendNodeId ?? null,
+    ).catch((err) => {
+      console.error('发送失败:', err);
+    });
   };
 
   const handleJumpToMessage = (index: number) => {
@@ -2578,6 +2687,7 @@ export default function ChatPage() {
       await selectConversation(convId);
       setShouldAutoScroll(true);
       const { currentReasoningEffort, currentThinkingEnabled } = useModelStore.getState();
+      const retryParentNodeId = useConversationStore.getState().currentNodeId || undefined;
       await startStreaming(
         convId,
         {
@@ -2590,6 +2700,8 @@ export default function ChatPage() {
           image_refs: imageRefs.length > 0 ? imageRefs : undefined,
         },
         userContent,
+        retryParentNodeId,
+        retryParentNodeId ?? null,
       );
     } catch (err) {
       console.error('重试失败:', err);
@@ -2741,6 +2853,220 @@ export default function ChatPage() {
               <span className="min-w-[120px] truncate" title={summary.output}>{summary.output}</span>
             </>
           )}
+        </div>
+      </div>
+    );
+  };
+
+  const renderPlanApprovalCard = () => {
+    if (!shouldShowPlanApproval(activePlan)) return null;
+    const markdown = getPlanApprovalMarkdown(activePlan);
+    const rejecting = planActionPending === 'reject';
+    const approving = planActionPending === 'approve';
+    return (
+      <div className="plan-approval-row w-full my-2 flex flex-col items-start">
+        <div
+          className="plan-approval-card flex max-w-[760px] w-full min-w-0 flex-col gap-3 rounded-md px-3 py-3 text-sm"
+          style={{
+            border: '0.5px solid var(--border)',
+            background: 'var(--bg-secondary)',
+            color: 'var(--fg-secondary)',
+          }}
+        >
+          <div className="flex items-center gap-2 text-xs font-medium" style={{ color: 'var(--fg-tertiary)' }}>
+            <ClipboardList className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--icon-accent)' }} />
+            <span>计划待审批</span>
+          </div>
+          <div
+            className="plan-markdown-panel min-w-0 rounded-sm px-2.5 py-2 prose prose-sm max-w-none [&_p]:m-0 [&_p:not(:last-child)]:mb-2"
+            style={{
+              border: '0.5px solid var(--border)',
+              background: 'var(--bg-input)',
+              color: 'var(--fg-secondary)',
+              fontSize: 'var(--codex-chat-font-size)',
+              lineHeight: 'calc(var(--codex-chat-font-size) + 8px)',
+            }}
+          >
+            <MarkdownView content={markdown} enableMermaid />
+          </div>
+          {planRejectOpen && (
+            <textarea
+              value={planRejectFeedback}
+              onChange={(event) => setPlanRejectFeedback(event.target.value)}
+              placeholder="写下需要修改的地方"
+              className="min-h-[72px] w-full resize-none rounded-md px-2.5 py-2 text-sm outline-none"
+              style={{
+                border: '0.5px solid var(--border)',
+                background: 'var(--bg-input)',
+                color: 'var(--fg-primary)',
+              }}
+            />
+          )}
+          {planError && (
+            <div className="text-xs" style={{ color: 'var(--destructive)' }}>{planError}</div>
+          )}
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              className="h-7 gap-1 px-2 text-xs"
+              onClick={handleApprovePlan}
+              disabled={planActionPending !== null}
+            >
+              {approving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+              批准并开始实现
+            </Button>
+            {planRejectOpen ? (
+              <>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  className="h-7 gap-1 px-2 text-xs"
+                  onClick={handleRejectPlan}
+                  disabled={planActionPending !== null || !planRejectFeedback.trim()}
+                >
+                  {rejecting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Pencil className="h-3.5 w-3.5" />}
+                  提交修改意见
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-2 text-xs"
+                  onClick={() => {
+                    setPlanRejectOpen(false);
+                    setPlanRejectFeedback('');
+                    setPlanError(null);
+                  }}
+                  disabled={planActionPending !== null}
+                >
+                  取消
+                </Button>
+              </>
+            ) : (
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                className="h-7 gap-1 px-2 text-xs"
+                onClick={() => setPlanRejectOpen(true)}
+                disabled={planActionPending !== null}
+              >
+                <Pencil className="h-3.5 w-3.5" />
+                要求修改
+              </Button>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderPlanQuestionCard = () => {
+    if (!shouldShowPlanQuestion(activePlan)) return null;
+    const question = getPlanQuestionText(activePlan);
+    const options = (activePlan?.question?.options || [])
+      .filter((option) => (option?.label || '').trim().length > 0);
+    const answering = planActionPending === 'answer';
+    return (
+      <div className="plan-question-row w-full my-2 flex flex-col items-start">
+        <div
+          className="plan-question-card flex max-w-[760px] w-full min-w-0 flex-col gap-3 rounded-md px-3 py-3 text-sm"
+          style={{
+            border: '0.5px solid var(--border)',
+            background: 'var(--bg-secondary)',
+            color: 'var(--fg-secondary)',
+          }}
+        >
+          <div className="flex items-center gap-2 text-xs font-medium" style={{ color: 'var(--fg-tertiary)' }}>
+            <MessageSquare className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--icon-accent)' }} />
+            <span>计划澄清</span>
+          </div>
+          <div className="text-sm leading-6" style={{ color: 'var(--fg-primary)' }}>{question}</div>
+          {options.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {options.map((option, index) => {
+                const label = (option.label || '').trim();
+                const description = (option.description || '').trim();
+                return (
+                  <Button
+                    key={`${label}-${index}`}
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    className="h-auto min-h-7 max-w-full justify-start gap-1 px-2 py-1 text-left text-xs"
+                    title={description || label}
+                    onClick={() => setPlanQuestionAnswer(label)}
+                    disabled={planActionPending !== null}
+                  >
+                    {planQuestionAnswer.trim() === label ? <Check className="h-3.5 w-3.5 shrink-0" /> : <span className="h-3.5 w-3.5 shrink-0" />}
+                    <span className="min-w-0 truncate">{label}</span>
+                  </Button>
+                );
+              })}
+            </div>
+          )}
+          <textarea
+            value={planQuestionAnswer}
+            onChange={(event) => setPlanQuestionAnswer(event.target.value)}
+            placeholder="输入回答"
+            className="min-h-[64px] w-full resize-none rounded-md px-2.5 py-2 text-sm outline-none"
+            style={{
+              border: '0.5px solid var(--border)',
+              background: 'var(--bg-input)',
+              color: 'var(--fg-primary)',
+            }}
+          />
+          {planError && (
+            <div className="text-xs" style={{ color: 'var(--destructive)' }}>{planError}</div>
+          )}
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              className="h-7 gap-1 px-2 text-xs"
+              onClick={() => handleAnswerPlanQuestion()}
+              disabled={planActionPending !== null || !planQuestionAnswer.trim()}
+            >
+              {answering ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+              提交回答
+            </Button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderPlanSummaryCard = () => {
+    if (!shouldShowPlanSummary(activePlan)) return null;
+    const markdown = getPlanApprovalMarkdown(activePlan);
+    return (
+      <div className="plan-summary-row w-full my-2 flex flex-col items-start">
+        <div
+          className="plan-summary-card flex max-w-[760px] w-full min-w-0 flex-col gap-3 rounded-md px-3 py-3 text-sm"
+          style={{
+            border: '0.5px solid var(--border)',
+            background: 'var(--bg-secondary)',
+            color: 'var(--fg-secondary)',
+          }}
+        >
+          <div className="flex items-center gap-2 text-xs font-medium" style={{ color: 'var(--fg-tertiary)' }}>
+            <Check className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--icon-accent)' }} />
+            <span>计划已批准</span>
+          </div>
+          <div
+            className="plan-markdown-panel min-w-0 rounded-sm px-2.5 py-2 prose prose-sm max-w-none [&_p]:m-0 [&_p:not(:last-child)]:mb-2"
+            style={{
+              border: '0.5px solid var(--border)',
+              background: 'var(--bg-input)',
+              color: 'var(--fg-secondary)',
+              fontSize: 'var(--codex-chat-font-size)',
+              lineHeight: 'calc(var(--codex-chat-font-size) + 8px)',
+            }}
+          >
+            <MarkdownView content={markdown} enableMermaid />
+          </div>
         </div>
       </div>
     );
@@ -3671,6 +3997,9 @@ export default function ChatPage() {
               >
                 <div className="w-[800px] max-w-full flex flex-col px-4">
                   {renderedMessages}
+                  {renderPlanQuestionCard()}
+                  {renderPlanApprovalCard()}
+                  {renderPlanSummaryCard()}
                   {renderTaskLedgerStrip()}
                   {activeRunDrafts.map((draft) => (
                     <div key={draft.run.runId} className="contents">

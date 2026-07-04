@@ -93,7 +93,7 @@ export interface SendMessageRequest {
   }>;
 }
 
-export type ToolPermissionMode = 'auto_approve' | 'modify_only' | 'ask_always';
+export type ToolPermissionMode = 'auto_approve' | 'modify_only' | 'ask_always' | 'plan';
 
 export type StreamStatus = 'start' | 'content' | 'complete' | 'error' | 'stopped';
 

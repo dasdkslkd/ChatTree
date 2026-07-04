@@ -373,6 +373,7 @@ export function ChatInput({
     auto_approve: '自动批准',
     modify_only: '仅修改',
     ask_always: '全部需批准',
+    plan: '计划模式',
   }[toolPermissionDraft.mode];
 
   // 所选模型的元数据 → 决定是否渲染推理强度/思考开关控件

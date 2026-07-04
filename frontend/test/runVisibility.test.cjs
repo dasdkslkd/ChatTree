@@ -140,6 +140,52 @@ function testDetachedChatRunStaysInMainTranscriptDuringPreTargetPhase() {
   assert.equal(isRunVisibleInMainTranscript(run, 'node-hello', new Set(['node-hello'])), true);
 }
 
+function testPendingChatRunStaysVisibleFromAnchorUntilTargetLands() {
+  const run = chatRun({
+    kind: 'chat',
+    status: 'streaming',
+    anchorNodeId: 'node-hello',
+    nodeId: 'node-new',
+    targetNodeId: 'node-new',
+    pendingUserMessage: '新的用户消息',
+  });
+
+  assert.equal(isRunVisibleInSelectedTranscript(run, 'node-hello', new Set(['node-hello'])), true);
+  assert.equal(isRunVisibleInMainTranscript(run, 'node-hello', new Set(['node-hello'])), true);
+  assert.equal(isRunBlockingSelectedBranch(run, 'node-hello', new Set(['node-hello'])), true);
+}
+
+function testControlChatRunStaysVisibleFromAnchorUntilTargetLands() {
+  const run = chatRun({
+    kind: 'chat',
+    status: 'streaming',
+    anchorNodeId: 'node-hello',
+    nodeId: 'node-new',
+    targetNodeId: 'node-new',
+    pendingUserMessage: null,
+    anchorUntilTargetLands: true,
+  });
+
+  assert.equal(isRunVisibleInSelectedTranscript(run, 'node-hello', new Set(['node-hello'])), true);
+  assert.equal(isRunVisibleInMainTranscript(run, 'node-hello', new Set(['node-hello'])), true);
+  assert.equal(isRunBlockingSelectedBranch(run, 'node-hello', new Set(['node-hello'])), true);
+}
+
+function testPendingRootChatRunStaysVisibleBeforeFirstHistoryRefresh() {
+  const run = chatRun({
+    kind: 'chat',
+    status: 'streaming',
+    anchorNodeId: null,
+    nodeId: 'node-new',
+    targetNodeId: 'node-new',
+    pendingUserMessage: '第一条用户消息',
+  });
+
+  assert.equal(isRunVisibleInSelectedTranscript(run, null, new Set()), true);
+  assert.equal(isRunVisibleInMainTranscript(run, null, new Set()), true);
+  assert.equal(isRunBlockingSelectedBranch(run, null, new Set()), true);
+}
+
 function testDetachedSubagentCanBeStoppedFromSelectedAnchorWithoutBlockingTranscript() {
   const run = chatRun({
     kind: 'subagent',
@@ -190,6 +236,9 @@ testDetachedBackgroundRunIsSideViewNotMainTranscript();
 testDirectResponseRunIsSideViewNotMainTranscriptWithoutNode();
 testDirectResponseRunNeverEntersMainTranscriptEvenWithTargetNode();
 testDetachedChatRunStaysInMainTranscriptDuringPreTargetPhase();
+testPendingChatRunStaysVisibleFromAnchorUntilTargetLands();
+testControlChatRunStaysVisibleFromAnchorUntilTargetLands();
+testPendingRootChatRunStaysVisibleBeforeFirstHistoryRefresh();
 testDetachedSubagentCanBeStoppedFromSelectedAnchorWithoutBlockingTranscript();
 testCommandRunIsSideViewAndStoppableFromAnchor();
 testSubagentWithTargetNodeStillUsesSideView();

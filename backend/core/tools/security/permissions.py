@@ -13,6 +13,7 @@ PermissionMode = Literal[
     "auto_approve",
     "modify_only",
     "ask_always",
+    "plan",
 ]
 RuleTargetType = Literal["tool", "mcp_server", "mcp_tool", "filesystem", "network", "command"]
 RuleSource = Literal["default", "user", "session", "project"]
@@ -77,6 +78,19 @@ class PermissionEngine:
         deny = self._first_behavior(matched, "deny")
         if deny:
             return PermissionDecision("deny", f"Denied by rule {deny.id}", [deny])
+
+        if mode == "plan":
+            if _is_plan_allowed_tool(context.tool_name):
+                return PermissionDecision("allow", "plan mode allows read-only planning tools", matched)
+            return PermissionDecision("deny", "plan mode blocks implementation tools until the plan is approved", matched)
+
+        if _is_plan_control_tool(context.tool_name):
+            allow = self._first_behavior(matched, "allow")
+            return PermissionDecision(
+                "allow",
+                self._allow_reason(allow) if allow else "Plan mode control tool allowed",
+                [allow] if allow else matched,
+            )
 
         if _is_agent_management_tool(context.tool_name):
             allow = self._first_behavior(matched, "allow")
@@ -185,6 +199,8 @@ class PermissionEngine:
         return f"Approval required by rule {rule.id}"
 
     def _allow_reason(self, rule: PermissionRule) -> str:
+        if rule.source == "default" and rule.target_type == "tool" and rule.pattern in _BUILTIN_READ_TOOLS:
+            return f"Allowed built-in read tool by default rule {rule.id}"
         if rule.source == "default" and rule.target_type == "tool":
             return f"Allowed by default tool rule {rule.id}"
         return f"Allowed by rule {rule.id}"
@@ -211,6 +227,9 @@ def default_permission_rules() -> List[PermissionRule]:
         PermissionRule("default-allow-create-task", "allow", "tool", "create_task", source="default"),
         PermissionRule("default-allow-update-task", "allow", "tool", "update_task", source="default"),
         PermissionRule("default-allow-list-tasks", "allow", "tool", "list_tasks", source="default"),
+        PermissionRule("default-allow-enter-plan-mode", "allow", "tool", "enter_plan_mode", source="default"),
+        PermissionRule("default-allow-exit-plan-mode", "allow", "tool", "exit_plan_mode", source="default"),
+        PermissionRule("default-allow-ask-user-question", "allow", "tool", "ask_user_question", source="default"),
         PermissionRule("default-allow-list-files", "allow", "tool", "list_files", source="default"),
         PermissionRule("default-allow-read-file", "allow", "tool", "read_file", source="default"),
         PermissionRule("default-allow-search-files", "allow", "tool", "search_files", source="default"),
@@ -232,9 +251,11 @@ def normalize_permission_mode(value: Any) -> PermissionMode:
         return "default"
     if value in ("ask_always", "ask_all", "all"):
         return "ask_always"
+    if value in ("plan", "plan_mode"):
+        return "plan"
     if value == "dont_ask":
         return "dont_ask"
-    return "ask_on_modify"
+    return "modify_only"
 
 
 _MUTATING_NAME_TOKENS = {
@@ -269,9 +290,38 @@ _AGENT_MANAGEMENT_TOOLS = {
     "interrupt_agent",
 }
 
+_BUILTIN_READ_TOOLS = {
+    "web_search",
+    "fetch_url",
+    "read_tool_result",
+    "list_available_tools",
+}
+
+_PLAN_ALLOWED_TOOLS = {
+    "list_files",
+    "read_file",
+    "search_files",
+    "list_available_tools",
+    "read_tool_result",
+    "web_search",
+    "fetch_url",
+    "list_tasks",
+    "enter_plan_mode",
+    "exit_plan_mode",
+    "ask_user_question",
+}
+
 
 def _is_agent_management_tool(tool_name: str) -> bool:
     return tool_name in _AGENT_MANAGEMENT_TOOLS
+
+
+def _is_plan_allowed_tool(tool_name: str) -> bool:
+    return tool_name in _PLAN_ALLOWED_TOOLS
+
+
+def _is_plan_control_tool(tool_name: str) -> bool:
+    return tool_name in {"enter_plan_mode", "exit_plan_mode", "ask_user_question"}
 
 
 def _is_mutating_tool_call(tool_name: str, arguments: Dict[str, Any]) -> bool:
