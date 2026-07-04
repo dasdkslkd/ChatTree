@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import inspect
 import json
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
+from backend.api.dependencies import get_tool_manager
 from backend.core.persistence.blob_store import BlobStore
 
 router = APIRouter()
@@ -72,7 +74,18 @@ def _sqlite_tool_result_slice(
 
     content = row["output_text"] or ""
     if row["output_blob_id"]:
-        content = BlobStore(persistence).get_text(row["output_blob_id"])
+        try:
+            content = BlobStore(persistence).get_text(row["output_blob_id"])
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail="工具结果 blob 不存在",
+            ) from exc
+        except (OSError, EOFError, UnicodeDecodeError) as exc:
+            raise HTTPException(
+                status_code=500,
+                detail="工具结果 blob 无法读取",
+            ) from exc
     metadata = _load_metadata(row["metadata_json"])
     tool_name = row["tool_name"] or metadata.get("tool_name")
 
@@ -105,6 +118,26 @@ def _load_metadata(value: str | None) -> dict[str, Any]:
     return loaded if isinstance(loaded, dict) else {}
 
 
+async def _get_optional_tool_manager(request: Request) -> Any | None:
+    override = request.app.dependency_overrides.get(get_tool_manager)
+    if override is not None:
+        try:
+            signature = inspect.signature(override)
+            value = override(request) if signature.parameters else override()
+        except (TypeError, ValueError):
+            value = override()
+        if inspect.isawaitable(value):
+            return await value
+        return value
+
+    try:
+        return get_tool_manager(request)
+    except HTTPException as exc:
+        if exc.status_code == 500 and exc.detail == "工具管理器未初始化":
+            return None
+        raise
+
+
 @router.get("/api/tool-results/{tool_result_id}", include_in_schema=False)
 @router.get("/tool-results/{tool_result_id}")
 async def get_tool_result(
@@ -112,8 +145,8 @@ async def get_tool_result(
     tool_result_id: str,
     offset: int = Query(0, ge=0),
     limit: int = Query(16000, ge=1),
+    tool_manager: Any | None = Depends(_get_optional_tool_manager),
 ):
-    tool_manager = getattr(request.app.state, "tool_manager", None)
     store = getattr(tool_manager, "tool_result_store", None)
     result = None
     if store is not None:
