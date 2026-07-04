@@ -2,8 +2,9 @@ import { useState } from 'react';
 import { ChevronRight, CheckCircle2, Loader2, XCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import MarkdownContent from '../../MarkdownContent';
-import type { TranscriptItem } from '../../../types/transcript';
+import type { TranscriptItem, TranscriptPlanActionHandler } from '../../../types/transcript';
 import { getItemText, getStatusText } from './itemText';
+import { PlanProposalCard, type PlanProposalBlock } from './PlanProposalCard';
 
 type ToolCallLike = {
   id?: string;
@@ -39,7 +40,16 @@ type ToolRenderItem = {
 type ProcessTimelineBlock =
   | { type: 'reasoning'; key: string; reasoning: string }
   | { type: 'content'; key: string; content: string }
-  | { type: 'tools'; key: string; items: ToolRenderItem[] };
+  | { type: 'tools'; key: string; items: ToolRenderItem[] }
+  | (PlanProposalBlock & { key: string });
+
+interface AssistantProcessItemProps {
+  item: TranscriptItem;
+  onApprovePlan?: TranscriptPlanActionHandler;
+  onRejectPlan?: TranscriptPlanActionHandler;
+  planActionPending?: string | null;
+  planError?: string | null;
+}
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -129,6 +139,75 @@ function getInteractionToolItems(interaction: unknown, interactionIndex: number)
   return items;
 }
 
+function getStringField(record: Record<string, unknown>, key: string): string {
+  const value = record[key];
+  return typeof value === 'string' ? value : '';
+}
+
+function normalizeTimelineToolCall(record: Record<string, unknown>): ToolCallLike | null {
+  const candidate = asRecord(record.tool_call) || asRecord(record.call) || record;
+  return candidate ? candidate as ToolCallLike : null;
+}
+
+function normalizeTimelineToolMessage(record: Record<string, unknown>): ToolMessageLike | null {
+  const candidate = asRecord(record.tool_result) || asRecord(record.result) || record;
+  return candidate ? candidate as ToolMessageLike : null;
+}
+
+function normalizeBackendTimelineBlock(rawBlock: unknown, index: number): ProcessTimelineBlock | null {
+  const record = asRecord(rawBlock);
+  if (!record) return null;
+  const type = getStringField(record, 'type');
+  const key = getStringField(record, 'key') || `${type || 'timeline'}-${index}`;
+
+  if (type === 'plan_proposal') {
+    const status = getStringField(record, 'status') || 'awaiting_approval';
+    const plan = getStringField(record, 'plan');
+    if (!plan.trim()) return null;
+    return {
+      type: 'plan_proposal',
+      key,
+      tool_name: getStringField(record, 'tool_name') || 'exit_plan_mode',
+      tool_call_id: getStringField(record, 'tool_call_id'),
+      plan_id: getStringField(record, 'plan_id'),
+      proposal_id: getStringField(record, 'proposal_id'),
+      revision: typeof record.revision === 'number' ? record.revision : 1,
+      status: status === 'approved' || status === 'rejected' || status === 'superseded'
+        ? status
+        : 'awaiting_approval',
+      plan,
+      feedback: typeof record.feedback === 'string' ? record.feedback : null,
+    };
+  }
+
+  if (type === 'reasoning') {
+    const reasoning = getStringField(record, 'reasoning') || getStringField(record, 'content');
+    return reasoning.trim() ? { type: 'reasoning', key, reasoning } : null;
+  }
+
+  if (type === 'content' || type === 'text') {
+    const content = getStringField(record, 'content') || getStringField(record, 'text');
+    return content.trim() ? { type: 'content', key, content } : null;
+  }
+
+  if (type === 'tools' && Array.isArray(record.items)) {
+    const items = record.items as ToolRenderItem[];
+    return items.length > 0 ? { type: 'tools', key, items } : null;
+  }
+
+  if (type === 'tool_call') {
+    const item = makeToolItem(normalizeTimelineToolCall(record), null, key);
+    return { type: 'tools', key, items: [item] };
+  }
+
+  if (type === 'tool_result') {
+    const item = makeToolItem(null, normalizeTimelineToolMessage(record), key);
+    return { type: 'tools', key, items: [item] };
+  }
+
+  return null;
+}
+
 function stripChronologicalPrefix(raw: unknown, snippets: string[]): string {
   if (typeof raw !== 'string' || raw.length === 0) return '';
   let remaining = raw;
@@ -141,6 +220,13 @@ function stripChronologicalPrefix(raw: unknown, snippets: string[]): string {
 }
 
 function getProcessTimeline(item: TranscriptItem): ProcessTimelineBlock[] {
+  const timeline = Array.isArray(item.props?.timeline) ? item.props.timeline : [];
+  if (timeline.length > 0) {
+    return timeline
+      .map((block, index) => normalizeBackendTimelineBlock(block, index))
+      .filter((block): block is ProcessTimelineBlock => Boolean(block));
+  }
+
   const blocks: ProcessTimelineBlock[] = [];
   const interactions = Array.isArray(item.props?.tool_interactions) ? item.props.tool_interactions : [];
   const interactionReasoning: string[] = [];
@@ -170,6 +256,24 @@ function getProcessTimeline(item: TranscriptItem): ProcessTimelineBlock[] {
   }
 
   return blocks;
+}
+
+function planProposalItem(item: TranscriptItem, block: PlanProposalBlock): TranscriptItem {
+  return {
+    ...item,
+    id: `${item.id}:${block.proposal_id || block.tool_call_id || block.plan_id || 'plan-proposal'}`,
+    plan_id: block.plan_id || item.plan_id || null,
+    status: block.status,
+    preview: block.plan,
+    props: {
+      ...(item.props || {}),
+      plan: block.plan,
+      proposal_id: block.proposal_id,
+      tool_call_id: block.tool_call_id,
+      revision: block.revision,
+      feedback: block.feedback,
+    },
+  };
 }
 
 function ThoughtBlock({ reasoning, streaming }: { reasoning: string; streaming?: boolean }) {
@@ -248,7 +352,23 @@ function ToolCallGroup({ items }: { items: ToolRenderItem[] }) {
   );
 }
 
-function renderProcessTimelineBlock(block: ProcessTimelineBlock) {
+function renderProcessTimelineBlock(
+  block: ProcessTimelineBlock,
+  item: TranscriptItem,
+  handlers: Pick<AssistantProcessItemProps, 'onApprovePlan' | 'onRejectPlan' | 'planActionPending' | 'planError'>,
+) {
+  if (block.type === 'plan_proposal') {
+    return (
+      <PlanProposalCard
+        key={block.key}
+        block={block}
+        onApprove={() => handlers.onApprovePlan?.(planProposalItem(item, block))}
+        onReject={() => handlers.onRejectPlan?.(planProposalItem(item, block))}
+        pending={handlers.planActionPending !== null && handlers.planActionPending !== undefined}
+        error={handlers.planError}
+      />
+    );
+  }
   if (block.type === 'reasoning') {
     return <ThoughtBlock key={block.key} reasoning={block.reasoning} />;
   }
@@ -270,12 +390,23 @@ function renderProcessTimelineBlock(block: ProcessTimelineBlock) {
   );
 }
 
-export function AssistantProcessItem({ item }: { item: TranscriptItem }) {
+export function AssistantProcessItem({
+  item,
+  onApprovePlan,
+  onRejectPlan,
+  planActionPending = null,
+  planError = null,
+}: AssistantProcessItemProps) {
   const timeline = getProcessTimeline(item);
   if (timeline.length > 0) {
     return (
       <div className="w-full flex flex-col items-start" role="listitem">
-        {timeline.map(renderProcessTimelineBlock)}
+        {timeline.map((block) => renderProcessTimelineBlock(block, item, {
+          onApprovePlan,
+          onRejectPlan,
+          planActionPending,
+          planError,
+        }))}
       </div>
     );
   }

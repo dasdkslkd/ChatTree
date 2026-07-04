@@ -61,6 +61,16 @@ function testPlanQuestionOptionClickOnlySelectsDraftAnswer() {
   assert.doesNotMatch(planCardSource, /onClick=\{\(\) => onAnswerPlanQuestion\?\.\(item,\s*label\)\}/);
 }
 
+function testPlanProposalCardUsesTranscriptPlanCallbacks() {
+  const proposalCardSource = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/PlanProposalCard.tsx'), 'utf8');
+  const processSource = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/AssistantProcessItem.tsx'), 'utf8');
+  assert.match(proposalCardSource, /onApprove/);
+  assert.match(proposalCardSource, /onReject/);
+  assert.match(processSource, /onApprovePlan/);
+  assert.match(processSource, /onRejectPlan/);
+  assert.match(processSource, /plan_id: block\.plan_id/);
+}
+
 function testApprovePlanStartsStructuredControlStream() {
   const mainPageSource = fs.readFileSync(path.join(__dirname, '../src/pages/MainPage.tsx'), 'utf8');
   const handlerMatch = mainPageSource.match(/const handleApprovePlan = useCallback\(async \(\) => \{[\s\S]*?\n  \}, \[/);
@@ -94,6 +104,7 @@ function main() {
   testQuestionOnlyVisibleWhenAwaitingQuestion();
   testApprovedPlanSummaryRemainsVisible();
   testPlanQuestionOptionClickOnlySelectsDraftAnswer();
+  testPlanProposalCardUsesTranscriptPlanCallbacks();
   testApprovePlanStartsStructuredControlStream();
   testAnswerPlanQuestionStartsStructuredControlStream();
   testChatInputDoesNotExposePlanAsManualPermissionMode();

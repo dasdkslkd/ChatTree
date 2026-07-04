@@ -7,14 +7,15 @@ const transcriptItemTypes = new Set([
   'assistant_process',
   'assistant_answer',
   'tool_group',
-  'plan_card',
   'task_notification',
   'task_progress',
   'run_draft',
   'side_run_notification',
 ]);
 
-function normalizeTranscriptItem(item: TranscriptItem): TranscriptItem {
+function normalizeTranscriptItem(item: TranscriptItem): TranscriptItem | null {
+  const rawType = item.type || item.item_type;
+  if (rawType === 'plan_card') return null;
   if (item.type) return item;
   const itemType = typeof item.item_type === 'string' && transcriptItemTypes.has(item.item_type)
     ? item.item_type
@@ -25,7 +26,8 @@ function normalizeTranscriptItem(item: TranscriptItem): TranscriptItem {
 export function normalizeTranscriptItems(items: TranscriptItem[]): TranscriptItem[] {
   return items
     .filter((item) => !item.visibility || item.visibility === 'main')
-    .map(normalizeTranscriptItem);
+    .map(normalizeTranscriptItem)
+    .filter((item): item is TranscriptItem => Boolean(item));
 }
 
 export interface LiveRunTranscriptOverlay {
@@ -47,6 +49,18 @@ function itemMatchesNode(item: TranscriptItem, nodeId: string | null | undefined
 function findLiveRunInsertionIndex(items: TranscriptItem[], overlay: LiveRunTranscriptOverlay): number {
   const existingRunIndex = items.findIndex((item) => itemBelongsToRun(item, overlay.runId));
   if (existingRunIndex >= 0) return existingRunIndex;
+
+  if (overlay.anchorNodeId) {
+    const processIndex = items.findIndex((item) => {
+      if (item.type !== 'assistant_process' || item.node_id !== overlay.anchorNodeId) return false;
+      const timeline = Array.isArray(item.props?.timeline) ? item.props.timeline : [];
+      return timeline.some((block) => {
+        if (!block || typeof block !== 'object' || Array.isArray(block)) return false;
+        return block.type === 'plan_proposal' && block.status === 'approved';
+      });
+    });
+    if (processIndex >= 0) return processIndex + 1;
+  }
 
   const targetNodeId = overlay.targetNodeId || overlay.nodeId;
   if (targetNodeId) {

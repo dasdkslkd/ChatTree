@@ -30,8 +30,16 @@ function testMainTranscriptDoesNotRenderLocalStreamingDrafts() {
   assert.doesNotMatch(chatHistory, /activeRunStates\.map\(/);
 }
 
+function testLiveImplementationOverlayAnchorsToApprovedPlanProposal() {
+  const transcriptItemsSource = fs.readFileSync(path.join(__dirname, '../src/utils/transcriptItems.ts'), 'utf8');
+  assert.match(transcriptItemsSource, /block\.type === 'plan_proposal'/);
+  assert.match(transcriptItemsSource, /block\.status === 'approved'/);
+  assert.match(transcriptItemsSource, /return processIndex \+ 1/);
+}
+
 testStreamingDraftsRenderChronologicalVisibleBlocks();
 testStreamingDraftsDoNotRenderAnswerDivider();
 testMainTranscriptDoesNotRenderLocalStreamingDrafts();
+testLiveImplementationOverlayAnchorsToApprovedPlanProposal();
 
 console.log('streamingTimelinePlacement tests passed');

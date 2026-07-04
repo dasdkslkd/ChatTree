@@ -141,6 +141,7 @@ import {
 } from '../utils/activeStreamPolling';
 import { ChatInput } from '../components/ChatInput';
 import { TranscriptList } from '../components/transcript/TranscriptList';
+import { AssistantProcessItem } from '../components/transcript/items/AssistantProcessItem';
 import TreeView from './TreeView';
 import {
   getVisibleProjectConversations,
@@ -2851,6 +2852,17 @@ export default function ChatPage() {
   const renderTranscriptItem = (item: TranscriptItem, defaultItem: React.ReactNode) => {
     const liveRunDraftProps = getLiveRunDraftTranscriptProps(item);
     if (liveRunDraftProps) return renderLiveRunDraftTranscriptItem(item, liveRunDraftProps);
+    if (item.type === 'assistant_process') {
+      return (
+        <AssistantProcessItem
+          item={item}
+          onApprovePlan={handleApprovePlan}
+          onRejectPlan={handleRejectPlan}
+          planActionPending={planActionPending}
+          planError={planError}
+        />
+      );
+    }
     return defaultItem;
   };
 

@@ -42,7 +42,6 @@ function testNormalizeUsesBackendItemTypeWithoutReordering() {
     { id: 'process-1', item_type: 'assistant_process', visibility: 'main' },
     { id: 'tool-1', item_type: 'tool_group', visibility: 'main' },
     { id: 'answer-1', item_type: 'assistant_answer', visibility: 'main' },
-    { id: 'plan-1', item_type: 'plan_card', visibility: 'main' },
     { id: 'draft-1', item_type: 'run_draft', visibility: 'main' },
     { id: 'answer-2', item_type: 'assistant_answer', visibility: 'main' },
   ]);
@@ -51,7 +50,6 @@ function testNormalizeUsesBackendItemTypeWithoutReordering() {
     'process-1',
     'tool-1',
     'answer-1',
-    'plan-1',
     'draft-1',
     'answer-2',
   ]);
@@ -59,10 +57,21 @@ function testNormalizeUsesBackendItemTypeWithoutReordering() {
     'assistant_process',
     'tool_group',
     'assistant_answer',
-    'plan_card',
     'run_draft',
     'assistant_answer',
   ]);
+}
+
+function testNormalizeDoesNotProjectStandalonePlanCards() {
+  const items = normalizeTranscriptItems([
+    { id: 'user-1', type: 'user_message', visibility: 'main' },
+    { id: 'legacy-plan-1', type: 'plan_card', visibility: 'main' },
+    { id: 'legacy-plan-2', item_type: 'plan_card', visibility: 'main' },
+    { id: 'process-1', item_type: 'assistant_process', visibility: 'main' },
+  ]);
+
+  assert.deepEqual(items.map((item) => item.id), ['user-1', 'process-1']);
+  assert.equal(items.some((item) => item.type === 'plan_card'), false);
 }
 
 function testNormalizeDoesNotGroupProcessToolAndAnswerBlocks() {
@@ -109,7 +118,6 @@ function testLiveRunOverlayReplacesPersistedDraftWithSingleLegacyRunItemAtOrigin
   assert.deepEqual(items.map((item) => item.id), [
     'user-1',
     'live-run-draft',
-    'plan-1',
   ]);
   assert.equal(items[1].type, 'run_draft');
   assert.equal(items[1].props.live_run_draft, true);
@@ -138,6 +146,50 @@ function testLiveRunOverlayAnchorsToBranchInsteadOfAppendingToTail() {
     'anchor-user',
     'live-answer-2',
     'task-progress',
+  ]);
+}
+
+function testLiveRunOverlayAnchorsAfterApprovedPlanProposal() {
+  const items = mergeLiveRunTranscriptItems(
+    [
+      { id: 'user-1', type: 'user_message', node_id: 'node-user' },
+      {
+        id: 'process-plan',
+        type: 'assistant_process',
+        node_id: 'node-plan',
+        props: {
+          timeline: [
+            {
+              type: 'plan_proposal',
+              status: 'approved',
+              plan_id: 'plan-1',
+              proposal_id: 'proposal-1',
+              tool_call_id: 'call-1',
+              plan: '# Plan',
+            },
+          ],
+        },
+      },
+      { id: 'answer-old', type: 'assistant_answer', node_id: 'node-old' },
+    ],
+    [
+      {
+        runId: 'run-implementation',
+        nodeId: null,
+        targetNodeId: null,
+        anchorNodeId: 'node-plan',
+        items: [
+          { id: 'live-implementation', type: 'run_draft', run_id: 'run-implementation' },
+        ],
+      },
+    ],
+  );
+
+  assert.deepEqual(items.map((item) => item.id), [
+    'user-1',
+    'process-plan',
+    'live-implementation',
+    'answer-old',
   ]);
 }
 
@@ -270,12 +322,41 @@ function testTranscriptMessageItemsUseLegacyChatBubbleStyling() {
   assert.match(assistantProcess, /className=\{cn\('thought'/);
   assert.match(assistantProcess, /className="thought-head"/);
   assert.match(assistantProcess, /tool_interactions/);
+  assert.match(assistantProcess, /type: 'content'/);
   assert.match(assistantProcess, /renderProcessTimelineBlock/);
+  assert.match(assistantProcess, /PlanProposalCard/);
   assert.doesNotMatch(assistantProcess, /transcript-assistant-process/);
 
   assert.match(toolGroup, /className=\{cn\('tool-group'/);
   assert.match(toolGroup, /className="tool-group-header"/);
   assert.doesNotMatch(toolGroup, /transcript-tool-group/);
+}
+
+function testAssistantProcessRendersIntermediateTextButNoCopy() {
+  const assistantProcess = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/AssistantProcessItem.tsx'), 'utf8');
+  const assistantAnswer = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/AssistantAnswerItem.tsx'), 'utf8');
+
+  assert.match(assistantProcess, /type: 'content'/);
+  assert.match(assistantProcess, /renderProcessTimelineBlock/);
+  assert.match(assistantProcess, /PlanProposalCard/);
+  assert.doesNotMatch(assistantProcess, /aria-label="复制消息"/);
+  assert.match(assistantAnswer, /aria-label="复制消息"/);
+}
+
+function testStreamStateContentStaysFinalAnswerOnly() {
+  const streamManager = fs.readFileSync(path.join(__dirname, '../src/services/streamManager.ts'), 'utf8');
+  assert.match(streamManager, /if \(chunk\.content && !isAggregateResultEvent\(chunk\) && !isCommandEvent\(chunk\)\) \{\s*next\.content \+= chunk\.content;\s*next\.reasoningActive = false;\s*\}/);
+  assert.match(streamManager, /next\.toolInteractions = appendToolCalls\(next\.toolInteractions, toolCalls, next\.content, next\.reasoning\);/);
+  assert.match(streamManager, /if \(toolCalls\.length > 0\) \{\s*next\.content = '';\s*next\.reasoning = '';\s*next\.reasoningActive = false;\s*\}/);
+}
+
+function testPlanApprovalDoesNotRenderControlEvents() {
+  const mainPage = fs.readFileSync(path.join(__dirname, '../src/pages/MainPage.tsx'), 'utf8');
+  const transcriptItems = fs.readFileSync(path.join(__dirname, '../src/utils/transcriptItems.ts'), 'utf8');
+  assert.match(transcriptItems, /visibility === 'main'/);
+  assert.doesNotMatch(mainPage, /control_event/);
+  assert.doesNotMatch(mainPage, /PlanCardItem/);
+  assert.doesNotMatch(transcriptItems, /type:\s*'plan_card'/);
 }
 
 function testCopyHandlerOnlyReachesRealTranscriptMessages() {
@@ -300,9 +381,11 @@ function testCopyHandlerOnlyReachesRealTranscriptMessages() {
 testNormalizeKeepsBackendOrderAndFiltersHidden();
 testNormalizeOnlyKeepsMainVisibilityInOrder();
 testNormalizeUsesBackendItemTypeWithoutReordering();
+testNormalizeDoesNotProjectStandalonePlanCards();
 testNormalizeDoesNotGroupProcessToolAndAnswerBlocks();
 testLiveRunOverlayReplacesPersistedDraftWithSingleLegacyRunItemAtOriginalPosition();
 testLiveRunOverlayAnchorsToBranchInsteadOfAppendingToTail();
+testLiveRunOverlayAnchorsAfterApprovedPlanProposal();
 testMainPageDelegatesTranscriptOrderingToTranscriptList();
 testMainPageUsesLiveTranscriptOverlayWithLegacyDraftRendering();
 testPlanActionsAreRealCallbacks();
@@ -313,5 +396,8 @@ testPlanActionsUseTranscriptItemPlanIdInsteadOfActivePlanFallback();
 testPlanQuestionAnswerUsesTranscriptItemPlanIdInsteadOfActivePlanFallback();
 testTranscriptFallbackAndCopySurfacesAreVisible();
 testTranscriptMessageItemsUseLegacyChatBubbleStyling();
+testAssistantProcessRendersIntermediateTextButNoCopy();
+testStreamStateContentStaysFinalAnswerOnly();
+testPlanApprovalDoesNotRenderControlEvents();
 testCopyHandlerOnlyReachesRealTranscriptMessages();
 console.log('transcriptItems tests passed');
