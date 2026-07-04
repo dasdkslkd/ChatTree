@@ -455,6 +455,61 @@ class ChatManager:
         except Exception as exc:
             logger.warning("SQLite transcript user turn write failed: %s", exc, exc_info=True)
 
+    def _persist_sqlite_control_event_turn(
+        self,
+        *,
+        conversation: Conversation,
+        node: Dict[str, Any],
+        control_event: Dict[str, Any],
+        provider_id: Optional[str],
+        model_id: Optional[str],
+        run_id: Optional[str],
+    ) -> None:
+        if not self._sqlite_enabled():
+            return
+        conversation_id = conversation.metadata["id"]
+        node_id = node["id"]
+        try:
+            self._sqlite_ensure_branch(
+                conversation,
+                node_id,
+                provider_id=provider_id,
+                model_id=model_id,
+            )
+            self.transcript_projection.upsert_control_event(
+                conversation_id,
+                node_id,
+                event_type=str(control_event.get("event_type") or "control_event"),
+                plan_id=control_event.get("plan_id"),
+                run_id=run_id,
+                status=control_event.get("status"),
+                preview=str(control_event.get("preview") or "")[:4096],
+                local_order=15,
+                visibility="hidden",
+                anchor_node_id=node.get("parent_id"),
+                props={
+                    key: value
+                    for key, value in dict(control_event).items()
+                    if key not in {"preview"}
+                },
+            )
+            if run_id:
+                self.transcript_projection.upsert_run_draft(
+                    conversation_id,
+                    node_id,
+                    run_id=run_id,
+                    status="running",
+                    preview="",
+                    local_order=20,
+                    anchor_node_id=node.get("parent_id"),
+                    props={
+                        "after_control_event": True,
+                        "plan_id": control_event.get("plan_id"),
+                    },
+                )
+        except Exception as exc:
+            logger.warning("SQLite transcript control event write failed: %s", exc, exc_info=True)
+
     def _assistant_process_preview(
         self,
         *,
@@ -881,6 +936,7 @@ class ChatManager:
         message_subtype: Optional[str] = None,
         hidden_user_message: bool = False,
         run_id: Optional[str] = None,
+        control_event: Optional[Dict[str, Any]] = None,
     ) -> AsyncIterator[StreamChunk]:
         """
         异步流式发送消息
@@ -1039,27 +1095,31 @@ class ChatManager:
             if active_parent:
                 requested_parent_node_id = active_parent
 
-        # 创建用户消息
-        user_msg = Message({
-            "id": str(uuid.uuid4()),
-            "role": Role.USER,
-            "content": model_content,
-            "name": None,
-            "tool_calls": None,
-            "tool_call_id": None,
-            "timestamp": int(time())
-        })
-        if message_subtype:
-            user_msg["subtype"] = message_subtype
-        if hidden_user_message:
-            user_msg["is_hidden_from_transcript"] = True
-        if slash_result.kind == SlashDispatchKind.MAIN_PROMPT:
-            user_msg["slash_command"] = self._slash_command_metadata(slash_result)
+        control_event_payload = dict(control_event or {})
+        is_control_event_turn = bool(control_event_payload)
+        user_msg: Optional[Message] = None
+        if not is_control_event_turn:
+            # 创建用户消息
+            user_msg = Message({
+                "id": str(uuid.uuid4()),
+                "role": Role.USER,
+                "content": model_content,
+                "name": None,
+                "tool_calls": None,
+                "tool_call_id": None,
+                "timestamp": int(time())
+            })
+            if message_subtype:
+                user_msg["subtype"] = message_subtype
+            if hidden_user_message:
+                user_msg["is_hidden_from_transcript"] = True
+            if slash_result.kind == SlashDispatchKind.MAIN_PROMPT:
+                user_msg["slash_command"] = self._slash_command_metadata(slash_result)
         normalized_import_files = self._normalize_import_file_refs(import_files)
-        if normalized_import_files:
+        if user_msg is not None and normalized_import_files:
             user_msg["import_files"] = normalized_import_files
         normalized_image_refs = self._normalize_image_refs(image_refs)
-        if normalized_image_refs:
+        if user_msg is not None and normalized_image_refs:
             user_msg["image_refs"] = normalized_image_refs
 
         skill_names: list[str] = []
@@ -1121,7 +1181,7 @@ class ChatManager:
                 if requested_tool_permission_mode
                 else plan_context_permission_mode or active_plan_permission_mode or parent_tool_permission_mode or "ask_always"
             )
-            if self.capability_registry is not None and not hidden_user_message:
+            if self.capability_registry is not None and not hidden_user_message and not is_control_event_turn:
                 skill_names = collect_skill_injection_names(
                     model_content,
                     self.capability_registry,
@@ -1149,14 +1209,24 @@ class ChatManager:
                 model_context_window=meta.get("context_length"),
             )
             self._save(conversation)
-            self._persist_sqlite_user_turn(
-                conversation=conversation,
-                node=new_node,
-                user_msg=user_msg,
-                provider_id=target_provider,
-                model_id=target_model,
-                run_id=run_id,
-            )
+            if is_control_event_turn:
+                self._persist_sqlite_control_event_turn(
+                    conversation=conversation,
+                    node=new_node,
+                    control_event=control_event_payload,
+                    provider_id=target_provider,
+                    model_id=target_model,
+                    run_id=run_id,
+                )
+            elif user_msg is not None:
+                self._persist_sqlite_user_turn(
+                    conversation=conversation,
+                    node=new_node,
+                    user_msg=user_msg,
+                    provider_id=target_provider,
+                    model_id=target_model,
+                    run_id=run_id,
+                )
 
         # 创建流控制器（在锁外，避免把网络流式包进锁里阻塞同对话其他分支）
         controller = StreamController(
@@ -1739,23 +1809,42 @@ class ChatManager:
             if plan_id and current.plan_id != plan_id:
                 raise ValueError("plan not found")
             status = getattr(getattr(current, "status", None), "value", getattr(current, "status", None))
+            projection_context: Dict[str, Any] = {}
             if message_subtype == "plan_approval_response":
                 if status != "awaiting_approval":
                     raise ValueError("plan must be awaiting approval")
-                await plan_ledger.approve_plan(
+                approved_plan = await plan_ledger.approve_plan(
                     conversation_id=conversation_id,
                     plan_id=current.plan_id,
                 )
+                projection_context = self._persist_sqlite_plan_action_projection(
+                    conversation_id=conversation_id,
+                    plan=approved_plan,
+                    action="approved",
+                    fallback_node_id=node_id or getattr(current, "submitted_node_id", None),
+                    run_id=run_id,
+                )
                 model_content = "Plan mode approval response received. Continue with the approved plan."
+                control_event_type = "plan_approved"
+                control_status = "approved"
             elif message_subtype == "plan_question_response":
                 if status != "awaiting_question":
                     raise ValueError("plan must be awaiting question")
-                await plan_ledger.answer_question(
+                answered_plan = await plan_ledger.answer_question(
                     conversation_id=conversation_id,
                     plan_id=current.plan_id,
                     answer=content,
                 )
+                projection_context = self._persist_sqlite_plan_action_projection(
+                    conversation_id=conversation_id,
+                    plan=answered_plan,
+                    action="question_answered",
+                    fallback_node_id=node_id or getattr(current, "submitted_node_id", None),
+                    run_id=run_id,
+                )
                 model_content = "Plan mode clarification response received. Continue planning with the user's answer."
+                control_event_type = "plan_question_answered"
+                control_status = "active"
             else:
                 raise ValueError("unsupported plan action response")
         except Exception as exc:
@@ -1782,8 +1871,16 @@ class ChatManager:
             image_refs=None,
             tool_permission_mode=tool_permission_mode,
             message_subtype=message_subtype,
-            hidden_user_message=True,
             run_id=run_id,
+            control_event={
+                "event_type": control_event_type,
+                "plan_id": current.plan_id,
+                "message_subtype": message_subtype,
+                "status": control_status,
+                "preview": model_content,
+                "content": model_content,
+                **projection_context,
+            },
         ):
             yield chunk
 
@@ -2062,6 +2159,68 @@ class ChatManager:
                 ]),
             }))
         return messages
+
+    def _persist_sqlite_plan_action_projection(
+        self,
+        *,
+        conversation_id: str,
+        plan: Any,
+        action: str,
+        fallback_node_id: Optional[str],
+        run_id: Optional[str],
+    ) -> Dict[str, Any]:
+        if not self._sqlite_enabled():
+            return {}
+        plan_id = str(getattr(plan, "plan_id", "") or "")
+        if not plan_id:
+            return {}
+        if action == "approved":
+            plan_node_id = (
+                getattr(plan, "submitted_node_id", None)
+                or fallback_node_id
+            )
+            status = "approved"
+            preview = str(getattr(plan, "plan", "") or "")
+            summary = "Plan approved"
+        elif action == "question_answered":
+            question = getattr(plan, "question", None) or {}
+            plan_node_id = (
+                question.get("asked_node_id")
+                or getattr(plan, "submitted_node_id", None)
+                or fallback_node_id
+            )
+            status = "active"
+            preview = str(question.get("question") or question.get("answer") or "")
+            summary = "Plan question answered"
+        else:
+            plan_node_id = fallback_node_id
+            status = str(getattr(getattr(plan, "status", None), "value", getattr(plan, "status", "")) or "")
+            preview = str(getattr(plan, "plan", "") or "")
+            summary = f"Plan {action}"
+        if not plan_node_id:
+            return {}
+        props = plan.to_dict() if hasattr(plan, "to_dict") else {}
+        props.update({"control_action": action, "run_id": run_id})
+        try:
+            item_id = self.transcript_projection.upsert_plan_card(
+                conversation_id,
+                plan_node_id,
+                plan_id=plan_id,
+                status=status,
+                preview=preview[:4096],
+                local_order=40,
+                summary=summary,
+                props=props,
+            )
+            return {
+                "plan_card_item_id": item_id,
+                "plan_node_id": plan_node_id,
+                "plan_id": plan_id,
+                "plan_status": status,
+            }
+        except Exception as exc:
+            logger.warning("SQLite plan action projection write failed: %s", exc, exc_info=True)
+            return {}
 
     def _permission_mode_after_plan_tools(self, tool_messages: list[Message], current_mode: str) -> str:
         mode = normalize_permission_mode(current_mode)

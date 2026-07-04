@@ -6,13 +6,13 @@ const source = fs.readFileSync(path.join(__dirname, '../src/pages/MainPage.tsx')
 
 function testStreamingDraftsRenderChronologicalVisibleBlocks() {
   const visibleBlockUses = source.match(/draft\.streamingFoldState\.visibleBlocks/g) || [];
-  assert.ok(visibleBlockUses.length >= 2, 'main and side streaming drafts should render visibleBlocks chronologically');
+  assert.ok(visibleBlockUses.length >= 1, 'side streaming drafts should render visibleBlocks chronologically');
 }
 
 function testStreamingDraftsDoNotRenderAnswerDivider() {
   const streamingDraftSections = source.split('draft.streamingFoldState.canFoldProcess');
-  assert.ok(streamingDraftSections.length >= 3, 'expected main and side streaming fold branches');
-  for (const section of streamingDraftSections.slice(1, 3)) {
+  assert.ok(streamingDraftSections.length >= 2, 'expected side streaming fold branch');
+  for (const section of streamingDraftSections.slice(1)) {
     const branch = section.split(') : (')[0];
     assert.equal(branch.includes('processed-answer-divider'), false);
     assert.equal(branch.includes('streamingFoldState.contentBlocks.map'), false);
@@ -20,7 +20,15 @@ function testStreamingDraftsDoNotRenderAnswerDivider() {
   }
 }
 
+function testMainTranscriptDoesNotRenderLocalStreamingDrafts() {
+  assert.match(source, /<TranscriptList[\s\S]*items=\{transcriptItems\}/);
+  const chatHistory = source.slice(source.indexOf('{/* Chat view */'), source.indexOf('{/* Tree view */'));
+  assert.doesNotMatch(chatHistory, /draft\.streamingFoldState/);
+  assert.doesNotMatch(chatHistory, /activeRunStates\.map\(/);
+}
+
 testStreamingDraftsRenderChronologicalVisibleBlocks();
 testStreamingDraftsDoNotRenderAnswerDivider();
+testMainTranscriptDoesNotRenderLocalStreamingDrafts();
 
 console.log('streamingTimelinePlacement tests passed');

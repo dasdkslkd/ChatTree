@@ -668,7 +668,7 @@ function stripChronologicalPrefix(raw: unknown, snippets: string[]): string {
   return remaining;
 }
 
-function getAssistantTimeline(message: {
+function getSideRunAssistantTimeline(message: {
   content?: unknown;
   reasoning?: unknown;
   tool_interactions?: unknown[];
@@ -1286,7 +1286,7 @@ export default function ChatPage() {
         && Boolean(run.parentRunId)
         && (!run.anchorNodeId || run.anchorNodeId === selectedBranchTipId);
       if (!isWorkflowStep && !isDetachedRunView(run, selectedBranchTipId)) return null;
-      const timeline = getAssistantTimeline({
+      const timeline = getSideRunAssistantTimeline({
         content: run.content,
         reasoning: run.reasoning,
         tool_interactions: run.toolInteractions,

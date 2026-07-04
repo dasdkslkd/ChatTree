@@ -148,6 +148,53 @@ class TranscriptProjection:
                 },
             )
 
+    def upsert_control_event(
+        self,
+        conversation_id: str,
+        node_id: str,
+        *,
+        event_type: str,
+        plan_id: str | None = None,
+        run_id: str | None = None,
+        status: str | None = None,
+        preview: str = "",
+        local_order: int = 0,
+        visibility: str = "hidden",
+        summary: str = "",
+        anchor_node_id: str | None = None,
+        props: dict[str, Any] | None = None,
+    ) -> str:
+        event_props = dict(props or {})
+        event_props.setdefault("event_type", event_type)
+        with self.persistence.connect() as conn:
+            if run_id:
+                self._ensure_run(conn, conversation_id, run_id, "running", summary)
+            return self._upsert_item(
+                conn,
+                lookup_sql="""
+                    SELECT id
+                    FROM transcript_items
+                    WHERE conversation_id = ?
+                      AND node_id = ?
+                      AND item_type = 'control_event'
+                """,
+                lookup_params=(conversation_id, node_id),
+                values={
+                    "conversation_id": conversation_id,
+                    "node_id": node_id,
+                    "anchor_node_id": anchor_node_id,
+                    "plan_id": plan_id,
+                    "run_id": run_id,
+                    "item_type": "control_event",
+                    "local_order": local_order,
+                    "visibility": visibility,
+                    "status": status,
+                    "summary": summary,
+                    "preview": preview,
+                    "props_json": self._json_field(event_props),
+                },
+            )
+
     def upsert_task_item(
         self,
         conversation_id: str,

@@ -21,6 +21,7 @@ from backend.core.tools.security.approval import ApprovalManager
 from backend.core.tools.security.logical_sandbox import LogicalSandbox
 from backend.core.tools.security.permissions import PermissionEngine
 from test_chat_manager_prompt_slash import (
+    CapturingProvider,
     CapturingModelManager,
     PlanFinalWithoutExitProvider,
     PlanModeToolManager,
@@ -222,6 +223,99 @@ def test_plan_control_turn_writes_process_and_plan_card_without_answer(tmp_path:
     plan_card = next(item for item in items if item["item_type"] == "plan_card")
     assert plan_card["status"] == "awaiting_approval"
     assert "修改设置页" in plan_card["preview"]
+
+
+def test_plan_approval_stream_uses_control_event_transcript_projection(tmp_path: Path):
+    manager, repository, projection = _make_manager(tmp_path)
+    plan_ledger = PlanLedger()
+    tool_manager = PlanModeToolManager(plan_ledger)
+    manager.plan_ledger = plan_ledger
+    manager.tool_manager = tool_manager
+    manager.tool_orchestrator = ToolOrchestrator(
+        tool_manager=tool_manager,
+        permission_engine=PermissionEngine.default(),
+        approval_manager=ApprovalManager(),
+        logical_sandbox=LogicalSandbox.for_config({}, tmp_path),
+    )
+    manager.model_manager.provider = PlanFinalWithoutExitProvider()
+    conversation = manager.create_conversation("sqlite plan approval")
+    asyncio.run(
+        plan_ledger.enter_plan_mode(
+            conversation_id=conversation.metadata["id"],
+            previous_permission_mode="modify_only",
+        )
+    )
+    plan_chunks = asyncio.run(
+        collect_chunks(
+            manager.send_message_stream(
+                conversation.metadata["id"],
+                "写计划",
+                model_id="fake-model",
+            )
+        )
+    )
+    assert plan_chunks[-1]["status"] == "complete"
+    plan_node_id = manager.get_conversation(conversation.metadata["id"]).current_node_id
+    manager.model_manager.provider = CapturingProvider()
+
+    approval_chunks = asyncio.run(
+        collect_chunks(
+            manager.continue_plan_action_stream(
+                conversation_id=conversation.metadata["id"],
+                content="Plan approved.",
+                model_id="fake-model",
+                node_id=plan_node_id,
+                message_subtype="plan_approval_response",
+                run_id="run-impl-1",
+            )
+        )
+    )
+
+    assert approval_chunks[-1]["status"] == "complete"
+    reloaded = manager.get_conversation(conversation.metadata["id"])
+    items = projection.list_for_branch(
+        conversation.metadata["id"],
+        reloaded.current_node_id,
+    )
+    item_types = [item["item_type"] for item in items]
+    plan_index = item_types.index("plan_card")
+    run_index = next(
+        index
+        for index, item in enumerate(items)
+        if item["item_type"] == "run_draft" and item["run_id"] == "run-impl-1"
+    )
+    assistant_index = next(
+        index
+        for index, item in enumerate(items)
+        if item["item_type"] == "assistant_answer" and item["preview"] == "ok"
+    )
+    control_event = next(item for item in items if item["item_type"] == "control_event")
+    plan_card = next(item for item in items if item["item_type"] == "plan_card")
+
+    assert plan_card["status"] == "approved"
+    assert control_event["visibility"] == "hidden"
+    assert control_event["plan_id"] == plan_card["plan_id"]
+    assert plan_index < run_index < assistant_index
+    assert reloaded.nodes[reloaded.current_node_id]["tool_permission_mode"] == "modify_only"
+    with repository.persistence.connect() as conn:
+        hidden_user_messages = conn.execute(
+            """
+            SELECT id, content_inline, subtype
+            FROM messages
+            WHERE conversation_id = ?
+              AND role = 'user'
+              AND hidden = 1
+            """,
+            (conversation.metadata["id"],),
+        ).fetchall()
+    assert hidden_user_messages == []
+    first_prompt = "\n\n".join(
+        str(message.get("content") or "")
+        for message in manager.model_manager.provider.calls[0]["messages"]
+    )
+    assert "Approved plan for this conversation" in first_prompt
+    assert "Continue with the approved plan" in first_prompt
+    assert "modify_only" in first_prompt
 
 
 class ToolCallingProvider:
