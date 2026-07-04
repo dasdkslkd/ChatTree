@@ -351,11 +351,27 @@ class ChatRepository:
                 ON CONFLICT(id) DO UPDATE SET
                   run_id = COALESCE(excluded.run_id, tool_calls.run_id),
                   assistant_message_id = COALESCE(excluded.assistant_message_id, tool_calls.assistant_message_id),
-                  call_index = excluded.call_index,
-                  name = excluded.name,
-                  args_inline = excluded.args_inline,
-                  args_blob_id = excluded.args_blob_id,
-                  args_preview = excluded.args_preview,
+                  call_index = CASE
+                    WHEN excluded.call_index = 0 AND tool_calls.call_index <> 0
+                      THEN tool_calls.call_index
+                    ELSE excluded.call_index
+                  END,
+                  name = COALESCE(NULLIF(excluded.name, ''), tool_calls.name),
+                  args_inline = CASE
+                    WHEN COALESCE(excluded.args_inline, '') = '' AND excluded.args_blob_id IS NULL
+                      THEN tool_calls.args_inline
+                    ELSE excluded.args_inline
+                  END,
+                  args_blob_id = CASE
+                    WHEN COALESCE(excluded.args_inline, '') = '' AND excluded.args_blob_id IS NULL
+                      THEN tool_calls.args_blob_id
+                    ELSE excluded.args_blob_id
+                  END,
+                  args_preview = CASE
+                    WHEN COALESCE(excluded.args_inline, '') = '' AND excluded.args_blob_id IS NULL
+                      THEN tool_calls.args_preview
+                    ELSE excluded.args_preview
+                  END,
                   status = excluded.status,
                   updated_at = strftime('%s', 'now')
                 """,
@@ -374,6 +390,20 @@ class ChatRepository:
                 ),
             )
         return call_id
+
+    def tool_call_exists(self, conversation_id: str, tool_call_id: str | None) -> bool:
+        if not tool_call_id:
+            return False
+        with self.persistence.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM tool_calls
+                WHERE conversation_id = ? AND id = ?
+                """,
+                (conversation_id, tool_call_id),
+            ).fetchone()
+        return row is not None
 
     def add_tool_result(
         self,

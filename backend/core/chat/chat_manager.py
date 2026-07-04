@@ -505,7 +505,10 @@ class ChatManager:
         for message in tool_messages:
             raw_output = str(message.get("raw_content") or message.get("content") or "")
             tool_call_id = message.get("tool_call_id")
-            if tool_call_id:
+            if tool_call_id and not self.chat_repository.tool_call_exists(
+                conversation_id,
+                str(tool_call_id),
+            ):
                 self.chat_repository.add_tool_call(
                     conversation_id,
                     node_id,

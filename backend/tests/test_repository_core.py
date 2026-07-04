@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from backend.core.persistence.database import SQLitePersistence
@@ -57,3 +59,43 @@ def test_repository_rejects_second_root_without_moving_current_node(tmp_path):
     conversation = repo.get_conversation(conv_id)
     assert conversation["root_node_id"] == root_id
     assert conversation["current_node_id"] == root_id
+
+
+def test_add_tool_call_preserves_metadata_when_result_placeholder_conflicts(tmp_path):
+    persistence = SQLitePersistence(tmp_path)
+    persistence.initialize()
+    repo = ChatRepository(persistence)
+    conv_id = repo.create_conversation(title="Tool call upsert")
+    node_id = repo.create_node(conv_id, parent_id=None, child_order=0)
+
+    repo.add_tool_call(
+        conv_id,
+        node_id,
+        tool_call_id="call_2",
+        name="second_tool",
+        arguments='{"b":2}',
+        call_index=1,
+    )
+    repo.add_tool_call(
+        conv_id,
+        node_id,
+        tool_call_id="call_2",
+        name="",
+        arguments=None,
+        call_index=0,
+    )
+
+    with persistence.connect() as conn:
+        row = conn.execute(
+            """
+            SELECT call_index, name, args_inline
+            FROM tool_calls
+            WHERE conversation_id = ? AND id = ?
+            """,
+            (conv_id, "call_2"),
+        ).fetchone()
+
+    assert repo.tool_call_exists(conv_id, "call_2")
+    assert row["call_index"] == 1
+    assert row["name"] == "second_tool"
+    assert json.loads(row["args_inline"]) == {"b": 2}
