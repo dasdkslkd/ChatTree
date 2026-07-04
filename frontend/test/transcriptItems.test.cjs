@@ -68,6 +68,25 @@ function testTranscriptRefreshUsesPerConversationRequestGuardsAndVisibleErrors()
   assert.match(source, /transcriptError=\{transcriptError\}/);
 }
 
+function testTranscriptRefreshGuardsCurrentVisibleNodeBeforeWriting() {
+  const source = fs.readFileSync(path.join(__dirname, '../src/pages/MainPage.tsx'), 'utf8');
+
+  assert.match(source, /currentVisibleTranscriptKeyRef/);
+  assert.match(source, /getTranscriptRequestKey\(currentConversation\.id,\s*selectedBranchTipId\)/);
+  assert.match(source, /const isCurrentVisibleRequest = \(\) => requestKey === currentVisibleTranscriptKeyRef\.current/);
+  assert.match(source, /if \(!isCurrentVisibleRequest\(\)\) return;\s*setTranscriptItems\(normalizeTranscriptItems\(items\)\)/);
+}
+
+function testPlanActionsUseTranscriptItemPlanIdInsteadOfActivePlanFallback() {
+  const source = fs.readFileSync(path.join(__dirname, '../src/pages/MainPage.tsx'), 'utf8');
+
+  assert.match(source, /const handleApprovePlan = useCallback\(async \(item: TranscriptItem\)/);
+  assert.match(source, /const handleRejectPlan = useCallback\(async \(item: TranscriptItem\)/);
+  assert.match(source, /const planId = item\.plan_id \|\| ''/);
+  assert.match(source, /isTranscriptItemVisibleNow\(item,\s*currentConversation\?\.id \?\? null,\s*selectedBranchTipId\)/);
+  assert.doesNotMatch(source, /const planId = activePlan\.plan_id \|\| activePlan\.id \|\| ''/);
+}
+
 function testTranscriptFallbackAndCopySurfacesAreVisible() {
   const renderer = fs.readFileSync(path.join(__dirname, '../src/components/transcript/TranscriptItemRenderer.tsx'), 'utf8');
   const list = fs.readFileSync(path.join(__dirname, '../src/components/transcript/TranscriptList.tsx'), 'utf8');
@@ -91,5 +110,7 @@ testNormalizeOnlyKeepsMainVisibilityInOrder();
 testMainPageDelegatesTranscriptOrderingToTranscriptList();
 testPlanActionsAreRealCallbacks();
 testTranscriptRefreshUsesPerConversationRequestGuardsAndVisibleErrors();
+testTranscriptRefreshGuardsCurrentVisibleNodeBeforeWriting();
+testPlanActionsUseTranscriptItemPlanIdInsteadOfActivePlanFallback();
 testTranscriptFallbackAndCopySurfacesAreVisible();
 console.log('transcriptItems tests passed');

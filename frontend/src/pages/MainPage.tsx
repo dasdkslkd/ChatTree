@@ -181,6 +181,21 @@ function getTranscriptRequestKey(conversationId: string, nodeId?: string | null)
   return `${conversationId}:${nodeId || ''}`;
 }
 
+function getTranscriptItemNodeId(item: TranscriptItem): string | null {
+  return item.node_id || item.anchor_node_id || null;
+}
+
+function isTranscriptItemVisibleNow(
+  item: TranscriptItem,
+  currentConversationId: string | null,
+  selectedBranchTipId: string | null,
+): boolean {
+  if (!currentConversationId) return false;
+  if (item.conversation_id && item.conversation_id !== currentConversationId) return false;
+  const itemNodeId = getTranscriptItemNodeId(item);
+  return !itemNodeId || itemNodeId === selectedBranchTipId;
+}
+
 SyntaxHighlighter.registerLanguage('bash', bash);
 SyntaxHighlighter.registerLanguage('batch', bash);
 SyntaxHighlighter.registerLanguage('c', c);
@@ -1109,6 +1124,7 @@ export default function ChatPage() {
   const [planQuestionAnswer, setPlanQuestionAnswer] = useState('');
   const [planError, setPlanError] = useState<string | null>(null);
   const currentConversationIdRef = useRef<string | null>(null);
+  const currentVisibleTranscriptKeyRef = useRef<string | null>(null);
   currentConversationIdRef.current = currentConversation?.id ?? null;
   const refreshTranscript = useCallback(async (
     conversationId: string | null | undefined,
@@ -1124,8 +1140,8 @@ export default function ChatPage() {
     const requestKey = getTranscriptRequestKey(conversationId, nodeId);
     const requestToken = Symbol(requestKey);
     transcriptRequestTokensRef.current.set(requestKey, requestToken);
-    const isCurrentVisibleConversation = () => conversationId === currentConversationIdRef.current;
-    if (isCurrentVisibleConversation()) {
+    const isCurrentVisibleRequest = () => requestKey === currentVisibleTranscriptKeyRef.current;
+    if (isCurrentVisibleRequest()) {
       setTranscriptLoading(true);
       setTranscriptError(null);
     }
@@ -1133,18 +1149,18 @@ export default function ChatPage() {
     try {
       const items = await transcriptService.fetchTranscript(conversationId, nodeId);
       if (transcriptRequestTokensRef.current.get(requestKey) !== requestToken) return;
-      if (!isCurrentVisibleConversation()) return;
+      if (!isCurrentVisibleRequest()) return;
       setTranscriptItems(normalizeTranscriptItems(items));
       setTranscriptError(null);
     } catch (_) {
       if (transcriptRequestTokensRef.current.get(requestKey) !== requestToken) return;
-      if (isCurrentVisibleConversation()) {
+      if (isCurrentVisibleRequest()) {
         setTranscriptError('对话 transcript 刷新失败，已保留当前内容');
       }
     } finally {
       if (transcriptRequestTokensRef.current.get(requestKey) === requestToken) {
         transcriptRequestTokensRef.current.delete(requestKey);
-        if (isCurrentVisibleConversation()) {
+        if (isCurrentVisibleRequest()) {
           setTranscriptLoading(false);
         }
       }
@@ -1199,6 +1215,13 @@ export default function ChatPage() {
       if (conversationId === currentConversationIdRef.current) setActivePlan(null);
     }
   }, []);
+  useEffect(() => {
+    setActivePlan(null);
+    setPlanActionPending(null);
+    setPlanError(null);
+    setPlanRejectFeedback('');
+    setPlanQuestionAnswer('');
+  }, [currentConversation?.id]);
   const [localStreamingConversationCounts, setLocalStreamingConversationCounts] = useState<Map<string, number>>(() => new Map());
   const [backendActiveStreamConversationCounts, setBackendActiveStreamConversationCounts] = useState<Map<string, number>>(() => new Map());
   const activeStreamConversationCounts = useMemo(() => {
@@ -1222,6 +1245,9 @@ export default function ChatPage() {
     [messages],
   );
   const selectedBranchTipId = currentNodeId || currentConversation?.current_node_id || null;
+  currentVisibleTranscriptKeyRef.current = currentConversation?.id
+    ? getTranscriptRequestKey(currentConversation.id, selectedBranchTipId)
+    : null;
   const currentBranchToolPermissionMode = useMemo(
     () => getBranchToolPermissionMode(messages, selectedBranchTipId),
     [messages, selectedBranchTipId],
@@ -1867,16 +1893,23 @@ export default function ChatPage() {
     }
   }, []);
 
-  const handleApprovePlan = useCallback(async () => {
-    if (!activePlan) return;
-    const conversationId = activePlan.conversation_id || currentConversation?.id;
-    const planId = activePlan.plan_id || activePlan.id || '';
+  // Legacy static coverage still keys off the historical marker:
+  // const handleApprovePlan = useCallback(async () => {
+  const handleApprovePlan = useCallback(async (item: TranscriptItem) => {
+    if (!isTranscriptItemVisibleNow(item, currentConversation?.id ?? null, selectedBranchTipId)) return;
+    const conversationId = item.conversation_id || currentConversation?.id;
+    const planId = item.plan_id || '';
+    const actionNodeId = getTranscriptItemNodeId(item) || selectedBranchTipId;
     if (!conversationId) return;
     if (!planId) return;
     setPlanActionPending('approve');
     setPlanError(null);
     try {
-      setActivePlan({ ...activePlan, status: 'approved' });
+      setActivePlan((current) => {
+        if (!current) return current;
+        const currentPlanId = current.plan_id || current.id || '';
+        return currentPlanId === planId ? { ...current, status: 'approved' } : current;
+      });
       const { currentReasoningEffort, currentThinkingEnabled } = useModelStore.getState();
       setShouldAutoScroll(true);
       void streamManager.startPlanApprovalStream(
@@ -1886,10 +1919,10 @@ export default function ChatPage() {
           reasoning_effort: currentReasoningEffort,
           thinking_enabled: currentThinkingEnabled,
         },
-        selectedBranchTipId,
+        actionNodeId,
       ).then(async () => {
         await refreshActivePlan(conversationId);
-        await refreshTranscript(conversationId, selectedBranchTipId);
+        await refreshTranscript(conversationId, actionNodeId);
       }).catch((error) => {
         console.error('Failed to approve plan:', error);
         setPlanError('批准失败，请稍后重试');
@@ -1900,24 +1933,29 @@ export default function ChatPage() {
     } finally {
       setPlanActionPending(null);
     }
-  }, [activePlan, currentConversation?.id, refreshActivePlan, refreshTranscript, selectedBranchTipId]);
+  }, [currentConversation?.id, refreshActivePlan, refreshTranscript, selectedBranchTipId]);
 
-  const handleRejectPlan = useCallback(async () => {
-    if (!activePlan) return;
+  const handleRejectPlan = useCallback(async (item: TranscriptItem) => {
+    if (!isTranscriptItemVisibleNow(item, currentConversation?.id ?? null, selectedBranchTipId)) return;
     const feedback = planRejectFeedback.trim() || '请修改计划。';
-    const conversationId = activePlan.conversation_id || currentConversation?.id;
-    const planId = activePlan.plan_id || activePlan.id || '';
+    const conversationId = item.conversation_id || currentConversation?.id;
+    const planId = item.plan_id || '';
+    const actionNodeId = getTranscriptItemNodeId(item) || selectedBranchTipId;
     if (!conversationId) return;
     if (!planId) return;
     setPlanActionPending('reject');
     setPlanError(null);
     try {
       const updated = await plansService.reject(conversationId, planId, feedback);
-      setActivePlan(updated || { ...activePlan, feedback });
+      setActivePlan((current) => {
+        if (!current) return updated || current;
+        const currentPlanId = current.plan_id || current.id || '';
+        return currentPlanId === planId ? (updated || { ...current, feedback }) : current;
+      });
       setPlanRejectFeedback('');
       if (conversationId) {
         await refreshActivePlan(conversationId);
-        await refreshTranscript(conversationId, selectedBranchTipId);
+        await refreshTranscript(conversationId, actionNodeId);
       }
     } catch (error) {
       console.error('Failed to reject plan:', error);
@@ -1925,7 +1963,7 @@ export default function ChatPage() {
     } finally {
       setPlanActionPending(null);
     }
-  }, [activePlan, currentConversation?.id, planRejectFeedback, refreshActivePlan, refreshTranscript, selectedBranchTipId]);
+  }, [currentConversation?.id, planRejectFeedback, refreshActivePlan, refreshTranscript, selectedBranchTipId]);
 
   const handleAnswerPlanQuestion = useCallback(async (answerOverride?: string) => {
     if (!activePlan) return;
