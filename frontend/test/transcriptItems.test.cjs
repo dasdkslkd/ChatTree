@@ -23,5 +23,17 @@ function testNormalizeKeepsBackendOrderAndFiltersHidden() {
   assert.deepEqual(items.map((item) => item.id), ['a', 'c']);
 }
 
+function testNormalizeOnlyKeepsMainVisibilityInOrder() {
+  const items = normalizeTranscriptItems([
+    { id: 'a', type: 'user_message' },
+    { id: 'b', type: 'plan_card', visibility: 'side_panel' },
+    { id: 'c', type: 'run_draft', visibility: 'main' },
+    { id: 'd', type: 'tool_call', visibility: 'drawer' },
+    { id: 'e', type: 'assistant_message', visibility: 'main' },
+  ]);
+  assert.deepEqual(items.map((item) => item.id), ['a', 'c', 'e']);
+}
+
 testNormalizeKeepsBackendOrderAndFiltersHidden();
+testNormalizeOnlyKeepsMainVisibilityInOrder();
 console.log('transcriptItems tests passed');
