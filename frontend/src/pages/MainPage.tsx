@@ -2025,7 +2025,7 @@ export default function ChatPage() {
       });
       const { currentReasoningEffort, currentThinkingEnabled } = useModelStore.getState();
       setShouldAutoScroll(true);
-      void streamManager.startPlanApprovalStream(
+      await streamManager.startPlanApprovalStream(
         conversationId,
         planId,
         {
@@ -2033,13 +2033,9 @@ export default function ChatPage() {
           thinking_enabled: currentThinkingEnabled,
         },
         actionNodeId,
-      ).then(async () => {
-        await refreshActivePlan(conversationId);
-        await refreshTranscript(conversationId, actionNodeId);
-      }).catch((error) => {
-        console.error('Failed to approve plan:', error);
-        setPlanError('批准失败，请稍后重试');
-      });
+      );
+      await refreshActivePlan(conversationId);
+      await refreshTranscript(conversationId, actionNodeId);
     } catch (error) {
       console.error('Failed to approve plan:', error);
       setPlanError('批准失败，请稍后重试');
@@ -2067,7 +2063,7 @@ export default function ChatPage() {
       const { currentReasoningEffort, currentThinkingEnabled } = useModelStore.getState();
       setShouldAutoScroll(true);
       setPlanRejectFeedback('');
-      void streamManager.startPlanRejectStream(
+      await streamManager.startPlanRejectStream(
         conversationId,
         planId,
         {
@@ -2076,13 +2072,9 @@ export default function ChatPage() {
           thinking_enabled: currentThinkingEnabled,
         },
         actionNodeId,
-      ).then(async () => {
-        await refreshActivePlan(conversationId);
-        await refreshTranscript(conversationId, actionNodeId);
-      }).catch((error) => {
-        console.error('Failed to reject plan:', error);
-        setPlanError('提交修改意见失败，请稍后重试');
-      });
+      );
+      await refreshActivePlan(conversationId);
+      await refreshTranscript(conversationId, actionNodeId);
     } catch (error) {
       console.error('Failed to reject plan:', error);
       setPlanError('提交修改意见失败，请稍后重试');

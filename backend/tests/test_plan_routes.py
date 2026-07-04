@@ -363,6 +363,36 @@ def test_plan_approve_stream_uses_tool_result_continuation():
     assert "User has approved your plan" in chat_manager.calls[0]["tool_result_content"]
 
 
+def test_plan_approve_stream_without_exit_tool_call_id_does_not_mutate_or_context():
+    ledger = PlanLedger()
+    run(ledger.enter_plan_mode(
+        conversation_id="conv-1",
+        node_id="node-current",
+        previous_permission_mode="modify_only",
+    ))
+    awaiting = run(ledger.submit_plan(
+        conversation_id="conv-1",
+        plan="## Plan\nDo it.",
+        node_id="node-current",
+        run_id="run-plan",
+    ))
+    chat_manager = FakePlanChatManager()
+    client = client_for_plan_stream(chat_manager, RunManager(), ledger)
+
+    response = client.post(
+        f"/conversations/conv-1/plans/{awaiting.plan_id}/approve/stream",
+        json={"node_id": "node-current"},
+    )
+
+    current = run(ledger.get_plan("conv-1", awaiting.plan_id))
+    pending_context = run(ledger.consume_pending_context("conv-1"))
+    assert response.status_code == 409
+    assert current.status == PlanStatus.AWAITING_APPROVAL
+    assert current.proposal_status == "awaiting_approval"
+    assert pending_context == []
+    assert chat_manager.calls == []
+
+
 def test_plan_approve_stream_restores_snapshot_before_decision():
     original_ledger = PlanLedger()
     conversation = Conversation(title="approve stream persisted plan")
@@ -423,6 +453,36 @@ def test_plan_answer_stream_uses_tool_result_continuation():
     assert "默认显示" in chat_manager.calls[0]["tool_result_content"]
 
 
+def test_plan_answer_stream_without_question_tool_call_id_does_not_mutate_or_context():
+    ledger = PlanLedger()
+    run(ledger.enter_plan_mode(
+        conversation_id="conv-1",
+        node_id="node-current",
+        previous_permission_mode="modify_only",
+    ))
+    question = run(ledger.ask_user_question(
+        conversation_id="conv-1",
+        question="项目栏默认显示吗？",
+        node_id="node-current",
+        run_id="run-plan",
+    ))
+    chat_manager = FakePlanChatManager()
+    client = client_for_plan_stream(chat_manager, RunManager(), ledger)
+
+    response = client.post(
+        f"/conversations/conv-1/plans/{question.plan_id}/answer/stream",
+        json={"node_id": "node-current", "answer": "默认显示"},
+    )
+
+    current = run(ledger.get_plan("conv-1", question.plan_id))
+    pending_context = run(ledger.consume_pending_context("conv-1"))
+    assert response.status_code == 409
+    assert current.status == PlanStatus.AWAITING_QUESTION
+    assert current.question.get("answer") is None
+    assert pending_context == []
+    assert chat_manager.calls == []
+
+
 def test_plan_answer_stream_restores_snapshot_before_decision():
     original_ledger = PlanLedger()
     conversation = Conversation(title="answer stream persisted question")
@@ -480,6 +540,37 @@ def test_reject_plan_stream_without_feedback_uses_tool_result_continuation():
     assert chat_manager.calls[-1]["tool_call_id"] == "call-exit-1"
     assert "did not provide specific feedback" in chat_manager.calls[-1]["tool_result_content"]
     assert "message_subtype" not in chat_manager.calls[-1]
+
+
+def test_plan_reject_stream_without_exit_tool_call_id_does_not_mutate_or_context():
+    ledger = PlanLedger()
+    run(ledger.enter_plan_mode(
+        conversation_id="conv-1",
+        node_id="node-current",
+        previous_permission_mode="modify_only",
+    ))
+    awaiting = run(ledger.submit_plan(
+        conversation_id="conv-1",
+        plan="## Plan\nDo it.",
+        node_id="node-current",
+        run_id="run-plan",
+    ))
+    chat_manager = FakePlanChatManager()
+    client = client_for_plan_stream(chat_manager, RunManager(), ledger)
+
+    response = client.post(
+        f"/conversations/conv-1/plans/{awaiting.plan_id}/reject/stream",
+        json={"feedback": "需要缩小范围"},
+    )
+
+    current = run(ledger.get_plan("conv-1", awaiting.plan_id))
+    pending_context = run(ledger.consume_pending_context("conv-1"))
+    assert response.status_code == 409
+    assert current.status == PlanStatus.AWAITING_APPROVAL
+    assert current.proposal_status == "awaiting_approval"
+    assert current.feedback == []
+    assert pending_context == []
+    assert chat_manager.calls == []
 
 
 def test_plan_reject_stream_restores_snapshot_before_decision():

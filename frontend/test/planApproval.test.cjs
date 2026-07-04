@@ -73,12 +73,13 @@ function testPlanProposalCardUsesTranscriptPlanCallbacks() {
 
 function testApprovePlanStartsStructuredControlStream() {
   const mainPageSource = fs.readFileSync(path.join(__dirname, '../src/pages/MainPage.tsx'), 'utf8');
-  const handlerMatch = mainPageSource.match(/const handleApprovePlan = useCallback\(async \(\) => \{[\s\S]*?\n  \}, \[/);
+  const handlerMatch = mainPageSource.match(/const handleApprovePlan = useCallback\(async \(item: TranscriptItem\) => \{[\s\S]*?\n  \}, \[/);
   assert.ok(handlerMatch, 'handleApprovePlan handler should be present');
   assert.doesNotMatch(handlerMatch[0], /plansService\.approve/);
   assert.doesNotMatch(handlerMatch[0], /继续实现已批准的计划/);
   assert.doesNotMatch(handlerMatch[0], /void startStreaming\(/);
-  assert.match(handlerMatch[0], /void streamManager\.startPlanApprovalStream\(/);
+  assert.doesNotMatch(handlerMatch[0], /void streamManager\.startPlanApprovalStream\(/);
+  assert.match(handlerMatch[0], /await streamManager\.startPlanApprovalStream\(/);
   assert.match(handlerMatch[0], /selectedBranchTipId/);
 }
 
@@ -98,7 +99,8 @@ function testRejectPlanStartsStructuredControlStream() {
   const handlerMatch = mainPageSource.match(/const handleRejectPlan = useCallback\(async \(item: TranscriptItem\) => \{[\s\S]*?\n  \}, \[/);
   assert.ok(handlerMatch, 'handleRejectPlan handler should be present');
   assert.doesNotMatch(handlerMatch[0], /plansService\.reject\(/);
-  assert.match(handlerMatch[0], /void streamManager\.startPlanRejectStream\(/);
+  assert.doesNotMatch(handlerMatch[0], /void streamManager\.startPlanRejectStream\(/);
+  assert.match(handlerMatch[0], /await streamManager\.startPlanRejectStream\(/);
   assert.match(handlerMatch[0], /feedback,/);
   assert.match(handlerMatch[0], /planId,/);
   assert.match(handlerMatch[0], /actionNodeId,\s*\)/);

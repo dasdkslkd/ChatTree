@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from backend.api.dependencies import get_chat_manager, get_plan_ledger, get_run_manager
 from backend.api.routes.messages import _subscribe_sse, build_stream_chunk_data
 from backend.core.chat.chat_manager import ChatManager
-from backend.core.plans import PlanLedger, PlanNotFoundError
+from backend.core.plans import PlanLedger, PlanNotFoundError, PlanStatus
 from backend.core.runs import RunKind, RunManager, RunStatus
 
 router = APIRouter()
@@ -60,6 +60,30 @@ async def _restore_plan_snapshot_if_available(request: Request, conversation_id:
     restore = getattr(chat_manager, "restore_plan_snapshot", None)
     if callable(restore):
         await restore(conversation_id)
+
+
+async def _require_plan_stream_tool_call_id(
+    plan_ledger: PlanLedger,
+    *,
+    conversation_id: str,
+    plan_id: str,
+    expected_status: PlanStatus,
+    tool_call_attr: str,
+    missing_detail: str,
+) -> str:
+    current = await plan_ledger.get_active_or_awaiting(conversation_id)
+    if current is None or current.plan_id != plan_id:
+        current = await plan_ledger.get_plan(conversation_id, plan_id)
+    if current is None:
+        raise HTTPException(status_code=404, detail="plan not found")
+    if current.status != expected_status:
+        if expected_status == PlanStatus.AWAITING_APPROVAL:
+            raise HTTPException(status_code=400, detail="plan must be awaiting approval")
+        raise HTTPException(status_code=400, detail="plan must be awaiting question")
+    tool_call_id = str(getattr(current, tool_call_attr, "") or "")
+    if not tool_call_id:
+        raise HTTPException(status_code=409, detail=missing_detail)
+    return tool_call_id
 
 
 @router.get("/conversations/{conversation_id}/plans/current", response_model=Dict[str, Any])
@@ -172,6 +196,7 @@ async def _plan_action_stream(
     chat_manager: ChatManager,
     run_manager: RunManager,
     plan_ledger: PlanLedger,
+    tool_call_id: str,
 ) -> AsyncIterator[str]:
     is_approval = message_subtype == "plan_approval_response"
     is_rejection = message_subtype == "plan_rejection_response"
@@ -198,9 +223,6 @@ async def _plan_action_stream(
         try:
             if is_approval:
                 plan = await plan_ledger.approve_plan(conversation_id=conversation_id, plan_id=plan_id)
-                tool_call_id = plan.exit_tool_call_id or ""
-                if not tool_call_id:
-                    raise HTTPException(status_code=409, detail="approved plan has no exit_plan_mode tool_call_id")
                 tool_result_content = plan_ledger.approved_tool_result_content(plan)
                 tool_name = "exit_plan_mode"
                 continuation_permission_mode = plan.previous_permission_mode
@@ -210,9 +232,6 @@ async def _plan_action_stream(
                     plan_id=plan_id,
                     feedback=content,
                 )
-                tool_call_id = plan.exit_tool_call_id or ""
-                if not tool_call_id:
-                    raise HTTPException(status_code=409, detail="rejected plan has no exit_plan_mode tool_call_id")
                 tool_result_content = plan_ledger.rejected_tool_result_content(plan)
                 tool_name = "exit_plan_mode"
                 continuation_permission_mode = "plan"
@@ -222,9 +241,6 @@ async def _plan_action_stream(
                     plan_id=plan_id,
                     answer=content,
                 )
-                tool_call_id = plan.question_tool_call_id or ""
-                if not tool_call_id:
-                    raise HTTPException(status_code=409, detail="answered plan has no ask_user_question tool_call_id")
                 tool_result_content = plan_ledger.question_answer_tool_result_content(plan)
                 tool_name = "ask_user_question"
                 continuation_permission_mode = "plan"
@@ -293,6 +309,14 @@ async def approve_plan_stream(
 ):
     await _restore_plan_snapshot_if_available(request_context, conversation_id)
     stream_request = request or PlanActionStreamRequest()
+    tool_call_id = await _require_plan_stream_tool_call_id(
+        plan_ledger,
+        conversation_id=conversation_id,
+        plan_id=plan_id,
+        expected_status=PlanStatus.AWAITING_APPROVAL,
+        tool_call_attr="exit_tool_call_id",
+        missing_detail="plan has no exit_plan_mode tool_call_id",
+    )
     return StreamingResponse(
         _plan_action_stream(
             conversation_id=conversation_id,
@@ -303,6 +327,7 @@ async def approve_plan_stream(
             chat_manager=chat_manager,
             run_manager=run_manager,
             plan_ledger=plan_ledger,
+            tool_call_id=tool_call_id,
         ),
         media_type="text/event-stream",
         headers={
@@ -325,6 +350,14 @@ async def reject_plan_stream(
 ):
     await _restore_plan_snapshot_if_available(request_context, conversation_id)
     stream_request = request or PlanRejectStreamRequest()
+    tool_call_id = await _require_plan_stream_tool_call_id(
+        plan_ledger,
+        conversation_id=conversation_id,
+        plan_id=plan_id,
+        expected_status=PlanStatus.AWAITING_APPROVAL,
+        tool_call_attr="exit_tool_call_id",
+        missing_detail="plan has no exit_plan_mode tool_call_id",
+    )
     feedback = stream_request.feedback or ""
     return StreamingResponse(
         _plan_action_stream(
@@ -336,6 +369,7 @@ async def reject_plan_stream(
             chat_manager=chat_manager,
             run_manager=run_manager,
             plan_ledger=plan_ledger,
+            tool_call_id=tool_call_id,
         ),
         media_type="text/event-stream",
         headers={
@@ -357,6 +391,14 @@ async def answer_plan_question_stream(
     plan_ledger: PlanLedger = Depends(get_plan_ledger),
 ):
     await _restore_plan_snapshot_if_available(request_context, conversation_id)
+    tool_call_id = await _require_plan_stream_tool_call_id(
+        plan_ledger,
+        conversation_id=conversation_id,
+        plan_id=plan_id,
+        expected_status=PlanStatus.AWAITING_QUESTION,
+        tool_call_attr="question_tool_call_id",
+        missing_detail="plan has no ask_user_question tool_call_id",
+    )
     return StreamingResponse(
         _plan_action_stream(
             conversation_id=conversation_id,
@@ -367,6 +409,7 @@ async def answer_plan_question_stream(
             chat_manager=chat_manager,
             run_manager=run_manager,
             plan_ledger=plan_ledger,
+            tool_call_id=tool_call_id,
         ),
         media_type="text/event-stream",
         headers={
