@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import gzip
+import hashlib
 import json
+import os
 import uuid
 from time import time
 from typing import Any, Iterable
 
 from .blob_store import BlobStore
-from .content import store_text_content
+from .content import INLINE_TEXT_LIMIT, StoredText, store_text_content
 from .database import SQLitePersistence
 
 
@@ -463,7 +466,7 @@ class SQLitePlanRepository:
         if str(item.get("conversation_id") or "") != conversation_id:
             raise ValueError("snapshot record conversation_id mismatch")
         plan_text = str(item.get("plan") or "")
-        stored = store_text_content(self.persistence, plan_text)
+        stored = self._store_text_content(conn, plan_text)
         created_at = self._float_field(item.get("created_at"), time())
         updated_at = self._float_field(item.get("updated_at"), created_at)
         conn.execute(
@@ -532,3 +535,91 @@ class SQLitePlanRepository:
 
     def _value(self, value: Any) -> str:
         return str(getattr(value, "value", value))
+
+    def _store_text_content(
+        self,
+        conn: Any,
+        text: str,
+        *,
+        preview_limit: int = 4096,
+        inline_limit: int = INLINE_TEXT_LIMIT,
+    ) -> StoredText:
+        value = text or ""
+        preview = value[:preview_limit]
+        data = value.encode("utf-8")
+        size = len(data)
+        if size <= inline_limit:
+            return StoredText(
+                inline=value,
+                blob_id=None,
+                preview=preview,
+                size=size,
+            )
+
+        blob_id = hashlib.sha256(data).hexdigest()
+        relative_path = f"blobs/{blob_id[:2]}/{blob_id}.gz"
+        final_path = self.persistence.blobs_dir / blob_id[:2] / f"{blob_id}.gz"
+        compressed = gzip.compress(data)
+        row = conn.execute(
+            """
+            SELECT id
+            FROM blobs
+            WHERE id = ?
+            """,
+            (blob_id,),
+        ).fetchone()
+        if row:
+            conn.execute(
+                """
+                UPDATE blobs
+                SET ref_count = ref_count + 1,
+                    last_accessed_at = strftime('%s', 'now')
+                WHERE id = ?
+                """,
+                (blob_id,),
+            )
+        else:
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+            self.persistence.tmp_dir.mkdir(parents=True, exist_ok=True)
+            tmp_path = (
+                self.persistence.tmp_dir
+                / f"{blob_id}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+            )
+            tmp_path.write_bytes(compressed)
+            try:
+                os.replace(tmp_path, final_path)
+            finally:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            conn.execute(
+                """
+                INSERT INTO blobs (
+                  id,
+                  path,
+                  mime_type,
+                  compression,
+                  byte_size,
+                  stored_size,
+                  char_count,
+                  ref_count,
+                  created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1, strftime('%s', 'now'))
+                """,
+                (
+                    blob_id,
+                    relative_path,
+                    "text/plain; charset=utf-8",
+                    "gzip",
+                    size,
+                    len(compressed),
+                    len(value),
+                ),
+            )
+
+        return StoredText(
+            inline=None,
+            blob_id=blob_id,
+            preview=preview,
+            size=size,
+        )

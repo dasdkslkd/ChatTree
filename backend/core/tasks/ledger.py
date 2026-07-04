@@ -320,6 +320,12 @@ class TaskLedger:
         # Stable persistence boundary: callers may store this per-conversation
         # list and later restore it with load_snapshot without inspecting internals.
         async with self._lock:
+            if self._repository is not None:
+                records = self._repository.list_tasks(conversation_id, include_finished=True)
+                return [
+                    self._record_from_row(record).to_dict()
+                    for record in records
+                ]
             records = list(self._tasks_by_conversation.get(conversation_id, {}).values())
             return [record.to_dict() for record in sorted(records, key=lambda task: (task.created_at, task.task_id))]
 
@@ -331,6 +337,12 @@ class TaskLedger:
                 raise ValueError("snapshot record conversation_id mismatch")
             loaded[record.task_id] = record
         async with self._lock:
+            if self._repository is not None:
+                self._repository.replace_snapshot(
+                    conversation_id,
+                    [record.to_dict() for record in loaded.values()],
+                )
+                return
             self._tasks_by_conversation[conversation_id] = loaded
 
     def install_run_finish_listener(self, run_manager: Any) -> bool:

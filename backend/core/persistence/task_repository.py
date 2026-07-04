@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import gzip
+import hashlib
 import json
+import os
 import uuid
 from time import time
 from typing import Any, Iterable
@@ -8,7 +11,7 @@ from typing import Any, Iterable
 from backend.core.tasks.types import FINISHED_TASK_STATUSES, OPEN_TASK_STATUSES
 
 from .blob_store import BlobStore
-from .content import store_text_content
+from .content import INLINE_TEXT_LIMIT, StoredText, store_text_content
 from .database import SQLitePersistence
 
 
@@ -221,6 +224,23 @@ class SQLiteTaskRepository:
             include_finished=False,
         )
 
+    def replace_snapshot(
+        self,
+        conversation_id: str,
+        records: Iterable[dict[str, Any]],
+    ) -> None:
+        with self.persistence.connect() as conn:
+            conn.execute(
+                "DELETE FROM task_events WHERE conversation_id = ?",
+                (conversation_id,),
+            )
+            conn.execute(
+                "DELETE FROM tasks WHERE conversation_id = ?",
+                (conversation_id,),
+            )
+            for item in records:
+                self._insert_task_snapshot(conn, conversation_id, dict(item))
+
     def _require_task(self, conversation_id: str, task_id: str) -> dict[str, Any]:
         task = self.get_task(conversation_id, task_id)
         if task is None:
@@ -269,6 +289,63 @@ class SQLiteTaskRepository:
             (task_id, conversation_id, event_type, self._json_field(payload), created_at),
         )
 
+    def _insert_task_snapshot(
+        self,
+        conn: Any,
+        conversation_id: str,
+        item: dict[str, Any],
+    ) -> str:
+        task_id = str(item.get("task_id") or item.get("id") or "")
+        if not task_id:
+            raise KeyError(task_id)
+        if str(item.get("conversation_id") or "") != conversation_id:
+            raise ValueError("snapshot record conversation_id mismatch")
+        detail = str(item.get("detail") or "")
+        stored = self._store_text_content(conn, detail)
+        created_at = self._float_field(item.get("created_at"), time())
+        updated_at = self._float_field(item.get("updated_at"), created_at)
+        finished_at = item.get("finished_at")
+        conn.execute(
+            """
+            INSERT INTO tasks (
+              id,
+              conversation_id,
+              status,
+              owner_type,
+              owner_run_id,
+              title,
+              detail_inline,
+              detail_blob_id,
+              evidence_summary,
+              evidence_run_id,
+              metadata_json,
+              created_at,
+              updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_id,
+                conversation_id,
+                self._value(item.get("status") or "pending"),
+                self._value(item.get("owner_type") or "assistant"),
+                item.get("owner_run_id"),
+                str(item.get("title") or ""),
+                stored.inline,
+                stored.blob_id,
+                str(item.get("evidence_summary") or ""),
+                item.get("evidence_run_id"),
+                self._metadata_field(
+                    dict(item.get("metadata") or {}),
+                    created_by_run_id=item.get("created_by_run_id"),
+                    finished_at=self._float_or_none(finished_at),
+                ),
+                created_at,
+                updated_at,
+            ),
+        )
+        return task_id
+
     def _metadata_field(
         self,
         metadata: dict[str, Any],
@@ -296,3 +373,105 @@ class SQLiteTaskRepository:
 
     def _value(self, value: Any) -> str:
         return str(getattr(value, "value", value))
+
+    def _float_field(self, value: Any, default: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _float_or_none(self, value: Any) -> float | None:
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _store_text_content(
+        self,
+        conn: Any,
+        text: str,
+        *,
+        preview_limit: int = 4096,
+        inline_limit: int = INLINE_TEXT_LIMIT,
+    ) -> StoredText:
+        value = text or ""
+        preview = value[:preview_limit]
+        data = value.encode("utf-8")
+        size = len(data)
+        if size <= inline_limit:
+            return StoredText(
+                inline=value,
+                blob_id=None,
+                preview=preview,
+                size=size,
+            )
+
+        blob_id = hashlib.sha256(data).hexdigest()
+        relative_path = f"blobs/{blob_id[:2]}/{blob_id}.gz"
+        final_path = self.persistence.blobs_dir / blob_id[:2] / f"{blob_id}.gz"
+        compressed = gzip.compress(data)
+        row = conn.execute(
+            """
+            SELECT id
+            FROM blobs
+            WHERE id = ?
+            """,
+            (blob_id,),
+        ).fetchone()
+        if row:
+            conn.execute(
+                """
+                UPDATE blobs
+                SET ref_count = ref_count + 1,
+                    last_accessed_at = strftime('%s', 'now')
+                WHERE id = ?
+                """,
+                (blob_id,),
+            )
+        else:
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+            self.persistence.tmp_dir.mkdir(parents=True, exist_ok=True)
+            tmp_path = (
+                self.persistence.tmp_dir
+                / f"{blob_id}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+            )
+            tmp_path.write_bytes(compressed)
+            try:
+                os.replace(tmp_path, final_path)
+            finally:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            conn.execute(
+                """
+                INSERT INTO blobs (
+                  id,
+                  path,
+                  mime_type,
+                  compression,
+                  byte_size,
+                  stored_size,
+                  char_count,
+                  ref_count,
+                  created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1, strftime('%s', 'now'))
+                """,
+                (
+                    blob_id,
+                    relative_path,
+                    "text/plain; charset=utf-8",
+                    "gzip",
+                    size,
+                    len(compressed),
+                    len(value),
+                ),
+            )
+
+        return StoredText(
+            inline=None,
+            blob_id=blob_id,
+            preview=preview,
+            size=size,
+        )
