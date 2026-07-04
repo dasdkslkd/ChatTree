@@ -12,7 +12,10 @@ require.extensions['.ts'] = function loadTs(module, filename) {
   module._compile(output, filename);
 };
 
-const { normalizeTranscriptItems } = require(path.join(__dirname, '../src/utils/transcriptItems.ts'));
+const {
+  mergeLiveRunTranscriptItems,
+  normalizeTranscriptItems,
+} = require(path.join(__dirname, '../src/utils/transcriptItems.ts'));
 
 function testNormalizeKeepsBackendOrderAndFiltersHidden() {
   const items = normalizeTranscriptItems([
@@ -78,6 +81,66 @@ function testNormalizeDoesNotGroupProcessToolAndAnswerBlocks() {
   ]);
 }
 
+function testLiveRunOverlayReplacesPersistedDraftWithSingleLegacyRunItemAtOriginalPosition() {
+  const items = mergeLiveRunTranscriptItems(
+    [
+      { id: 'user-1', type: 'user_message', node_id: 'node-1' },
+      { id: 'draft-1', type: 'run_draft', run_id: 'run-1', node_id: 'node-1' },
+      { id: 'plan-1', type: 'plan_card', node_id: 'node-1' },
+    ],
+    [
+      {
+        runId: 'run-1',
+        nodeId: 'node-1',
+        targetNodeId: 'node-1',
+        anchorNodeId: 'parent-1',
+        items: [
+          {
+            id: 'live-run-draft',
+            type: 'run_draft',
+            run_id: 'run-1',
+            props: { live_run_draft: true },
+          },
+        ],
+      },
+    ],
+  );
+
+  assert.deepEqual(items.map((item) => item.id), [
+    'user-1',
+    'live-run-draft',
+    'plan-1',
+  ]);
+  assert.equal(items[1].type, 'run_draft');
+  assert.equal(items[1].props.live_run_draft, true);
+}
+
+function testLiveRunOverlayAnchorsToBranchInsteadOfAppendingToTail() {
+  const items = mergeLiveRunTranscriptItems(
+    [
+      { id: 'anchor-user', type: 'user_message', node_id: 'anchor-node' },
+      { id: 'task-progress', type: 'task_progress', node_id: 'unrelated-node' },
+    ],
+    [
+      {
+        runId: 'run-2',
+        nodeId: null,
+        targetNodeId: null,
+        anchorNodeId: 'anchor-node',
+        items: [
+          { id: 'live-answer-2', type: 'assistant_answer', run_id: 'run-2' },
+        ],
+      },
+    ],
+  );
+
+  assert.deepEqual(items.map((item) => item.id), [
+    'anchor-user',
+    'live-answer-2',
+    'task-progress',
+  ]);
+}
+
 function testMainPageDelegatesTranscriptOrderingToTranscriptList() {
   const source = fs.readFileSync(path.join(__dirname, '../src/pages/MainPage.tsx'), 'utf8');
   assert.match(source, /<TranscriptList/);
@@ -87,13 +150,20 @@ function testMainPageDelegatesTranscriptOrderingToTranscriptList() {
   assert.doesNotMatch(source, /activeRunDrafts\.map\(/);
 }
 
-function testMainPageKeepsAssistantTimelineOutOfMainTranscriptPath() {
+function testMainPageUsesLiveTranscriptOverlayWithLegacyDraftRendering() {
   const source = fs.readFileSync(path.join(__dirname, '../src/pages/MainPage.tsx'), 'utf8');
 
   assert.doesNotMatch(source, /\bgetAssistantTimeline\b/);
   assert.match(source, /\bgetSideRunAssistantTimeline\b/);
+  assert.match(source, /\bcreateLiveRunTranscriptItem\b/);
+  assert.match(source, /\bliveMainTranscriptRunOverlays\b/);
+  assert.match(source, /\bmergeLiveRunTranscriptItems\b/);
+  assert.match(source, /\brenderLiveRunDraftTranscriptItem\b/);
+  assert.match(source, /className="processed-fold expanded"/);
+  assert.match(source, /<ThinkingBlock[\s\S]*streaming=\{block\.key === props\.activeReasoningKey\}/);
+  assert.match(source, /<ToolCallGroup key=\{block\.key\} items=\{block\.items\} \/>/);
   assert.match(source, /const sideRunDrafts = useMemo/);
-  assert.doesNotMatch(source, /transcriptItems[\s\S]*activeRunStates[\s\S]*run_draft/);
+  assert.doesNotMatch(source, /activeRunDrafts\.map\(/);
 }
 
 function testPlanActionsAreRealCallbacks() {
@@ -183,6 +253,31 @@ function testTranscriptFallbackAndCopySurfacesAreVisible() {
   assert.match(mainPage, /onCopyItem=\{handleCopyTranscriptItem\}/);
 }
 
+function testTranscriptMessageItemsUseLegacyChatBubbleStyling() {
+  const userMessage = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/UserMessageItem.tsx'), 'utf8');
+  const assistantAnswer = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/AssistantAnswerItem.tsx'), 'utf8');
+  const assistantProcess = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/AssistantProcessItem.tsx'), 'utf8');
+  const toolGroup = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/ToolGroupItem.tsx'), 'utf8');
+
+  assert.match(userMessage, /chat-message-row w-full my-2 flex flex-col group items-end/);
+  assert.match(userMessage, /rounded-2xl rounded-br-sm/);
+  assert.match(userMessage, /self-end justify-end/);
+
+  assert.match(assistantAnswer, /chat-message-row w-full my-2 flex flex-col group items-start/);
+  assert.match(assistantAnswer, /rounded-2xl leading-relaxed/);
+  assert.match(assistantAnswer, /self-start justify-start/);
+
+  assert.match(assistantProcess, /className=\{cn\('thought'/);
+  assert.match(assistantProcess, /className="thought-head"/);
+  assert.match(assistantProcess, /tool_interactions/);
+  assert.match(assistantProcess, /renderProcessTimelineBlock/);
+  assert.doesNotMatch(assistantProcess, /transcript-assistant-process/);
+
+  assert.match(toolGroup, /className=\{cn\('tool-group'/);
+  assert.match(toolGroup, /className="tool-group-header"/);
+  assert.doesNotMatch(toolGroup, /transcript-tool-group/);
+}
+
 function testCopyHandlerOnlyReachesRealTranscriptMessages() {
   const renderer = fs.readFileSync(path.join(__dirname, '../src/components/transcript/TranscriptItemRenderer.tsx'), 'utf8');
   const planCard = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/PlanCardItem.tsx'), 'utf8');
@@ -206,8 +301,10 @@ testNormalizeKeepsBackendOrderAndFiltersHidden();
 testNormalizeOnlyKeepsMainVisibilityInOrder();
 testNormalizeUsesBackendItemTypeWithoutReordering();
 testNormalizeDoesNotGroupProcessToolAndAnswerBlocks();
+testLiveRunOverlayReplacesPersistedDraftWithSingleLegacyRunItemAtOriginalPosition();
+testLiveRunOverlayAnchorsToBranchInsteadOfAppendingToTail();
 testMainPageDelegatesTranscriptOrderingToTranscriptList();
-testMainPageKeepsAssistantTimelineOutOfMainTranscriptPath();
+testMainPageUsesLiveTranscriptOverlayWithLegacyDraftRendering();
 testPlanActionsAreRealCallbacks();
 testPlanQuestionIsRenderedAndAnsweredFromTranscriptItem();
 testTranscriptRefreshUsesPerConversationRequestGuardsAndVisibleErrors();
@@ -215,5 +312,6 @@ testTranscriptRefreshGuardsCurrentVisibleNodeBeforeWriting();
 testPlanActionsUseTranscriptItemPlanIdInsteadOfActivePlanFallback();
 testPlanQuestionAnswerUsesTranscriptItemPlanIdInsteadOfActivePlanFallback();
 testTranscriptFallbackAndCopySurfacesAreVisible();
+testTranscriptMessageItemsUseLegacyChatBubbleStyling();
 testCopyHandlerOnlyReachesRealTranscriptMessages();
 console.log('transcriptItems tests passed');

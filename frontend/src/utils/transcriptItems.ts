@@ -27,3 +27,70 @@ export function normalizeTranscriptItems(items: TranscriptItem[]): TranscriptIte
     .filter((item) => !item.visibility || item.visibility === 'main')
     .map(normalizeTranscriptItem);
 }
+
+export interface LiveRunTranscriptOverlay {
+  runId: string;
+  nodeId?: string | null;
+  targetNodeId?: string | null;
+  anchorNodeId?: string | null;
+  items: TranscriptItem[];
+}
+
+function itemBelongsToRun(item: TranscriptItem, runId: string): boolean {
+  return item.run_id === runId;
+}
+
+function itemMatchesNode(item: TranscriptItem, nodeId: string | null | undefined): boolean {
+  return Boolean(nodeId && (item.node_id === nodeId || item.anchor_node_id === nodeId));
+}
+
+function findLiveRunInsertionIndex(items: TranscriptItem[], overlay: LiveRunTranscriptOverlay): number {
+  const existingRunIndex = items.findIndex((item) => itemBelongsToRun(item, overlay.runId));
+  if (existingRunIndex >= 0) return existingRunIndex;
+
+  const targetNodeId = overlay.targetNodeId || overlay.nodeId;
+  if (targetNodeId) {
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      if (itemMatchesNode(items[index], targetNodeId)) return index + 1;
+    }
+  }
+
+  if (overlay.anchorNodeId) {
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      if (itemMatchesNode(items[index], overlay.anchorNodeId)) return index + 1;
+    }
+  }
+
+  return items.length;
+}
+
+export function mergeLiveRunTranscriptItems(
+  baseItems: TranscriptItem[],
+  liveRuns: LiveRunTranscriptOverlay[],
+): TranscriptItem[] {
+  let merged = normalizeTranscriptItems(baseItems);
+
+  for (const liveRun of liveRuns) {
+    const liveItems = normalizeTranscriptItems(liveRun.items);
+    if (liveItems.length === 0) continue;
+
+    const insertionIndex = findLiveRunInsertionIndex(merged, liveRun);
+    const removedBeforeInsertion = merged
+      .slice(0, insertionIndex)
+      .filter((item) => itemBelongsToRun(item, liveRun.runId))
+      .length;
+    const withoutStaleRunItems = merged.filter((item) => !itemBelongsToRun(item, liveRun.runId));
+    const adjustedInsertionIndex = Math.min(
+      Math.max(0, insertionIndex - removedBeforeInsertion),
+      withoutStaleRunItems.length,
+    );
+
+    merged = [
+      ...withoutStaleRunItems.slice(0, adjustedInsertionIndex),
+      ...liveItems,
+      ...withoutStaleRunItems.slice(adjustedInsertionIndex),
+    ];
+  }
+
+  return merged;
+}

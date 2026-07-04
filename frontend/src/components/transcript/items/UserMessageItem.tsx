@@ -1,32 +1,26 @@
-import { Copy } from 'lucide-react';
+import { useState } from 'react';
+import { Check, Copy } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import MarkdownContent from '../../MarkdownContent';
 import type { TranscriptCopyHandler, TranscriptItem } from '../../../types/transcript';
 import { getItemText } from './itemText';
 
 export function UserMessageItem({ item, onCopy }: { item: TranscriptItem; onCopy?: TranscriptCopyHandler }) {
+  const [copied, setCopied] = useState(false);
   const text = getItemText(item);
   if (!text) return null;
 
+  const handleCopy = async () => {
+    await onCopy?.(item, text);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1600);
+  };
+
   return (
-    <div className="transcript-user-message w-full my-2 flex flex-col items-end" role="listitem">
-      <div className="group flex max-w-full items-start gap-1">
-        {onCopy && (
-          <button
-            type="button"
-            className="mt-1 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100"
-            style={{
-              borderColor: 'var(--border)',
-              background: 'var(--bg-button-tertiary)',
-              color: 'var(--fg-tertiary)',
-            }}
-            aria-label="复制消息"
-            onClick={() => onCopy(item, text)}
-          >
-            <Copy className="h-3.5 w-3.5" />
-          </button>
-        )}
+    <div className="chat-message-row w-full my-2 flex flex-col group items-end" role="listitem">
+      <div className="flex flex-col max-w-full items-end">
         <div
-          className="max-w-full w-fit rounded-2xl rounded-br-sm px-3 py-2 leading-relaxed prose prose-sm prose-invert max-w-none [&_p]:m-0 [&_p:not(:last-child)]:mb-2"
+          className="max-w-full w-fit px-3 py-2 rounded-2xl rounded-br-sm leading-relaxed prose prose-sm prose-invert max-w-none [&_p]:m-0 [&_p:not(:last-child)]:mb-2"
           style={{
             background: 'linear-gradient(160deg, rgba(217,119,87,0.16), rgba(217,119,87,0.08))',
             border: '0.5px solid rgba(217,119,87,0.28)',
@@ -38,6 +32,19 @@ export function UserMessageItem({ item, onCopy }: { item: TranscriptItem; onCopy
         >
           <MarkdownContent enableMermaid>{text}</MarkdownContent>
         </div>
+        {onCopy && (
+          <div className="flex items-center gap-1 mt-1 self-end justify-end">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="opacity-0 group-hover:opacity-100 transition-opacity p-0 h-7 w-7"
+              onClick={handleCopy}
+              aria-label="复制消息"
+            >
+              {copied ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
+            </Button>
+          </div>
+        )}
       </div>
     </div>
   );

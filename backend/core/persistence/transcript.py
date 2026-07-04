@@ -283,7 +283,8 @@ class TranscriptProjection:
                   JOIN branch ON branch.parent_id = parent.id
                   WHERE parent.conversation_id = ?
                 )
-                SELECT transcript_items.*
+                SELECT transcript_items.*,
+                       messages.metadata_json AS message_metadata_json
                 FROM branch
                 JOIN transcript_items
                   ON transcript_items.conversation_id = ?
@@ -294,6 +295,9 @@ class TranscriptProjection:
                      AND transcript_items.anchor_node_id = branch.id
                     )
                  )
+                LEFT JOIN messages
+                  ON messages.conversation_id = transcript_items.conversation_id
+                 AND messages.id = transcript_items.message_id
                 ORDER BY branch.node_depth, transcript_items.local_order,
                          transcript_items.created_at, transcript_items.id
                 """,

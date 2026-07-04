@@ -1,3 +1,4 @@
+import { Fragment, type ReactNode } from 'react';
 import type { TranscriptActionHandlers, TranscriptItem } from '../../types/transcript';
 import { normalizeTranscriptItems } from '../../utils/transcriptItems';
 import { TranscriptItemRenderer } from './TranscriptItemRenderer';
@@ -6,6 +7,7 @@ interface TranscriptListProps extends TranscriptActionHandlers {
   items: TranscriptItem[];
   isLoading?: boolean;
   transcriptError?: string | null;
+  renderItem?: (item: TranscriptItem, defaultItem: ReactNode) => ReactNode;
 }
 
 export function TranscriptList({
@@ -18,6 +20,7 @@ export function TranscriptList({
   onCopyItem,
   planActionPending,
   planError,
+  renderItem,
 }: TranscriptListProps) {
   const normalizedItems = normalizeTranscriptItems(items);
 
@@ -43,18 +46,24 @@ export function TranscriptList({
           {transcriptError}
         </div>
       )}
-      {normalizedItems.map((item) => (
-        <TranscriptItemRenderer
-          key={item.id}
-          item={item}
-          onApprovePlan={onApprovePlan}
-          onRejectPlan={onRejectPlan}
-          onAnswerPlanQuestion={onAnswerPlanQuestion}
-          onCopyItem={onCopyItem}
-          planActionPending={planActionPending}
-          planError={planError}
-        />
-      ))}
+      {normalizedItems.map((item) => {
+        const defaultItem = (
+          <TranscriptItemRenderer
+            item={item}
+            onApprovePlan={onApprovePlan}
+            onRejectPlan={onRejectPlan}
+            onAnswerPlanQuestion={onAnswerPlanQuestion}
+            onCopyItem={onCopyItem}
+            planActionPending={planActionPending}
+            planError={planError}
+          />
+        );
+        return (
+          <Fragment key={item.id}>
+            {renderItem ? renderItem(item, defaultItem) : defaultItem}
+          </Fragment>
+        );
+      })}
     </div>
   );
 }

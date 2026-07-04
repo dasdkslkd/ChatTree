@@ -20,6 +20,7 @@ from backend.core.tools.orchestrator import ToolOrchestrator
 from backend.core.tools.security.approval import ApprovalManager
 from backend.core.tools.security.logical_sandbox import LogicalSandbox
 from backend.core.tools.security.permissions import PermissionEngine
+from backend.api.routes.conversations import to_transcript_item_dto
 from test_chat_manager_prompt_slash import (
     CapturingProvider,
     CapturingModelManager,
@@ -220,6 +221,10 @@ def test_plan_control_turn_writes_process_and_plan_card_without_answer(tmp_path:
     assert "assistant_process" in item_types
     assert "plan_card" in item_types
     assert "assistant_answer" not in item_types
+    process_item = next(item for item in items if item["item_type"] == "assistant_process")
+    dto = to_transcript_item_dto(process_item)
+    assert dto["props"]["tool_interactions"]
+    assert "reasoning" in dto["props"]
     plan_card = next(item for item in items if item["item_type"] == "plan_card")
     assert plan_card["status"] == "awaiting_approval"
     assert "修改设置页" in plan_card["preview"]
