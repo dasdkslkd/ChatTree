@@ -99,3 +99,94 @@ def test_add_tool_call_preserves_metadata_when_result_placeholder_conflicts(tmp_
     assert row["call_index"] == 1
     assert row["name"] == "second_tool"
     assert json.loads(row["args_inline"]) == {"b": 2}
+
+
+def test_tool_call_ids_can_repeat_across_conversations_without_metadata_bleed(
+    tmp_path,
+):
+    persistence = SQLitePersistence(tmp_path)
+    persistence.initialize()
+    repo = ChatRepository(persistence)
+    conv_a = repo.create_conversation(title="Tool call A")
+    node_a = repo.create_node(conv_a, parent_id=None, child_order=0)
+    conv_b = repo.create_conversation(title="Tool call B")
+    node_b = repo.create_node(conv_b, parent_id=None, child_order=0)
+
+    repo.add_tool_call(
+        conv_a,
+        node_a,
+        tool_call_id="call_0",
+        name="first_tool",
+        arguments={"conversation": "a"},
+        call_index=2,
+    )
+    repo.add_tool_result(
+        conv_a,
+        node_a,
+        tool_result_id="result-a",
+        tool_call_id="call_0",
+        output="result a",
+        metadata={"conversation": "a"},
+    )
+    repo.add_tool_call(
+        conv_b,
+        node_b,
+        tool_call_id="call_0",
+        name="second_tool",
+        arguments={"conversation": "b"},
+        call_index=5,
+    )
+    repo.add_tool_result(
+        conv_b,
+        node_b,
+        tool_result_id="result-b",
+        tool_call_id="call_0",
+        output="result b",
+        metadata={"conversation": "b"},
+    )
+
+    with persistence.connect() as conn:
+        calls = conn.execute(
+            """
+            SELECT conversation_id, call_index, name, args_inline
+            FROM tool_calls
+            WHERE id = ?
+            ORDER BY conversation_id
+            """,
+            ("call_0",),
+        ).fetchall()
+        results = conn.execute(
+            """
+            SELECT conversation_id, tool_call_id, output_preview, metadata_json
+            FROM tool_results
+            WHERE id IN (?, ?)
+            ORDER BY conversation_id
+            """,
+            ("result-a", "result-b"),
+        ).fetchall()
+
+    calls_by_conversation = {
+        row["conversation_id"]: (
+            row["call_index"],
+            row["name"],
+            json.loads(row["args_inline"]),
+        )
+        for row in calls
+    }
+    results_by_conversation = {
+        row["conversation_id"]: (
+            row["tool_call_id"],
+            row["output_preview"],
+            json.loads(row["metadata_json"]),
+        )
+        for row in results
+    }
+
+    assert calls_by_conversation == {
+        conv_a: (2, "first_tool", {"conversation": "a"}),
+        conv_b: (5, "second_tool", {"conversation": "b"}),
+    }
+    assert results_by_conversation == {
+        conv_a: ("call_0", "result a", {"conversation": "a"}),
+        conv_b: ("call_0", "result b", {"conversation": "b"}),
+    }

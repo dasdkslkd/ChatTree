@@ -348,7 +348,7 @@ class ChatRepository:
                   updated_at
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s', 'now'), strftime('%s', 'now'))
-                ON CONFLICT(id) DO UPDATE SET
+                ON CONFLICT(conversation_id, id) DO UPDATE SET
                   run_id = COALESCE(excluded.run_id, tool_calls.run_id),
                   assistant_message_id = COALESCE(excluded.assistant_message_id, tool_calls.assistant_message_id),
                   call_index = CASE

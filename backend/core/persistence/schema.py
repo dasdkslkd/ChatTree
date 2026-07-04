@@ -88,7 +88,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_blob
   ON messages(content_blob_id);
 
 CREATE TABLE IF NOT EXISTS tool_calls (
-  id TEXT PRIMARY KEY,
+  id TEXT NOT NULL,
   conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   node_id TEXT REFERENCES nodes(id) ON DELETE CASCADE,
   run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
@@ -101,7 +101,7 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   status TEXT NOT NULL DEFAULT 'running',
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
-  UNIQUE(conversation_id, id),
+  PRIMARY KEY (conversation_id, id),
   FOREIGN KEY (conversation_id, node_id) REFERENCES nodes(conversation_id, id),
   FOREIGN KEY (conversation_id, run_id) REFERENCES runs(conversation_id, id),
   FOREIGN KEY (conversation_id, assistant_message_id)
@@ -113,7 +113,7 @@ CREATE TABLE IF NOT EXISTS tool_results (
   conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   node_id TEXT REFERENCES nodes(id) ON DELETE CASCADE,
   run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
-  tool_call_id TEXT REFERENCES tool_calls(id) ON DELETE CASCADE,
+  tool_call_id TEXT,
   status TEXT NOT NULL,
   output_preview TEXT NOT NULL DEFAULT '',
   output_blob_id TEXT REFERENCES blobs(id),
@@ -126,12 +126,13 @@ CREATE TABLE IF NOT EXISTS tool_results (
   FOREIGN KEY (conversation_id, run_id) REFERENCES runs(conversation_id, id),
   FOREIGN KEY (conversation_id, tool_call_id)
     REFERENCES tool_calls(conversation_id, id)
+    ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_tool_calls_node
   ON tool_calls(node_id, call_index);
 CREATE INDEX IF NOT EXISTS idx_tool_results_call
-  ON tool_results(tool_call_id);
+  ON tool_results(conversation_id, tool_call_id);
 CREATE INDEX IF NOT EXISTS idx_tool_results_blob
   ON tool_results(output_blob_id);
 
