@@ -11,11 +11,15 @@ def _native_path(value: str | os.PathLike[str]) -> Path:
     return _NativePath(value)
 
 
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
 def resolve_chattree_home(value: str | os.PathLike[str] | None = None) -> Path:
     explicit = value or os.environ.get("CHATTREE_HOME")
     if explicit:
         return _native_path(explicit).expanduser().resolve()
-    if os.name == "nt":
+    if _is_windows():
         userprofile = os.environ.get("USERPROFILE")
         if userprofile:
             return (_native_path(userprofile) / ".chattree").resolve()

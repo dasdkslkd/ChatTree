@@ -1,3 +1,4 @@
+import sqlite3
 from pathlib import Path
 
 from backend.core.persistence.database import SQLitePersistence
@@ -46,3 +47,85 @@ def test_initialize_applies_wal_and_foreign_keys(tmp_path: Path):
 
     assert journal.lower() == "wal"
     assert foreign_keys == 1
+
+
+def _insert_conversation(conn, conversation_id: str):
+    conn.execute(
+        """
+        INSERT INTO conversations (id, title, created_at, updated_at)
+        VALUES (?, ?, 1, 1)
+        """,
+        (conversation_id, conversation_id),
+    )
+
+
+def test_nodes_parent_id_rejects_cross_conversation_reference(tmp_path: Path):
+    persistence = SQLitePersistence(tmp_path)
+    persistence.initialize()
+
+    with persistence.connect() as conn:
+        _insert_conversation(conn, "conversation-a")
+        _insert_conversation(conn, "conversation-b")
+        conn.execute(
+            """
+            INSERT INTO nodes (id, conversation_id, created_at, updated_at)
+            VALUES ('parent-a', 'conversation-a', 1, 1)
+            """
+        )
+
+        try:
+            conn.execute(
+                """
+                INSERT INTO nodes (
+                  id, conversation_id, parent_id, created_at, updated_at
+                )
+                VALUES ('child-b', 'conversation-b', 'parent-a', 1, 1)
+                """
+            )
+        except sqlite3.IntegrityError:
+            pass
+        else:
+            raise AssertionError("cross-conversation parent_id was accepted")
+
+
+def test_transcript_message_id_rejects_cross_conversation_reference(tmp_path: Path):
+    persistence = SQLitePersistence(tmp_path)
+    persistence.initialize()
+
+    with persistence.connect() as conn:
+        _insert_conversation(conn, "conversation-a")
+        _insert_conversation(conn, "conversation-b")
+        conn.execute(
+            """
+            INSERT INTO messages (id, conversation_id, role, created_at)
+            VALUES ('message-a', 'conversation-a', 'assistant', 1)
+            """
+        )
+
+        try:
+            conn.execute(
+                """
+                INSERT INTO transcript_items (
+                  id,
+                  conversation_id,
+                  message_id,
+                  item_type,
+                  local_order,
+                  created_at,
+                  updated_at
+                )
+                VALUES (
+                  'transcript-b',
+                  'conversation-b',
+                  'message-a',
+                  'message',
+                  1,
+                  1,
+                  1
+                )
+                """
+            )
+        except sqlite3.IntegrityError:
+            pass
+        else:
+            raise AssertionError("cross-conversation message_id was accepted")

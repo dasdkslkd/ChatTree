@@ -46,7 +46,9 @@ CREATE TABLE IF NOT EXISTS nodes (
   branch_usage_json TEXT,
   active_context_usage_json TEXT,
   created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  UNIQUE(conversation_id, id),
+  FOREIGN KEY (conversation_id, parent_id) REFERENCES nodes(conversation_id, id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_nodes_conversation_parent
@@ -70,7 +72,9 @@ CREATE TABLE IF NOT EXISTS messages (
   transcript_only INTEGER NOT NULL DEFAULT 0,
   metadata_json TEXT,
   usage_json TEXT,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  UNIQUE(conversation_id, id),
+  FOREIGN KEY (conversation_id, node_id) REFERENCES nodes(conversation_id, id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_node_role
@@ -84,7 +88,7 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   id TEXT PRIMARY KEY,
   conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   node_id TEXT REFERENCES nodes(id) ON DELETE CASCADE,
-  run_id TEXT,
+  run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
   assistant_message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
   call_index INTEGER NOT NULL,
   name TEXT NOT NULL,
@@ -93,14 +97,19 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   args_preview TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'running',
   created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  UNIQUE(conversation_id, id),
+  FOREIGN KEY (conversation_id, node_id) REFERENCES nodes(conversation_id, id),
+  FOREIGN KEY (conversation_id, run_id) REFERENCES runs(conversation_id, id),
+  FOREIGN KEY (conversation_id, assistant_message_id)
+    REFERENCES messages(conversation_id, id)
 );
 
 CREATE TABLE IF NOT EXISTS tool_results (
   id TEXT PRIMARY KEY,
   conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   node_id TEXT REFERENCES nodes(id) ON DELETE CASCADE,
-  run_id TEXT,
+  run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
   tool_call_id TEXT REFERENCES tool_calls(id) ON DELETE CASCADE,
   status TEXT NOT NULL,
   output_preview TEXT NOT NULL DEFAULT '',
@@ -108,7 +117,12 @@ CREATE TABLE IF NOT EXISTS tool_results (
   output_size INTEGER NOT NULL DEFAULT 0,
   truncated INTEGER NOT NULL DEFAULT 0,
   metadata_json TEXT,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  UNIQUE(conversation_id, id),
+  FOREIGN KEY (conversation_id, node_id) REFERENCES nodes(conversation_id, id),
+  FOREIGN KEY (conversation_id, run_id) REFERENCES runs(conversation_id, id),
+  FOREIGN KEY (conversation_id, tool_call_id)
+    REFERENCES tool_calls(conversation_id, id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_tool_calls_node
@@ -131,7 +145,14 @@ CREATE TABLE IF NOT EXISTS runs (
   event_count INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
-  finished_at INTEGER
+  finished_at INTEGER,
+  UNIQUE(conversation_id, id),
+  FOREIGN KEY (conversation_id, parent_run_id)
+    REFERENCES runs(conversation_id, id),
+  FOREIGN KEY (conversation_id, anchor_node_id)
+    REFERENCES nodes(conversation_id, id),
+  FOREIGN KEY (conversation_id, target_node_id)
+    REFERENCES nodes(conversation_id, id)
 );
 
 CREATE TABLE IF NOT EXISTS run_events (
@@ -143,7 +164,8 @@ CREATE TABLE IF NOT EXISTS run_events (
   payload_inline TEXT,
   payload_blob_id TEXT REFERENCES blobs(id),
   created_at INTEGER NOT NULL,
-  UNIQUE(run_id, event_index)
+  UNIQUE(run_id, event_index),
+  FOREIGN KEY (conversation_id, run_id) REFERENCES runs(conversation_id, id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_runs_conversation_status
@@ -173,7 +195,18 @@ CREATE TABLE IF NOT EXISTS plans (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   approved_at INTEGER,
-  rejected_at INTEGER
+  rejected_at INTEGER,
+  UNIQUE(conversation_id, id),
+  FOREIGN KEY (conversation_id, entered_node_id)
+    REFERENCES nodes(conversation_id, id),
+  FOREIGN KEY (conversation_id, submitted_node_id)
+    REFERENCES nodes(conversation_id, id),
+  FOREIGN KEY (conversation_id, entered_run_id)
+    REFERENCES runs(conversation_id, id),
+  FOREIGN KEY (conversation_id, submitted_run_id)
+    REFERENCES runs(conversation_id, id),
+  FOREIGN KEY (conversation_id, approved_run_id)
+    REFERENCES runs(conversation_id, id)
 );
 
 CREATE TABLE IF NOT EXISTS plan_events (
@@ -182,7 +215,8 @@ CREATE TABLE IF NOT EXISTS plan_events (
   conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   event_type TEXT NOT NULL,
   payload_json TEXT,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (conversation_id, plan_id) REFERENCES plans(conversation_id, id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_plans_conversation_status
@@ -203,7 +237,12 @@ CREATE TABLE IF NOT EXISTS tasks (
   evidence_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
   metadata_json TEXT,
   created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  UNIQUE(conversation_id, id),
+  FOREIGN KEY (conversation_id, owner_run_id)
+    REFERENCES runs(conversation_id, id),
+  FOREIGN KEY (conversation_id, evidence_run_id)
+    REFERENCES runs(conversation_id, id)
 );
 
 CREATE TABLE IF NOT EXISTS task_events (
@@ -212,7 +251,8 @@ CREATE TABLE IF NOT EXISTS task_events (
   conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   event_type TEXT NOT NULL,
   payload_json TEXT,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (conversation_id, task_id) REFERENCES tasks(conversation_id, id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_conversation_status
@@ -239,7 +279,16 @@ CREATE TABLE IF NOT EXISTS transcript_items (
   preview TEXT NOT NULL DEFAULT '',
   props_json TEXT,
   created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  UNIQUE(conversation_id, id),
+  FOREIGN KEY (conversation_id, node_id) REFERENCES nodes(conversation_id, id),
+  FOREIGN KEY (conversation_id, anchor_node_id)
+    REFERENCES nodes(conversation_id, id),
+  FOREIGN KEY (conversation_id, run_id) REFERENCES runs(conversation_id, id),
+  FOREIGN KEY (conversation_id, plan_id) REFERENCES plans(conversation_id, id),
+  FOREIGN KEY (conversation_id, task_id) REFERENCES tasks(conversation_id, id),
+  FOREIGN KEY (conversation_id, message_id)
+    REFERENCES messages(conversation_id, id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_transcript_conversation_node_order
