@@ -208,7 +208,7 @@ class SQLiteTaskRepository:
                 SELECT *
                 FROM tasks
                 WHERE {' AND '.join(where)}
-                ORDER BY created_at, id
+                ORDER BY created_at, rowid
                 """,
                 tuple(params),
             ).fetchall()

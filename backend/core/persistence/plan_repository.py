@@ -317,6 +317,53 @@ class SQLitePlanRepository:
             ).fetchone()
         return self._plan_from_row(row) if row is not None else None
 
+    def list_plans(self, conversation_id: str) -> list[dict[str, Any]]:
+        with self.persistence.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM plans
+                WHERE conversation_id = ?
+                ORDER BY created_at, rowid
+                """,
+                (conversation_id,),
+            ).fetchall()
+        return [self._plan_from_row(row) for row in rows]
+
+    def replace_snapshot(
+        self,
+        conversation_id: str,
+        *,
+        plans: Iterable[dict[str, Any]],
+        pending_context: Iterable[dict[str, Any]],
+    ) -> None:
+        with self.persistence.connect() as conn:
+            conn.execute(
+                "DELETE FROM plan_events WHERE conversation_id = ?",
+                (conversation_id,),
+            )
+            conn.execute(
+                "DELETE FROM plans WHERE conversation_id = ?",
+                (conversation_id,),
+            )
+            plan_ids: set[str] = set()
+            for item in plans:
+                plan_id = self._insert_plan_snapshot(conn, conversation_id, dict(item))
+                plan_ids.add(plan_id)
+            for item in pending_context:
+                payload = dict(item)
+                plan_id = str(payload.get("plan_id") or "")
+                if not plan_id or plan_id not in plan_ids:
+                    raise KeyError(plan_id)
+                self._append_event(
+                    conn,
+                    conversation_id,
+                    plan_id,
+                    "pending_context",
+                    payload,
+                    self._float_field(payload.get("created_at"), time()),
+                )
+
     def append_pending_context(
         self,
         conversation_id: str,
@@ -337,20 +384,31 @@ class SQLitePlanRepository:
         with self.persistence.connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, payload_json
+                WITH pending AS (
+                  SELECT id
+                  FROM plan_events
+                  WHERE conversation_id = ? AND event_type = 'pending_context'
+                )
+                DELETE FROM plan_events
+                WHERE id IN (SELECT id FROM pending)
+                RETURNING id, payload_json, created_at
+                """,
+                (conversation_id,),
+            ).fetchall()
+        rows = sorted(rows, key=lambda row: (row["created_at"], row["id"]))
+        return [self._load_json(row["payload_json"]) or {} for row in rows]
+
+    def peek_pending_context(self, conversation_id: str) -> list[dict[str, Any]]:
+        with self.persistence.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT payload_json
                 FROM plan_events
                 WHERE conversation_id = ? AND event_type = 'pending_context'
                 ORDER BY created_at, id
                 """,
                 (conversation_id,),
             ).fetchall()
-            ids = [row["id"] for row in rows]
-            if ids:
-                placeholders = ",".join("?" for _ in ids)
-                conn.execute(
-                    f"DELETE FROM plan_events WHERE id IN ({placeholders})",
-                    tuple(ids),
-                )
         return [self._load_json(row["payload_json"]) or {} for row in rows]
 
     def _require_plan(self, conversation_id: str, plan_id: str) -> dict[str, Any]:
@@ -393,6 +451,69 @@ class SQLitePlanRepository:
             (plan_id, conversation_id, event_type, self._json_field(payload), created_at),
         )
 
+    def _insert_plan_snapshot(
+        self,
+        conn: Any,
+        conversation_id: str,
+        item: dict[str, Any],
+    ) -> str:
+        plan_id = str(item.get("plan_id") or item.get("id") or "")
+        if not plan_id:
+            raise KeyError(plan_id)
+        if str(item.get("conversation_id") or "") != conversation_id:
+            raise ValueError("snapshot record conversation_id mismatch")
+        plan_text = str(item.get("plan") or "")
+        stored = store_text_content(self.persistence, plan_text)
+        created_at = self._float_field(item.get("created_at"), time())
+        updated_at = self._float_field(item.get("updated_at"), created_at)
+        conn.execute(
+            """
+            INSERT INTO plans (
+              id,
+              conversation_id,
+              status,
+              entered_node_id,
+              submitted_node_id,
+              entered_run_id,
+              submitted_run_id,
+              approved_run_id,
+              previous_permission_mode,
+              plan_inline,
+              plan_blob_id,
+              plan_preview,
+              question_json,
+              feedback_json,
+              created_at,
+              updated_at,
+              approved_at,
+              rejected_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                plan_id,
+                conversation_id,
+                self._value(item.get("status") or "active"),
+                item.get("entered_node_id"),
+                item.get("submitted_node_id"),
+                item.get("entered_run_id"),
+                item.get("submitted_run_id"),
+                str(item.get("previous_permission_mode") or "modify_only"),
+                stored.inline,
+                stored.blob_id,
+                stored.preview,
+                self._json_field(item.get("question"))
+                if isinstance(item.get("question"), dict)
+                else None,
+                self._json_field(list(item.get("feedback") or [])),
+                created_at,
+                updated_at,
+                item.get("approved_at"),
+                item.get("rejected_at"),
+            ),
+        )
+        return plan_id
+
     def _json_field(self, value: Any) -> str | None:
         if value is None:
             return None
@@ -402,3 +523,12 @@ class SQLitePlanRepository:
         if not value:
             return None
         return json.loads(value)
+
+    def _float_field(self, value: Any, default: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _value(self, value: Any) -> str:
+        return str(getattr(value, "value", value))

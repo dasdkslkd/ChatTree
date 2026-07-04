@@ -351,6 +351,19 @@ class PlanLedger:
 
     async def snapshot(self, conversation_id: str) -> Dict[str, Any]:
         async with self._lock:
+            if self._repository is not None:
+                plans = [
+                    self._session_from_record(record)
+                    for record in self._repository.list_plans(conversation_id)
+                ]
+                pending = [
+                    PlanContextInjection.from_dict(dict(item))
+                    for item in self._repository.peek_pending_context(conversation_id)
+                ]
+                return {
+                    "plans": [plan.to_dict() for plan in plans],
+                    "pending_context": [item.to_dict() for item in pending],
+                }
             plans = list(self._plans_by_conversation.get(conversation_id, {}).values())
             pending = list(self._pending_context_by_conversation.get(conversation_id, []))
             return {
@@ -381,6 +394,13 @@ class PlanLedger:
                 raise ValueError("snapshot context conversation_id mismatch")
             pending.append(injection)
         async with self._lock:
+            if self._repository is not None:
+                self._repository.replace_snapshot(
+                    conversation_id,
+                    plans=[record.to_dict() for record in plans.values()],
+                    pending_context=[item.to_dict() for item in pending],
+                )
+                return
             self._plans_by_conversation[conversation_id] = plans
             self._pending_context_by_conversation[conversation_id] = pending
 
