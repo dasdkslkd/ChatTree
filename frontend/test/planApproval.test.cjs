@@ -93,6 +93,26 @@ function testAnswerPlanQuestionStartsStructuredControlStream() {
   assert.match(handlerMatch[0], /actionNodeId,\s*\)/);
 }
 
+function testRejectPlanStartsStructuredControlStream() {
+  const mainPageSource = fs.readFileSync(path.join(__dirname, '../src/pages/MainPage.tsx'), 'utf8');
+  const handlerMatch = mainPageSource.match(/const handleRejectPlan = useCallback\(async \(item: TranscriptItem\) => \{[\s\S]*?\n  \}, \[/);
+  assert.ok(handlerMatch, 'handleRejectPlan handler should be present');
+  assert.doesNotMatch(handlerMatch[0], /plansService\.reject\(/);
+  assert.match(handlerMatch[0], /void streamManager\.startPlanRejectStream\(/);
+  assert.match(handlerMatch[0], /feedback,/);
+  assert.match(handlerMatch[0], /planId,/);
+  assert.match(handlerMatch[0], /actionNodeId,\s*\)/);
+}
+
+function testPlanRejectStreamEndpointIsWired() {
+  const apiSource = fs.readFileSync(path.join(__dirname, '../src/api/message.ts'), 'utf8');
+  const streamManagerSource = fs.readFileSync(path.join(__dirname, '../src/services/streamManager.ts'), 'utf8');
+  assert.match(apiSource, /streamPlanReject/);
+  assert.match(apiSource, /\/reject\/stream/);
+  assert.match(streamManagerSource, /startPlanRejectStream/);
+  assert.match(streamManagerSource, /streamPlanReject/);
+}
+
 function testChatInputDoesNotExposePlanAsManualPermissionMode() {
   const chatInputSource = fs.readFileSync(path.join(__dirname, '../src/components/ChatInput.tsx'), 'utf8');
   assert.doesNotMatch(chatInputSource, /<DropdownMenuRadioItem\s+value=["']plan["']/);
@@ -107,6 +127,8 @@ function main() {
   testPlanProposalCardUsesTranscriptPlanCallbacks();
   testApprovePlanStartsStructuredControlStream();
   testAnswerPlanQuestionStartsStructuredControlStream();
+  testRejectPlanStartsStructuredControlStream();
+  testPlanRejectStreamEndpointIsWired();
   testChatInputDoesNotExposePlanAsManualPermissionMode();
   console.log('planApproval tests passed');
 }

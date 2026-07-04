@@ -2059,17 +2059,30 @@ export default function ChatPage() {
     setPlanActionPending('reject');
     setPlanError(null);
     try {
-      const updated = await plansService.reject(conversationId, planId, feedback);
       setActivePlan((current) => {
-        if (!current) return updated || current;
+        if (!current) return current;
         const currentPlanId = current.plan_id || current.id || '';
-        return currentPlanId === planId ? (updated || { ...current, feedback }) : current;
+        return currentPlanId === planId ? { ...current, status: 'rejected', feedback } : current;
       });
+      const { currentReasoningEffort, currentThinkingEnabled } = useModelStore.getState();
+      setShouldAutoScroll(true);
       setPlanRejectFeedback('');
-      if (conversationId) {
+      void streamManager.startPlanRejectStream(
+        conversationId,
+        planId,
+        {
+          feedback,
+          reasoning_effort: currentReasoningEffort,
+          thinking_enabled: currentThinkingEnabled,
+        },
+        actionNodeId,
+      ).then(async () => {
         await refreshActivePlan(conversationId);
         await refreshTranscript(conversationId, actionNodeId);
-      }
+      }).catch((error) => {
+        console.error('Failed to reject plan:', error);
+        setPlanError('提交修改意见失败，请稍后重试');
+      });
     } catch (error) {
       console.error('Failed to reject plan:', error);
       setPlanError('提交修改意见失败，请稍后重试');

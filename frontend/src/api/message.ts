@@ -31,6 +31,10 @@ export type PlanAnswerStreamRequest = PlanActionStreamRequest & {
   answer: string;
 };
 
+export type PlanRejectStreamRequest = PlanActionStreamRequest & {
+  feedback: string;
+};
+
 export interface ActiveStreamInfo {
   run_id?: string | null;
   conversation_id: string;
@@ -180,6 +184,24 @@ export const messageApi = {
   ): AsyncGenerator<StreamChunk, void> {
     const response = await fetch(
       `/api/conversations/${encodeURIComponent(conversationId)}/plans/${encodeURIComponent(planId)}/answer/stream`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+        signal,
+      },
+    );
+    yield* parseSseResponse(response);
+  },
+
+  streamPlanReject: async function* (
+    conversationId: string,
+    planId: string,
+    data: PlanRejectStreamRequest,
+    signal?: AbortSignal,
+  ): AsyncGenerator<StreamChunk, void> {
+    const response = await fetch(
+      `/api/conversations/${encodeURIComponent(conversationId)}/plans/${encodeURIComponent(planId)}/reject/stream`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
