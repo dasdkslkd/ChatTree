@@ -24,6 +24,14 @@ from backend.core.config.config import Config
 from backend.core.agents import AgentMailbox, AgentRuntime, SubagentExecutor
 from backend.core.runs import RunManager
 from backend.core.plans import PlanLedger
+from backend.core.persistence import (
+    ChatRepository,
+    SQLitePersistence,
+    SQLitePlanRepository,
+    SQLiteRunRepository,
+    SQLiteTaskRepository,
+    TranscriptProjection,
+)
 from backend.core.tasks import TaskLedger
 from backend.core.workflows import WorkflowManager
 from backend.core.storage.chat_storage import ChatStorage
@@ -70,6 +78,13 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup_event():
     config_manager = Config()
+    persistence = SQLitePersistence()
+    persistence.initialize()
+    chat_repository = ChatRepository(persistence)
+    transcript_projection = TranscriptProjection(persistence)
+    run_repository = SQLiteRunRepository(persistence)
+    plan_repository = SQLitePlanRepository(persistence)
+    task_repository = SQLiteTaskRepository(persistence)
     capability_registry = build_capability_registry(PROJECT_ROOT, config_manager.data)
     runtime_config = build_runtime_config_with_plugin_mcp(
         config_manager.data,
@@ -81,9 +96,9 @@ async def startup_event():
     tool_manager = ToolManager(runtime_config)
     await tool_manager.init()
     approval_manager = ApprovalManager()
-    run_manager = RunManager()
-    plan_ledger = PlanLedger()
-    task_ledger = TaskLedger()
+    run_manager = RunManager(repository=run_repository)
+    plan_ledger = PlanLedger(repository=plan_repository)
+    task_ledger = TaskLedger(repository=task_repository)
     task_ledger.install_run_finish_listener(run_manager)
     command_executor = CommandExecutor(run_manager, task_ledger=task_ledger)
     tool_manager.command_executor = command_executor
@@ -141,6 +156,12 @@ async def startup_event():
     )
     synthetic_followup_scheduler.install()
 
+    app.state.persistence = persistence
+    app.state.chat_repository = chat_repository
+    app.state.transcript_projection = transcript_projection
+    app.state.run_repository = run_repository
+    app.state.plan_repository = plan_repository
+    app.state.task_repository = task_repository
     app.state.config_manager = config_manager
     app.state.project_root = PROJECT_ROOT
     app.state.capability_registry = capability_registry

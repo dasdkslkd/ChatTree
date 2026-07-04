@@ -117,6 +117,34 @@ def get_plan_ledger(request: Request):
         raise HTTPException(status_code=500, detail=f"依赖注入错误: {str(e)}")
 
 
+def get_persistence(request: Request):
+    """获取 SQLite persistence。"""
+    try:
+        if not hasattr(request.app.state, 'persistence'):
+            logger.error("❌ persistence 未在 app.state 中初始化")
+            raise HTTPException(status_code=500, detail="Persistence 未初始化")
+        return request.app.state.persistence
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ 获取 persistence 失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"依赖注入错误: {str(e)}")
+
+
+def get_transcript_projection(request: Request):
+    """获取 TranscriptProjection。"""
+    try:
+        if not hasattr(request.app.state, 'transcript_projection'):
+            logger.error("❌ transcript_projection 未在 app.state 中初始化")
+            raise HTTPException(status_code=500, detail="TranscriptProjection 未初始化")
+        return request.app.state.transcript_projection
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ 获取 transcript_projection 失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"依赖注入错误: {str(e)}")
+
+
 def get_subagent_executor(request: Request):
     """获取 Subagent 执行器"""
     try:
