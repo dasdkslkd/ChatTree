@@ -19,6 +19,50 @@ ACTIVE_PLAN_STATUS_VALUES = ("active", "awaiting_question", "awaiting_approval")
 class SQLitePlanRepository:
     def __init__(self, persistence: SQLitePersistence) -> None:
         self.persistence = persistence
+        self._ensure_schema()
+
+    def _ensure_schema(self) -> None:
+        with self.persistence.connect() as conn:
+            columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(plans)").fetchall()
+            }
+            for name, ddl in {
+                "exit_tool_call_id": "ALTER TABLE plans ADD COLUMN exit_tool_call_id TEXT",
+                "question_tool_call_id": "ALTER TABLE plans ADD COLUMN question_tool_call_id TEXT",
+                "blocking_run_id": "ALTER TABLE plans ADD COLUMN blocking_run_id TEXT",
+                "proposal_id": "ALTER TABLE plans ADD COLUMN proposal_id TEXT",
+                "proposal_revision": "ALTER TABLE plans ADD COLUMN proposal_revision INTEGER DEFAULT 0",
+                "proposal_status": "ALTER TABLE plans ADD COLUMN proposal_status TEXT",
+            }.items():
+                if name not in columns:
+                    conn.execute(ddl)
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS plan_proposals (
+                    proposal_id TEXT PRIMARY KEY,
+                    plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+                    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                    revision INTEGER NOT NULL,
+                    plan TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    tool_call_id TEXT,
+                    run_id TEXT,
+                    node_id TEXT,
+                    created_at INTEGER,
+                    resolved_at INTEGER,
+                    feedback TEXT,
+                    UNIQUE(plan_id, revision),
+                    FOREIGN KEY (conversation_id, plan_id) REFERENCES plans(conversation_id, id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_plan_proposals_plan
+                  ON plan_proposals(plan_id, revision)
+                """
+            )
 
     def create_plan(
         self,
@@ -79,10 +123,36 @@ class SQLitePlanRepository:
         plan: str,
         submitted_node_id: str | None = None,
         submitted_run_id: str | None = None,
+        tool_call_id: str | None = None,
     ) -> dict[str, Any]:
         stored = store_text_content(self.persistence, plan)
         now = time()
+        created_ms = int(now * 1000)
         with self.persistence.connect() as conn:
+            persisted_submitted_run_id = self._existing_run_id(conn, conversation_id, submitted_run_id)
+            row = conn.execute(
+                """
+                SELECT *
+                FROM plans
+                WHERE conversation_id = ? AND id = ?
+                """,
+                (conversation_id, plan_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(plan_id)
+            current = dict(row)
+            if current.get("proposal_status") == "awaiting_approval" and current.get("proposal_id"):
+                conn.execute(
+                    """
+                    UPDATE plan_proposals
+                    SET status = 'superseded',
+                        resolved_at = ?
+                    WHERE proposal_id = ?
+                    """,
+                    (created_ms, current.get("proposal_id")),
+                )
+            revision = int(current.get("proposal_revision") or 0) + 1
+            proposal_id = str(uuid.uuid4())
             updated = conn.execute(
                 """
                 UPDATE plans
@@ -92,6 +162,11 @@ class SQLitePlanRepository:
                     plan_preview = ?,
                     submitted_node_id = ?,
                     submitted_run_id = ?,
+                    exit_tool_call_id = ?,
+                    blocking_run_id = ?,
+                    proposal_id = ?,
+                    proposal_revision = ?,
+                    proposal_status = 'awaiting_approval',
                     updated_at = ?
                 WHERE conversation_id = ? AND id = ?
                 """,
@@ -100,7 +175,11 @@ class SQLitePlanRepository:
                     stored.blob_id,
                     stored.preview,
                     submitted_node_id,
+                    persisted_submitted_run_id,
+                    tool_call_id,
                     submitted_run_id,
+                    proposal_id,
+                    revision,
                     now,
                     conversation_id,
                     plan_id,
@@ -108,6 +187,34 @@ class SQLitePlanRepository:
             )
             if updated.rowcount == 0:
                 raise KeyError(plan_id)
+            conn.execute(
+                """
+                INSERT INTO plan_proposals (
+                  proposal_id,
+                  plan_id,
+                  conversation_id,
+                  revision,
+                  plan,
+                  status,
+                  tool_call_id,
+                  run_id,
+                  node_id,
+                  created_at
+                )
+                VALUES (?, ?, ?, ?, ?, 'awaiting_approval', ?, ?, ?, ?)
+                """,
+                (
+                    proposal_id,
+                    plan_id,
+                    conversation_id,
+                    revision,
+                    plan,
+                    tool_call_id,
+                    submitted_run_id,
+                    submitted_node_id,
+                    created_ms,
+                ),
+            )
             self._append_event(
                 conn,
                 conversation_id,
@@ -117,6 +224,9 @@ class SQLitePlanRepository:
                     "submitted_node_id": submitted_node_id,
                     "submitted_run_id": submitted_run_id,
                     "plan_preview": stored.preview,
+                    "tool_call_id": tool_call_id,
+                    "proposal_id": proposal_id,
+                    "revision": revision,
                 },
                 now,
             )
@@ -131,6 +241,8 @@ class SQLitePlanRepository:
         options: Iterable[dict[str, Any]] | None = None,
         asked_node_id: str | None = None,
         asked_run_id: str | None = None,
+        tool_call_id: str | None = None,
+        run_id: str | None = None,
     ) -> dict[str, Any]:
         payload = dict(question) if isinstance(question, dict) else {
             "question": str(question),
@@ -146,10 +258,19 @@ class SQLitePlanRepository:
                 UPDATE plans
                 SET status = 'awaiting_question',
                     question_json = ?,
+                    question_tool_call_id = ?,
+                    blocking_run_id = ?,
                     updated_at = ?
                 WHERE conversation_id = ? AND id = ?
                 """,
-                (self._json_field(payload), now, conversation_id, plan_id),
+                (
+                    self._json_field(payload),
+                    tool_call_id,
+                    run_id or asked_run_id,
+                    now,
+                    conversation_id,
+                    plan_id,
+                ),
             )
             if updated.rowcount == 0:
                 raise KeyError(plan_id)
@@ -220,6 +341,7 @@ class SQLitePlanRepository:
                 SET status = 'approved',
                     approved_run_id = ?,
                     approved_at = ?,
+                    proposal_status = 'approved',
                     updated_at = ?
                 WHERE conversation_id = ? AND id = ?
                 """,
@@ -227,6 +349,21 @@ class SQLitePlanRepository:
             )
             if updated.rowcount == 0:
                 raise KeyError(plan_id)
+            row = conn.execute(
+                "SELECT proposal_id FROM plans WHERE conversation_id = ? AND id = ?",
+                (conversation_id, plan_id),
+            ).fetchone()
+            proposal_id = row["proposal_id"] if row is not None else None
+            if proposal_id:
+                conn.execute(
+                    """
+                    UPDATE plan_proposals
+                    SET status = 'approved',
+                        resolved_at = ?
+                    WHERE proposal_id = ?
+                    """,
+                    (int(now * 1000), proposal_id),
+                )
             self._append_event(
                 conn,
                 conversation_id,
@@ -255,6 +392,7 @@ class SQLitePlanRepository:
                 SET status = 'active',
                     rejected_at = ?,
                     feedback_json = ?,
+                    proposal_status = 'rejected',
                     updated_at = ?
                 WHERE conversation_id = ? AND id = ?
                 """,
@@ -268,6 +406,22 @@ class SQLitePlanRepository:
             )
             if updated.rowcount == 0:
                 raise KeyError(plan_id)
+            row = conn.execute(
+                "SELECT proposal_id FROM plans WHERE conversation_id = ? AND id = ?",
+                (conversation_id, plan_id),
+            ).fetchone()
+            proposal_id = row["proposal_id"] if row is not None else None
+            if proposal_id:
+                conn.execute(
+                    """
+                    UPDATE plan_proposals
+                    SET status = 'rejected',
+                        resolved_at = ?,
+                        feedback = ?
+                    WHERE proposal_id = ?
+                    """,
+                    (int(now * 1000), str(feedback or ""), proposal_id),
+                )
             self._append_event(
                 conn,
                 conversation_id,
@@ -343,6 +497,10 @@ class SQLitePlanRepository:
         with self.persistence.connect() as conn:
             conn.execute(
                 "DELETE FROM plan_events WHERE conversation_id = ?",
+                (conversation_id,),
+            )
+            conn.execute(
+                "DELETE FROM plan_proposals WHERE conversation_id = ?",
                 (conversation_id,),
             )
             conn.execute(
@@ -434,7 +592,35 @@ class SQLitePlanRepository:
         data["plan"] = data["plan"] or ""
         data["question"] = self._load_json(data.pop("question_json")) if data.get("question_json") else None
         data["feedback"] = self._load_json(data.pop("feedback_json")) or []
+        data["proposals"] = self._load_proposals(data["id"])
+        data["proposal_revision"] = int(data.get("proposal_revision") or 0)
         return data
+
+    def _load_proposals(self, plan_id: str) -> list[dict[str, Any]]:
+        with self.persistence.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM plan_proposals
+                WHERE plan_id = ?
+                ORDER BY revision ASC
+                """,
+                (plan_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def _existing_run_id(self, conn: Any, conversation_id: str, run_id: str | None) -> str | None:
+        if not run_id:
+            return None
+        row = conn.execute(
+            """
+            SELECT id
+            FROM runs
+            WHERE conversation_id = ? AND id = ?
+            """,
+            (conversation_id, run_id),
+        ).fetchone()
+        return run_id if row is not None else None
 
     def _append_event(
         self,
@@ -485,6 +671,12 @@ class SQLitePlanRepository:
               entered_run_id,
               submitted_run_id,
               approved_run_id,
+              exit_tool_call_id,
+              question_tool_call_id,
+              blocking_run_id,
+              proposal_id,
+              proposal_revision,
+              proposal_status,
               previous_permission_mode,
               plan_inline,
               plan_blob_id,
@@ -496,7 +688,7 @@ class SQLitePlanRepository:
               approved_at,
               rejected_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 plan_id,
@@ -506,6 +698,12 @@ class SQLitePlanRepository:
                 item.get("submitted_node_id"),
                 item.get("entered_run_id"),
                 item.get("submitted_run_id"),
+                item.get("exit_tool_call_id"),
+                item.get("question_tool_call_id"),
+                item.get("blocking_run_id"),
+                item.get("proposal_id"),
+                int(item.get("proposal_revision") or 0),
+                item.get("proposal_status"),
                 str(item.get("previous_permission_mode") or "modify_only"),
                 stored.inline,
                 stored.blob_id,
@@ -520,6 +718,41 @@ class SQLitePlanRepository:
                 item.get("rejected_at"),
             ),
         )
+        for proposal in item.get("proposals") or []:
+            payload = dict(proposal)
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO plan_proposals (
+                  proposal_id,
+                  plan_id,
+                  conversation_id,
+                  revision,
+                  plan,
+                  status,
+                  tool_call_id,
+                  run_id,
+                  node_id,
+                  created_at,
+                  resolved_at,
+                  feedback
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(payload.get("proposal_id") or ""),
+                    plan_id,
+                    conversation_id,
+                    int(payload.get("revision") or 0),
+                    str(payload.get("plan") or ""),
+                    str(payload.get("status") or "awaiting_approval"),
+                    payload.get("tool_call_id"),
+                    payload.get("run_id"),
+                    payload.get("node_id"),
+                    payload.get("created_at"),
+                    payload.get("resolved_at"),
+                    payload.get("feedback"),
+                ),
+            )
         return plan_id
 
     def _json_field(self, value: Any) -> str | None:

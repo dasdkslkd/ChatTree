@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, Optional, Sequence
 
 from backend.core.tools.security.permissions import normalize_permission_mode
 
-from .types import ACTIVE_PLAN_STATUSES, PlanContextInjection, PlanSession, PlanStatus
+from .types import ACTIVE_PLAN_STATUSES, PlanContextInjection, PlanProposal, PlanSession, PlanStatus
 
 
 class PlanLedgerError(Exception):
@@ -79,6 +79,7 @@ class PlanLedger:
         plan: str,
         node_id: Optional[str] = None,
         run_id: Optional[str] = None,
+        tool_call_id: Optional[str] = None,
     ) -> PlanSession:
         plan_text = str(plan or "").strip()
         if not conversation_id:
@@ -88,7 +89,10 @@ class PlanLedger:
         async with self._lock:
             if self._repository is not None:
                 record = self._repository.get_active_or_awaiting(conversation_id)
-                if record is None or record.get("status") != PlanStatus.ACTIVE.value:
+                if record is None or record.get("status") not in (
+                    PlanStatus.ACTIVE.value,
+                    PlanStatus.AWAITING_APPROVAL.value,
+                ):
                     raise ValueError("active plan session is required")
                 updated = self._repository.submit_plan(
                     conversation_id,
@@ -96,16 +100,41 @@ class PlanLedger:
                     plan=plan_text,
                     submitted_node_id=node_id,
                     submitted_run_id=run_id,
+                    tool_call_id=tool_call_id,
                 )
                 return self._session_from_record(updated)
             record = self._active_or_awaiting_locked(conversation_id)
-            if record is None or record.status != PlanStatus.ACTIVE:
+            if record is None or record.status not in (PlanStatus.ACTIVE, PlanStatus.AWAITING_APPROVAL):
                 raise ValueError("active plan session is required")
             updated = deepcopy(record)
+            if updated.proposal_status == "awaiting_approval" and updated.proposal_id:
+                updated = self._mark_current_proposal(
+                    updated,
+                    status="superseded",
+                    resolved_at=self._now_ms(),
+                )
+            revision = updated.proposal_revision + 1
+            proposal = PlanProposal(
+                proposal_id=str(uuid.uuid4()),
+                plan_id=updated.plan_id,
+                revision=revision,
+                plan=plan_text,
+                status="awaiting_approval",
+                tool_call_id=tool_call_id,
+                run_id=run_id,
+                node_id=node_id,
+                created_at=self._now_ms(),
+            )
             updated.status = PlanStatus.AWAITING_APPROVAL
             updated.plan = plan_text
             updated.submitted_node_id = node_id
             updated.submitted_run_id = run_id
+            updated.exit_tool_call_id = tool_call_id
+            updated.blocking_run_id = run_id
+            updated.proposal_id = proposal.proposal_id
+            updated.proposal_revision = revision
+            updated.proposal_status = proposal.status
+            updated.proposals.append(proposal)
             updated.updated_at = time()
             self._plans_by_conversation[conversation_id][updated.plan_id] = updated
             return deepcopy(updated)
@@ -118,6 +147,7 @@ class PlanLedger:
         options: Optional[Sequence[Dict[str, Any]]] = None,
         node_id: Optional[str] = None,
         run_id: Optional[str] = None,
+        tool_call_id: Optional[str] = None,
     ) -> PlanSession:
         question_text = str(question or "").strip()
         if not conversation_id:
@@ -144,6 +174,8 @@ class PlanLedger:
                     conversation_id,
                     record["plan_id"],
                     question=payload,
+                    tool_call_id=tool_call_id,
+                    run_id=run_id,
                 )
                 return self._session_from_record(updated)
             record = self._active_or_awaiting_locked(conversation_id)
@@ -158,6 +190,8 @@ class PlanLedger:
                 "asked_run_id": run_id,
                 "created_at": now,
             }
+            updated.question_tool_call_id = tool_call_id
+            updated.blocking_run_id = run_id
             updated.updated_at = now
             self._plans_by_conversation[conversation_id][updated.plan_id] = updated
             return deepcopy(updated)
@@ -255,6 +289,11 @@ class PlanLedger:
             updated.status = PlanStatus.APPROVED
             updated.approved_at = time()
             updated.updated_at = updated.approved_at
+            updated = self._mark_current_proposal(
+                updated,
+                status="approved",
+                resolved_at=self._now_ms(),
+            )
             self._plans_by_conversation[conversation_id][plan_id] = updated
             self._pending_context_by_conversation.setdefault(conversation_id, []).append(
                 PlanContextInjection(
@@ -302,6 +341,12 @@ class PlanLedger:
             updated.rejected_at = now
             updated.updated_at = now
             updated.feedback.append({"feedback": str(feedback or ""), "created_at": now})
+            updated = self._mark_current_proposal(
+                updated,
+                status="rejected",
+                resolved_at=self._now_ms(),
+                feedback=str(feedback or ""),
+            )
             self._plans_by_conversation[conversation_id][plan_id] = updated
             self._pending_context_by_conversation.setdefault(conversation_id, []).append(
                 PlanContextInjection(
@@ -449,11 +494,78 @@ class PlanLedger:
             "entered_run_id": record.get("entered_run_id"),
             "submitted_node_id": record.get("submitted_node_id"),
             "submitted_run_id": record.get("submitted_run_id"),
+            "exit_tool_call_id": record.get("exit_tool_call_id"),
+            "question_tool_call_id": record.get("question_tool_call_id"),
+            "blocking_run_id": record.get("blocking_run_id"),
+            "proposal_id": record.get("proposal_id"),
+            "proposal_revision": record.get("proposal_revision") or 0,
+            "proposal_status": record.get("proposal_status"),
+            "proposals": list(record.get("proposals") or []),
             "approved_at": record.get("approved_at"),
             "rejected_at": record.get("rejected_at"),
             "created_at": record.get("created_at", time()),
             "updated_at": record.get("updated_at", time()),
         })
+
+    @staticmethod
+    def _now_ms() -> int:
+        return int(time() * 1000)
+
+    def _mark_current_proposal(
+        self,
+        session: PlanSession,
+        *,
+        status: str,
+        resolved_at: Optional[int] = None,
+        feedback: Optional[str] = None,
+    ) -> PlanSession:
+        proposal_id = session.proposal_id
+        if not proposal_id:
+            return session
+        proposals: list[PlanProposal] = []
+        for proposal in session.proposals:
+            updated = deepcopy(proposal)
+            if updated.proposal_id == proposal_id:
+                updated.status = status  # type: ignore[assignment]
+                updated.resolved_at = resolved_at if resolved_at is not None else updated.resolved_at
+                if feedback is not None:
+                    updated.feedback = feedback
+            proposals.append(updated)
+        session.proposals = proposals
+        session.proposal_status = status
+        return session
+
+    def approved_tool_result_content(self, session: PlanSession) -> str:
+        return (
+            "User has approved your plan. You can now start coding. "
+            "Start with updating your todo list if applicable.\n\n"
+            "## Approved Plan:\n"
+            f"{session.plan}"
+        )
+
+    def rejected_tool_result_content(self, session: PlanSession) -> str:
+        feedback = session.feedback[-1].get("feedback", "") if session.feedback else ""
+        if feedback.strip():
+            return (
+                "User did not approve the plan.\n\n"
+                f"Feedback:\n{feedback}\n\n"
+                "Remain in plan mode. Revise the plan and call exit_plan_mode again when ready."
+            )
+        return (
+            "User did not approve the plan and did not provide specific feedback.\n\n"
+            "Remain in plan mode. Re-evaluate and improve the plan. "
+            "Call exit_plan_mode again when ready, or ask_user_question only if a real decision is required."
+        )
+
+    def question_answer_tool_result_content(self, session: PlanSession) -> str:
+        question = str((session.question or {}).get("question") or "")
+        answer = str((session.question or {}).get("answer") or "")
+        return (
+            "The user answered your plan-mode clarification question.\n\n"
+            f"Question: {question}\n"
+            f"Answer: {answer}\n\n"
+            "Remain in plan mode. Continue planning and call exit_plan_mode when ready."
+        )
 
     def _approved_plan_content(self, session: PlanSession) -> str:
         return (

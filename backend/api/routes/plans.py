@@ -40,6 +40,10 @@ class PlanAnswerStreamRequest(PlanActionStreamRequest):
     answer: str
 
 
+class PlanRejectStreamRequest(PlanActionStreamRequest):
+    feedback: Optional[str] = None
+
+
 def _plan_payload(plan) -> Optional[Dict[str, Any]]:
     return plan.to_dict() if plan else None
 
@@ -167,14 +171,17 @@ async def _plan_action_stream(
     message_subtype: str,
     chat_manager: ChatManager,
     run_manager: RunManager,
+    plan_ledger: PlanLedger,
 ) -> AsyncIterator[str]:
+    is_approval = message_subtype == "plan_approval_response"
+    is_rejection = message_subtype == "plan_rejection_response"
     run = await run_manager.create_run(
         conversation_id=conversation_id,
         kind=RunKind.CHAT,
         anchor_node_id=request.node_id,
-        summary="批准计划" if message_subtype == "plan_approval_response" else "回答计划澄清",
+        summary="批准计划" if is_approval else ("驳回计划" if is_rejection else "回答计划澄清"),
         metadata={
-            "origin": "plan_approval" if message_subtype == "plan_approval_response" else "plan_question_answer",
+            "origin": "plan_approval" if is_approval else ("plan_rejection" if is_rejection else "plan_question_answer"),
             "plan_id": plan_id,
             "model_id": request.model_id,
             "provider_id": request.provider_id,
@@ -189,17 +196,54 @@ async def _plan_action_stream(
         final_error: str | None = None
         bound_node_id: str | None = None
         try:
-            async for chunk in chat_manager.continue_plan_action_stream(
+            if is_approval:
+                plan = await plan_ledger.approve_plan(conversation_id=conversation_id, plan_id=plan_id)
+                tool_call_id = plan.exit_tool_call_id or ""
+                if not tool_call_id:
+                    raise HTTPException(status_code=409, detail="approved plan has no exit_plan_mode tool_call_id")
+                tool_result_content = plan_ledger.approved_tool_result_content(plan)
+                tool_name = "exit_plan_mode"
+                continuation_permission_mode = plan.previous_permission_mode
+            elif is_rejection:
+                plan = await plan_ledger.reject_plan(
+                    conversation_id=conversation_id,
+                    plan_id=plan_id,
+                    feedback=content,
+                )
+                tool_call_id = plan.exit_tool_call_id or ""
+                if not tool_call_id:
+                    raise HTTPException(status_code=409, detail="rejected plan has no exit_plan_mode tool_call_id")
+                tool_result_content = plan_ledger.rejected_tool_result_content(plan)
+                tool_name = "exit_plan_mode"
+                continuation_permission_mode = "plan"
+            else:
+                plan = await plan_ledger.answer_question(
+                    conversation_id=conversation_id,
+                    plan_id=plan_id,
+                    answer=content,
+                )
+                tool_call_id = plan.question_tool_call_id or ""
+                if not tool_call_id:
+                    raise HTTPException(status_code=409, detail="answered plan has no ask_user_question tool_call_id")
+                tool_result_content = plan_ledger.question_answer_tool_result_content(plan)
+                tool_name = "ask_user_question"
+                continuation_permission_mode = "plan"
+            await plan_ledger.consume_pending_context(conversation_id)
+            update_projection = getattr(chat_manager, "update_plan_proposal_projection", None)
+            if callable(update_projection):
+                update_projection(conversation_id, plan)
+            async for chunk in chat_manager.continue_plan_tool_result_stream(
                 conversation_id=conversation_id,
-                content=content,
+                plan_id=plan_id,
+                tool_result_content=tool_result_content,
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
                 model_id=request.model_id,
                 provider_id=request.provider_id,
                 node_id=request.node_id,
                 reasoning_effort=request.reasoning_effort,
                 thinking_enabled=request.thinking_enabled,
-                tool_permission_mode=request.tool_permission_mode,
-                message_subtype=message_subtype,
-                plan_id=plan_id,
+                tool_permission_mode=continuation_permission_mode,
                 run_id=run.run_id,
             ):
                 chunk_data = build_stream_chunk_data(chunk, conversation_id)
@@ -244,6 +288,7 @@ async def approve_plan_stream(
     request: Optional[PlanActionStreamRequest] = Body(None),
     chat_manager: ChatManager = Depends(get_chat_manager),
     run_manager: RunManager = Depends(get_run_manager),
+    plan_ledger: PlanLedger = Depends(get_plan_ledger),
 ):
     stream_request = request or PlanActionStreamRequest()
     return StreamingResponse(
@@ -255,6 +300,38 @@ async def approve_plan_stream(
             message_subtype="plan_approval_response",
             chat_manager=chat_manager,
             run_manager=run_manager,
+            plan_ledger=plan_ledger,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/conversations/{conversation_id}/plans/{plan_id}/reject/stream")
+async def reject_plan_stream(
+    conversation_id: str,
+    plan_id: str,
+    request: Optional[PlanRejectStreamRequest] = Body(None),
+    chat_manager: ChatManager = Depends(get_chat_manager),
+    run_manager: RunManager = Depends(get_run_manager),
+    plan_ledger: PlanLedger = Depends(get_plan_ledger),
+):
+    stream_request = request or PlanRejectStreamRequest()
+    feedback = stream_request.feedback or ""
+    return StreamingResponse(
+        _plan_action_stream(
+            conversation_id=conversation_id,
+            plan_id=plan_id,
+            request=stream_request,
+            content=feedback,
+            message_subtype="plan_rejection_response",
+            chat_manager=chat_manager,
+            run_manager=run_manager,
+            plan_ledger=plan_ledger,
         ),
         media_type="text/event-stream",
         headers={
@@ -272,6 +349,7 @@ async def answer_plan_question_stream(
     request: PlanAnswerStreamRequest,
     chat_manager: ChatManager = Depends(get_chat_manager),
     run_manager: RunManager = Depends(get_run_manager),
+    plan_ledger: PlanLedger = Depends(get_plan_ledger),
 ):
     return StreamingResponse(
         _plan_action_stream(
@@ -282,6 +360,7 @@ async def answer_plan_question_stream(
             message_subtype="plan_question_response",
             chat_manager=chat_manager,
             run_manager=run_manager,
+            plan_ledger=plan_ledger,
         ),
         media_type="text/event-stream",
         headers={

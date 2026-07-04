@@ -92,7 +92,7 @@ def to_transcript_item_dto(item: Dict[str, Any]) -> Dict[str, Any]:
         try:
             loaded_metadata = json.loads(message_metadata_json)
             if isinstance(loaded_metadata, dict):
-                for key in ("tool_interactions", "reasoning", "tool_calls", "tool_results"):
+                for key in ("tool_interactions", "timeline", "reasoning", "tool_calls", "tool_results"):
                     if key in loaded_metadata and key not in props:
                         props[key] = loaded_metadata[key]
         except (TypeError, json.JSONDecodeError):

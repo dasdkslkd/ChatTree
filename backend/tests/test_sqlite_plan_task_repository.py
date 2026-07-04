@@ -49,6 +49,43 @@ def test_plan_repository_persists_plan_card_state(tmp_path):
     assert loaded["submitted_node_id"] == node_id
 
 
+def test_plan_repository_persists_proposal_revisions(tmp_path):
+    persistence = SQLitePersistence(tmp_path)
+    persistence.initialize()
+    chat = ChatRepository(persistence)
+    plans = SQLitePlanRepository(persistence)
+    conv_id = chat.create_conversation(title="Plan proposals")
+    node_id = chat.create_node(conv_id, parent_id=None)
+
+    plan_id = plans.create_plan(conv_id, entered_node_id=node_id)
+    first = plans.submit_plan(
+        conv_id,
+        plan_id,
+        plan="First plan",
+        submitted_node_id=node_id,
+        submitted_run_id="run-1",
+        tool_call_id="call-exit-1",
+    )
+    plans.reject_plan(conv_id, plan_id, feedback="Try again.")
+    second = plans.submit_plan(
+        conv_id,
+        plan_id,
+        plan="Second plan",
+        submitted_node_id=node_id,
+        submitted_run_id="run-2",
+        tool_call_id="call-exit-2",
+    )
+
+    assert first["proposal_revision"] == 1
+    assert second["proposal_revision"] == 2
+    assert [proposal["status"] for proposal in second["proposals"]] == [
+        "rejected",
+        "awaiting_approval",
+    ]
+    assert second["proposals"][0]["tool_call_id"] == "call-exit-1"
+    assert second["proposals"][1]["tool_call_id"] == "call-exit-2"
+
+
 def test_task_repository_persists_open_tasks(tmp_path):
     persistence = SQLitePersistence(tmp_path)
     persistence.initialize()

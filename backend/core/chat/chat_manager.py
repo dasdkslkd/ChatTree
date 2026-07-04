@@ -40,6 +40,11 @@ from ..slash import (
 from ..tools.security.permissions import PermissionMode, normalize_permission_mode
 from ..tools.agent_tools import AGENT_TOOL_NAMES, LEGACY_AGENT_TOOL_NAMES
 from ..tasks import TaskRecord, TaskStatus
+from .turn_timeline import (
+    has_blocking_plan_tool_result,
+    plan_proposal_block,
+    should_emit_as_intermediate_text,
+)
 
 logger = setup_logger('ChatManager')
 
@@ -532,31 +537,102 @@ class ChatManager:
             parts.append(reasoning[:300])
         return "\n".join(parts)[:4096] or "Assistant process"
 
-    def _plan_cards_from_tool_messages(self, tool_messages: List[Message]) -> list[dict[str, Any]]:
-        cards: list[dict[str, Any]] = []
-        for message in tool_messages:
-            name = str(message.get("name") or "")
-            if name not in {"exit_plan_mode", "ask_user_question"}:
+    def _proposal_block_with_latest_status(
+        self,
+        block: dict[str, Any],
+        conversation: Optional[Conversation],
+    ) -> dict[str, Any]:
+        snapshot = ((conversation.metadata or {}).get("plan_ledger") if conversation is not None else None) or {}
+        if not isinstance(snapshot, dict):
+            return block
+        proposal_id = str(block.get("proposal_id") or "")
+        tool_call_id = str(block.get("tool_call_id") or "")
+        for plan in snapshot.get("plans") or []:
+            if not isinstance(plan, dict):
                 continue
-            payload = self._json_tool_payload(message.get("raw_content") or message.get("content"))
-            status = str(payload.get("status") or "")
-            if status not in {"awaiting_approval", "awaiting_question"}:
-                continue
-            plan_id = str(payload.get("plan_id") or "")
-            if not plan_id:
-                continue
-            if name == "exit_plan_mode":
-                preview = str(payload.get("plan") or payload.get("message") or "")
-            else:
-                question = payload.get("question") if isinstance(payload.get("question"), dict) else {}
-                preview = str(question.get("question") or payload.get("message") or "")
-            cards.append({
-                "plan_id": plan_id,
-                "status": status,
-                "preview": preview[:4096],
-                "props": payload,
-            })
-        return cards
+            for proposal in plan.get("proposals") or []:
+                if not isinstance(proposal, dict):
+                    continue
+                if (
+                    proposal_id
+                    and str(proposal.get("proposal_id") or "") == proposal_id
+                ) or (
+                    tool_call_id
+                    and str(proposal.get("tool_call_id") or "") == tool_call_id
+                ):
+                    updated = dict(block)
+                    updated["status"] = str(proposal.get("status") or updated.get("status") or "")
+                    updated["proposal_id"] = str(proposal.get("proposal_id") or updated.get("proposal_id") or "")
+                    updated["revision"] = int(proposal.get("revision") or updated.get("revision") or 1)
+                    updated["resolved_at"] = proposal.get("resolved_at")
+                    updated["feedback"] = proposal.get("feedback")
+                    return updated
+        return block
+
+    def update_plan_proposal_projection(self, conversation_id: str, plan: Any) -> None:
+        if not self._sqlite_enabled():
+            return
+        proposals = list(getattr(plan, "proposals", []) or [])
+        if not proposals:
+            return
+        by_proposal_id = {
+            str(getattr(proposal, "proposal_id", "") or ""): proposal
+            for proposal in proposals
+        }
+        by_tool_call_id = {
+            str(getattr(proposal, "tool_call_id", "") or ""): proposal
+            for proposal in proposals
+            if getattr(proposal, "tool_call_id", None)
+        }
+        try:
+            with self.chat_repository.persistence.connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT messages.id, messages.metadata_json
+                    FROM messages
+                    JOIN transcript_items
+                      ON transcript_items.conversation_id = messages.conversation_id
+                     AND transcript_items.message_id = messages.id
+                    WHERE messages.conversation_id = ?
+                      AND messages.subtype = 'assistant_process'
+                      AND transcript_items.item_type = 'assistant_process'
+                    """,
+                    (conversation_id,),
+                ).fetchall()
+                for row in rows:
+                    try:
+                        metadata = json.loads(row["metadata_json"] or "{}")
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                    timeline = metadata.get("timeline")
+                    if not isinstance(timeline, list):
+                        continue
+                    changed = False
+                    for block in timeline:
+                        if not isinstance(block, dict) or block.get("type") != "plan_proposal":
+                            continue
+                        proposal = by_proposal_id.get(str(block.get("proposal_id") or ""))
+                        if proposal is None:
+                            proposal = by_tool_call_id.get(str(block.get("tool_call_id") or ""))
+                        if proposal is None:
+                            continue
+                        block["proposal_id"] = getattr(proposal, "proposal_id", block.get("proposal_id"))
+                        block["revision"] = getattr(proposal, "revision", block.get("revision"))
+                        block["status"] = getattr(proposal, "status", block.get("status"))
+                        block["resolved_at"] = getattr(proposal, "resolved_at", None)
+                        block["feedback"] = getattr(proposal, "feedback", None)
+                        changed = True
+                    if changed:
+                        conn.execute(
+                            """
+                            UPDATE messages
+                            SET metadata_json = ?
+                            WHERE id = ?
+                            """,
+                            (json.dumps(metadata, ensure_ascii=False, sort_keys=True), row["id"]),
+                        )
+        except Exception as exc:
+            logger.warning("SQLite plan proposal projection update failed: %s", exc, exc_info=True)
 
     def _persist_sqlite_tool_metadata(
         self,
@@ -669,6 +745,34 @@ class ChatManager:
                 tool_interactions=tool_interactions,
                 reasoning=str(assistant_msg.get("reasoning") or ""),
             )
+            timeline_blocks: list[dict[str, Any]] = []
+            for interaction in tool_interactions:
+                assistant = interaction.get("assistant") or {}
+                if assistant.get("reasoning"):
+                    timeline_blocks.append({"type": "reasoning", "content": assistant["reasoning"]})
+                elif interaction.get("reasoning"):
+                    timeline_blocks.append({"type": "reasoning", "content": interaction["reasoning"]})
+                if assistant.get("content"):
+                    timeline_blocks.append({"type": "content", "content": assistant["content"]})
+
+                calls = assistant.get("tool_calls") or interaction.get("tool_calls") or []
+                results = interaction.get("tools") or interaction.get("tool_results") or []
+                results_by_call_id = {
+                    str(result.get("tool_call_id") or ""): result
+                    for result in results
+                }
+                for call in calls:
+                    result = results_by_call_id.get(str(call.get("id") or ""))
+                    proposal = plan_proposal_block(tool_call=call, tool_result=result or {})
+                    if proposal is not None:
+                        proposal = self._proposal_block_with_latest_status(proposal, conversation)
+                        timeline_blocks.append(proposal)
+                        continue
+                    timeline_blocks.append({
+                        "type": "tool_call",
+                        "tool_call": call,
+                        "tool_result": result,
+                    })
             if tool_interactions or assistant_msg.get("reasoning"):
                 process_message_id = self.chat_repository.add_message(
                     conversation_id,
@@ -679,6 +783,7 @@ class ChatManager:
                     hidden=False,
                     metadata={
                         "tool_interactions": tool_interactions,
+                        "timeline": timeline_blocks,
                         "reasoning": assistant_msg.get("reasoning"),
                     },
                     message_id=f"{assistant_msg.get('id')}:process",
@@ -692,7 +797,7 @@ class ChatManager:
                     status=generation_status,
                     preview=process_preview,
                 )
-            plan_control_only = self._plan_tool_paused_turn(tool_messages)
+            plan_control_only = has_blocking_plan_tool_result(tool_messages)
             if content and not plan_control_only and assistant_message_id:
                 self.transcript_projection.upsert_message_item(
                     conversation_id,
@@ -701,16 +806,6 @@ class ChatManager:
                     "assistant_answer",
                     local_order=30,
                     status=generation_status,
-                )
-            for card in self._plan_cards_from_tool_messages(tool_messages):
-                self.transcript_projection.upsert_plan_card(
-                    conversation_id,
-                    node_id,
-                    plan_id=card["plan_id"],
-                    status=card["status"],
-                    preview=card["preview"],
-                    local_order=40,
-                    props=card["props"],
                 )
             if run_id:
                 self.transcript_projection.upsert_run_draft(
@@ -937,6 +1032,8 @@ class ChatManager:
         hidden_user_message: bool = False,
         run_id: Optional[str] = None,
         control_event: Optional[Dict[str, Any]] = None,
+        continuation_messages: Optional[List[Message]] = None,
+        suppress_user_message: bool = False,
     ) -> AsyncIterator[StreamChunk]:
         """
         异步流式发送消息
@@ -1098,7 +1195,7 @@ class ChatManager:
         control_event_payload = dict(control_event or {})
         is_control_event_turn = bool(control_event_payload)
         user_msg: Optional[Message] = None
-        if not is_control_event_turn:
+        if not is_control_event_turn and not suppress_user_message:
             # 创建用户消息
             user_msg = Message({
                 "id": str(uuid.uuid4()),
@@ -1181,7 +1278,12 @@ class ChatManager:
                 if requested_tool_permission_mode
                 else plan_context_permission_mode or active_plan_permission_mode or parent_tool_permission_mode or "ask_always"
             )
-            if self.capability_registry is not None and not hidden_user_message and not is_control_event_turn:
+            if (
+                self.capability_registry is not None
+                and not hidden_user_message
+                and not is_control_event_turn
+                and not suppress_user_message
+            ):
                 skill_names = collect_skill_injection_names(
                     model_content,
                     self.capability_registry,
@@ -1248,6 +1350,8 @@ class ChatManager:
         # 准备消息链（使用锁内加载的最新 conversation）
         messages = self._build_prompt_messages(conversation, skill_names)
         messages.extend(self._plan_context_messages(pending_plan_context))
+        if continuation_messages:
+            self._apply_continuation_messages(messages, continuation_messages)
 
         workspace_context = normalize_workspace(
             preview.metadata.get("workspace"),
@@ -1473,8 +1577,15 @@ class ChatManager:
                     )
                     break
 
-                for deferred_chunk in deferred_content_chunks:
-                    yield deferred_chunk
+                round_has_tool_calls = bool(round_tool_calls)
+                round_text_is_intermediate = should_emit_as_intermediate_text(
+                    has_tool_calls=round_has_tool_calls,
+                    plan_or_task_guard_active=defer_round_content,
+                )
+
+                if not round_text_is_intermediate:
+                    for deferred_chunk in deferred_content_chunks:
+                        yield deferred_chunk
                 tool_round += 1
                 assistant_tool_message = {
                     "role": "assistant",
@@ -1482,6 +1593,10 @@ class ChatManager:
                     "tool_calls": round_tool_calls,
                 }
                 messages.append(assistant_tool_message)
+                if round_text_is_intermediate:
+                    for deferred_chunk in deferred_content_chunks:
+                        deferred_chunk.setdefault("event_type", "process_content")
+                        yield deferred_chunk
                 approval_events: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
 
                 async def emit_tool_event(event: Dict[str, Any]):
@@ -1627,7 +1742,7 @@ class ChatManager:
                             "tool_result_id": tool_msg.get("tool_result_id"),
                         },
                     )
-                if self._plan_tool_paused_turn(tool_messages):
+                if has_blocking_plan_tool_result(tool_messages):
                     final_content = ""
                     persisted_final_content = ""
                     final_reasoning = round_reasoning
@@ -1772,6 +1887,50 @@ class ChatManager:
             if new_node["id"] in self._active_controllers:
                 del self._active_controllers[new_node["id"]]
 
+    async def continue_plan_tool_result_stream(
+        self,
+        *,
+        conversation_id: str,
+        plan_id: str,
+        tool_result_content: str,
+        tool_call_id: str,
+        tool_name: str,
+        model_id: Optional[str] = None,
+        provider_id: Optional[str] = None,
+        node_id: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
+        thinking_enabled: Optional[bool] = None,
+        tool_permission_mode: Optional[str] = None,
+        run_id: Optional[str] = None,
+    ) -> AsyncIterator[StreamChunk]:
+        continuation_message = Message({
+            "id": str(uuid.uuid4()),
+            "role": Role.TOOL,
+            "content": tool_result_content,
+            "name": tool_name,
+            "tool_call_id": tool_call_id,
+            "timestamp": int(time()),
+            "model_visible_content": tool_result_content,
+            "raw_content": tool_result_content,
+        })
+        async for chunk in self.send_message_stream(
+            conversation_id=conversation_id,
+            content="",
+            model_id=model_id,
+            provider_id=provider_id,
+            node_id=node_id,
+            reasoning_effort=reasoning_effort,
+            thinking_enabled=thinking_enabled,
+            import_files=None,
+            image_refs=None,
+            tool_permission_mode=tool_permission_mode,
+            message_subtype="plan_tool_result_continuation",
+            run_id=run_id,
+            continuation_messages=[continuation_message],
+            suppress_user_message=True,
+        ):
+            yield chunk
+
     async def continue_plan_action_stream(
         self,
         *,
@@ -1809,44 +1968,37 @@ class ChatManager:
             if plan_id and current.plan_id != plan_id:
                 raise ValueError("plan not found")
             status = getattr(getattr(current, "status", None), "value", getattr(current, "status", None))
-            projection_context: Dict[str, Any] = {}
             if message_subtype == "plan_approval_response":
                 if status != "awaiting_approval":
                     raise ValueError("plan must be awaiting approval")
-                approved_plan = await plan_ledger.approve_plan(
+                plan = await plan_ledger.approve_plan(
                     conversation_id=conversation_id,
                     plan_id=current.plan_id,
                 )
-                projection_context = self._persist_sqlite_plan_action_projection(
-                    conversation_id=conversation_id,
-                    plan=approved_plan,
-                    action="approved",
-                    fallback_node_id=node_id or getattr(current, "submitted_node_id", None),
-                    run_id=run_id,
-                )
-                model_content = "Plan mode approval response received. Continue with the approved plan."
-                control_event_type = "plan_approved"
-                control_status = "approved"
+                tool_call_id = plan.exit_tool_call_id or ""
+                if not tool_call_id:
+                    raise ValueError("approved plan has no exit_plan_mode tool_call_id")
+                tool_result_content = plan_ledger.approved_tool_result_content(plan)
+                tool_name = "exit_plan_mode"
+                continuation_permission_mode = plan.previous_permission_mode
             elif message_subtype == "plan_question_response":
                 if status != "awaiting_question":
                     raise ValueError("plan must be awaiting question")
-                answered_plan = await plan_ledger.answer_question(
+                plan = await plan_ledger.answer_question(
                     conversation_id=conversation_id,
                     plan_id=current.plan_id,
                     answer=content,
                 )
-                projection_context = self._persist_sqlite_plan_action_projection(
-                    conversation_id=conversation_id,
-                    plan=answered_plan,
-                    action="question_answered",
-                    fallback_node_id=node_id or getattr(current, "submitted_node_id", None),
-                    run_id=run_id,
-                )
-                model_content = "Plan mode clarification response received. Continue planning with the user's answer."
-                control_event_type = "plan_question_answered"
-                control_status = "active"
+                tool_call_id = plan.question_tool_call_id or ""
+                if not tool_call_id:
+                    raise ValueError("answered plan has no ask_user_question tool_call_id")
+                tool_result_content = plan_ledger.question_answer_tool_result_content(plan)
+                tool_name = "ask_user_question"
+                continuation_permission_mode = "plan"
             else:
                 raise ValueError("unsupported plan action response")
+            await plan_ledger.consume_pending_context(conversation_id)
+            self.update_plan_proposal_projection(conversation_id, plan)
         except Exception as exc:
             yield StreamChunk(
                 status=StreamStatus.ERROR,
@@ -1859,28 +2011,19 @@ class ChatManager:
             )
             return
 
-        async for chunk in self.send_message_stream(
+        async for chunk in self.continue_plan_tool_result_stream(
             conversation_id=conversation_id,
-            content=model_content,
+            plan_id=current.plan_id,
+            tool_result_content=tool_result_content,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
             model_id=model_id,
             provider_id=provider_id,
             node_id=node_id,
             reasoning_effort=reasoning_effort,
             thinking_enabled=thinking_enabled,
-            import_files=None,
-            image_refs=None,
-            tool_permission_mode=tool_permission_mode,
-            message_subtype=message_subtype,
+            tool_permission_mode=continuation_permission_mode,
             run_id=run_id,
-            control_event={
-                "event_type": control_event_type,
-                "plan_id": current.plan_id,
-                "message_subtype": message_subtype,
-                "status": control_status,
-                "preview": model_content,
-                "content": model_content,
-                **projection_context,
-            },
         ):
             yield chunk
 
@@ -2160,67 +2303,31 @@ class ChatManager:
             }))
         return messages
 
-    def _persist_sqlite_plan_action_projection(
+    def _apply_continuation_messages(
         self,
-        *,
-        conversation_id: str,
-        plan: Any,
-        action: str,
-        fallback_node_id: Optional[str],
-        run_id: Optional[str],
-    ) -> Dict[str, Any]:
-        if not self._sqlite_enabled():
-            return {}
-        plan_id = str(getattr(plan, "plan_id", "") or "")
-        if not plan_id:
-            return {}
-        if action == "approved":
-            plan_node_id = (
-                getattr(plan, "submitted_node_id", None)
-                or fallback_node_id
-            )
-            status = "approved"
-            preview = str(getattr(plan, "plan", "") or "")
-            summary = "Plan approved"
-        elif action == "question_answered":
-            question = getattr(plan, "question", None) or {}
-            plan_node_id = (
-                question.get("asked_node_id")
-                or getattr(plan, "submitted_node_id", None)
-                or fallback_node_id
-            )
-            status = "active"
-            preview = str(question.get("question") or question.get("answer") or "")
-            summary = "Plan question answered"
-        else:
-            plan_node_id = fallback_node_id
-            status = str(getattr(getattr(plan, "status", None), "value", getattr(plan, "status", "")) or "")
-            preview = str(getattr(plan, "plan", "") or "")
-            summary = f"Plan {action}"
-        if not plan_node_id:
-            return {}
-        props = plan.to_dict() if hasattr(plan, "to_dict") else {}
-        props.update({"control_action": action, "run_id": run_id})
-        try:
-            item_id = self.transcript_projection.upsert_plan_card(
-                conversation_id,
-                plan_node_id,
-                plan_id=plan_id,
-                status=status,
-                preview=preview[:4096],
-                local_order=40,
-                summary=summary,
-                props=props,
-            )
-            return {
-                "plan_card_item_id": item_id,
-                "plan_node_id": plan_node_id,
-                "plan_id": plan_id,
-                "plan_status": status,
+        messages: list[Message],
+        continuation_messages: list[Message],
+    ) -> None:
+        for continuation in continuation_messages:
+            tool_call_id = str(continuation.get("tool_call_id") or "")
+            name = str(continuation.get("name") or "")
+            replacement = {
+                "role": "tool",
+                "content": str(continuation.get("model_visible_content") or continuation.get("content") or ""),
+                "tool_call_id": tool_call_id,
+                "name": name,
             }
-        except Exception as exc:
-            logger.warning("SQLite plan action projection write failed: %s", exc, exc_info=True)
-            return {}
+            for index in range(len(messages) - 1, -1, -1):
+                message = messages[index]
+                if (
+                    str(message.get("role") or "") == "tool"
+                    and str(message.get("tool_call_id") or "") == tool_call_id
+                    and (not name or str(message.get("name") or "") == name)
+                ):
+                    messages[index] = Message(replacement)
+                    break
+            else:
+                messages.append(Message(replacement))
 
     def _permission_mode_after_plan_tools(self, tool_messages: list[Message], current_mode: str) -> str:
         mode = normalize_permission_mode(current_mode)
@@ -2236,14 +2343,7 @@ class ChatManager:
         return mode
 
     def _plan_tool_paused_turn(self, tool_messages: list[Message]) -> bool:
-        for message in tool_messages:
-            name = str(message.get("name") or "")
-            if name not in {"exit_plan_mode", "ask_user_question"}:
-                continue
-            payload = self._json_tool_payload(message.get("raw_content") or message.get("content"))
-            if payload.get("status") in {"awaiting_approval", "awaiting_question"}:
-                return True
-        return False
+        return has_blocking_plan_tool_result(tool_messages)
 
     @staticmethod
     def _json_tool_payload(value: Any) -> Dict[str, Any]:
@@ -2893,7 +2993,8 @@ class ChatManager:
                 final_assistant.pop("tool_calls", None)
                 final_assistant.pop("tool_results", None)
                 final_assistant.pop("tool_interactions", None)
-                append_message(final_assistant)
+                if final_assistant.get("content") or final_assistant.get("reasoning"):
+                    append_message(final_assistant)
             else:
                 append_message(assistant)
                 if assistant and assistant.get("tool_calls"):
@@ -3215,6 +3316,8 @@ class ChatManager:
             name = fn.get("name", "")
             arguments = self._parse_tool_arguments(fn.get("arguments"))
             tool_orchestrator = getattr(self, "tool_orchestrator", None)
+            call_run_context = dict(run_context or {})
+            call_run_context["tool_call_id"] = tool_call.get("id")
             if tool_orchestrator:
                 try:
                     message = await tool_orchestrator.execute_tool_call(
@@ -3224,7 +3327,7 @@ class ChatManager:
                         emit_event=emit_event,
                         workspace=workspace,
                         permission_mode=current_permission_mode,
-                        run_context=run_context,
+                        run_context=call_run_context,
                     )
                 except TypeError as exc:
                     error_text = str(exc)
@@ -3276,7 +3379,7 @@ class ChatManager:
                         name,
                         arguments,
                         workspace=workspace,
-                        runtime_context=run_context,
+                        runtime_context=call_run_context,
                     )
                 except TypeError as exc:
                     if "unexpected keyword argument 'workspace'" not in str(exc):

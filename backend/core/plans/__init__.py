@@ -1,5 +1,5 @@
 from .ledger import PlanLedger, PlanLedgerError, PlanNotFoundError
-from .types import ACTIVE_PLAN_STATUSES, PlanContextInjection, PlanSession, PlanStatus
+from .types import ACTIVE_PLAN_STATUSES, PlanContextInjection, PlanProposal, PlanSession, PlanStatus
 
 __all__ = [
     "ACTIVE_PLAN_STATUSES",
@@ -7,6 +7,7 @@ __all__ = [
     "PlanLedger",
     "PlanLedgerError",
     "PlanNotFoundError",
+    "PlanProposal",
     "PlanSession",
     "PlanStatus",
 ]

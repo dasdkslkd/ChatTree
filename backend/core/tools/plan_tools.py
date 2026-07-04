@@ -133,11 +133,13 @@ class ExitPlanModeTool(PlanLedgerTool):
         if not plan:
             return _invalid_arguments("plan is required")
         try:
+            tool_call_id = str(context.get("tool_call_id") or "") or None
             session = await self._plan_ledger.submit_plan(
                 conversation_id=conversation_id,
                 plan=plan,
                 node_id=str(context.get("node_id") or "") or None,
                 run_id=str(context.get("run_id") or "") or None,
+                tool_call_id=tool_call_id,
             )
         except ValueError as exc:
             return _invalid_arguments(str(exc))
@@ -147,6 +149,8 @@ class ExitPlanModeTool(PlanLedgerTool):
             "requires_user_approval": True,
             "message": "Plan submitted for user approval.",
             "plan": session.plan,
+            "proposal_id": session.proposal_id,
+            "revision": session.proposal_revision,
         })
 
 
@@ -203,12 +207,14 @@ class AskUserQuestionTool(PlanLedgerTool):
         if options is not None and not isinstance(options, list):
             return _invalid_arguments("options must be an array")
         try:
+            tool_call_id = str(context.get("tool_call_id") or "") or None
             session = await self._plan_ledger.ask_user_question(
                 conversation_id=conversation_id,
                 question=question,
                 options=options,
                 node_id=str(context.get("node_id") or "") or None,
                 run_id=str(context.get("run_id") or "") or None,
+                tool_call_id=tool_call_id,
             )
         except ValueError as exc:
             return _invalid_arguments(str(exc))

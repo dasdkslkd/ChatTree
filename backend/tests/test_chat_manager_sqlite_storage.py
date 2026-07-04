@@ -30,6 +30,97 @@ from test_chat_manager_prompt_slash import (
 )
 
 
+class TextThenExitPlanProvider:
+    def __init__(self):
+        self.calls = []
+
+    async def generate_response_stream(self, model, messages, stream_controller=None, **kwargs):
+        self.calls.append({"messages": list(messages), "kwargs": kwargs})
+        node_id = stream_controller.node_id
+        conversation_id = stream_controller.conversation_id
+        yield StreamChunk(
+            status=StreamStatus.CONTENT,
+            content="这是正文里不应该成为最终回复的计划摘要。\n",
+            node_id=node_id,
+            conversation_id=conversation_id,
+            tokens_used=1,
+        )
+        yield StreamChunk(
+            status=StreamStatus.CONTENT,
+            content="它只能进入已处理折叠区。\n",
+            node_id=node_id,
+            conversation_id=conversation_id,
+            tokens_used=1,
+        )
+        yield StreamChunk(
+            status=StreamStatus.CONTENT,
+            content="",
+            node_id=node_id,
+            conversation_id=conversation_id,
+            tokens_used=1,
+            tool_calls=[{
+                "id": "call_exit_plan_test",
+                "type": "function",
+                "function": {
+                    "name": "exit_plan_mode",
+                    "arguments": json.dumps({"plan": "## Canonical Plan\n\n1. Only this appears in the plan card."}),
+                },
+            }],
+        )
+        yield StreamChunk(
+            status=StreamStatus.COMPLETE,
+            content="",
+            node_id=node_id,
+            conversation_id=conversation_id,
+            tokens_used=3,
+        )
+
+
+class ToolThenFinalAnswerProvider:
+    def __init__(self):
+        self.calls = []
+
+    async def generate_response_stream(self, model, messages, stream_controller=None, **kwargs):
+        self.calls.append({"messages": list(messages), "kwargs": kwargs})
+        node_id = stream_controller.node_id
+        conversation_id = stream_controller.conversation_id
+        if len(self.calls) == 1:
+            yield StreamChunk(
+                status=StreamStatus.CONTENT,
+                content="我先检查一下环境。\n",
+                node_id=node_id,
+                conversation_id=conversation_id,
+                tokens_used=1,
+            )
+            yield StreamChunk(
+                status=StreamStatus.CONTENT,
+                content="",
+                node_id=node_id,
+                conversation_id=conversation_id,
+                tokens_used=1,
+                tool_calls=[{
+                    "id": "call_large_tool",
+                    "type": "function",
+                    "function": {"name": "large_tool", "arguments": "{\"value\":\"small\"}"},
+                }],
+            )
+        else:
+            yield StreamChunk(
+                status=StreamStatus.CONTENT,
+                content="最终总结只应该是这一段。",
+                node_id=node_id,
+                conversation_id=conversation_id,
+                tokens_used=1,
+            )
+        yield StreamChunk(
+            status=StreamStatus.COMPLETE,
+            content="",
+            node_id=node_id,
+            conversation_id=conversation_id,
+            tokens_used=3,
+        )
+
+
 def _make_manager(tmp_path: Path):
     persistence = SQLitePersistence(tmp_path / "sqlite")
     persistence.initialize()
@@ -179,7 +270,7 @@ def test_send_message_stream_updates_run_draft_item(tmp_path: Path):
     assert run_items[0]["preview"] == "ok"
 
 
-def test_plan_control_turn_writes_process_and_plan_card_without_answer(tmp_path: Path):
+def test_plan_control_turn_writes_process_timeline_without_answer(tmp_path: Path):
     manager, _repository, projection = _make_manager(tmp_path)
     plan_ledger = PlanLedger()
     tool_manager = PlanModeToolManager(plan_ledger)
@@ -219,18 +310,96 @@ def test_plan_control_turn_writes_process_and_plan_card_without_answer(tmp_path:
     item_types = [item["item_type"] for item in items]
     assert "user_message" in item_types
     assert "assistant_process" in item_types
-    assert "plan_card" in item_types
+    assert "plan_card" not in item_types
     assert "assistant_answer" not in item_types
     process_item = next(item for item in items if item["item_type"] == "assistant_process")
     dto = to_transcript_item_dto(process_item)
     assert dto["props"]["tool_interactions"]
     assert "reasoning" in dto["props"]
-    plan_card = next(item for item in items if item["item_type"] == "plan_card")
-    assert plan_card["status"] == "awaiting_approval"
-    assert "修改设置页" in plan_card["preview"]
+    proposal = next(block for block in dto["props"]["timeline"] if block["type"] == "plan_proposal")
+    assert proposal["status"] == "awaiting_approval"
+    assert "修改设置页" in proposal["plan"]
 
 
-def test_plan_approval_stream_uses_control_event_transcript_projection(tmp_path: Path):
+def test_exit_plan_mode_treats_same_round_text_as_process_not_answer(tmp_path: Path):
+    manager, _repository, projection = _make_manager(tmp_path)
+    plan_ledger = PlanLedger()
+    tool_manager = PlanModeToolManager(plan_ledger)
+    manager.plan_ledger = plan_ledger
+    manager.tool_manager = tool_manager
+    manager.tool_orchestrator = ToolOrchestrator(
+        tool_manager=tool_manager,
+        permission_engine=PermissionEngine.default(),
+        approval_manager=ApprovalManager(),
+        logical_sandbox=LogicalSandbox.for_config({}, tmp_path),
+    )
+    manager.model_manager.provider = TextThenExitPlanProvider()
+    conversation = manager.create_conversation("blocking exit plan")
+    asyncio.run(plan_ledger.enter_plan_mode(
+        conversation_id=conversation.metadata["id"],
+        previous_permission_mode="modify_only",
+    ))
+
+    chunks = asyncio.run(collect_chunks(manager.send_message_stream(
+        conversation.metadata["id"],
+        "写计划",
+        model_id="fake-model",
+        run_id="run-plan-blocking",
+    )))
+
+    main_text = "".join(
+        str(chunk.get("content") or "")
+        for chunk in chunks
+        if chunk.get("status") == "content" and not chunk.get("event_type")
+    )
+    assert "不应该成为最终回复" not in main_text
+    assert chunks[-1]["status"] == "complete"
+
+    reloaded = manager.get_conversation(conversation.metadata["id"])
+    items = projection.list_for_branch(conversation.metadata["id"], reloaded.current_node_id)
+    assert "assistant_answer" not in [item["item_type"] for item in items]
+
+    process_item = next(item for item in items if item["item_type"] == "assistant_process")
+    dto = to_transcript_item_dto(process_item)
+    interactions = dto["props"]["tool_interactions"]
+    assert "不应该成为最终回复" in interactions[-1]["assistant"]["content"]
+
+    assert "plan_card" not in [item["item_type"] for item in items]
+    timeline = dto["props"]["timeline"]
+    proposal = next(block for block in timeline if block["type"] == "plan_proposal")
+    assert proposal["tool_name"] == "exit_plan_mode"
+    assert proposal["status"] == "awaiting_approval"
+    assert proposal["plan"].startswith("## Canonical Plan")
+    assert "不应该成为最终回复" not in proposal["plan"]
+
+
+def test_tool_turn_uses_last_non_tool_text_as_assistant_answer(tmp_path: Path):
+    manager, _repository, projection = _make_manager(tmp_path)
+    manager.tool_manager = LargeToolManager(tmp_path)
+    manager.model_manager.provider = ToolThenFinalAnswerProvider()
+    conversation = manager.create_conversation("tool then final")
+
+    chunks = asyncio.run(collect_chunks(manager.send_message_stream(
+        conversation.metadata["id"],
+        "检查后总结",
+        model_id="fake-model",
+    )))
+
+    assert chunks[-1]["status"] == "complete"
+    reloaded = manager.get_conversation(conversation.metadata["id"])
+    items = projection.list_for_branch(conversation.metadata["id"], reloaded.current_node_id)
+    answer = next(item for item in items if item["item_type"] == "assistant_answer")
+    assert answer["preview"] == "最终总结只应该是这一段。"
+
+    process = next(item for item in items if item["item_type"] == "assistant_process")
+    dto = to_transcript_item_dto(process)
+    timeline = dto["props"]["timeline"]
+    assert timeline[0]["type"] == "content"
+    assert timeline[0]["content"] == "我先检查一下环境。\n"
+    assert timeline[1]["type"] == "tool_call"
+
+
+def test_plan_approval_stream_uses_tool_result_continuation(tmp_path: Path):
     manager, repository, projection = _make_manager(tmp_path)
     plan_ledger = PlanLedger()
     tool_manager = PlanModeToolManager(plan_ledger)
@@ -262,15 +431,24 @@ def test_plan_approval_stream_uses_control_event_transcript_projection(tmp_path:
     assert plan_chunks[-1]["status"] == "complete"
     plan_node_id = manager.get_conversation(conversation.metadata["id"]).current_node_id
     manager.model_manager.provider = CapturingProvider()
+    awaiting_plan = asyncio.run(plan_ledger.get_active_or_awaiting(conversation.metadata["id"]))
+    approved_plan = asyncio.run(plan_ledger.approve_plan(
+        conversation_id=conversation.metadata["id"],
+        plan_id=awaiting_plan.plan_id,
+    ))
+    manager.update_plan_proposal_projection(conversation.metadata["id"], approved_plan)
 
     approval_chunks = asyncio.run(
         collect_chunks(
-            manager.continue_plan_action_stream(
+            manager.continue_plan_tool_result_stream(
                 conversation_id=conversation.metadata["id"],
-                content="Plan approved.",
+                plan_id=approved_plan.plan_id,
+                tool_result_content=plan_ledger.approved_tool_result_content(approved_plan),
+                tool_call_id=approved_plan.exit_tool_call_id,
+                tool_name="exit_plan_mode",
                 model_id="fake-model",
                 node_id=plan_node_id,
-                message_subtype="plan_approval_response",
+                tool_permission_mode="modify_only",
                 run_id="run-impl-1",
             )
         )
@@ -283,7 +461,7 @@ def test_plan_approval_stream_uses_control_event_transcript_projection(tmp_path:
         reloaded.current_node_id,
     )
     item_types = [item["item_type"] for item in items]
-    plan_index = item_types.index("plan_card")
+    process_index = item_types.index("assistant_process")
     run_index = next(
         index
         for index, item in enumerate(items)
@@ -294,13 +472,9 @@ def test_plan_approval_stream_uses_control_event_transcript_projection(tmp_path:
         for index, item in enumerate(items)
         if item["item_type"] == "assistant_answer" and item["preview"] == "ok"
     )
-    control_event = next(item for item in items if item["item_type"] == "control_event")
-    plan_card = next(item for item in items if item["item_type"] == "plan_card")
-
-    assert plan_card["status"] == "approved"
-    assert control_event["visibility"] == "hidden"
-    assert control_event["plan_id"] == plan_card["plan_id"]
-    assert plan_index < run_index < assistant_index
+    assert "control_event" not in item_types
+    assert "plan_card" not in item_types
+    assert process_index < run_index < assistant_index
     assert reloaded.nodes[reloaded.current_node_id]["tool_permission_mode"] == "modify_only"
     with repository.persistence.connect() as conn:
         hidden_user_messages = conn.execute(
@@ -318,9 +492,13 @@ def test_plan_approval_stream_uses_control_event_transcript_projection(tmp_path:
         str(message.get("content") or "")
         for message in manager.model_manager.provider.calls[0]["messages"]
     )
-    assert "Approved plan for this conversation" in first_prompt
-    assert "Continue with the approved plan" in first_prompt
-    assert "modify_only" in first_prompt
+    assert "User has approved your plan" in first_prompt
+    assert "## Approved Plan:" in first_prompt
+    process_item = next(item for item in items if item["item_type"] == "assistant_process")
+    timeline = to_transcript_item_dto(process_item)["props"]["timeline"]
+    proposal = next(block for block in timeline if block["type"] == "plan_proposal")
+    assert proposal["status"] == "approved"
+    assert proposal["plan"].startswith("1. 修改设置页")
 
 
 class ToolCallingProvider:

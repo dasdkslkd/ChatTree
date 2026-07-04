@@ -35,7 +35,7 @@ class FakePlanChatManager:
     def __init__(self):
         self.calls = []
 
-    async def continue_plan_action_stream(self, **kwargs):
+    async def continue_plan_tool_result_stream(self, **kwargs):
         self.calls.append(kwargs)
         run_id = kwargs.get("run_id")
         conversation_id = kwargs.get("conversation_id")
@@ -78,11 +78,16 @@ class SnapshotChatManager:
             await self.plan_ledger.load_snapshot(conversation_id, snapshot)
 
 
-def client_for_plan_stream(chat_manager: FakePlanChatManager, run_manager: RunManager) -> TestClient:
+def client_for_plan_stream(
+    chat_manager: FakePlanChatManager,
+    run_manager: RunManager,
+    ledger: PlanLedger,
+) -> TestClient:
     app = FastAPI()
     app.include_router(plans_route.router)
     app.dependency_overrides[get_chat_manager] = lambda: chat_manager
     app.dependency_overrides[get_run_manager] = lambda: run_manager
+    app.dependency_overrides[get_plan_ledger] = lambda: ledger
     return TestClient(app)
 
 
@@ -266,37 +271,92 @@ def test_plan_route_answer_question_keeps_plan_active_with_context():
     assert "默认显示" in pending_context.json()["context"][0]["content"]
 
 
-def test_plan_approve_stream_uses_structured_control_response():
+def test_plan_approve_stream_uses_tool_result_continuation():
+    ledger = PlanLedger()
+    run(ledger.enter_plan_mode(
+        conversation_id="conv-1",
+        node_id="node-current",
+        previous_permission_mode="modify_only",
+    ))
+    awaiting = run(ledger.submit_plan(
+        conversation_id="conv-1",
+        plan="## Plan\nDo it.",
+        node_id="node-current",
+        run_id="run-plan",
+        tool_call_id="call-exit-1",
+    ))
     chat_manager = FakePlanChatManager()
-    client = client_for_plan_stream(chat_manager, RunManager())
+    client = client_for_plan_stream(chat_manager, RunManager(), ledger)
 
     response = client.post(
-        "/conversations/conv-1/plans/plan-1/approve/stream",
+        f"/conversations/conv-1/plans/{awaiting.plan_id}/approve/stream",
         json={"node_id": "node-current", "reasoning_effort": "medium"},
     )
 
     assert response.status_code == 200
     assert "node-generated" in response.text
     assert chat_manager.calls[0]["conversation_id"] == "conv-1"
-    assert chat_manager.calls[0]["plan_id"] == "plan-1"
-    assert chat_manager.calls[0]["message_subtype"] == "plan_approval_response"
+    assert chat_manager.calls[0]["plan_id"] == awaiting.plan_id
     assert chat_manager.calls[0]["node_id"] == "node-current"
-    assert chat_manager.calls[0]["content"] == "Plan approved."
+    assert chat_manager.calls[0]["tool_name"] == "exit_plan_mode"
+    assert chat_manager.calls[0]["tool_call_id"] == "call-exit-1"
+    assert "User has approved your plan" in chat_manager.calls[0]["tool_result_content"]
 
 
-def test_plan_answer_stream_uses_structured_control_response():
+def test_plan_answer_stream_uses_tool_result_continuation():
+    ledger = PlanLedger()
+    run(ledger.enter_plan_mode(
+        conversation_id="conv-1",
+        node_id="node-current",
+        previous_permission_mode="modify_only",
+    ))
+    question = run(ledger.ask_user_question(
+        conversation_id="conv-1",
+        question="项目栏默认显示吗？",
+        node_id="node-current",
+        run_id="run-plan",
+        tool_call_id="call-question-1",
+    ))
     chat_manager = FakePlanChatManager()
-    client = client_for_plan_stream(chat_manager, RunManager())
+    client = client_for_plan_stream(chat_manager, RunManager(), ledger)
 
     response = client.post(
-        "/conversations/conv-1/plans/plan-1/answer/stream",
+        f"/conversations/conv-1/plans/{question.plan_id}/answer/stream",
         json={"node_id": "node-current", "answer": "默认显示"},
     )
 
     assert response.status_code == 200
     assert "node-generated" in response.text
-    assert chat_manager.calls[0]["message_subtype"] == "plan_question_response"
-    assert chat_manager.calls[0]["content"] == "默认显示"
+    assert chat_manager.calls[0]["tool_name"] == "ask_user_question"
+    assert chat_manager.calls[0]["tool_call_id"] == "call-question-1"
+    assert "默认显示" in chat_manager.calls[0]["tool_result_content"]
+
+
+def test_reject_plan_stream_without_feedback_uses_tool_result_continuation():
+    ledger = PlanLedger()
+    run(ledger.enter_plan_mode(
+        conversation_id="conv-1",
+        node_id="node-current",
+        previous_permission_mode="modify_only",
+    ))
+    awaiting = run(ledger.submit_plan(
+        conversation_id="conv-1",
+        plan="## Plan\nDo it.",
+        node_id="node-current",
+        run_id="run-plan",
+        tool_call_id="call-exit-1",
+    ))
+    chat_manager = FakePlanChatManager()
+    client = client_for_plan_stream(chat_manager, RunManager(), ledger)
+    response = client.post(
+        f"/conversations/conv-1/plans/{awaiting.plan_id}/reject/stream",
+        json={"feedback": "", "model_id": "fake-model"},
+    )
+    assert response.status_code == 200
+    assert chat_manager.calls[-1]["tool_name"] == "exit_plan_mode"
+    assert chat_manager.calls[-1]["tool_call_id"] == "call-exit-1"
+    assert "did not provide specific feedback" in chat_manager.calls[-1]["tool_result_content"]
+    assert "message_subtype" not in chat_manager.calls[-1]
 
 
 def test_plan_route_returns_404_for_missing_plan_decision():

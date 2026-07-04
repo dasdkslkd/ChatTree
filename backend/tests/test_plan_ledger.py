@@ -155,3 +155,63 @@ async def _snapshot_roundtrips_plan_sessions_case():
 
 def test_snapshot_roundtrips_plan_sessions():
     run(_snapshot_roundtrips_plan_sessions_case())
+
+
+async def _submit_plan_records_exit_tool_call_id_case():
+    ledger = PlanLedger()
+    active = await ledger.enter_plan_mode(
+        conversation_id="conv-1",
+        previous_permission_mode="modify_only",
+    )
+    awaiting = await ledger.submit_plan(
+        conversation_id="conv-1",
+        plan="1. Do it",
+        node_id="node-1",
+        run_id="run-1",
+        tool_call_id="call-exit-1",
+    )
+    assert awaiting.plan_id == active.plan_id
+    assert awaiting.exit_tool_call_id == "call-exit-1"
+    assert awaiting.blocking_run_id == "run-1"
+    assert awaiting.proposal_revision == 1
+    assert awaiting.proposal_status == "awaiting_approval"
+    assert awaiting.proposals[-1].plan == "1. Do it"
+
+
+def test_submit_plan_records_exit_tool_call_id():
+    run(_submit_plan_records_exit_tool_call_id_case())
+
+
+async def _rejected_plan_keeps_old_proposal_and_expands_new_case():
+    ledger = PlanLedger()
+    active = await ledger.enter_plan_mode(
+        conversation_id="conv-1",
+        previous_permission_mode="modify_only",
+    )
+    first = await ledger.submit_plan(
+        conversation_id="conv-1",
+        plan="First plan",
+        run_id="run-1",
+        tool_call_id="call-exit-1",
+    )
+    rejected = await ledger.reject_plan(
+        conversation_id="conv-1",
+        plan_id=active.plan_id,
+        feedback="Make it safer.",
+    )
+    second = await ledger.submit_plan(
+        conversation_id="conv-1",
+        plan="Second plan",
+        run_id="run-2",
+        tool_call_id="call-exit-2",
+    )
+    assert first.proposals[-1].revision == 1
+    assert rejected.proposals[0].status == "rejected"
+    assert second.proposals[0].status == "rejected"
+    assert second.proposals[1].status == "awaiting_approval"
+    assert second.proposal_revision == 2
+    assert second.exit_tool_call_id == "call-exit-2"
+
+
+def test_rejected_plan_keeps_old_proposal_and_expands_new():
+    run(_rejected_plan_keeps_old_proposal_and_expands_new_case())

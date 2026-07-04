@@ -190,6 +190,12 @@ CREATE TABLE IF NOT EXISTS plans (
   entered_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
   submitted_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
   approved_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  exit_tool_call_id TEXT,
+  question_tool_call_id TEXT,
+  blocking_run_id TEXT,
+  proposal_id TEXT,
+  proposal_revision INTEGER NOT NULL DEFAULT 0,
+  proposal_status TEXT,
   previous_permission_mode TEXT NOT NULL DEFAULT 'modify_only',
   plan_inline TEXT,
   plan_blob_id TEXT REFERENCES blobs(id),
@@ -213,6 +219,23 @@ CREATE TABLE IF NOT EXISTS plans (
     REFERENCES runs(conversation_id, id)
 );
 
+CREATE TABLE IF NOT EXISTS plan_proposals (
+  proposal_id TEXT PRIMARY KEY,
+  plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  revision INTEGER NOT NULL,
+  plan TEXT NOT NULL,
+  status TEXT NOT NULL,
+  tool_call_id TEXT,
+  run_id TEXT,
+  node_id TEXT,
+  created_at INTEGER,
+  resolved_at INTEGER,
+  feedback TEXT,
+  UNIQUE(plan_id, revision),
+  FOREIGN KEY (conversation_id, plan_id) REFERENCES plans(conversation_id, id)
+);
+
 CREATE TABLE IF NOT EXISTS plan_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
@@ -227,6 +250,8 @@ CREATE INDEX IF NOT EXISTS idx_plans_conversation_status
   ON plans(conversation_id, status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_plan_events_plan
   ON plan_events(plan_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_plan_proposals_plan
+  ON plan_proposals(plan_id, revision);
 
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
