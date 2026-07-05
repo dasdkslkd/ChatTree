@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from backend.core.agents import SubagentExecutor
-from backend.core.agents.subagent_executor import DEFAULT_MAX_TOOL_ROUNDS
+from backend.core.agents.subagent_executor import DEFAULT_MAX_TOOL_ROUNDS, DEFAULT_MAX_TURNS
 from backend.core.capabilities.registry import CapabilityRegistry
 from backend.core.capabilities.types import (
     AgentDefinition,
@@ -242,6 +242,10 @@ def test_subagent_max_turns_limits_model_rounds():
 
 def test_default_subagent_tool_round_limit_is_500():
     assert DEFAULT_MAX_TOOL_ROUNDS == 500
+
+
+def test_default_subagent_max_turns_is_1000():
+    assert DEFAULT_MAX_TURNS == 1000
 
 
 def test_subagent_output_schema_validates_json_result():

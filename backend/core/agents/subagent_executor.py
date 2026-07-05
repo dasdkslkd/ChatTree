@@ -16,6 +16,7 @@ from backend.core.tools.security.permissions import normalize_permission_mode
 
 
 DEFAULT_MAX_TOOL_ROUNDS = 500
+DEFAULT_MAX_TURNS = 1000
 
 
 class SubagentExecutor:
@@ -249,6 +250,7 @@ class SubagentExecutor:
             tools = self._filter_tools(agent.tools)
             permission = normalize_permission_mode(permission_mode or agent.permission_mode)
             max_tool_rounds = agent.max_tool_rounds or DEFAULT_MAX_TOOL_ROUNDS
+            max_turns = agent.max_turns or DEFAULT_MAX_TURNS
             controller = StreamController(run_id, conversation_id, run_id=run_id)
             self._controllers[run_id] = controller
 
@@ -266,8 +268,8 @@ class SubagentExecutor:
             tool_round = 0
             model_turn = 0
             while True:
-                if agent.max_turns and model_turn >= agent.max_turns:
-                    raise RuntimeError(f"max_turns exceeded: {agent.max_turns}")
+                if model_turn >= max_turns:
+                    raise RuntimeError(f"max_turns exceeded: {max_turns}")
                 model_turn += 1
                 round_content = ""
                 round_reasoning = ""
