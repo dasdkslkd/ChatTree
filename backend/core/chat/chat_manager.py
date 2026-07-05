@@ -607,6 +607,7 @@ class ChatManager:
         tool_interactions: List[Dict[str, Any]],
         tool_messages: List[Message],
         tool_calls: List[Dict[str, Any]],
+        transcript_continuation: Optional[Dict[str, Any]] = None,
     ) -> None:
         if not self._sqlite_enabled():
             return
@@ -670,6 +671,9 @@ class ChatManager:
                         "tool_call": call,
                         "tool_result": result,
                     })
+            continuation_meta = dict(transcript_continuation or {})
+            is_transcript_continuation = bool(continuation_meta)
+            continuation_appended = False
             if tool_interactions or assistant_msg.get("reasoning"):
                 process_message_id = self.chat_repository.add_message(
                     conversation_id,
@@ -677,23 +681,83 @@ class ChatManager:
                     role="assistant",
                     content=process_preview,
                     subtype="assistant_process",
-                    hidden=False,
+                    hidden=is_transcript_continuation,
                     metadata={
                         "tool_interactions": tool_interactions,
                         "timeline": timeline_blocks,
                         "reasoning": assistant_msg.get("reasoning"),
+                        "transcript_continuation": continuation_meta or None,
                     },
                     message_id=f"{assistant_msg.get('id')}:process",
                 )
-                self.transcript_projection.upsert_message_item(
-                    conversation_id,
-                    node_id,
-                    process_message_id,
-                    "assistant_process",
-                    local_order=25,
-                    status=generation_status,
-                    preview=process_preview,
+                if is_transcript_continuation:
+                    base_node_id = str(
+                        continuation_meta.get("continuation_of_node_id")
+                        or node.get("parent_id")
+                        or ""
+                    )
+                    continuation_props = {
+                        **continuation_meta,
+                        "continuation_of_node_id": base_node_id,
+                        "timeline": timeline_blocks,
+                        "reasoning": assistant_msg.get("reasoning"),
+                    }
+                    appended_to = self.transcript_projection.append_process_continuation(
+                        conversation_id,
+                        base_node_id,
+                        message_id=process_message_id,
+                        run_id=run_id,
+                        status=generation_status,
+                        preview=process_preview,
+                        marker=str(continuation_meta.get("marker") or ""),
+                        props=continuation_props,
+                    )
+                    continuation_appended = appended_to is not None
+                    if appended_to is None:
+                        self.transcript_projection.upsert_message_item(
+                            conversation_id,
+                            node_id,
+                            process_message_id,
+                            "assistant_process",
+                            local_order=25,
+                            status=generation_status,
+                            preview=process_preview,
+                            anchor_node_id=base_node_id or None,
+                            props=continuation_props,
+                        )
+                else:
+                    self.transcript_projection.upsert_message_item(
+                        conversation_id,
+                        node_id,
+                        process_message_id,
+                        "assistant_process",
+                        local_order=25,
+                        status=generation_status,
+                        preview=process_preview,
+                    )
+            if is_transcript_continuation and not continuation_appended:
+                base_node_id = str(
+                    continuation_meta.get("continuation_of_node_id")
+                    or node.get("parent_id")
+                    or ""
                 )
+                marker_message_id = assistant_message_id or f"{assistant_msg.get('id')}:continuation"
+                appended_to = self.transcript_projection.append_process_continuation(
+                    conversation_id,
+                    base_node_id,
+                    message_id=marker_message_id,
+                    run_id=run_id,
+                    status=generation_status,
+                    preview="",
+                    marker=str(continuation_meta.get("marker") or ""),
+                    props={
+                        **continuation_meta,
+                        "continuation_of_node_id": base_node_id,
+                        "timeline": [],
+                        "reasoning": None,
+                    },
+                )
+                continuation_appended = appended_to is not None
             plan_control_only = has_blocking_plan_tool_result(tool_messages)
             if content and not plan_control_only and assistant_message_id:
                 self.transcript_projection.upsert_message_item(
@@ -712,6 +776,12 @@ class ChatManager:
                     status=generation_status,
                     preview=content[:4096],
                     local_order=20,
+                    visibility="hidden" if is_transcript_continuation else "main",
+                    anchor_node_id=(
+                        str(continuation_meta.get("continuation_of_node_id") or "")
+                        or None
+                    ) if is_transcript_continuation else None,
+                    props=continuation_meta or None,
                 )
         except Exception as exc:
             logger.warning("SQLite transcript assistant turn write failed: %s", exc, exc_info=True)
@@ -931,6 +1001,7 @@ class ChatManager:
         control_event: Optional[Dict[str, Any]] = None,
         continuation_messages: Optional[List[Message]] = None,
         suppress_user_message: bool = False,
+        transcript_continuation: Optional[Dict[str, Any]] = None,
     ) -> AsyncIterator[StreamChunk]:
         """
         异步流式发送消息
@@ -1782,6 +1853,7 @@ class ChatManager:
                     tool_interactions=tool_interactions,
                     tool_messages=all_tool_messages,
                     tool_calls=all_tool_calls,
+                    transcript_continuation=transcript_continuation,
                 )
 
             # 清理控制器
@@ -1803,7 +1875,23 @@ class ChatManager:
         thinking_enabled: Optional[bool] = None,
         tool_permission_mode: Optional[str] = None,
         run_id: Optional[str] = None,
+        continuation_of_run_id: Optional[str] = None,
+        continuation_marker: Optional[str] = None,
     ) -> AsyncIterator[StreamChunk]:
+        marker = continuation_marker or (
+            "计划已批准，开始实现"
+            if normalize_permission_mode(tool_permission_mode) != "plan"
+            else "计划反馈已提交，继续计划"
+        )
+        transcript_continuation = {
+            "origin": "plan_tool_result_continuation",
+            "plan_id": plan_id,
+            "tool_name": tool_name,
+            "tool_result_for": tool_call_id,
+            "continuation_of_node_id": node_id,
+            "continuation_of_run_id": continuation_of_run_id,
+            "marker": marker,
+        }
         continuation_message = Message({
             "id": str(uuid.uuid4()),
             "role": Role.TOOL,
@@ -1829,6 +1917,7 @@ class ChatManager:
             run_id=run_id,
             continuation_messages=[continuation_message],
             suppress_user_message=True,
+            transcript_continuation=transcript_continuation,
         ):
             yield chunk
 
@@ -1924,6 +2013,12 @@ class ChatManager:
             thinking_enabled=thinking_enabled,
             tool_permission_mode=continuation_permission_mode,
             run_id=run_id,
+            continuation_of_run_id=plan.submitted_run_id or plan.entered_run_id,
+            continuation_marker=(
+                "计划已批准，开始实现"
+                if message_subtype == "plan_approval_response"
+                else "计划反馈已提交，继续计划"
+            ),
         ):
             yield chunk
 

@@ -51,6 +51,7 @@ export type ToolRenderItem = {
 
 export type AssistantTimelineBlock =
   | { type: 'reasoning'; key: string; reasoning: string }
+  | { type: 'marker'; key: string; content: string }
   | { type: 'content'; key: string; content: string }
   | { type: 'tools'; key: string; items: ToolRenderItem[] };
 
@@ -66,6 +67,9 @@ export type AssistantProcessRenderProps = {
   duration: number;
   errorMessage: string | null;
   content: string;
+  continuation_of_node_id?: string | null;
+  continuation_marker?: string | null;
+  continuations?: unknown[];
 };
 
 const TOOL_DISPLAY_LIMIT = 100;
@@ -179,6 +183,10 @@ export function normalizePersistedAssistantTimeline(rawTimeline: unknown): Assis
         const reasoning = getStringField(record, 'reasoning') || getStringField(record, 'content');
         return reasoning.trim() ? { type: 'reasoning', key, reasoning } : null;
       }
+      if (type === 'marker') {
+        const content = getStringField(record, 'content') || getStringField(record, 'text') || getStringField(record, 'marker');
+        return content.trim() ? { type: 'marker', key, content } : null;
+      }
       if (type === 'content' || type === 'text') {
         const content = getStringField(record, 'content') || getStringField(record, 'text');
         return content.trim() ? { type: 'content', key, content } : null;
@@ -196,6 +204,28 @@ export function normalizePersistedAssistantTimeline(rawTimeline: unknown): Assis
       return null;
     })
     .filter((block): block is AssistantTimelineBlock => Boolean(block));
+}
+
+export function appendAssistantContinuations(
+  timeline: AssistantTimelineBlock[],
+  continuations: unknown,
+): AssistantTimelineBlock[] {
+  if (!Array.isArray(continuations) || continuations.length === 0) return timeline;
+  const blocks = [...timeline];
+  continuations.forEach((rawContinuation, index) => {
+    const continuation = asRecord(rawContinuation);
+    if (!continuation) return;
+    const marker = getStringField(continuation, 'marker') || getStringField(continuation, 'continuation_marker');
+    const continuationBlocks = normalizePersistedAssistantTimeline(continuation.timeline);
+    if (marker.trim()) {
+      blocks.push({ type: 'marker', key: `continuation-marker-${index}`, content: marker });
+    }
+    blocks.push(...continuationBlocks.map((block) => ({
+      ...block,
+      key: `continuation-${index}-${block.key}`,
+    })));
+  });
+  return blocks;
 }
 
 function getInteractionToolItems(interaction: unknown, interactionIndex: number): ToolRenderItem[] {
@@ -339,8 +369,22 @@ export function createProcessRenderPropsFromRun(run: StreamState): AssistantProc
     reasoning: run.reasoning,
     tool_interactions: run.toolInteractions,
   });
+  const continuationOfNodeId = typeof run.metadata?.continuation_of_node_id === 'string'
+    ? run.metadata.continuation_of_node_id
+    : run.metadata?.origin === 'plan_approval' || run.metadata?.origin === 'plan_question_answer' || run.metadata?.origin === 'plan_reject' || run.metadata?.origin === 'plan_rejection'
+      ? run.anchorNodeId
+      : null;
+  const continuationMarker = typeof run.metadata?.continuation_marker === 'string'
+    ? run.metadata.continuation_marker
+    : run.metadata?.origin === 'plan_approval'
+      ? '计划已批准，开始实现'
+      : run.metadata?.origin === 'plan_question_answer' || run.metadata?.origin === 'plan_reject' || run.metadata?.origin === 'plan_rejection'
+        ? '计划反馈已提交，继续计划'
+        : null;
   return {
     live_process: true,
+    continuation_of_node_id: continuationOfNodeId,
+    continuation_marker: continuationMarker,
     pendingUserMessage: run.pendingUserMessage,
     showPendingBubble: Boolean(run.pendingUserMessage),
     showStreamBlock: run.status !== 'idle',

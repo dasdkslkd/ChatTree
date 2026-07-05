@@ -163,6 +163,19 @@ function ContentBlock({ block }: { block: Extract<AssistantTimelineBlock, { type
   );
 }
 
+function MarkerBlock({ block }: { block: Extract<AssistantTimelineBlock, { type: 'marker' }> }) {
+  return (
+    <div
+      key={block.key}
+      className="my-1 flex items-center gap-2 px-3 py-1 text-xs"
+      style={{ color: 'var(--fg-tertiary)' }}
+    >
+      <span className="h-px w-6 shrink-0" style={{ background: 'var(--border-subtle)' }} />
+      <span className="min-w-0 truncate">{block.content}</span>
+    </div>
+  );
+}
+
 function renderTimelineBlock(
   block: AssistantTimelineBlock,
   _item: TranscriptItem,
@@ -179,6 +192,9 @@ function renderTimelineBlock(
   }
   if (block.type === 'tools') {
     return <ToolCallGroup key={block.key} items={block.items} />;
+  }
+  if (block.type === 'marker') {
+    return <MarkerBlock key={block.key} block={block} />;
   }
   return <ContentBlock key={block.key} block={block} />;
 }

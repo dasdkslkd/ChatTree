@@ -205,14 +205,33 @@ async def _plan_action_stream(
 ) -> AsyncIterator[str]:
     is_approval = message_subtype == "plan_approval_response"
     is_rejection = message_subtype == "plan_rejection_response"
+    current_plan = await plan_ledger.get_active_or_awaiting(conversation_id)
+    continuation_of_node_id = (
+        getattr(current_plan, "submitted_node_id", None)
+        or getattr(current_plan, "entered_node_id", None)
+        or request.node_id
+    )
+    continuation_of_run_id = (
+        getattr(current_plan, "submitted_run_id", None)
+        or getattr(current_plan, "entered_run_id", None)
+    )
+    continuation_marker = (
+        "计划已批准，开始实现"
+        if is_approval
+        else "计划反馈已提交，继续计划"
+    )
     run = await run_manager.create_run(
         conversation_id=conversation_id,
         kind=RunKind.CHAT,
-        anchor_node_id=request.node_id,
+        anchor_node_id=continuation_of_node_id,
         summary="批准计划" if is_approval else ("驳回计划" if is_rejection else "回答计划澄清"),
         metadata={
             "origin": "plan_approval" if is_approval else ("plan_rejection" if is_rejection else "plan_question_answer"),
             "plan_id": plan_id,
+            "continuation_of_node_id": continuation_of_node_id,
+            "continuation_of_run_id": continuation_of_run_id,
+            "tool_result_for": tool_call_id,
+            "continuation_marker": continuation_marker,
             "model_id": request.model_id,
             "provider_id": request.provider_id,
             "reasoning_effort": request.reasoning_effort,
@@ -258,11 +277,13 @@ async def _plan_action_stream(
                 tool_name=tool_name,
                 model_id=request.model_id,
                 provider_id=request.provider_id,
-                node_id=request.node_id,
+                node_id=continuation_of_node_id,
                 reasoning_effort=request.reasoning_effort,
                 thinking_enabled=request.thinking_enabled,
                 tool_permission_mode=continuation_permission_mode,
                 run_id=run.run_id,
+                continuation_of_run_id=continuation_of_run_id,
+                continuation_marker=continuation_marker,
             ):
                 chunk_data = build_stream_chunk_data(chunk, conversation_id)
                 node_id = chunk_data.get("node_id")

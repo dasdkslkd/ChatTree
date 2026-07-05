@@ -55,12 +55,121 @@ function filterStaleRunDraftItems(items: TranscriptItem[]): TranscriptItem[] {
   });
 }
 
+function getContinuationTargetNodeId(item: TranscriptItem): string | null {
+  const props = item.props || {};
+  const target = props.continuation_of_node_id || props.continuationOfNodeId;
+  if (typeof target === 'string' && target.length > 0) return target;
+  const origin = props.origin;
+  if (
+    item.type === 'assistant_process'
+    && (origin === 'plan_approval' || origin === 'plan_question_answer' || origin === 'plan_reject' || origin === 'plan_rejection')
+    && item.anchor_node_id
+  ) {
+    return item.anchor_node_id;
+  }
+  return null;
+}
+
+function getContinuationMarker(item: TranscriptItem): string {
+  const marker = item.props?.continuation_marker || item.props?.marker;
+  if (typeof marker === 'string' && marker.trim()) return marker;
+  const origin = item.props?.origin;
+  return origin === 'plan_approval' ? '计划已批准，开始实现' : '计划反馈已提交，继续计划';
+}
+
+function getTimelineBlocks(item: TranscriptItem): unknown[] {
+  return Array.isArray(item.props?.timeline) ? item.props.timeline : [];
+}
+
+function mergeContinuationProcessItems(items: TranscriptItem[]): TranscriptItem[] {
+  const merged: TranscriptItem[] = [];
+  for (const item of items) {
+    if (item.type !== 'assistant_process') {
+      merged.push(item);
+      continue;
+    }
+
+    const targetNodeId = getContinuationTargetNodeId(item);
+    if (!targetNodeId) {
+      const continuations = Array.isArray(item.props?.continuations) ? item.props.continuations : [];
+      if (continuations.length > 0) {
+        const timeline = [...getTimelineBlocks(item)];
+        for (const continuation of continuations) {
+          if (!continuation || typeof continuation !== 'object') continue;
+          const record = continuation as Record<string, unknown>;
+          const marker = typeof record.marker === 'string' && record.marker.trim()
+            ? record.marker
+            : typeof record.continuation_marker === 'string'
+              ? record.continuation_marker
+              : '';
+          if (marker) timeline.push({ type: 'marker', content: marker });
+          if (Array.isArray(record.timeline)) timeline.push(...record.timeline);
+        }
+        merged.push({
+          ...item,
+          props: {
+            ...item.props,
+            timeline,
+            continuations: [],
+          },
+        });
+      } else {
+        merged.push(item);
+      }
+      continue;
+    }
+
+    const targetIndex = (() => {
+      for (let index = merged.length - 1; index >= 0; index -= 1) {
+        const candidate = merged[index];
+        if (
+          candidate.type === 'assistant_process'
+          && (candidate.node_id === targetNodeId || candidate.anchor_node_id === targetNodeId)
+        ) {
+          return index;
+        }
+      }
+      return -1;
+    })();
+    if (targetIndex < 0) {
+      merged.push(item);
+      continue;
+    }
+
+    const target = merged[targetIndex];
+    const marker = getContinuationMarker(item);
+    const continuationTimeline = getTimelineBlocks(item);
+    merged[targetIndex] = {
+      ...target,
+      status: item.status || target.status,
+      preview: item.preview || target.preview,
+      props: {
+        ...target.props,
+        timeline: [
+          ...getTimelineBlocks(target),
+          ...(marker ? [{ type: 'marker', content: marker }] : []),
+          ...continuationTimeline,
+        ],
+        continuation_run_ids: [
+          ...(
+            Array.isArray(target.props?.continuation_run_ids)
+              ? target.props.continuation_run_ids.filter((value): value is string => typeof value === 'string')
+              : []
+          ),
+          ...(item.run_id ? [item.run_id] : []),
+        ],
+      },
+    };
+  }
+  return merged;
+}
+
 export function normalizeTranscriptItems(items: TranscriptItem[]): TranscriptItem[] {
   const normalized = items
     .filter((item) => !item.visibility || item.visibility === 'main')
     .map(normalizeTranscriptItem)
     .filter((item): item is TranscriptItem => Boolean(item));
-  return filterStaleRunDraftItems(normalized);
+  return filterStaleRunDraftItems(mergeContinuationProcessItems(normalized));
 }
 
 export interface LiveRunTranscriptOverlay {
@@ -120,11 +229,11 @@ export function mergeLiveRunTranscriptItems(
       withoutStaleRunItems.length,
     );
 
-    merged = [
+    merged = mergeContinuationProcessItems([
       ...withoutStaleRunItems.slice(0, adjustedInsertionIndex),
       ...liveItems,
       ...withoutStaleRunItems.slice(adjustedInsertionIndex),
-    ];
+    ]);
   }
 
   return merged;

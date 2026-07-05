@@ -195,6 +195,75 @@ class TranscriptProjection:
                 },
             )
 
+    def append_process_continuation(
+        self,
+        conversation_id: str,
+        base_node_id: str,
+        *,
+        message_id: str,
+        run_id: str | None,
+        status: str | None,
+        preview: str,
+        marker: str,
+        props: dict[str, Any],
+    ) -> str | None:
+        continuation = dict(props)
+        continuation.setdefault("message_id", message_id)
+        continuation.setdefault("run_id", run_id)
+        continuation.setdefault("status", status)
+        continuation.setdefault("preview", preview)
+        continuation.setdefault("marker", marker)
+        with self.persistence.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, props_json
+                FROM transcript_items
+                WHERE conversation_id = ?
+                  AND node_id = ?
+                  AND item_type = 'assistant_process'
+                  AND visibility = 'main'
+                ORDER BY local_order DESC, created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (conversation_id, base_node_id),
+            ).fetchone()
+            if row is None:
+                return None
+            item_props = self._load_json(row["props_json"]) or {}
+            if not isinstance(item_props, dict):
+                item_props = {}
+            continuations = item_props.get("continuations")
+            if not isinstance(continuations, list):
+                continuations = []
+            continuations = [
+                item
+                for item in continuations
+                if not (
+                    isinstance(item, dict)
+                    and item.get("message_id") == message_id
+                )
+            ]
+            continuations.append(continuation)
+            item_props["continuations"] = continuations
+            conn.execute(
+                """
+                UPDATE transcript_items
+                SET status = ?,
+                    preview = CASE WHEN ? != '' THEN ? ELSE preview END,
+                    props_json = ?,
+                    updated_at = strftime('%s', 'now')
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    preview,
+                    preview,
+                    self._json_field(item_props),
+                    row["id"],
+                ),
+            )
+            return str(row["id"])
+
     def upsert_task_item(
         self,
         conversation_id: str,
@@ -474,3 +543,11 @@ class TranscriptProjection:
         if value is None:
             return None
         return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+    def _load_json(self, value: Any) -> Any:
+        if not value:
+            return None
+        try:
+            return json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            return None

@@ -475,12 +475,7 @@ def test_plan_approval_stream_uses_tool_result_continuation(tmp_path: Path):
         reloaded.current_node_id,
     )
     item_types = [item["item_type"] for item in items]
-    process_index = item_types.index("assistant_process")
-    run_index = next(
-        index
-        for index, item in enumerate(items)
-        if item["item_type"] == "run_draft" and item["run_id"] == "run-impl-1"
-    )
+    process_items = [item for item in items if item["item_type"] == "assistant_process"]
     assistant_index = next(
         index
         for index, item in enumerate(items)
@@ -488,7 +483,15 @@ def test_plan_approval_stream_uses_tool_result_continuation(tmp_path: Path):
     )
     assert "control_event" not in item_types
     assert "plan_card" not in item_types
-    assert process_index < run_index < assistant_index
+    assert not any(
+        item["item_type"] == "run_draft"
+        and item["run_id"] == "run-impl-1"
+        and item["visibility"] == "main"
+        for item in items
+    )
+    assert len(process_items) == 1
+    process_index = item_types.index("assistant_process")
+    assert process_index < assistant_index
     assert reloaded.nodes[reloaded.current_node_id]["tool_permission_mode"] == "modify_only"
     with repository.persistence.connect() as conn:
         hidden_user_messages = conn.execute(
@@ -508,13 +511,19 @@ def test_plan_approval_stream_uses_tool_result_continuation(tmp_path: Path):
     )
     assert "User has approved your plan" in first_prompt
     assert "## Approved Plan:" in first_prompt
-    process_item = next(item for item in items if item["item_type"] == "assistant_process")
+    process_item = process_items[0]
     timeline = to_transcript_item_dto(process_item)["props"]["timeline"]
     assert any(
         block["type"] == "tool_call"
         and block["tool_call"]["function"]["name"] == "exit_plan_mode"
         for block in timeline
     )
+    continuations = to_transcript_item_dto(process_item)["props"].get("continuations")
+    assert isinstance(continuations, list)
+    assert continuations[0]["run_id"] == "run-impl-1"
+    assert continuations[0]["continuation_of_node_id"] == plan_node_id
+    assert continuations[0]["tool_result_for"] == approved_plan.exit_tool_call_id
+    assert continuations[0]["marker"] == "计划已批准，开始实现"
     assert not any(block.get("type") == "plan_proposal" for block in timeline)
 
 

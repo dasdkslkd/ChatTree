@@ -358,6 +358,8 @@ def test_plan_approve_stream_uses_tool_result_continuation():
     assert chat_manager.calls[0]["conversation_id"] == "conv-1"
     assert chat_manager.calls[0]["plan_id"] == awaiting.plan_id
     assert chat_manager.calls[0]["node_id"] == "node-current"
+    assert chat_manager.calls[0]["continuation_of_run_id"] == "run-plan"
+    assert chat_manager.calls[0]["continuation_marker"] == "计划已批准，开始实现"
     assert chat_manager.calls[0]["tool_name"] == "exit_plan_mode"
     assert chat_manager.calls[0]["tool_call_id"] == "call-exit-1"
     assert "User has approved your plan" in chat_manager.calls[0]["tool_result_content"]

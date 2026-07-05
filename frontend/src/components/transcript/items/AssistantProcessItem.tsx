@@ -1,5 +1,6 @@
 import type { TranscriptItem } from '../../../types/transcript';
 import {
+  appendAssistantContinuations,
   getActiveReasoningKey,
   normalizeLegacyToolInteractions,
   normalizePersistedAssistantTimeline,
@@ -26,10 +27,11 @@ function getProcessProps(item: TranscriptItem): AssistantProcessRenderProps {
       tool_interactions: Array.isArray(item.props?.tool_interactions) ? item.props.tool_interactions : [],
     });
 
-  const fallbackText = timeline.length === 0 ? getItemText(item, 'Processing') : '';
-  const renderTimeline = timeline.length === 0 && fallbackText
+  const timelineWithContinuations = appendAssistantContinuations(timeline, item.props?.continuations);
+  const fallbackText = timelineWithContinuations.length === 0 ? getItemText(item, 'Processing') : '';
+  const renderTimeline = timelineWithContinuations.length === 0 && fallbackText
     ? [{ type: 'reasoning' as const, key: 'reasoning-fallback', reasoning: fallbackText }]
-    : timeline;
+    : timelineWithContinuations;
   const status = item.status || getStatusText(item) || null;
   const duration = typeof item.props?.duration === 'number' ? item.props.duration : 0;
   const errorMessage = typeof item.props?.errorMessage === 'string' ? item.props.errorMessage : null;

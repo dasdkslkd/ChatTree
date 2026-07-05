@@ -216,6 +216,104 @@ function testLiveRunOverlayAnchorsAfterApprovedPlanProposal() {
   ]);
 }
 
+function testPlanApprovalLiveRunMergesIntoPlanProcess() {
+  const items = mergeLiveRunTranscriptItems(
+    [
+      { id: 'user-1', type: 'user_message', node_id: 'node-user' },
+      {
+        id: 'process-plan',
+        type: 'assistant_process',
+        node_id: 'node-plan',
+        status: 'completed',
+        props: {
+          timeline: [
+            {
+              type: 'tool_call',
+              tool_call: {
+                id: 'call-exit',
+                function: { name: 'exit_plan_mode', arguments: '{}' },
+              },
+              tool_result: null,
+            },
+          ],
+        },
+      },
+    ],
+    [
+      {
+        runId: 'run-implementation',
+        nodeId: null,
+        targetNodeId: 'node-impl',
+        anchorNodeId: 'node-plan',
+        items: [
+          {
+            id: 'live-implementation',
+            type: 'assistant_process',
+            run_id: 'run-implementation',
+            node_id: 'node-impl',
+            anchor_node_id: 'node-plan',
+            status: 'streaming',
+            props: {
+              continuation_of_node_id: 'node-plan',
+              continuation_marker: '计划已批准，开始实现',
+              timeline: [
+                {
+                  type: 'tools',
+                  key: 'tools-implementation',
+                  items: [{
+                    key: 'call-create-task',
+                    name: 'create_task',
+                    summary: 'create_task',
+                    argsText: '',
+                    outputText: '',
+                    status: 'running',
+                    resultEnvelope: null,
+                  }],
+                },
+              ],
+            },
+          },
+        ],
+      },
+    ],
+  );
+
+  assert.deepEqual(items.map((item) => item.id), ['user-1', 'process-plan']);
+  assert.equal(items[1].status, 'streaming');
+  assert.deepEqual(items[1].props.timeline.map((block) => block.type), [
+    'tool_call',
+    'marker',
+    'tools',
+  ]);
+  assert.equal(items[1].props.timeline[1].content, '计划已批准，开始实现');
+}
+
+function testPersistedPlanContinuationStaysInsideParentProcess() {
+  const items = normalizeTranscriptItems([
+    {
+      id: 'process-plan',
+      type: 'assistant_process',
+      node_id: 'node-plan',
+      props: {
+        timeline: [{ type: 'tool_call', tool_call: { function: { name: 'exit_plan_mode' } } }],
+        continuations: [
+          {
+            marker: '计划已批准，开始实现',
+            timeline: [{ type: 'tool_call', tool_call: { function: { name: 'create_task' } } }],
+          },
+        ],
+      },
+    },
+  ]);
+
+  assert.equal(items.length, 1);
+  assert.deepEqual(items[0].props.timeline.map((block) => block.type), [
+    'tool_call',
+    'marker',
+    'tool_call',
+  ]);
+}
+
 function testMainPageDelegatesTranscriptOrderingToTranscriptList() {
   const source = fs.readFileSync(path.join(__dirname, '../src/pages/MainPage.tsx'), 'utf8');
   assert.match(source, /<TranscriptList/);
@@ -426,6 +524,8 @@ testRunDraftHiddenWhenAssistantProcessExistsForSameRun();
 testRunDraftHiddenWhenAssistantProcessMatchesSameNodeWithoutRunId();
 testLiveRunOverlayAnchorsToBranchInsteadOfAppendingToTail();
 testLiveRunOverlayAnchorsAfterApprovedPlanProposal();
+testPlanApprovalLiveRunMergesIntoPlanProcess();
+testPersistedPlanContinuationStaysInsideParentProcess();
 testMainPageDelegatesTranscriptOrderingToTranscriptList();
 testMainPageUsesLiveTranscriptOverlayWithSharedProcessRendering();
 testPlanActionsAreRealCallbacks();
