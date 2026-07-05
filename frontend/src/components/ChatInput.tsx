@@ -64,7 +64,9 @@ interface Props {
   disabled: boolean;
   conversationId: string | null;
   editValue?: string | null;
+  isEditing?: boolean;
   onEditValueConsumed?: () => void;
+  onCancelEdit?: () => void;
   attachedFiles?: string[];
   attachedImages?: Array<{ filename: string; url: string }>;
   onFilesPicked?: (files: File[]) => void;
@@ -91,7 +93,9 @@ export function ChatInput({
   disabled,
   conversationId,
   editValue,
+  isEditing = false,
   onEditValueConsumed,
+  onCancelEdit,
   attachedFiles = [],
   attachedImages = [],
   onFilesPicked,
@@ -239,6 +243,11 @@ export function ChatInput({
       currentMultiAgentMode,
     );
     onToolPermissionDraftChange(markToolPermissionModeSent(getToolPermissionDraft(), pendingToolPermissionMode));
+  };
+
+  const handleCancelEdit = () => {
+    setValue('');
+    onCancelEdit?.();
   };
 
   const handleFilePick = () => { fileInputRef.current?.click(); };
@@ -666,6 +675,29 @@ export function ChatInput({
                 </div>
               );
             })}
+          </div>
+        )}
+        {isEditing && (
+          <div
+            className="mx-3 mt-2 flex items-center justify-between gap-2 rounded-md px-2.5 py-1.5 text-xs"
+            style={{
+              background: 'var(--accent-soft)',
+              color: 'var(--icon-accent)',
+              border: '0.5px solid color-mix(in srgb, var(--icon-accent) 38%, transparent)',
+            }}
+          >
+            <span className="min-w-0 truncate">编辑中</span>
+            <TextTooltip content="取消编辑">
+              <button
+                type="button"
+                className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border-0 bg-transparent p-0 cursor-pointer"
+                style={{ color: 'var(--icon-accent)' }}
+                onClick={handleCancelEdit}
+                aria-label="取消编辑"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </TextTooltip>
           </div>
         )}
         {(attachedFiles.length > 0 || attachedImages.length > 0) && (

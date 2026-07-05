@@ -562,6 +562,7 @@ function testUserMessageEditAndDeleteActionsAreWired() {
   const list = fs.readFileSync(path.join(__dirname, '../src/components/transcript/TranscriptList.tsx'), 'utf8');
   const renderer = fs.readFileSync(path.join(__dirname, '../src/components/transcript/TranscriptItemRenderer.tsx'), 'utf8');
   const userMessage = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/UserMessageItem.tsx'), 'utf8');
+  const chatInput = fs.readFileSync(path.join(__dirname, '../src/components/ChatInput.tsx'), 'utf8');
   const mainPage = fs.readFileSync(path.join(__dirname, '../src/pages/MainPage.tsx'), 'utf8');
 
   assert.match(types, /TranscriptUserMessageActionHandler/);
@@ -575,8 +576,24 @@ function testUserMessageEditAndDeleteActionsAreWired() {
   assert.match(userMessage, /Pencil/);
   assert.match(userMessage, /Trash2/);
   assert.match(mainPage, /const handleEditUserMessage = useCallback\(async \(item: TranscriptItem,\s*text: string\)/);
+  assert.match(mainPage, /isTranscriptItemOnCurrentBranch\(item,\s*currentConversation\?\.id \?\? null,\s*currentBranchNodeIds\)/);
   assert.match(mainPage, /const parentNodeId = getEditableUserMessageParentNodeId\(item,\s*messages\)/);
+  assert.match(mainPage, /const inheritedToolPermissionMode = liveBranchToolPermissionMode \?\? currentBranchToolPermissionMode \?\? null/);
   assert.match(mainPage, /setEditTargetNodeId\(parentNodeId\)/);
+  assert.match(mainPage, /setEditToolPermissionMode\(inheritedToolPermissionMode\)/);
+  assert.match(mainPage, /const attachmentRefs = getEditableUserMessageAttachmentRefs\(item,\s*messages\)/);
+  assert.match(mainPage, /setAttachedFiles\(attachmentRefs\.importFiles\)/);
+  assert.match(mainPage, /setAttachedImageRefs\(attachmentRefs\.imageRefs\)/);
+  assert.match(mainPage, /await switchNode\(parentNodeId\)/);
+  assert.match(mainPage, /const handleCancelEdit = useCallback\(async \(\) => \{/);
+  assert.match(mainPage, /await switchNode\(returnNodeId\)/);
+  assert.match(mainPage, /isEditing=\{Boolean\(editTargetNodeId\)\}/);
+  assert.match(mainPage, /onCancelEdit=\{handleCancelEdit\}/);
+  assert.match(chatInput, /isEditing\?: boolean/);
+  assert.match(chatInput, /onCancelEdit\?: \(\) => void/);
+  assert.match(chatInput, /aria-label="取消编辑"/);
+  assert.match(mainPage, /tool_permission_mode: toolPermissionMode \?\? \(editTargetNodeId \? editToolPermissionMode \?\? undefined : undefined\)/);
+  assert.match(mainPage, /const isProtectedEditAttachment = editProtectedAttachmentNames\.includes\(filename\)/);
   assert.match(mainPage, /const handleDeleteUserMessage = useCallback\(async \(item: TranscriptItem\)/);
   assert.match(mainPage, /deleteNode\(nodeId\)/);
   assert.match(mainPage, /onEditUserMessage=\{handleEditUserMessage\}/);

@@ -205,6 +205,30 @@ function getEditableUserMessageParentNodeId(item: TranscriptItem, messages: Mess
   return typeof propsParentNodeId === 'string' && propsParentNodeId ? propsParentNodeId : null;
 }
 
+function getEditableUserMessageAttachmentRefs(
+  item: TranscriptItem,
+  messages: Message[],
+): {
+  importFiles: string[];
+  imageRefs: Array<{ filename: string; mime_type?: string }>;
+} {
+  const nodeId = getTranscriptItemNodeId(item);
+  const message = nodeId
+    ? messages.find((candidate) => candidate.node_id === nodeId && candidate.role === 'user')
+    : null;
+  return {
+    importFiles: (message?.import_files ?? []).map((file) => file.filename).filter(Boolean),
+    imageRefs: (message?.image_refs ?? []).filter((file) => Boolean(file.filename)),
+  };
+}
+
+function messageReferencesAttachment(message: Message, filename: string): boolean {
+  return Boolean(
+    message.import_files?.some((file) => file.filename === filename)
+    || message.image_refs?.some((file) => file.filename === filename)
+  );
+}
+
 function isTranscriptItemVisibleNow(
   item: TranscriptItem,
   currentConversationId: string | null,
@@ -214,6 +238,17 @@ function isTranscriptItemVisibleNow(
   if (item.conversation_id && item.conversation_id !== currentConversationId) return false;
   const itemNodeId = getTranscriptItemNodeId(item);
   return !itemNodeId || itemNodeId === selectedBranchTipId;
+}
+
+function isTranscriptItemOnCurrentBranch(
+  item: TranscriptItem,
+  currentConversationId: string | null,
+  currentBranchNodeIds: Set<string>,
+): boolean {
+  if (!currentConversationId) return false;
+  if (item.conversation_id && item.conversation_id !== currentConversationId) return false;
+  const itemNodeId = getTranscriptItemNodeId(item);
+  return Boolean(itemNodeId && currentBranchNodeIds.has(itemNodeId));
 }
 
 SyntaxHighlighter.registerLanguage('bash', bash);
@@ -917,6 +952,9 @@ export default function ChatPage() {
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
   const [editValue, setEditValue] = useState<string | null>(null);
   const [editTargetNodeId, setEditTargetNodeId] = useState<string | null>(null);
+  const [editToolPermissionMode, setEditToolPermissionMode] = useState<ToolPermissionMode | null>(null);
+  const [editReturnNodeId, setEditReturnNodeId] = useState<string | null>(null);
+  const [editProtectedAttachmentNames, setEditProtectedAttachmentNames] = useState<string[]>([]);
   const [attachedFiles, setAttachedFiles] = useState<string[]>([]);
   const [attachedImageRefs, setAttachedImageRefs] = useState<Array<{ filename: string; mime_type?: string }>>([]);
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([]);
@@ -1114,7 +1152,7 @@ export default function ChatPage() {
   const {
     conversations, currentConversation, messages,
     currentNodeId, pendingScrollNodeId, clearPendingScroll,
-    createConversation, selectConversation, deleteConversation, deleteNode, loadConversations,
+    createConversation, selectConversation, deleteConversation, deleteNode, switchNode, loadConversations,
     clearCurrentConversation, updateConversationTitle, refreshMessages, patchAssistantMessageFromStream,
   } = useConversationStore();
 
@@ -1858,6 +1896,9 @@ export default function ChatPage() {
   const handleNewConversation = () => {
     setEditValue(null);
     setEditTargetNodeId(null);
+    setEditToolPermissionMode(null);
+    setEditReturnNodeId(null);
+    setEditProtectedAttachmentNames([]);
     clearCurrentConversation();
   };
   const sendNextQueuedMessage = useCallback(async (conversationId: string): Promise<boolean> => {
@@ -2012,12 +2053,47 @@ export default function ChatPage() {
   }, []);
 
   const handleEditUserMessage = useCallback(async (item: TranscriptItem, text: string) => {
-    if (!isTranscriptItemVisibleNow(item, currentConversation?.id ?? null, selectedBranchTipId)) return;
+    if (!isTranscriptItemOnCurrentBranch(item, currentConversation?.id ?? null, currentBranchNodeIds)) return;
     const parentNodeId = getEditableUserMessageParentNodeId(item, messages);
     if (!parentNodeId) return;
+    const inheritedToolPermissionMode = liveBranchToolPermissionMode ?? currentBranchToolPermissionMode ?? null;
+    const attachmentRefs = getEditableUserMessageAttachmentRefs(item, messages);
+    const protectedAttachmentNames = [
+      ...attachmentRefs.importFiles,
+      ...attachmentRefs.imageRefs.map((file) => file.filename),
+    ];
     setEditValue(text);
     setEditTargetNodeId(parentNodeId);
-  }, [currentConversation?.id, messages, selectedBranchTipId]);
+    setEditToolPermissionMode(inheritedToolPermissionMode);
+    setEditReturnNodeId(selectedBranchTipId);
+    setEditProtectedAttachmentNames(protectedAttachmentNames);
+    setAttachedFiles(attachmentRefs.importFiles);
+    setAttachedImageRefs(attachmentRefs.imageRefs);
+    await switchNode(parentNodeId);
+  }, [
+    currentBranchNodeIds,
+    currentBranchToolPermissionMode,
+    currentConversation?.id,
+    liveBranchToolPermissionMode,
+    messages,
+    selectedBranchTipId,
+    switchNode,
+  ]);
+
+  const handleCancelEdit = useCallback(async () => {
+    const returnNodeId = editReturnNodeId;
+    const conversationId = currentConversation?.id;
+    setEditValue(null);
+    setEditTargetNodeId(null);
+    setEditToolPermissionMode(null);
+    setEditReturnNodeId(null);
+    setEditProtectedAttachmentNames([]);
+    setAttachedFiles([]);
+    setAttachedImageRefs([]);
+    if (conversationId && returnNodeId) {
+      await switchNode(returnNodeId);
+    }
+  }, [currentConversation?.id, editReturnNodeId, switchNode]);
 
   const handleDeleteUserMessage = useCallback(async (item: TranscriptItem) => {
     if (!isTranscriptItemVisibleNow(item, currentConversation?.id ?? null, selectedBranchTipId)) return;
@@ -2467,6 +2543,9 @@ export default function ChatPage() {
     pendingScrollId.current = id;
     setEditValue(null);
     setEditTargetNodeId(null);
+    setEditToolPermissionMode(null);
+    setEditReturnNodeId(null);
+    setEditProtectedAttachmentNames([]);
     const selected = conversations.find((conversation) => conversation.id === id);
     if (selected?.workspace?.cwd) {
       const group = allProjectGroups.find((item) => item.path === selected.workspace?.cwd);
@@ -2567,11 +2646,16 @@ export default function ChatPage() {
 
   const handleRemoveFile = async (filename: string) => {
     if (!currentConversation) return;
+    const isReferencedByHistory = messages.some((message) => messageReferencesAttachment(message, filename));
+    const isProtectedEditAttachment = editProtectedAttachmentNames.includes(filename);
     try {
-      await conversationApi.deleteImport(currentConversation.id, filename);
+      if (!isReferencedByHistory && !isProtectedEditAttachment) {
+        await conversationApi.deleteImport(currentConversation.id, filename);
+      }
     } catch (_) {}
     setAttachedFiles(prev => prev.filter(f => f !== filename));
     setAttachedImageRefs(prev => prev.filter(ref => ref.filename !== filename));
+    setEditProtectedAttachmentNames(prev => prev.filter(name => name !== filename));
   };
 
   const getImportAssetUrl = (filename: string, conversationId = currentConversation?.id) => {
@@ -2611,7 +2695,7 @@ export default function ChatPage() {
       provider_id: providerId,
       reasoning_effort: currentReasoningEffort,
       thinking_enabled: currentThinkingEnabled,
-      tool_permission_mode: toolPermissionMode,
+      tool_permission_mode: toolPermissionMode ?? (editTargetNodeId ? editToolPermissionMode ?? undefined : undefined),
       import_files: importFiles.length > 0 ? importFiles : undefined,
       image_refs: imageRefs.length > 0 ? imageRefs : undefined,
     };
@@ -2634,6 +2718,9 @@ export default function ChatPage() {
       const queuedConversationId = conversationId;
       clearAttachments();
       setEditTargetNodeId(null);
+      setEditToolPermissionMode(null);
+      setEditReturnNodeId(null);
+      setEditProtectedAttachmentNames([]);
       updateQueuedMessages((messages) => [
         ...messages,
         {
@@ -2678,6 +2765,9 @@ export default function ChatPage() {
 
     clearAttachments();
     setEditTargetNodeId(null);
+    setEditToolPermissionMode(null);
+    setEditReturnNodeId(null);
+    setEditProtectedAttachmentNames([]);
     // 第三个参数是乐观渲染的用户气泡文本（显示用户输入的原文）。
     // 推理设置从 modelStore 的当前值读取（已确认值），随请求透传。
     void startStreaming(
@@ -3299,7 +3389,9 @@ export default function ChatPage() {
                     disabled={currentBranchHasStreamingChat}
                     conversationId={null}
                     editValue={editValue}
+                    isEditing={Boolean(editTargetNodeId)}
                     onEditValueConsumed={() => setEditValue(null)}
+                    onCancelEdit={handleCancelEdit}
                     attachedFiles={attachedFiles}
                     attachedImages={attachedImageRefs.map(ref => ({
                       filename: ref.filename,
@@ -3365,7 +3457,9 @@ export default function ChatPage() {
                   disabled={currentBranchHasStreamingChat}
                   conversationId={currentConversation?.id || null}
                   editValue={editValue}
+                  isEditing={Boolean(editTargetNodeId)}
                   onEditValueConsumed={() => setEditValue(null)}
+                  onCancelEdit={handleCancelEdit}
                   attachedFiles={attachedFiles}
                   attachedImages={attachedImageRefs.map(ref => ({
                     filename: ref.filename,
