@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -130,6 +131,60 @@ async def _submit_requires_active_plan_session_case():
 
 def test_submit_requires_active_plan_session():
     run(_submit_requires_active_plan_session_case())
+
+
+async def _update_plan_persists_artifact_snapshot_case(tmp_path: Path):
+    ledger = PlanLedger(artifact_home=tmp_path)
+    session = await ledger.enter_plan_mode(conversation_id="conv1")
+
+    updated = await ledger.update_plan(
+        conversation_id="conv1",
+        content="# Plan\n\n- Step\n",
+        mode="replace",
+    )
+
+    assert updated.plan_id == session.plan_id
+    assert updated.plan == "# Plan\n\n- Step\n"
+    assert updated.plan_revision == 1
+    assert updated.plan_artifact_path is not None
+    assert updated.plan_artifact_path.endswith(".md")
+
+
+def test_update_plan_persists_artifact_snapshot(tmp_path: Path):
+    run(_update_plan_persists_artifact_snapshot_case(tmp_path))
+
+
+async def _exit_plan_mode_submits_current_artifact_case(tmp_path: Path):
+    ledger = PlanLedger(artifact_home=tmp_path)
+    await ledger.enter_plan_mode(conversation_id="conv1")
+    await ledger.update_plan(conversation_id="conv1", mode="replace", content="# Plan\n")
+
+    submitted = await ledger.submit_plan(
+        conversation_id="conv1",
+        node_id="node1",
+        run_id="run1",
+        tool_call_id="call_exit",
+    )
+
+    assert submitted.status == PlanStatus.AWAITING_APPROVAL
+    assert submitted.plan == "# Plan\n"
+    assert submitted.exit_tool_call_id == "call_exit"
+
+
+def test_exit_plan_mode_submits_current_artifact(tmp_path: Path):
+    run(_exit_plan_mode_submits_current_artifact_case(tmp_path))
+
+
+async def _exit_plan_mode_requires_artifact_case(tmp_path: Path):
+    ledger = PlanLedger(artifact_home=tmp_path)
+    await ledger.enter_plan_mode(conversation_id="conv1")
+
+    with pytest.raises(ValueError, match="plan artifact is empty"):
+        await ledger.submit_plan(conversation_id="conv1")
+
+
+def test_exit_plan_mode_requires_artifact(tmp_path: Path):
+    run(_exit_plan_mode_requires_artifact_case(tmp_path))
 
 
 async def _snapshot_roundtrips_plan_sessions_case():

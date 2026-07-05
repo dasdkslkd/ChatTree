@@ -42,7 +42,6 @@ from ..tools.agent_tools import AGENT_TOOL_NAMES, LEGACY_AGENT_TOOL_NAMES
 from ..tasks import TaskRecord, TaskStatus
 from .turn_timeline import (
     has_blocking_plan_tool_result,
-    plan_proposal_block,
     should_emit_as_intermediate_text,
 )
 
@@ -537,103 +536,6 @@ class ChatManager:
             parts.append(reasoning[:300])
         return "\n".join(parts)[:4096] or "Assistant process"
 
-    def _proposal_block_with_latest_status(
-        self,
-        block: dict[str, Any],
-        conversation: Optional[Conversation],
-    ) -> dict[str, Any]:
-        snapshot = ((conversation.metadata or {}).get("plan_ledger") if conversation is not None else None) or {}
-        if not isinstance(snapshot, dict):
-            return block
-        proposal_id = str(block.get("proposal_id") or "")
-        tool_call_id = str(block.get("tool_call_id") or "")
-        for plan in snapshot.get("plans") or []:
-            if not isinstance(plan, dict):
-                continue
-            for proposal in plan.get("proposals") or []:
-                if not isinstance(proposal, dict):
-                    continue
-                if (
-                    proposal_id
-                    and str(proposal.get("proposal_id") or "") == proposal_id
-                ) or (
-                    tool_call_id
-                    and str(proposal.get("tool_call_id") or "") == tool_call_id
-                ):
-                    updated = dict(block)
-                    updated["status"] = str(proposal.get("status") or updated.get("status") or "")
-                    updated["proposal_id"] = str(proposal.get("proposal_id") or updated.get("proposal_id") or "")
-                    updated["revision"] = int(proposal.get("revision") or updated.get("revision") or 1)
-                    updated["resolved_at"] = proposal.get("resolved_at")
-                    updated["feedback"] = proposal.get("feedback")
-                    return updated
-        return block
-
-    def update_plan_proposal_projection(self, conversation_id: str, plan: Any) -> None:
-        if not self._sqlite_enabled():
-            return
-        proposals = list(getattr(plan, "proposals", []) or [])
-        if not proposals:
-            return
-        by_proposal_id = {
-            str(getattr(proposal, "proposal_id", "") or ""): proposal
-            for proposal in proposals
-        }
-        by_tool_call_id = {
-            str(getattr(proposal, "tool_call_id", "") or ""): proposal
-            for proposal in proposals
-            if getattr(proposal, "tool_call_id", None)
-        }
-        try:
-            with self.chat_repository.persistence.connect() as conn:
-                rows = conn.execute(
-                    """
-                    SELECT messages.id, messages.metadata_json
-                    FROM messages
-                    JOIN transcript_items
-                      ON transcript_items.conversation_id = messages.conversation_id
-                     AND transcript_items.message_id = messages.id
-                    WHERE messages.conversation_id = ?
-                      AND messages.subtype = 'assistant_process'
-                      AND transcript_items.item_type = 'assistant_process'
-                    """,
-                    (conversation_id,),
-                ).fetchall()
-                for row in rows:
-                    try:
-                        metadata = json.loads(row["metadata_json"] or "{}")
-                    except (TypeError, json.JSONDecodeError):
-                        continue
-                    timeline = metadata.get("timeline")
-                    if not isinstance(timeline, list):
-                        continue
-                    changed = False
-                    for block in timeline:
-                        if not isinstance(block, dict) or block.get("type") != "plan_proposal":
-                            continue
-                        proposal = by_proposal_id.get(str(block.get("proposal_id") or ""))
-                        if proposal is None:
-                            proposal = by_tool_call_id.get(str(block.get("tool_call_id") or ""))
-                        if proposal is None:
-                            continue
-                        block["proposal_id"] = getattr(proposal, "proposal_id", block.get("proposal_id"))
-                        block["revision"] = getattr(proposal, "revision", block.get("revision"))
-                        block["status"] = getattr(proposal, "status", block.get("status"))
-                        block["resolved_at"] = getattr(proposal, "resolved_at", None)
-                        block["feedback"] = getattr(proposal, "feedback", None)
-                        changed = True
-                    if changed:
-                        conn.execute(
-                            """
-                            UPDATE messages
-                            SET metadata_json = ?
-                            WHERE id = ?
-                            """,
-                            (json.dumps(metadata, ensure_ascii=False, sort_keys=True), row["id"]),
-                        )
-        except Exception as exc:
-            logger.warning("SQLite plan proposal projection update failed: %s", exc, exc_info=True)
-
     def _persist_sqlite_tool_metadata(
         self,
         *,
@@ -763,11 +665,6 @@ class ChatManager:
                 }
                 for call in calls:
                     result = results_by_call_id.get(str(call.get("id") or ""))
-                    proposal = plan_proposal_block(tool_call=call, tool_result=result or {})
-                    if proposal is not None:
-                        proposal = self._proposal_block_with_latest_status(proposal, conversation)
-                        timeline_blocks.append(proposal)
-                        continue
                     timeline_blocks.append({
                         "type": "tool_call",
                         "tool_call": call,
@@ -1362,8 +1259,9 @@ class ChatManager:
             self._multi_agent_intent_text(conversation, model_content),
             conversation.metadata if conversation is not None else (preview.metadata if preview is not None else {}),
         )
-        tools = self.tool_manager.get_openai_tools() if self.tool_manager else []
-        tools = self._filter_agent_tools_for_mode(tools, multi_agent_mode)
+        available_tools = self.tool_manager.get_openai_tools() if self.tool_manager else []
+        tools = self._filter_agent_tools_for_mode(available_tools, multi_agent_mode)
+        tools = self._filter_plan_tools_for_mode(tools, new_node.get("tool_permission_mode") or "default")
         tools = tools or None
         if slash_result.tool_policy == SlashToolPolicy.DISABLED:
             tools = None
@@ -1697,6 +1595,9 @@ class ChatManager:
                             )
                             if next_permission_mode != new_node.get("tool_permission_mode"):
                                 new_node["tool_permission_mode"] = next_permission_mode
+                                if slash_result.tool_policy != SlashToolPolicy.DISABLED:
+                                    tools = self._filter_agent_tools_for_mode(available_tools, multi_agent_mode)
+                                    tools = self._filter_plan_tools_for_mode(tools, next_permission_mode) or None
                             break
                 finally:
                     if not event_get_task.done():
@@ -1998,7 +1899,6 @@ class ChatManager:
             else:
                 raise ValueError("unsupported plan action response")
             await plan_ledger.consume_pending_context(conversation_id)
-            self.update_plan_proposal_projection(conversation_id, plan)
         except Exception as exc:
             yield StreamChunk(
                 status=StreamStatus.ERROR,
@@ -2133,7 +2033,11 @@ class ChatManager:
                 "Plan mode is active:",
                 "- You are in a read-only planning phase. Inspect, search, compare approaches, and reason only with read-only tools.",
                 "- Do not edit files, run implementation commands, start implementation work, change configuration, commit, or claim changes were made.",
-                "- Your turn must end with exactly one structured plan-mode action: call `ask_user_question` if a genuine user decision is required, or call `exit_plan_mode` with the complete plan when ready for approval.",
+                "- Do not write the full plan in assistant text. The user will review the plan card.",
+                "- Call update_plan whenever the plan artifact needs to be created or changed.",
+                "- When the plan changes, call `update_plan` with either `replace` or `apply_patch`.",
+                "- Call exit_plan_mode with no arguments when the artifact is ready for approval.",
+                "- Your turn must end with exactly one structured plan-mode action: call `ask_user_question` if a genuine user decision is required, or call `exit_plan_mode` with no arguments when ready for approval.",
                 "- Do not ask whether the plan is acceptable in text; `exit_plan_mode` is the only plan-approval path.",
                 "- If the user changes direction while you are in plan mode, update the plan-mode work instead of implementing until a plan is approved.",
             ]
@@ -2145,7 +2049,7 @@ class ChatManager:
             "- When the user asks you to implement now, directly execute, or complete the change, start working instead of planning unless continuing would violate safety or permission rules.",
             "- Prefer direct implementation for small fixes, clear bug fixes after diagnosis, specific instructions, and features that follow an obvious existing pattern.",
             "- Use `ask_user_question` in plan mode only for genuine user decisions that block planning; do not use it to ask whether the completed plan is acceptable.",
-            "- When plan mode is active and the plan is ready, call `exit_plan_mode` with the plan and wait for user approval before implementing.",
+            "- When plan mode is active, call `update_plan` to write the plan artifact. When the plan is ready, call `exit_plan_mode` with no arguments and wait for user approval before implementing.",
         ]
 
     def _format_open_tasks_for_prompt(self, conversation: Optional[Conversation]) -> list[str]:
@@ -2420,9 +2324,10 @@ class ChatManager:
             "<system-reminder>",
             "Plan mode final response was discarded because plan mode can only end by calling a plan-mode tool.",
             "You are already in plan mode. Continue read-only planning.",
+            "Do not write the full plan in assistant text. Call update_plan to create or revise the plan artifact.",
             "At the end of this turn, you MUST call exactly one of these tools:",
             "- ask_user_question: only when a genuine user decision is required to continue planning.",
-            "- exit_plan_mode: when the plan is ready for user approval.",
+            "- exit_plan_mode: with no arguments, when the plan artifact is ready for user approval.",
             "Do not ask for plan approval in plain text. Do not edit files, run implementation commands, or claim the plan is approved.",
             f"Attempt: {attempt}",
             "</system-reminder>",
@@ -2531,6 +2436,23 @@ class ChatManager:
             if name in LEGACY_AGENT_TOOL_NAMES:
                 continue
             if name in AGENT_TOOL_NAMES and mode == "none":
+                continue
+            filtered.append(tool)
+        return filtered
+
+    def _filter_plan_tools_for_mode(
+        self,
+        tools: List[Dict[str, Any]],
+        mode: str,
+    ) -> List[Dict[str, Any]]:
+        normalized_mode = normalize_permission_mode(mode)
+        plan_only = {"update_plan", "exit_plan_mode", "ask_user_question"}
+        filtered: List[Dict[str, Any]] = []
+        for tool in tools:
+            name = str((tool.get("function") or {}).get("name") or "")
+            if name in plan_only and normalized_mode != "plan":
+                continue
+            if name == "enter_plan_mode" and normalized_mode == "plan":
                 continue
             filtered.append(tool)
         return filtered

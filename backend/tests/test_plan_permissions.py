@@ -20,6 +20,7 @@ def make_context(tool_name: str, mode: str = "plan", arguments=None) -> Permissi
     "tool_name",
     [
         "enter_plan_mode",
+        "update_plan",
         "exit_plan_mode",
         "ask_user_question",
         "list_files",

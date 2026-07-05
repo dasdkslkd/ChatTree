@@ -154,7 +154,7 @@ def test_plan_routes_get_approve_and_expose_pending_context():
     assert pending_context.json()["context"][0]["permission_mode"] == "ask_always"
 
 
-def test_plan_route_current_keeps_recent_approved_plan_visible():
+def test_plan_route_current_hides_recent_approved_plan_content():
     ledger = PlanLedger()
     run(
         ledger.enter_plan_mode(
@@ -172,7 +172,7 @@ def test_plan_route_current_keeps_recent_approved_plan_visible():
     assert current.status_code == 200
     assert current.json()["plan"]["plan_id"] == awaiting.plan_id
     assert current.json()["plan"]["status"] == PlanStatus.APPROVED.value
-    assert current.json()["plan"]["plan"] == "Approved visible plan"
+    assert current.json()["plan"]["plan"] == ""
 
 
 def test_plan_route_current_restores_persisted_snapshot_after_restart():

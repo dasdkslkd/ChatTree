@@ -142,7 +142,6 @@ import {
 } from '../utils/activeStreamPolling';
 import { ChatInput } from '../components/ChatInput';
 import { TranscriptList } from '../components/transcript/TranscriptList';
-import { AssistantProcessItem } from '../components/transcript/items/AssistantProcessItem';
 import TreeView from './TreeView';
 import {
   getVisibleProjectConversations,
@@ -1130,7 +1129,7 @@ export default function ChatPage() {
   };
 
   const activeRunStates = useRunManager(currentConversation?.id ?? null);
-  const [, setActivePlan] = useState<PlanSession | null>(null);
+  const [activePlan, setActivePlan] = useState<PlanSession | null>(null);
   const [planActionPending, setPlanActionPending] = useState<'approve' | 'reject' | 'answer' | null>(null);
   const [planRejectFeedback, setPlanRejectFeedback] = useState('');
   const [planError, setPlanError] = useState<string | null>(null);
@@ -1431,10 +1430,53 @@ export default function ChatPage() {
       .filter((overlay) => overlay.items.length > 0),
     [activeRunStates, currentBranchNodeIds, selectedBranchTipId],
   );
-  const displayTranscriptItems = useMemo(
-    () => mergeLiveRunTranscriptItems(transcriptItems, liveMainTranscriptRunOverlays),
-    [liveMainTranscriptRunOverlays, transcriptItems],
-  );
+  const displayTranscriptItems = useMemo(() => {
+    const merged = mergeLiveRunTranscriptItems(transcriptItems, liveMainTranscriptRunOverlays);
+    const planText = typeof activePlan?.plan === 'string' ? activePlan.plan : '';
+    if (activePlan?.status !== 'awaiting_approval' || !planText.trim()) return merged;
+    const planRecord = activePlan as PlanSession & {
+      submitted_node_id?: string | null;
+      entered_node_id?: string | null;
+      proposal_id?: string | null;
+      proposal_revision?: number | null;
+    };
+    const activePlanId = activePlan.plan_id || activePlan.id || '';
+    if (!activePlanId) return merged;
+    const nodeId = planRecord.submitted_node_id || planRecord.entered_node_id || null;
+    const card: TranscriptItem = {
+      id: `active-plan-${activePlanId}`,
+      type: 'plan_card',
+      conversation_id: activePlan.conversation_id || currentConversation?.id || null,
+      node_id: nodeId,
+      plan_id: activePlanId,
+      status: 'awaiting_approval',
+      preview: planText,
+      visibility: 'main',
+      props: {
+        plan: planText,
+        status: 'awaiting_approval',
+        proposal_id: planRecord.proposal_id || null,
+        revision: planRecord.proposal_revision || null,
+      },
+    };
+    let insertionIndex = 0;
+    if (nodeId) {
+      for (let index = merged.length - 1; index >= 0; index -= 1) {
+        if (merged[index].node_id === nodeId || merged[index].anchor_node_id === nodeId) {
+          insertionIndex = index + 1;
+          break;
+        }
+      }
+    }
+    if (insertionIndex > 0) {
+      return [
+        ...merged.slice(0, insertionIndex),
+        card,
+        ...merged.slice(insertionIndex),
+      ];
+    }
+    return [...merged, card];
+  }, [activePlan, currentConversation?.id, liveMainTranscriptRunOverlays, transcriptItems]);
   const approvalPromptRunStates = sidePanelRunStates;
   const pendingToolApprovalPrompts = useMemo(
     () => collectPendingToolApprovalPrompts(approvalPromptRunStates),
@@ -1939,7 +1981,7 @@ export default function ChatPage() {
       setActivePlan((current) => {
         if (!current) return current;
         const currentPlanId = current.plan_id || current.id || '';
-        return currentPlanId === planId ? { ...current, status: 'approved' } : current;
+        return currentPlanId === planId ? null : current;
       });
       const { currentReasoningEffort, currentThinkingEnabled } = useModelStore.getState();
       setShouldAutoScroll(true);
@@ -1976,7 +2018,7 @@ export default function ChatPage() {
       setActivePlan((current) => {
         if (!current) return current;
         const currentPlanId = current.plan_id || current.id || '';
-        return currentPlanId === planId ? { ...current, status: 'rejected', feedback } : current;
+        return currentPlanId === planId ? null : current;
       });
       const { currentReasoningEffort, currentThinkingEnabled } = useModelStore.getState();
       setShouldAutoScroll(true);
@@ -2647,18 +2689,7 @@ export default function ChatPage() {
     );
   };
 
-  const renderTranscriptItem = (item: TranscriptItem, defaultItem: React.ReactNode) => {
-    if (item.type === 'assistant_process') {
-      return (
-        <AssistantProcessItem
-          item={item}
-          onApprovePlan={handleApprovePlan}
-          onRejectPlan={handleRejectPlan}
-          planActionPending={planActionPending}
-          planError={planError}
-        />
-      );
-    }
+  const renderTranscriptItem = (_item: TranscriptItem, defaultItem: React.ReactNode) => {
     return defaultItem;
   };
 

@@ -63,8 +63,13 @@ async def _exit_plan_mode_submits_plan_for_user_approval_case():
     register_plan_tools(manager, ledger)
     await manager.tools["enter_plan_mode"].execute(_runtime_context=context())
 
+    updated_raw = await manager.tools["update_plan"].execute(
+        mode="replace",
+        content="1. Add ledger\n2. Add tools\n3. Add routes",
+        _runtime_context=context(node_id="node-2", run_id="run-2", permission_mode="plan"),
+    )
+    updated_payload = json.loads(updated_raw)
     raw = await manager.tools["exit_plan_mode"].execute(
-        plan="1. Add ledger\n2. Add tools\n3. Add routes",
         _runtime_context=context(node_id="node-2", run_id="run-2", permission_mode="plan"),
     )
     payload = json.loads(raw)
@@ -75,6 +80,7 @@ async def _exit_plan_mode_submits_plan_for_user_approval_case():
     assert current is not None
     assert current.status == PlanStatus.AWAITING_APPROVAL
     assert current.plan == "1. Add ledger\n2. Add tools\n3. Add routes"
+    assert updated_payload["revision"] == current.plan_revision
 
 
 def test_exit_plan_mode_submits_plan_for_user_approval():
@@ -137,8 +143,8 @@ def test_sync_runtime_managers_preserves_plan_ledger_and_registers_plan_tools():
 
     assert isinstance(first_ledger, PlanLedger)
     assert app.state.plan_ledger is first_ledger
-    assert {"enter_plan_mode", "exit_plan_mode"} <= set(first_tool_manager.tools)
-    assert {"enter_plan_mode", "exit_plan_mode"} <= set(second_tool_manager.tools)
+    assert {"enter_plan_mode", "update_plan", "exit_plan_mode"} <= set(first_tool_manager.tools)
+    assert {"enter_plan_mode", "update_plan", "exit_plan_mode"} <= set(second_tool_manager.tools)
 
 
 def test_registered_plan_tools_are_model_visible_in_real_tool_manager():
@@ -147,4 +153,4 @@ def test_registered_plan_tools_are_model_visible_in_real_tool_manager():
 
     names = {tool["function"]["name"] for tool in tool_manager.get_openai_tools()}
 
-    assert {"enter_plan_mode", "exit_plan_mode", "ask_user_question"} <= names
+    assert {"enter_plan_mode", "update_plan", "exit_plan_mode", "ask_user_question"} <= names

@@ -228,6 +228,7 @@ def default_permission_rules() -> List[PermissionRule]:
         PermissionRule("default-allow-update-task", "allow", "tool", "update_task", source="default"),
         PermissionRule("default-allow-list-tasks", "allow", "tool", "list_tasks", source="default"),
         PermissionRule("default-allow-enter-plan-mode", "allow", "tool", "enter_plan_mode", source="default"),
+        PermissionRule("default-allow-update-plan", "allow", "tool", "update_plan", source="default"),
         PermissionRule("default-allow-exit-plan-mode", "allow", "tool", "exit_plan_mode", source="default"),
         PermissionRule("default-allow-ask-user-question", "allow", "tool", "ask_user_question", source="default"),
         PermissionRule("default-allow-list-files", "allow", "tool", "list_files", source="default"),
@@ -307,6 +308,7 @@ _PLAN_ALLOWED_TOOLS = {
     "fetch_url",
     "list_tasks",
     "enter_plan_mode",
+    "update_plan",
     "exit_plan_mode",
     "ask_user_question",
 }
@@ -321,7 +323,7 @@ def _is_plan_allowed_tool(tool_name: str) -> bool:
 
 
 def _is_plan_control_tool(tool_name: str) -> bool:
-    return tool_name in {"enter_plan_mode", "exit_plan_mode", "ask_user_question"}
+    return tool_name in {"enter_plan_mode", "update_plan", "exit_plan_mode", "ask_user_question"}
 
 
 def _is_mutating_tool_call(tool_name: str, arguments: Dict[str, Any]) -> bool:

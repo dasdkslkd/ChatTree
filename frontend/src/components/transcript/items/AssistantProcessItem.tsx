@@ -1,4 +1,4 @@
-import type { TranscriptItem, TranscriptPlanActionHandler } from '../../../types/transcript';
+import type { TranscriptItem } from '../../../types/transcript';
 import {
   getActiveReasoningKey,
   normalizeLegacyToolInteractions,
@@ -11,10 +11,6 @@ import { getItemText, getStatusText } from './itemText';
 
 interface AssistantProcessItemProps {
   item: TranscriptItem;
-  onApprovePlan?: TranscriptPlanActionHandler;
-  onRejectPlan?: TranscriptPlanActionHandler;
-  planActionPending?: string | null;
-  planError?: string | null;
 }
 
 function getProcessProps(item: TranscriptItem): AssistantProcessRenderProps {
@@ -57,19 +53,11 @@ function getProcessProps(item: TranscriptItem): AssistantProcessRenderProps {
 
 export function AssistantProcessItem({
   item,
-  onApprovePlan,
-  onRejectPlan,
-  planActionPending = null,
-  planError = null,
 }: AssistantProcessItemProps) {
   return (
     <AssistantProcessTimeline
       item={item}
       props={getProcessProps(item)}
-      onApprovePlan={onApprovePlan}
-      onRejectPlan={onRejectPlan}
-      planActionPending={planActionPending}
-      planError={planError}
     />
   );
 }

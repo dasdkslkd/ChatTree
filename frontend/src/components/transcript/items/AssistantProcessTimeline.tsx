@@ -3,19 +3,11 @@ import { Check, ChevronRight, Loader2, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { messageApi, type ToolResultSlice } from '../../../api/message';
-import type { TranscriptItem, TranscriptPlanActionHandler } from '../../../types/transcript';
+import type { TranscriptItem } from '../../../types/transcript';
 import type { AssistantProcessRenderProps, AssistantTimelineBlock, ToolRenderItem } from '../../../utils/assistantTimeline';
 import { formatProcessedDuration } from '../../../utils/assistantTimelineFolding';
 import { formatToolOutput } from '../../../utils/toolDisplay';
 import MarkdownContent from '../../MarkdownContent';
-import { PlanProposalCard, type PlanProposalBlock } from './PlanProposalCard';
-
-type ProcessTimelineHandlers = {
-  onApprovePlan?: TranscriptPlanActionHandler;
-  onRejectPlan?: TranscriptPlanActionHandler;
-  planActionPending?: string | null;
-  planError?: string | null;
-};
 
 export function getStreamStatusLabel(status: AssistantProcessRenderProps['status'], errorMessage: string | null): string | null {
   if (status === 'error') return errorMessage || '生成失败';
@@ -155,24 +147,6 @@ function ToolCallGroup({ items }: { items: ToolRenderItem[] }) {
   );
 }
 
-function planProposalItem(item: TranscriptItem, block: PlanProposalBlock): TranscriptItem {
-  return {
-    ...item,
-    id: `${item.id}:${block.proposal_id || block.tool_call_id || block.plan_id || 'plan-proposal'}`,
-    plan_id: block.plan_id || item.plan_id || null,
-    status: block.status,
-    preview: block.plan,
-    props: {
-      ...(item.props || {}),
-      plan: block.plan,
-      proposal_id: block.proposal_id,
-      tool_call_id: block.tool_call_id,
-      revision: block.revision,
-      feedback: block.feedback,
-    },
-  };
-}
-
 function ContentBlock({ block }: { block: Extract<AssistantTimelineBlock, { type: 'content' }> }) {
   return (
     <div
@@ -191,22 +165,9 @@ function ContentBlock({ block }: { block: Extract<AssistantTimelineBlock, { type
 
 function renderTimelineBlock(
   block: AssistantTimelineBlock,
-  item: TranscriptItem,
+  _item: TranscriptItem,
   props: AssistantProcessRenderProps,
-  handlers: ProcessTimelineHandlers,
 ) {
-  if (block.type === 'plan_proposal') {
-    return (
-      <PlanProposalCard
-        key={block.key}
-        block={block}
-        onApprove={() => handlers.onApprovePlan?.(planProposalItem(item, block))}
-        onReject={() => handlers.onRejectPlan?.(planProposalItem(item, block))}
-        pending={handlers.planActionPending !== null && handlers.planActionPending !== undefined}
-        error={handlers.planError}
-      />
-    );
-  }
   if (block.type === 'reasoning') {
     return (
       <ThoughtBlock
@@ -225,25 +186,14 @@ function renderTimelineBlock(
 export function AssistantProcessTimeline({
   item,
   props,
-  onApprovePlan,
-  onRejectPlan,
-  planActionPending = null,
-  planError = null,
 }: {
   item: TranscriptItem;
   props: AssistantProcessRenderProps;
-} & ProcessTimelineHandlers) {
+}) {
   const timeline = Array.isArray(props.timeline) ? props.timeline : [];
   const statusLabel = getStreamStatusLabel(props.status, props.errorMessage);
   const showPendingBubble = Boolean(props.showPendingBubble && props.pendingUserMessage);
   const showStreamBlock = props.showStreamBlock !== false;
-  const handlers = {
-    onApprovePlan,
-    onRejectPlan,
-    planActionPending,
-    planError,
-  };
-
   return (
     <div className="contents">
       {showPendingBubble && (
@@ -278,13 +228,13 @@ export function AssistantProcessTimeline({
                 </div>
                 <div className="processed-blocks-shell expanded" aria-hidden="false">
                   <div className="processed-blocks-inner">
-                    {props.streamingFoldState.visibleBlocks.map((block) => renderTimelineBlock(block, item, props, handlers))}
+                    {props.streamingFoldState.visibleBlocks.map((block) => renderTimelineBlock(block, item, props))}
                   </div>
                 </div>
               </>
             ) : (
               <div className="w-full flex flex-col items-start">
-                {timeline.map((block) => renderTimelineBlock(block, item, props, handlers))}
+                {timeline.map((block) => renderTimelineBlock(block, item, props))}
               </div>
             )}
             {timeline.length === 0 && props.status === 'streaming' && (

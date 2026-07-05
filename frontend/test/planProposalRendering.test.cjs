@@ -7,10 +7,12 @@ const processPath = path.join(__dirname, '../src/components/transcript/items/Ass
 const processTimelinePath = path.join(__dirname, '../src/components/transcript/items/AssistantProcessTimeline.tsx');
 const transcriptPath = path.join(__dirname, '../src/utils/transcriptItems.ts');
 
-function testPlanProposalCardHasExpandedAndCompactStates() {
+function testNoCompactHistoricalPlanCards() {
   const source = fs.readFileSync(cardPath, 'utf8');
-  assert.match(source, /status === 'awaiting_approval'/);
-  assert.match(source, /truncatePlan/);
+  assert.match(source, /awaiting_approval/);
+  assert.doesNotMatch(source, /truncatePlan/);
+  assert.doesNotMatch(source, /已批准/);
+  assert.doesNotMatch(source, /已驳回/);
   assert.match(source, /批准/);
   assert.match(source, /驳回/);
   assert.match(source, /plan-card/);
@@ -24,26 +26,27 @@ function testProcessRendererUsesDedicatedPlanProposalCard() {
   const timelineSource = fs.readFileSync(processTimelinePath, 'utf8');
   assert.match(source, /Array\.isArray\(item\.props\?\.timeline\)/);
   assert.match(source, /AssistantProcessTimeline/);
-  assert.match(timelineSource, /block\.type === 'plan_proposal'/);
-  assert.match(timelineSource, /<PlanProposalCard/);
-  assert.doesNotMatch(timelineSource, /plan_proposal[\s\S]{0,120}<ToolCallCard/);
+  assert.doesNotMatch(timelineSource, /block\.type === 'plan_proposal'/);
+  assert.doesNotMatch(timelineSource, /<PlanProposalCard/);
 }
 
 function testPlanProposalCardMatchesProcessShellContract() {
   const source = fs.readFileSync(cardPath, 'utf8');
   assert.match(source, /transcript-plan-card plan-card/);
-  assert.match(source, /status === 'awaiting_approval'/);
-  assert.match(source, /truncatePlan/);
+  assert.match(source, /awaiting_approval/);
+  assert.doesNotMatch(source, /truncatePlan/);
   assert.doesNotMatch(source, /aria-label="复制消息"/);
 }
 
 function testTranscriptNoLongerDependsOnStandalonePlanCardItem() {
   const source = fs.readFileSync(transcriptPath, 'utf8');
-  assert.doesNotMatch(source, /type:\s*'plan_card'/);
-  assert.doesNotMatch(source, /item_type === 'plan_card'/);
+  assert.match(source, /rawType === 'plan_card'/);
+  assert.match(source, /status === 'awaiting_approval'/);
+  assert.doesNotMatch(source, /status === 'approved'/);
+  assert.doesNotMatch(source, /status === 'rejected'/);
 }
 
-testPlanProposalCardHasExpandedAndCompactStates();
+testNoCompactHistoricalPlanCards();
 testProcessRendererUsesDedicatedPlanProposalCard();
 testPlanProposalCardMatchesProcessShellContract();
 testTranscriptNoLongerDependsOnStandalonePlanCardItem();

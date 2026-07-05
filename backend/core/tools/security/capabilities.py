@@ -20,6 +20,7 @@ DEFAULT_TOOL_CAPABILITIES: Mapping[str, Set[ToolCapability]] = {
     "read_tool_result": {ToolCapability.READ_ONLY},
     "list_available_tools": {ToolCapability.READ_ONLY},
     "enter_plan_mode": {ToolCapability.READ_ONLY},
+    "update_plan": {ToolCapability.READ_ONLY},
     "exit_plan_mode": {ToolCapability.READ_ONLY},
     "ask_user_question": {ToolCapability.READ_ONLY},
     "list_files": {ToolCapability.FILESYSTEM_READ},

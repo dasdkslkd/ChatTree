@@ -145,7 +145,6 @@ export function PlanCardItem({
               <div className="flex flex-wrap gap-2">
                 {options.map((option, index) => {
                   const label = (option.label || '').trim();
-                  const description = (option.description || '').trim();
                   return (
                     <button
                       key={`${label}-${index}`}
@@ -156,7 +155,6 @@ export function PlanCardItem({
                         background: 'var(--bg-button-secondary)',
                         color: 'var(--fg-primary)',
                       }}
-                      title={description || label}
                       onClick={() => setDraftAnswer(label)}
                       disabled={planActionPending !== null}
                     >

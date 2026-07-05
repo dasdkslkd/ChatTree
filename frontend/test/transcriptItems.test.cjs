@@ -350,7 +350,7 @@ function testTranscriptMessageItemsUseLegacyChatBubbleStyling() {
   assert.match(assistantProcess, /tool_interactions/);
   assert.match(assistantProcessTimeline, /type: 'content'/);
   assert.match(assistantProcessTimeline, /renderTimelineBlock/);
-  assert.match(assistantProcessTimeline, /PlanProposalCard/);
+  assert.doesNotMatch(assistantProcessTimeline, /PlanProposalCard/);
   assert.doesNotMatch(assistantProcess, /transcript-assistant-process/);
 
   assert.match(toolGroup, /className=\{cn\('tool-group'/);
@@ -365,7 +365,7 @@ function testAssistantProcessRendersIntermediateTextButNoCopy() {
 
   assert.match(assistantProcessTimeline, /type: 'content'/);
   assert.match(assistantProcessTimeline, /renderTimelineBlock/);
-  assert.match(assistantProcessTimeline, /PlanProposalCard/);
+  assert.doesNotMatch(assistantProcessTimeline, /PlanProposalCard/);
   assert.doesNotMatch(assistantProcess, /aria-label="复制消息"/);
   assert.doesNotMatch(assistantProcessTimeline, /aria-label="复制消息"/);
   assert.match(assistantAnswer, /aria-label="复制消息"/);
@@ -393,7 +393,8 @@ function testPlanApprovalDoesNotRenderControlEvents() {
   assert.match(transcriptItems, /visibility === 'main'/);
   assert.doesNotMatch(mainPage, /control_event/);
   assert.doesNotMatch(mainPage, /PlanCardItem/);
-  assert.doesNotMatch(transcriptItems, /type:\s*'plan_card'/);
+  assert.match(transcriptItems, /rawType === 'plan_card'/);
+  assert.match(transcriptItems, /status === 'awaiting_approval'/);
 }
 
 function testCopyHandlerOnlyReachesRealTranscriptMessages() {

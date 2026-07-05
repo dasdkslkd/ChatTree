@@ -3,11 +3,14 @@ from __future__ import annotations
 import asyncio
 import uuid
 from copy import deepcopy
+from pathlib import Path
 from time import time
 from typing import Any, Dict, Iterable, Optional, Sequence
 
+from backend.core.persistence.home import resolve_chattree_home
 from backend.core.tools.security.permissions import normalize_permission_mode
 
+from .artifact import PlanArtifactStore
 from .types import ACTIVE_PLAN_STATUSES, PlanContextInjection, PlanProposal, PlanSession, PlanStatus
 
 
@@ -22,8 +25,22 @@ class PlanNotFoundError(PlanLedgerError):
 class PlanLedger:
     """Process-local per-conversation plan-mode ledger."""
 
-    def __init__(self, repository=None) -> None:
+    def __init__(
+        self,
+        repository=None,
+        *,
+        artifact_store: PlanArtifactStore | None = None,
+        artifact_home: str | Path | None = None,
+    ) -> None:
         self._repository = repository
+        if artifact_store is not None:
+            self._artifact_store = artifact_store
+        elif artifact_home is not None:
+            self._artifact_store = PlanArtifactStore(artifact_home)
+        elif repository is not None and getattr(repository, "persistence", None) is not None:
+            self._artifact_store = PlanArtifactStore(repository.persistence.home)
+        else:
+            self._artifact_store = PlanArtifactStore(resolve_chattree_home())
         self._plans_by_conversation: Dict[str, Dict[str, PlanSession]] = {}
         self._pending_context_by_conversation: Dict[str, list[PlanContextInjection]] = {}
         self._lock = asyncio.Lock()
@@ -76,16 +93,13 @@ class PlanLedger:
         self,
         *,
         conversation_id: str,
-        plan: str,
+        plan: str | None = None,
         node_id: Optional[str] = None,
         run_id: Optional[str] = None,
         tool_call_id: Optional[str] = None,
     ) -> PlanSession:
-        plan_text = str(plan or "").strip()
         if not conversation_id:
             raise ValueError("conversation_id is required")
-        if not plan_text:
-            raise ValueError("plan is required")
         async with self._lock:
             if self._repository is not None:
                 record = self._repository.get_active_or_awaiting(conversation_id)
@@ -94,6 +108,17 @@ class PlanLedger:
                     PlanStatus.AWAITING_APPROVAL.value,
                 ):
                     raise ValueError("active plan session is required")
+                if plan is not None:
+                    record = self._update_plan_record(
+                        record,
+                        conversation_id=conversation_id,
+                        mode="replace",
+                        content=plan,
+                        patch=None,
+                    )
+                plan_text = str(record.get("plan") or "")
+                if not plan_text.strip():
+                    raise ValueError("plan artifact is empty; call update_plan before exit_plan_mode")
                 updated = self._repository.submit_plan(
                     conversation_id,
                     record["plan_id"],
@@ -107,6 +132,17 @@ class PlanLedger:
             if record is None or record.status not in (PlanStatus.ACTIVE, PlanStatus.AWAITING_APPROVAL):
                 raise ValueError("active plan session is required")
             updated = deepcopy(record)
+            if plan is not None:
+                updated = self._update_plan_session_locked(
+                    updated,
+                    conversation_id=conversation_id,
+                    mode="replace",
+                    content=plan,
+                    patch=None,
+                )
+            plan_text = str(updated.plan or "")
+            if not plan_text.strip():
+                raise ValueError("plan artifact is empty; call update_plan before exit_plan_mode")
             if updated.proposal_status == "awaiting_approval" and updated.proposal_id:
                 updated = self._mark_current_proposal(
                     updated,
@@ -136,6 +172,45 @@ class PlanLedger:
             updated.proposal_status = proposal.status
             updated.proposals.append(proposal)
             updated.updated_at = time()
+            self._plans_by_conversation[conversation_id][updated.plan_id] = updated
+            return deepcopy(updated)
+
+    async def update_plan(
+        self,
+        *,
+        conversation_id: str,
+        mode: str,
+        content: str | None = None,
+        patch: str | None = None,
+    ) -> PlanSession:
+        if not conversation_id:
+            raise ValueError("conversation_id is required")
+        async with self._lock:
+            if self._repository is not None:
+                record = self._repository.get_active_or_awaiting(conversation_id)
+                if record is None or record.get("status") not in (
+                    PlanStatus.ACTIVE.value,
+                    PlanStatus.AWAITING_APPROVAL.value,
+                ):
+                    raise ValueError("active plan session is required")
+                updated = self._update_plan_record(
+                    record,
+                    conversation_id=conversation_id,
+                    mode=mode,
+                    content=content,
+                    patch=patch,
+                )
+                return self._session_from_record(updated)
+            record = self._active_or_awaiting_locked(conversation_id)
+            if record is None or record.status not in (PlanStatus.ACTIVE, PlanStatus.AWAITING_APPROVAL):
+                raise ValueError("active plan session is required")
+            updated = self._update_plan_session_locked(
+                deepcopy(record),
+                conversation_id=conversation_id,
+                mode=mode,
+                content=content,
+                patch=patch,
+            )
             self._plans_by_conversation[conversation_id][updated.plan_id] = updated
             return deepcopy(updated)
 
@@ -488,6 +563,9 @@ class PlanLedger:
             "status": record.get("status", PlanStatus.ACTIVE.value),
             "previous_permission_mode": record.get("previous_permission_mode", "modify_only"),
             "plan": record.get("plan") or "",
+            "plan_artifact_path": record.get("plan_artifact_path"),
+            "plan_revision": int(record.get("plan_revision") or 0),
+            "plan_updated_at": record.get("plan_updated_at"),
             "question": record.get("question") if isinstance(record.get("question"), dict) else None,
             "feedback": list(record.get("feedback") or []),
             "entered_node_id": record.get("entered_node_id"),
@@ -506,6 +584,58 @@ class PlanLedger:
             "created_at": record.get("created_at", time()),
             "updated_at": record.get("updated_at", time()),
         })
+
+    def _update_plan_record(
+        self,
+        record: Dict[str, Any],
+        *,
+        conversation_id: str,
+        mode: str,
+        content: str | None,
+        patch: str | None,
+    ) -> Dict[str, Any]:
+        updated_artifact = self._artifact_store.update(
+            conversation_id=conversation_id,
+            plan_id=str(record.get("plan_id") or record.get("id") or ""),
+            mode=mode,
+            content=content,
+            patch=patch,
+            revision=int(record.get("plan_revision") or 0),
+        )
+        now = time()
+        return self._repository.update_plan_content(
+            conversation_id,
+            str(record.get("plan_id") or record.get("id") or ""),
+            plan=updated_artifact.content,
+            plan_artifact_path=str(updated_artifact.path),
+            plan_revision=updated_artifact.revision,
+            plan_updated_at=now,
+        )
+
+    def _update_plan_session_locked(
+        self,
+        session: PlanSession,
+        *,
+        conversation_id: str,
+        mode: str,
+        content: str | None,
+        patch: str | None,
+    ) -> PlanSession:
+        updated_artifact = self._artifact_store.update(
+            conversation_id=conversation_id,
+            plan_id=session.plan_id,
+            mode=mode,
+            content=content,
+            patch=patch,
+            revision=session.plan_revision,
+        )
+        now = time()
+        session.plan = updated_artifact.content
+        session.plan_artifact_path = str(updated_artifact.path)
+        session.plan_revision = updated_artifact.revision
+        session.plan_updated_at = now
+        session.updated_at = now
+        return session
 
     @staticmethod
     def _now_ms() -> int:
@@ -549,12 +679,14 @@ class PlanLedger:
             return (
                 "User did not approve the plan.\n\n"
                 f"Feedback:\n{feedback}\n\n"
-                "Remain in plan mode. Revise the plan and call exit_plan_mode again when ready."
+                "Remain in plan mode. Update the plan artifact with update_plan, then call "
+                "exit_plan_mode with no arguments when ready."
             )
         return (
             "User did not approve the plan and did not provide specific feedback.\n\n"
-            "Remain in plan mode. Re-evaluate and improve the plan. "
-            "Call exit_plan_mode again when ready, or ask_user_question only if a real decision is required."
+            "Remain in plan mode. Re-evaluate and improve the plan. Update the plan artifact with "
+            "update_plan, then call exit_plan_mode with no arguments when ready, or ask_user_question "
+            "only if a real decision is required."
         )
 
     def question_answer_tool_result_content(self, session: PlanSession) -> str:
@@ -564,7 +696,8 @@ class PlanLedger:
             "The user answered your plan-mode clarification question.\n\n"
             f"Question: {question}\n"
             f"Answer: {answer}\n\n"
-            "Remain in plan mode. Continue planning and call exit_plan_mode when ready."
+            "Remain in plan mode. Update the plan artifact with update_plan and call "
+            "exit_plan_mode with no arguments when ready."
         )
 
     def _approved_plan_content(self, session: PlanSession) -> str:
@@ -580,7 +713,8 @@ class PlanLedger:
         return (
             "The submitted plan was rejected by the user.\n"
             f"Feedback: {feedback}\n\n"
-            "Remain in plan mode. Revise the plan before calling exit_plan_mode again."
+            "Remain in plan mode. Update the plan artifact with update_plan, then call "
+            "exit_plan_mode with no arguments when ready."
         )
 
     def _question_answer_content(self, session: PlanSession) -> str:
@@ -592,6 +726,6 @@ class PlanLedger:
             f"Question: {question}\n"
             f"Answer: {answer}\n\n"
             "Remain in plan mode. Use this answer to continue read-only exploration and then call "
-            "exit_plan_mode when the plan is ready, or ask_user_question only if another genuine "
-            "decision is required."
+            "update_plan before calling exit_plan_mode with no arguments when the plan is ready, "
+            "or ask_user_question only if another genuine decision is required."
         )

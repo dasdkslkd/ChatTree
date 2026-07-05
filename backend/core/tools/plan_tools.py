@@ -8,7 +8,7 @@ from backend.core.plans import PlanLedger
 from .base import BaseTool
 
 
-PLAN_TOOL_NAMES = {"enter_plan_mode", "exit_plan_mode", "ask_user_question"}
+PLAN_TOOL_NAMES = {"enter_plan_mode", "update_plan", "exit_plan_mode", "ask_user_question"}
 
 
 def _json(payload: Dict[str, Any]) -> str:
@@ -95,8 +95,67 @@ class EnterPlanModeTool(PlanLedgerTool):
                 "commands, change configuration, commit, or claim changes were made.\n"
                 "Your next plan-mode turn must end with ask_user_question or exit_plan_mode: use "
                 "ask_user_question only when a genuine user decision blocks planning; use "
-                "exit_plan_mode with the complete plan when ready for approval."
+                "update_plan to write the plan artifact, then call exit_plan_mode with no arguments "
+                "when ready for approval. Do not write the full plan in assistant text."
             ),
+        })
+
+
+class UpdatePlanTool(PlanLedgerTool):
+    @property
+    def name(self) -> str:
+        return "update_plan"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Create or update the current plan-mode plan artifact. Use this instead of writing the "
+            "full plan in assistant text. The file path is controlled by ChatTree."
+        )
+
+    def parameters_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "mode": {"type": "string", "enum": ["replace", "apply_patch"]},
+                "content": {"type": "string"},
+                "patch": {"type": "string"},
+            },
+            "required": ["mode"],
+        }
+
+    async def execute(self, **kwargs) -> str:
+        context = self._context(kwargs)
+        if context is None:
+            return _missing_context_error()
+        conversation_id = _conversation_id(context)
+        if not conversation_id:
+            return _invalid_arguments("conversation_id is required")
+        mode = str(kwargs.get("mode") or "").strip()
+        content = kwargs.get("content")
+        patch = kwargs.get("patch")
+        if mode == "replace" and not isinstance(content, str):
+            return _invalid_arguments("content is required when mode is replace")
+        if mode == "apply_patch" and not isinstance(patch, str):
+            return _invalid_arguments("patch is required when mode is apply_patch")
+        if mode not in {"replace", "apply_patch"}:
+            return _invalid_arguments("mode must be replace or apply_patch")
+        try:
+            session = await self._plan_ledger.update_plan(
+                conversation_id=conversation_id,
+                mode=mode,
+                content=content if isinstance(content, str) else None,
+                patch=patch if isinstance(patch, str) else None,
+            )
+        except ValueError as exc:
+            return _invalid_arguments(str(exc))
+        return _json({
+            "plan_id": session.plan_id,
+            "status": session.status.value,
+            "message": "Plan artifact updated.",
+            "revision": session.plan_revision,
+            "plan_artifact_path": session.plan_artifact_path,
         })
 
 
@@ -113,13 +172,7 @@ class ExitPlanModeTool(PlanLedgerTool):
         return {
             "type": "object",
             "additionalProperties": False,
-            "properties": {
-                "plan": {
-                    "type": "string",
-                    "description": "The implementation plan to show the user for approval.",
-                },
-            },
-            "required": ["plan"],
+            "properties": {},
         }
 
     async def execute(self, **kwargs) -> str:
@@ -127,16 +180,12 @@ class ExitPlanModeTool(PlanLedgerTool):
         if context is None:
             return _missing_context_error()
         conversation_id = _conversation_id(context)
-        plan = str(kwargs.get("plan") or "").strip()
         if not conversation_id:
             return _invalid_arguments("conversation_id is required")
-        if not plan:
-            return _invalid_arguments("plan is required")
         try:
             tool_call_id = str(context.get("tool_call_id") or "") or None
             session = await self._plan_ledger.submit_plan(
                 conversation_id=conversation_id,
-                plan=plan,
                 node_id=str(context.get("node_id") or "") or None,
                 run_id=str(context.get("run_id") or "") or None,
                 tool_call_id=tool_call_id,
@@ -148,7 +197,6 @@ class ExitPlanModeTool(PlanLedgerTool):
             "status": session.status.value,
             "requires_user_approval": True,
             "message": "Plan submitted for user approval.",
-            "plan": session.plan,
             "proposal_id": session.proposal_id,
             "revision": session.proposal_revision,
         })
@@ -231,5 +279,10 @@ def register_plan_tools(tool_manager: Any, plan_ledger: PlanLedger) -> None:
     register = getattr(tool_manager, "register", None)
     if not callable(register):
         return
-    for tool in (EnterPlanModeTool(plan_ledger), ExitPlanModeTool(plan_ledger), AskUserQuestionTool(plan_ledger)):
+    for tool in (
+        EnterPlanModeTool(plan_ledger),
+        UpdatePlanTool(plan_ledger),
+        ExitPlanModeTool(plan_ledger),
+        AskUserQuestionTool(plan_ledger),
+    ):
         register(tool)

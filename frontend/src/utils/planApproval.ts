@@ -10,7 +10,8 @@ export function shouldShowPlanApproval(plan: Pick<PlanSession, 'status' | 'plan'
 }
 
 export function shouldShowPlanSummary(plan: Pick<PlanSession, 'status' | 'plan' | 'plan_markdown' | 'markdown' | 'content'> | null | undefined): boolean {
-  return plan?.status === 'approved' && getPlanApprovalMarkdown(plan).length > 0;
+  void plan;
+  return false;
 }
 
 export function getPlanQuestionText(plan: Pick<PlanSession, 'question'> | null | undefined): string {

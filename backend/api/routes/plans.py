@@ -45,7 +45,12 @@ class PlanRejectStreamRequest(PlanActionStreamRequest):
 
 
 def _plan_payload(plan) -> Optional[Dict[str, Any]]:
-    return plan.to_dict() if plan else None
+    if not plan:
+        return None
+    payload = plan.to_dict()
+    if payload.get("status") != PlanStatus.AWAITING_APPROVAL.value:
+        payload["plan"] = ""
+    return payload
 
 
 async def _persist_plan_snapshot_if_available(request: Request, conversation_id: str) -> None:
@@ -245,9 +250,6 @@ async def _plan_action_stream(
                 tool_name = "ask_user_question"
                 continuation_permission_mode = "plan"
             await plan_ledger.consume_pending_context(conversation_id)
-            update_projection = getattr(chat_manager, "update_plan_proposal_projection", None)
-            if callable(update_projection):
-                update_projection(conversation_id, plan)
             async for chunk in chat_manager.continue_plan_tool_result_stream(
                 conversation_id=conversation_id,
                 plan_id=plan_id,

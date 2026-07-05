@@ -20,11 +20,11 @@ function testAssistantTimelineModuleExistsAndExportsNormalizers() {
   assert.match(source, /export function createLiveAssistantProcessItem/);
 }
 
-function testPlanProposalBlockIsPartOfTimelineType() {
+function testNoPlanProposalNormalization() {
   const source = read(assistantTimelinePath);
-  assert.match(source, /type:\s*'plan_proposal'/);
-  assert.match(source, /PlanProposalBlock/);
-  assert.match(source, /exit_plan_mode/);
+  assert.doesNotMatch(source, /type:\s*'plan_proposal'/);
+  assert.doesNotMatch(source, /PlanProposalBlock/);
+  assert.doesNotMatch(source, /normalizePlanProposal/);
 }
 
 function testMainPageDelegatesLiveRenderingToSharedProcessPath() {
@@ -44,13 +44,13 @@ function testAssistantProcessItemIsThinAdapter() {
 function testSharedTimelineRendererOwnsLiveStyle() {
   const source = read(processTimelinePath);
   assert.match(source, /processed-fold expanded/);
-  assert.match(source, /PlanProposalCard/);
+  assert.doesNotMatch(source, /PlanProposalCard/);
   assert.match(source, /ToolCallGroup/);
   assert.match(source, /getStreamStatusLabel/);
 }
 
 testAssistantTimelineModuleExistsAndExportsNormalizers();
-testPlanProposalBlockIsPartOfTimelineType();
+testNoPlanProposalNormalization();
 testMainPageDelegatesLiveRenderingToSharedProcessPath();
 testAssistantProcessItemIsThinAdapter();
 testSharedTimelineRendererOwnsLiveStyle();

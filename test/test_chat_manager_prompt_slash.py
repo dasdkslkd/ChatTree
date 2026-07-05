@@ -325,11 +325,22 @@ class PlanFinalWithoutExitProvider(CapturingProvider):
                 tokens_used=1,
                 tool_calls=[
                     {
+                        "id": "call_update_plan",
+                        "type": "function",
+                        "function": {
+                            "name": "update_plan",
+                            "arguments": json.dumps({
+                                "mode": "replace",
+                                "content": "1. 修改设置页\n2. 增加验证",
+                            }, ensure_ascii=False),
+                        },
+                    },
+                    {
                         "id": "call_exit_plan",
                         "type": "function",
                         "function": {
                             "name": "exit_plan_mode",
-                            "arguments": json.dumps({"plan": "1. 修改设置页\n2. 增加验证"}),
+                            "arguments": "{}",
                         },
                     }
                 ],
@@ -566,6 +577,7 @@ def test_continue_plan_question_answer_stream_uses_hidden_control_response(tmp_p
         conversation_id=conversation.metadata["id"],
         question="项目栏是否默认显示？",
         options=[{"label": "默认显示", "description": "进入页面直接看到"}],
+        tool_call_id="call-question",
     ))
 
     chunks = asyncio.run(
@@ -581,7 +593,7 @@ def test_continue_plan_question_answer_stream_uses_hidden_control_response(tmp_p
 
     assert chunks[-1]["status"] == StreamStatus.COMPLETE
     first_prompt = "\n\n".join(str(message.get("content") or "") for message in model_manager.provider.calls[0]["messages"])
-    assert "The user answered a plan-mode clarification question." in first_prompt
+    assert "The user answered your plan-mode clarification question." in first_prompt
     assert "项目栏是否默认显示？" in first_prompt
     assert "默认显示" in first_prompt
     reloaded = manager.get_conversation(conversation.metadata["id"])
@@ -604,6 +616,7 @@ def test_continue_plan_approval_stream_uses_hidden_control_response(tmp_path: Pa
     awaiting = asyncio.run(plan_ledger.submit_plan(
         conversation_id=conversation.metadata["id"],
         plan="1. 修改设置页\n2. 增加验证",
+        tool_call_id="call-exit",
     ))
     assert awaiting.plan_id == active.plan_id
 
@@ -620,9 +633,10 @@ def test_continue_plan_approval_stream_uses_hidden_control_response(tmp_path: Pa
 
     assert chunks[-1]["status"] == StreamStatus.COMPLETE
     first_prompt = "\n\n".join(str(message.get("content") or "") for message in model_manager.provider.calls[0]["messages"])
-    assert "Approved plan for this conversation" in first_prompt
+    assert "User has approved your plan" in first_prompt
+    assert "## Approved Plan:" in first_prompt
     assert "修改设置页" in first_prompt
-    assert "Continue with the approved plan" in first_prompt
+    assert "start coding" in first_prompt
     assert asyncio.run(plan_ledger.get_active_or_awaiting(conversation.metadata["id"])) is None
     reloaded = manager.get_conversation(conversation.metadata["id"])
     current = reloaded.nodes[reloaded.current_node_id]

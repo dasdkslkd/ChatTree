@@ -54,32 +54,3 @@ def has_blocking_plan_tool_result(messages: Iterable[dict[str, Any]]) -> bool:
 def should_emit_as_intermediate_text(*, has_tool_calls: bool, plan_or_task_guard_active: bool) -> bool:
     return has_tool_calls or plan_or_task_guard_active
 
-
-def plan_proposal_block(
-    *,
-    tool_call: dict[str, Any],
-    tool_result: dict[str, Any],
-    proposal_status: str | None = None,
-) -> dict[str, Any] | None:
-    if tool_call_name(tool_call) != "exit_plan_mode":
-        return None
-
-    args = json_tool_payload((tool_call.get("function") or {}).get("arguments"))
-    result = json_tool_payload(tool_result.get("raw_content") or tool_result.get("content"))
-    plan = str(result.get("plan") or args.get("plan") or "")
-    if not plan.strip():
-        return None
-
-    return {
-        "type": "plan_proposal",
-        "tool_name": "exit_plan_mode",
-        "tool_call_id": tool_call_id(tool_call),
-        "plan_id": str(result.get("plan_id") or ""),
-        "proposal_id": str(result.get("proposal_id") or ""),
-        "revision": int(result.get("revision") or 1),
-        "status": str(proposal_status or result.get("status") or "awaiting_approval"),
-        "plan": plan,
-        "created_at": tool_result.get("timestamp"),
-        "resolved_at": result.get("resolved_at"),
-        "feedback": result.get("feedback"),
-    }

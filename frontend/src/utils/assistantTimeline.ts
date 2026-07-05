@@ -1,6 +1,5 @@
 import type { StreamState } from '../services/streamManager';
 import type { TranscriptItem } from '../types/transcript';
-import type { PlanProposalBlock } from '../components/transcript/items/PlanProposalCard';
 import {
   extractToolResultEnvelope,
   formatToolArguments,
@@ -53,8 +52,7 @@ export type ToolRenderItem = {
 export type AssistantTimelineBlock =
   | { type: 'reasoning'; key: string; reasoning: string }
   | { type: 'content'; key: string; content: string }
-  | { type: 'tools'; key: string; items: ToolRenderItem[] }
-  | (PlanProposalBlock & { key: string });
+  | { type: 'tools'; key: string; items: ToolRenderItem[] };
 
 export type AssistantProcessRenderProps = {
   live_process?: boolean;
@@ -141,26 +139,6 @@ function normalizeTimelineToolMessage(record: Record<string, unknown>): ToolMess
   return candidate ? candidate as ToolMessageLike : null;
 }
 
-function normalizePlanProposal(record: Record<string, unknown>, key: string): AssistantTimelineBlock | null {
-  const status = getStringField(record, 'status') || 'awaiting_approval';
-  const plan = getStringField(record, 'plan');
-  if (!plan.trim()) return null;
-  return {
-    type: 'plan_proposal',
-    key,
-    tool_name: getStringField(record, 'tool_name') || 'exit_plan_mode',
-    tool_call_id: getStringField(record, 'tool_call_id'),
-    plan_id: getStringField(record, 'plan_id'),
-    proposal_id: getStringField(record, 'proposal_id'),
-    revision: typeof record.revision === 'number' ? record.revision : 1,
-    status: status === 'approved' || status === 'rejected' || status === 'superseded'
-      ? status
-      : 'awaiting_approval',
-    plan,
-    feedback: typeof record.feedback === 'string' ? record.feedback : null,
-  };
-}
-
 function normalizeToolItems(items: unknown[], key: string): ToolRenderItem[] {
   return items
     .map((item, index) => {
@@ -197,7 +175,6 @@ export function normalizePersistedAssistantTimeline(rawTimeline: unknown): Assis
       const type = getStringField(record, 'type');
       const key = getStringField(record, 'key') || `${type || 'timeline'}-${index}`;
 
-      if (type === 'plan_proposal') return normalizePlanProposal(record, key);
       if (type === 'reasoning') {
         const reasoning = getStringField(record, 'reasoning') || getStringField(record, 'content');
         return reasoning.trim() ? { type: 'reasoning', key, reasoning } : null;

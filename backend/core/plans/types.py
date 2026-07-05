@@ -60,6 +60,9 @@ class PlanSession:
     status: PlanStatus = PlanStatus.ACTIVE
     previous_permission_mode: str = "modify_only"
     plan: str = ""
+    plan_artifact_path: Optional[str] = None
+    plan_revision: int = 0
+    plan_updated_at: Optional[float] = None
     question: Optional[Dict[str, Any]] = None
     feedback: List[Dict[str, Any]] = field(default_factory=list)
     entered_node_id: Optional[str] = None
@@ -93,6 +96,7 @@ class PlanSession:
             item if isinstance(item, PlanProposal) else PlanProposal.from_dict(dict(item))
             for item in list(payload.get("proposals") or [])
         ]
+        payload["plan_revision"] = int(payload.get("plan_revision") or 0)
         payload["proposal_revision"] = int(payload.get("proposal_revision") or 0)
         return cls(**payload)
 

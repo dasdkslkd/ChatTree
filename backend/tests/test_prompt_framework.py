@@ -349,7 +349,8 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("genuine ambiguity", messages[1]["content"])
         self.assertIn("Do not enter plan mode merely because the task is large", messages[1]["content"])
         self.assertIn("When the user asks you to implement now", messages[1]["content"])
-        self.assertIn("call `exit_plan_mode` with the plan", messages[1]["content"])
+        self.assertIn("call `update_plan` to write the plan artifact", messages[1]["content"])
+        self.assertIn("call `exit_plan_mode` with no arguments", messages[1]["content"])
 
     def test_active_plan_mode_prompt_requires_structured_exit_or_question(self):
         manager = ChatManager(
@@ -367,7 +368,32 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Plan mode is active:", messages[1]["content"])
         self.assertIn("read-only planning phase", messages[1]["content"])
         self.assertIn("must end with exactly one structured plan-mode action", messages[1]["content"])
+        self.assertIn("Do not write the full plan in assistant text", messages[1]["content"])
+        self.assertIn("Call update_plan", messages[1]["content"])
+        self.assertIn("Call exit_plan_mode with no arguments", messages[1]["content"])
         self.assertIn("Do not ask whether the plan is acceptable in text", messages[1]["content"])
+
+    def test_plan_control_tools_are_visible_only_in_plan_mode(self):
+        manager = ChatManager.__new__(ChatManager)
+        tools = [
+            {"type": "function", "function": {"name": "enter_plan_mode"}},
+            {"type": "function", "function": {"name": "update_plan"}},
+            {"type": "function", "function": {"name": "exit_plan_mode"}},
+            {"type": "function", "function": {"name": "ask_user_question"}},
+            {"type": "function", "function": {"name": "read_file"}},
+        ]
+
+        normal_names = {
+            tool["function"]["name"]
+            for tool in manager._filter_plan_tools_for_mode(tools, "modify_only")
+        }
+        plan_names = {
+            tool["function"]["name"]
+            for tool in manager._filter_plan_tools_for_mode(tools, "plan")
+        }
+
+        self.assertEqual(normal_names, {"enter_plan_mode", "read_file"})
+        self.assertEqual(plan_names, {"update_plan", "exit_plan_mode", "ask_user_question", "read_file"})
 
     async def test_main_runtime_context_lists_open_tasks(self):
         task_ledger = TaskLedger()

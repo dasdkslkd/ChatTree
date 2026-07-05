@@ -34,6 +34,9 @@ class SQLitePlanRepository:
                 "proposal_id": "ALTER TABLE plans ADD COLUMN proposal_id TEXT",
                 "proposal_revision": "ALTER TABLE plans ADD COLUMN proposal_revision INTEGER DEFAULT 0",
                 "proposal_status": "ALTER TABLE plans ADD COLUMN proposal_status TEXT",
+                "plan_artifact_path": "ALTER TABLE plans ADD COLUMN plan_artifact_path TEXT",
+                "plan_revision": "ALTER TABLE plans ADD COLUMN plan_revision INTEGER NOT NULL DEFAULT 0",
+                "plan_updated_at": "ALTER TABLE plans ADD COLUMN plan_updated_at INTEGER",
             }.items():
                 if name not in columns:
                     conn.execute(ddl)
@@ -63,6 +66,60 @@ class SQLitePlanRepository:
                   ON plan_proposals(plan_id, revision)
                 """
             )
+
+    def update_plan_content(
+        self,
+        conversation_id: str,
+        plan_id: str,
+        *,
+        plan: str,
+        plan_artifact_path: str | None,
+        plan_revision: int,
+        plan_updated_at: float | None,
+    ) -> dict[str, Any]:
+        stored = store_text_content(self.persistence, plan)
+        now = time()
+        with self.persistence.connect() as conn:
+            updated = conn.execute(
+                """
+                UPDATE plans
+                SET plan_inline = ?,
+                    plan_blob_id = ?,
+                    plan_preview = ?,
+                    plan_artifact_path = ?,
+                    plan_revision = ?,
+                    plan_updated_at = ?,
+                    updated_at = ?
+                WHERE conversation_id = ? AND id = ?
+                """,
+                (
+                    stored.inline,
+                    stored.blob_id,
+                    stored.preview,
+                    plan_artifact_path,
+                    int(plan_revision or 0),
+                    plan_updated_at,
+                    now,
+                    conversation_id,
+                    plan_id,
+                ),
+            )
+            if updated.rowcount == 0:
+                raise KeyError(plan_id)
+            self._append_event(
+                conn,
+                conversation_id,
+                plan_id,
+                "artifact_updated",
+                {
+                    "plan_preview": stored.preview,
+                    "plan_artifact_path": plan_artifact_path,
+                    "plan_revision": int(plan_revision or 0),
+                    "plan_updated_at": plan_updated_at,
+                },
+                now,
+            )
+        return self._require_plan(conversation_id, plan_id)
 
     def create_plan(
         self,
@@ -160,6 +217,7 @@ class SQLitePlanRepository:
                     plan_inline = ?,
                     plan_blob_id = ?,
                     plan_preview = ?,
+                    plan_revision = CASE WHEN plan_revision > 0 THEN plan_revision ELSE ? END,
                     submitted_node_id = ?,
                     submitted_run_id = ?,
                     exit_tool_call_id = ?,
@@ -174,6 +232,7 @@ class SQLitePlanRepository:
                     stored.inline,
                     stored.blob_id,
                     stored.preview,
+                    revision,
                     submitted_node_id,
                     persisted_submitted_run_id,
                     tool_call_id,
@@ -593,6 +652,7 @@ class SQLitePlanRepository:
         data["question"] = self._load_json(data.pop("question_json")) if data.get("question_json") else None
         data["feedback"] = self._load_json(data.pop("feedback_json")) or []
         data["proposals"] = self._load_proposals(data["id"])
+        data["plan_revision"] = int(data.get("plan_revision") or 0)
         data["proposal_revision"] = int(data.get("proposal_revision") or 0)
         return data
 
@@ -677,6 +737,9 @@ class SQLitePlanRepository:
               proposal_id,
               proposal_revision,
               proposal_status,
+              plan_artifact_path,
+              plan_revision,
+              plan_updated_at,
               previous_permission_mode,
               plan_inline,
               plan_blob_id,
@@ -688,7 +751,7 @@ class SQLitePlanRepository:
               approved_at,
               rejected_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 plan_id,
@@ -698,12 +761,16 @@ class SQLitePlanRepository:
                 item.get("submitted_node_id"),
                 item.get("entered_run_id"),
                 item.get("submitted_run_id"),
+                None,
                 item.get("exit_tool_call_id"),
                 item.get("question_tool_call_id"),
                 item.get("blocking_run_id"),
                 item.get("proposal_id"),
                 int(item.get("proposal_revision") or 0),
                 item.get("proposal_status"),
+                item.get("plan_artifact_path"),
+                int(item.get("plan_revision") or 0),
+                item.get("plan_updated_at"),
                 str(item.get("previous_permission_mode") or "modify_only"),
                 stored.inline,
                 stored.blob_id,

@@ -15,7 +15,13 @@ const transcriptItemTypes = new Set([
 
 function normalizeTranscriptItem(item: TranscriptItem): TranscriptItem | null {
   const rawType = item.type || item.item_type;
-  if (rawType === 'plan_card') return null;
+  if (rawType === 'plan_card') {
+    const status = String(item.status || item.props?.status || '');
+    const plan = typeof item.props?.plan === 'string' ? item.props.plan : item.preview || '';
+    return status === 'awaiting_approval' && plan.trim()
+      ? { ...item, type: 'plan_card' }
+      : null;
+  }
   if (item.type) return item;
   const itemType = typeof item.item_type === 'string' && transcriptItemTypes.has(item.item_type)
     ? item.item_type
@@ -76,18 +82,6 @@ function itemMatchesNode(item: TranscriptItem, nodeId: string | null | undefined
 function findLiveRunInsertionIndex(items: TranscriptItem[], overlay: LiveRunTranscriptOverlay): number {
   const existingRunIndex = items.findIndex((item) => itemBelongsToRun(item, overlay.runId));
   if (existingRunIndex >= 0) return existingRunIndex;
-
-  if (overlay.anchorNodeId) {
-    const processIndex = items.findIndex((item) => {
-      if (item.type !== 'assistant_process' || item.node_id !== overlay.anchorNodeId) return false;
-      const timeline = Array.isArray(item.props?.timeline) ? item.props.timeline : [];
-      return timeline.some((block) => {
-        if (!block || typeof block !== 'object' || Array.isArray(block)) return false;
-        return block.type === 'plan_proposal' && block.status === 'approved';
-      });
-    });
-    if (processIndex >= 0) return processIndex + 1;
-  }
 
   const targetNodeId = overlay.targetNodeId || overlay.nodeId;
   if (targetNodeId) {

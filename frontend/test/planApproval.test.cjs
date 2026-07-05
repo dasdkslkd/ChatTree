@@ -48,11 +48,11 @@ function testQuestionOnlyVisibleWhenAwaitingQuestion() {
   assert.equal(getPlanQuestionText({ question: { question: '  选择哪种布局？  ' } }), '选择哪种布局？');
 }
 
-function testApprovedPlanSummaryRemainsVisible() {
+function testApprovedPlanSummaryDisappears() {
   assert.equal(shouldShowPlanSummary(null), false);
   assert.equal(shouldShowPlanSummary({ status: 'awaiting_approval', plan: '# Plan' }), false);
   assert.equal(shouldShowPlanSummary({ status: 'approved', plan: '   ' }), false);
-  assert.equal(shouldShowPlanSummary({ status: 'approved', plan: '# Plan' }), true);
+  assert.equal(shouldShowPlanSummary({ status: 'approved', plan: '# Plan' }), false);
 }
 
 function testPlanQuestionOptionClickOnlySelectsDraftAnswer() {
@@ -67,9 +67,10 @@ function testPlanProposalCardUsesTranscriptPlanCallbacks() {
   const timelineSource = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/AssistantProcessTimeline.tsx'), 'utf8');
   assert.match(proposalCardSource, /onApprove/);
   assert.match(proposalCardSource, /onReject/);
-  assert.match(processSource, /onApprovePlan/);
-  assert.match(processSource, /onRejectPlan/);
-  assert.match(timelineSource, /plan_id: block\.plan_id/);
+  assert.doesNotMatch(processSource, /onApprovePlan/);
+  assert.doesNotMatch(processSource, /onRejectPlan/);
+  assert.doesNotMatch(timelineSource, /plan_id: block\.plan_id/);
+  assert.doesNotMatch(timelineSource, /PlanProposalCard/);
 }
 
 function testMainTranscriptUsesSharedLiveProcessRenderer() {
@@ -132,7 +133,7 @@ function main() {
   testOnlyPendingApprovalWithMarkdownIsVisible();
   testMarkdownFallsBackAcrossBackendFieldNames();
   testQuestionOnlyVisibleWhenAwaitingQuestion();
-  testApprovedPlanSummaryRemainsVisible();
+  testApprovedPlanSummaryDisappears();
   testPlanQuestionOptionClickOnlySelectsDraftAnswer();
   testPlanProposalCardUsesTranscriptPlanCallbacks();
   testMainTranscriptUsesSharedLiveProcessRenderer();

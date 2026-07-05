@@ -59,11 +59,21 @@ class TextThenExitPlanProvider:
             conversation_id=conversation_id,
             tokens_used=1,
             tool_calls=[{
+                "id": "call_update_plan_test",
+                "type": "function",
+                "function": {
+                    "name": "update_plan",
+                    "arguments": json.dumps({
+                        "mode": "replace",
+                        "content": "## Canonical Plan\n\n1. Only this appears in the plan card.",
+                    }, ensure_ascii=False),
+                },
+            }, {
                 "id": "call_exit_plan_test",
                 "type": "function",
                 "function": {
                     "name": "exit_plan_mode",
-                    "arguments": json.dumps({"plan": "## Canonical Plan\n\n1. Only this appears in the plan card."}),
+                    "arguments": "{}",
                 },
             }],
         )
@@ -316,9 +326,13 @@ def test_plan_control_turn_writes_process_timeline_without_answer(tmp_path: Path
     dto = to_transcript_item_dto(process_item)
     assert dto["props"]["tool_interactions"]
     assert "reasoning" in dto["props"]
-    proposal = next(block for block in dto["props"]["timeline"] if block["type"] == "plan_proposal")
-    assert proposal["status"] == "awaiting_approval"
-    assert "修改设置页" in proposal["plan"]
+    exit_block = next(
+        block
+        for block in dto["props"]["timeline"]
+        if block["type"] == "tool_call"
+        and block["tool_call"]["function"]["name"] == "exit_plan_mode"
+    )
+    assert exit_block["tool_result"] is not None
 
 
 def test_exit_plan_mode_treats_same_round_text_as_process_not_answer(tmp_path: Path):
@@ -366,11 +380,12 @@ def test_exit_plan_mode_treats_same_round_text_as_process_not_answer(tmp_path: P
 
     assert "plan_card" not in [item["item_type"] for item in items]
     timeline = dto["props"]["timeline"]
-    proposal = next(block for block in timeline if block["type"] == "plan_proposal")
-    assert proposal["tool_name"] == "exit_plan_mode"
-    assert proposal["status"] == "awaiting_approval"
-    assert proposal["plan"].startswith("## Canonical Plan")
-    assert "不应该成为最终回复" not in proposal["plan"]
+    assert any(
+        block["type"] == "tool_call"
+        and block["tool_call"]["function"]["name"] == "exit_plan_mode"
+        for block in timeline
+    )
+    assert not any(block.get("type") == "plan_proposal" for block in timeline)
 
 
 def test_tool_turn_uses_last_non_tool_text_as_assistant_answer(tmp_path: Path):
@@ -436,7 +451,6 @@ def test_plan_approval_stream_uses_tool_result_continuation(tmp_path: Path):
         conversation_id=conversation.metadata["id"],
         plan_id=awaiting_plan.plan_id,
     ))
-    manager.update_plan_proposal_projection(conversation.metadata["id"], approved_plan)
 
     approval_chunks = asyncio.run(
         collect_chunks(
@@ -496,9 +510,12 @@ def test_plan_approval_stream_uses_tool_result_continuation(tmp_path: Path):
     assert "## Approved Plan:" in first_prompt
     process_item = next(item for item in items if item["item_type"] == "assistant_process")
     timeline = to_transcript_item_dto(process_item)["props"]["timeline"]
-    proposal = next(block for block in timeline if block["type"] == "plan_proposal")
-    assert proposal["status"] == "approved"
-    assert proposal["plan"].startswith("1. 修改设置页")
+    assert any(
+        block["type"] == "tool_call"
+        and block["tool_call"]["function"]["name"] == "exit_plan_mode"
+        for block in timeline
+    )
+    assert not any(block.get("type") == "plan_proposal" for block in timeline)
 
 
 class ToolCallingProvider:
