@@ -175,6 +175,7 @@ class StreamChunk(TypedDict, total=False):
     status: StreamStatus
     content: Optional[str]
     node_id: Optional[str]
+    anchor_node_id: Optional[str]
     target_node_id: Optional[str]
     run_id: Optional[str]
     event_index: Optional[int]
@@ -186,6 +187,7 @@ class StreamChunk(TypedDict, total=False):
     tool_call: Optional[Dict[str, Any]]  # 工具调用增量/完整载荷
     tool_calls: Optional[List[Dict[str, Any]]]  # 完整工具调用列表（provider 聚合后填充）
     approval: Optional[Dict[str, Any]]   # 工具审批请求/结果载荷
+    tool_permission_mode: Optional[str]  # 当前节点工具权限模式发生变化时随流同步
 
     usage_info: UsageInfo
 

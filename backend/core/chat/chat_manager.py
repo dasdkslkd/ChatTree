@@ -336,6 +336,16 @@ class ChatManager:
         """保存一个 Conversation 并清空其待删集合。"""
         self.storage.save(conversation.to_dict())
         self._sqlite_ensure_conversation(conversation)
+        if conversation.current_node_id:
+            try:
+                self._sqlite_ensure_branch(
+                    conversation,
+                    conversation.current_node_id,
+                    provider_id=conversation.metadata.get("provider_id"),
+                    model_id=conversation.metadata.get("model_id"),
+                )
+            except Exception as exc:
+                logger.warning("SQLite branch ensure failed: %s", exc, exc_info=True)
         conversation._deleted_node_ids.clear()
 
     def _mark_conversation_updated_at(self, conversation: Conversation, updated_at: int):
@@ -1309,10 +1319,12 @@ class ChatManager:
             status=StreamStatus.START,
             content=None,
             node_id=new_node["id"],
+            anchor_node_id=current_node_id,
             target_node_id=new_node["id"],
             conversation_id=conversation_id,
             run_id=run_id,
             tokens_used=0,
+            tool_permission_mode=new_node.get("tool_permission_mode"),
         )
 
         # 准备消息链（使用锁内加载的最新 conversation）
@@ -1666,6 +1678,18 @@ class ChatManager:
                             )
                             if next_permission_mode != new_node.get("tool_permission_mode"):
                                 new_node["tool_permission_mode"] = next_permission_mode
+                                yield StreamChunk(
+                                    status=StreamStatus.CONTENT,
+                                    content=None,
+                                    node_id=new_node["id"],
+                                    target_node_id=new_node["id"],
+                                    conversation_id=conversation_id,
+                                    run_id=run_id,
+                                    error=None,
+                                    tokens_used=0,
+                                    event_type="permission_mode_changed",
+                                    tool_permission_mode=next_permission_mode,
+                                )
                                 if slash_result.tool_policy != SlashToolPolicy.DISABLED:
                                     tools = self._filter_agent_tools_for_mode(available_tools, multi_agent_mode)
                                     tools = self._filter_plan_tools_for_mode(tools, next_permission_mode) or None

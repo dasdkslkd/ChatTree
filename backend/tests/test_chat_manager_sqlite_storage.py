@@ -86,6 +86,38 @@ class TextThenExitPlanProvider:
         )
 
 
+class EnterPlanModeProvider:
+    def __init__(self):
+        self.calls = []
+
+    async def generate_response_stream(self, model, messages, stream_controller=None, **kwargs):
+        self.calls.append({"messages": list(messages), "kwargs": kwargs})
+        node_id = stream_controller.node_id
+        conversation_id = stream_controller.conversation_id
+        yield StreamChunk(
+            status=StreamStatus.CONTENT,
+            content="",
+            node_id=node_id,
+            conversation_id=conversation_id,
+            tokens_used=1,
+            tool_calls=[{
+                "id": "call_enter_plan_test",
+                "type": "function",
+                "function": {
+                    "name": "enter_plan_mode",
+                    "arguments": "{}",
+                },
+            }],
+        )
+        yield StreamChunk(
+            status=StreamStatus.COMPLETE,
+            content="",
+            node_id=node_id,
+            conversation_id=conversation_id,
+            tokens_used=1,
+        )
+
+
 class ToolThenFinalAnswerProvider:
     def __init__(self):
         self.calls = []
@@ -386,6 +418,36 @@ def test_exit_plan_mode_treats_same_round_text_as_process_not_answer(tmp_path: P
         for block in timeline
     )
     assert not any(block.get("type") == "plan_proposal" for block in timeline)
+
+
+def test_plan_tool_permission_change_streams_immediately(tmp_path: Path):
+    manager, _repository, _projection = _make_manager(tmp_path)
+    plan_ledger = PlanLedger()
+    tool_manager = PlanModeToolManager(plan_ledger)
+    manager.plan_ledger = plan_ledger
+    manager.tool_manager = tool_manager
+    manager.tool_orchestrator = ToolOrchestrator(
+        tool_manager=tool_manager,
+        permission_engine=PermissionEngine.default(),
+        approval_manager=ApprovalManager(),
+        logical_sandbox=LogicalSandbox.for_config({}, tmp_path),
+    )
+    manager.model_manager.provider = EnterPlanModeProvider()
+    conversation = manager.create_conversation("permission mode stream")
+
+    chunks = asyncio.run(collect_chunks(manager.send_message_stream(
+        conversation.metadata["id"],
+        "先进入计划模式",
+        model_id="fake-model",
+        run_id="run-plan-permission",
+    )))
+
+    permission_chunks = [
+        chunk for chunk in chunks
+        if chunk.get("event_type") == "permission_mode_changed"
+    ]
+    assert permission_chunks
+    assert permission_chunks[-1]["tool_permission_mode"] == "plan"
 
 
 def test_tool_turn_uses_last_non_tool_text_as_assistant_answer(tmp_path: Path):

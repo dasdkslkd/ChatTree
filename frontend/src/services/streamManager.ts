@@ -35,6 +35,7 @@ export interface StreamState {
   errorMessage: string | null;
   abortController: AbortController | null;
   pendingUserMessage: string | null;
+  toolPermissionMode: string | null;
   anchorUntilTargetLands: boolean;
   eventCount: number;
   createdAt: number;
@@ -242,6 +243,12 @@ function getStringOrNull(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
+function normalizeToolPermissionMode(value: unknown): string | null {
+  return value === 'auto_approve' || value === 'modify_only' || value === 'ask_always' || value === 'plan'
+    ? value
+    : null;
+}
+
 function isWorkflowEvent(chunk: any): boolean {
   return [
     'workflow_start',
@@ -364,6 +371,7 @@ export class StreamManager {
       state.toolInteractions.length,
       state.errorMessage ?? '',
       state.pendingUserMessage ?? '',
+      state.toolPermissionMode ?? '',
       state.anchorUntilTargetLands ? 'anchor' : '',
     ].join(':')).join('|');
     const cached = this.conversationSnapshots.get(conversationId);
@@ -514,6 +522,17 @@ export class StreamManager {
         ...chunk.metadata,
       };
     }
+    const metadataPermissionMode = chunk.metadata && typeof chunk.metadata === 'object'
+      ? normalizeToolPermissionMode((chunk.metadata as Record<string, unknown>).tool_permission_mode)
+      : null;
+    const chunkPermissionMode = normalizeToolPermissionMode(chunk.tool_permission_mode) ?? metadataPermissionMode;
+    if (chunkPermissionMode) {
+      next.toolPermissionMode = chunkPermissionMode;
+      next.metadata = {
+        ...next.metadata,
+        tool_permission_mode: chunkPermissionMode,
+      };
+    }
     const createdAt = normalizeTimestampMs(chunk.created_at);
     if (createdAt !== null) {
       next.createdAt = createdAt;
@@ -640,6 +659,7 @@ export class StreamManager {
       errorMessage: null,
       abortController: controller,
       pendingUserMessage,
+      toolPermissionMode: null,
       anchorUntilTargetLands: false,
       eventCount: 0,
       createdAt: Date.now(),
@@ -675,6 +695,7 @@ export class StreamManager {
       errorMessage: typeof record.metadata?.error === 'string' ? record.metadata.error : null,
       abortController: null,
       pendingUserMessage: null,
+      toolPermissionMode: normalizeToolPermissionMode(record.metadata?.tool_permission_mode),
       anchorUntilTargetLands: false,
       eventCount: 0,
       createdAt,
@@ -916,10 +937,14 @@ export class StreamManager {
     if (!state || (state.status !== 'streaming' && state.status !== 'waiting_approval' && state.status !== 'stopping')) return;
     this.streams.set(runId, { ...state, status: 'stopping', reasoningActive: false });
     this.notify(state.conversationId, true);
+    const stopRequest = !runId.startsWith('client_') && !runId.startsWith('attach_')
+      ? runsApi.stop(runId)
+      : state.targetNodeId
+        ? messageApi.stopStream(state.conversationId, state.targetNodeId)
+        : Promise.resolve();
+    state.abortController?.abort();
     try {
-      if (!runId.startsWith('client_') && !runId.startsWith('attach_')) await runsApi.stop(runId);
-      else if (state.targetNodeId) await messageApi.stopStream(state.conversationId, state.targetNodeId);
-      else state.abortController?.abort();
+      await stopRequest;
     } catch (_) {
       state.abortController?.abort();
     }

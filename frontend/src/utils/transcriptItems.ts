@@ -188,6 +188,24 @@ function itemMatchesNode(item: TranscriptItem, nodeId: string | null | undefined
   return Boolean(nodeId && (item.node_id === nodeId || item.anchor_node_id === nodeId));
 }
 
+function hasUserMessageForNode(items: TranscriptItem[], nodeId: string | null | undefined): boolean {
+  return Boolean(nodeId && items.some((item) => item.type === 'user_message' && item.node_id === nodeId));
+}
+
+function suppressPendingBubble(items: TranscriptItem[]): TranscriptItem[] {
+  return items.map((item) => {
+    if (item.type !== 'assistant_process' || !item.props?.showPendingBubble) return item;
+    return {
+      ...item,
+      props: {
+        ...item.props,
+        pendingUserMessage: null,
+        showPendingBubble: false,
+      },
+    };
+  });
+}
+
 function findLiveRunInsertionIndex(items: TranscriptItem[], overlay: LiveRunTranscriptOverlay): number {
   const existingRunIndex = items.findIndex((item) => itemBelongsToRun(item, overlay.runId));
   if (existingRunIndex >= 0) return existingRunIndex;
@@ -215,7 +233,10 @@ export function mergeLiveRunTranscriptItems(
   let merged = normalizeTranscriptItems(baseItems);
 
   for (const liveRun of liveRuns) {
-    const liveItems = normalizeTranscriptItems(liveRun.items);
+    const targetNodeId = liveRun.targetNodeId || liveRun.nodeId;
+    const liveItems = hasUserMessageForNode(merged, targetNodeId)
+      ? suppressPendingBubble(normalizeTranscriptItems(liveRun.items))
+      : normalizeTranscriptItems(liveRun.items);
     if (liveItems.length === 0) continue;
 
     const insertionIndex = findLiveRunInsertionIndex(merged, liveRun);

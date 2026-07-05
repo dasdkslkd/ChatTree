@@ -536,6 +536,63 @@ async function testWaitingApprovalRunStaysBlockingAndCanBeStopped() {
   });
 }
 
+async function testPermissionModeChangedEventUpdatesRunStateImmediately() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    messageApi.stream = controlled.stream;
+    const running = manager.startStream('conv-1', { content: 'hello' });
+
+    await controlled.push(chunk({
+      event_type: 'permission_mode_changed',
+      tool_permission_mode: 'plan',
+    }));
+
+    try {
+      const state = manager.getConversationStates('conv-1')[0];
+      assert.equal(state.toolPermissionMode, 'plan');
+      assert.equal(state.metadata.tool_permission_mode, 'plan');
+    } finally {
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
+async function testStopRunAbortsLocalStreamWithoutWaitingForServerAck() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    let resolveStop;
+    messageApi.stream = controlled.stream;
+    runsApi.stop = async () => {
+      await new Promise((resolve) => {
+        resolveStop = resolve;
+      });
+    };
+    const running = manager.startStream('conv-1', { content: 'hello' });
+
+    await controlled.push({
+      type: 'run_started',
+      run_id: 'run_server_slow_stop',
+      conversation_id: 'conv-1',
+      kind: 'chat',
+      status: 'running',
+    });
+
+    const stopPromise = manager.stopRun('run_server_slow_stop');
+    await tick();
+
+    try {
+      const state = manager.getConversationStates('conv-1')[0];
+      assert.equal(state.abortController.signal.aborted, true);
+    } finally {
+      resolveStop();
+      await stopPromise;
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
 async function testResumeStreamPreservesAttachedRunKindBeforeFirstEvent() {
   await withManager(async (manager) => {
     const controlled = createControlledStream();
@@ -1121,6 +1178,8 @@ async function main() {
   await testPlanQuestionAnswerUsesControlStreamWithoutPendingUserMessage();
   await testBlockingRunAliasesFollowServerRunId();
   await testWaitingApprovalRunStaysBlockingAndCanBeStopped();
+  await testPermissionModeChangedEventUpdatesRunStateImmediately();
+  await testStopRunAbortsLocalStreamWithoutWaitingForServerAck();
   await testResumeStreamPreservesAttachedRunKindBeforeFirstEvent();
   await testRestoreCompletedSideRunFromBackendEvents();
   await testRestoreRunKeepsParentSummaryAndMetadata();

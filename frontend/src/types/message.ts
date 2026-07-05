@@ -122,6 +122,7 @@ export interface StreamChunk {
   status: StreamStatus;
   content: string | null;
   node_id: string | null;
+  anchor_node_id?: string | null;
   target_node_id?: string | null;
   run_id?: string | null;
   event_index?: number | null;

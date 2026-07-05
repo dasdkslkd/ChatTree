@@ -129,6 +129,14 @@ function testChatInputDoesNotExposePlanAsManualPermissionMode() {
   assert.doesNotMatch(chatInputSource, /<DropdownMenuRadioItem\s+value=["']plan["']/);
 }
 
+function testActivePlanRefreshesWhenPlanToolEventsStream() {
+  const mainPageSource = fs.readFileSync(path.join(__dirname, '../src/pages/MainPage.tsx'), 'utf8');
+  assert.match(mainPageSource, /activePlanToolSignal/);
+  assert.match(mainPageSource, /enter_plan_mode/);
+  assert.match(mainPageSource, /exit_plan_mode/);
+  assert.match(mainPageSource, /refreshActivePlan\(conversationId\)/);
+}
+
 function main() {
   testOnlyPendingApprovalWithMarkdownIsVisible();
   testMarkdownFallsBackAcrossBackendFieldNames();
@@ -142,6 +150,7 @@ function main() {
   testRejectPlanStartsStructuredControlStream();
   testPlanRejectStreamEndpointIsWired();
   testChatInputDoesNotExposePlanAsManualPermissionMode();
+  testActivePlanRefreshesWhenPlanToolEventsStream();
   console.log('planApproval tests passed');
 }
 

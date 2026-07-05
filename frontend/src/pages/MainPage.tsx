@@ -92,6 +92,7 @@ import {
   isDetachedRunView,
   isRunBlockingSelectedBranch,
   isRunStoppableFromSelectedBranch,
+  isRunVisibleInSelectedTranscript,
   isRunVisibleInMainTranscript,
 } from '../utils/runVisibility';
 import { resolveSendNodeId, resolveSlashStreamNodeId, shouldSendSlashAnchorNode } from '../utils/sendTarget';
@@ -170,6 +171,7 @@ import {
 const MarkdownContent = lazy(() => import('../components/MarkdownContent'));
 const MANUAL_PROJECTS_STORAGE_KEY = 'chattree.manualProjectWorkspaces';
 const PROJECT_ORDER_STORAGE_KEY = 'chattree.projectOrder';
+const PLAN_MODE_TOOL_NAMES = new Set(['enter_plan_mode', 'update_plan', 'exit_plan_mode', 'ask_user_question']);
 
 type SidebarResizeSession = {
   side: SidebarResizeSide;
@@ -1261,16 +1263,46 @@ export default function ChatPage() {
     () => getBranchToolPermissionMode(messages, selectedBranchTipId),
     [messages, selectedBranchTipId],
   );
+  const liveBranchToolPermissionMode = useMemo(() => {
+    const runs = activeRunStates
+      .filter((run) => isRunVisibleInSelectedTranscript(run, selectedBranchTipId, currentBranchNodeIds))
+      .filter((run) => normalizeToolPermissionMode(run.toolPermissionMode))
+      .sort((a, b) => b.createdAt - a.createdAt);
+    return normalizeToolPermissionMode(runs[0]?.toolPermissionMode);
+  }, [activeRunStates, currentBranchNodeIds, selectedBranchTipId]);
+  const activePlanToolSignal = useMemo(() => activeRunStates
+    .map((run) => {
+      const toolNames: string[] = [];
+      for (const interaction of run.toolInteractions || []) {
+        for (const call of interaction?.assistant?.tool_calls || []) {
+          const name = call?.function?.name;
+          if (PLAN_MODE_TOOL_NAMES.has(name)) toolNames.push(name);
+        }
+        for (const tool of interaction?.tools || []) {
+          const name = tool?.name;
+          if (PLAN_MODE_TOOL_NAMES.has(name)) toolNames.push(name);
+        }
+      }
+      return toolNames.length > 0 ? `${run.runId}:${run.eventCount}:${toolNames.join(',')}` : '';
+    })
+    .filter(Boolean)
+    .join('|'), [activeRunStates]);
 
   useEffect(() => {
     const next = syncToolPermissionDraftFromBranch(
       toolPermissionDraftRef.current,
-      currentBranchToolPermissionMode,
+      liveBranchToolPermissionMode ?? currentBranchToolPermissionMode,
     );
     if (next !== toolPermissionDraftRef.current) {
       updateToolPermissionDraft(next);
     }
-  }, [currentBranchToolPermissionMode, updateToolPermissionDraft]);
+  }, [currentBranchToolPermissionMode, liveBranchToolPermissionMode, updateToolPermissionDraft]);
+
+  useEffect(() => {
+    const conversationId = currentConversation?.id;
+    if (!conversationId || !activePlanToolSignal) return;
+    void refreshActivePlan(conversationId);
+  }, [activePlanToolSignal, currentConversation?.id, refreshActivePlan]);
 
   useEffect(() => {
     if (currentConversation || toolPermissionDraftRef.current.explicit) return;
@@ -2550,14 +2582,14 @@ export default function ChatPage() {
       import_files: importFiles.length > 0 ? importFiles : undefined,
       image_refs: imageRefs.length > 0 ? imageRefs : undefined,
     };
-    const sendNodeId = resolveSendNodeId({
+    let sendNodeId = resolveSendNodeId({
       editTargetNodeId,
       currentNodeId,
       conversationCurrentNodeId: currentConversation?.current_node_id,
     });
     const slashMatch = slashRegistry.match(val);
     const slashCommand = slashMatch?.command ?? null;
-    const streamNodeId = resolveSlashStreamNodeId({
+    let streamNodeId = resolveSlashStreamNodeId({
       sendNodeId,
       streamTargetPolicy: slashCommand?.stream_target_policy,
     });
@@ -2597,6 +2629,18 @@ export default function ChatPage() {
         return;
       }
       conversationId = newConv.id;
+      sendNodeId = resolveSendNodeId({
+        editTargetNodeId: null,
+        currentNodeId: null,
+        conversationCurrentNodeId: newConv.current_node_id,
+      });
+      streamNodeId = resolveSlashStreamNodeId({
+        sendNodeId,
+        streamTargetPolicy: slashCommand?.stream_target_policy,
+      });
+      if (shouldSendSlashAnchorNode(slashCommand?.stream_target_policy)) {
+        request.node_id = sendNodeId ?? undefined;
+      }
     }
 
     clearAttachments();

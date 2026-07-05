@@ -288,6 +288,42 @@ function testPlanApprovalLiveRunMergesIntoPlanProcess() {
   assert.equal(items[1].props.timeline[1].content, '计划已批准，开始实现');
 }
 
+function testLiveRunPendingBubbleHiddenWhenUserMessageAlreadyLanded() {
+  const items = mergeLiveRunTranscriptItems(
+    [
+      { id: 'user-real', type: 'user_message', node_id: 'node-1', visibility: 'main' },
+    ],
+    [
+      {
+        runId: 'run-1',
+        nodeId: 'node-1',
+        targetNodeId: 'node-1',
+        anchorNodeId: null,
+        items: [
+          {
+            id: 'live-run-process',
+            type: 'assistant_process',
+            run_id: 'run-1',
+            node_id: 'node-1',
+            visibility: 'main',
+            props: {
+              live_process: true,
+              pendingUserMessage: 'hello',
+              showPendingBubble: true,
+              showStreamBlock: true,
+              timeline: [],
+            },
+          },
+        ],
+      },
+    ],
+  );
+
+  assert.deepEqual(items.map((item) => item.id), ['user-real', 'live-run-process']);
+  assert.equal(items[1].props.showPendingBubble, false);
+  assert.equal(items[1].props.pendingUserMessage, null);
+}
+
 function testPersistedPlanContinuationStaysInsideParentProcess() {
   const items = normalizeTranscriptItems([
     {
@@ -525,6 +561,7 @@ testRunDraftHiddenWhenAssistantProcessMatchesSameNodeWithoutRunId();
 testLiveRunOverlayAnchorsToBranchInsteadOfAppendingToTail();
 testLiveRunOverlayAnchorsAfterApprovedPlanProposal();
 testPlanApprovalLiveRunMergesIntoPlanProcess();
+testLiveRunPendingBubbleHiddenWhenUserMessageAlreadyLanded();
 testPersistedPlanContinuationStaysInsideParentProcess();
 testMainPageDelegatesTranscriptOrderingToTranscriptList();
 testMainPageUsesLiveTranscriptOverlayWithSharedProcessRendering();
