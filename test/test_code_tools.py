@@ -42,6 +42,15 @@ def make_config(tmp_path: Path, **overrides) -> CodeToolConfig:
     return CodeToolConfig.from_dict(config)
 
 
+def test_run_command_default_initial_wait_is_120_seconds(tmp_path):
+    config = CodeToolConfig.from_dict({
+        "workspace_roots": [str(tmp_path)],
+        "protected_paths": [".git"],
+    })
+
+    assert config.run_command_initial_wait_seconds == 120.0
+
+
 def test_list_files_lists_workspace_files_and_hides_protected_paths(tmp_path):
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("print('hi')", encoding="utf-8")

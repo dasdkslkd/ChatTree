@@ -141,6 +141,39 @@ function testRunningSubagentWithoutContentRendersAsDraft() {
   assert.equal(shouldRenderRunDraft(run({ kind: 'subagent', status: 'streaming' })), true);
 }
 
+function testForegroundManagedRunCommandDoesNotRenderAsDraft() {
+  assert.equal(shouldRenderRunDraft(run({
+    kind: 'command',
+    status: 'streaming',
+    metadata: {
+      tool_name: 'run_command',
+      run_command_managed: true,
+    },
+  })), false);
+}
+
+function testAutoBackgroundedRunCommandRendersAsDraft() {
+  assert.equal(shouldRenderRunDraft(run({
+    kind: 'command',
+    status: 'streaming',
+    metadata: {
+      tool_name: 'run_command',
+      run_command_managed: true,
+      run_command_auto_backgrounded: true,
+    },
+  })), true);
+}
+
+function testExplicitBackgroundCommandRendersAsDraft() {
+  assert.equal(shouldRenderRunDraft(run({
+    kind: 'command',
+    status: 'streaming',
+    metadata: {
+      tool_name: 'start_background_command',
+    },
+  })), true);
+}
+
 function testForkWorkflowPendingApprovalRunsRenderAsDrafts() {
   const pendingApprovals = {
     approval_1: { id: 'approval_1', status: 'pending', tool_name: 'shell_command' },
@@ -218,6 +251,9 @@ testSlashCompletionAppliesCanonicalCommandAndPreservesArgs();
 testForkWorkflowErrorRunsRenderAsDrafts();
 testForkWorkflowPendingSlashRunsRenderAsDrafts();
 testRunningSubagentWithoutContentRendersAsDraft();
+testForegroundManagedRunCommandDoesNotRenderAsDraft();
+testAutoBackgroundedRunCommandRendersAsDraft();
+testExplicitBackgroundCommandRendersAsDraft();
 testForkWorkflowPendingApprovalRunsRenderAsDrafts();
 testBtwSideQuestionRunsRenderAsDrafts();
 testDirectResponseRunsRenderAsDrafts();

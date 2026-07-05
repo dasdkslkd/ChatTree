@@ -130,6 +130,8 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(payload["auto_backgrounded"], True)
             self.assertIn("command_run_id", payload)
             self.assertNotIn("terminal_run_id", payload)
+            run = run_manager.get_run(payload["command_run_id"])
+            self.assertTrue((run.get("metadata") or {}).get("run_command_auto_backgrounded"))
 
             try:
                 await command_executor.stop(payload["command_run_id"])

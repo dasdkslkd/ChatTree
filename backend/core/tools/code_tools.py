@@ -106,7 +106,7 @@ class CodeToolConfig:
     workspace_roots: List[Path]
     protected_paths: List[Path]
     command_timeout_seconds: int = 120
-    run_command_initial_wait_seconds: float = 3.0
+    run_command_initial_wait_seconds: float = 120.0
     max_read_chars: int = 20000
     max_output_chars: int = 60000
     allow_parent_dir_creation: bool = False
@@ -120,7 +120,7 @@ class CodeToolConfig:
             workspace_roots=[Path(root).expanduser().resolve() for root in roots],
             protected_paths=[Path(path) for path in protected],
             command_timeout_seconds=int(cfg.get("command_timeout_seconds", 120)),
-            run_command_initial_wait_seconds=float(cfg.get("run_command_initial_wait_seconds", 3.0)),
+            run_command_initial_wait_seconds=float(cfg.get("run_command_initial_wait_seconds", 120.0)),
             max_read_chars=int(cfg.get("max_read_chars", 20000)),
             max_output_chars=int(cfg.get("max_output_chars", 60000)),
             allow_parent_dir_creation=bool(cfg.get("allow_parent_dir_creation", False)),
@@ -605,6 +605,11 @@ class RunCommandTool(_CodeTool):
         try:
             await command_executor.wait(run_id, timeout=initial_wait)
         except asyncio.TimeoutError:
+            if hasattr(command_executor, "run_manager"):
+                await command_executor.run_manager.update_metadata(run_id, {
+                    "run_command_auto_backgrounded": True,
+                    "run_command_initial_wait_seconds": initial_wait,
+                })
             snapshot = command_executor.snapshot(run_id) or {}
             return _json(self._managed_background_payload(command, cwd, run_id, snapshot, auto_backgrounded=True))
 
