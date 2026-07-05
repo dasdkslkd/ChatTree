@@ -23,6 +23,7 @@ const {
   isRunBlockingSelectedBranch,
   isRunStoppableFromSelectedBranch,
   isRunVisibleInSelectedTranscript,
+  shouldPatchRunIntoMainConversation,
 } = require('../src/utils/runVisibility.ts');
 
 function chatRun(overrides = {}) {
@@ -227,6 +228,17 @@ function testSubagentWithTargetNodeStillUsesSideView() {
   assert.equal(isRunStoppableFromSelectedBranch(run, 'node-hello', new Set(['node-hello'])), true);
 }
 
+function testOnlyChatRunsPatchMainConversation() {
+  assert.equal(shouldPatchRunIntoMainConversation(chatRun({ kind: 'chat' })), true);
+  assert.equal(shouldPatchRunIntoMainConversation(chatRun({
+    kind: 'subagent',
+    nodeId: 'run-subagent',
+    targetNodeId: 'run-subagent',
+  })), false);
+  assert.equal(shouldPatchRunIntoMainConversation(chatRun({ kind: 'side_question' })), false);
+  assert.equal(shouldPatchRunIntoMainConversation(chatRun({ kind: 'direct_response' })), false);
+}
+
 testChildRunIsHiddenFromParentTranscript();
 testChildRunIsVisibleOnItsOwnBranch();
 testExistingBranchRunIsVisibleWhenTargetIsInHistory();
@@ -242,5 +254,6 @@ testPendingRootChatRunStaysVisibleBeforeFirstHistoryRefresh();
 testDetachedSubagentCanBeStoppedFromSelectedAnchorWithoutBlockingTranscript();
 testCommandRunIsSideViewAndStoppableFromAnchor();
 testSubagentWithTargetNodeStillUsesSideView();
+testOnlyChatRunsPatchMainConversation();
 
 console.log('runVisibility tests passed');

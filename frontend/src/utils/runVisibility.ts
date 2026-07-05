@@ -54,6 +54,10 @@ export function isRunVisibleInMainTranscript(
   return isRunVisibleInSelectedTranscript(run, selectedBranchTipId, currentBranchNodeIds);
 }
 
+export function shouldPatchRunIntoMainConversation(run: BranchRunLike): boolean {
+  return run.kind === 'chat';
+}
+
 export function isRunBlockingSelectedBranch(
   run: BranchRunLike,
   selectedBranchTipId: string | null,

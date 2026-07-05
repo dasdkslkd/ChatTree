@@ -94,6 +94,7 @@ import {
   isRunStoppableFromSelectedBranch,
   isRunVisibleInSelectedTranscript,
   isRunVisibleInMainTranscript,
+  shouldPatchRunIntoMainConversation,
 } from '../utils/runVisibility';
 import { resolveSendNodeId, resolveSlashStreamNodeId, shouldSendSlashAnchorNode } from '../utils/sendTarget';
 import { getSlashRunLabel, shouldQueueForMainThread, shouldRenderRunDraft } from '../utils/slashRuntime';
@@ -624,6 +625,7 @@ function getStreamGenerationStatus(status: StreamState['status']): 'completed' |
 }
 
 function createAssistantMessageFromStream(run: StreamState): Message | null {
+  if (!shouldPatchRunIntoMainConversation(run)) return null;
   const nodeId = run.targetNodeId || run.nodeId;
   if (!nodeId) return null;
   const status = getStreamGenerationStatus(run.status);
@@ -2185,17 +2187,20 @@ export default function ChatPage() {
   useEffect(() => {
     const unsubscribe = streamManager.onFinish(async ({ conversationId: finishedId, runId, drained, nodeId, targetNodeId, controller }) => {
       const finishedRun = streamManager.getConversationStates(finishedId).find((state) => state.runId === runId);
-      const streamMessage = finishedRun ? createAssistantMessageFromStream(finishedRun) : null;
+      const shouldPatchMainConversation = finishedRun ? shouldPatchRunIntoMainConversation(finishedRun) : true;
+      const streamMessage = shouldPatchMainConversation && finishedRun ? createAssistantMessageFromStream(finishedRun) : null;
       const patchedAssistant = streamMessage
         ? patchAssistantMessageFromStream(finishedId, streamMessage, finishedRun?.pendingUserMessage)
         : false;
-      const awaitNodeId = targetNodeId ?? nodeId ?? streamMessage?.node_id ?? undefined;
+      const awaitNodeId = shouldPatchMainConversation
+        ? targetNodeId ?? nodeId ?? streamMessage?.node_id ?? undefined
+        : undefined;
       const hasQueuedFollowup = queuedMessagesRef.current.some((message) =>
         message.conversationId === finishedId
         && message.content.trim()
       );
 
-      if (!targetNodeId && !nodeId) {
+      if (!shouldPatchMainConversation || (!targetNodeId && !nodeId)) {
         if (!finishedRun || !shouldRenderRunDraft(finishedRun)) {
           streamManager.cleanupIfController(finishedId, controller, runId);
         }

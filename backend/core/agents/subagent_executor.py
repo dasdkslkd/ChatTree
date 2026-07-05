@@ -15,6 +15,9 @@ from backend.core.runs import RunKind, RunManager, RunStatus
 from backend.core.tools.security.permissions import normalize_permission_mode
 
 
+DEFAULT_MAX_TOOL_ROUNDS = 500
+
+
 class SubagentExecutor:
     def __init__(
         self,
@@ -245,7 +248,7 @@ class SubagentExecutor:
             )
             tools = self._filter_tools(agent.tools)
             permission = normalize_permission_mode(permission_mode or agent.permission_mode)
-            max_tool_rounds = agent.max_tool_rounds or 5
+            max_tool_rounds = agent.max_tool_rounds or DEFAULT_MAX_TOOL_ROUNDS
             controller = StreamController(run_id, conversation_id, run_id=run_id)
             self._controllers[run_id] = controller
 
