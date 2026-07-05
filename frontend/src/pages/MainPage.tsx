@@ -3402,7 +3402,7 @@ export default function ChatPage() {
       {chatViewMode === 'chat' && (
         <aside
           className={cn(
-            'app-right-panel flex flex-col shrink-0 transition-[width] duration-200 overflow-y-auto overflow-x-hidden custom-scrollbar',
+            'app-right-panel flex flex-col shrink-0 transition-[width] duration-200 overflow-hidden',
             resizingSidebar === 'right' && 'is-resizing',
           )}
           style={{
@@ -3474,7 +3474,7 @@ export default function ChatPage() {
           {!outlineCollapsed && (
             <>
               {rightPanelView === 'outline' ? (
-                <>
+                <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar">
                   {outline.map((item, idx) => (
                     <TextTooltip key={idx} content={item.text} side="left">
                       <div
@@ -3488,39 +3488,39 @@ export default function ChatPage() {
                       </div>
                     </TextTooltip>
                   ))}
-                </>
-              ) : (
-                <div className="flex min-h-0 flex-1 flex-col gap-3 px-3 pb-4">
-                  {selectedSideRunItem ? (
-                    <>
-                      <div className="flex items-center gap-2">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-8 px-2"
-                          onClick={() => setSelectedSideRunId(
-                            selectedSideRunItem.run.parentRunId || null,
-                          )}
-                        >
-                          <ArrowLeft className="h-3.5 w-3.5" />
-                        </Button>
-                        <div className="min-w-0 flex-1">
-                          <div className="truncate text-sm font-semibold" style={{ color: 'var(--fg-secondary)' }}>
-                            {getSideRunTitle(selectedSideRunItem.run)}
-                          </div>
-                          <div className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>
-                            {getSlashRunLabel(selectedSideRunItem.run.kind, selectedSideRunItem.run.pendingUserMessage)} · {selectedSideRunItem.run.runId.slice(0, 12)}
-                          </div>
-                        </div>
-                        <div className="flex shrink-0 items-center gap-1">
-                          {renderSideRunActions(selectedSideRunItem.draft)}
-                        </div>
+                </div>
+              ) : selectedSideRunItem ? (
+                <div className="flex min-h-0 flex-1 flex-col">
+                  <div className="flex shrink-0 items-center gap-2 px-3 pb-3">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-8 px-2"
+                      onClick={() => setSelectedSideRunId(
+                        selectedSideRunItem.run.parentRunId || null,
+                      )}
+                    >
+                      <ArrowLeft className="h-3.5 w-3.5" />
+                    </Button>
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-sm font-semibold" style={{ color: 'var(--fg-secondary)' }}>
+                        {getSideRunTitle(selectedSideRunItem.run)}
                       </div>
-                      {selectedSideRunItem.run.kind === 'workflow' && renderWorkflowOverview(selectedSideRunItem)}
-                      {selectedSideRunItem.run.kind !== 'workflow' && renderSideRunBody(selectedSideRunItem.draft)}
-                    </>
-                  ) : (
-                    <>
+                      <div className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>
+                        {getSlashRunLabel(selectedSideRunItem.run.kind, selectedSideRunItem.run.pendingUserMessage)} · {selectedSideRunItem.run.runId.slice(0, 12)}
+                      </div>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-1">
+                      {renderSideRunActions(selectedSideRunItem.draft)}
+                    </div>
+                  </div>
+                  <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 pb-4 custom-scrollbar">
+                    {selectedSideRunItem.run.kind === 'workflow' && renderWorkflowOverview(selectedSideRunItem)}
+                    {selectedSideRunItem.run.kind !== 'workflow' && renderSideRunBody(selectedSideRunItem.draft)}
+                  </div>
+                </div>
+              ) : (
+                <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto overflow-x-hidden px-3 pb-4 custom-scrollbar">
                   {sideRunTopLevelCount === 0 && (
                     <div className="rounded-lg border px-3 py-4 text-sm" style={{ borderColor: 'var(--border)', color: 'var(--fg-tertiary)' }}>
                       暂无运行任务。
@@ -3572,8 +3572,6 @@ export default function ChatPage() {
                       ))}
                     </section>
                   ))}
-                    </>
-                  )}
                 </div>
               )}
             </>
