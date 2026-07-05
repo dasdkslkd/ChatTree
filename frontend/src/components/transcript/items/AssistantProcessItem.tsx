@@ -41,7 +41,7 @@ function getProcessProps(item: TranscriptItem): AssistantProcessRenderProps {
     showPendingBubble: false,
     showStreamBlock: true,
     timeline: renderTimeline,
-    streamingFoldState: getStreamingTimelineFoldState(renderTimeline, []),
+    streamingFoldState: getStreamingTimelineFoldState(renderTimeline, [], { allowProcessOnly: true }),
     activeReasoningKey: getActiveReasoningKey(renderTimeline, {
       status: status === 'streaming' ? 'streaming' : 'completed',
       reasoningActive: false,
@@ -50,6 +50,7 @@ function getProcessProps(item: TranscriptItem): AssistantProcessRenderProps {
     duration,
     errorMessage,
     content: item.preview || '',
+    compactWithNextAnswer: item.props?.compact_with_next_answer === true,
   };
 }
 

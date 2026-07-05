@@ -210,6 +210,8 @@ export function AssistantProcessTimeline({
   const statusLabel = getStreamStatusLabel(props.status, props.errorMessage);
   const showPendingBubble = Boolean(props.showPendingBubble && props.pendingUserMessage);
   const showStreamBlock = props.showStreamBlock !== false;
+  const [processExpanded, setProcessExpanded] = useState(props.streamingFoldState?.processExpanded ?? true);
+  const foldedContentBlocks = processExpanded ? [] : props.streamingFoldState?.contentBlocks ?? [];
   return (
     <div className="contents">
       {showPendingBubble && (
@@ -232,21 +234,31 @@ export function AssistantProcessTimeline({
         </div>
       )}
       {showStreamBlock && (
-        <div className="w-full my-2 flex flex-col items-start" role="listitem">
+        <div className={cn('w-full flex flex-col items-start', props.compactWithNextAnswer ? 'mt-2 mb-0' : 'my-2')} role="listitem">
           <div className="flex flex-col items-start max-w-full w-full min-w-0">
             {props.streamingFoldState?.canFoldProcess ? (
               <>
-                <div className="processed-fold expanded">
-                  <div className="processed-fold-button" aria-expanded="true">
+                <div className={cn('processed-fold', processExpanded && 'expanded')}>
+                  <button
+                    type="button"
+                    className="processed-fold-button"
+                    aria-expanded={processExpanded}
+                    onClick={() => setProcessExpanded((value) => !value)}
+                  >
                     <span>{props.duration > 0 ? `已处理 ${formatProcessedDuration(props.duration) ?? ''}`.trim() : '已处理'}</span>
                     <ChevronRight className="processed-fold-chevron" />
-                  </div>
+                  </button>
                 </div>
-                <div className="processed-blocks-shell expanded" aria-hidden="false">
+                <div className={cn('processed-blocks-shell', processExpanded && 'expanded')} aria-hidden={!processExpanded}>
                   <div className="processed-blocks-inner">
                     {props.streamingFoldState.visibleBlocks.map((block) => renderTimelineBlock(block, item, props))}
                   </div>
                 </div>
+                {foldedContentBlocks.length > 0 && (
+                  <div className="w-full flex flex-col items-start">
+                    {foldedContentBlocks.map((block) => renderTimelineBlock(block, item, props))}
+                  </div>
+                )}
               </>
             ) : (
               <div className="w-full flex flex-col items-start">

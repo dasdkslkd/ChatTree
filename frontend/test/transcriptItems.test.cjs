@@ -370,7 +370,8 @@ function testMainPageUsesLiveTranscriptOverlayWithSharedProcessRendering() {
   assert.match(source, /\bliveMainTranscriptRunOverlays\b/);
   assert.match(source, /\bmergeLiveRunTranscriptItems\b/);
   assert.doesNotMatch(source, /\brenderLiveRunDraftTranscriptItem\b/);
-  assert.match(processTimeline, /className="processed-fold expanded"/);
+  assert.match(processTimeline, /cn\('processed-fold', processExpanded && 'expanded'\)/);
+  assert.match(processTimeline, /onClick=\{\(\) => setProcessExpanded/);
   assert.match(processTimeline, /streaming=\{block\.key === props\.activeReasoningKey\}/);
   assert.match(processTimeline, /<ToolCallGroup key=\{block\.key\} items=\{block\.items\} \/>/);
   assert.match(source, /const sideRunDrafts = useMemo/);
@@ -465,6 +466,7 @@ function testTranscriptFallbackAndCopySurfacesAreVisible() {
 }
 
 function testTranscriptMessageItemsUseLegacyChatBubbleStyling() {
+  const list = fs.readFileSync(path.join(__dirname, '../src/components/transcript/TranscriptList.tsx'), 'utf8');
   const userMessage = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/UserMessageItem.tsx'), 'utf8');
   const assistantAnswer = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/AssistantAnswerItem.tsx'), 'utf8');
   const assistantProcess = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/AssistantProcessItem.tsx'), 'utf8');
@@ -475,12 +477,17 @@ function testTranscriptMessageItemsUseLegacyChatBubbleStyling() {
   assert.match(userMessage, /rounded-2xl rounded-br-sm/);
   assert.match(userMessage, /self-end justify-end/);
 
-  assert.match(assistantAnswer, /chat-message-row w-full my-2 flex flex-col group items-start/);
+  assert.match(assistantAnswer, /chat-message-row w-full flex flex-col group items-start/);
+  assert.match(assistantAnswer, /compactAfterProcess \? 'mt-0 mb-2' : 'my-2'/);
   assert.match(assistantAnswer, /rounded-2xl leading-relaxed/);
   assert.match(assistantAnswer, /self-start justify-start/);
 
+  assert.match(list, /applyProcessAnswerCompaction/);
+  assert.match(list, /compact_with_next_answer:\s*true/);
+  assert.match(list, /compact_after_process:\s*true/);
   assert.match(assistantProcessTimeline, /className=\{cn\('thought'/);
   assert.match(assistantProcessTimeline, /className="thought-head"/);
+  assert.match(assistantProcessTimeline, /props\.compactWithNextAnswer \? 'mt-2 mb-0' : 'my-2'/);
   assert.match(assistantProcess, /tool_interactions/);
   assert.match(assistantProcessTimeline, /type: 'content'/);
   assert.match(assistantProcessTimeline, /renderTimelineBlock/);

@@ -111,11 +111,12 @@ export function getTimelineFoldState<T extends TimelineFoldBlock>(
   options: {
     processExpanded: boolean;
     finalContentKeys?: Iterable<string>;
+    allowProcessOnly?: boolean;
   },
 ): TimelineFoldState<T> {
   const processBlocks = blocks.filter((block) => block.type !== 'content');
   const contentBlocks = blocks.filter((block) => block.type === 'content');
-  const canFoldProcess = processBlocks.length > 0 && contentBlocks.length > 0;
+  const canFoldProcess = processBlocks.length > 0 && (contentBlocks.length > 0 || options.allowProcessOnly === true);
 
   if (!canFoldProcess) {
     return {
@@ -139,11 +140,15 @@ export function getTimelineFoldState<T extends TimelineFoldBlock>(
 export function getStreamingTimelineFoldState<T extends TimelineFoldBlock>(
   blocks: T[],
   finalContentKeys?: Iterable<string>,
+  options?: {
+    allowProcessOnly?: boolean;
+  },
 ): StreamingTimelineFoldState<T> {
   return {
     ...getTimelineFoldState(blocks, {
       processExpanded: true,
       finalContentKeys,
+      allowProcessOnly: options?.allowProcessOnly,
     }),
     processExpanded: true,
   };

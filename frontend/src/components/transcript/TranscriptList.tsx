@@ -10,6 +10,42 @@ interface TranscriptListProps extends TranscriptActionHandlers {
   renderItem?: (item: TranscriptItem, defaultItem: ReactNode) => ReactNode;
 }
 
+function getItemNodeKey(item: TranscriptItem): string | null {
+  return item.node_id || item.anchor_node_id || null;
+}
+
+function areSameTurnProcessAndAnswer(previous: TranscriptItem | undefined, current: TranscriptItem | undefined): boolean {
+  if (!previous || !current) return false;
+  if (previous.type !== 'assistant_process' || current.type !== 'assistant_answer') return false;
+  const previousNode = getItemNodeKey(previous);
+  const currentNode = getItemNodeKey(current);
+  return Boolean(previousNode && currentNode && previousNode === currentNode);
+}
+
+function applyProcessAnswerCompaction(items: TranscriptItem[]): TranscriptItem[] {
+  return items.map((item, index) => {
+    if (areSameTurnProcessAndAnswer(item, items[index + 1])) {
+      return {
+        ...item,
+        props: {
+          ...item.props,
+          compact_with_next_answer: true,
+        },
+      };
+    }
+    if (areSameTurnProcessAndAnswer(items[index - 1], item)) {
+      return {
+        ...item,
+        props: {
+          ...item.props,
+          compact_after_process: true,
+        },
+      };
+    }
+    return item;
+  });
+}
+
 export function TranscriptList({
   items,
   isLoading = false,
@@ -24,7 +60,7 @@ export function TranscriptList({
   planError,
   renderItem,
 }: TranscriptListProps) {
-  const normalizedItems = normalizeTranscriptItems(items);
+  const normalizedItems = applyProcessAnswerCompaction(normalizeTranscriptItems(items));
 
   if (normalizedItems.length === 0) {
     return (

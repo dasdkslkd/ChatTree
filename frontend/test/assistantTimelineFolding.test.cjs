@@ -126,6 +126,19 @@ function testStreamingDoesNotInventFoldForProcessOnlyDrafts() {
   assert.deepEqual(folded.visibleBlocks.map((block) => block.key), ['r1', 't1']);
 }
 
+function testCompletedProcessOnlyTimelineCanUseProcessedShell() {
+  const blocks = [
+    { type: 'reasoning', key: 'r1' },
+    { type: 'tools', key: 't1' },
+  ];
+
+  const folded = getStreamingTimelineFoldState(blocks, [], { allowProcessOnly: true });
+
+  assert.equal(folded.canFoldProcess, true);
+  assert.equal(folded.processExpanded, true);
+  assert.deepEqual(folded.visibleBlocks.map((block) => block.key), ['r1', 't1']);
+}
+
 function testDetectsAssistantProcessHistoryWithoutFormattingTools() {
   assert.equal(hasAssistantProcessHistory({
     tool_interactions: [{
@@ -159,6 +172,7 @@ function main() {
   testKeepsIntermediateContentInContentBlocksWhenFinalKeysProvided();
   testStreamingProcessDefaultsExpandedAndKeepsAnswerSeparated();
   testStreamingDoesNotInventFoldForProcessOnlyDrafts();
+  testCompletedProcessOnlyTimelineCanUseProcessedShell();
   testDetectsAssistantProcessHistoryWithoutFormattingTools();
   testExtractsFoldedFinalContentWithoutToolBlocks();
   console.log('assistantTimelineFolding tests passed');

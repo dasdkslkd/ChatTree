@@ -37,13 +37,16 @@ function testMainPageDelegatesLiveRenderingToSharedProcessPath() {
 function testAssistantProcessItemIsThinAdapter() {
   const source = read(processItemPath);
   assert.match(source, /AssistantProcessTimeline/);
+  assert.match(source, /allowProcessOnly:\s*true/);
   assert.doesNotMatch(source, /function ToolCallCard/);
   assert.doesNotMatch(source, /function getProcessTimeline/);
 }
 
 function testSharedTimelineRendererOwnsLiveStyle() {
   const source = read(processTimelinePath);
-  assert.match(source, /processed-fold expanded/);
+  assert.match(source, /cn\('processed-fold', processExpanded && 'expanded'\)/);
+  assert.match(source, /setProcessExpanded/);
+  assert.match(source, /aria-expanded=\{processExpanded\}/);
   assert.doesNotMatch(source, /PlanProposalCard/);
   assert.match(source, /ToolCallGroup/);
   assert.match(source, /getStreamStatusLabel/);

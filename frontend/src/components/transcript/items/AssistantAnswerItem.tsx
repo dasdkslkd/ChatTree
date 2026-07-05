@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Check, Copy } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { cn } from '@/lib/utils';
 import MarkdownContent from '../../MarkdownContent';
 import type { TranscriptCopyHandler, TranscriptItem } from '../../../types/transcript';
 import { getItemText } from './itemText';
@@ -8,6 +9,7 @@ import { getItemText } from './itemText';
 export function AssistantAnswerItem({ item, onCopy }: { item: TranscriptItem; onCopy?: TranscriptCopyHandler }) {
   const [copied, setCopied] = useState(false);
   const text = getItemText(item);
+  const compactAfterProcess = item.props?.compact_after_process === true;
   if (!text) return null;
 
   const handleCopy = async () => {
@@ -17,7 +19,7 @@ export function AssistantAnswerItem({ item, onCopy }: { item: TranscriptItem; on
   };
 
   return (
-    <div className="chat-message-row w-full my-2 flex flex-col group items-start" role="listitem">
+    <div className={cn('chat-message-row w-full flex flex-col group items-start', compactAfterProcess ? 'mt-0 mb-2' : 'my-2')} role="listitem">
       <div className="flex flex-col max-w-full items-start w-full">
         <div
           className="max-w-full w-fit px-3 py-2 rounded-2xl leading-relaxed prose prose-sm max-w-none [&_p]:m-0 [&_p:not(:last-child)]:mb-2"

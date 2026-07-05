@@ -67,6 +67,7 @@ export type AssistantProcessRenderProps = {
   duration: number;
   errorMessage: string | null;
   content: string;
+  compactWithNextAnswer?: boolean;
   continuation_of_node_id?: string | null;
   continuation_marker?: string | null;
   continuations?: unknown[];
