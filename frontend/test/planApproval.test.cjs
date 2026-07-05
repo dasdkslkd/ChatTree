@@ -64,11 +64,19 @@ function testPlanQuestionOptionClickOnlySelectsDraftAnswer() {
 function testPlanProposalCardUsesTranscriptPlanCallbacks() {
   const proposalCardSource = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/PlanProposalCard.tsx'), 'utf8');
   const processSource = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/AssistantProcessItem.tsx'), 'utf8');
+  const timelineSource = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/AssistantProcessTimeline.tsx'), 'utf8');
   assert.match(proposalCardSource, /onApprove/);
   assert.match(proposalCardSource, /onReject/);
   assert.match(processSource, /onApprovePlan/);
   assert.match(processSource, /onRejectPlan/);
-  assert.match(processSource, /plan_id: block\.plan_id/);
+  assert.match(timelineSource, /plan_id: block\.plan_id/);
+}
+
+function testMainTranscriptUsesSharedLiveProcessRenderer() {
+  const mainPage = fs.readFileSync(path.join(__dirname, '../src/pages/MainPage.tsx'), 'utf8');
+  assert.match(mainPage, /createLiveAssistantProcessItem/);
+  assert.doesNotMatch(mainPage, /renderLiveRunDraftTranscriptItem/);
+  assert.doesNotMatch(mainPage, /getLiveRunDraftTranscriptProps/);
 }
 
 function testApprovePlanStartsStructuredControlStream() {
@@ -127,6 +135,7 @@ function main() {
   testApprovedPlanSummaryRemainsVisible();
   testPlanQuestionOptionClickOnlySelectsDraftAnswer();
   testPlanProposalCardUsesTranscriptPlanCallbacks();
+  testMainTranscriptUsesSharedLiveProcessRenderer();
   testApprovePlanStartsStructuredControlStream();
   testAnswerPlanQuestionStartsStructuredControlStream();
   testRejectPlanStartsStructuredControlStream();

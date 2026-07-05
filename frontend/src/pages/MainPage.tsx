@@ -135,6 +135,7 @@ import {
   getStreamingTimelineFoldState,
   type StreamingTimelineFoldState,
 } from '../utils/assistantTimelineFolding';
+import { createLiveAssistantProcessItem } from '../utils/assistantTimeline';
 import {
   getActiveStreamPollingDelay,
   getConversationActiveStreamLookupLimit,
@@ -587,21 +588,6 @@ type SideRunDraft = {
   activeReasoningKey: string | null;
 };
 
-type LiveRunDraftTranscriptProps = {
-  live_run_draft: true;
-  pendingUserMessage: string | null;
-  showPendingBubble: boolean;
-  showStreamBlock: boolean;
-  timeline: AssistantTimelineBlock[];
-  streamingFoldState: StreamingTimelineFoldState<AssistantTimelineBlock>;
-  activeReasoningIndex: number;
-  activeReasoningKey: string | null;
-  status: StreamState['status'];
-  duration: number;
-  errorMessage: string | null;
-  content: string;
-};
-
 type QueuedMessage = {
   id: string;
   conversationId: string;
@@ -623,15 +609,6 @@ function getStreamGenerationStatus(status: StreamState['status']): 'completed' |
   if (status === 'error') return 'error';
   if (status === 'stopped') return 'stopped';
   return 'completed';
-}
-
-function getDraftCopyContent(timeline: AssistantTimelineBlock[], fallbackContent: string): string {
-  const timelineContent = timeline
-    .filter((block): block is Extract<AssistantTimelineBlock, { type: 'content' }> => block.type === 'content')
-    .map((block) => block.content.trim())
-    .filter(Boolean)
-    .join('\n\n');
-  return (timelineContent || fallbackContent).trim();
 }
 
 function createAssistantMessageFromStream(run: StreamState): Message | null {
@@ -757,66 +734,7 @@ function getSideRunAssistantTimeline(message: {
 }
 
 function createLiveRunTranscriptItem(run: StreamState): TranscriptItem {
-  const nodeId = run.targetNodeId || run.nodeId || null;
-  const timeline = getSideRunAssistantTimeline({
-    content: run.content,
-    reasoning: run.reasoning,
-    tool_interactions: run.toolInteractions,
-  });
-  const streamingFoldedContentBlocks = getAssistantFoldedContentBlocks({
-    content: run.content,
-    reasoning: run.reasoning,
-    tool_interactions: run.toolInteractions,
-  });
-  const streamingFoldState = getStreamingTimelineFoldState(
-    timeline,
-    streamingFoldedContentBlocks.map((block) => block.key),
-  );
-  let activeReasoningIndex = -1;
-  let activeReasoningKey: string | null = null;
-  if (run.status === 'streaming') {
-    for (let i = timeline.length - 1; i >= 0; i -= 1) {
-      if (timeline[i].type === 'reasoning') {
-        const hasLaterBlock = timeline.slice(i + 1).some((block) => block.type !== 'reasoning');
-        activeReasoningIndex = run.reasoningActive || !hasLaterBlock ? i : -1;
-        activeReasoningKey = activeReasoningIndex >= 0 ? timeline[activeReasoningIndex].key : null;
-        break;
-      }
-    }
-  }
-
-  const props: LiveRunDraftTranscriptProps = {
-    live_run_draft: true,
-    pendingUserMessage: run.pendingUserMessage,
-    showPendingBubble: Boolean(run.pendingUserMessage),
-    showStreamBlock: run.status !== 'idle',
-    timeline,
-    streamingFoldState,
-    activeReasoningIndex,
-    activeReasoningKey,
-    status: run.status,
-    duration: run.duration,
-    errorMessage: run.errorMessage,
-    content: run.content,
-  };
-
-  return {
-    id: `live-${run.runId}-draft`,
-    type: 'run_draft',
-    conversation_id: run.conversationId,
-    node_id: nodeId,
-    anchor_node_id: run.anchorNodeId,
-    run_id: run.runId,
-    status: run.status,
-    visibility: 'main',
-    preview: run.content || run.reasoning || run.pendingUserMessage || '',
-    props: props as unknown as Record<string, unknown>,
-  };
-}
-
-function getLiveRunDraftTranscriptProps(item: TranscriptItem): LiveRunDraftTranscriptProps | null {
-  if (item.type !== 'run_draft' || item.props?.live_run_draft !== true) return null;
-  return item.props as unknown as LiveRunDraftTranscriptProps;
+  return createLiveAssistantProcessItem(run);
 }
 
 function ToolCallCard({ item }: { item: ToolRenderItem }) {
@@ -992,7 +910,7 @@ export default function ChatPage() {
   const [transcriptItems, setTranscriptItems] = useState<TranscriptItem[]>([]);
   const [transcriptLoading, setTranscriptLoading] = useState(false);
   const [transcriptError, setTranscriptError] = useState<string | null>(null);
-  const [copiedTranscriptRunId, setCopiedTranscriptRunId] = useState<string | null>(null);
+  const [, setCopiedTranscriptRunId] = useState<string | null>(null);
   const handledSideRunNotificationsRef = useRef<Set<string>>(new Set());
   const [toolPermissionDraft, setToolPermissionDraftState] = useState<ToolPermissionDraft>(() => createToolPermissionDraft());
   const [newConversationMultiAgentMode, setNewConversationMultiAgentMode] = useState<MultiAgentMode>('explicit_request_only');
@@ -2729,134 +2647,7 @@ export default function ChatPage() {
     );
   };
 
-  const renderLiveRunDraftTranscriptItem = (item: TranscriptItem, props: LiveRunDraftTranscriptProps) => (
-    <div className="contents">
-      {props.showPendingBubble && (
-        <div className="w-full my-2 flex flex-col items-end" role="listitem">
-          <div className="flex flex-col items-start max-w-full">
-            <div
-              className="max-w-full w-fit px-3 py-2 rounded-2xl rounded-br-sm leading-relaxed prose prose-sm prose-invert max-w-none [&_p]:m-0"
-              style={{
-                background: 'linear-gradient(160deg, rgba(217,119,87,0.16), rgba(217,119,87,0.08))',
-                border: '0.5px solid rgba(217,119,87,0.28)',
-                boxShadow: 'var(--highlight-top)',
-                color: 'var(--fg-85)',
-                fontSize: 'var(--codex-chat-font-size)',
-                lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
-              }}
-            >
-              <MarkdownView content={props.pendingUserMessage || ''} />
-            </div>
-          </div>
-        </div>
-      )}
-      {props.showStreamBlock && (
-        <div className="w-full my-2 flex flex-col items-start" role="listitem">
-          <div className="flex flex-col items-start max-w-full w-full min-w-0">
-            {props.streamingFoldState.canFoldProcess ? (
-              <>
-                <div className="processed-fold expanded">
-                  <div className="processed-fold-button" aria-expanded="true">
-                    <span>{props.duration > 0 ? `已处理 ${formatProcessedDuration(props.duration) ?? ''}`.trim() : '已处理'}</span>
-                    <ChevronRight className="processed-fold-chevron" />
-                  </div>
-                </div>
-                <AnimatedProcessedBlocks
-                  expanded
-                  blocks={props.streamingFoldState.visibleBlocks}
-                  renderBlock={(block) => {
-                    if (block.type === 'reasoning') {
-                      return (
-                        <ThinkingBlock
-                          key={block.key}
-                          reasoning={block.reasoning}
-                          streaming={block.key === props.activeReasoningKey}
-                        />
-                      );
-                    }
-                    if (block.type === 'tools') {
-                      return <ToolCallGroup key={block.key} items={block.items} />;
-                    }
-                    return renderAssistantTimelineBlock(block);
-                  }}
-                />
-              </>
-            ) : (
-              props.timeline.map((block, blockIndex) => {
-                if (block.type === 'reasoning') {
-                  const reasoningStillOpen = blockIndex === props.activeReasoningIndex;
-                  return <ThinkingBlock key={block.key} reasoning={block.reasoning} streaming={reasoningStillOpen} />;
-                }
-                if (block.type === 'tools') {
-                  return <ToolCallGroup key={block.key} items={block.items} />;
-                }
-                return (
-                  <div
-                    key={block.key}
-                    className="max-w-full w-full min-w-0 px-3 py-2 rounded-2xl rounded-bl-sm leading-relaxed prose prose-sm max-w-none [&_p]:m-0"
-                    style={{
-                      color: 'var(--fg-secondary)',
-                      fontSize: 'var(--codex-chat-font-size)',
-                      lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
-                    }}
-                  >
-                    <MarkdownView content={block.content} />
-                  </div>
-                );
-              })
-            )}
-            {props.timeline.length === 0 && props.status === 'streaming' && (
-              <div
-                className="max-w-full w-fit px-3 py-2 rounded-2xl rounded-bl-sm leading-relaxed prose prose-sm max-w-none [&_p]:m-0"
-                style={{
-                  color: 'var(--fg-secondary)',
-                  fontSize: 'var(--codex-chat-font-size)',
-                  lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
-                }}
-              >
-                <div className="flex items-center gap-2">
-                  <Loader2 className="h-4 w-4 animate-spin" style={{ color: 'var(--icon-accent)' }} />
-                  <span className="text-sm" style={{ color: 'var(--fg-tertiary)' }}>思考中...</span>
-                </div>
-              </div>
-            )}
-            {getStreamStatusLabel(props.status, props.errorMessage) && (
-              <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
-                <span className="text-destructive">{getStreamStatusLabel(props.status, props.errorMessage)}</span>
-              </div>
-            )}
-            {props.status !== 'streaming' && (() => {
-              const copyContent = getDraftCopyContent(props.timeline, props.content);
-              if (!copyContent) return null;
-              return (
-                <div className="mt-0.5 flex items-center gap-1 self-start">
-                  <TextTooltip content="复制">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-5 w-5 p-0"
-                      onClick={() => handleCopyTranscriptItem(item, copyContent)}
-                      aria-label="复制"
-                    >
-                      {copiedTranscriptRunId === item.id ? (
-                        <Check className="h-3.5 w-3.5 text-green-500" />
-                      ) : (
-                        <Copy className="h-3.5 w-3.5" />
-                      )}
-                    </Button>
-                  </TextTooltip>
-                </div>
-              );
-            })()}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-
   const renderTranscriptItem = (item: TranscriptItem, defaultItem: React.ReactNode) => {
-    const liveRunDraftProps = getLiveRunDraftTranscriptProps(item);
-    if (liveRunDraftProps) return renderLiveRunDraftTranscriptItem(item, liveRunDraftProps);
     if (item.type === 'assistant_process') {
       return (
         <AssistantProcessItem

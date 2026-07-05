@@ -23,11 +23,38 @@ function normalizeTranscriptItem(item: TranscriptItem): TranscriptItem | null {
   return itemType ? { ...item, type: itemType as TranscriptItem['type'] } : item;
 }
 
+function processKeys(item: TranscriptItem): string[] {
+  const keys: string[] = [];
+  const nodeId = item.node_id || item.anchor_node_id || null;
+  const runId = item.run_id || null;
+  if (runId) keys.push(`run:${runId}`);
+  if (nodeId) keys.push(`node:${nodeId}`);
+  if (item.anchor_node_id && item.anchor_node_id !== nodeId) keys.push(`node:${item.anchor_node_id}`);
+  return keys;
+}
+
+function filterStaleRunDraftItems(items: TranscriptItem[]): TranscriptItem[] {
+  const processKeySet = new Set(
+    items
+      .filter((item) => item.type === 'assistant_process')
+      .flatMap(processKeys),
+  );
+  if (processKeySet.size === 0) return items;
+  return items.filter((item) => {
+    if (item.type === 'run_draft') {
+      const keys = processKeys(item);
+      return keys.length === 0 || !keys.some((key) => processKeySet.has(key));
+    }
+    return true;
+  });
+}
+
 export function normalizeTranscriptItems(items: TranscriptItem[]): TranscriptItem[] {
-  return items
+  const normalized = items
     .filter((item) => !item.visibility || item.visibility === 'main')
     .map(normalizeTranscriptItem)
     .filter((item): item is TranscriptItem => Boolean(item));
+  return filterStaleRunDraftItems(normalized);
 }
 
 export interface LiveRunTranscriptOverlay {

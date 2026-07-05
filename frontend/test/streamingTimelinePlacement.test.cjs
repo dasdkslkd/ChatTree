@@ -24,7 +24,8 @@ function testMainTranscriptDoesNotRenderLocalStreamingDrafts() {
   assert.match(source, /<TranscriptList[\s\S]*items=\{displayTranscriptItems\}/);
   assert.match(source, /mergeLiveRunTranscriptItems/);
   assert.match(source, /renderItem=\{renderTranscriptItem\}/);
-  assert.match(source, /renderLiveRunDraftTranscriptItem/);
+  assert.match(source, /createLiveAssistantProcessItem/);
+  assert.doesNotMatch(source, /renderLiveRunDraftTranscriptItem/);
   const chatHistory = source.slice(source.indexOf('{/* Chat view */'), source.indexOf('{/* Tree view */'));
   assert.doesNotMatch(chatHistory, /draft\.streamingFoldState/);
   assert.doesNotMatch(chatHistory, /activeRunStates\.map\(/);

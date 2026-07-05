@@ -90,7 +90,7 @@ function testNormalizeDoesNotGroupProcessToolAndAnswerBlocks() {
   ]);
 }
 
-function testLiveRunOverlayReplacesPersistedDraftWithSingleLegacyRunItemAtOriginalPosition() {
+function testLiveRunOverlayReplacesPersistedDraftWithSingleProcessItemAtOriginalPosition() {
   const items = mergeLiveRunTranscriptItems(
     [
       { id: 'user-1', type: 'user_message', node_id: 'node-1' },
@@ -105,10 +105,10 @@ function testLiveRunOverlayReplacesPersistedDraftWithSingleLegacyRunItemAtOrigin
         anchorNodeId: 'parent-1',
         items: [
           {
-            id: 'live-run-draft',
-            type: 'run_draft',
+            id: 'live-run-process',
+            type: 'assistant_process',
             run_id: 'run-1',
-            props: { live_run_draft: true },
+            props: { live_process: true },
           },
         ],
       },
@@ -117,10 +117,33 @@ function testLiveRunOverlayReplacesPersistedDraftWithSingleLegacyRunItemAtOrigin
 
   assert.deepEqual(items.map((item) => item.id), [
     'user-1',
-    'live-run-draft',
+    'live-run-process',
   ]);
-  assert.equal(items[1].type, 'run_draft');
-  assert.equal(items[1].props.live_run_draft, true);
+  assert.equal(items[1].type, 'assistant_process');
+  assert.equal(items[1].props.live_process, true);
+}
+
+function testRunDraftHiddenWhenAssistantProcessExistsForSameRun() {
+  const source = fs.readFileSync(path.join(__dirname, '../src/utils/transcriptItems.ts'), 'utf8');
+  assert.match(source, /filterStaleRunDraftItems/);
+  assert.match(source, /item\.type === 'run_draft'/);
+  assert.match(source, /item\.type === 'assistant_process'/);
+
+  const items = normalizeTranscriptItems([
+    { id: 'draft-1', type: 'run_draft', run_id: 'run-1', visibility: 'main' },
+    { id: 'process-1', type: 'assistant_process', run_id: 'run-1', visibility: 'main' },
+    { id: 'draft-2', type: 'run_draft', run_id: 'run-2', visibility: 'main' },
+  ]);
+  assert.deepEqual(items.map((item) => item.id), ['process-1', 'draft-2']);
+}
+
+function testRunDraftHiddenWhenAssistantProcessMatchesSameNodeWithoutRunId() {
+  const items = normalizeTranscriptItems([
+    { id: 'draft-actual', type: 'run_draft', run_id: 'run-actual', node_id: 'node-1', visibility: 'main' },
+    { id: 'process-actual', type: 'assistant_process', node_id: 'node-1', visibility: 'main' },
+    { id: 'draft-other', type: 'run_draft', run_id: 'run-other', node_id: 'node-2', visibility: 'main' },
+  ]);
+  assert.deepEqual(items.map((item) => item.id), ['process-actual', 'draft-other']);
 }
 
 function testLiveRunOverlayAnchorsToBranchInsteadOfAppendingToTail() {
@@ -202,18 +225,20 @@ function testMainPageDelegatesTranscriptOrderingToTranscriptList() {
   assert.doesNotMatch(source, /activeRunDrafts\.map\(/);
 }
 
-function testMainPageUsesLiveTranscriptOverlayWithLegacyDraftRendering() {
+function testMainPageUsesLiveTranscriptOverlayWithSharedProcessRendering() {
   const source = fs.readFileSync(path.join(__dirname, '../src/pages/MainPage.tsx'), 'utf8');
+  const processTimeline = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/AssistantProcessTimeline.tsx'), 'utf8');
 
   assert.doesNotMatch(source, /\bgetAssistantTimeline\b/);
   assert.match(source, /\bgetSideRunAssistantTimeline\b/);
   assert.match(source, /\bcreateLiveRunTranscriptItem\b/);
+  assert.match(source, /\bcreateLiveAssistantProcessItem\b/);
   assert.match(source, /\bliveMainTranscriptRunOverlays\b/);
   assert.match(source, /\bmergeLiveRunTranscriptItems\b/);
-  assert.match(source, /\brenderLiveRunDraftTranscriptItem\b/);
-  assert.match(source, /className="processed-fold expanded"/);
-  assert.match(source, /<ThinkingBlock[\s\S]*streaming=\{block\.key === props\.activeReasoningKey\}/);
-  assert.match(source, /<ToolCallGroup key=\{block\.key\} items=\{block\.items\} \/>/);
+  assert.doesNotMatch(source, /\brenderLiveRunDraftTranscriptItem\b/);
+  assert.match(processTimeline, /className="processed-fold expanded"/);
+  assert.match(processTimeline, /streaming=\{block\.key === props\.activeReasoningKey\}/);
+  assert.match(processTimeline, /<ToolCallGroup key=\{block\.key\} items=\{block\.items\} \/>/);
   assert.match(source, /const sideRunDrafts = useMemo/);
   assert.doesNotMatch(source, /activeRunDrafts\.map\(/);
 }
@@ -309,6 +334,7 @@ function testTranscriptMessageItemsUseLegacyChatBubbleStyling() {
   const userMessage = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/UserMessageItem.tsx'), 'utf8');
   const assistantAnswer = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/AssistantAnswerItem.tsx'), 'utf8');
   const assistantProcess = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/AssistantProcessItem.tsx'), 'utf8');
+  const assistantProcessTimeline = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/AssistantProcessTimeline.tsx'), 'utf8');
   const toolGroup = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/ToolGroupItem.tsx'), 'utf8');
 
   assert.match(userMessage, /chat-message-row w-full my-2 flex flex-col group items-end/);
@@ -319,12 +345,12 @@ function testTranscriptMessageItemsUseLegacyChatBubbleStyling() {
   assert.match(assistantAnswer, /rounded-2xl leading-relaxed/);
   assert.match(assistantAnswer, /self-start justify-start/);
 
-  assert.match(assistantProcess, /className=\{cn\('thought'/);
-  assert.match(assistantProcess, /className="thought-head"/);
+  assert.match(assistantProcessTimeline, /className=\{cn\('thought'/);
+  assert.match(assistantProcessTimeline, /className="thought-head"/);
   assert.match(assistantProcess, /tool_interactions/);
-  assert.match(assistantProcess, /type: 'content'/);
-  assert.match(assistantProcess, /renderProcessTimelineBlock/);
-  assert.match(assistantProcess, /PlanProposalCard/);
+  assert.match(assistantProcessTimeline, /type: 'content'/);
+  assert.match(assistantProcessTimeline, /renderTimelineBlock/);
+  assert.match(assistantProcessTimeline, /PlanProposalCard/);
   assert.doesNotMatch(assistantProcess, /transcript-assistant-process/);
 
   assert.match(toolGroup, /className=\{cn\('tool-group'/);
@@ -334,20 +360,22 @@ function testTranscriptMessageItemsUseLegacyChatBubbleStyling() {
 
 function testAssistantProcessRendersIntermediateTextButNoCopy() {
   const assistantProcess = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/AssistantProcessItem.tsx'), 'utf8');
+  const assistantProcessTimeline = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/AssistantProcessTimeline.tsx'), 'utf8');
   const assistantAnswer = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/AssistantAnswerItem.tsx'), 'utf8');
 
-  assert.match(assistantProcess, /type: 'content'/);
-  assert.match(assistantProcess, /renderProcessTimelineBlock/);
-  assert.match(assistantProcess, /PlanProposalCard/);
+  assert.match(assistantProcessTimeline, /type: 'content'/);
+  assert.match(assistantProcessTimeline, /renderTimelineBlock/);
+  assert.match(assistantProcessTimeline, /PlanProposalCard/);
   assert.doesNotMatch(assistantProcess, /aria-label="复制消息"/);
+  assert.doesNotMatch(assistantProcessTimeline, /aria-label="复制消息"/);
   assert.match(assistantAnswer, /aria-label="复制消息"/);
 }
 
 function testAssistantProcessUsesToolResultOnToolCallTimelineBlocks() {
-  const assistantProcess = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/AssistantProcessItem.tsx'), 'utf8');
+  const assistantTimeline = fs.readFileSync(path.join(__dirname, '../src/utils/assistantTimeline.ts'), 'utf8');
 
   assert.match(
-    assistantProcess,
+    assistantTimeline,
     /type === 'tool_call'[\s\S]*makeToolItem\(\s*normalizeTimelineToolCall\(record\),\s*normalizeTimelineToolMessage\(record\),\s*key\s*\)/,
   );
 }
@@ -392,11 +420,13 @@ testNormalizeOnlyKeepsMainVisibilityInOrder();
 testNormalizeUsesBackendItemTypeWithoutReordering();
 testNormalizeDoesNotProjectStandalonePlanCards();
 testNormalizeDoesNotGroupProcessToolAndAnswerBlocks();
-testLiveRunOverlayReplacesPersistedDraftWithSingleLegacyRunItemAtOriginalPosition();
+testLiveRunOverlayReplacesPersistedDraftWithSingleProcessItemAtOriginalPosition();
+testRunDraftHiddenWhenAssistantProcessExistsForSameRun();
+testRunDraftHiddenWhenAssistantProcessMatchesSameNodeWithoutRunId();
 testLiveRunOverlayAnchorsToBranchInsteadOfAppendingToTail();
 testLiveRunOverlayAnchorsAfterApprovedPlanProposal();
 testMainPageDelegatesTranscriptOrderingToTranscriptList();
-testMainPageUsesLiveTranscriptOverlayWithLegacyDraftRendering();
+testMainPageUsesLiveTranscriptOverlayWithSharedProcessRendering();
 testPlanActionsAreRealCallbacks();
 testPlanQuestionIsRenderedAndAnsweredFromTranscriptItem();
 testTranscriptRefreshUsesPerConversationRequestGuardsAndVisibleErrors();

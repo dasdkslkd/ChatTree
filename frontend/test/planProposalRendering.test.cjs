@@ -4,6 +4,7 @@ const path = require('node:path');
 
 const cardPath = path.join(__dirname, '../src/components/transcript/items/PlanProposalCard.tsx');
 const processPath = path.join(__dirname, '../src/components/transcript/items/AssistantProcessItem.tsx');
+const processTimelinePath = path.join(__dirname, '../src/components/transcript/items/AssistantProcessTimeline.tsx');
 const transcriptPath = path.join(__dirname, '../src/utils/transcriptItems.ts');
 
 function testPlanProposalCardHasExpandedAndCompactStates() {
@@ -20,11 +21,20 @@ function testPlanProposalCardHasExpandedAndCompactStates() {
 
 function testProcessRendererUsesDedicatedPlanProposalCard() {
   const source = fs.readFileSync(processPath, 'utf8');
+  const timelineSource = fs.readFileSync(processTimelinePath, 'utf8');
   assert.match(source, /Array\.isArray\(item\.props\?\.timeline\)/);
-  assert.match(source, /if \(timeline\.length > 0\)/);
-  assert.match(source, /block\.type === 'plan_proposal'/);
-  assert.match(source, /<PlanProposalCard/);
-  assert.doesNotMatch(source, /plan_proposal[\s\S]{0,120}<ToolCallCard/);
+  assert.match(source, /AssistantProcessTimeline/);
+  assert.match(timelineSource, /block\.type === 'plan_proposal'/);
+  assert.match(timelineSource, /<PlanProposalCard/);
+  assert.doesNotMatch(timelineSource, /plan_proposal[\s\S]{0,120}<ToolCallCard/);
+}
+
+function testPlanProposalCardMatchesProcessShellContract() {
+  const source = fs.readFileSync(cardPath, 'utf8');
+  assert.match(source, /transcript-plan-card plan-card/);
+  assert.match(source, /status === 'awaiting_approval'/);
+  assert.match(source, /truncatePlan/);
+  assert.doesNotMatch(source, /aria-label="复制消息"/);
 }
 
 function testTranscriptNoLongerDependsOnStandalonePlanCardItem() {
@@ -35,5 +45,6 @@ function testTranscriptNoLongerDependsOnStandalonePlanCardItem() {
 
 testPlanProposalCardHasExpandedAndCompactStates();
 testProcessRendererUsesDedicatedPlanProposalCard();
+testPlanProposalCardMatchesProcessShellContract();
 testTranscriptNoLongerDependsOnStandalonePlanCardItem();
 console.log('planProposalRendering tests passed');
