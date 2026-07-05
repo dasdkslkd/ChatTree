@@ -18,6 +18,8 @@ export function TranscriptList({
   onRejectPlan,
   onAnswerPlanQuestion,
   onCopyItem,
+  onEditUserMessage,
+  onDeleteUserMessage,
   planActionPending,
   planError,
   renderItem,
@@ -54,6 +56,8 @@ export function TranscriptList({
             onRejectPlan={onRejectPlan}
             onAnswerPlanQuestion={onAnswerPlanQuestion}
             onCopyItem={onCopyItem}
+            onEditUserMessage={onEditUserMessage}
+            onDeleteUserMessage={onDeleteUserMessage}
             planActionPending={planActionPending}
             planError={planError}
           />

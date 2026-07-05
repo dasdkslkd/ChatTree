@@ -193,6 +193,17 @@ function getTranscriptItemNodeId(item: TranscriptItem): string | null {
   return item.node_id || item.anchor_node_id || null;
 }
 
+function getEditableUserMessageParentNodeId(item: TranscriptItem, messages: Message[]): string | null {
+  const nodeId = getTranscriptItemNodeId(item);
+  if (!nodeId) return null;
+  const messageParentNodeId = messages.find((message) =>
+    message.node_id === nodeId && message.role === 'user'
+  )?.parent_node_id;
+  if (messageParentNodeId) return messageParentNodeId;
+  const propsParentNodeId = item.props?.parent_node_id;
+  return typeof propsParentNodeId === 'string' && propsParentNodeId ? propsParentNodeId : null;
+}
+
 function isTranscriptItemVisibleNow(
   item: TranscriptItem,
   currentConversationId: string | null,
@@ -1101,7 +1112,7 @@ export default function ChatPage() {
   const {
     conversations, currentConversation, messages,
     currentNodeId, pendingScrollNodeId, clearPendingScroll,
-    createConversation, selectConversation, deleteConversation, loadConversations,
+    createConversation, selectConversation, deleteConversation, deleteNode, loadConversations,
     clearCurrentConversation, updateConversationTitle, refreshMessages, patchAssistantMessageFromStream,
   } = useConversationStore();
 
@@ -1997,6 +2008,23 @@ export default function ChatPage() {
       console.error('Failed to copy transcript item:', error);
     }
   }, []);
+
+  const handleEditUserMessage = useCallback(async (item: TranscriptItem, text: string) => {
+    if (!isTranscriptItemVisibleNow(item, currentConversation?.id ?? null, selectedBranchTipId)) return;
+    const parentNodeId = getEditableUserMessageParentNodeId(item, messages);
+    if (!parentNodeId) return;
+    setEditValue(text);
+    setEditTargetNodeId(parentNodeId);
+  }, [currentConversation?.id, messages, selectedBranchTipId]);
+
+  const handleDeleteUserMessage = useCallback(async (item: TranscriptItem) => {
+    if (!isTranscriptItemVisibleNow(item, currentConversation?.id ?? null, selectedBranchTipId)) return;
+    const nodeId = getTranscriptItemNodeId(item);
+    if (!nodeId || !currentConversation?.id) return;
+    if (!window.confirm('确定删除这条消息及其后续分支？')) return;
+    await deleteNode(nodeId);
+    await refreshTranscript(currentConversation.id);
+  }, [currentConversation?.id, deleteNode, refreshTranscript, selectedBranchTipId]);
 
   // Legacy static coverage still keys off the historical marker:
   // const handleApprovePlan = useCallback(async () => {
@@ -3308,6 +3336,8 @@ export default function ChatPage() {
                     onRejectPlan={handleRejectPlan}
                     onAnswerPlanQuestion={handleAnswerPlanQuestion}
                     onCopyItem={handleCopyTranscriptItem}
+                    onEditUserMessage={handleEditUserMessage}
+                    onDeleteUserMessage={handleDeleteUserMessage}
                     planActionPending={planActionPending}
                     planError={planError}
                     renderItem={renderTranscriptItem}

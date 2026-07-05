@@ -1,11 +1,27 @@
 import { useState } from 'react';
-import { Check, Copy } from 'lucide-react';
+import { Check, Copy, Pencil, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { TextTooltip } from '@/components/ui/text-tooltip';
 import MarkdownContent from '../../MarkdownContent';
-import type { TranscriptCopyHandler, TranscriptItem } from '../../../types/transcript';
+import type {
+  TranscriptCopyHandler,
+  TranscriptItem,
+  TranscriptUserMessageActionHandler,
+  TranscriptUserMessageDeleteHandler,
+} from '../../../types/transcript';
 import { getItemText } from './itemText';
 
-export function UserMessageItem({ item, onCopy }: { item: TranscriptItem; onCopy?: TranscriptCopyHandler }) {
+export function UserMessageItem({
+  item,
+  onCopy,
+  onEdit,
+  onDelete,
+}: {
+  item: TranscriptItem;
+  onCopy?: TranscriptCopyHandler;
+  onEdit?: TranscriptUserMessageActionHandler;
+  onDelete?: TranscriptUserMessageDeleteHandler;
+}) {
   const [copied, setCopied] = useState(false);
   const text = getItemText(item);
   if (!text) return null;
@@ -15,6 +31,16 @@ export function UserMessageItem({ item, onCopy }: { item: TranscriptItem; onCopy
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1600);
   };
+
+  const handleEdit = async () => {
+    await onEdit?.(item, text);
+  };
+
+  const handleDelete = async () => {
+    await onDelete?.(item);
+  };
+
+  const hasActions = Boolean(onCopy || onEdit || onDelete);
 
   return (
     <div className="chat-message-row w-full my-2 flex flex-col group items-end" role="listitem">
@@ -32,17 +58,47 @@ export function UserMessageItem({ item, onCopy }: { item: TranscriptItem; onCopy
         >
           <MarkdownContent enableMermaid>{text}</MarkdownContent>
         </div>
-        {onCopy && (
+        {hasActions && (
           <div className="flex items-center gap-1 mt-1 self-end justify-end">
-            <Button
-              variant="ghost"
-              size="sm"
-              className="opacity-0 group-hover:opacity-100 transition-opacity p-0 h-7 w-7"
-              onClick={handleCopy}
-              aria-label="复制消息"
-            >
-              {copied ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
-            </Button>
+            {onCopy && (
+              <TextTooltip content="复制">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="opacity-0 group-hover:opacity-100 transition-opacity p-0 h-7 w-7"
+                  onClick={handleCopy}
+                  aria-label="复制消息"
+                >
+                  {copied ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
+                </Button>
+              </TextTooltip>
+            )}
+            {onEdit && (
+              <TextTooltip content="编辑">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="opacity-0 group-hover:opacity-100 transition-opacity p-0 h-7 w-7"
+                  onClick={handleEdit}
+                  aria-label="编辑消息"
+                >
+                  <Pencil className="h-4 w-4" />
+                </Button>
+              </TextTooltip>
+            )}
+            {onDelete && (
+              <TextTooltip content="删除">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="opacity-0 group-hover:opacity-100 transition-opacity p-0 h-7 w-7"
+                  onClick={handleDelete}
+                  aria-label="删除消息"
+                >
+                  <Trash2 className="h-4 w-4" style={{ color: 'var(--destructive)' }} />
+                </Button>
+              </TextTooltip>
+            )}
           </div>
         )}
       </div>

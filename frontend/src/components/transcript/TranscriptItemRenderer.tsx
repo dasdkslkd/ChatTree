@@ -39,12 +39,21 @@ export function TranscriptItemRenderer({
   onRejectPlan,
   onAnswerPlanQuestion,
   onCopyItem,
+  onEditUserMessage,
+  onDeleteUserMessage,
   planActionPending,
   planError,
 }: TranscriptItemRendererProps) {
   switch (item.type) {
     case 'user_message':
-      return <UserMessageItem item={item} onCopy={onCopyItem} />;
+      return (
+        <UserMessageItem
+          item={item}
+          onCopy={onCopyItem}
+          onEdit={onEditUserMessage}
+          onDelete={onDeleteUserMessage}
+        />
+      );
     case 'assistant_answer':
       return <AssistantAnswerItem item={item} onCopy={onCopyItem} />;
     case 'assistant_process':

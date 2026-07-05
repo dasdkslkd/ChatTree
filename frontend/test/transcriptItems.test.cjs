@@ -538,7 +538,7 @@ function testCopyHandlerOnlyReachesRealTranscriptMessages() {
   const assistantProcess = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/AssistantProcessItem.tsx'), 'utf8');
   const toolGroup = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/ToolGroupItem.tsx'), 'utf8');
 
-  assert.match(renderer, /case 'user_message':\s*return <UserMessageItem item=\{item\} onCopy=\{onCopyItem\} \/>/);
+  assert.match(renderer, /case 'user_message':[\s\S]*<UserMessageItem[\s\S]*onCopy=\{onCopyItem\}/);
   assert.match(renderer, /case 'assistant_answer':\s*return <AssistantAnswerItem item=\{item\} onCopy=\{onCopyItem\} \/>/);
   const nonCopyableCases = renderer.match(/case 'assistant_process':[\s\S]*?case 'task_notification':/)?.[0] || '';
   assert.ok(nonCopyableCases, 'renderer should expose the non-copyable transcript cases');
@@ -548,6 +548,32 @@ function testCopyHandlerOnlyReachesRealTranscriptMessages() {
   assert.doesNotMatch(runDraft, /aria-label="复制消息"|onCopy/);
   assert.doesNotMatch(assistantProcess, /aria-label="复制消息"|onCopy/);
   assert.doesNotMatch(toolGroup, /aria-label="复制消息"|onCopy/);
+}
+
+function testUserMessageEditAndDeleteActionsAreWired() {
+  const types = fs.readFileSync(path.join(__dirname, '../src/types/transcript.ts'), 'utf8');
+  const list = fs.readFileSync(path.join(__dirname, '../src/components/transcript/TranscriptList.tsx'), 'utf8');
+  const renderer = fs.readFileSync(path.join(__dirname, '../src/components/transcript/TranscriptItemRenderer.tsx'), 'utf8');
+  const userMessage = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/UserMessageItem.tsx'), 'utf8');
+  const mainPage = fs.readFileSync(path.join(__dirname, '../src/pages/MainPage.tsx'), 'utf8');
+
+  assert.match(types, /TranscriptUserMessageActionHandler/);
+  assert.match(types, /onEditUserMessage\?:/);
+  assert.match(types, /onDeleteUserMessage\?:/);
+  assert.match(list, /onEditUserMessage=\{onEditUserMessage\}/);
+  assert.match(list, /onDeleteUserMessage=\{onDeleteUserMessage\}/);
+  assert.match(renderer, /<UserMessageItem[\s\S]*onEdit=\{onEditUserMessage\}[\s\S]*onDelete=\{onDeleteUserMessage\}/);
+  assert.match(userMessage, /aria-label="编辑消息"/);
+  assert.match(userMessage, /aria-label="删除消息"/);
+  assert.match(userMessage, /Pencil/);
+  assert.match(userMessage, /Trash2/);
+  assert.match(mainPage, /const handleEditUserMessage = useCallback\(async \(item: TranscriptItem,\s*text: string\)/);
+  assert.match(mainPage, /const parentNodeId = getEditableUserMessageParentNodeId\(item,\s*messages\)/);
+  assert.match(mainPage, /setEditTargetNodeId\(parentNodeId\)/);
+  assert.match(mainPage, /const handleDeleteUserMessage = useCallback\(async \(item: TranscriptItem\)/);
+  assert.match(mainPage, /deleteNode\(nodeId\)/);
+  assert.match(mainPage, /onEditUserMessage=\{handleEditUserMessage\}/);
+  assert.match(mainPage, /onDeleteUserMessage=\{handleDeleteUserMessage\}/);
 }
 
 testNormalizeKeepsBackendOrderAndFiltersHidden();
@@ -578,4 +604,5 @@ testAssistantProcessUsesToolResultOnToolCallTimelineBlocks();
 testStreamStateContentStaysFinalAnswerOnly();
 testPlanApprovalDoesNotRenderControlEvents();
 testCopyHandlerOnlyReachesRealTranscriptMessages();
+testUserMessageEditAndDeleteActionsAreWired();
 console.log('transcriptItems tests passed');

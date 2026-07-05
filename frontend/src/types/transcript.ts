@@ -37,12 +37,16 @@ export interface TranscriptItem {
 export type TranscriptPlanActionHandler = (item: TranscriptItem) => void | Promise<void>;
 export type TranscriptPlanQuestionAnswerHandler = (item: TranscriptItem, answer: string) => void | Promise<void>;
 export type TranscriptCopyHandler = (item: TranscriptItem, text: string) => void | Promise<void>;
+export type TranscriptUserMessageActionHandler = (item: TranscriptItem, text: string) => void | Promise<void>;
+export type TranscriptUserMessageDeleteHandler = (item: TranscriptItem) => void | Promise<void>;
 
 export interface TranscriptActionHandlers {
   onApprovePlan?: TranscriptPlanActionHandler;
   onRejectPlan?: TranscriptPlanActionHandler;
   onAnswerPlanQuestion?: TranscriptPlanQuestionAnswerHandler;
   onCopyItem?: TranscriptCopyHandler;
+  onEditUserMessage?: TranscriptUserMessageActionHandler;
+  onDeleteUserMessage?: TranscriptUserMessageDeleteHandler;
   planActionPending?: string | null;
   planError?: string | null;
 }
