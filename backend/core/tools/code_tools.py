@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import locale
 import os
+import platform
 import re
 import shlex
 import subprocess
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from .base import BaseTool
 from .security.logical_sandbox import DEFAULT_PROTECTED_PATHS
@@ -18,6 +20,15 @@ from ..shell_profile import ShellProfileResolver, render_command_tool_guidance
 
 
 DEFAULT_CODE_WORKSPACE = r"D:\Workspace\ChatTree\tmp"
+DEFAULT_RIPGREP_VERSION = "15.1.0"
+
+
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def _default_ripgrep_install_dir() -> Path:
+    return _project_root() / "data" / "tools" / "ripgrep"
 
 
 class CodeToolError(ValueError):
@@ -84,14 +95,14 @@ def _run_command_env() -> Dict[str, str]:
     return env
 
 
-def _windows_multiline_python_c_args(command: str) -> Optional[List[str]]:
-    if os.name != "nt" or "\n" not in command:
+def _windows_python_c_args(command: str) -> Optional[List[str]]:
+    if os.name != "nt":
         return None
     try:
         parts = shlex.split(command, posix=True)
     except ValueError:
         return None
-    if len(parts) != 3 or parts[1] != "-c" or "\n" not in parts[2]:
+    if len(parts) != 3 or parts[1] != "-c":
         return None
     executable_name = parts[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
     if executable_name.endswith(".exe"):
@@ -110,12 +121,23 @@ class CodeToolConfig:
     max_read_chars: int = 20000
     max_output_chars: int = 60000
     allow_parent_dir_creation: bool = False
+    ripgrep_version: str = DEFAULT_RIPGREP_VERSION
+    ripgrep_install_dir: Path = _default_ripgrep_install_dir()
 
     @classmethod
     def from_dict(cls, raw: Optional[Dict[str, Any]] = None) -> "CodeToolConfig":
         cfg = raw or {}
         roots = cfg.get("workspace_roots") or [DEFAULT_CODE_WORKSPACE]
         protected = cfg.get("protected_paths") or DEFAULT_PROTECTED_PATHS
+        ripgrep_cfg = cfg.get("ripgrep") if isinstance(cfg.get("ripgrep"), dict) else {}
+        ripgrep_install_dir = (
+            ripgrep_cfg.get("install_dir")
+            or cfg.get("ripgrep_install_dir")
+            or _default_ripgrep_install_dir()
+        )
+        ripgrep_install_path = Path(str(ripgrep_install_dir)).expanduser()
+        if not ripgrep_install_path.is_absolute():
+            ripgrep_install_path = _project_root() / ripgrep_install_path
         return cls(
             workspace_roots=[Path(root).expanduser().resolve() for root in roots],
             protected_paths=[Path(path) for path in protected],
@@ -124,6 +146,12 @@ class CodeToolConfig:
             max_read_chars=int(cfg.get("max_read_chars", 20000)),
             max_output_chars=int(cfg.get("max_output_chars", 60000)),
             allow_parent_dir_creation=bool(cfg.get("allow_parent_dir_creation", False)),
+            ripgrep_version=str(
+                ripgrep_cfg.get("version")
+                or cfg.get("ripgrep_version")
+                or DEFAULT_RIPGREP_VERSION
+            ),
+            ripgrep_install_dir=ripgrep_install_path.resolve(),
         )
 
     @classmethod
@@ -221,7 +249,10 @@ class ListFilesTool(_CodeTool):
 
     @property
     def description(self) -> str:
-        return "List files under the code workspace. Paths are relative to the workspace root."
+        return (
+            "List files under the code workspace. Paths are relative to the workspace root. "
+            "Uses the project-bundled ripgrep binary when available, with a Python fallback."
+        )
 
     def parameters_schema(self) -> Dict[str, Any]:
         return {
@@ -231,7 +262,10 @@ class ListFilesTool(_CodeTool):
                 "path": {"type": "string", "default": "."},
                 "pattern": {"type": "string", "default": "*"},
                 "recursive": {"type": "boolean", "default": False},
-                "max_results": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 200},
+                "max_results": {"type": "integer", "minimum": 1, "maximum": 2000, "default": 200},
+                "include_ignored": {"type": "boolean", "default": False},
+                "hidden": {"type": "boolean", "default": False},
+                "files_only": {"type": "boolean", "default": False},
             },
         }
 
@@ -242,21 +276,52 @@ class ListFilesTool(_CodeTool):
             return _error(exc.error_type, str(exc), path=str(kwargs.get("path") or "."))
 
         pattern = str(kwargs.get("pattern") or "*")
-        max_results = max(1, min(int(kwargs.get("max_results") or 200), 1000))
-        iterator = root.rglob(pattern) if bool(kwargs.get("recursive", False)) else root.glob(pattern)
-        items = []
-        for item in sorted(iterator, key=lambda p: p.as_posix()):
-            resolved = item.resolve()
-            if not self.workspace.is_visible(resolved):
-                continue
-            items.append({
-                "path": self.workspace.relative(resolved),
-                "type": "dir" if resolved.is_dir() else "file",
-                "size": resolved.stat().st_size if resolved.is_file() else None,
-            })
-            if len(items) >= max_results:
-                return _json({"root": self.workspace.relative(root), "items": items, "truncated": True})
-        return _json({"root": self.workspace.relative(root), "items": items, "truncated": False})
+        recursive = bool(kwargs.get("recursive", False))
+        include_ignored = bool(kwargs.get("include_ignored", False))
+        hidden = bool(kwargs.get("hidden", False))
+        files_only = bool(kwargs.get("files_only", False))
+        max_results = max(1, min(int(kwargs.get("max_results") or 200), 2000))
+
+        fallback_reason: Optional[str] = None
+        if recursive or files_only:
+            rg_path = _resolve_ripgrep_executable(self.config)
+            if rg_path is not None:
+                rg_payload, fallback_reason = _list_files_with_rg(
+                    rg_path=rg_path,
+                    workspace=self.workspace,
+                    root=root,
+                    pattern=pattern,
+                    recursive=recursive,
+                    include_ignored=include_ignored,
+                    hidden=hidden,
+                    files_only=files_only,
+                    max_results=max_results,
+                    timeout_seconds=self.config.command_timeout_seconds,
+                )
+                if rg_payload is not None:
+                    return _json(rg_payload)
+            else:
+                fallback_reason = "ripgrep_not_installed"
+
+        items, truncated = _list_files_python(
+            workspace=self.workspace,
+            root=root,
+            pattern=pattern,
+            recursive=recursive,
+            include_ignored=include_ignored,
+            hidden=hidden,
+            files_only=files_only,
+            max_results=max_results,
+        )
+        payload: Dict[str, Any] = {
+            "root": self.workspace.relative(root),
+            "items": items,
+            "truncated": truncated,
+            "engine": "python",
+        }
+        if fallback_reason:
+            payload["fallback_reason"] = fallback_reason
+        return _json(payload)
 
 
 class ReadFileTool(_CodeTool):
@@ -313,7 +378,10 @@ class SearchFilesTool(_CodeTool):
 
     @property
     def description(self) -> str:
-        return "Search UTF-8 text files in the code workspace and return matching file lines."
+        return (
+            "Search UTF-8 text files in the code workspace and return matching file lines. "
+            "Uses the project-bundled ripgrep binary when available, with a Python fallback."
+        )
 
     def parameters_schema(self) -> Dict[str, Any]:
         return {
@@ -323,7 +391,11 @@ class SearchFilesTool(_CodeTool):
                 "query": {"type": "string"},
                 "path": {"type": "string", "default": "."},
                 "glob": {"type": "string", "default": "*"},
-                "max_results": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+                "max_results": {"type": "integer", "minimum": 1, "maximum": 500, "default": 50},
+                "regex": {"type": "boolean", "default": False},
+                "ignore_case": {"type": "boolean", "default": False},
+                "include_ignored": {"type": "boolean", "default": False},
+                "hidden": {"type": "boolean", "default": False},
             },
             "required": ["query"],
         }
@@ -338,45 +410,55 @@ class SearchFilesTool(_CodeTool):
             return _error(exc.error_type, str(exc), path=str(kwargs.get("path") or "."))
 
         glob = str(kwargs.get("glob") or "*")
-        max_results = max(1, min(int(kwargs.get("max_results") or 50), 200))
-        matches: List[Dict[str, Any]] = []
-        searched_files = 0
-        skipped_files: List[str] = []
+        max_results = max(1, min(int(kwargs.get("max_results") or 50), 500))
+        regex = bool(kwargs.get("regex", False))
+        ignore_case = bool(kwargs.get("ignore_case", False))
+        include_ignored = bool(kwargs.get("include_ignored", False))
+        hidden = bool(kwargs.get("hidden", False))
 
-        for file_path in _iter_search_files(root, glob):
-            resolved = file_path.resolve()
-            if not resolved.is_file() or not self.workspace.is_visible(resolved):
-                continue
-            searched_files += 1
+        fallback_reason: Optional[str] = None
+        rg_path = _resolve_ripgrep_executable(self.config)
+        if rg_path is not None:
+            rg_payload, fallback_reason = _search_files_with_rg(
+                rg_path=rg_path,
+                workspace=self.workspace,
+                root=root,
+                query=query,
+                glob=glob,
+                max_results=max_results,
+                regex=regex,
+                ignore_case=ignore_case,
+                include_ignored=include_ignored,
+                hidden=hidden,
+                timeout_seconds=self.config.command_timeout_seconds,
+            )
+            if rg_payload is not None:
+                return _json(rg_payload)
+            if fallback_reason and fallback_reason.startswith("ripgrep_invalid_regex:"):
+                return _error("invalid_query", fallback_reason.split(":", 1)[1])
+        else:
+            fallback_reason = "ripgrep_not_installed"
+
+        if regex:
             try:
-                text = resolved.read_text(encoding="utf-8")
-            except UnicodeDecodeError:
-                skipped_files.append(self.workspace.relative(resolved))
-                continue
-            for line_number, line in enumerate(text.splitlines(), start=1):
-                if query not in line:
-                    continue
-                matches.append({
-                    "path": self.workspace.relative(resolved),
-                    "line": line_number,
-                    "preview": line.strip(),
-                })
-                if len(matches) >= max_results:
-                    return _json({
-                        "query": query,
-                        "matches": matches,
-                        "searched_files": searched_files,
-                        "skipped_non_utf8": skipped_files,
-                        "truncated": True,
-                    })
+                re.compile(query, re.IGNORECASE if ignore_case else 0)
+            except re.error as exc:
+                return _error("invalid_query", f"invalid regex: {exc}")
 
-        return _json({
-            "query": query,
-            "matches": matches,
-            "searched_files": searched_files,
-            "skipped_non_utf8": skipped_files,
-            "truncated": False,
-        })
+        payload = _search_files_python(
+            workspace=self.workspace,
+            root=root,
+            query=query,
+            glob=glob,
+            max_results=max_results,
+            regex=regex,
+            ignore_case=ignore_case,
+            include_ignored=include_ignored,
+            hidden=hidden,
+        )
+        if fallback_reason:
+            payload["fallback_reason"] = fallback_reason
+        return _json(payload)
 
 
 class EditFileTool(_CodeTool):
@@ -534,7 +616,7 @@ class RunCommandTool(_CodeTool):
                     "task_id": kwargs.get("task_id") or runtime_context.get("task_id"),
                 },
             )
-        python_c_args = _windows_multiline_python_c_args(command)
+        python_c_args = _windows_python_c_args(command)
         profile = ShellProfileResolver().resolve()
         try:
             proc = await asyncio.to_thread(
@@ -775,12 +857,494 @@ def _apply_simple_unified_patch(workspace: CodeWorkspace, base: Path, patch: str
     return changed
 
 
-def _iter_search_files(root: Path, glob: str):
+def _resolve_ripgrep_executable(config: CodeToolConfig) -> Optional[Path]:
+    executable = "rg.exe" if os.name == "nt" else "rg"
+    platform_dir = _ripgrep_platform_dir()
+    candidates = [
+        config.ripgrep_install_dir / config.ripgrep_version / platform_dir / executable,
+        config.ripgrep_install_dir / config.ripgrep_version / platform_dir / "rg",
+        config.ripgrep_install_dir / platform_dir / executable,
+        config.ripgrep_install_dir / platform_dir / "rg",
+        config.ripgrep_install_dir / executable,
+        config.ripgrep_install_dir / "rg",
+    ]
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        if os.name != "nt" and not os.access(candidate, os.X_OK):
+            continue
+        return candidate
+    return None
+
+
+def _ripgrep_platform_dir() -> str:
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    arch = "arm64" if machine in {"arm64", "aarch64"} else "x64"
+    if system == "windows":
+        return f"win32-{arch}"
+    if system == "darwin":
+        return f"darwin-{arch}"
+    if system == "linux":
+        return f"linux-{arch}"
+    return f"{system or 'unknown'}-{arch}"
+
+
+def _search_files_with_rg(
+    *,
+    rg_path: Path,
+    workspace: CodeWorkspace,
+    root: Path,
+    query: str,
+    glob: str,
+    max_results: int,
+    regex: bool,
+    ignore_case: bool,
+    include_ignored: bool,
+    hidden: bool,
+    timeout_seconds: int,
+) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+    if root.is_file() and not _matches_glob(root, glob):
+        return ({
+            "query": query,
+            "matches": [],
+            "searched_files": 0,
+            "skipped_non_utf8": [],
+            "truncated": False,
+            "engine": "rg",
+        }, None)
+
+    cwd = root if root.is_dir() else root.parent
+    target = "." if root.is_dir() else root.name
+    argv = [
+        str(rg_path),
+        "--json",
+        "--color",
+        "never",
+        "--no-config",
+        "--line-number",
+    ]
+    if not regex:
+        argv.append("--fixed-strings")
+    if ignore_case:
+        argv.append("--ignore-case")
+    if include_ignored:
+        argv.append("--no-ignore")
+    if hidden:
+        argv.append("--hidden")
+    if glob and glob != "*":
+        argv.extend(["--glob", glob])
+    argv.extend(["--", query, target])
+
+    try:
+        proc = subprocess.run(
+            argv,
+            cwd=str(cwd),
+            env=_run_command_env(),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_seconds,
+        )
+    except FileNotFoundError:
+        return None, "ripgrep_not_installed"
+    except subprocess.TimeoutExpired:
+        return None, "ripgrep_timeout"
+    except OSError as exc:
+        return None, f"ripgrep_failed:{type(exc).__name__}"
+
+    if proc.returncode not in {0, 1}:
+        return None, _ripgrep_failure_reason(proc.stderr)
+
+    matches: List[Dict[str, Any]] = []
+    skipped_files: set[str] = set()
+    searched_paths: set[str] = set()
+    truncated = False
+    for raw_line in proc.stdout.splitlines():
+        try:
+            event = json.loads(raw_line)
+        except json.JSONDecodeError:
+            return None, "ripgrep_invalid_json"
+        if event.get("type") != "match":
+            continue
+        data = event.get("data") if isinstance(event.get("data"), dict) else {}
+        path_text = _rg_json_text(data.get("path"))
+        if not path_text:
+            continue
+        resolved = (cwd / path_text).resolve()
+        if not resolved.is_file() or not workspace.is_visible(resolved):
+            continue
+        relative_path = workspace.relative(resolved)
+        searched_paths.add(relative_path)
+        line_text = _rg_json_text(data.get("lines"))
+        if line_text is None:
+            skipped_files.add(relative_path)
+            continue
+        matches.append({
+            "path": relative_path,
+            "line": int(data.get("line_number") or 0),
+            "preview": line_text.strip(),
+        })
+        if len(matches) >= max_results:
+            truncated = True
+            break
+
+    return ({
+        "query": query,
+        "matches": matches,
+        "searched_files": len(searched_paths),
+        "skipped_non_utf8": sorted(skipped_files),
+        "truncated": truncated,
+        "engine": "rg",
+    }, None)
+
+
+def _list_files_with_rg(
+    *,
+    rg_path: Path,
+    workspace: CodeWorkspace,
+    root: Path,
+    pattern: str,
+    recursive: bool,
+    include_ignored: bool,
+    hidden: bool,
+    files_only: bool,
+    max_results: int,
+    timeout_seconds: int,
+) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
     if root.is_file():
-        if fnmatch(root.name, glob):
+        if _matches_glob(root, pattern):
+            item = _list_item(workspace, root)
+            return ({
+                "root": workspace.relative(root),
+                "items": [item] if item else [],
+                "truncated": False,
+                "engine": "rg",
+            }, None)
+        return ({
+            "root": workspace.relative(root),
+            "items": [],
+            "truncated": False,
+            "engine": "rg",
+        }, None)
+
+    argv = [str(rg_path), "--files", "--color", "never", "--no-config"]
+    if include_ignored:
+        argv.append("--no-ignore")
+    if hidden:
+        argv.append("--hidden")
+    if not recursive:
+        argv.extend(["--max-depth", "1"])
+    if pattern and pattern != "*":
+        argv.extend(["--glob", pattern])
+    argv.append(".")
+
+    try:
+        proc = subprocess.run(
+            argv,
+            cwd=str(root),
+            env=_run_command_env(),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_seconds,
+        )
+    except FileNotFoundError:
+        return None, "ripgrep_not_installed"
+    except subprocess.TimeoutExpired:
+        return None, "ripgrep_timeout"
+    except OSError as exc:
+        return None, f"ripgrep_failed:{type(exc).__name__}"
+
+    if proc.returncode not in {0, 1}:
+        return None, _ripgrep_failure_reason(proc.stderr)
+
+    items_by_path: Dict[str, Dict[str, Any]] = {}
+    for raw_line in proc.stdout.splitlines():
+        text = raw_line.strip()
+        if not text:
+            continue
+        resolved = (root / text).resolve()
+        if not resolved.is_file() or not workspace.is_visible(resolved):
+            continue
+        if not files_only:
+            _add_parent_dirs(workspace, root, resolved, pattern, items_by_path)
+        item = _list_item(workspace, resolved)
+        if item:
+            items_by_path[item["path"]] = item
+
+    items = list(items_by_path.values())
+    truncated = len(items) > max_results
+    return ({
+        "root": workspace.relative(root),
+        "items": items[:max_results],
+        "truncated": truncated,
+        "engine": "rg",
+    }, None)
+
+
+def _search_files_python(
+    *,
+    workspace: CodeWorkspace,
+    root: Path,
+    query: str,
+    glob: str,
+    max_results: int,
+    regex: bool,
+    ignore_case: bool,
+    include_ignored: bool,
+    hidden: bool,
+) -> Dict[str, Any]:
+    matches: List[Dict[str, Any]] = []
+    searched_files = 0
+    skipped_files: List[str] = []
+    matcher = _compile_python_matcher(query, regex=regex, ignore_case=ignore_case)
+    ignore_matcher = _GitIgnoreMatcher.for_root(root, workspace)
+
+    for file_path in _iter_search_files(root, glob):
+        resolved = file_path.resolve()
+        if (
+            not resolved.is_file()
+            or not workspace.is_visible(resolved)
+            or _should_skip_python_path(resolved, root, hidden=hidden, include_ignored=include_ignored, ignore_matcher=ignore_matcher)
+        ):
+            continue
+        searched_files += 1
+        try:
+            text = resolved.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            skipped_files.append(workspace.relative(resolved))
+            continue
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            if not matcher(line):
+                continue
+            matches.append({
+                "path": workspace.relative(resolved),
+                "line": line_number,
+                "preview": line.strip(),
+            })
+            if len(matches) >= max_results:
+                return {
+                    "query": query,
+                    "matches": matches,
+                    "searched_files": searched_files,
+                    "skipped_non_utf8": skipped_files,
+                    "truncated": True,
+                    "engine": "python",
+                }
+
+    return {
+        "query": query,
+        "matches": matches,
+        "searched_files": searched_files,
+        "skipped_non_utf8": skipped_files,
+        "truncated": False,
+        "engine": "python",
+    }
+
+
+def _list_files_python(
+    *,
+    workspace: CodeWorkspace,
+    root: Path,
+    pattern: str,
+    recursive: bool,
+    include_ignored: bool,
+    hidden: bool,
+    files_only: bool,
+    max_results: int,
+) -> tuple[List[Dict[str, Any]], bool]:
+    ignore_matcher = _GitIgnoreMatcher.for_root(root, workspace)
+    if root.is_file():
+        if files_only and not root.is_file():
+            return [], False
+        if not _matches_glob(root, pattern):
+            return [], False
+        item = _list_item(workspace, root)
+        return ([item] if item else []), False
+
+    iterator = root.rglob(pattern) if recursive else root.glob(pattern)
+    items: List[Dict[str, Any]] = []
+    for item_path in iterator:
+        resolved = item_path.resolve()
+        if files_only and not resolved.is_file():
+            continue
+        if (
+            not workspace.is_visible(resolved)
+            or _should_skip_python_path(resolved, root, hidden=hidden, include_ignored=include_ignored, ignore_matcher=ignore_matcher)
+        ):
+            continue
+        item = _list_item(workspace, resolved)
+        if item is None:
+            continue
+        items.append(item)
+        if len(items) >= max_results:
+            return items, True
+    return items, False
+
+
+def _iter_search_files(root: Path, glob: str) -> Iterable[Path]:
+    if root.is_file():
+        if _matches_glob(root, glob):
             yield root
         return
-    yield from sorted(root.rglob(glob), key=lambda p: p.as_posix())
+    yield from root.rglob(glob)
+
+
+def _compile_python_matcher(query: str, *, regex: bool, ignore_case: bool):
+    if regex:
+        flags = re.IGNORECASE if ignore_case else 0
+        compiled = re.compile(query, flags)
+        return lambda line: compiled.search(line) is not None
+    if ignore_case:
+        needle = query.lower()
+        return lambda line: needle in line.lower()
+    return lambda line: query in line
+
+
+def _matches_glob(path: Path, pattern: str) -> bool:
+    return fnmatch(path.name, pattern) or fnmatch(path.as_posix(), pattern)
+
+
+def _list_item(workspace: CodeWorkspace, path: Path) -> Optional[Dict[str, Any]]:
+    if not workspace.is_visible(path):
+        return None
+    return {
+        "path": workspace.relative(path),
+        "type": "dir" if path.is_dir() else "file",
+        "size": path.stat().st_size if path.is_file() else None,
+    }
+
+
+def _add_parent_dirs(
+    workspace: CodeWorkspace,
+    root: Path,
+    file_path: Path,
+    pattern: str,
+    items_by_path: Dict[str, Dict[str, Any]],
+) -> None:
+    parent = file_path.parent
+    parents: List[Path] = []
+    while parent != root and _is_relative_to(parent, root):
+        parents.append(parent)
+        parent = parent.parent
+    for directory in reversed(parents):
+        if pattern != "*" and not _matches_glob(directory, pattern):
+            continue
+        item = _list_item(workspace, directory)
+        if item:
+            items_by_path.setdefault(item["path"], item)
+
+
+def _rg_json_text(value: Any) -> Optional[str]:
+    if not isinstance(value, dict):
+        return None
+    text = value.get("text")
+    if isinstance(text, str):
+        return text
+    raw_bytes = value.get("bytes")
+    if isinstance(raw_bytes, str):
+        try:
+            return base64.b64decode(raw_bytes).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return None
+    return None
+
+
+def _ripgrep_failure_reason(stderr: str) -> str:
+    stderr_text = stderr or ""
+    if "regex parse error" in stderr_text.lower():
+        message = " ".join(line.strip() for line in stderr_text.splitlines() if line.strip())
+        return f"ripgrep_invalid_regex:{message[:200]}"
+    message = (stderr or "").strip().splitlines()
+    if message:
+        first_line = message[0][:120].replace("\n", " ")
+        return f"ripgrep_failed:{first_line}"
+    return "ripgrep_failed"
+
+
+def _should_skip_python_path(
+    path: Path,
+    root: Path,
+    *,
+    hidden: bool,
+    include_ignored: bool,
+    ignore_matcher: "_GitIgnoreMatcher",
+) -> bool:
+    if not hidden and _is_hidden_under(path, root):
+        return True
+    if not include_ignored and ignore_matcher.matches(path):
+        return True
+    return False
+
+
+def _is_hidden_under(path: Path, root: Path) -> bool:
+    try:
+        relative = path.resolve().relative_to(root.resolve())
+    except ValueError:
+        relative = Path(path.name)
+    return any(part.startswith(".") for part in relative.parts if part not in {"", "."})
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+class _GitIgnoreMatcher:
+    def __init__(self, root: Path, patterns: List[str]):
+        self.root = root.resolve()
+        self.patterns = patterns
+
+    @classmethod
+    def for_root(cls, root: Path, workspace: CodeWorkspace) -> "_GitIgnoreMatcher":
+        workspace_root = workspace._containing_root(root.resolve()) or workspace.default_root
+        gitignore = workspace_root / ".gitignore"
+        patterns: List[str] = []
+        try:
+            for line in gitignore.read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                patterns.append(stripped)
+        except (OSError, UnicodeDecodeError):
+            pass
+        return cls(workspace_root, patterns)
+
+    def matches(self, path: Path) -> bool:
+        try:
+            rel = path.resolve().relative_to(self.root).as_posix()
+        except ValueError:
+            return False
+        ignored = False
+        for raw_pattern in self.patterns:
+            negated = raw_pattern.startswith("!")
+            pattern = raw_pattern[1:] if negated else raw_pattern
+            if self._matches_pattern(rel, pattern):
+                ignored = not negated
+        return ignored
+
+    def _matches_pattern(self, rel: str, pattern: str) -> bool:
+        pattern = pattern.strip()
+        if not pattern:
+            return False
+        anchored = pattern.startswith("/")
+        pattern = pattern.lstrip("/")
+        directory_only = pattern.endswith("/")
+        pattern = pattern.rstrip("/")
+        if not pattern:
+            return False
+        if directory_only:
+            return rel == pattern or rel.startswith(pattern + "/")
+        if "/" in pattern or anchored:
+            return fnmatch(rel, pattern) or rel.startswith(pattern + "/")
+        parts = rel.split("/")
+        return any(fnmatch(part, pattern) for part in parts) or fnmatch(rel, pattern)
 
 
 def _find_unique_hunk_offset(text_lines: List[str], remove: List[str], path: str, hunk_header: str) -> int:
