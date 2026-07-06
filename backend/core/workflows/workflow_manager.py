@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any, Dict, Optional
 
 from backend.core.agents import SubagentExecutor
+from backend.core.agents.types import AgentDeliveryPolicy
 from backend.core.runs import RunKind, RunManager, RunStatus
 from .js_runner import WorkflowJsRunner
 from .runtime_bridge import WorkflowRuntimeBridge
@@ -46,6 +48,7 @@ class WorkflowManager:
         task_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         self.runner.validate_script(script)
+        delivery_policy = AgentDeliveryPolicy(str(delivery_policy or "auto")).value
         budget = {
             "max_seconds": 600,
             "max_host_calls": 200,
@@ -138,7 +141,7 @@ class WorkflowManager:
             notification_payload = {
                 "status": "complete",
                 "event_type": "workflow_result",
-                "content": "" if result is None else str(result),
+                "content": _result_preview(result),
                 "result": result,
             }
             await self.run_manager.append_event(run_id, notification_payload)
@@ -180,7 +183,7 @@ class WorkflowManager:
         event_payload: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         run = self.run_manager.get_run(run_id)
-        if not run or run.get("parent_run_id"):
+        if not run:
             return None
         if run.get("kind") != RunKind.WORKFLOW.value:
             return None
@@ -188,10 +191,12 @@ class WorkflowManager:
         slash_metadata = metadata.get("slash_command") if isinstance(metadata.get("slash_command"), dict) else {}
         original_slash_input = metadata.get("original_slash_input") or slash_metadata.get("original_input")
         event_payload = dict(event_payload or {})
-        mailbox_message_id = None
+        delivery_policy = str(metadata.get("delivery_policy") or "auto")
+        if delivery_policy == "silent":
+            return None
         if self.mailbox is not None:
             message_type = "result" if source_status == "completed" else "error"
-            mailbox_item = await self.mailbox.publish(
+            await self.mailbox.publish(
                 conversation_id=str(run["conversation_id"]),
                 source_run_id=run_id,
                 source_run_kind=RunKind.WORKFLOW.value,
@@ -205,9 +210,8 @@ class WorkflowManager:
                     "original_slash_input": original_slash_input,
                     "task_id": metadata.get("task_id"),
                 },
-                delivery_policy=str(metadata.get("delivery_policy") or "auto"),
+                delivery_policy=delivery_policy,
             )
-            mailbox_message_id = mailbox_item.message_id
         item = self.run_manager.synthetic_inputs.enqueue(
             kind="task_notification",
             conversation_id=str(run["conversation_id"]),
@@ -223,8 +227,15 @@ class WorkflowManager:
                 "event_type": event_payload.get("event_type"),
                 "delegated_task": metadata.get("delegated_task"),
                 "original_slash_input": original_slash_input,
-                "mailbox_message_id": mailbox_message_id,
                 "task_id": metadata.get("task_id"),
             },
         )
         return item.to_dict()
+
+
+def _result_preview(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False)

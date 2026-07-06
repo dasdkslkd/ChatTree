@@ -13,6 +13,7 @@ from backend.core.prompts.catalog import load_prompt_template
 from backend.core.prompts.types import RuntimePromptContext
 from backend.core.runs import RunKind, RunManager, RunStatus
 from backend.core.tools.security.permissions import normalize_permission_mode
+from .types import AgentDeliveryPolicy
 
 
 DEFAULT_MAX_TOOL_ROUNDS = 500
@@ -53,6 +54,7 @@ class SubagentExecutor:
         context_mode: str = "fresh",
         task_id: Optional[str] = None,
     ) -> Dict[str, Any]:
+        delivery_policy = AgentDeliveryPolicy(str(delivery_policy or "auto")).value
         agent = self.capability_registry.get_agent(agent_name)
         if agent is None:
             raise KeyError(agent_name)
@@ -667,10 +669,11 @@ class SubagentExecutor:
         original_slash_input = metadata.get("original_slash_input") or slash_metadata.get("original_input")
         event_payload = dict(event_payload or {})
         delivery_policy = str(metadata.get("delivery_policy") or "auto")
-        mailbox_message_id = None
+        if delivery_policy == "silent":
+            return None
         if self.mailbox is not None:
             message_type = "result" if source_status == "completed" else "error"
-            mailbox_item = await self.mailbox.publish(
+            await self.mailbox.publish(
                 conversation_id=str(run["conversation_id"]),
                 source_run_id=run_id,
                 source_run_kind=RunKind.SUBAGENT.value,
@@ -687,14 +690,12 @@ class SubagentExecutor:
                 },
                 delivery_policy=delivery_policy,
             )
-            mailbox_message_id = mailbox_item.message_id
         parent_run_id = run.get("parent_run_id")
         parent_run = self.run_manager.get_run(str(parent_run_id)) if parent_run_id else None
         parent_kind = str((parent_run or {}).get("kind") or "")
         agent_name = str(metadata.get("agent_name") or event_payload.get("agent_name") or "")
         if parent_run_id and (
-            delivery_policy == "wait"
-            or parent_kind in {RunKind.WORKFLOW.value, RunKind.WORKFLOW_STEP.value}
+            parent_kind in {RunKind.WORKFLOW.value, RunKind.WORKFLOW_STEP.value}
             or agent_name == "workflow-worker"
         ):
             return None
@@ -714,7 +715,6 @@ class SubagentExecutor:
                 "agent_name": metadata.get("agent_name") or event_payload.get("agent_name"),
                 "delegated_task": metadata.get("delegated_task"),
                 "original_slash_input": original_slash_input,
-                "mailbox_message_id": mailbox_message_id,
                 "task_id": metadata.get("task_id"),
             },
         )

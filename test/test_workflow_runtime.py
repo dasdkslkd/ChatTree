@@ -17,8 +17,10 @@ from backend.api.dependencies import (
     get_workflow_manager,
 )
 from backend.api.routes import runs as runs_route
+from backend.core.agents import AgentMailbox, AgentRuntime
+from backend.core.agents.types import AgentSource
 from backend.core.runs import RunManager
-from backend.core.runs.types import RunKind
+from backend.core.runs.types import RunKind, RunStatus
 from backend.core.workflows import WorkflowManager
 from backend.core.workflows.js_runner import WorkflowJsRunner, WorkflowScriptError
 from backend.core.workflows.runtime_bridge import WorkflowRuntimeBridge
@@ -97,7 +99,7 @@ def test_workflow_runtime_bridge_agent_result_uses_content_only():
             self.appended.append((args, kwargs))
             return None
 
-        async def wait_for_result(self, run_id, **kwargs):
+        async def wait_for_terminal_result(self, run_id, **kwargs):
             return {"status": "completed", "content": "RESULT=0.5"}
 
     async def run():
@@ -117,6 +119,96 @@ def test_workflow_runtime_bridge_agent_result_uses_content_only():
             for args, _ in run_manager.appended
             if len(args) > 1 and args[1].get("event_type") == "workflow_child_event"
         ]
+
+    asyncio.run(run())
+
+
+def test_wait_agent_reads_completed_workflow_result():
+    async def run():
+        run_manager = RunManager()
+
+        class FakeSubagentExecutor:
+            async def start(self, **kwargs):
+                record = await run_manager.create_run(
+                    conversation_id=kwargs["conversation_id"],
+                    kind=RunKind.SUBAGENT,
+                    parent_run_id=kwargs.get("parent_run_id"),
+                    anchor_node_id=kwargs.get("parent_node_id"),
+                    summary=str(kwargs.get("input_data") or "")[:80],
+                    metadata={"agent_name": kwargs.get("agent_name")},
+                )
+                asyncio.create_task(self._complete(record.run_id, str(kwargs.get("input_data") or "")))
+                return {"run_id": record.run_id}
+
+            async def _complete(self, run_id, prompt):
+                await asyncio.sleep(0.01)
+                if "x^2" in prompt:
+                    content = "0.3333333333"
+                elif "和" in prompt:
+                    content = "和 = 0.8333333333"
+                else:
+                    content = "0.5"
+                await run_manager.append_event(
+                    run_id,
+                    {"status": "complete", "event_type": "subagent_result", "content": content},
+                )
+                await run_manager.finish_run(run_id, RunStatus.COMPLETED)
+
+        subagent_executor = FakeSubagentExecutor()
+        workflow = WorkflowManager(
+            run_manager=run_manager,
+            subagent_executor=subagent_executor,
+        )
+        runtime = AgentRuntime(
+            run_manager=run_manager,
+            mailbox=AgentMailbox(),
+            subagent_executor=subagent_executor,
+            workflow_manager=workflow,
+            capability_registry=object(),
+        )
+        chat_run = await run_manager.create_run(
+            conversation_id="conv-workflow-read",
+            kind=RunKind.CHAT,
+            anchor_node_id="node-1",
+            summary="chat",
+        )
+        workflow_run = await workflow.start(
+            conversation_id="conv-workflow-read",
+            script="""
+export default async function workflow(ctx) {
+  const first = await ctx.parallel([
+    () => ctx.agent('计算 x 从 0 到 1 的积分', { agentType: 'workflow-worker' }),
+    () => ctx.agent('计算 x^2 从 0 到 1 的积分', { agentType: 'workflow-worker' })
+  ]);
+  const sum = await ctx.agent(`计算两个结果的和: ${first[0].content}, ${first[1].content}`, { agentType: 'workflow-worker' });
+  return { integral_x: first[0].content, integral_x2: first[1].content, sum: sum.content };
+}
+""",
+            parent_node_id="node-1",
+            parent_run_id=chat_run.run_id,
+            delivery_policy="silent",
+        )
+
+        result = await runtime.wait_agent(
+            source=AgentSource(
+                conversation_id="conv-workflow-read",
+                run_id=chat_run.run_id,
+                run_kind=RunKind.CHAT.value,
+                anchor_node_id="node-1",
+            ),
+            run_ids=[str(workflow_run["run_id"])],
+            timeout_seconds=3,
+        )
+
+        assert result["status"] == "completed"
+        workflow_result = result["runs"][0]
+        assert workflow_result["status"] == "completed"
+        assert workflow_result["message_type"] == "result"
+        assert workflow_result["event_type"] == "workflow_result"
+        assert workflow_result["result"]["integral_x"] == "0.5"
+        assert workflow_result["result"]["integral_x2"] == "0.3333333333"
+        assert workflow_result["result"]["sum"] == "和 = 0.8333333333"
+        assert '"integral_x"' in workflow_result["content"]
 
     asyncio.run(run())
 

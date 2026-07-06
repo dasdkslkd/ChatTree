@@ -227,7 +227,7 @@ class RunManager:
             async with condition:
                 await condition.wait()
 
-    async def wait_for_result(
+    async def wait_for_terminal_result(
         self,
         run_id: str,
         *,
@@ -259,13 +259,23 @@ class RunManager:
                 or RunStatus.COMPLETED.value
             )
             selected = error_payload or result_payload or final_payload or {}
+            message_type = "terminal"
+            if error_payload is not None:
+                message_type = "error"
+            elif result_payload is not None:
+                message_type = "result"
             return {
                 "run_id": run_id,
+                "conversation_id": run.get("conversation_id"),
+                "kind": run.get("kind"),
                 "status": status,
+                "message_type": message_type,
                 "content": selected.get("content") or "",
+                "result": selected.get("result"),
                 "error": selected.get("error"),
                 "event_type": selected.get("event_type") or selected.get("type"),
                 "event": deepcopy(selected),
+                "finished_at": run.get("finished_at") or (final_payload or {}).get("finished_at"),
             }
 
         if timeout is not None:

@@ -142,7 +142,7 @@ def test_spawn_agent_schema_names_delivery_and_forbids_simulation():
 
     assert "Do not simulate a subagent" in schema["description"]
     assert properties["context_mode"]["enum"] == ["fresh", "fork"]
-    assert properties["delivery"]["enum"] == ["auto", "wait", "notify", "both"]
+    assert properties["delivery"]["enum"] == ["auto", "notify", "silent"]
     for role in ["explorer", "planner", "implementer", "reviewer", "verifier", "workflow-worker"]:
         assert role in properties["agent_name"]["description"]
 

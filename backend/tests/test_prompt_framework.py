@@ -1307,7 +1307,7 @@ class SyntheticTaskNotificationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(run_manager.synthetic_inputs.list_pending("conversation-1"), [])
 
-    async def test_parented_wait_subagent_publishes_mailbox_without_synthetic_notification(self):
+    async def test_parented_silent_subagent_suppresses_notifications(self):
         run_manager = RunManager()
         mailbox = AgentMailbox()
         executor = self._executor(run_manager, self.FakeProvider(), mailbox=mailbox)
@@ -1317,7 +1317,7 @@ class SyntheticTaskNotificationTests(unittest.IsolatedAsyncioTestCase):
             anchor_node_id="node-1",
             parent_run_id="chat-1",
             summary="implementer: inspect",
-            metadata={"agent_name": "implementer", "delivery_policy": "wait"},
+            metadata={"agent_name": "implementer", "delivery_policy": "silent"},
         )
 
         await executor._produce(
@@ -1333,14 +1333,9 @@ class SyntheticTaskNotificationTests(unittest.IsolatedAsyncioTestCase):
             workspace=None,
         )
 
-        messages = await mailbox.wait_for_run(
-            conversation_id="conversation-1",
-            run_id=run.run_id,
-            timeout_seconds=0.01,
-        )
+        messages = await mailbox.list_pending_notifications("conversation-1")
         self.assertEqual(run_manager.synthetic_inputs.list_pending("conversation-1"), [])
-        self.assertEqual(len(messages), 1)
-        self.assertEqual(messages[0]["content"], "subagent answer")
+        self.assertEqual(messages, [])
 
     async def test_parented_auto_subagent_keeps_mailbox_and_synthetic_notification(self):
         run_manager = RunManager()
@@ -1374,17 +1369,12 @@ class SyntheticTaskNotificationTests(unittest.IsolatedAsyncioTestCase):
             workspace=None,
         )
 
-        messages = await mailbox.wait_for_run(
-            conversation_id="conversation-1",
-            run_id=run.run_id,
-            timeout_seconds=0.01,
-        )
+        messages = await mailbox.list_pending_notifications("conversation-1")
         pending = run_manager.synthetic_inputs.list_pending("conversation-1")
         self.assertEqual(len(messages), 1)
         self.assertEqual(messages[0]["content"], "subagent answer")
         self.assertEqual(len(pending), 1)
         self.assertEqual(pending[0]["source_run_id"], run.run_id)
-        self.assertEqual(pending[0]["metadata"]["mailbox_message_id"], messages[0]["message_id"])
 
     async def test_workflow_completion_enqueues_task_notification(self):
         class FakeRunner:
@@ -1855,27 +1845,16 @@ class SyntheticInputRouteTests(unittest.TestCase):
         self.assertEqual(chat_runs[0]["metadata"]["origin"], "task_notification")
         self.assertIn("subagent result", chat_manager.contents[0])
 
-    def test_synthetic_followup_scheduler_skips_integrated_mailbox_notification(self):
+    def test_synthetic_followup_scheduler_drains_task_notification(self):
         from backend.api.routes.messages import SyntheticFollowupScheduler
 
         async def scenario():
             run_manager = RunManager()
-            mailbox = AgentMailbox()
-            run_manager.agent_mailbox = mailbox
             chat_manager = self.FakeChatManager()
             scheduler = SyntheticFollowupScheduler(
                 chat_manager=chat_manager,
                 run_manager=run_manager,
             )
-            mailbox_item = await mailbox.publish(
-                conversation_id="conversation-1",
-                source_run_id="run-1",
-                source_run_kind="subagent",
-                message_type="result",
-                content="subagent result",
-                delivery_policy="both",
-            )
-            await mailbox.mark_integrated("conversation-1", mailbox_item.message_id)
             run_manager.synthetic_inputs.enqueue(
                 kind="task_notification",
                 conversation_id="conversation-1",
@@ -1888,21 +1867,14 @@ class SyntheticInputRouteTests(unittest.TestCase):
                 metadata={
                     "origin": "task_notification",
                     "source_status": "completed",
-                    "mailbox_message_id": mailbox_item.message_id,
                 },
             )
 
             await scheduler.drain("conversation-1")
+            await asyncio.sleep(0.05)
 
             self.assertEqual(run_manager.synthetic_inputs.list_pending("conversation-1"), [])
-            self.assertEqual(chat_manager.contents, [])
-            self.assertEqual(
-                [
-                    run for run in run_manager.list_runs("conversation-1")
-                    if run["kind"] == "chat"
-                ],
-                [],
-            )
+            self.assertEqual(chat_manager.contents, ["<task-notification>\n{\n  \"kind\": \"task_notification\",\n  \"summary\": \"subagent completed\",\n  \"source_run_id\": \"run-1\",\n  \"source_run_kind\": \"subagent\",\n  \"task_id\": null,\n  \"source_status\": \"completed\",\n  \"delegated_task\": null,\n  \"original_slash_input\": null,\n  \"content\": \"subagent result\"\n}\n</task-notification>"])
 
         asyncio.run(scenario())
 
@@ -2623,7 +2595,7 @@ class WorkflowRuntimeBridgeTests(unittest.IsolatedAsyncioTestCase):
             async def append_event(self, *args, **kwargs):
                 return None
 
-            async def wait_for_result(self, run_id, **kwargs):
+            async def wait_for_terminal_result(self, run_id, **kwargs):
                 return {"run_id": run_id, "status": "completed", "content": ""}
 
         subagent_executor = FakeSubagentExecutor()
@@ -2651,7 +2623,7 @@ class WorkflowRuntimeBridgeTests(unittest.IsolatedAsyncioTestCase):
             async def append_event(self, *args, **kwargs):
                 return None
 
-            async def wait_for_result(self, run_id, **kwargs):
+            async def wait_for_terminal_result(self, run_id, **kwargs):
                 return {"run_id": run_id, "status": "completed", "content": ""}
 
         subagent_executor = FakeSubagentExecutor()
@@ -2688,7 +2660,7 @@ class WorkflowRuntimeBridgeTests(unittest.IsolatedAsyncioTestCase):
             async def append_event(self, *args, **kwargs):
                 return None
 
-            async def wait_for_result(self, run_id, **kwargs):
+            async def wait_for_terminal_result(self, run_id, **kwargs):
                 await asyncio.Event().wait()
 
         subagent_executor = FakeSubagentExecutor()

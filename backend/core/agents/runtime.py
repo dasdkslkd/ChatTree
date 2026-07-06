@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, Dict, Optional
 
@@ -32,7 +33,6 @@ class AgentRuntime:
         self.workflow_manager = workflow_manager
         self.capability_registry = capability_registry
         self.task_ledger = task_ledger
-        self.run_manager.add_finish_listener(self._handle_run_finished)
 
     async def spawn_agent(
         self,
@@ -203,27 +203,53 @@ class AgentRuntime:
         run_ids: list[str],
         timeout_seconds: Optional[float] = None,
     ) -> Dict[str, Any]:
-        runs = []
-        for run_id in run_ids:
-            messages = await self.mailbox.wait_for_run(
-                conversation_id=source.conversation_id,
-                run_id=run_id,
-                timeout_seconds=timeout_seconds,
-            )
-            run = self.run_manager.get_run(run_id) or {}
-            if not messages and run.get("status") in {"completed", "failed", "cancelled"}:
-                messages = self._result_messages_from_run_journal(source.conversation_id, run_id)
-            for message in messages:
-                message_id = str(message.get("message_id") or "")
-                if message_id:
-                    await self.mailbox.mark_integrated(source.conversation_id, message_id)
-            runs.append({
-                "run_id": run_id,
-                "status": run.get("status") or ("completed" if messages else "timeout"),
-                "agent_name": (run.get("metadata") or {}).get("agent_name"),
-                "messages": messages,
-            })
-        return {"status": "completed" if any(run["messages"] for run in runs) else "timeout", "runs": runs}
+        async def wait_one(run_id: str) -> Dict[str, Any]:
+            run = self.run_manager.get_run(run_id)
+            if not run:
+                return {
+                    "run_id": run_id,
+                    "status": "missing",
+                    "message_type": "error",
+                    "content": "",
+                    "result": None,
+                    "error": "run not found",
+                }
+            try:
+                terminal = await self.run_manager.wait_for_terminal_result(
+                    run_id,
+                    result_event_types={"subagent_result", "workflow_result"},
+                    error_event_types={"subagent_error", "workflow_error"},
+                    timeout=timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                current = self.run_manager.get_run(run_id) or run
+                return {
+                    "run_id": run_id,
+                    "kind": current.get("kind"),
+                    "status": current.get("status") or "timeout",
+                    "agent_name": (current.get("metadata") or {}).get("agent_name"),
+                    "message_type": "timeout",
+                    "content": "",
+                    "result": None,
+                    "error": None,
+                    "timed_out": True,
+                }
+            current = self.run_manager.get_run(run_id) or run
+            terminal["agent_name"] = (current.get("metadata") or {}).get("agent_name")
+            terminal["task_id"] = (current.get("metadata") or {}).get("task_id")
+            terminal["timed_out"] = False
+            return terminal
+
+        runs = list(await asyncio.gather(*(wait_one(str(run_id)) for run_id in run_ids)))
+        if any(run.get("timed_out") for run in runs):
+            status = "timeout"
+        elif any(run.get("status") == "missing" for run in runs):
+            status = "error"
+        elif all(run.get("message_type") != "error" for run in runs):
+            status = "completed"
+        else:
+            status = "completed"
+        return {"status": status, "runs": runs}
 
     async def list_agents(
         self,
@@ -251,7 +277,7 @@ class AgentRuntime:
             message_type="user_input",
             content=message,
             metadata={"from_run_id": source.run_id},
-            delivery_policy="wait",
+            delivery_policy="silent",
         )
         return {"message_id": item.message_id, "status": "queued"}
 
@@ -290,51 +316,3 @@ class AgentRuntime:
         if kind == RunKind.WORKFLOW.value and self.workflow_manager is not None:
             return bool(await self.workflow_manager.stop(run_id))
         return bool(await self.run_manager.request_stop(run_id))
-
-    def _result_messages_from_run_journal(self, conversation_id: str, run_id: str) -> list[Dict[str, Any]]:
-        messages: list[Dict[str, Any]] = []
-        try:
-            events = self.run_manager.read_events(run_id, 0)
-        except Exception:
-            events = []
-        for payload in events:
-            payload = dict(payload)
-            event_type = str(payload.get("event_type") or "")
-            if event_type in {"subagent_result", "workflow_result"}:
-                messages.append({
-                    "conversation_id": conversation_id,
-                    "source_run_id": run_id,
-                    "source_run_kind": payload.get("kind") or (self.run_manager.get_run(run_id) or {}).get("kind"),
-                    "message_type": "result",
-                    "content": payload.get("content") or "",
-                    "metadata": {
-                        "origin": "run_journal",
-                        "event_type": event_type,
-                        "agent_name": payload.get("agent_name"),
-                    },
-                    "created_at": payload.get("created_at"),
-                })
-            elif event_type in {"subagent_error", "workflow_error"}:
-                messages.append({
-                    "conversation_id": conversation_id,
-                    "source_run_id": run_id,
-                    "source_run_kind": payload.get("kind") or (self.run_manager.get_run(run_id) or {}).get("kind"),
-                    "message_type": "error",
-                    "content": payload.get("error") or payload.get("content") or "",
-                    "metadata": {
-                        "origin": "run_journal",
-                        "event_type": event_type,
-                        "agent_name": payload.get("agent_name"),
-                    },
-                    "created_at": payload.get("created_at"),
-                })
-        return messages
-
-    def _handle_run_finished(self, run: Dict[str, Any]) -> None:
-        if run.get("kind") not in {RunKind.SUBAGENT.value, RunKind.WORKFLOW.value}:
-            return
-        # Executors still enqueue legacy synthetic inputs; mailbox publishing is
-        # handled there once the runtime is wired in a follow-up patch. This
-        # listener intentionally stays side-effect-free for now to avoid
-        # duplicate result publication from event replay.
-        return

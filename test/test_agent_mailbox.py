@@ -9,7 +9,7 @@ from backend.core.persistence.run_repository import SQLiteRunRepository
 from backend.core.runs import RunKind, RunManager, RunStatus
 
 
-async def _publish_and_wait_marks_wait_delivered_without_ack():
+async def _publish_notify_message_enqueues_pending_notification():
     mailbox = AgentMailbox()
     message = await mailbox.publish(
         conversation_id="conversation-1",
@@ -17,23 +17,18 @@ async def _publish_and_wait_marks_wait_delivered_without_ack():
         source_run_kind="subagent",
         message_type="result",
         content="done",
-        delivery_policy="both",
+        delivery_policy="notify",
     )
 
-    messages = await mailbox.wait_for_run(
-        conversation_id="conversation-1",
-        run_id="run-1",
-        timeout_seconds=0.01,
-    )
+    pending = await mailbox.list_pending_notifications("conversation-1")
 
-    assert [item["message_id"] for item in messages] == [message.message_id]
-    assert messages[0]["wait_delivered_at"] is not None
-    assert messages[0]["integrated_at"] is None
-    assert messages[0]["acknowledged_at"] is None
+    assert [item["message_id"] for item in pending] == [message.message_id]
+    assert pending[0]["integrated_at"] is None
+    assert pending[0]["acknowledged_at"] is None
 
 
-def test_publish_and_wait_marks_wait_delivered_without_ack():
-    asyncio.run(_publish_and_wait_marks_wait_delivered_without_ack())
+def test_publish_notify_message_enqueues_pending_notification():
+    asyncio.run(_publish_notify_message_enqueues_pending_notification())
 
 
 async def _claim_release_notification_preserves_retry():
@@ -113,7 +108,7 @@ def test_duplicate_publish_returns_existing_message():
     asyncio.run(_duplicate_publish_returns_existing_message())
 
 
-async def _wait_agent_falls_back_to_terminal_run_journal():
+async def _wait_agent_reads_terminal_subagent_result():
     run_manager = RunManager()
     mailbox = AgentMailbox()
     runtime = AgentRuntime(
@@ -148,12 +143,13 @@ async def _wait_agent_falls_back_to_terminal_run_journal():
     )
 
     assert result["status"] == "completed"
-    assert result["runs"][0]["messages"][0]["content"] == "OK"
-    assert result["runs"][0]["messages"][0]["metadata"]["origin"] == "run_journal"
+    assert result["runs"][0]["content"] == "OK"
+    assert result["runs"][0]["message_type"] == "result"
+    assert result["runs"][0]["event_type"] == "subagent_result"
 
 
-def test_wait_agent_falls_back_to_terminal_run_journal():
-    asyncio.run(_wait_agent_falls_back_to_terminal_run_journal())
+def test_wait_agent_reads_terminal_subagent_result():
+    asyncio.run(_wait_agent_reads_terminal_subagent_result())
 
 
 async def _wait_agent_reads_workflow_error_from_repository_events(tmp_path):
@@ -202,9 +198,10 @@ async def _wait_agent_reads_workflow_error_from_repository_events(tmp_path):
 
     assert result["status"] == "completed"
     assert result["runs"][0]["status"] == "failed"
-    assert result["runs"][0]["messages"][0]["message_type"] == "error"
-    assert result["runs"][0]["messages"][0]["content"] == "workflow boom"
-    assert result["runs"][0]["messages"][0]["metadata"]["event_type"] == "workflow_error"
+    assert result["runs"][0]["message_type"] == "error"
+    assert result["runs"][0]["content"] == ""
+    assert result["runs"][0]["error"] == "workflow boom"
+    assert result["runs"][0]["event_type"] == "workflow_error"
 
 
 def test_wait_agent_reads_workflow_error_from_repository_events(tmp_path):

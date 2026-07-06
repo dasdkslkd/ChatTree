@@ -122,10 +122,14 @@ class CommandExecutor:
         return run.to_dict()
 
     async def wait(self, run_id: str, timeout: Optional[float] = None) -> None:
-        task = self._tasks.get(run_id)
-        if task is None:
+        if self.run_manager.get_run(run_id) is None:
             return
-        await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+        await self.run_manager.wait_for_terminal_result(
+            run_id,
+            result_event_types={"command_exited", "command_stopped"},
+            error_event_types={"command_error"},
+            timeout=timeout,
+        )
 
     async def mark_observed(
         self,

@@ -61,7 +61,7 @@ def test_run_journal_stores_events_under_conversation_runs_dir(tmp_path):
     asyncio.run(run())
 
 
-def test_run_manager_wait_for_result_returns_terminal_result(tmp_path):
+def test_run_manager_wait_for_terminal_result_returns_terminal_result(tmp_path):
     async def run():
         manager = RunManager(RunJournal(tmp_path))
         record = await manager.create_run(conversation_id="conv", kind=RunKind.SUBAGENT)
@@ -76,7 +76,7 @@ def test_run_manager_wait_for_result_returns_terminal_result(tmp_path):
             await manager.finish_run(record.run_id, RunStatus.COMPLETED)
 
         task = asyncio.create_task(produce_result())
-        result = await manager.wait_for_result(
+        result = await manager.wait_for_terminal_result(
             record.run_id,
             result_event_types={"subagent_result"},
             error_event_types={"subagent_error"},
@@ -86,6 +86,7 @@ def test_run_manager_wait_for_result_returns_terminal_result(tmp_path):
 
         assert result["run_id"] == record.run_id
         assert result["status"] == RunStatus.COMPLETED.value
+        assert result["message_type"] == "result"
         assert result["event_type"] == "subagent_result"
         assert result["content"] == "OK"
 

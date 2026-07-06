@@ -108,8 +108,8 @@ class SpawnAgentTool(AgentRuntimeTool):
                 },
                 "delivery": {
                     "type": "string",
-                    "enum": ["auto", "wait", "notify", "both"],
-                    "description": "auto lets the runtime choose; wait means call wait_agent; notify delivers completion asynchronously.",
+                    "enum": ["auto", "notify", "silent"],
+                    "description": "auto lets the runtime choose notification behavior; notify delivers completion asynchronously; silent suppresses notifications.",
                 },
                 "task_id": {
                     "type": "string",
@@ -157,7 +157,7 @@ class WaitAgentTool(AgentRuntimeTool):
 
     @property
     def description(self) -> str:
-        return "Wait for one or more spawned ChatTree agents and read their mailbox results without deleting async notifications."
+        return "Wait for one or more spawned ChatTree agent/workflow runs and read their terminal run results."
 
     def parameters_schema(self) -> Dict[str, Any]:
         return {

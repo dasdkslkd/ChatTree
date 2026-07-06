@@ -11,19 +11,12 @@ from .types import AgentDeliveryPolicy, AgentMailboxMessage, AgentMailboxMessage
 
 
 class AgentMailbox:
-    """Delivery state for agent wait/notification channels.
-
-    The mailbox is intentionally small and in-memory for the current runtime
-    shape. It gives wait_agent and task notifications one shared message and
-    integration state so reading through one channel does not delete the other.
-    """
+    """In-memory notification delivery state for agent results."""
 
     def __init__(self) -> None:
         self._messages: Dict[str, AgentMailboxMessage] = {}
         self._by_conversation: Dict[str, list[str]] = {}
-        self._by_source_run: Dict[str, list[str]] = {}
         self._dedupe: Dict[tuple[str, str, str], str] = {}
-        self._conditions: Dict[str, asyncio.Condition] = {}
         self._pending_listener: Optional[Callable[[str], None]] = None
         self._lock = asyncio.Lock()
 
@@ -67,36 +60,9 @@ class AgentMailbox:
             self._messages[message_id] = message
             self._dedupe[dedupe_key] = message_id
             self._by_conversation.setdefault(conversation_id, []).append(message_id)
-            self._by_source_run.setdefault(source_run_id, []).append(message_id)
-            condition = self._conditions.setdefault(source_run_id, asyncio.Condition())
-        async with condition:
-            condition.notify_all()
         if notify and self._pending_listener is not None:
             self._pending_listener(conversation_id)
         return deepcopy(message)
-
-    async def wait_for_run(
-        self,
-        *,
-        conversation_id: str,
-        run_id: str,
-        timeout_seconds: Optional[float],
-        include_errors: bool = True,
-    ) -> list[dict[str, Any]]:
-        deadline = None if timeout_seconds is None else time() + max(0, timeout_seconds)
-        while True:
-            messages = await self._deliverable_wait_messages(conversation_id, run_id, include_errors)
-            if messages:
-                return messages
-            wait_seconds = None if deadline is None else max(0, deadline - time())
-            if wait_seconds == 0:
-                return []
-            condition = self._conditions.setdefault(run_id, asyncio.Condition())
-            try:
-                async with condition:
-                    await asyncio.wait_for(condition.wait(), timeout=wait_seconds)
-            except asyncio.TimeoutError:
-                return []
 
     async def list_pending_notifications(self, conversation_id: str) -> list[dict[str, Any]]:
         async with self._lock:
@@ -153,27 +119,6 @@ class AgentMailbox:
             message = self._messages.get(message_id)
             return bool(message and message.conversation_id == conversation_id and message.integrated_at is not None)
 
-    async def _deliverable_wait_messages(
-        self,
-        conversation_id: str,
-        run_id: str,
-        include_errors: bool,
-    ) -> list[dict[str, Any]]:
-        async with self._lock:
-            result: list[dict[str, Any]] = []
-            for message_id in self._by_source_run.get(run_id, []):
-                message = self._messages.get(message_id)
-                if not message or message.conversation_id != conversation_id:
-                    continue
-                if message.message_type == AgentMailboxMessageType.ERROR and not include_errors:
-                    continue
-                if message.message_type not in {AgentMailboxMessageType.RESULT, AgentMailboxMessageType.ERROR}:
-                    continue
-                if message.wait_delivered_at is None:
-                    message.wait_delivered_at = time()
-                result.append(deepcopy(message).to_dict())
-            return result
-
     def _conversation_messages_locked(self, conversation_id: str) -> list[AgentMailboxMessage]:
         return [
             self._messages[message_id]
@@ -197,7 +142,6 @@ class AgentMailbox:
             and message.delivery_policy in {
                 AgentDeliveryPolicy.AUTO,
                 AgentDeliveryPolicy.NOTIFY,
-                AgentDeliveryPolicy.BOTH,
             }
         )
 

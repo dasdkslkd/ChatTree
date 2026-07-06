@@ -19,9 +19,8 @@ class AgentContextMode(str, Enum):
 
 class AgentDeliveryPolicy(str, Enum):
     AUTO = "auto"
-    WAIT = "wait"
     NOTIFY = "notify"
-    BOTH = "both"
+    SILENT = "silent"
 
 
 class AgentMailboxMessageType(str, Enum):
@@ -60,7 +59,6 @@ class AgentMailboxMessage:
     metadata: Dict[str, Any] = field(default_factory=dict)
     delivery_policy: AgentDeliveryPolicy = AgentDeliveryPolicy.AUTO
     created_at: float = field(default_factory=time)
-    wait_delivered_at: Optional[float] = None
     notification_enqueued_at: Optional[float] = None
     notification_delivered_at: Optional[float] = None
     integrated_at: Optional[float] = None

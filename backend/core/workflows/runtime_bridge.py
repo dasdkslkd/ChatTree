@@ -76,7 +76,7 @@ class WorkflowRuntimeBridge:
                     agent_name=agent_name,
                     task=input_data if isinstance(input_data, str) else str(input_data),
                     context_mode=str(options.get("context_mode") or "fresh"),
-                    delivery_policy=str(options.get("delivery") or "wait"),
+                    delivery_policy=str(options.get("delivery") or "silent"),
                     parent_run_id=self.workflow_run_id,
                     provider_id=options.get("provider_id"),
                     model_id=options.get("model_id"),
@@ -94,11 +94,11 @@ class WorkflowRuntimeBridge:
                     model_id=options.get("model_id"),
                     permission_mode=options.get("permission_mode") or self.permission_mode,
                     workspace=options.get("workspace"),
-                    delivery_policy=str(options.get("delivery") or "wait"),
+                    delivery_policy=str(options.get("delivery") or "silent"),
                 )
             run_id = str(run["run_id"])
             try:
-                result = await self.run_manager.wait_for_result(
+                result = await self.run_manager.wait_for_terminal_result(
                     run_id,
                     result_event_types={"subagent_result"},
                     error_event_types={"subagent_error"},
