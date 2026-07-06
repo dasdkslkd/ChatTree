@@ -24,6 +24,7 @@ const {
   CONVERSATION_ACTIVE_STREAM_IDLE_LOOKUPS,
   getConversationActiveStreamLookupLimit,
   getActiveStreamPollingDelay,
+  shouldProbeBackendScheduledFollowup,
 } = require(path.join(__dirname, '../src/utils/activeStreamPolling.ts'));
 
 function testUsesFastPollingWhenStreamsAreActive() {
@@ -53,12 +54,32 @@ function testAllowsRetryWhenSelectedConversationHasActiveHint() {
   );
 }
 
+function testOnlyCompletedStreamsProbeForScheduledFollowup() {
+  assert.equal(
+    shouldProbeBackendScheduledFollowup({ finishStatus: 'completed', hasQueuedFollowup: false }),
+    true,
+  );
+  assert.equal(
+    shouldProbeBackendScheduledFollowup({ finishStatus: 'stopped', hasQueuedFollowup: false }),
+    false,
+  );
+  assert.equal(
+    shouldProbeBackendScheduledFollowup({ finishStatus: 'error', hasQueuedFollowup: false }),
+    false,
+  );
+  assert.equal(
+    shouldProbeBackendScheduledFollowup({ finishStatus: 'completed', hasQueuedFollowup: true }),
+    false,
+  );
+}
+
 function main() {
   testUsesFastPollingWhenStreamsAreActive();
   testUsesSlowPollingWhenIdle();
   testPausesPollingWhenDocumentIsHidden();
   testUsesThreeShortLookupsWithoutActiveHint();
   testAllowsRetryWhenSelectedConversationHasActiveHint();
+  testOnlyCompletedStreamsProbeForScheduledFollowup();
   console.log('activeStreamPolling tests passed');
 }
 

@@ -20,3 +20,10 @@ export function getConversationActiveStreamLookupLimit(options: {
     ? CONVERSATION_ACTIVE_STREAM_HINTED_LOOKUPS
     : CONVERSATION_ACTIVE_STREAM_IDLE_LOOKUPS;
 }
+
+export function shouldProbeBackendScheduledFollowup(options: {
+  finishStatus: 'completed' | 'error' | 'stopped';
+  hasQueuedFollowup: boolean;
+}): boolean {
+  return options.finishStatus === 'completed' && !options.hasQueuedFollowup;
+}

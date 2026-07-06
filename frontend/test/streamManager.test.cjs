@@ -972,6 +972,32 @@ async function testStoppingStatusIsTrackedExplicitly() {
   });
 }
 
+async function testStoppingStreamFinishesAsStopped() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    const finishes = [];
+    runsApi.attach = controlled.stream;
+    const unsubscribe = manager.onFinish((info) => finishes.push(info));
+    const running = manager.resumeStream('conv-1', null, 'run-stopping-final', 0, 'node-1', 'subagent');
+
+    await controlled.push({
+      type: 'run_stop_requested',
+      run_id: 'run-stopping-final',
+      conversation_id: 'conv-1',
+      kind: 'subagent',
+      status: 'stopping',
+    });
+    await controlled.close();
+    await runTimersUntil(running);
+    unsubscribe();
+
+    const state = manager.getConversationStates('conv-1')[0];
+    assert.equal(state.status, 'stopped');
+    assert.equal(finishes.length, 1);
+    assert.equal(finishes[0].status, 'stopped');
+  });
+}
+
 async function testRunFinishedFailedMapsToErrorState() {
   await withManager(async (manager) => {
     const controlled = createControlledStream();
@@ -1191,6 +1217,7 @@ async function main() {
   await testStopUsesServerRunIdBeforeTargetNodeArrives();
   await testStopUsesRunsApiForAnyServerRunId();
   await testStoppingStatusIsTrackedExplicitly();
+  await testStoppingStreamFinishesAsStopped();
   await testRunFinishedFailedMapsToErrorState();
   await testRunFinishedCancelledMapsToStoppedState();
   await testCompletedDirectResponseCanBeArchivedAndRemovedFromActiveRuns();

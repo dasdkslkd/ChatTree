@@ -141,6 +141,7 @@ import { createLiveAssistantProcessItem } from '../utils/assistantTimeline';
 import {
   getActiveStreamPollingDelay,
   getConversationActiveStreamLookupLimit,
+  shouldProbeBackendScheduledFollowup,
 } from '../utils/activeStreamPolling';
 import { ChatInput } from '../components/ChatInput';
 import { TranscriptList } from '../components/transcript/TranscriptList';
@@ -2283,7 +2284,7 @@ export default function ChatPage() {
   // 从后端刷新真实消息，再清理 StreamManager 中该对话的临时状态。
   // 不依赖当前查看的是哪个对话，因此切走的对话流完成也能正确落地。
   useEffect(() => {
-    const unsubscribe = streamManager.onFinish(async ({ conversationId: finishedId, runId, drained, nodeId, targetNodeId, controller }) => {
+    const unsubscribe = streamManager.onFinish(async ({ conversationId: finishedId, runId, status, drained, nodeId, targetNodeId, controller }) => {
       const finishedRun = streamManager.getConversationStates(finishedId).find((state) => state.runId === runId);
       const shouldPatchMainConversation = finishedRun ? shouldPatchRunIntoMainConversation(finishedRun) : true;
       const streamMessage = shouldPatchMainConversation && finishedRun ? createAssistantMessageFromStream(finishedRun) : null;
@@ -2306,7 +2307,9 @@ export default function ChatPage() {
         await refreshTranscript(finishedId, awaitNodeId ?? null);
         void syncSelectedConversationSideRuns(finishedId);
         const sentQueued = await sendNextQueuedMessage(finishedId);
-        if (!sentQueued) void syncBackendScheduledFollowup(finishedId);
+        if (shouldProbeBackendScheduledFollowup({ finishStatus: status, hasQueuedFollowup: sentQueued })) {
+          void syncBackendScheduledFollowup(finishedId);
+        }
         return;
       }
 
@@ -2323,7 +2326,9 @@ export default function ChatPage() {
             await refreshTranscript(finishedId, awaitNodeId ?? null);
             await loadConversations();
             void syncSelectedConversationSideRuns(finishedId);
-            void syncBackendScheduledFollowup(finishedId);
+            if (shouldProbeBackendScheduledFollowup({ finishStatus: status, hasQueuedFollowup: false })) {
+              void syncBackendScheduledFollowup(finishedId);
+            }
           })();
         });
         return;
@@ -2360,7 +2365,9 @@ export default function ChatPage() {
       await loadConversations();
       void syncSelectedConversationSideRuns(finishedId);
       const sentQueued = await sendNextQueuedMessage(finishedId);
-      if (!sentQueued) void syncBackendScheduledFollowup(finishedId);
+      if (shouldProbeBackendScheduledFollowup({ finishStatus: status, hasQueuedFollowup: sentQueued })) {
+        void syncBackendScheduledFollowup(finishedId);
+      }
     });
     return unsubscribe;
   }, [

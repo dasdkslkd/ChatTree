@@ -911,9 +911,14 @@ export class StreamManager {
       this.durationTimers.delete(runId);
       const state = this.streams.get(runId);
       if (state) {
+        const finalStatus = state.status === 'streaming'
+          ? finishStatus
+          : state.status === 'stopping'
+            ? 'stopped'
+            : state.status;
         const finalState = {
           ...state,
-          status: state.status === 'streaming' ? finishStatus : state.status,
+          status: finalStatus,
           duration: Date.now() - start,
           reasoningActive: false,
         };
