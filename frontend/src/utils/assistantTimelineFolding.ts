@@ -114,8 +114,13 @@ export function getTimelineFoldState<T extends TimelineFoldBlock>(
     allowProcessOnly?: boolean;
   },
 ): TimelineFoldState<T> {
-  const processBlocks = blocks.filter((block) => block.type !== 'content');
-  const contentBlocks = blocks.filter((block) => block.type === 'content');
+  const finalContentKeySet = options.finalContentKeys === undefined
+    ? null
+    : new Set(options.finalContentKeys);
+  const isFinalContentBlock = (block: T) =>
+    block.type === 'content' && (finalContentKeySet === null || finalContentKeySet.has(block.key));
+  const processBlocks = blocks.filter((block) => !isFinalContentBlock(block));
+  const contentBlocks = blocks.filter(isFinalContentBlock);
   const canFoldProcess = processBlocks.length > 0 && (contentBlocks.length > 0 || options.allowProcessOnly === true);
 
   if (!canFoldProcess) {

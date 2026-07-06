@@ -194,6 +194,32 @@ function getTranscriptItemNodeId(item: TranscriptItem): string | null {
   return item.node_id || item.anchor_node_id || null;
 }
 
+type TranscriptScrollTarget = {
+  messageId?: string | null;
+  nodeId?: string | null;
+  legacyIndex?: number | null;
+};
+
+function findTranscriptAnchorElement(
+  container: HTMLElement | null,
+  target: TranscriptScrollTarget,
+): HTMLElement | null {
+  const anchors = Array.from(
+    container?.querySelectorAll<HTMLElement>('[data-transcript-message-id], [data-transcript-node-id]') ?? [],
+  );
+  if (target.messageId) {
+    const byMessage = anchors.find((element) => element.dataset.transcriptMessageId === target.messageId);
+    if (byMessage) return byMessage;
+  }
+  if (target.nodeId) {
+    const byNode = anchors.find((element) => element.dataset.transcriptNodeId === target.nodeId);
+    if (byNode) return byNode;
+  }
+  return target.legacyIndex === undefined || target.legacyIndex === null
+    ? null
+    : document.getElementById(`message-${target.legacyIndex}`);
+}
+
 function getEditableUserMessageParentNodeId(item: TranscriptItem, messages: Message[]): string | null {
   const nodeId = getTranscriptItemNodeId(item);
   if (!nodeId) return null;
@@ -2568,7 +2594,10 @@ export default function ChatPage() {
     const idx = messages.findIndex((m) => m.node_id === pendingScrollNodeId);
     if (idx === -1) return;
     const tryScroll = () => {
-      const el = document.getElementById('message-' + idx);
+      const el = findTranscriptAnchorElement(historyRef.current, {
+        nodeId: pendingScrollNodeId,
+        legacyIndex: idx,
+      });
       if (el) {
         el.scrollIntoView({ behavior: 'smooth', block: 'start' });
         clearPendingScroll();
@@ -2776,8 +2805,8 @@ export default function ChatPage() {
     });
   };
 
-  const handleJumpToMessage = (index: number) => {
-    const element = document.getElementById(`message-${index}`);
+  const handleJumpToMessage = (target: TranscriptScrollTarget) => {
+    const element = findTranscriptAnchorElement(historyRef.current, target);
     if (element) {
       element.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
@@ -2826,6 +2855,8 @@ export default function ChatPage() {
       return {
         text: clean.slice(0, 20) + (clean.length > 20 ? '...' : ''),
         originalIndex: m.originalIndex,
+        messageId: m.id,
+        nodeId: m.node_id,
       };
     });
 
@@ -2851,8 +2882,19 @@ export default function ChatPage() {
     );
   };
 
-  const renderTranscriptItem = (_item: TranscriptItem, defaultItem: React.ReactNode) => {
-    return defaultItem;
+  const renderTranscriptItem = (item: TranscriptItem, defaultItem: React.ReactNode) => {
+    const nodeId = getTranscriptItemNodeId(item);
+    return (
+      <div
+        role="presentation"
+        className="w-full"
+        data-transcript-item-id={item.id}
+        data-transcript-message-id={item.message_id || undefined}
+        data-transcript-node-id={nodeId || undefined}
+      >
+        {defaultItem}
+      </div>
+    );
   };
 
   const getSideRunGroupLabel = (kind: string): string => {
@@ -3569,7 +3611,11 @@ export default function ChatPage() {
                       <div
                         className="flex items-center py-2 px-3 cursor-pointer rounded-lg mx-2 my-0.5 transition-colors"
                         style={{ color: 'var(--fg-85)' }}
-                        onClick={() => handleJumpToMessage(item.originalIndex)}
+                        onClick={() => handleJumpToMessage({
+                          messageId: item.messageId,
+                          nodeId: item.nodeId,
+                          legacyIndex: item.originalIndex,
+                        })}
                         onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-hover)'; }}
                         onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = ''; }}
                       >

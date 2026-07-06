@@ -78,7 +78,7 @@ function testDoesNotFoldWhenThereIsNoContentBlock() {
   assert.deepEqual(folded.visibleBlocks.map((block) => block.key), ['r1', 't1']);
 }
 
-function testKeepsIntermediateContentInContentBlocksWhenFinalKeysProvided() {
+function testKeepsOnlyFinalContentOutsideFoldWhenFinalKeysProvided() {
   const blocks = [
     { type: 'reasoning', key: 'r1' },
     { type: 'content', key: 'content-0' },
@@ -92,9 +92,28 @@ function testKeepsIntermediateContentInContentBlocksWhenFinalKeysProvided() {
   });
 
   assert.equal(folded.canFoldProcess, true);
-  assert.deepEqual(folded.processBlocks.map((block) => block.key), ['r1', 't1']);
-  assert.deepEqual(folded.contentBlocks.map((block) => block.key), ['content-0', 'content-final']);
+  assert.deepEqual(folded.processBlocks.map((block) => block.key), ['r1', 'content-0', 't1']);
+  assert.deepEqual(folded.contentBlocks.map((block) => block.key), ['content-final']);
   assert.deepEqual(folded.visibleBlocks.map((block) => block.key), ['r1', 'content-0', 't1', 'content-final']);
+}
+
+function testExplicitEmptyFinalKeysFoldAllProcessText() {
+  const blocks = [
+    { type: 'reasoning', key: 'r1' },
+    { type: 'content', key: 'content-0' },
+    { type: 'tools', key: 't1' },
+  ];
+
+  const folded = getTimelineFoldState(blocks, {
+    processExpanded: false,
+    finalContentKeys: [],
+    allowProcessOnly: true,
+  });
+
+  assert.equal(folded.canFoldProcess, true);
+  assert.deepEqual(folded.processBlocks.map((block) => block.key), ['r1', 'content-0', 't1']);
+  assert.deepEqual(folded.contentBlocks.map((block) => block.key), []);
+  assert.deepEqual(folded.visibleBlocks.map((block) => block.key), []);
 }
 
 function testStreamingProcessDefaultsExpandedAndKeepsAnswerSeparated() {
@@ -169,7 +188,8 @@ function main() {
   testCollapsesHistoricalProcessBlocks();
   testCollapsesProcessBlocksEvenForLatestCompletedAssistant();
   testDoesNotFoldWhenThereIsNoContentBlock();
-  testKeepsIntermediateContentInContentBlocksWhenFinalKeysProvided();
+  testKeepsOnlyFinalContentOutsideFoldWhenFinalKeysProvided();
+  testExplicitEmptyFinalKeysFoldAllProcessText();
   testStreamingProcessDefaultsExpandedAndKeepsAnswerSeparated();
   testStreamingDoesNotInventFoldForProcessOnlyDrafts();
   testCompletedProcessOnlyTimelineCanUseProcessedShell();

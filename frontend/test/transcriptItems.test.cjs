@@ -359,6 +359,18 @@ function testMainPageDelegatesTranscriptOrderingToTranscriptList() {
   assert.doesNotMatch(source, /activeRunDrafts\.map\(/);
 }
 
+function testMainPageOutlineJumpsToTranscriptAnchors() {
+  const source = fs.readFileSync(path.join(__dirname, '../src/pages/MainPage.tsx'), 'utf8');
+
+  assert.match(source, /function findTranscriptAnchorElement/);
+  assert.match(source, /data-transcript-message-id=\{item\.message_id \|\| undefined\}/);
+  assert.match(source, /data-transcript-node-id=\{nodeId \|\| undefined\}/);
+  assert.match(source, /messageId: m\.id/);
+  assert.match(source, /nodeId: m\.node_id/);
+  assert.match(source, /findTranscriptAnchorElement\(historyRef\.current,\s*target\)/);
+  assert.match(source, /findTranscriptAnchorElement\(historyRef\.current,\s*\{\s*nodeId: pendingScrollNodeId/);
+}
+
 function testMainPageUsesLiveTranscriptOverlayWithSharedProcessRendering() {
   const source = fs.readFileSync(path.join(__dirname, '../src/pages/MainPage.tsx'), 'utf8');
   const processTimeline = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/AssistantProcessTimeline.tsx'), 'utf8');
@@ -614,6 +626,7 @@ testPlanApprovalLiveRunMergesIntoPlanProcess();
 testLiveRunPendingBubbleHiddenWhenUserMessageAlreadyLanded();
 testPersistedPlanContinuationStaysInsideParentProcess();
 testMainPageDelegatesTranscriptOrderingToTranscriptList();
+testMainPageOutlineJumpsToTranscriptAnchors();
 testMainPageUsesLiveTranscriptOverlayWithSharedProcessRendering();
 testPlanActionsAreRealCallbacks();
 testPlanQuestionIsRenderedAndAnsweredFromTranscriptItem();
