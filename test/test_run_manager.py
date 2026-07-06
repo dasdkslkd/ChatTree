@@ -61,6 +61,37 @@ def test_run_journal_stores_events_under_conversation_runs_dir(tmp_path):
     asyncio.run(run())
 
 
+def test_run_manager_wait_for_result_returns_terminal_result(tmp_path):
+    async def run():
+        manager = RunManager(RunJournal(tmp_path))
+        record = await manager.create_run(conversation_id="conv", kind=RunKind.SUBAGENT)
+
+        async def produce_result():
+            await asyncio.sleep(0.01)
+            await manager.append_event(record.run_id, {
+                "status": "complete",
+                "event_type": "subagent_result",
+                "content": "OK",
+            })
+            await manager.finish_run(record.run_id, RunStatus.COMPLETED)
+
+        task = asyncio.create_task(produce_result())
+        result = await manager.wait_for_result(
+            record.run_id,
+            result_event_types={"subagent_result"},
+            error_event_types={"subagent_error"},
+            timeout=1,
+        )
+        await task
+
+        assert result["run_id"] == record.run_id
+        assert result["status"] == RunStatus.COMPLETED.value
+        assert result["event_type"] == "subagent_result"
+        assert result["content"] == "OK"
+
+    asyncio.run(run())
+
+
 def test_run_journal_ignores_legacy_data_runs_layout(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     legacy_root = tmp_path / "data" / "runs"

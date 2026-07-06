@@ -4,6 +4,9 @@ import json
 from typing import Any, Dict
 
 
+COMMAND_ARGUMENT_TOOLS = {"run_command", "start_background_command"}
+
+
 def normalize_tool_arguments(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize compact or alias-heavy tool arguments into canonical shapes."""
     if not isinstance(arguments, dict):
@@ -20,7 +23,10 @@ def normalize_tool_arguments(tool_name: str, arguments: Dict[str, Any]) -> Dict[
 
     normalized = dict(arguments)
     _rename_first(normalized, "path", ("file_path", "filepath", "file"))
-    _rename_first(normalized, "command", ("cmd", "script"))
+    if tool_name.lower() in COMMAND_ARGUMENT_TOOLS:
+        _rename_first(normalized, "command", ("cmd", "script"))
+    else:
+        _rename_first(normalized, "command", ("cmd",))
     if tool_name.lower() == "search_files":
         _rename_first(normalized, "pattern", ("q", "query"))
     else:

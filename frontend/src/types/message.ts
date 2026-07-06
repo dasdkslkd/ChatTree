@@ -107,6 +107,13 @@ export interface ToolApprovalPayload {
   node_id?: string;
   tool_call_id?: string;
   tool_name?: string;
+  run_id?: string | null;
+  run_kind?: string | null;
+  parent_run_id?: string | null;
+  root_run_id?: string | null;
+  agent_name?: string | null;
+  task_summary?: string | null;
+  source_label?: string | null;
   arguments_preview?: string;
   risk?: string;
   risk_level?: string;

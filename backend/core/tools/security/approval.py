@@ -73,6 +73,14 @@ class ApprovalManager:
     def is_session_allowed(self, conversation_id: str, tool_name: str) -> bool:
         return tool_name in self._session_allowed_tools.get(conversation_id, set())
 
+    def list_pending(self, conversation_id: Optional[str] = None) -> List[dict]:
+        return [
+            request.to_payload()
+            for request in self._pending.values()
+            if request.status == "pending"
+            and (conversation_id is None or request.conversation_id == conversation_id)
+        ]
+
     def begin_request(self, request: ApprovalRequest) -> asyncio.Task[ApprovalDecision]:
         if request.id in self._pending:
             raise ValueError(f"Approval request already pending: {request.id}")

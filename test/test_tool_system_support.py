@@ -165,6 +165,49 @@ def test_start_subagent_schema_names_common_agent_roles_and_forbids_simulation()
         assert role in agent_description
 
 
+def test_start_workflow_schema_forbids_simulating_workflow():
+    tool = StartWorkflowTool(workflow_manager=object())
+    schema = tool.to_openai_tool()["function"]
+
+    assert "When the user explicitly asks for a workflow" in schema["description"]
+    assert "instead of simulating" in schema["description"]
+    assert "export default async function workflow(ctx)" in schema["description"]
+
+
+def test_tool_manager_preserves_start_workflow_script_argument():
+    class FakeWorkflowManager:
+        def __init__(self):
+            self.kwargs = None
+
+        async def start(self, **kwargs):
+            self.kwargs = kwargs
+            return {"run_id": "workflow-1", "kind": "workflow", "status": "running"}
+
+    fake = FakeWorkflowManager()
+    manager = ToolManager({
+        "tools": {
+            "enabled": True,
+            "builtin": {"enabled": False},
+        }
+    })
+    manager.register(StartWorkflowTool(workflow_manager=fake))
+
+    result = asyncio.run(manager.execute_tool(
+        "start_workflow",
+        {"script": "export default async function workflow(ctx) { await ctx.log('hello'); }"},
+        runtime_context={
+            "conversation_id": "conversation-1",
+            "node_id": "node-1",
+            "run_id": "run-parent",
+        },
+    ))
+
+    payload = json.loads(result)
+    assert payload["run_id"] == "workflow-1"
+    assert fake.kwargs["script"] == "export default async function workflow(ctx) { await ctx.log('hello'); }"
+    assert fake.kwargs["parent_run_id"] == "run-parent"
+
+
 def test_start_subagent_tool_requires_runtime_context():
     tool = StartSubagentTool(subagent_executor=object())
 

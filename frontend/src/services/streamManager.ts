@@ -704,6 +704,9 @@ export class StreamManager {
     this.addToConversation(record.conversation_id, runId);
     const orderedEvents = [...events].sort((a, b) => (a.event_index ?? 0) - (b.event_index ?? 0));
     for (const event of orderedEvents) {
+      if (event.event_type === 'tool_approval_request' || event.event_type === 'tool_approval_result') {
+        continue;
+      }
       this.applyChunk(runId, event);
     }
     const restored = this.streams.get(runId);

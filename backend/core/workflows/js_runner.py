@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import subprocess
 from pathlib import Path
 from contextlib import suppress
@@ -31,6 +32,10 @@ class WorkflowJsRunner:
         self.worker_path = Path(worker_path) if worker_path else Path(__file__).resolve().parents[2] / "workers" / "workflow_runtime.mjs"
 
     def validate_script(self, script: str) -> None:
+        if not _has_strict_workflow_entrypoint(script):
+            raise WorkflowScriptError(
+                "workflow script must be `export default async function workflow(ctx) { ... }`"
+            )
         lowered = script.lower()
         for term in FORBIDDEN_SCRIPT_TERMS:
             if term.lower() in lowered:
@@ -134,3 +139,10 @@ class WorkflowJsRunner:
             return
         process.stdin.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
         process.stdin.flush()
+
+
+def _has_strict_workflow_entrypoint(script: str) -> bool:
+    return re.search(
+        r"^\s*export\s+default\s+async\s+function\s+workflow\s*\(\s*ctx\s*\)\s*\{",
+        script,
+    ) is not None

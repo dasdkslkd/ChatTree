@@ -38,12 +38,6 @@ class WorkflowRuntimeBridge:
             return await self._phase("phase_end", params)
         if method == "agent":
             return await self._agent(params)
-        if method == "workflow":
-            return {
-                "run_id": self.workflow_run_id,
-                "conversation_id": self.conversation_id,
-                "parent_node_id": self.parent_node_id,
-            }
         raise ValueError(f"unsupported workflow host method: {method}")
 
     async def _log(self, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -103,23 +97,17 @@ class WorkflowRuntimeBridge:
                     delivery_policy=str(options.get("delivery") or "wait"),
                 )
             run_id = str(run["run_id"])
-            content = ""
-            status = RunStatus.COMPLETED.value
             try:
-                async for payload in self.run_manager.subscribe(run_id, 0):
-                    await self.run_manager.append_event(self.workflow_run_id, {
-                        "status": "content",
-                        "event_type": "workflow_child_event",
-                        "child_run_id": run_id,
-                        "child_kind": "subagent",
-                        "payload": payload,
-                    })
-                    if payload.get("event_type") in {"subagent_result", "subagent_error"}:
-                        content = payload.get("content") or content
-                    if payload.get("type") == "run_finished":
-                        status = payload.get("status") or status
-                        break
+                result = await self.run_manager.wait_for_result(
+                    run_id,
+                    result_event_types={"subagent_result"},
+                    error_event_types={"subagent_error"},
+                )
             except asyncio.CancelledError:
                 await self.subagent_executor.stop(run_id)
                 raise
-            return {"run_id": run_id, "status": status, "content": content}
+            return {
+                "run_id": run_id,
+                "status": result.get("status") or RunStatus.COMPLETED.value,
+                "content": result.get("content") or "",
+            }

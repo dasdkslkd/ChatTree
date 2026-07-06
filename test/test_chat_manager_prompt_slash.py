@@ -13,7 +13,7 @@ from backend.core.capabilities.types import (
 )
 from backend.core.chat.chat_manager import ChatManager
 from backend.core.chat.conversation import Conversation
-from backend.core.config.types import StreamChunk, StreamController, StreamStatus
+from backend.core.config.types import Role, StreamChunk, StreamController, StreamStatus
 from backend.core.plans import PlanLedger
 from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
@@ -162,6 +162,87 @@ class FakeToolManager:
             )
             return json.dumps({"task_id": task.task_id, "status": task.status.value}, ensure_ascii=False)
         return json.dumps({"ok": True}, ensure_ascii=False)
+
+
+class FakeWorkflowToolManager(FakeToolManager):
+    def get_openai_tools(self, include_disabled=False):
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "start_workflow",
+                    "description": "Start a real workflow",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "run_command",
+                    "description": "Run a command",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+        ]
+
+
+class WorkflowToolThenFinalProvider(CapturingProvider):
+    async def generate_response_stream(
+        self,
+        model,
+        messages,
+        stream_controller: StreamController = None,
+        **kwargs,
+    ):
+        self.messages = messages
+        self.kwargs = kwargs
+        self.calls.append({"messages": list(messages), "kwargs": kwargs})
+        call_number = len(self.calls)
+        if call_number == 1:
+            yield StreamChunk(
+                status=StreamStatus.CONTENT,
+                content="",
+                node_id=stream_controller.node_id,
+                conversation_id=stream_controller.conversation_id,
+                error=None,
+                tokens_used=1,
+                tool_calls=[
+                    {
+                        "id": "call_start_workflow",
+                        "type": "function",
+                        "function": {
+                            "name": "start_workflow",
+                            "arguments": json.dumps({
+                                "script": "export default async function workflow(ctx) { return 1; }"
+                            }),
+                        },
+                    }
+                ],
+            )
+        else:
+            yield StreamChunk(
+                status=StreamStatus.CONTENT,
+                content="workflow done",
+                node_id=stream_controller.node_id,
+                conversation_id=stream_controller.conversation_id,
+                error=None,
+                tokens_used=1,
+            )
+        yield StreamChunk(
+            status=StreamStatus.COMPLETE,
+            content=None,
+            node_id=stream_controller.node_id,
+            conversation_id=stream_controller.conversation_id,
+            error=None,
+            tokens_used=1,
+            usage_info={
+                "input_tokens": 1,
+                "output_tokens": 0,
+                "total_tokens": 1,
+                "source": "test",
+                "raw": {},
+            },
+        )
 
 
 class ResolvingAfterGuardProvider(CapturingProvider):
@@ -783,6 +864,30 @@ def test_send_message_stream_task_guard_continues_after_tool_retry(tmp_path: Pat
     assistant = reloaded.nodes[reloaded.current_node_id]["assistant_message"]
     assert assistant["content"] == "task resolved"
     assert assistant["generation_info"]["task_guard"]["nudged"] is True
+
+
+def test_send_message_stream_allows_final_after_real_start_workflow(tmp_path: Path):
+    manager, model_manager = make_stream_manager(tmp_path)
+    manager.tool_manager = FakeWorkflowToolManager()
+    model_manager.provider = WorkflowToolThenFinalProvider()
+    conversation = manager.create_conversation("workflow real tool")
+
+    chunks = asyncio.run(
+        collect_chunks(
+            manager.send_message_stream(
+                conversation.metadata["id"],
+                "启动一个 3 层 workflow 来验证积分结果",
+                model_id="fake-model",
+            )
+        )
+    )
+
+    content_chunks = [chunk.get("content") for chunk in chunks if chunk.get("content")]
+    assert "workflow done" in content_chunks
+    assert len(model_manager.provider.calls) == 2
+    reloaded = manager.get_conversation(conversation.metadata["id"])
+    assistant = reloaded.nodes[reloaded.current_node_id]["assistant_message"]
+    assert assistant["content"] == "workflow done"
 
 
 def test_send_message_stream_btw_runs_isolated_side_question_without_tools(tmp_path: Path):

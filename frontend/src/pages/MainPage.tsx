@@ -76,6 +76,7 @@ import { transcriptService } from '../services/transcript';
 import type {
   Message,
   SendMessageRequest,
+  ToolApprovalPayload,
   ToolPermissionMode,
 } from '../types/message';
 import type { PlanSession } from '../types/plan';
@@ -991,6 +992,8 @@ export default function ChatPage() {
   const [transcriptError, setTranscriptError] = useState<string | null>(null);
   const [, setCopiedTranscriptRunId] = useState<string | null>(null);
   const handledSideRunNotificationsRef = useRef<Set<string>>(new Set());
+  const sideRunSyncPromisesRef = useRef<Map<string, Promise<void>>>(new Map());
+  const restoredSideRunEventsRef = useRef<Set<string>>(new Set());
   const [toolPermissionDraft, setToolPermissionDraftState] = useState<ToolPermissionDraft>(() => createToolPermissionDraft());
   const [newConversationMultiAgentMode, setNewConversationMultiAgentMode] = useState<MultiAgentMode>('explicit_request_only');
   const [previewImage, setPreviewImage] = useState<{ name: string; url: string } | null>(null);
@@ -1209,6 +1212,7 @@ export default function ChatPage() {
   };
 
   const activeRunStates = useRunManager(currentConversation?.id ?? null);
+  const [serverPendingToolApprovals, setServerPendingToolApprovals] = useState<ToolApprovalPayload[]>([]);
   const [activePlan, setActivePlan] = useState<PlanSession | null>(null);
   const [planActionPending, setPlanActionPending] = useState<'approve' | 'reject' | 'answer' | null>(null);
   const [planRejectFeedback, setPlanRejectFeedback] = useState('');
@@ -1584,9 +1588,41 @@ export default function ChatPage() {
     return [...merged, card];
   }, [activePlan, currentConversation?.id, liveMainTranscriptRunOverlays, transcriptItems]);
   const approvalPromptRunStates = sidePanelRunStates;
-  const pendingToolApprovalPrompts = useMemo(
-    () => collectPendingToolApprovalPrompts(approvalPromptRunStates),
+  const approvalPromptRunSignal = useMemo(
+    () => approvalPromptRunStates.map((run) => [
+      run.runId,
+      Object.values(run.pendingApprovals || {})
+        .map((approval) => `${approval?.id || ''}:${approval?.status || ''}`)
+        .join(','),
+    ].join(':')).join('|'),
     [approvalPromptRunStates],
+  );
+  const refreshPendingToolApprovals = useCallback(async (conversationId: string | null | undefined) => {
+    if (!conversationId) {
+      setServerPendingToolApprovals([]);
+      return;
+    }
+    try {
+      const approvals = await messageApi.getPendingApprovals(conversationId);
+      if (conversationId === currentConversationIdRef.current) {
+        setServerPendingToolApprovals(approvals);
+      }
+    } catch (_) {
+      if (conversationId === currentConversationIdRef.current) {
+        setServerPendingToolApprovals([]);
+      }
+    }
+  }, []);
+  useEffect(() => {
+    void refreshPendingToolApprovals(currentConversation?.id);
+  }, [approvalPromptRunSignal, currentConversation?.id, refreshPendingToolApprovals]);
+  const activePendingApprovalIds = useMemo(
+    () => new Set(serverPendingToolApprovals.map((approval) => approval.id).filter(Boolean)),
+    [serverPendingToolApprovals],
+  );
+  const pendingToolApprovalPrompts = useMemo(
+    () => collectPendingToolApprovalPrompts(approvalPromptRunStates, activePendingApprovalIds),
+    [activePendingApprovalIds, approvalPromptRunStates],
   );
   const pendingApprovalCount = pendingToolApprovalPrompts.length;
 
@@ -2003,24 +2039,43 @@ export default function ChatPage() {
   }, [hiddenSideRunIds, loadConversations, refreshMessages]);
 
   const syncSelectedConversationSideRuns = useCallback(async (conversationId: string) => {
-    const runs = await runsApi.listConversation(conversationId);
-    const sideRuns = getVisibleSideRunRecords(runs, hiddenSideRunIds);
-    for (const run of sideRuns) {
-      if (streamManager.hasRun(run.run_id)) continue;
-      if (!isCommandRunStatus(run.status)) {
-        void streamManager.resumeStream(
-          conversationId,
-          run.target_node_id ?? null,
-          run.run_id,
-          0,
-          run.anchor_node_id ?? null,
-          run.kind,
-        );
-        continue;
+    const existing = sideRunSyncPromisesRef.current.get(conversationId);
+    if (existing) return existing;
+    const syncPromise = (async () => {
+      const runs = await runsApi.listConversation(conversationId);
+      const sideRuns = getVisibleSideRunRecords(runs, hiddenSideRunIds);
+      for (const run of sideRuns) {
+        if (streamManager.hasRun(run.run_id)) continue;
+        if (!isCommandRunStatus(run.status)) {
+          void streamManager.resumeStream(
+            conversationId,
+            run.target_node_id ?? null,
+            run.run_id,
+            0,
+            run.anchor_node_id ?? null,
+            run.kind,
+          );
+          continue;
+        }
+        if (restoredSideRunEventsRef.current.has(run.run_id)) continue;
+        restoredSideRunEventsRef.current.add(run.run_id);
+        try {
+          const events = await runsApi.events(run.run_id, 0);
+          if (hiddenSideRunIds.has(run.run_id)) continue;
+          streamManager.restoreRunFromEvents(run, events);
+        } catch (error) {
+          restoredSideRunEventsRef.current.delete(run.run_id);
+          throw error;
+        }
       }
-      const events = await runsApi.events(run.run_id, 0);
-      if (hiddenSideRunIds.has(run.run_id)) continue;
-      streamManager.restoreRunFromEvents(run, events);
+    })();
+    sideRunSyncPromisesRef.current.set(conversationId, syncPromise);
+    try {
+      await syncPromise;
+    } finally {
+      if (sideRunSyncPromisesRef.current.get(conversationId) === syncPromise) {
+        sideRunSyncPromisesRef.current.delete(conversationId);
+      }
     }
   }, [hiddenSideRunIds]);
 
@@ -2049,9 +2104,13 @@ export default function ChatPage() {
     scope,
     runId,
   ) => {
-    await messageApi.decideApproval(approvalId, decision, scope);
     const run = activeRunStates.find((item) => item.runId === runId);
     const conversationId = run?.conversationId ?? currentConversation?.id ?? null;
+    try {
+      await messageApi.decideApproval(approvalId, decision, scope);
+    } finally {
+      await refreshPendingToolApprovals(conversationId);
+    }
     if (!conversationId) return;
     void streamManager.resumeStream(
       conversationId,
@@ -2063,7 +2122,7 @@ export default function ChatPage() {
     );
     await refreshMessages(conversationId, { retries: 0 });
     await refreshTranscript(conversationId, run?.targetNodeId ?? run?.nodeId ?? selectedBranchTipId);
-  }, [activeRunStates, currentConversation?.id, refreshMessages, refreshTranscript, selectedBranchTipId]);
+  }, [activeRunStates, currentConversation?.id, refreshMessages, refreshPendingToolApprovals, refreshTranscript, selectedBranchTipId]);
 
   const handleCopyTranscriptItem = useCallback(async (_item: TranscriptItem, text: string) => {
     try {

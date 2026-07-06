@@ -55,12 +55,14 @@ function getRunSourceLabel(run: ToolApprovalRunLike): string {
 
 export function collectPendingToolApprovalPrompts(
   runs: ToolApprovalRunLike[],
+  activeApprovalIds?: Set<string>,
 ): PendingToolApprovalPrompt[] {
   const prompts: PendingToolApprovalPrompt[] = [];
   const seen = new Set<string>();
   for (const run of runs) {
     for (const approval of Object.values(run.pendingApprovals ?? {})) {
       if (!approval || approval.status !== 'pending') continue;
+      if (activeApprovalIds && !activeApprovalIds.has(approval.id)) continue;
       const key = `${run.runId}:${approval.id}`;
       if (seen.has(key)) continue;
       seen.add(key);

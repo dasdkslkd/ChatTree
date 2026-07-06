@@ -130,12 +130,12 @@ ChatTree workflows orchestrate multiple subagents from JavaScript. Use them only
 
 Workflow rules:
 
-- Scout enough context before authoring the workflow so the worklist is concrete.
-- Use `pipeline()` by default for staged per-item work.
-- Use `parallel()` only when a real barrier is needed.
-- Use `phase(name, async () => {...})` to group progress.
-- Use `agent(prompt, { agentType })` for role selection.
-- Treat schema, worktree isolation, saved workflow registry, and resume caching as compatibility fields unless current runtime support is confirmed.
+- Workflow scripts must use exactly this entrypoint: `export default async function workflow(ctx) { ... }`.
+- Inside the entrypoint, use only `ctx.agent`, `ctx.parallel`, `ctx.pipeline`, `ctx.phase`, `ctx.log`, `ctx.args`, and `ctx.budget`.
+- Return the workflow result from the exported function. Do not end with a bare `wf()` or `workflow()` call.
+- Use `await ctx.phase(name, async () => {...})` to group progress; do not call `phase(name)` as a marker.
+- Use `ctx.agent(prompt, { agentType })`; read worker output from the returned object's `.content`.
+- Use `ctx.parallel([() => ..., () => ...])`; every item must be a function.
 - The workflow result is data for the main agent to inspect and summarize.
 
 ## Slash Commands

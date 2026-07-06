@@ -165,11 +165,10 @@ class CommandExecutor:
         duration_seconds = None
         command_status = run.get("status")
         error = (run.get("metadata") or {}).get("error")
-        events = self.run_manager.journal.read_from_index(str(run.get("conversation_id") or ""), run_id, 0)
+        events = self.run_manager.read_events(run_id, 0)
         stdout_parts: list[str] = []
         stderr_parts: list[str] = []
-        for event in events:
-            payload = event.get("payload") or {}
+        for payload in events:
             event_type = payload.get("event_type")
             if event_type == "command_stdout":
                 stdout_parts.append(str(payload.get("content") or ""))

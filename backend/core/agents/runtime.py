@@ -293,8 +293,12 @@ class AgentRuntime:
 
     def _result_messages_from_run_journal(self, conversation_id: str, run_id: str) -> list[Dict[str, Any]]:
         messages: list[Dict[str, Any]] = []
-        for event in self.run_manager.journal.read_events(conversation_id, run_id):
-            payload = dict(event.get("payload") or {})
+        try:
+            events = self.run_manager.read_events(run_id, 0)
+        except Exception:
+            events = []
+        for payload in events:
+            payload = dict(payload)
             event_type = str(payload.get("event_type") or "")
             if event_type in {"subagent_result", "workflow_result"}:
                 messages.append({
@@ -308,7 +312,7 @@ class AgentRuntime:
                         "event_type": event_type,
                         "agent_name": payload.get("agent_name"),
                     },
-                    "created_at": event.get("created_at"),
+                    "created_at": payload.get("created_at"),
                 })
             elif event_type in {"subagent_error", "workflow_error"}:
                 messages.append({
@@ -322,7 +326,7 @@ class AgentRuntime:
                         "event_type": event_type,
                         "agent_name": payload.get("agent_name"),
                     },
-                    "created_at": event.get("created_at"),
+                    "created_at": payload.get("created_at"),
                 })
         return messages
 

@@ -44,7 +44,7 @@ from backend.core.tasks import TaskLedger, TaskStatus
 from backend.core.workflows.workflow_manager import WorkflowManager
 from backend.core.slash.dispatcher import SlashCommandDispatcher
 from backend.core.slash.registry import SlashCommandRegistry
-from backend.core.workflows.js_runner import WorkflowJsRunner
+from backend.core.workflows.js_runner import WorkflowJsRunner, WorkflowScriptError
 from backend.core.workflows.runtime_bridge import WorkflowRuntimeBridge
 
 
@@ -562,6 +562,7 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
         tools = manager._filter_agent_tools_for_mode(
             [
                 {"type": "function", "function": {"name": "spawn_agent"}},
+                {"type": "function", "function": {"name": "start_workflow"}},
                 {"type": "function", "function": {"name": "run_command"}},
             ],
             mode,
@@ -569,7 +570,50 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("spawn_agent", messages[1]["content"])
         self.assertEqual(mode, "explicit_request_only")
-        self.assertEqual([tool["function"]["name"] for tool in tools], ["spawn_agent", "run_command"])
+        self.assertEqual([tool["function"]["name"] for tool in tools], ["spawn_agent", "start_workflow", "run_command"])
+
+    def test_explicit_workflow_request_exposes_real_workflow_tool(self):
+        manager = ChatManager(
+            model_manager=None,
+            storage=self.FakeStorage(),
+            prompts=self.FakePromptStorage(),
+        )
+        conversation = manager.create_conversation("title")
+
+        mode = manager._resolve_multi_agent_mode("启动一个3层workflow", conversation.metadata)
+        tools = manager._filter_agent_tools_for_mode(
+            [
+                {"type": "function", "function": {"name": "spawn_agent"}},
+                {"type": "function", "function": {"name": "start_workflow"}},
+                {"type": "function", "function": {"name": "start_subagent"}},
+                {"type": "function", "function": {"name": "run_command"}},
+            ],
+            mode,
+        )
+
+        self.assertEqual(mode, "explicit_request_only")
+        self.assertEqual([tool["function"]["name"] for tool in tools], ["spawn_agent", "start_workflow", "run_command"])
+
+    def test_no_multi_agent_request_hides_workflow_tool(self):
+        manager = ChatManager(
+            model_manager=None,
+            storage=self.FakeStorage(),
+            prompts=self.FakePromptStorage(),
+        )
+        conversation = manager.create_conversation("title")
+
+        mode = manager._resolve_multi_agent_mode("普通问题", conversation.metadata)
+        tools = manager._filter_agent_tools_for_mode(
+            [
+                {"type": "function", "function": {"name": "spawn_agent"}},
+                {"type": "function", "function": {"name": "start_workflow"}},
+                {"type": "function", "function": {"name": "run_command"}},
+            ],
+            mode,
+        )
+
+        self.assertEqual(mode, "none")
+        self.assertEqual([tool["function"]["name"] for tool in tools], ["run_command"])
 
     def test_short_confirmation_turn_inherits_explicit_subagent_request(self):
         manager = ChatManager(
@@ -2579,8 +2623,8 @@ class WorkflowRuntimeBridgeTests(unittest.IsolatedAsyncioTestCase):
             async def append_event(self, *args, **kwargs):
                 return None
 
-            async def subscribe(self, run_id, offset):
-                yield {"type": "run_finished", "status": "completed"}
+            async def wait_for_result(self, run_id, **kwargs):
+                return {"run_id": run_id, "status": "completed", "content": ""}
 
         subagent_executor = FakeSubagentExecutor()
         bridge = WorkflowRuntimeBridge(
@@ -2607,8 +2651,8 @@ class WorkflowRuntimeBridgeTests(unittest.IsolatedAsyncioTestCase):
             async def append_event(self, *args, **kwargs):
                 return None
 
-            async def subscribe(self, run_id, offset):
-                yield {"type": "run_finished", "status": "completed"}
+            async def wait_for_result(self, run_id, **kwargs):
+                return {"run_id": run_id, "status": "completed", "content": ""}
 
         subagent_executor = FakeSubagentExecutor()
         bridge = WorkflowRuntimeBridge(
@@ -2644,9 +2688,8 @@ class WorkflowRuntimeBridgeTests(unittest.IsolatedAsyncioTestCase):
             async def append_event(self, *args, **kwargs):
                 return None
 
-            async def subscribe(self, run_id, offset):
+            async def wait_for_result(self, run_id, **kwargs):
                 await asyncio.Event().wait()
-                yield {"type": "run_finished", "status": "completed"}
 
         subagent_executor = FakeSubagentExecutor()
         bridge = WorkflowRuntimeBridge(
@@ -2714,18 +2757,18 @@ class WorkflowRuntimeWorkerTests(unittest.TestCase):
         self.assertIn("Promise.all(items.map(async (item, index)", worker)
         self.assertIn("stage(value, item, index)", worker)
 
-    def test_runtime_supports_export_const_meta(self):
+    def test_runtime_rejects_export_const_meta(self):
         class FakeBridge:
             async def handle_call(self, method, params):
                 return {"method": method, "params": params}
 
-        result = asyncio.run(WorkflowJsRunner().run(
-            script="export const meta = { name: 'x', description: 'x' }; return meta.name;",
-            args={},
-            budget={"max_host_calls": 10},
-            bridge=FakeBridge(),
-        ))
-        self.assertEqual(result, "x")
+        with self.assertRaises(WorkflowScriptError):
+            asyncio.run(WorkflowJsRunner().run(
+                script="export const meta = { name: 'x', description: 'x' }; return meta.name;",
+                args={},
+                budget={"max_host_calls": 10},
+                bridge=FakeBridge(),
+            ))
 
     def test_runtime_agent_supports_chattree_style_signature(self):
         class FakeBridge:
@@ -2733,7 +2776,11 @@ class WorkflowRuntimeWorkerTests(unittest.TestCase):
                 return {"method": method, "params": params}
 
         result = asyncio.run(WorkflowJsRunner().run(
-            script="return await agent('inspect', {agentType: 'reviewer', label: 'r1'});",
+            script=(
+                "export default async function workflow(ctx) {"
+                "return await ctx.agent('inspect', {agentType: 'reviewer', label: 'r1'});"
+                "}"
+            ),
             args={},
             budget={"max_host_calls": 10},
             bridge=FakeBridge(),
@@ -2742,34 +2789,39 @@ class WorkflowRuntimeWorkerTests(unittest.TestCase):
         self.assertEqual(result["params"]["name"], "reviewer")
         self.assertEqual(result["params"]["input"], "inspect")
 
-    def test_runtime_agent_supports_legacy_name_input_signature(self):
+    def test_runtime_agent_rejects_legacy_name_input_signature(self):
         class FakeBridge:
             async def handle_call(self, method, params):
                 return {"method": method, "params": params}
 
-        result = asyncio.run(WorkflowJsRunner().run(
-            script="return await agent('reviewer', 'inspect');",
-            args={},
-            budget={"max_host_calls": 10},
-            bridge=FakeBridge(),
-        ))
-        self.assertEqual(result["params"]["name"], "reviewer")
-        self.assertEqual(result["params"]["input"], "inspect")
+        with self.assertRaises(WorkflowScriptError):
+            asyncio.run(WorkflowJsRunner().run(
+                script=(
+                    "export default async function workflow(ctx) {"
+                    "return await ctx.agent('reviewer', 'inspect');"
+                    "}"
+                ),
+                args={},
+                budget={"max_host_calls": 10},
+                bridge=FakeBridge(),
+            ))
 
-    def test_runtime_agent_supports_legacy_object_input_signature(self):
+    def test_runtime_agent_rejects_legacy_object_input_signature(self):
         class FakeBridge:
             async def handle_call(self, method, params):
                 return {"method": method, "params": params}
 
-        result = asyncio.run(WorkflowJsRunner().run(
-            script="return await agent('reviewer', {topic: 'x'}, {label: 'legacy'});",
-            args={},
-            budget={"max_host_calls": 10},
-            bridge=FakeBridge(),
-        ))
-        self.assertEqual(result["params"]["name"], "reviewer")
-        self.assertEqual(result["params"]["input"], {"topic": "x"})
-        self.assertEqual(result["params"]["options"], {"label": "legacy"})
+        with self.assertRaises(WorkflowScriptError):
+            asyncio.run(WorkflowJsRunner().run(
+                script=(
+                    "export default async function workflow(ctx) {"
+                    "return await ctx.agent('reviewer', {topic: 'x'}, {label: 'legacy'});"
+                    "}"
+                ),
+                args={},
+                budget={"max_host_calls": 10},
+                bridge=FakeBridge(),
+            ))
 
 
 class PromptDriftGuardTests(unittest.TestCase):

@@ -8,6 +8,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+sys.path.insert(0, ".")
+
 from backend.api.dependencies import (
     get_chat_manager,
     get_run_manager,
@@ -19,6 +21,7 @@ from backend.core.runs import RunManager
 from backend.core.runs.types import RunKind
 from backend.core.workflows import WorkflowManager
 from backend.core.workflows.js_runner import WorkflowJsRunner, WorkflowScriptError
+from backend.core.workflows.runtime_bridge import WorkflowRuntimeBridge
 
 
 def process_exists(pid: int) -> bool:
@@ -42,18 +45,78 @@ def test_workflow_js_runner_executes_host_calls():
         async def handle_call(self, method, params):
             if method == "log":
                 return {"ok": True}
-            if method == "workflow":
-                return {"run_id": "run-test"}
+            if method == "agent":
+                return {"content": "agent-data", "status": "completed"}
             raise RuntimeError(method)
 
     async def run():
         result = await WorkflowJsRunner().run(
-            script="await log('hello'); const info = await workflow(); return info.run_id;",
+            script="""
+export default async function workflow(ctx) {
+  await ctx.log('hello');
+  const data = await ctx.agent('inspect', { agentType: 'workflow-worker' });
+  return data.content;
+}
+""",
             args={},
             budget={"max_host_calls": 5, "max_seconds": 10},
             bridge=Bridge(),
         )
-        assert result == "run-test"
+        assert result == "agent-data"
+
+    asyncio.run(run())
+
+
+def test_workflow_js_runner_rejects_legacy_workflow_object():
+    class Bridge:
+        async def handle_call(self, method, params):
+            return {"ok": True}
+
+    async def run():
+        with pytest.raises(WorkflowScriptError):
+            await WorkflowJsRunner().run(
+                script="const workflow = { async run(ctx) { return 'ok'; } }; return workflow;",
+                args={},
+                budget={"max_host_calls": 5, "max_seconds": 10},
+                bridge=Bridge(),
+            )
+
+    asyncio.run(run())
+
+
+def test_workflow_runtime_bridge_agent_result_uses_content_only():
+    class FakeSubagentExecutor:
+        async def start(self, **kwargs):
+            return {"run_id": "child-1"}
+
+    class FakeRunManager:
+        def __init__(self):
+            self.appended = []
+
+        async def append_event(self, *args, **kwargs):
+            self.appended.append((args, kwargs))
+            return None
+
+        async def wait_for_result(self, run_id, **kwargs):
+            return {"status": "completed", "content": "RESULT=0.5"}
+
+    async def run():
+        run_manager = FakeRunManager()
+        bridge = WorkflowRuntimeBridge(
+            workflow_run_id="workflow-1",
+            conversation_id="conversation-1",
+            parent_node_id="node-1",
+            run_manager=run_manager,
+            subagent_executor=FakeSubagentExecutor(),
+        )
+        result = await bridge._agent({"input": "calculate"})
+        assert result["content"] == "RESULT=0.5"
+        assert "result" not in result
+        assert not [
+            args[1]
+            for args, _ in run_manager.appended
+            if len(args) > 1 and args[1].get("event_type") == "workflow_child_event"
+        ]
 
     asyncio.run(run())
 
@@ -64,7 +127,7 @@ def test_workflow_js_runner_rejects_forbidden_terms():
         runner.validate_script("return require('fs')")
 
 
-def test_workflow_js_runner_exposes_phase_start_and_phase_end_aliases():
+def test_workflow_js_runner_phase_emits_start_and_end_events():
     class Bridge:
         def __init__(self):
             self.methods = []
@@ -77,9 +140,10 @@ def test_workflow_js_runner_exposes_phase_start_and_phase_end_aliases():
         bridge = Bridge()
         result = await WorkflowJsRunner().run(
             script=(
-                "await phase_start('检查', { step: 1 });"
-                "await phase_end('检查', { ok: true });"
+                "export default async function workflow(ctx) {"
+                "await ctx.phase('检查', async () => 'inner');"
                 "return 'ok';"
+                "}"
             ),
             args={},
             budget={"max_host_calls": 5, "max_seconds": 10},
@@ -87,7 +151,7 @@ def test_workflow_js_runner_exposes_phase_start_and_phase_end_aliases():
         )
         assert result == "ok"
         assert [method for method, _ in bridge.methods] == ["phase_start", "phase_end"]
-        assert bridge.methods[0][1] == {"name": "检查", "data": {"step": 1}}
+        assert bridge.methods[0][1] == {"name": "检查"}
 
     asyncio.run(run())
 
@@ -109,11 +173,13 @@ def test_workflow_js_runner_processes_parallel_host_calls_concurrently():
         started = time.perf_counter()
         result = await WorkflowJsRunner().run(
             script="""
-const result = await parallel([
-  () => agent('a', 'one'),
-  () => agent('b', 'two')
-]);
-return result.map((item) => item.name).join(',');
+export default async function workflow(ctx) {
+  const result = await ctx.parallel([
+    () => ctx.agent('one', { agentType: 'a' }),
+    () => ctx.agent('two', { agentType: 'b' })
+  ]);
+  return result.map((item) => item.name).join(',');
+}
 """,
             args={},
             budget={"max_host_calls": 10, "max_seconds": 5},
@@ -144,7 +210,12 @@ setInterval(() => {{}}, 1000);
         runner = WorkflowJsRunner(worker)
         task = asyncio.create_task(
             runner.run(
-                script="return 'never';",
+                script="""
+export default async function workflow(ctx) {
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  return 'done';
+}
+""",
                 args={},
                 budget={"max_host_calls": 5, "max_seconds": 10},
                 bridge=object(),
@@ -177,7 +248,12 @@ def test_workflow_manager_stop_cancels_running_workflow():
         workflow = WorkflowManager(run_manager=run_manager, subagent_executor=DummySubagent())
         record = await workflow.start(
             conversation_id="conv-stop",
-            script="await new Promise((resolve) => setTimeout(resolve, 1000)); return 'done';",
+            script="""
+export default async function workflow(ctx) {
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  return 'done';
+}
+""",
             budget={"max_seconds": 5, "max_host_calls": 5},
         )
         await asyncio.sleep(0.05)

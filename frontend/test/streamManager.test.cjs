@@ -665,6 +665,60 @@ async function testRestoreCompletedSideRunFromBackendEvents() {
   });
 }
 
+async function testRestoreRunDoesNotReviveHistoricalApprovalRequests() {
+  await withManager(async (manager) => {
+    manager.restoreRunFromEvents(
+      {
+        run_id: 'run_restored_approval',
+        conversation_id: 'conv-1',
+        kind: 'subagent',
+        status: 'cancelled',
+        anchor_node_id: 'node-anchor',
+        target_node_id: null,
+        event_count: 3,
+        created_at: 10,
+        updated_at: 13,
+        finished_at: 13,
+      },
+      [
+        {
+          type: 'run_started',
+          run_id: 'run_restored_approval',
+          conversation_id: 'conv-1',
+          kind: 'subagent',
+          status: 'running',
+          event_index: 0,
+        },
+        {
+          run_id: 'run_restored_approval',
+          conversation_id: 'conv-1',
+          kind: 'subagent',
+          status: 'waiting_approval',
+          event_type: 'tool_approval_request',
+          approval: {
+            id: 'stale-approval',
+            status: 'pending',
+            tool_name: 'run_command',
+          },
+          event_index: 1,
+        },
+        {
+          type: 'run_finished',
+          run_id: 'run_restored_approval',
+          conversation_id: 'conv-1',
+          kind: 'subagent',
+          status: 'cancelled',
+          event_index: 2,
+        },
+      ],
+    );
+
+    const state = manager.getConversationStates('conv-1')[0];
+    assert.equal(state.status, 'stopped');
+    assert.deepEqual(state.pendingApprovals, {});
+  });
+}
+
 async function testRestoreRunKeepsParentSummaryAndMetadata() {
   await withManager(async (manager) => {
     manager.restoreRunFromEvents(
@@ -1208,6 +1262,7 @@ async function main() {
   await testStopRunAbortsLocalStreamWithoutWaitingForServerAck();
   await testResumeStreamPreservesAttachedRunKindBeforeFirstEvent();
   await testRestoreCompletedSideRunFromBackendEvents();
+  await testRestoreRunDoesNotReviveHistoricalApprovalRequests();
   await testRestoreRunKeepsParentSummaryAndMetadata();
   await testSubagentResultDoesNotAppendAlreadyStreamedContent();
   await testWorkflowResultDoesNotAppendAggregateContentToRunBody();

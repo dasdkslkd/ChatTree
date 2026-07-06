@@ -47,28 +47,33 @@ try {
     spent: () => Number(rawBudget.spent || 0),
     remaining: () => rawBudget.total == null ? Infinity : Math.max(0, Number(rawBudget.total) - Number(rawBudget.spent || 0)),
   };
-  const workflow = (nameOrRef, workflowArgs) => hostCall('workflow', { nameOrRef, args: workflowArgs });
+
+  function agent(prompt, options = {}) {
+    if (arguments.length > 2) {
+      throw new Error('agent(prompt, options) accepts only prompt and options');
+    }
+    if (typeof prompt !== 'string' || !prompt.trim()) {
+      throw new Error('agent(prompt, options) requires a non-empty string prompt');
+    }
+    if (!options || typeof options !== 'object' || Array.isArray(options)) {
+      throw new Error('agent(prompt, options) requires an options object');
+    }
+    return hostCall('agent', {
+      name: options.agentType || 'workflow-worker',
+      input: prompt,
+      options,
+    });
+  }
   const log = (message, data) => hostCall('log', { message, data });
-  const isNewAgentOptions = (value) => {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-    return Object.prototype.hasOwnProperty.call(value, 'agentType')
-      || Object.prototype.hasOwnProperty.call(value, 'agent')
-      || Object.prototype.hasOwnProperty.call(value, 'name');
-  };
-  const agent = (promptOrName, inputOrOptions = {}, maybeOptions = {}) => {
-    if (typeof promptOrName === 'object' && promptOrName !== null) {
-      return hostCall('agent', promptOrName);
-    }
-    if (typeof inputOrOptions === 'string' || !isNewAgentOptions(inputOrOptions)) {
-      return hostCall('agent', { name: promptOrName, input: inputOrOptions, options: maybeOptions || {} });
-    }
-    const options = inputOrOptions;
-    const name = options.agentType || options.agent || options.name || 'workflow-worker';
-    return hostCall('agent', { name, input: promptOrName, options });
-  };
   const phase_start = (name, data) => hostCall('phase_start', { name, data });
   const phase_end = (name, data) => hostCall('phase_end', { name, data });
   const phase = async (name, fn) => {
+    if (typeof name !== 'string' || !name.trim()) {
+      throw new Error('phase(name, asyncFn) requires a non-empty phase name');
+    }
+    if (typeof fn !== 'function') {
+      throw new Error('phase(name, asyncFn) requires an async function');
+    }
     await phase_start(name);
     try {
       const result = await fn();
@@ -79,9 +84,18 @@ try {
       throw error;
     }
   };
-  const parallel = async (items) => Promise.all(items.map((item) => typeof item === 'function' ? item() : item));
+  const parallel = async (thunks) => {
+    if (!Array.isArray(thunks)) throw new Error('parallel(thunks) requires an array');
+    return Promise.all(thunks.map((thunk) => {
+      if (typeof thunk !== 'function') throw new Error('parallel(thunks) items must be functions');
+      return thunk();
+    }));
+  };
   const pipeline = async (items, ...stages) => {
     if (!Array.isArray(items)) throw new Error('pipeline items must be an array');
+    for (const stage of stages) {
+      if (typeof stage !== 'function') throw new Error('pipeline stages must be functions');
+    }
     return Promise.all(items.map(async (item, index) => {
       let value = item;
       try {
@@ -95,26 +109,34 @@ try {
       }
     }));
   };
+  const workflowContext = {
+    agent,
+    parallel,
+    pipeline,
+    phase,
+    log,
+    args,
+    budget,
+  };
 
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-  const script = String(payload.script || '').replace(/\bexport\s+const\s+meta\s*=/, 'const meta =');
+  const script = compileWorkflowScript(String(payload.script || ''));
   const fn = new AsyncFunction(
-    'agent',
-    'parallel',
-    'pipeline',
-    'phase',
-    'phase_start',
-    'phase_end',
-    'log',
-    'workflow',
-    'budget',
-    'args',
+    'workflowContext',
     `"use strict"; const require = undefined; const process = undefined; const global = undefined; ${script}`,
   );
-  const result = await fn(agent, parallel, pipeline, phase, phase_start, phase_end, log, workflow, budget, args);
+  const result = await fn(workflowContext);
   emit({ type: 'done', result });
   process.exit(0);
 } catch (error) {
   emit({ type: 'error', error: String(error?.stack || error?.message || error) });
   process.exit(1);
+}
+
+function compileWorkflowScript(source) {
+  const trimmed = source.trim();
+  if (!/^export\s+default\s+async\s+function\s+workflow\s*\(\s*ctx\s*\)\s*\{/.test(trimmed)) {
+    throw new Error('workflow script must be `export default async function workflow(ctx) { ... }`');
+  }
+  return `${trimmed.replace(/^export\s+default\s+async\s+function\s+workflow/, 'async function workflow')}\nreturn await workflow(workflowContext);`;
 }

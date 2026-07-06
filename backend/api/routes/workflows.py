@@ -61,8 +61,8 @@ async def get_workflow_graph(
     run = manager.run_manager.get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Workflow 不存在")
-    events = manager.run_manager.journal.read_events(str(run["conversation_id"]), run_id)
+    events = manager.run_manager.read_events(run_id, 0)
     return {
         "run": run,
-        "events": [event["payload"] for event in events],
+        "events": events,
     }

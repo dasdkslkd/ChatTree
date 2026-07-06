@@ -8,6 +8,7 @@ from .base import BaseTool
 
 AGENT_TOOL_NAMES = {
     "spawn_agent",
+    "start_workflow",
     "wait_agent",
     "list_agents",
     "send_message",
@@ -18,7 +19,7 @@ AGENT_TOOL_NAMES = {
     "interrupt_agent",
 }
 
-LEGACY_AGENT_TOOL_NAMES = {"start_subagent", "start_workflow"}
+LEGACY_AGENT_TOOL_NAMES = {"start_subagent"}
 
 
 def _runtime_context(kwargs: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -474,14 +475,27 @@ class StartWorkflowTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return "Compatibility alias for backend workflow spawning. Prefer workflow-capable agent tools for new model calls."
+        return (
+            "Start a real ChatTree workflow run from a strict JavaScript workflow module. "
+            "When the user explicitly asks for a workflow, call this tool instead of simulating "
+            "a workflow with ordinary command, subagent, or prose steps. The script must be exactly "
+            "`export default async function workflow(ctx) { ... }`; use only ctx.agent, ctx.parallel, "
+            "ctx.pipeline, ctx.phase, ctx.log, ctx.args, and ctx.budget. Return the workflow result "
+            "from that function."
+        )
 
     def parameters_schema(self) -> Dict[str, Any]:
         return {
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "script": {"type": "string", "description": "Dynamic workflow JavaScript script body to run."},
+                "script": {
+                    "type": "string",
+                    "description": (
+                        "Strict workflow module. Required shape: "
+                        "export default async function workflow(ctx) { ... return result; }"
+                    ),
+                },
                 "args": {"type": "object", "description": "Optional workflow arguments object."},
                 "task_id": {"type": "string", "description": "Optional existing TaskLedger task id to bind to the workflow."},
                 "auto_create_task": {
@@ -528,7 +542,6 @@ class StartWorkflowTool(BaseTool):
             "kind": run.get("kind", "workflow"),
             "status": run.get("status"),
             "task_id": run.get("task_id"),
-            "replacement_tool": "spawn_agent",
             "message": "Workflow started. Its result will be delivered back to this conversation when complete.",
         }, ensure_ascii=False)
 

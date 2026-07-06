@@ -45,6 +45,7 @@ class WorkflowManager:
         delivery_policy: str = "auto",
         task_id: Optional[str] = None,
     ) -> Dict[str, Any]:
+        self.runner.validate_script(script)
         budget = {
             "max_seconds": 600,
             "max_host_calls": 200,

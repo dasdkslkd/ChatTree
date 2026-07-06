@@ -4,6 +4,7 @@ import type {
   SendMessageRequest,
   StreamChunk,
   ToolApprovalDecision,
+  ToolApprovalPayload,
   ToolApprovalScope,
 } from '../types/message';
 
@@ -33,6 +34,10 @@ export type PlanAnswerStreamRequest = PlanActionStreamRequest & {
 
 export type PlanRejectStreamRequest = PlanActionStreamRequest & {
   feedback: string;
+};
+
+export type PendingToolApprovalsResponse = {
+  approvals: ToolApprovalPayload[];
 };
 
 export interface ActiveStreamInfo {
@@ -233,6 +238,15 @@ export const messageApi = {
       params: { offset, limit },
     });
     return response.data;
+  },
+
+  getPendingApprovals: async (
+    conversationId?: string | null,
+  ): Promise<ToolApprovalPayload[]> => {
+    const response = await apiClient.get<PendingToolApprovalsResponse>('/tool-approvals/pending', {
+      params: conversationId ? { conversation_id: conversationId } : undefined,
+    });
+    return response.data.approvals || [];
   },
 
   // 决定工具审批请求

@@ -3,6 +3,9 @@ import asyncio
 from backend.core.agents.mailbox import AgentMailbox
 from backend.core.agents.runtime import AgentRuntime
 from backend.core.agents.types import AgentSource
+from backend.core.persistence.database import SQLitePersistence
+from backend.core.persistence.repository import ChatRepository
+from backend.core.persistence.run_repository import SQLiteRunRepository
 from backend.core.runs import RunKind, RunManager, RunStatus
 
 
@@ -151,3 +154,58 @@ async def _wait_agent_falls_back_to_terminal_run_journal():
 
 def test_wait_agent_falls_back_to_terminal_run_journal():
     asyncio.run(_wait_agent_falls_back_to_terminal_run_journal())
+
+
+async def _wait_agent_reads_workflow_error_from_repository_events(tmp_path):
+    persistence = SQLitePersistence(tmp_path)
+    persistence.initialize()
+    chat = ChatRepository(persistence)
+    runs = SQLiteRunRepository(persistence)
+    conversation_id = chat.create_conversation(title="workflow")
+    node_id = chat.create_node(conversation_id, parent_id=None)
+    run_manager = RunManager(repository=runs)
+    runtime = AgentRuntime(
+        run_manager=run_manager,
+        mailbox=AgentMailbox(),
+        subagent_executor=object(),
+        capability_registry=object(),
+    )
+    chat_run = await run_manager.create_run(
+        conversation_id=conversation_id,
+        kind=RunKind.CHAT,
+        anchor_node_id=node_id,
+        summary="chat",
+    )
+    run = await run_manager.create_run(
+        conversation_id=conversation_id,
+        kind=RunKind.WORKFLOW,
+        parent_run_id=chat_run.run_id,
+        anchor_node_id=node_id,
+        summary="Dynamic workflow",
+    )
+    await run_manager.append_event(run.run_id, {
+        "status": "error",
+        "event_type": "workflow_error",
+        "error": "workflow boom",
+    })
+    await run_manager.finish_run(run.run_id, RunStatus.FAILED)
+
+    result = await runtime.wait_agent(
+        source=AgentSource(
+            conversation_id=conversation_id,
+            run_id=chat_run.run_id,
+            run_kind=RunKind.CHAT.value,
+        ),
+        run_ids=[run.run_id],
+        timeout_seconds=0.01,
+    )
+
+    assert result["status"] == "completed"
+    assert result["runs"][0]["status"] == "failed"
+    assert result["runs"][0]["messages"][0]["message_type"] == "error"
+    assert result["runs"][0]["messages"][0]["content"] == "workflow boom"
+    assert result["runs"][0]["messages"][0]["metadata"]["event_type"] == "workflow_error"
+
+
+def test_wait_agent_reads_workflow_error_from_repository_events(tmp_path):
+    asyncio.run(_wait_agent_reads_workflow_error_from_repository_events(tmp_path))

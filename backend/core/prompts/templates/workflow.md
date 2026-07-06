@@ -35,23 +35,24 @@ Poor workflow uses:
 
 ## Script Shape
 
-Every workflow script should start with a literal metadata declaration:
+Every workflow script must use exactly one entrypoint:
 
 ```js
-export const meta = {
-  name: 'review-changes',
-  description: 'Review changed files across dimensions and verify findings',
-  phases: [
-    { title: 'Discover', detail: 'Find changed surfaces' },
-    { title: 'Review', detail: 'Run independent review angles' },
-    { title: 'Verify', detail: 'Adversarially verify candidates' },
-  ],
+export default async function workflow(ctx) {
+  return await ctx.phase('Run work', async () => {
+    const [a, b] = await ctx.parallel([
+      () => ctx.agent('First worker task. Return compact raw data.', { agentType: 'workflow-worker' }),
+      () => ctx.agent('Second worker task. Return compact raw data.', { agentType: 'workflow-worker' }),
+    ])
+    await ctx.log('workers finished', { a: a.status, b: b.status })
+    return { first: a.content, second: b.content }
+  })
 }
 ```
 
-The current ChatTree worker accepts this source form and rewrites it internally before execution. Keep the object literal simple: no function calls, no spreads, no dynamic expressions.
+The script is a strict async module. Do not use bare top-level hook calls, wrapper objects, `const workflow = ...`, `workflow()`, `wf()`, `export const meta`, Node APIs, filesystem APIs, `require`, dynamic imports, child processes, network modules, or process globals.
 
-The script body runs in an async JavaScript context. Use `await` directly. Use plain JavaScript, not TypeScript. Do not use Node APIs, filesystem APIs, `require`, dynamic imports, child processes, network modules, or process globals.
+Return the final workflow data from the exported function. All examples below belong inside `workflow(ctx)` and should call hooks through `ctx`.
 
 ## Available Hooks
 
@@ -65,13 +66,7 @@ Current return shape is an object like:
 { run_id: '...', status: 'completed', content: '...' }
 ```
 
-If you need structured data, ask the subagent to return strict JSON and parse `content`. The `schema`, `model`, `effort`, and `isolation` option fields are compatibility fields; do not assume schema-enforced retries or worktree isolation unless current runtime code confirms support.
-
-Legacy form is also supported:
-
-```js
-await agent('reviewer', 'review this diff')
-```
+Read worker output from `.content`. If you need structured data, ask the subagent to return strict JSON and parse `content`. Do not use schema-enforced retries, model overrides, effort knobs, or worktree isolation from workflow scripts.
 
 `pipeline(items, stage1, stage2, ...)`
 
@@ -88,12 +83,12 @@ Runs an array of async thunks concurrently and waits for all of them. This is a 
 Runs a block inside a named phase:
 
 ```js
-const files = await phase('Discover', async () => {
-  return await agent('Find changed files and return JSON.', { agentType: 'explorer' })
+const files = await ctx.phase('Discover', async () => {
+  return await ctx.agent('Find changed files and return JSON.', { agentType: 'explorer' })
 })
 ```
 
-Low-level `phase_start(title)` and `phase_end(title)` exist for manual control, but prefer `phase(title, async () => {...})`.
+`phase(title)` without a function is invalid. Always pass an async function and `await` the phase result.
 
 `log(message, data)`
 
@@ -106,10 +101,6 @@ The object includes `total`, `spent()`, and `remaining()`. In current ChatTree r
 `args`
 
 The value passed into the workflow. Pass actual arrays or objects, not JSON-encoded strings.
-
-`workflow(nameOrRef, args)`
-
-Compatibility hook. Current ChatTree runtime exposes the active workflow identity and does not yet guarantee saved child workflow execution or scriptPath resume.
 
 ## Pipeline First
 
@@ -131,21 +122,21 @@ A barrier is not justified when:
 Rewrite this:
 
 ```js
-const reviews = await parallel(files.map(file => () => agent(`Review ${file}`)))
+const reviews = await ctx.parallel(files.map(file => () => ctx.agent(`Review ${file}`)))
 const findings = reviews.filter(Boolean).flatMap(r => JSON.parse(r.content).findings)
-const verified = await parallel(findings.map(f => () => agent(`Verify ${JSON.stringify(f)}`)))
+const verified = await ctx.parallel(findings.map(f => () => ctx.agent(`Verify ${JSON.stringify(f)}`)))
 ```
 
 As this when per-file findings can verify independently:
 
 ```js
-const verifiedByFile = await pipeline(
+const verifiedByFile = await ctx.pipeline(
   files,
-  file => agent(`Review ${file}. Return JSON findings.`, { agentType: 'reviewer' }),
+  file => ctx.agent(`Review ${file}. Return JSON findings.`, { agentType: 'reviewer' }),
   review => {
     const findings = JSON.parse(review.content).findings || []
-    return parallel(findings.map(f => () =>
-      agent(`Verify this finding and return JSON: ${JSON.stringify(f)}`, { agentType: 'verifier' })
+    return ctx.parallel(findings.map(f => () =>
+      ctx.agent(`Verify this finding and return JSON: ${JSON.stringify(f)}`, { agentType: 'verifier' })
     ))
   },
 )
@@ -159,8 +150,8 @@ Use independent verifiers that try to refute a candidate. A finding survives onl
 
 ```js
 async function verifyFinding(finding) {
-  const votes = await parallel([0, 1, 2].map(i => () =>
-    agent(`Try to refute this finding. Return JSON {refuted:boolean, evidence:string}: ${JSON.stringify(finding)}`, {
+  const votes = await ctx.parallel([0, 1, 2].map(i => () =>
+    ctx.agent(`Try to refute this finding. Return JSON {refuted:boolean, evidence:string}: ${JSON.stringify(finding)}`, {
       agentType: 'verifier',
       label: `verify-${i}`,
     })
@@ -183,8 +174,8 @@ const LENSES = [
   'test coverage gaps',
 ]
 
-const candidates = await parallel(LENSES.map(lens => () =>
-  agent(`Review the target for ${lens}. Return JSON findings.`, { agentType: 'reviewer' })
+const candidates = await ctx.parallel(LENSES.map(lens => () =>
+  ctx.agent(`Review the target for ${lens}. Return JSON findings.`, { agentType: 'reviewer' })
 ))
 ```
 
@@ -193,12 +184,12 @@ Judge panel:
 Use several planners, then a verifier or reviewer to score plans.
 
 ```js
-const plans = await parallel([
-  () => agent('Plan the simplest safe implementation.', { agentType: 'planner' }),
-  () => agent('Plan the most compatible implementation.', { agentType: 'planner' }),
-  () => agent('Plan the implementation with strongest tests.', { agentType: 'planner' }),
+const plans = await ctx.parallel([
+  () => ctx.agent('Plan the simplest safe implementation.', { agentType: 'planner' }),
+  () => ctx.agent('Plan the cleanest implementation.', { agentType: 'planner' }),
+  () => ctx.agent('Plan the implementation with strongest tests.', { agentType: 'planner' }),
 ])
-const judged = await agent(`Compare these plans and choose one: ${JSON.stringify(plans)}`, {
+const judged = await ctx.agent(`Compare these plans and choose one: ${JSON.stringify(plans)}`, {
   agentType: 'reviewer',
 })
 return judged
@@ -216,8 +207,8 @@ let round = 0
 
 while (dryRounds < 2 && round < 6) {
   round += 1
-  const found = await parallel(LENSES.map(lens => () =>
-    agent(`Round ${round}: find new issues via ${lens}. Return JSON findings.`, { agentType: 'reviewer' })
+  const found = await ctx.parallel(LENSES.map(lens => () =>
+    ctx.agent(`Round ${round}: find new issues via ${lens}. Return JSON findings.`, { agentType: 'reviewer' })
   ))
   const fresh = []
   for (const result of found.filter(Boolean)) {
@@ -234,11 +225,11 @@ while (dryRounds < 2 && round < 6) {
     continue
   }
   dryRounds = 0
-  const verified = await parallel(fresh.map(item => () => verifyFinding(item)))
+  const verified = await ctx.parallel(fresh.map(item => () => verifyFinding(item)))
   fresh.forEach((item, index) => {
     if (verified[index]) confirmed.push(item)
   })
-  log(`round ${round}: ${fresh.length} fresh, ${confirmed.length} confirmed`)
+  await ctx.log(`round ${round}: ${fresh.length} fresh, ${confirmed.length} confirmed`)
 }
 
 return { confirmed }
@@ -267,11 +258,11 @@ Ask workers for compact outputs:
 
 Be honest about current ChatTree support:
 
-- `/workflow <script>` runs inline script text.
-- `export const meta = ...` is accepted by the worker.
-- `agent(prompt, { agentType })` and `agent(name, input)` are accepted.
-- `pipeline`, `parallel`, `phase`, `log`, `args`, and `budget` are available.
-- Saved workflow registries, scriptPath resume, prefix-cache replay, schema-enforced structured output, and worktree isolation are compatibility targets, not guaranteed runtime features.
+- `/workflow <script>` and `start_workflow.script` run inline workflow module text.
+- `export default async function workflow(ctx) { ... }` is the only accepted entrypoint.
+- Only `ctx.agent(prompt, { agentType })` is accepted for worker calls.
+- `ctx.pipeline`, `ctx.parallel`, `ctx.phase`, `ctx.log`, `ctx.args`, and `ctx.budget` are available.
+- Saved workflow registries, scriptPath resume, prefix-cache replay, schema-enforced structured output, and worktree isolation are not part of the workflow contract.
 
 Do not promise unsupported behavior in prompts, docs, or final reports.
 

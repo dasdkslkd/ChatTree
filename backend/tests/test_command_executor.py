@@ -8,6 +8,9 @@ from unittest.mock import AsyncMock, patch
 
 from backend.api.routes.run_control import stop_run_tree
 from backend.core.command_runtime import CommandExecutor
+from backend.core.persistence.database import SQLitePersistence
+from backend.core.persistence.repository import ChatRepository
+from backend.core.persistence.run_repository import SQLiteRunRepository
 from backend.core.runs import RunKind, RunManager, RunStatus
 from backend.core.tasks import TaskLedger, TaskStatus
 from backend.core.tools.code_tools import CodeToolConfig, RunCommandTool
@@ -260,6 +263,50 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("terminal_run_id", payload)
             self.assertIn("hello-command", payload["stdout_tail"])
             self.assertEqual(seen_notifications, ["conv_1"])
+
+    async def test_command_snapshot_reads_repository_events(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            persistence = SQLitePersistence(tmpdir)
+            persistence.initialize()
+            chat = ChatRepository(persistence)
+            runs = SQLiteRunRepository(persistence)
+            conversation_id = chat.create_conversation(title="repo command")
+            node_id = chat.create_node(conversation_id, parent_id=None)
+            run_manager = RunManager(repository=runs)
+            command_executor = CommandExecutor(run_manager)
+            record = await run_manager.create_run(
+                conversation_id=conversation_id,
+                kind=RunKind.COMMAND,
+                anchor_node_id=node_id,
+                summary="repo snapshot",
+                metadata={"command": "echo repo"},
+            )
+
+            await run_manager.append_event(record.run_id, {
+                "event_type": "command_stdout",
+                "status": "content",
+                "content": "repo-out\n",
+            })
+            await run_manager.append_event(record.run_id, {
+                "event_type": "command_stderr",
+                "status": "content",
+                "content": "repo-err\n",
+            })
+            await run_manager.append_event(record.run_id, {
+                "event_type": "command_exited",
+                "status": "content",
+                "exit_code": 0,
+                "duration_seconds": 0.1,
+                "command_status": RunStatus.COMPLETED.value,
+            })
+            await run_manager.finish_run(record.run_id, RunStatus.COMPLETED)
+
+            snapshot = command_executor.snapshot(record.run_id)
+
+            self.assertEqual(snapshot["stdout"], "repo-out\n")
+            self.assertEqual(snapshot["stderr"], "repo-err\n")
+            self.assertEqual(snapshot["exit_code"], 0)
+            self.assertEqual(snapshot["status"], RunStatus.COMPLETED.value)
 
     async def test_background_command_auto_creates_task_for_standalone_notification(self):
         with tempfile.TemporaryDirectory() as tmpdir:

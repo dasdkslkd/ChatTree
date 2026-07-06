@@ -227,6 +227,51 @@ class RunManager:
             async with condition:
                 await condition.wait()
 
+    async def wait_for_result(
+        self,
+        run_id: str,
+        *,
+        result_event_types: Iterable[str],
+        error_event_types: Iterable[str] = (),
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        result_types = {str(item) for item in result_event_types}
+        error_types = {str(item) for item in error_event_types}
+
+        async def wait() -> Dict[str, Any]:
+            result_payload: Optional[Dict[str, Any]] = None
+            error_payload: Optional[Dict[str, Any]] = None
+            final_payload: Optional[Dict[str, Any]] = None
+            async for payload in self.subscribe(run_id, 0):
+                event_type = str(payload.get("event_type") or "")
+                if event_type in result_types:
+                    result_payload = payload
+                elif event_type in error_types:
+                    error_payload = payload
+                if payload.get("type") == "run_finished":
+                    final_payload = payload
+                    break
+
+            run = self.get_run(run_id) or {}
+            status = (
+                (final_payload or {}).get("status")
+                or run.get("status")
+                or RunStatus.COMPLETED.value
+            )
+            selected = error_payload or result_payload or final_payload or {}
+            return {
+                "run_id": run_id,
+                "status": status,
+                "content": selected.get("content") or "",
+                "error": selected.get("error"),
+                "event_type": selected.get("event_type") or selected.get("type"),
+                "event": deepcopy(selected),
+            }
+
+        if timeout is not None:
+            return await asyncio.wait_for(wait(), timeout=timeout)
+        return await wait()
+
     async def finish_run(
         self,
         run_id: str,

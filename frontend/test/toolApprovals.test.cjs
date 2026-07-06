@@ -141,7 +141,37 @@ function testDeduplicatesApprovalsWhenRunsAppearInMultipleSurfaces() {
   ]);
 }
 
+function testFiltersToServerConfirmedPendingApprovals() {
+  const prompts = collectPendingToolApprovalPrompts([
+    run({
+      runId: 'run-restored',
+      kind: 'subagent',
+      pendingApprovals: {
+        stale_approval: {
+          id: 'stale_approval',
+          status: 'pending',
+          tool_name: 'run_command',
+        },
+      },
+    }),
+    run({
+      runId: 'run-live',
+      kind: 'subagent',
+      pendingApprovals: {
+        live_approval: {
+          id: 'live_approval',
+          status: 'pending',
+          tool_name: 'run_command',
+        },
+      },
+    }),
+  ], new Set(['live_approval']));
+
+  assert.deepEqual(prompts.map((item) => item.approval.id), ['live_approval']);
+}
+
 testCollectsPendingApprovalsFromMainDetachedAndChildRuns();
 testDeduplicatesApprovalsWhenRunsAppearInMultipleSurfaces();
+testFiltersToServerConfirmedPendingApprovals();
 
 console.log('toolApprovals tests passed');
