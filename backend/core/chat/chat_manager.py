@@ -72,6 +72,31 @@ MULTI_AGENT_REQUEST_TOKENS = (
     "工作流",
 )
 
+PARALLEL_READ_ONLY_TOOL_NAMES = {
+    "fetch_url",
+    "list_available_tools",
+    "list_files",
+    "read_file",
+    "read_tool_result",
+    "search_files",
+    "web_search",
+}
+
+
+def _tool_call_function_name(tool_call: Dict[str, Any]) -> str:
+    fn = tool_call.get("function") or {}
+    return str(fn.get("name") or "")
+
+
+def _is_parallel_read_only_tool(name: str) -> bool:
+    if name in PARALLEL_READ_ONLY_TOOL_NAMES:
+        return True
+    if name.startswith("mcp__"):
+        lowered = name.lower()
+        return lowered.endswith("__read_file") or lowered.endswith("__list_files") or lowered.endswith("__search_files")
+    return False
+
+
 class ChatManager:
     """延迟加载模型的聊天管理器"""
     
@@ -3353,102 +3378,151 @@ class ChatManager:
     ) -> List[Message]:
         results: List[Message] = []
         current_permission_mode = permission_mode
-        for tool_call in tool_calls:
-            fn = tool_call.get("function") or {}
-            name = fn.get("name", "")
-            arguments = self._parse_tool_arguments(fn.get("arguments"))
-            tool_orchestrator = getattr(self, "tool_orchestrator", None)
-            call_run_context = dict(run_context or {})
-            call_run_context["tool_call_id"] = tool_call.get("id")
-            if tool_orchestrator:
-                try:
-                    message = await tool_orchestrator.execute_tool_call(
-                        tool_call,
-                        conversation_id or "",
-                        node_id,
-                        emit_event=emit_event,
-                        workspace=workspace,
-                        permission_mode=current_permission_mode,
-                        run_context=call_run_context,
-                    )
-                except TypeError as exc:
-                    error_text = str(exc)
-                    if "unexpected keyword argument 'run_context'" in error_text:
-                        message = await tool_orchestrator.execute_tool_call(
-                            tool_call,
-                            conversation_id or "",
-                            node_id,
-                            emit_event=emit_event,
-                            workspace=workspace,
-                            permission_mode=current_permission_mode,
-                        )
-                    elif "unexpected keyword argument 'permission_mode'" in error_text:
-                        message = await tool_orchestrator.execute_tool_call(
-                            tool_call,
-                            conversation_id or "",
-                            node_id,
-                            emit_event=emit_event,
-                            workspace=workspace,
-                        )
-                    elif "unexpected keyword argument 'workspace'" in error_text:
-                        message = await tool_orchestrator.execute_tool_call(
-                            tool_call,
-                            conversation_id or "",
-                            node_id,
-                            emit_event=emit_event,
-                        )
-                    else:
-                        raise
-                model_message = self._model_visible_tool_message(
-                    message,
-                    name=name,
-                    conversation_id=conversation_id,
+        batch: List[Dict[str, Any]] = []
+
+        async def flush_read_only_batch() -> None:
+            nonlocal batch, current_permission_mode
+            if not batch:
+                return
+            messages = await asyncio.gather(*[
+                self._execute_single_tool_call(
+                    tool_call,
                     node_id=node_id,
-                    tool_call_id=tool_call.get("id"),
+                    conversation_id=conversation_id,
+                    emit_event=emit_event,
+                    workspace=workspace,
+                    permission_mode=current_permission_mode,
+                    run_context=run_context,
                 )
-                results.append(model_message)
+                for tool_call in batch
+            ])
+            for message in messages:
+                results.append(message)
                 current_permission_mode = self._permission_mode_after_plan_tools(
-                    [model_message],
+                    [message],
                     current_permission_mode,
                 )
+            batch = []
+
+        for tool_call in tool_calls:
+            name = _tool_call_function_name(tool_call)
+            if _is_parallel_read_only_tool(name):
+                batch.append(tool_call)
                 continue
 
-            if not self.tool_manager:
-                raw_result = json.dumps({"error": "Tool manager is not configured"}, ensure_ascii=False)
-            else:
-                try:
-                    raw_result = await self.tool_manager.execute_tool(
-                        name,
-                        arguments,
-                        workspace=workspace,
-                        runtime_context=call_run_context,
-                    )
-                except TypeError as exc:
-                    if "unexpected keyword argument 'workspace'" not in str(exc):
-                        raise
-                    raw_result = await self.tool_manager.execute_tool(name, arguments)
-            model_message = self._model_visible_tool_message(
-                Message({
-                    "id": str(uuid.uuid4()),
-                    "role": Role.TOOL,
-                    "content": raw_result,
-                    "name": name,
-                    "tool_calls": None,
-                    "tool_call_id": tool_call.get("id"),
-                    "node_id": node_id,
-                    "timestamp": int(time()),
-                }),
-                name=name,
-                conversation_id=conversation_id,
+            await flush_read_only_batch()
+            model_message = await self._execute_single_tool_call(
+                tool_call,
                 node_id=node_id,
-                tool_call_id=tool_call.get("id"),
+                conversation_id=conversation_id,
+                emit_event=emit_event,
+                workspace=workspace,
+                permission_mode=current_permission_mode,
+                run_context=run_context,
             )
             results.append(model_message)
             current_permission_mode = self._permission_mode_after_plan_tools(
                 [model_message],
                 current_permission_mode,
             )
+
+        await flush_read_only_batch()
         return results
+
+    async def _execute_single_tool_call(
+        self,
+        tool_call: Dict[str, Any],
+        *,
+        node_id: str,
+        conversation_id: Optional[str] = None,
+        emit_event: Optional[Callable[[Dict[str, Any]], Any]] = None,
+        workspace: Optional[Dict[str, Any]] = None,
+        permission_mode: PermissionMode = "default",
+        run_context: Optional[Dict[str, Any]] = None,
+    ) -> Message:
+        fn = tool_call.get("function") or {}
+        name = str(fn.get("name") or "")
+        arguments = self._parse_tool_arguments(fn.get("arguments"))
+        tool_orchestrator = getattr(self, "tool_orchestrator", None)
+        call_run_context = dict(run_context or {})
+        call_run_context["tool_call_id"] = tool_call.get("id")
+        if tool_orchestrator:
+            try:
+                message = await tool_orchestrator.execute_tool_call(
+                    tool_call,
+                    conversation_id or "",
+                    node_id,
+                    emit_event=emit_event,
+                    workspace=workspace,
+                    permission_mode=permission_mode,
+                    run_context=call_run_context,
+                )
+            except TypeError as exc:
+                error_text = str(exc)
+                if "unexpected keyword argument 'run_context'" in error_text:
+                    message = await tool_orchestrator.execute_tool_call(
+                        tool_call,
+                        conversation_id or "",
+                        node_id,
+                        emit_event=emit_event,
+                        workspace=workspace,
+                        permission_mode=permission_mode,
+                    )
+                elif "unexpected keyword argument 'permission_mode'" in error_text:
+                    message = await tool_orchestrator.execute_tool_call(
+                        tool_call,
+                        conversation_id or "",
+                        node_id,
+                        emit_event=emit_event,
+                        workspace=workspace,
+                    )
+                elif "unexpected keyword argument 'workspace'" in error_text:
+                    message = await tool_orchestrator.execute_tool_call(
+                        tool_call,
+                        conversation_id or "",
+                        node_id,
+                        emit_event=emit_event,
+                    )
+                else:
+                    raise
+            return self._model_visible_tool_message(
+                message,
+                name=name,
+                conversation_id=conversation_id,
+                node_id=node_id,
+                tool_call_id=tool_call.get("id"),
+            )
+
+        if not self.tool_manager:
+            raw_result = json.dumps({"error": "Tool manager is not configured"}, ensure_ascii=False)
+        else:
+            try:
+                raw_result = await self.tool_manager.execute_tool(
+                    name,
+                    arguments,
+                    workspace=workspace,
+                    runtime_context=call_run_context,
+                )
+            except TypeError as exc:
+                if "unexpected keyword argument 'workspace'" not in str(exc):
+                    raise
+                raw_result = await self.tool_manager.execute_tool(name, arguments)
+        return self._model_visible_tool_message(
+            Message({
+                "id": str(uuid.uuid4()),
+                "role": Role.TOOL,
+                "content": raw_result,
+                "name": name,
+                "tool_calls": None,
+                "tool_call_id": tool_call.get("id"),
+                "node_id": node_id,
+                "timestamp": int(time()),
+            }),
+            name=name,
+            conversation_id=conversation_id,
+            node_id=node_id,
+            tool_call_id=tool_call.get("id"),
+        )
 
     def _parse_tool_arguments(self, raw_arguments: Any) -> Dict[str, Any]:
         if isinstance(raw_arguments, dict):

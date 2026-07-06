@@ -21,7 +21,10 @@ def normalize_tool_arguments(tool_name: str, arguments: Dict[str, Any]) -> Dict[
     normalized = dict(arguments)
     _rename_first(normalized, "path", ("file_path", "filepath", "file"))
     _rename_first(normalized, "command", ("cmd", "script"))
-    _rename_first(normalized, "query", ("q", "pattern"))
+    if tool_name.lower() == "search_files":
+        _rename_first(normalized, "pattern", ("q", "query"))
+    else:
+        _rename_first(normalized, "query", ("q", "pattern"))
     _rename_first(normalized, "old_string", ("old", "oldString", "old_text"))
     _rename_first(normalized, "new_string", ("new", "newString", "new_text"))
     return normalized
@@ -47,7 +50,7 @@ def _compact_argument_for_tool(tool_name: str, raw: str) -> Dict[str, Any] | Non
     if name in {"read_file", "list_files"}:
         return {"path": raw}
     if name == "search_files":
-        return {"query": raw}
+        return {"pattern": raw}
     if name in {"run_command", "start_background_command"}:
         return {"command": raw}
     if name == "apply_patch":

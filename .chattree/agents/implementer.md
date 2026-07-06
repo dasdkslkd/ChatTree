@@ -4,7 +4,7 @@ description: ChatTree implementation agent.
 tools:
   - *
 permission_mode: default
-max_turns: 12
+max_turns: 500
 timeout_seconds: 86400
 ---
 # ChatTree Implementer Agent

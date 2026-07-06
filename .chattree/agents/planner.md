@@ -4,7 +4,7 @@ description: ChatTree planning agent for implementation design.
 tools:
   - *
 permission_mode: read_only
-max_turns: 8
+max_turns: 500
 timeout_seconds: 86400
 ---
 # ChatTree Planner Agent

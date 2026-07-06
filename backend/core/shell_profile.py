@@ -142,8 +142,8 @@ def _profile_for(platform_id: PlatformId, shell_id: ShellId, *, executable: Opti
                 "Use single-quoted here-strings @' ... '@ for multiline literal text.",
             ],
             preferred_examples=[
-                CommandExample("list files", "Get-ChildItem -Force"),
-                CommandExample("search text", "Select-String -Path .\\src\\*.ts -Pattern \"needle\""),
+                CommandExample("run tests", "npm test"),
+                CommandExample("build project", "npm run build"),
                 CommandExample("set env and run", "$env:FOO = \"bar\"; npm test"),
                 CommandExample("inline python", "@'\nprint('hello')\n'@ | python -"),
             ],
@@ -169,7 +169,7 @@ def _profile_for(platform_id: PlatformId, shell_id: ShellId, *, executable: Opti
                 "Prefer PowerShell if available for complex scripting.",
             ],
             preferred_examples=[
-                CommandExample("list files", "dir /a"),
+                CommandExample("run tests", "npm test"),
                 CommandExample("set env and run", "set FOO=bar && npm test"),
             ],
             forbidden_examples=[
@@ -193,8 +193,8 @@ def _profile_for(platform_id: PlatformId, shell_id: ShellId, *, executable: Opti
             "Here-documents and POSIX redirection are valid in this shell.",
         ],
         preferred_examples=[
-            CommandExample("list files", "ls -la"),
-            CommandExample("search text", "rg \"needle\" src"),
+            CommandExample("run tests", "npm test"),
+            CommandExample("build project", "npm run build"),
             CommandExample("set env and run", "FOO=bar npm test"),
             CommandExample("inline python", "python - <<'PY'\nprint('hello')\nPY"),
         ],

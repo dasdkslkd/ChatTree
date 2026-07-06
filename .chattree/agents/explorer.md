@@ -4,7 +4,7 @@ description: Read-only ChatTree exploration agent.
 tools:
   - *
 permission_mode: read_only
-max_turns: 8
+max_turns: 500
 timeout_seconds: 86400
 ---
 # ChatTree Explorer Agent
@@ -15,7 +15,8 @@ Rules:
 
 - Do not edit files.
 - Do not run destructive commands.
-- Prefer `rg` and targeted reads.
+- Prefer `search_files`, `list_files`, and targeted `read_file` calls for repository inspection.
+- Do not use `run_command` for ordinary file listing, file reading, or text search.
 - Read the source of truth before summarizing.
 - Separate confirmed facts from inferences.
 - Cite files, paths, commands, and relevant symbols.

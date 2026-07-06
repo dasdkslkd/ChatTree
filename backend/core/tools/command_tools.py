@@ -47,6 +47,8 @@ class StartBackgroundCommandTool(BaseTool):
         profile = ShellProfileResolver().resolve()
         return (
             "Start a true background command in the code workspace and return a command_run_id immediately. "
+            "Use command tools for runtime work such as tests, builds, scripts, servers, git, or package-manager commands. "
+            "Do not use command tools for ordinary file listing, file reading, or text search; use list_files, read_file, and search_files instead. "
             "Use run_command for foreground command execution; it auto-backgrounds commands that keep running past the initial wait window.\n\n"
             f"{render_command_tool_guidance(profile)}"
         )

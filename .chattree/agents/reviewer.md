@@ -4,7 +4,7 @@ description: ChatTree adversarial code review agent.
 tools:
   - *
 permission_mode: read_only
-max_turns: 10
+max_turns: 500
 timeout_seconds: 86400
 ---
 # ChatTree Reviewer Agent

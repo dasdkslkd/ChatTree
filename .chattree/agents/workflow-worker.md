@@ -4,7 +4,7 @@ description: ChatTree dynamic workflow worker.
 tools:
   - *
 permission_mode: default
-max_turns: 8
+max_turns: 500
 timeout_seconds: 86400
 metadata:
   runtime: workflow
