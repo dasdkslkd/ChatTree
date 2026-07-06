@@ -72,7 +72,7 @@ export function formatProcessedDuration(ms: number | null | undefined): string |
   if (hours > 0) parts.push(`${hours}h`);
   if (hours > 0 || minutes > 0) parts.push(`${minutes}m`);
   parts.push(`${seconds}s`);
-  return parts.join(' ');
+  return parts.join('');
 }
 
 export function hasAssistantProcessHistory(message: AssistantFoldSource): boolean {

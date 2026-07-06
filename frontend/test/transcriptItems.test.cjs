@@ -499,6 +499,9 @@ function testTranscriptMessageItemsUseLegacyChatBubbleStyling() {
   assert.match(list, /compact_after_process:\s*true/);
   assert.match(assistantProcessTimeline, /className=\{cn\('thought'/);
   assert.match(assistantProcessTimeline, /className="thought-head"/);
+  assert.match(assistantProcessTimeline, /rounded-lg px-3 py-2 text-sm leading-relaxed/);
+  assert.match(assistantProcessTimeline, /rounded-lg px-3 py-2 text-sm prose prose-sm prose-invert/);
+  assert.doesNotMatch(assistantProcessTimeline, /rounded-2xl rounded-br-sm/);
   assert.match(assistantProcessTimeline, /props\.compactWithNextAnswer \? 'mt-2 mb-0' : 'my-2'/);
   assert.match(assistantProcess, /tool_interactions/);
   assert.match(assistantProcessTimeline, /type: 'content'/);

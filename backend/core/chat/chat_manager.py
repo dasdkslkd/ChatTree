@@ -683,6 +683,11 @@ class ChatManager:
                 tool_interactions=tool_interactions,
                 reasoning=str(assistant_msg.get("reasoning") or ""),
             )
+            generation_info = assistant_msg.get("generation_info") or {}
+            duration_ms = generation_info.get("duration_ms")
+            process_props: dict[str, Any] = {}
+            if isinstance(duration_ms, (int, float)) and duration_ms >= 0:
+                process_props["duration"] = int(duration_ms)
             timeline_blocks: list[dict[str, Any]] = []
             for interaction in tool_interactions:
                 assistant = interaction.get("assistant") or {}
@@ -721,6 +726,7 @@ class ChatManager:
                         "tool_interactions": tool_interactions,
                         "timeline": timeline_blocks,
                         "reasoning": assistant_msg.get("reasoning"),
+                        "duration": process_props.get("duration"),
                         "transcript_continuation": continuation_meta or None,
                     },
                     message_id=f"{assistant_msg.get('id')}:process",
@@ -736,6 +742,7 @@ class ChatManager:
                         "continuation_of_node_id": base_node_id,
                         "timeline": timeline_blocks,
                         "reasoning": assistant_msg.get("reasoning"),
+                        **process_props,
                     }
                     appended_to = self.transcript_projection.append_process_continuation(
                         conversation_id,
@@ -769,6 +776,7 @@ class ChatManager:
                         local_order=25,
                         status=generation_status,
                         preview=process_preview,
+                        props=process_props or None,
                     )
             if is_transcript_continuation and not continuation_appended:
                 base_node_id = str(
@@ -790,6 +798,7 @@ class ChatManager:
                         "continuation_of_node_id": base_node_id,
                         "timeline": [],
                         "reasoning": None,
+                        **process_props,
                     },
                 )
                 continuation_appended = appended_to is not None

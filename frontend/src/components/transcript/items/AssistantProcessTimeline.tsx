@@ -151,12 +151,8 @@ function ContentBlock({ block }: { block: Extract<AssistantTimelineBlock, { type
   return (
     <div
       key={block.key}
-      className="max-w-full w-full min-w-0 px-3 py-2 rounded-2xl leading-relaxed prose prose-sm max-w-none [&_p]:m-0 [&_p:not(:last-child)]:mb-2"
-      style={{
-        color: 'var(--fg-secondary)',
-        fontSize: 'var(--codex-chat-font-size)',
-        lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
-      }}
+      className="max-w-full min-w-0 rounded-lg px-3 py-2 text-sm leading-relaxed prose prose-sm max-w-none [&_p]:m-0"
+      style={{ color: 'var(--fg-secondary)' }}
     >
       <MarkdownContent enableMermaid>{block.content}</MarkdownContent>
     </div>
@@ -218,14 +214,11 @@ export function AssistantProcessTimeline({
         <div className="w-full my-2 flex flex-col items-end" role="listitem">
           <div className="flex flex-col items-start max-w-full">
             <div
-              className="max-w-full w-fit px-3 py-2 rounded-2xl rounded-br-sm leading-relaxed prose prose-sm prose-invert max-w-none [&_p]:m-0"
+              className="max-w-full rounded-lg px-3 py-2 text-sm prose prose-sm prose-invert max-w-none [&_p]:m-0"
               style={{
                 background: 'linear-gradient(160deg, rgba(217,119,87,0.16), rgba(217,119,87,0.08))',
                 border: '0.5px solid rgba(217,119,87,0.28)',
-                boxShadow: 'var(--highlight-top)',
                 color: 'var(--fg-85)',
-                fontSize: 'var(--codex-chat-font-size)',
-                lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
               }}
             >
               <MarkdownContent enableMermaid>{props.pendingUserMessage || ''}</MarkdownContent>

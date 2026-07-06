@@ -26,8 +26,9 @@ const {
 } = require(path.join(__dirname, '../src/utils/assistantTimelineFolding.ts'));
 
 function testFormatsProcessedDurationWithHours() {
-  assert.equal(formatProcessedDuration(4_202_000), '1h 10m 2s');
-  assert.equal(formatProcessedDuration(62_000), '1m 2s');
+  assert.equal(formatProcessedDuration(5_550_000), '1h32m30s');
+  assert.equal(formatProcessedDuration(4_202_000), '1h10m2s');
+  assert.equal(formatProcessedDuration(62_000), '1m2s');
   assert.equal(formatProcessedDuration(900), '1s');
   assert.equal(formatProcessedDuration(null), null);
 }

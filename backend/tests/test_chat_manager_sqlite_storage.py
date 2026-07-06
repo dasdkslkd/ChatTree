@@ -8,7 +8,7 @@ sys.path.insert(0, ".")
 sys.path.insert(0, "test")
 
 from backend.core.chat.chat_manager import ChatManager
-from backend.core.config.types import StreamChunk, StreamController, StreamStatus
+from backend.core.config.types import Message, Role, StreamChunk, StreamController, StreamStatus
 from backend.core.persistence.database import SQLitePersistence
 from backend.core.persistence.repository import ChatRepository
 from backend.core.persistence.transcript import TranscriptProjection
@@ -474,6 +474,53 @@ def test_tool_turn_uses_last_non_tool_text_as_assistant_answer(tmp_path: Path):
     assert timeline[0]["type"] == "content"
     assert timeline[0]["content"] == "我先检查一下环境。\n"
     assert timeline[1]["type"] == "tool_call"
+
+
+def test_completed_assistant_process_persists_duration(tmp_path: Path):
+    manager, _repository, projection = _make_manager(tmp_path)
+    conversation = manager.create_conversation("process duration")
+    node = conversation.nodes[conversation.current_node_id]
+
+    manager._persist_sqlite_assistant_turn(
+        conversation=conversation,
+        node=node,
+        assistant_msg=Message({
+            "id": "assistant-duration",
+            "role": Role.ASSISTANT,
+            "content": "最终回复",
+            "reasoning": "检查文件",
+            "generation_info": {
+                "duration_ms": 5_550_000,
+                "status": "completed",
+                "tokens_used": 1,
+            },
+        }),
+        provider_id="fake-provider",
+        model_id="fake-model",
+        run_id="run-duration",
+        generation_status="completed",
+        tool_interactions=[{
+            "assistant": {
+                "tool_calls": [{
+                    "id": "call-duration",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                }],
+            },
+            "tools": [{
+                "tool_call_id": "call-duration",
+                "name": "read_file",
+                "content": "ok",
+            }],
+        }],
+        tool_messages=[],
+        tool_calls=[],
+    )
+
+    items = projection.list_for_branch(conversation.metadata["id"], conversation.current_node_id)
+    process = next(item for item in items if item["item_type"] == "assistant_process")
+    dto = to_transcript_item_dto(process)
+    assert dto["props"]["duration"] == 5_550_000
 
 
 def test_plan_approval_stream_uses_tool_result_continuation(tmp_path: Path):
