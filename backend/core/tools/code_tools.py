@@ -9,6 +9,7 @@ import platform
 import re
 import shlex
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
@@ -21,6 +22,7 @@ from ..shell_profile import ShellProfileResolver, render_command_tool_guidance
 
 DEFAULT_CODE_WORKSPACE = r"D:\Workspace\ChatTree\tmp"
 DEFAULT_RIPGREP_VERSION = "15.1.0"
+TEXT_READ_CHUNK_CHARS = 8192
 
 
 def _project_root() -> Path:
@@ -352,15 +354,13 @@ class ReadFileTool(_CodeTool):
             return _error(exc.error_type, str(exc), path=str(kwargs.get("path") or ""))
         if not target.exists() or not target.is_file():
             return _error("not_found", "file not found", path=self.workspace.relative(target))
-        try:
-            text = target.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            return _error("not_utf8", "file is not valid UTF-8 text", path=self.workspace.relative(target))
         offset = max(0, int(kwargs.get("offset") or 0))
         limit = max(1, min(int(kwargs.get("limit") or self.config.max_read_chars), self.config.max_read_chars))
-        content = text[offset:offset + limit]
+        try:
+            content, truncated = _read_text_window(target, offset=offset, limit=limit)
+        except UnicodeDecodeError:
+            return _error("not_utf8", "file is not valid UTF-8 text", path=self.workspace.relative(target))
         next_offset = offset + len(content)
-        truncated = next_offset < len(text)
         payload: Dict[str, Any] = {
             "path": self.workspace.relative(target),
             "content": content,
@@ -790,6 +790,20 @@ class ApplyPatchTool(_CodeTool):
         return _json({"applied": True, "files_changed": changed})
 
 
+@dataclass(frozen=True)
+class _PatchHunk:
+    old_index: int
+    remove: List[str]
+    add: List[str]
+    header: str
+
+
+@dataclass(frozen=True)
+class _FilePatch:
+    path: str
+    hunks: List[_PatchHunk]
+
+
 def _patch_path(raw: str) -> str:
     path = raw.strip()
     if path == "/dev/null":
@@ -802,9 +816,37 @@ def _patch_path(raw: str) -> str:
     return path
 
 
+def _read_text_window(target: Path, *, offset: int, limit: int) -> tuple[str, bool]:
+    with target.open("r", encoding="utf-8") as handle:
+        remaining = offset
+        while remaining > 0:
+            chunk = handle.read(min(remaining, TEXT_READ_CHUNK_CHARS))
+            if not chunk:
+                return "", False
+            remaining -= len(chunk)
+        content = handle.read(limit + 1)
+    if len(content) > limit:
+        return content[:limit], True
+    return content, False
+
+
 def _apply_simple_unified_patch(workspace: CodeWorkspace, base: Path, patch: str) -> List[str]:
-    lines = patch.splitlines()
+    file_patches = _parse_unified_patch(patch)
     changed: List[str] = []
+    for file_patch in file_patches:
+        target = workspace.check_write(base / file_patch.path)
+        if not target.exists():
+            raise ValueError(f"target file does not exist: {file_patch.path}")
+        _apply_file_patch_streaming(target, file_patch)
+        changed.append(workspace.relative(target))
+    if not changed:
+        raise ValueError("no file changes found in patch")
+    return changed
+
+
+def _parse_unified_patch(patch: str) -> List[_FilePatch]:
+    lines = patch.splitlines()
+    file_patches: List[_FilePatch] = []
     i = 0
     while i < len(lines):
         if not lines[i].startswith("--- "):
@@ -817,10 +859,7 @@ def _apply_simple_unified_patch(workspace: CodeWorkspace, base: Path, patch: str
         new_path = _patch_path(lines[i][4:].split("\t", 1)[0].strip())
         if old_path != new_path:
             raise ValueError("renames are not supported")
-        target = workspace.check_write(base / new_path)
-        if not target.exists():
-            raise ValueError(f"target file does not exist: {new_path}")
-        text_lines = target.read_text(encoding="utf-8").splitlines()
+        hunks: List[_PatchHunk] = []
         i += 1
         while i < len(lines) and lines[i].startswith("@@"):
             hunk_header = lines[i]
@@ -847,14 +886,139 @@ def _apply_simple_unified_patch(workspace: CodeWorkspace, base: Path, patch: str
                 else:
                     raise ValueError("invalid hunk line")
                 i += 1
-            if text_lines[old_index:old_index + len(remove)] != remove:
-                old_index = _find_unique_hunk_offset(text_lines, remove, new_path, hunk_header)
-            text_lines[old_index:old_index + len(remove)] = add
-        target.write_text("\n".join(text_lines) + "\n", encoding="utf-8")
-        changed.append(workspace.relative(target))
-    if not changed:
+            hunks.append(_PatchHunk(old_index=old_index, remove=remove, add=add, header=hunk_header))
+        file_patches.append(_FilePatch(path=new_path, hunks=hunks))
+    if not file_patches:
         raise ValueError("no file changes found in patch")
-    return changed
+    return file_patches
+
+
+def _apply_file_patch_streaming(target: Path, file_patch: _FilePatch) -> None:
+    resolved_hunks = _resolve_patch_hunk_offsets(target, file_patch)
+    temp_name: Optional[str] = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            newline="\n",
+            dir=str(target.parent),
+            delete=False,
+        ) as output:
+            temp_name = output.name
+            _rewrite_patch_stream(target, output, resolved_hunks, file_patch.path)
+        os.replace(temp_name, target)
+    except Exception:
+        if temp_name:
+            try:
+                Path(temp_name).unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+
+
+def _resolve_patch_hunk_offsets(target: Path, file_patch: _FilePatch) -> List[_PatchHunk]:
+    resolved: List[_PatchHunk] = []
+    for hunk in file_patch.hunks:
+        old_index = hunk.old_index
+        if hunk.remove and not _stream_lines_match_at(target, old_index, hunk.remove):
+            old_index = _find_unique_hunk_offset_streaming(target, hunk.remove, file_patch.path, hunk.header)
+        resolved.append(_PatchHunk(old_index=old_index, remove=hunk.remove, add=hunk.add, header=hunk.header))
+
+    resolved.sort(key=lambda item: item.old_index)
+    previous_end = 0
+    for hunk in resolved:
+        if hunk.old_index < previous_end:
+            raise ValueError(f"overlapping hunks are not supported: {file_patch.path}; {hunk.header}")
+        previous_end = hunk.old_index + len(hunk.remove)
+    return resolved
+
+
+def _stream_lines_match_at(target: Path, old_index: int, expected: List[str]) -> bool:
+    if not expected:
+        return True
+    with target.open("r", encoding="utf-8") as handle:
+        for current_index, raw_line in enumerate(handle):
+            if current_index < old_index:
+                continue
+            expected_index = current_index - old_index
+            if expected_index >= len(expected):
+                return True
+            if _strip_line_ending(raw_line) != expected[expected_index]:
+                return False
+        return False
+
+
+def _find_unique_hunk_offset_streaming(target: Path, expected: List[str], path: str, hunk_header: str) -> int:
+    if not expected:
+        raise ValueError(
+            f"hunk does not match target file: {path}; {hunk_header}; empty context cannot be relocated"
+        )
+
+    matches: List[int] = []
+    window: List[str] = []
+    with target.open("r", encoding="utf-8") as handle:
+        for line_number, raw_line in enumerate(handle):
+            window.append(_strip_line_ending(raw_line))
+            if len(window) < len(expected):
+                continue
+            if len(window) > len(expected):
+                window.pop(0)
+            if window == expected:
+                matches.append(line_number - len(expected) + 1)
+                if len(matches) > 5:
+                    break
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        lines = ", ".join(str(index + 1) for index in matches[:5])
+        suffix = "..." if len(matches) > 5 else ""
+        raise ValueError(
+            f"hunk does not match target file: {path}; {hunk_header}; "
+            f"multiple matching locations found at lines {lines}{suffix}"
+        )
+    raise ValueError(
+        f"hunk does not match target file: {path}; {hunk_header}; no matching context found"
+    )
+
+
+def _rewrite_patch_stream(target: Path, output, hunks: List[_PatchHunk], path: str) -> None:
+    hunk_index = 0
+    current_index = 0
+    with target.open("r", encoding="utf-8") as source:
+        while True:
+            next_hunk = hunks[hunk_index] if hunk_index < len(hunks) else None
+            if next_hunk is not None and current_index == next_hunk.old_index:
+                _consume_expected_lines(source, next_hunk.remove, path, next_hunk.header)
+                for line in next_hunk.add:
+                    output.write(line + "\n")
+                current_index += len(next_hunk.remove)
+                hunk_index += 1
+                continue
+
+            raw_line = source.readline()
+            if raw_line == "":
+                break
+            output.write(_strip_line_ending(raw_line) + "\n")
+            current_index += 1
+
+        while hunk_index < len(hunks):
+            hunk = hunks[hunk_index]
+            if hunk.old_index > current_index or hunk.remove:
+                raise ValueError(f"hunk does not match target file: {path}; {hunk.header}")
+            for line in hunk.add:
+                output.write(line + "\n")
+            hunk_index += 1
+
+
+def _consume_expected_lines(source, expected: List[str], path: str, hunk_header: str) -> None:
+    for expected_line in expected:
+        raw_line = source.readline()
+        if raw_line == "" or _strip_line_ending(raw_line) != expected_line:
+            raise ValueError(f"hunk does not match target file: {path}; {hunk_header}")
+
+
+def _strip_line_ending(line: str) -> str:
+    return line[:-2] if line.endswith("\r\n") else line[:-1] if line.endswith("\n") else line
 
 
 def _resolve_ripgrep_executable(config: CodeToolConfig) -> Optional[Path]:

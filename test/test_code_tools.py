@@ -138,6 +138,26 @@ def test_read_file_reads_utf8_slice_and_next_offset(tmp_path):
     }
 
 
+def test_read_file_streams_window_without_read_text(tmp_path, monkeypatch):
+    target = tmp_path / "large.txt"
+    target.write_text("0123456789abcdef", encoding="utf-8")
+
+    def fail_read_text(*args, **kwargs):
+        raise AssertionError("read_file should not read the whole file")
+
+    monkeypatch.setattr(Path, "read_text", fail_read_text)
+    tool = ReadFileTool(make_config(tmp_path, max_read_chars=4))
+
+    result = load(run(tool.execute(path="large.txt", offset=8, limit=4)))
+
+    assert result == {
+        "path": "large.txt",
+        "content": "89ab",
+        "next_offset": 12,
+        "truncated": True,
+    }
+
+
 def test_read_file_rejects_outside_workspace(tmp_path):
     outside = tmp_path.parent / "outside.txt"
     outside.write_text("nope", encoding="utf-8")
@@ -315,6 +335,28 @@ def test_apply_patch_offsets_hunk_when_context_matches_uniquely(tmp_path):
     assert (tmp_path / "notes.md").read_text(encoding="utf-8") == (
         "# Title\n\nIntro\n\n## Tasks\n- [x] Search\n- [x] Run\n"
     )
+
+
+def test_apply_patch_streams_rewrite_without_read_text_or_write_text(tmp_path, monkeypatch):
+    (tmp_path / "notes.md").write_text("first\nsecond\nthird\n", encoding="utf-8")
+    tool = ApplyPatchTool(make_config(tmp_path))
+    patch = """--- a/notes.md
++++ b/notes.md
+@@ -2 +2 @@
+-second
++updated
+"""
+
+    def fail_whole_file_method(*args, **kwargs):
+        raise AssertionError("apply_patch should not use whole-file read_text/write_text")
+
+    monkeypatch.setattr(Path, "read_text", fail_whole_file_method)
+    monkeypatch.setattr(Path, "write_text", fail_whole_file_method)
+
+    result = load(run(tool.execute(patch=patch)))
+
+    assert result["applied"] is True
+    assert (tmp_path / "notes.md").open(encoding="utf-8").read() == "first\nupdated\nthird\n"
 
 
 def test_apply_patch_rejects_ambiguous_offset_match(tmp_path):
