@@ -1607,6 +1607,7 @@ class ChatManager:
                             "run_kind": "chat",
                             "root_run_id": run_id,
                             "conversation_id": conversation_id,
+                            "anchor_node_id": current_node_id,
                             "node_id": new_node["id"],
                             "task_summary": model_content[:160],
                         },

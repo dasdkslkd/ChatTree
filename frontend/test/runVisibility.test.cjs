@@ -101,7 +101,7 @@ function testDetachedBackgroundRunIsSideViewNotMainTranscript() {
     targetNodeId: null,
   });
 
-  assert.equal(isDetachedRunView(run, 'node-hello'), true);
+  assert.equal(isDetachedRunView(run, 'node-hello', new Set(['node-hello'])), true);
   assert.equal(isRunVisibleInMainTranscript(run, 'node-hello', new Set(['node-hello'])), false);
 }
 
@@ -113,7 +113,7 @@ function testDirectResponseRunIsSideViewNotMainTranscriptWithoutNode() {
     targetNodeId: null,
   });
 
-  assert.equal(isDetachedRunView(run, 'node-hello'), true);
+  assert.equal(isDetachedRunView(run, 'node-hello', new Set(['node-hello'])), true);
   assert.equal(isRunVisibleInMainTranscript(run, 'node-hello', new Set(['node-hello'])), false);
 }
 
@@ -137,7 +137,7 @@ function testDetachedChatRunStaysInMainTranscriptDuringPreTargetPhase() {
     targetNodeId: null,
   });
 
-  assert.equal(isDetachedRunView(run, 'node-hello'), false);
+  assert.equal(isDetachedRunView(run, 'node-hello', new Set(['node-hello'])), false);
   assert.equal(isRunVisibleInMainTranscript(run, 'node-hello', new Set(['node-hello'])), true);
 }
 
@@ -200,6 +200,33 @@ function testDetachedSubagentCanBeStoppedFromSelectedAnchorWithoutBlockingTransc
   assert.equal(isRunStoppableFromSelectedBranch(run, 'node-hello', new Set(['node-hello'])), true);
 }
 
+function testDetachedRunIsVisibleWhenAnchorIsInSelectedBranchHistory() {
+  const run = chatRun({
+    kind: 'subagent',
+    status: 'streaming',
+    anchorNodeId: 'node-hello',
+    nodeId: null,
+    targetNodeId: null,
+  });
+
+  assert.equal(isDetachedRunView(run, 'node-child', new Set(['node-root', 'node-hello', 'node-child'])), true);
+  assert.equal(isRunVisibleInMainTranscript(run, 'node-child', new Set(['node-root', 'node-hello', 'node-child'])), false);
+  assert.equal(isRunStoppableFromSelectedBranch(run, 'node-child', new Set(['node-root', 'node-hello', 'node-child'])), true);
+}
+
+function testDetachedRunIsHiddenWhenAnchorIsOutsideSelectedBranch() {
+  const run = chatRun({
+    kind: 'subagent',
+    status: 'streaming',
+    anchorNodeId: 'node-other',
+    nodeId: null,
+    targetNodeId: null,
+  });
+
+  assert.equal(isDetachedRunView(run, 'node-child', new Set(['node-root', 'node-hello', 'node-child'])), false);
+  assert.equal(isRunStoppableFromSelectedBranch(run, 'node-child', new Set(['node-root', 'node-hello', 'node-child'])), false);
+}
+
 function testCommandRunIsSideViewAndStoppableFromAnchor() {
   const run = chatRun({
     kind: 'command',
@@ -209,7 +236,7 @@ function testCommandRunIsSideViewAndStoppableFromAnchor() {
     targetNodeId: null,
   });
 
-  assert.equal(isDetachedRunView(run, 'node-hello'), true);
+  assert.equal(isDetachedRunView(run, 'node-hello', new Set(['node-hello'])), true);
   assert.equal(isRunVisibleInMainTranscript(run, 'node-hello', new Set(['node-hello'])), false);
   assert.equal(isRunStoppableFromSelectedBranch(run, 'node-hello', new Set(['node-hello'])), true);
 }
@@ -223,7 +250,7 @@ function testSubagentWithTargetNodeStillUsesSideView() {
     targetNodeId: 'run-child-node',
   });
 
-  assert.equal(isDetachedRunView(run, 'node-hello'), true);
+  assert.equal(isDetachedRunView(run, 'node-hello', new Set(['node-hello'])), true);
   assert.equal(isRunVisibleInMainTranscript(run, 'node-hello', new Set(['node-hello'])), false);
   assert.equal(isRunStoppableFromSelectedBranch(run, 'node-hello', new Set(['node-hello'])), true);
 }
@@ -252,6 +279,8 @@ testPendingChatRunStaysVisibleFromAnchorUntilTargetLands();
 testControlChatRunStaysVisibleFromAnchorUntilTargetLands();
 testPendingRootChatRunStaysVisibleBeforeFirstHistoryRefresh();
 testDetachedSubagentCanBeStoppedFromSelectedAnchorWithoutBlockingTranscript();
+testDetachedRunIsVisibleWhenAnchorIsInSelectedBranchHistory();
+testDetachedRunIsHiddenWhenAnchorIsOutsideSelectedBranch();
 testCommandRunIsSideViewAndStoppableFromAnchor();
 testSubagentWithTargetNodeStillUsesSideView();
 testOnlyChatRunsPatchMainConversation();

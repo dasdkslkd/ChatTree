@@ -1378,12 +1378,7 @@ export default function ChatPage() {
   const sideRunDrafts = useMemo(() => sidePanelRunStates
     .filter((run) => shouldRenderRunDraft(run))
     .map((run) => {
-      const isWorkflowStep = run.kind === 'workflow_step'
-        && !run.targetNodeId
-        && !run.nodeId
-        && Boolean(run.parentRunId)
-        && (!run.anchorNodeId || run.anchorNodeId === selectedBranchTipId);
-      if (!isWorkflowStep && !isDetachedRunView(run, selectedBranchTipId)) return null;
+      if (!isDetachedRunView(run, selectedBranchTipId, currentBranchNodeIds)) return null;
       const timeline = getSideRunAssistantTimeline({
         content: run.content,
         reasoning: run.reasoning,
@@ -1422,7 +1417,7 @@ export default function ChatPage() {
     })
     .filter((draft): draft is SideRunDraft => Boolean(draft))
     .filter((draft) => draft.showPendingBubble || draft.showStreamBlock),
-    [selectedBranchTipId, sidePanelRunStates],
+    [currentBranchNodeIds, selectedBranchTipId, sidePanelRunStates],
   );
 
   const sideRunGroups = useMemo(

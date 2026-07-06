@@ -4,6 +4,7 @@ import pytest
 
 from backend.core.persistence.database import SQLitePersistence
 from backend.core.persistence.repository import ChatRepository
+from backend.core.storage.tool_result_storage import ToolResultStorage
 
 
 def test_repository_creates_conversation_node_and_messages(tmp_path):
@@ -190,3 +191,44 @@ def test_tool_call_ids_can_repeat_across_conversations_without_metadata_bleed(
         conv_a: ("call_0", "result a", {"conversation": "a"}),
         conv_b: ("call_0", "result b", {"conversation": "b"}),
     }
+
+
+def test_tool_result_storage_sqlite_copy_tolerates_run_id_as_node_id(tmp_path):
+    persistence = SQLitePersistence(tmp_path / "sqlite")
+    persistence.initialize()
+    repo = ChatRepository(persistence)
+    conv_id = repo.create_conversation(title="Subagent tool copy")
+    repo.create_node(conv_id, parent_id=None, child_order=0)
+    store = ToolResultStorage(str(tmp_path / "tool-results"), sqlite_repository=repo)
+
+    record = store.save_result(
+        content="subagent output",
+        tool_name="run_command",
+        conversation_id=conv_id,
+        node_id="run-subagent-1",
+        tool_call_id="call-subagent-1",
+    )
+
+    with persistence.connect() as conn:
+        call = conn.execute(
+            """
+            SELECT node_id, name
+            FROM tool_calls
+            WHERE conversation_id = ? AND id = ?
+            """,
+            (conv_id, "call-subagent-1"),
+        ).fetchone()
+        result = conn.execute(
+            """
+            SELECT node_id, tool_call_id, output_preview
+            FROM tool_results
+            WHERE id = ?
+            """,
+            (record["id"],),
+        ).fetchone()
+
+    assert call["node_id"] is None
+    assert call["name"] == "run_command"
+    assert result["node_id"] is None
+    assert result["tool_call_id"] == "call-subagent-1"
+    assert result["output_preview"] == "subagent output"

@@ -669,7 +669,7 @@ class RunCommandTool(_CodeTool):
             conversation_id=str(runtime_context.get("conversation_id") or ""),
             command=command,
             cwd=str(cwd),
-            anchor_node_id=str(runtime_context.get("node_id") or "") or None,
+            anchor_node_id=str(runtime_context.get("anchor_node_id") or runtime_context.get("node_id") or "") or None,
             parent_run_id=str(runtime_context.get("run_id") or "") or None,
             summary=command[:80],
             timeout_seconds=timeout,

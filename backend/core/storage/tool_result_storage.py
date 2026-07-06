@@ -40,7 +40,7 @@ class ToolResultStorage:
         content: str,
         tool_name: str,
         conversation_id: str,
-        node_id: str,
+        node_id: Optional[str],
         tool_call_id: Optional[str],
         structured_metadata: Optional[Dict[str, Any]] = None,
         raw_metadata: Optional[Dict[str, Any]] = None,

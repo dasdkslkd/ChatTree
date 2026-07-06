@@ -12,6 +12,15 @@ export function getRunTargetNodeId(run: BranchRunLike): string | null {
   return run.targetNodeId || run.nodeId || null;
 }
 
+export function isRunAnchorVisibleOnSelectedBranch(
+  anchorNodeId: string | null,
+  selectedBranchTipId: string | null,
+  currentBranchNodeIds: Set<string>,
+): boolean {
+  if (!anchorNodeId) return true;
+  return anchorNodeId === selectedBranchTipId || currentBranchNodeIds.has(anchorNodeId);
+}
+
 export function isRunVisibleInSelectedTranscript(
   run: BranchRunLike,
   selectedBranchTipId: string | null,
@@ -39,9 +48,10 @@ export function isRunVisibleInSelectedTranscript(
 export function isDetachedRunView(
   run: BranchRunLike,
   selectedBranchTipId: string | null,
+  currentBranchNodeIds: Set<string>,
 ): boolean {
-  if (!['side_question', 'subagent', 'command', 'workflow', 'direct_response'].includes(run.kind)) return false;
-  return !run.anchorNodeId || run.anchorNodeId === selectedBranchTipId;
+  if (!['side_question', 'subagent', 'command', 'workflow', 'workflow_step', 'direct_response'].includes(run.kind)) return false;
+  return isRunAnchorVisibleOnSelectedBranch(run.anchorNodeId, selectedBranchTipId, currentBranchNodeIds);
 }
 
 export function isRunVisibleInMainTranscript(
@@ -50,7 +60,7 @@ export function isRunVisibleInMainTranscript(
   currentBranchNodeIds: Set<string>,
 ): boolean {
   if (run.kind === 'direct_response') return false;
-  if (isDetachedRunView(run, selectedBranchTipId)) return false;
+  if (isDetachedRunView(run, selectedBranchTipId, currentBranchNodeIds)) return false;
   return isRunVisibleInSelectedTranscript(run, selectedBranchTipId, currentBranchNodeIds);
 }
 
@@ -75,5 +85,5 @@ export function isRunStoppableFromSelectedBranch(
 ): boolean {
   if (run.status !== 'streaming' && run.status !== 'waiting_approval' && run.status !== 'stopping') return false;
   if (isRunBlockingSelectedBranch(run, selectedBranchTipId, currentBranchNodeIds)) return true;
-  return isDetachedRunView(run, selectedBranchTipId);
+  return isDetachedRunView(run, selectedBranchTipId, currentBranchNodeIds);
 }

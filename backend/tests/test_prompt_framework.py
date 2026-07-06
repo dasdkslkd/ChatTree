@@ -983,11 +983,13 @@ class RunLifecycleContractTests(unittest.IsolatedAsyncioTestCase):
                 "run_id": "run-parent",
                 "run_kind": RunKind.CHAT.value,
                 "conversation_id": "conversation-1",
+                "anchor_node_id": "branch-anchor-1",
                 "node_id": "assistant-node-1",
             },
         )
 
         self.assertEqual(executor.kwargs["parent_run_id"], "run-parent")
+        self.assertEqual(executor.kwargs["parent_node_id"], "branch-anchor-1")
 
     async def test_legacy_start_workflow_tool_preserves_parent_run_id(self):
         class FakeWorkflowManager:
@@ -1007,11 +1009,13 @@ class RunLifecycleContractTests(unittest.IsolatedAsyncioTestCase):
                 "run_id": "run-parent",
                 "run_kind": RunKind.CHAT.value,
                 "conversation_id": "conversation-1",
+                "anchor_node_id": "branch-anchor-1",
                 "node_id": "assistant-node-1",
             },
         )
 
         self.assertEqual(manager.kwargs["parent_run_id"], "run-parent")
+        self.assertEqual(manager.kwargs["parent_node_id"], "branch-anchor-1")
 
 
 class SyntheticTaskNotificationTests(unittest.IsolatedAsyncioTestCase):
@@ -1116,6 +1120,92 @@ class SyntheticTaskNotificationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"/fork inspect"', wrapped)
         request = messages_route.build_synthetic_message_request(pending[0])
         self.assertEqual(request.synthetic_metadata["task_id"], "task_abc123")
+
+    async def test_subagent_tool_execution_uses_anchor_node_id_for_tool_context(self):
+        class ToolCallingProvider:
+            def __init__(self):
+                self.calls = 0
+
+            async def generate_response_stream(self, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    yield {
+                        "status": StreamStatus.COMPLETE,
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "run_command", "arguments": "{}"},
+                            }
+                        ],
+                    }
+                    return
+                yield {"status": StreamStatus.CONTENT, "content": "done"}
+                yield {"status": StreamStatus.COMPLETE, "content": "", "tokens_used": 0}
+
+        class RecordingChatManager(self.FakeChatManager):
+            def __init__(self, provider):
+                super().__init__(provider)
+                self.seen_node_ids: list[str] = []
+                self.seen_context_node_ids: list[str] = []
+
+            def _merge_tool_call_lists(self, existing, incoming):
+                return list(existing) + list(incoming)
+
+            async def _execute_tool_calls(self, tool_calls, **kwargs):
+                self.seen_node_ids.append(kwargs["node_id"])
+                self.seen_context_node_ids.append(kwargs["run_context"]["node_id"])
+                return [{
+                    "role": "tool",
+                    "name": "run_command",
+                    "tool_call_id": "call-1",
+                    "content": "{}",
+                }]
+
+            def _apply_round_tool_result_budget(self, tool_messages):
+                return tool_messages
+
+        run_manager = RunManager()
+        registry = CapabilityRegistry()
+        registry.add_agents([
+            AgentDefinition(
+                name="implementer",
+                system_prompt="Implementer body",
+                provider_id="fake",
+                model_id="model",
+                tools=["run_command"],
+            )
+        ])
+        chat_manager = RecordingChatManager(ToolCallingProvider())
+        executor = SubagentExecutor(
+            chat_manager=chat_manager,
+            run_manager=run_manager,
+            capability_registry=registry,
+        )
+        run = await run_manager.create_run(
+            conversation_id="conversation-1",
+            kind=RunKind.SUBAGENT,
+            anchor_node_id="node-anchor-1",
+            summary="implementer: inspect",
+            metadata={"agent_name": "implementer"},
+        )
+
+        await executor._produce(
+            run_id=run.run_id,
+            conversation_id="conversation-1",
+            agent_name="implementer",
+            input_data="inspect",
+            parent_node_id="node-anchor-1",
+            parent_run_id=None,
+            provider_id=None,
+            model_id=None,
+            permission_mode="modify_only",
+            workspace=None,
+        )
+
+        self.assertEqual(chat_manager.seen_node_ids, ["node-anchor-1"])
+        self.assertEqual(chat_manager.seen_context_node_ids, ["node-anchor-1"])
 
     async def test_failed_subagent_enqueues_failed_task_notification(self):
         run_manager = RunManager()

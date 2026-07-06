@@ -346,6 +346,7 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
                 task_id=task.task_id,
                 _runtime_context={
                     "conversation_id": "conv_1",
+                    "anchor_node_id": "node_anchor",
                     "node_id": "node_1",
                     "run_id": "chat-run-1",
                     "command_executor": command_executor,
@@ -355,6 +356,7 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             updated = await task_ledger.get_task("conv_1", task.task_id)
             self.assertEqual(updated.owner_run_id, result["run_id"])
             self.assertEqual(updated.status, TaskStatus.COMPLETED)
+            self.assertEqual(run_manager.get_run(result["run_id"])["anchor_node_id"], "node_anchor")
 
             other = await task_ledger.create_task(conversation_id="conv_1", title="后台命令任务")
             started = json.loads(await StartBackgroundCommandTool(config).execute(
@@ -362,6 +364,7 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
                 task_id=other.task_id,
                 _runtime_context={
                     "conversation_id": "conv_1",
+                    "anchor_node_id": "node_anchor",
                     "node_id": "node_1",
                     "run_id": "chat-run-1",
                     "command_executor": command_executor,
@@ -370,6 +373,7 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             await command_executor.wait(started["run_id"], timeout=5)
             other_updated = await task_ledger.get_task("conv_1", other.task_id)
             self.assertEqual(other_updated.owner_run_id, started["run_id"])
+            self.assertEqual(run_manager.get_run(started["run_id"])["anchor_node_id"], "node_anchor")
 
     async def test_wait_command_marks_final_result_observed_and_suppresses_notification(self):
         with tempfile.TemporaryDirectory() as tmpdir:

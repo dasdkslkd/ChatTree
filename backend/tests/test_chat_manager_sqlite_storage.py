@@ -734,6 +734,7 @@ class TwoToolCallingProvider:
 class TwoToolManager:
     def __init__(self, tmp_path: Path):
         self.tool_result_store = ToolResultStorage(str(tmp_path / "tool-results"))
+        self.runtime_contexts = []
 
     def get_openai_tools(self, include_disabled=False):
         return [
@@ -749,6 +750,7 @@ class TwoToolManager:
         ]
 
     async def execute_tool(self, name, arguments, workspace=None, runtime_context=None):
+        self.runtime_contexts.append(dict(runtime_context or {}))
         return json.dumps({"tool": name, "arguments": arguments}, sort_keys=True)
 
 
@@ -842,3 +844,39 @@ def test_tool_result_persistence_preserves_tool_call_arguments_and_index(tmp_pat
         "call_first",
         "call_second",
     ]
+
+
+def test_tool_runtime_context_uses_parent_branch_anchor(tmp_path: Path):
+    manager, _repository, _projection = _make_manager(tmp_path)
+    conversation = manager.create_conversation("tool anchor")
+
+    first_chunks = asyncio.run(
+        collect_chunks(
+            manager.send_message_stream(
+                conversation.metadata["id"],
+                "first turn",
+                model_id="fake-model",
+            )
+        )
+    )
+    parent_node_id = first_chunks[0]["node_id"]
+
+    tool_manager = TwoToolManager(tmp_path)
+    manager.tool_manager = tool_manager
+    manager.model_manager.provider = TwoToolCallingProvider()
+
+    second_chunks = asyncio.run(
+        collect_chunks(
+            manager.send_message_stream(
+                conversation.metadata["id"],
+                "run two tools",
+                model_id="fake-model",
+            )
+        )
+    )
+    second_node_id = second_chunks[0]["node_id"]
+
+    assert parent_node_id != second_node_id
+    assert tool_manager.runtime_contexts
+    assert {context["anchor_node_id"] for context in tool_manager.runtime_contexts} == {parent_node_id}
+    assert {context["node_id"] for context in tool_manager.runtime_contexts} == {second_node_id}

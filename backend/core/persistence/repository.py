@@ -360,7 +360,7 @@ class ChatRepository:
     def add_tool_call(
         self,
         conversation_id: str,
-        node_id: str,
+        node_id: str | None,
         *,
         tool_call_id: str | None,
         name: str,
@@ -374,6 +374,7 @@ class ChatRepository:
         args_text = arguments if isinstance(arguments, str) else self._json_field(arguments)
         stored = store_text_content(self.persistence, args_text or "")
         with self.persistence.connect() as conn:
+            node_id = self._existing_id(conn, "nodes", conversation_id, node_id)
             run_id = self._existing_id(conn, "runs", conversation_id, run_id)
             assistant_message_id = self._existing_id(
                 conn, "messages", conversation_id, assistant_message_id
@@ -456,7 +457,7 @@ class ChatRepository:
     def add_tool_result(
         self,
         conversation_id: str,
-        node_id: str,
+        node_id: str | None,
         *,
         tool_result_id: str | None = None,
         tool_call_id: str | None,
@@ -473,6 +474,7 @@ class ChatRepository:
         if len(value) > len(preview):
             blob_id = BlobStore(self.persistence).put_text(value).blob_id
         with self.persistence.connect() as conn:
+            node_id = self._existing_id(conn, "nodes", conversation_id, node_id)
             run_id = self._existing_id(conn, "runs", conversation_id, run_id)
             conn.execute(
                 """

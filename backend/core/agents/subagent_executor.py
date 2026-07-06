@@ -340,6 +340,13 @@ class SubagentExecutor:
                 }
                 messages.append(assistant_tool_message)
                 approval_events: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
+                run_snapshot = self.run_manager.get_run(run_id) or {}
+                tool_node_id = str(
+                    parent_node_id
+                    or run_snapshot.get("target_node_id")
+                    or run_snapshot.get("anchor_node_id")
+                    or run_id
+                )
 
                 async def emit_tool_event(event: Dict[str, Any]):
                     event = dict(event)
@@ -359,7 +366,7 @@ class SubagentExecutor:
                     # does not receive parent_run_id directly.
                     self.chat_manager._execute_tool_calls(
                         round_tool_calls,
-                        node_id=run_id,
+                        node_id=tool_node_id,
                         conversation_id=conversation_id,
                         emit_event=emit_tool_event,
                         workspace=workspace or conversation.metadata.get("workspace"),
@@ -367,12 +374,13 @@ class SubagentExecutor:
                         run_context={
                             "run_id": run_id,
                             "run_kind": RunKind.SUBAGENT.value,
-                            "parent_run_id": (self.run_manager.get_run(run_id) or {}).get("parent_run_id"),
-                            "root_run_id": ((self.run_manager.get_run(run_id) or {}).get("metadata") or {}).get("root_run_id") or run_id,
+                            "parent_run_id": run_snapshot.get("parent_run_id"),
+                            "root_run_id": (run_snapshot.get("metadata") or {}).get("root_run_id") or run_id,
                             "conversation_id": conversation_id,
-                            "node_id": run_id,
+                            "anchor_node_id": tool_node_id,
+                            "node_id": tool_node_id,
                             "agent_name": agent_name,
-                            "task_id": ((self.run_manager.get_run(run_id) or {}).get("metadata") or {}).get("task_id"),
+                            "task_id": (run_snapshot.get("metadata") or {}).get("task_id"),
                             "task_summary": str(input_data)[:160],
                         },
                     )
