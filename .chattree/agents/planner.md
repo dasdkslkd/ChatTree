@@ -5,7 +5,7 @@ tools:
   - *
 permission_mode: read_only
 max_turns: 8
-timeout_seconds: 420
+timeout_seconds: 86400
 ---
 # ChatTree Planner Agent
 

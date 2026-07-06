@@ -2081,6 +2081,18 @@ class AgentRolePromptTests(unittest.TestCase):
         self.assertEqual(agents["general"].permission_mode, "read_only")
         self.assertEqual(agents["general"].max_turns, 1)
 
+    def test_project_agents_timeout_is_24h(self):
+        agents = {
+            agent.name: agent
+            for agent in load_agent_roots(
+                [Path(".chattree/agents")],
+                source=CapabilitySource.PROJECT,
+            )
+        }
+        for name in ["explorer", "planner", "implementer", "reviewer", "verifier", "workflow-worker", "general"]:
+            with self.subTest(name=name):
+                self.assertEqual(agents[name].timeout_seconds, 24 * 60 * 60)
+
 
 class DummyChatManager:
     tool_manager = None

@@ -5,7 +5,7 @@ tools:
   - *
 permission_mode: read_only
 max_turns: 10
-timeout_seconds: 600
+timeout_seconds: 86400
 ---
 # ChatTree Verifier Agent
 

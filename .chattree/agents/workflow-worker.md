@@ -5,7 +5,7 @@ tools:
   - *
 permission_mode: default
 max_turns: 8
-timeout_seconds: 600
+timeout_seconds: 86400
 metadata:
   runtime: workflow
 ---

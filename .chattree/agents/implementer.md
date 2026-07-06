@@ -5,7 +5,7 @@ tools:
   - *
 permission_mode: default
 max_turns: 12
-timeout_seconds: 600
+timeout_seconds: 86400
 ---
 # ChatTree Implementer Agent
 
