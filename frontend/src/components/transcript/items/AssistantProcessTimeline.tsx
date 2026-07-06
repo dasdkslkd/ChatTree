@@ -258,7 +258,7 @@ export function AssistantProcessTimeline({
                 {timeline.map((block) => renderTimelineBlock(block, item, props))}
               </div>
             )}
-            {timeline.length === 0 && props.status === 'streaming' && (
+            {!props.streamingFoldState?.canFoldProcess && timeline.length === 0 && props.status === 'streaming' && (
               <div
                 className="max-w-full w-fit px-3 py-2 rounded-2xl rounded-bl-sm leading-relaxed prose prose-sm max-w-none [&_p]:m-0"
                 style={{

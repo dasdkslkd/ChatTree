@@ -47,9 +47,18 @@ function testSharedTimelineRendererOwnsLiveStyle() {
   assert.match(source, /cn\('processed-fold', processExpanded && 'expanded'\)/);
   assert.match(source, /setProcessExpanded/);
   assert.match(source, /aria-expanded=\{processExpanded\}/);
+  assert.match(source, /!props\.streamingFoldState\?\.canFoldProcess && timeline\.length === 0/);
   assert.doesNotMatch(source, /PlanProposalCard/);
   assert.match(source, /ToolCallGroup/);
   assert.match(source, /getStreamStatusLabel/);
+}
+
+function testLiveRunsUseProcessedShellBeforeTimelineArrives() {
+  const source = read(assistantTimelinePath);
+  const mainPage = read(mainPagePath);
+  assert.match(source, /getStreamingTimelineFoldState\([\s\S]*\{ allowProcessOnly: true \}/);
+  assert.match(mainPage, /getStreamingTimelineFoldState\([\s\S]*\{ allowProcessOnly: true \}/);
+  assert.match(mainPage, /!draft\.streamingFoldState\.canFoldProcess && draft\.timeline\.length === 0/);
 }
 
 testAssistantTimelineModuleExistsAndExportsNormalizers();
@@ -57,4 +66,5 @@ testNoPlanProposalNormalization();
 testMainPageDelegatesLiveRenderingToSharedProcessPath();
 testAssistantProcessItemIsThinAdapter();
 testSharedTimelineRendererOwnsLiveStyle();
+testLiveRunsUseProcessedShellBeforeTimelineArrives();
 console.log('assistantTimeline tests passed');

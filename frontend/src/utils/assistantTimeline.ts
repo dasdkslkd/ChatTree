@@ -393,6 +393,7 @@ export function createProcessRenderPropsFromRun(run: StreamState): AssistantProc
     streamingFoldState: getStreamingTimelineFoldState(
       timeline,
       streamingFoldedContentBlocks.map((block) => block.key),
+      { allowProcessOnly: true },
     ),
     activeReasoningKey: getActiveReasoningKey(timeline, run),
     status: run.status,

@@ -1418,6 +1418,7 @@ export default function ChatPage() {
       const streamingFoldState = getStreamingTimelineFoldState(
         timeline,
         streamingFoldedContentBlocks.map((block) => block.key),
+        { allowProcessOnly: true },
       );
       let activeReasoningIndex = -1;
       let activeReasoningKey: string | null = null;
@@ -3099,7 +3100,7 @@ export default function ChatPage() {
               );
             })
           )}
-          {draft.timeline.length === 0 && draft.run.status === 'streaming' && (
+          {!draft.streamingFoldState.canFoldProcess && draft.timeline.length === 0 && draft.run.status === 'streaming' && (
             <div className="flex items-center gap-2 px-3 py-2 text-sm" style={{ color: 'var(--fg-tertiary)' }}>
               <Loader2 className="h-4 w-4 animate-spin" style={{ color: 'var(--icon-accent)' }} />
               <span>运行中...</span>
