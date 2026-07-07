@@ -79,7 +79,7 @@ export function shouldRenderRunDraft(run: RunDraftLike): boolean {
   if (
     run.kind === 'command'
     && ['completed', 'failed', 'cancelled', 'stopped', 'error'].includes(run.status)
-    && run.metadata?.command_notification_state === 'observed'
+    && typeof run.metadata?.result_observed_at !== 'undefined'
   ) {
     return false;
   }

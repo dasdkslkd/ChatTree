@@ -235,6 +235,11 @@ class AgentRuntime:
                     "timed_out": True,
                 }
             current = self.run_manager.get_run(run_id) or run
+            await self.run_manager.mark_observed(
+                run_id,
+                observer_run_id=source.run_id,
+                via="wait_agent",
+            )
             terminal["agent_name"] = (current.get("metadata") or {}).get("agent_name")
             terminal["task_id"] = (current.get("metadata") or {}).get("task_id")
             terminal["timed_out"] = False

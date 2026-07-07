@@ -78,7 +78,8 @@ export interface Message {
 
 export interface SendMessageRequest {
   content: string;
-  node_id?: string | null;
+  parent_node_id?: string | null;
+  focus_new_node?: boolean;
   model_id?: string;
   provider_id?: string;
   reasoning_effort?: string | null;

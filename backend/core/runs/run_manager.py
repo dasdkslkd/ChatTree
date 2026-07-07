@@ -7,7 +7,6 @@ from time import time
 from typing import Any, AsyncIterator, Callable, Dict, Iterable, Optional
 
 from .journal import RunJournal
-from .synthetic_inputs import SyntheticInputQueue
 from .types import FINISHED_RUN_STATUSES, RunKind, RunRecord, RunStatus
 
 
@@ -29,7 +28,7 @@ class RunManager:
     ) -> None:
         self.journal = journal or RunJournal()
         self.repository = repository
-        self.synthetic_inputs = SyntheticInputQueue()
+        self.notification_service: Any = None
         self._runs: Dict[str, RunRecord] = {}
         self._events: Dict[str, list[Dict[str, Any]]] = {}
         self._conditions: Dict[str, asyncio.Condition] = {}
@@ -439,6 +438,25 @@ class RunManager:
             "metadata": dict(metadata or {}),
         })
         return snapshot
+
+    async def mark_observed(
+        self,
+        run_id: str,
+        *,
+        observer_run_id: Optional[str] = None,
+        via: str,
+    ) -> RunRecord:
+        metadata: Dict[str, Any] = {
+            "result_observed_at": time(),
+            "result_observed_via": via,
+        }
+        if observer_run_id:
+            metadata["result_observed_by_run_id"] = observer_run_id
+        updated = await self.update_metadata(run_id, metadata)
+        service = getattr(self, "notification_service", None)
+        if service is not None:
+            service.mark_observed_for_run(run_id)
+        return updated
 
     def stop_event(self, run_id: str) -> asyncio.Event:
         return self._stop_events.setdefault(run_id, asyncio.Event())

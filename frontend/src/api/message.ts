@@ -133,7 +133,7 @@ export const messageApi = {
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ ...data, node_id: nodeId ?? data.node_id }),
+      body: JSON.stringify({ ...data, parent_node_id: nodeId ?? data.parent_node_id, focus_new_node: data.focus_new_node ?? true }),
       signal,
     });
 

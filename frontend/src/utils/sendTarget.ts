@@ -20,12 +20,6 @@ export function shouldDetachSlashStreamTarget(
   return streamTargetPolicy === 'anchor_only' || streamTargetPolicy === 'none';
 }
 
-export function shouldSendSlashAnchorNode(
-  streamTargetPolicy?: SlashStreamTargetPolicy | null,
-): boolean {
-  return shouldDetachSlashStreamTarget(streamTargetPolicy);
-}
-
 export function resolveSlashStreamNodeId({
   sendNodeId,
   streamTargetPolicy,

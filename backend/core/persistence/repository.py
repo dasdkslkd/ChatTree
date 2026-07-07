@@ -110,6 +110,7 @@ class ChatRepository:
         parent_id: str | None,
         child_order: int = 0,
         node_id: str | None = None,
+        focus: bool = True,
         **fields: Any,
     ) -> str:
         node_id = node_id or str(uuid.uuid4())
@@ -125,15 +126,16 @@ class ChatRepository:
                 (conversation_id, node_id),
             ).fetchone()
             if existing is not None:
-                conn.execute(
-                    """
-                    UPDATE conversations
-                    SET current_node_id = ?,
-                        updated_at = strftime('%s', 'now')
-                    WHERE id = ?
-                    """,
-                    (node_id, conversation_id),
-                )
+                if focus:
+                    conn.execute(
+                        """
+                        UPDATE conversations
+                        SET current_node_id = ?,
+                            updated_at = strftime('%s', 'now')
+                        WHERE id = ?
+                        """,
+                        (node_id, conversation_id),
+                    )
                 return node_id
 
             conversation = conn.execute(
@@ -233,7 +235,7 @@ class ChatRepository:
                     """,
                     (node_id, node_id, conversation_id),
                 )
-            else:
+            elif focus:
                 conn.execute(
                     """
                     UPDATE conversations
@@ -252,6 +254,7 @@ class ChatRepository:
         node_id: str,
         parent_id: str | None,
         child_order: int = 0,
+        focus: bool = True,
         **fields: Any,
     ) -> str:
         return self.create_node(
@@ -259,6 +262,7 @@ class ChatRepository:
             parent_id,
             child_order=child_order,
             node_id=node_id,
+            focus=focus,
             **fields,
         )
 

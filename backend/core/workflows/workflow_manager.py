@@ -71,6 +71,7 @@ class WorkflowManager:
                 "task_id": task_id,
             },
         )
+        await self._register_task_notification(run.run_id)
         task = asyncio.create_task(self._produce(
             run_id=run.run_id,
             conversation_id=conversation_id,
@@ -83,6 +84,27 @@ class WorkflowManager:
         ))
         self._tasks[run.run_id] = task
         return run.to_dict()
+
+    async def _register_task_notification(self, run_id: str) -> None:
+        run = self.run_manager.get_run(run_id)
+        if not run:
+            return
+        metadata = dict(run.get("metadata") or {})
+        if str(metadata.get("delivery_policy") or "auto") == "silent":
+            return
+        service = getattr(self.run_manager, "notification_service", None)
+        if service is None:
+            return
+        await service.register_run_notification(
+            run_id=run_id,
+            summary="Workflow running",
+            payload={
+                "delegated_task": metadata.get("delegated_task"),
+                "original_slash_input": metadata.get("original_slash_input"),
+                "task_id": metadata.get("task_id"),
+            },
+            task_id=metadata.get("task_id"),
+        )
 
     async def stop(self, run_id: str) -> bool:
         requested = await self.run_manager.request_stop(run_id)
@@ -167,14 +189,14 @@ class WorkflowManager:
             await self.run_manager.finish_run(run_id, final_status, final_error)
             if notification_payload and final_status in {RunStatus.COMPLETED, RunStatus.FAILED}:
                 source_status = "completed" if final_status == RunStatus.COMPLETED else "failed"
-                await self._enqueue_synthetic_task_notification(
+                await self._publish_task_notification(
                     run_id,
                     source_status,
                     notification_payload.get("content") or notification_payload.get("error") or "",
                     event_payload=notification_payload,
                 )
 
-    async def _enqueue_synthetic_task_notification(
+    async def _publish_task_notification(
         self,
         run_id: str,
         source_status: str,
@@ -194,43 +216,22 @@ class WorkflowManager:
         delivery_policy = str(metadata.get("delivery_policy") or "auto")
         if delivery_policy == "silent":
             return None
-        if self.mailbox is not None:
-            message_type = "result" if source_status == "completed" else "error"
-            await self.mailbox.publish(
-                conversation_id=str(run["conversation_id"]),
-                source_run_id=run_id,
-                source_run_kind=RunKind.WORKFLOW.value,
-                message_type=message_type,
-                content=content,
-                metadata={
-                    "origin": "task_notification",
-                    "source_status": source_status,
-                    "event_type": event_payload.get("event_type"),
-                    "delegated_task": metadata.get("delegated_task"),
-                    "original_slash_input": original_slash_input,
-                    "task_id": metadata.get("task_id"),
-                },
-                delivery_policy=delivery_policy,
-            )
-        item = self.run_manager.synthetic_inputs.enqueue(
-            kind="task_notification",
-            conversation_id=str(run["conversation_id"]),
-            anchor_node_id=run.get("anchor_node_id"),
-            source_run_id=run_id,
-            source_run_kind=RunKind.WORKFLOW.value,
-            status="pending",
+        service = getattr(self.run_manager, "notification_service", None)
+        if service is None:
+            return None
+        return await service.publish_run_notification(
+            run_id=run_id,
+            source_status=source_status,
             summary=f"Workflow {source_status}",
             content=content,
-            metadata={
-                "origin": "task_notification",
-                "source_status": source_status,
+            payload={
                 "event_type": event_payload.get("event_type"),
                 "delegated_task": metadata.get("delegated_task"),
                 "original_slash_input": original_slash_input,
                 "task_id": metadata.get("task_id"),
             },
+            task_id=metadata.get("task_id"),
         )
-        return item.to_dict()
 
 
 def _result_preview(value: Any) -> str:

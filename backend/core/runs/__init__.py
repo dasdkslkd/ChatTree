@@ -1,7 +1,6 @@
 from .journal import RunJournal
 from .run_manager import RunManager, RunNotFoundError, RunWriterConflictError
-from .synthetic_inputs import SyntheticInput, SyntheticInputQueue
-from .types import RunEvent, RunKind, RunRecord, RunStatus
+from .types import FINISHED_RUN_STATUSES, RunEvent, RunKind, RunRecord, RunStatus
 
 __all__ = [
     "RunEvent",
@@ -12,6 +11,5 @@ __all__ = [
     "RunRecord",
     "RunStatus",
     "RunWriterConflictError",
-    "SyntheticInput",
-    "SyntheticInputQueue",
+    "FINISHED_RUN_STATUSES",
 ]

@@ -60,7 +60,13 @@ class Conversation:
         self.metadata["provider_id"] = provider
         self.metadata["model_id"] = model
     
-    def add_node(self, node: ConversationTreeNode, parent_id: Optional[str] = None, is_root: bool = False):
+    def add_node(
+        self,
+        node: ConversationTreeNode,
+        parent_id: Optional[str] = None,
+        is_root: bool = False,
+        focus: bool = True,
+    ):
         """添加节点到对话树"""
         node_id = node["id"]
         self.nodes[node_id] = node
@@ -72,7 +78,8 @@ class Conversation:
             # 建立父子关系
             node["parent_id"] = parent_id
             self.nodes[parent_id]["children_ids"].append(node_id)
-            self.current_node_id = node_id
+            if focus:
+                self.current_node_id = node_id
         
         self.metadata["updated_at"] = int(time())
 

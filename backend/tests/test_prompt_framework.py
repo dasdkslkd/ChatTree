@@ -36,7 +36,8 @@ from backend.core.prompts.catalog import (
     validate_prompt_catalog,
 )
 from backend.core.prompts.types import PromptBuildRequest
-from backend.core.runs import RunKind, RunManager, RunStatus, SyntheticInputQueue
+from backend.core.notifications import TaskNotificationService
+from backend.core.runs import RunKind, RunManager, RunStatus
 from backend.core.runs.journal import RunJournal
 from backend.core.tools.agent_tools import StartSubagentTool, StartWorkflowTool
 from backend.core.plans import PlanLedger
@@ -46,6 +47,44 @@ from backend.core.slash.dispatcher import SlashCommandDispatcher
 from backend.core.slash.registry import SlashCommandRegistry
 from backend.core.workflows.js_runner import WorkflowJsRunner, WorkflowScriptError
 from backend.core.workflows.runtime_bridge import WorkflowRuntimeBridge
+
+
+class MemoryNotificationRepository:
+    def __init__(self):
+        self.items = {}
+
+    def upsert_for_run(self, **kwargs):
+        source_run_id = kwargs["source_run_id"]
+        item = self.items.get(source_run_id) or {
+            "id": f"notification-{source_run_id}",
+            "status": "unbound",
+        }
+        item.update(kwargs)
+        self.items[source_run_id] = item
+        return dict(item)
+
+    def mark_observed_by_source(self, source_run_id):
+        item = self.items.get(source_run_id)
+        if item:
+            item["status"] = "observed"
+        return dict(item) if item else None
+
+    def list_for_conversation(self, conversation_id, include_deleted=False):
+        return [
+            dict(item)
+            for item in self.items.values()
+            if item.get("conversation_id") == conversation_id
+            and (include_deleted or item.get("status") != "deleted")
+        ]
+
+
+def install_notification_service(run_manager: RunManager) -> MemoryNotificationRepository:
+    repository = MemoryNotificationRepository()
+    run_manager.notification_service = TaskNotificationService(
+        repository=repository,
+        run_manager=run_manager,
+    )
+    return repository
 
 
 class PromptCatalogTests(unittest.TestCase):
@@ -810,7 +849,7 @@ class SlashRuntimeDispatchTests(unittest.IsolatedAsyncioTestCase):
             "conversation-1",
             SendMessageRequest(
                 content="/fork inspect prompts",
-                node_id="node-1",
+                parent_node_id="node-1",
                 tool_permission_mode="modify_only",
             ),
             chat,
@@ -857,7 +896,7 @@ class SlashRuntimeDispatchTests(unittest.IsolatedAsyncioTestCase):
             "conversation-1",
             SendMessageRequest(
                 content="/workflow return 1",
-                node_id="node-1",
+                parent_node_id="node-1",
                 tool_permission_mode="ask_always",
             ),
             chat,
@@ -891,7 +930,7 @@ class SlashRuntimeDispatchTests(unittest.IsolatedAsyncioTestCase):
         run_manager = RunManager()
         events = await self._collect_events(detached_stream_event_generator(
             "conversation-1",
-            SendMessageRequest(content="/btw summarize context", node_id="node-1"),
+            SendMessageRequest(content="/btw summarize context", parent_node_id="node-1"),
             chat,
             run_manager,
             None,
@@ -902,7 +941,7 @@ class SlashRuntimeDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runs[0]["kind"], "side_question")
         self.assertIsNone(runs[0]["target_node_id"])
         self.assertIn("summarize context", chat.kwargs["content"])
-        self.assertEqual(chat.kwargs["node_id"], "node-1")
+        self.assertEqual(chat.kwargs["parent_node_id"], "node-1")
         self.assertTrue(any('"target_node_id": null' in event for event in events))
         self.assertTrue(events[-1].strip().endswith("[DONE]"))
 
@@ -914,7 +953,7 @@ class SlashRuntimeDispatchTests(unittest.IsolatedAsyncioTestCase):
         run_manager = RunManager()
         events = await self._collect_events(detached_stream_event_generator(
             "conversation-1",
-            SendMessageRequest(content="/status", node_id="node-1"),
+            SendMessageRequest(content="/status", parent_node_id="node-1"),
             FakeChatManager(),
             run_manager,
             None,
@@ -927,51 +966,6 @@ class SlashRuntimeDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any('"status": "content"' in event for event in events))
         self.assertTrue(any("ChatTree" in event for event in events))
         self.assertTrue(events[-1].strip().endswith("[DONE]"))
-
-
-class SyntheticInputQueueTests(unittest.TestCase):
-    def test_enqueue_list_pending_and_consume_task_notification(self):
-        queue = SyntheticInputQueue()
-
-        item = queue.enqueue(
-            kind="task_notification",
-            conversation_id="conversation-1",
-            anchor_node_id="node-1",
-            source_run_id="run-1",
-            source_run_kind="subagent",
-            status="pending",
-            summary="implementer completed",
-            content="result text",
-            metadata={"origin": "task_notification", "source_status": "completed"},
-        )
-        duplicate = queue.enqueue(
-            kind="task_notification",
-            conversation_id="conversation-1",
-            anchor_node_id="node-1",
-            source_run_id="run-1",
-            source_run_kind="subagent",
-            status="pending",
-            summary="implementer completed again",
-            content="duplicate",
-            metadata={"origin": "task_notification", "source_status": "completed"},
-        )
-
-        self.assertEqual(item.input_id, duplicate.input_id)
-        pending = queue.list_pending("conversation-1")
-        self.assertEqual(len(pending), 1)
-        self.assertEqual(pending[0]["kind"], "task_notification")
-        self.assertEqual(pending[0]["status"], "pending")
-        self.assertEqual(pending[0]["source_run_kind"], "subagent")
-        self.assertEqual(pending[0]["metadata"]["origin"], "task_notification")
-        self.assertEqual(pending[0]["metadata"]["source_status"], "completed")
-        self.assertIsNone(pending[0]["consumed_at"])
-
-        consumed = queue.mark_consumed("conversation-1", item.input_id)
-
-        self.assertIsNotNone(consumed)
-        self.assertEqual(consumed["status"], "consumed")
-        self.assertIsNotNone(consumed["consumed_at"])
-        self.assertEqual(queue.list_pending("conversation-1"), [])
 
 
 class RunLifecycleContractTests(unittest.IsolatedAsyncioTestCase):
@@ -1062,7 +1056,7 @@ class RunLifecycleContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manager.kwargs["parent_node_id"], "branch-anchor-1")
 
 
-class SyntheticTaskNotificationTests(unittest.IsolatedAsyncioTestCase):
+class TaskNotificationTests(unittest.IsolatedAsyncioTestCase):
     class FakeConversation:
         current_provider = "fake"
         current_model = "model"
@@ -1091,10 +1085,10 @@ class SyntheticTaskNotificationTests(unittest.IsolatedAsyncioTestCase):
         tool_manager = None
 
         def __init__(self, provider):
-            self.model_manager = SyntheticTaskNotificationTests.FakeModelManager(provider)
+            self.model_manager = TaskNotificationTests.FakeModelManager(provider)
 
         def get_conversation(self, conversation_id):
-            return SyntheticTaskNotificationTests.FakeConversation()
+            return TaskNotificationTests.FakeConversation()
 
         def _provider_for_model(self, model_id):
             return "fake"
@@ -1118,6 +1112,7 @@ class SyntheticTaskNotificationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_completed_subagent_enqueues_pending_task_notification_once(self):
         run_manager = RunManager()
+        notifications = install_notification_service(run_manager)
         executor = self._executor(run_manager, self.FakeProvider())
         run = await run_manager.create_run(
             conversation_id="conversation-1",
@@ -1144,26 +1139,22 @@ class SyntheticTaskNotificationTests(unittest.IsolatedAsyncioTestCase):
             permission_mode=None,
             workspace=None,
         )
-        await executor._enqueue_synthetic_task_notification(run.run_id, "completed", "duplicate")
+        await executor._publish_task_notification(run.run_id, "completed", "duplicate")
 
-        pending = run_manager.synthetic_inputs.list_pending("conversation-1")
+        pending = notifications.list_for_conversation("conversation-1")
         self.assertEqual(len(pending), 1)
-        self.assertEqual(pending[0]["kind"], "task_notification")
-        self.assertEqual(pending[0]["anchor_node_id"], "node-1")
         self.assertEqual(pending[0]["source_run_id"], run.run_id)
         self.assertEqual(pending[0]["source_run_kind"], "subagent")
-        self.assertEqual(pending[0]["metadata"]["origin"], "task_notification")
-        self.assertEqual(pending[0]["metadata"]["source_status"], "completed")
-        self.assertEqual(pending[0]["metadata"]["delegated_task"], "inspect")
-        self.assertEqual(pending[0]["metadata"]["task_id"], "task_abc123")
-        self.assertEqual(pending[0]["metadata"]["original_slash_input"], "/fork inspect")
-        self.assertIn("subagent answer", pending[0]["content"])
-        wrapped = messages_route.build_task_notification_content(pending[0])
+        self.assertEqual(pending[0]["payload"]["source_status"], "completed")
+        self.assertEqual(pending[0]["payload"]["delegated_task"], "inspect")
+        self.assertEqual(pending[0]["task_id"], "task_abc123")
+        self.assertEqual(pending[0]["payload"]["original_slash_input"], "/fork inspect")
+        self.assertIn("duplicate", pending[0]["content"])
+        from backend.core.notifications import format_task_notification_content
+        wrapped = format_task_notification_content(pending[0])
         self.assertIn('"delegated_task": "inspect"', wrapped)
         self.assertIn('"task_id": "task_abc123"', wrapped)
         self.assertIn('"/fork inspect"', wrapped)
-        request = messages_route.build_synthetic_message_request(pending[0])
-        self.assertEqual(request.synthetic_metadata["task_id"], "task_abc123")
 
     async def test_subagent_tool_execution_uses_anchor_node_id_for_tool_context(self):
         class ToolCallingProvider:
@@ -1253,6 +1244,7 @@ class SyntheticTaskNotificationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_subagent_enqueues_failed_task_notification(self):
         run_manager = RunManager()
+        notifications = install_notification_service(run_manager)
         executor = self._executor(run_manager, self.FakeProvider(fail=True))
         run = await run_manager.create_run(
             conversation_id="conversation-1",
@@ -1275,13 +1267,14 @@ class SyntheticTaskNotificationTests(unittest.IsolatedAsyncioTestCase):
             workspace=None,
         )
 
-        pending = run_manager.synthetic_inputs.list_pending("conversation-1")
+        pending = notifications.list_for_conversation("conversation-1")
         self.assertEqual(len(pending), 1)
-        self.assertEqual(pending[0]["metadata"]["source_status"], "failed")
+        self.assertEqual(pending[0]["payload"]["source_status"], "failed")
         self.assertIn("provider failed", pending[0]["content"])
 
     async def test_workflow_child_subagent_does_not_enqueue_notification(self):
         run_manager = RunManager()
+        notifications = install_notification_service(run_manager)
         executor = self._executor(run_manager, self.FakeProvider())
         run = await run_manager.create_run(
             conversation_id="conversation-1",
@@ -1305,10 +1298,11 @@ class SyntheticTaskNotificationTests(unittest.IsolatedAsyncioTestCase):
             workspace=None,
         )
 
-        self.assertEqual(run_manager.synthetic_inputs.list_pending("conversation-1"), [])
+        self.assertEqual(notifications.list_for_conversation("conversation-1"), [])
 
     async def test_parented_silent_subagent_suppresses_notifications(self):
         run_manager = RunManager()
+        notifications = install_notification_service(run_manager)
         mailbox = AgentMailbox()
         executor = self._executor(run_manager, self.FakeProvider(), mailbox=mailbox)
         run = await run_manager.create_run(
@@ -1334,11 +1328,12 @@ class SyntheticTaskNotificationTests(unittest.IsolatedAsyncioTestCase):
         )
 
         messages = await mailbox.list_pending_notifications("conversation-1")
-        self.assertEqual(run_manager.synthetic_inputs.list_pending("conversation-1"), [])
+        self.assertEqual(notifications.list_for_conversation("conversation-1"), [])
         self.assertEqual(messages, [])
 
-    async def test_parented_auto_subagent_keeps_mailbox_and_synthetic_notification(self):
+    async def test_parented_auto_subagent_creates_unbound_task_notification(self):
         run_manager = RunManager()
+        notifications = install_notification_service(run_manager)
         mailbox = AgentMailbox()
         executor = self._executor(run_manager, self.FakeProvider(), mailbox=mailbox)
         parent = await run_manager.create_run(
@@ -1370,9 +1365,8 @@ class SyntheticTaskNotificationTests(unittest.IsolatedAsyncioTestCase):
         )
 
         messages = await mailbox.list_pending_notifications("conversation-1")
-        pending = run_manager.synthetic_inputs.list_pending("conversation-1")
-        self.assertEqual(len(messages), 1)
-        self.assertEqual(messages[0]["content"], "subagent answer")
+        pending = notifications.list_for_conversation("conversation-1")
+        self.assertEqual(messages, [])
         self.assertEqual(len(pending), 1)
         self.assertEqual(pending[0]["source_run_id"], run.run_id)
 
@@ -1382,6 +1376,7 @@ class SyntheticTaskNotificationTests(unittest.IsolatedAsyncioTestCase):
                 return "workflow answer"
 
         run_manager = RunManager()
+        notifications = install_notification_service(run_manager)
         manager = WorkflowManager(
             run_manager=run_manager,
             subagent_executor=self._executor(run_manager, self.FakeProvider()),
@@ -1408,12 +1403,12 @@ class SyntheticTaskNotificationTests(unittest.IsolatedAsyncioTestCase):
             budget={"max_seconds": 10, "max_parallel": 1},
         )
 
-        pending = run_manager.synthetic_inputs.list_pending("conversation-1")
+        pending = notifications.list_for_conversation("conversation-1")
         self.assertEqual(len(pending), 1)
         self.assertEqual(pending[0]["source_run_kind"], "workflow")
-        self.assertEqual(pending[0]["metadata"]["source_status"], "completed")
-        self.assertEqual(pending[0]["metadata"]["delegated_task"], "return 1")
-        self.assertEqual(pending[0]["metadata"]["original_slash_input"], "/workflow return 1")
+        self.assertEqual(pending[0]["payload"]["source_status"], "completed")
+        self.assertEqual(pending[0]["payload"]["delegated_task"], "return 1")
+        self.assertEqual(pending[0]["payload"]["original_slash_input"], "/workflow return 1")
         self.assertIn("workflow answer", pending[0]["content"])
 
     async def test_subagent_stop_interrupts_pending_tool_approval_wait(self):
@@ -1653,9 +1648,10 @@ class SyntheticTaskNotificationTests(unittest.IsolatedAsyncioTestCase):
                 }
 
         run_manager = RunManager()
+        notifications = install_notification_service(run_manager)
         await SlashRuntimeDispatchTests()._collect_events(detached_stream_event_generator(
             "conversation-1",
-            SendMessageRequest(content="/btw summarize context", node_id="node-1"),
+            SendMessageRequest(content="/btw summarize context", parent_node_id="node-1"),
             FakeChatManager(),
             run_manager,
             None,
@@ -1663,220 +1659,14 @@ class SyntheticTaskNotificationTests(unittest.IsolatedAsyncioTestCase):
         ))
         await SlashRuntimeDispatchTests()._collect_events(detached_stream_event_generator(
             "conversation-1",
-            SendMessageRequest(content="/status", node_id="node-1"),
+            SendMessageRequest(content="/status", parent_node_id="node-1"),
             FakeChatManager(),
             run_manager,
             None,
             None,
         ))
 
-        self.assertEqual(run_manager.synthetic_inputs.list_pending("conversation-1"), [])
-
-
-class SyntheticInputRouteTests(unittest.TestCase):
-    class FakeChatManager:
-        def __init__(self):
-            self.contents: list[str] = []
-            self.kwargs: list[dict[str, Any]] = []
-
-        async def send_message_stream(self, **kwargs):
-            self.kwargs.append(kwargs)
-            self.contents.append(kwargs["content"])
-            yield {
-                "status": "complete",
-                "content": "synthetic answer",
-                "node_id": "assistant-node-1",
-                "target_node_id": "assistant-node-1",
-                "run_id": kwargs["run_id"],
-            }
-
-    def _client(self, run_manager: RunManager, chat_manager: Any | None = None):
-        app = FastAPI()
-        app.include_router(messages_route.router)
-        app.dependency_overrides[get_run_manager] = lambda: run_manager
-        app.dependency_overrides[get_chat_manager] = lambda: chat_manager or self.FakeChatManager()
-        app.dependency_overrides[get_subagent_executor] = lambda: object()
-        app.dependency_overrides[get_workflow_manager] = lambda: object()
-        return TestClient(app)
-
-    def test_pending_and_consume_synthetic_inputs(self):
-        run_manager = RunManager()
-        item = run_manager.synthetic_inputs.enqueue(
-            kind="task_notification",
-            conversation_id="conversation-1",
-            anchor_node_id="node-1",
-            source_run_id="run-1",
-            source_run_kind="subagent",
-            status="pending",
-            summary="subagent completed",
-            content="result text",
-            metadata={"origin": "task_notification", "source_status": "completed"},
-        )
-        client = self._client(run_manager)
-
-        pending_response = client.get("/conversations/conversation-1/synthetic-inputs/pending")
-        consume_response = client.post(f"/conversations/conversation-1/synthetic-inputs/{item.input_id}/consume")
-
-        self.assertEqual(pending_response.status_code, 200)
-        self.assertEqual(len(pending_response.json()), 1)
-        self.assertEqual(pending_response.json()[0]["input_id"], item.input_id)
-        self.assertEqual(consume_response.status_code, 200)
-        self.assertEqual(consume_response.json()["status"], "consumed")
-        self.assertEqual(run_manager.synthetic_inputs.list_pending("conversation-1"), [])
-
-    def test_active_streams_include_subagent_runs(self):
-        run_manager = RunManager()
-        run = asyncio.run(run_manager.create_run(
-            conversation_id="conversation-1",
-            kind=RunKind.SUBAGENT,
-            anchor_node_id="node-1",
-            summary="subagent inspect",
-        ))
-
-        active = asyncio.run(messages_route.get_active_streams("conversation-1", run_manager))
-
-        self.assertEqual(len(active), 1)
-        self.assertEqual(active[0]["run_id"], run.run_id)
-        self.assertEqual(active[0]["kind"], RunKind.SUBAGENT.value)
-
-    def test_start_synthetic_input_stream_wraps_notification_and_marks_origin(self):
-        run_manager = RunManager()
-        chat_manager = self.FakeChatManager()
-        item = run_manager.synthetic_inputs.enqueue(
-            kind="task_notification",
-            conversation_id="conversation-1",
-            anchor_node_id="node-1",
-            source_run_id="run-1",
-            source_run_kind="workflow",
-            status="pending",
-            summary="workflow completed",
-            content="workflow result",
-            metadata={"origin": "task_notification", "source_status": "completed"},
-        )
-        client = self._client(run_manager, chat_manager)
-
-        response = client.post(f"/conversations/conversation-1/synthetic-inputs/{item.input_id}/stream")
-
-        self.assertEqual(response.status_code, 200)
-        self.assertIn("[DONE]", response.text)
-        self.assertEqual(len(chat_manager.contents), 1)
-        self.assertIn("<task-notification>", chat_manager.contents[0])
-        self.assertIn("workflow result", chat_manager.contents[0])
-        self.assertEqual(chat_manager.kwargs[0]["message_subtype"], "task_notification")
-        self.assertEqual(run_manager.synthetic_inputs.list_pending("conversation-1"), [])
-        chat_runs = [
-            run for run in run_manager.list_runs("conversation-1")
-            if run["kind"] == "chat"
-        ]
-        self.assertEqual(len(chat_runs), 1)
-        self.assertEqual(chat_runs[0]["metadata"]["origin"], "task_notification")
-        self.assertEqual(chat_runs[0]["metadata"]["synthetic_input"]["input_id"], item.input_id)
-        self.assertEqual(chat_runs[0]["metadata"]["synthetic_input"]["kind"], "task_notification")
-
-    def test_synthetic_input_stream_keeps_pending_when_followup_cannot_bind_node(self):
-        class FailingBeforeNodeChatManager(self.FakeChatManager):
-            async def send_message_stream(self, **kwargs):
-                self.kwargs.append(kwargs)
-                self.contents.append(kwargs["content"])
-                yield {
-                    "status": "error",
-                    "content": "",
-                    "node_id": None,
-                    "target_node_id": None,
-                    "run_id": kwargs["run_id"],
-                    "error": "model unavailable",
-                }
-
-        run_manager = RunManager()
-        chat_manager = FailingBeforeNodeChatManager()
-        item = run_manager.synthetic_inputs.enqueue(
-            kind="task_notification",
-            conversation_id="conversation-1",
-            anchor_node_id="node-1",
-            source_run_id="run-1",
-            source_run_kind="workflow",
-            status="pending",
-            summary="workflow completed",
-            content="workflow result",
-            metadata={"origin": "task_notification", "source_status": "completed"},
-        )
-        client = self._client(run_manager, chat_manager)
-
-        response = client.post(f"/conversations/conversation-1/synthetic-inputs/{item.input_id}/stream")
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(len(run_manager.synthetic_inputs.list_pending("conversation-1")), 1)
-        self.assertEqual(run_manager.synthetic_inputs.list_pending("conversation-1")[0]["input_id"], item.input_id)
-
-    def test_synthetic_followup_scheduler_starts_followup_without_frontend_trigger(self):
-        from backend.api.routes.messages import SyntheticFollowupScheduler
-
-        run_manager = RunManager()
-        chat_manager = self.FakeChatManager()
-        scheduler = SyntheticFollowupScheduler(
-            chat_manager=chat_manager,
-            run_manager=run_manager,
-        )
-        scheduler.install()
-        run_manager.synthetic_inputs.enqueue(
-            kind="task_notification",
-            conversation_id="conversation-1",
-            anchor_node_id="node-1",
-            source_run_id="run-1",
-            source_run_kind="subagent",
-            status="pending",
-            summary="subagent completed",
-            content="subagent result",
-            metadata={"origin": "task_notification", "source_status": "completed"},
-        )
-
-        async def run_scheduler():
-            await scheduler.drain("conversation-1")
-            await asyncio.sleep(0.05)
-
-        asyncio.run(run_scheduler())
-
-        self.assertEqual(run_manager.synthetic_inputs.list_pending("conversation-1"), [])
-        chat_runs = [
-            run for run in run_manager.list_runs("conversation-1")
-            if run["kind"] == "chat"
-        ]
-        self.assertEqual(len(chat_runs), 1)
-        self.assertEqual(chat_runs[0]["metadata"]["origin"], "task_notification")
-        self.assertIn("subagent result", chat_manager.contents[0])
-
-    def test_synthetic_followup_scheduler_drains_task_notification(self):
-        from backend.api.routes.messages import SyntheticFollowupScheduler
-
-        async def scenario():
-            run_manager = RunManager()
-            chat_manager = self.FakeChatManager()
-            scheduler = SyntheticFollowupScheduler(
-                chat_manager=chat_manager,
-                run_manager=run_manager,
-            )
-            run_manager.synthetic_inputs.enqueue(
-                kind="task_notification",
-                conversation_id="conversation-1",
-                anchor_node_id="node-1",
-                source_run_id="run-1",
-                source_run_kind="subagent",
-                status="pending",
-                summary="subagent completed",
-                content="subagent result",
-                metadata={
-                    "origin": "task_notification",
-                    "source_status": "completed",
-                },
-            )
-
-            await scheduler.drain("conversation-1")
-            await asyncio.sleep(0.05)
-
-            self.assertEqual(run_manager.synthetic_inputs.list_pending("conversation-1"), [])
-            self.assertEqual(chat_manager.contents, ["<task-notification>\n{\n  \"kind\": \"task_notification\",\n  \"summary\": \"subagent completed\",\n  \"source_run_id\": \"run-1\",\n  \"source_run_kind\": \"subagent\",\n  \"task_id\": null,\n  \"source_status\": \"completed\",\n  \"delegated_task\": null,\n  \"original_slash_input\": null,\n  \"content\": \"subagent result\"\n}\n</task-notification>"])
-
-        asyncio.run(scenario())
+        self.assertEqual(notifications.list_for_conversation("conversation-1"), [])
 
 
 class DetachedSlashStopRouteTests(unittest.TestCase):

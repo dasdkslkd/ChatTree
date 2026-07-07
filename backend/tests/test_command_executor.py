@@ -11,6 +11,7 @@ from backend.core.command_runtime import CommandExecutor
 from backend.core.persistence.database import SQLitePersistence
 from backend.core.persistence.repository import ChatRepository
 from backend.core.persistence.run_repository import SQLiteRunRepository
+from backend.core.notifications import TaskNotificationService
 from backend.core.runs import RunKind, RunManager, RunStatus
 from backend.core.tasks import TaskLedger, TaskStatus
 from backend.core.tools.code_tools import CodeToolConfig, RunCommandTool
@@ -21,6 +22,36 @@ from backend.core.tools.command_tools import (
     WaitCommandTool,
 )
 from backend.core.tools.tool_manager import ToolManager
+
+
+class MemoryNotificationRepository:
+    def __init__(self):
+        self.items = {}
+
+    def upsert_for_run(self, **kwargs):
+        source_run_id = kwargs["source_run_id"]
+        item = self.items.get(source_run_id) or {
+            "id": f"notification-{source_run_id}",
+            "status": "unbound",
+        }
+        item.update(kwargs)
+        self.items[source_run_id] = item
+        return dict(item)
+
+    def mark_observed_by_source(self, source_run_id):
+        item = self.items.get(source_run_id)
+        if item:
+            item["status"] = "observed"
+        return dict(item) if item else None
+
+
+def install_notification_service(run_manager: RunManager) -> MemoryNotificationRepository:
+    repository = MemoryNotificationRepository()
+    run_manager.notification_service = TaskNotificationService(
+        repository=repository,
+        run_manager=run_manager,
+    )
+    return repository
 
 
 class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
@@ -42,6 +73,7 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
     async def test_run_command_short_managed_command_returns_sync_output_and_suppresses_notification(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_manager = RunManager()
+            notifications = install_notification_service(run_manager)
             command_executor = CommandExecutor(run_manager)
             parent = await run_manager.create_run(
                 conversation_id="conv_1",
@@ -76,7 +108,7 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("command_run_id", payload)
             self.assertIn("shell", payload)
             self.assertNotIn("terminal_run_id", payload)
-            self.assertEqual(run_manager.synthetic_inputs.list_pending("conv_1"), [])
+            self.assertEqual(notifications.items[payload["command_run_id"]]["status"], "observed")
 
     async def test_run_command_short_managed_command_truncates_output(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -227,9 +259,8 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
     async def test_background_command_streams_events_and_enqueues_completion_notification(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_manager = RunManager()
+            notifications = install_notification_service(run_manager)
             command_executor = CommandExecutor(run_manager)
-            seen_notifications: list[str] = []
-            run_manager.synthetic_inputs.set_pending_listener(seen_notifications.append)
 
             run = await command_executor.start(
                 conversation_id="conv_1",
@@ -253,16 +284,13 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("command_stdout", event_types)
             self.assertIn("command_exited", event_types)
 
-            pending = run_manager.synthetic_inputs.list_pending("conv_1")
-            self.assertEqual(len(pending), 1)
-            notification = pending[0]
-            self.assertEqual(notification["kind"], "task_notification")
+            self.assertEqual(len(notifications.items), 1)
+            notification = list(notifications.items.values())[0]
             self.assertEqual(notification["source_run_kind"], RunKind.COMMAND.value)
             payload = json.loads(notification["content"])
             self.assertEqual(payload["command_run_id"], run["run_id"])
             self.assertNotIn("terminal_run_id", payload)
             self.assertIn("hello-command", payload["stdout_tail"])
-            self.assertEqual(seen_notifications, ["conv_1"])
 
     async def test_command_snapshot_reads_repository_events(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -311,6 +339,7 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
     async def test_background_command_auto_creates_task_for_standalone_notification(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_manager = RunManager()
+            notifications = install_notification_service(run_manager)
             task_ledger = TaskLedger()
             task_ledger.install_run_finish_listener(run_manager)
             command_executor = CommandExecutor(run_manager, task_ledger=task_ledger)
@@ -330,8 +359,8 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(tasks[0].status, TaskStatus.COMPLETED)
             record = run_manager.get_run(run["run_id"])
             self.assertEqual(record["metadata"]["task_id"], tasks[0].task_id)
-            pending = run_manager.synthetic_inputs.list_pending("conv_1")
-            self.assertEqual(pending[0]["metadata"]["task_id"], tasks[0].task_id)
+            notification = notifications.items[run["run_id"]]
+            self.assertEqual(notification["task_id"], tasks[0].task_id)
 
     async def test_command_binds_existing_task_id_from_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -425,6 +454,7 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
     async def test_wait_command_marks_final_result_observed_and_suppresses_notification(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_manager = RunManager()
+            notifications = install_notification_service(run_manager)
             command_executor = CommandExecutor(run_manager)
             parent = await run_manager.create_run(
                 conversation_id="conv_1",
@@ -453,9 +483,9 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(waited["status"], RunStatus.COMPLETED.value)
             self.assertIn("joined-command", waited["stdout"])
             updated = run_manager.get_run(run["run_id"])
-            self.assertEqual(updated["metadata"]["command_observed_by_run_id"], parent.run_id)
-            self.assertEqual(updated["metadata"]["command_observed_via"], "wait_command")
-            self.assertEqual(run_manager.synthetic_inputs.list_pending("conv_1"), [])
+            self.assertEqual(updated["metadata"]["result_observed_by_run_id"], parent.run_id)
+            self.assertEqual(updated["metadata"]["result_observed_via"], "wait_command")
+            self.assertEqual(notifications.items[run["run_id"]]["status"], "observed")
 
     async def test_command_start_exception_records_actionable_error_context(self):
         with tempfile.TemporaryDirectory() as tmpdir:

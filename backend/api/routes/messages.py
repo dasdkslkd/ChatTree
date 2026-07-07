@@ -1,5 +1,5 @@
 # backend/api/routes/messages.py
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from typing import Any, AsyncIterator, Dict, List, Optional
 from pydantic import BaseModel
@@ -36,33 +36,16 @@ _ANCHOR_STOP_RUN_KINDS = (
     RunKind.WORKFLOW_STEP,
 )
 
-
-def _wake_synthetic_followup_scheduler(request: Request, conversation_id: str) -> None:
-    scheduler = getattr(request.app.state, "synthetic_followup_scheduler", None)
-    if scheduler is not None:
-        scheduler.notify(conversation_id)
-
 class SendMessageRequest(BaseModel):
     content: str
     model_id: Optional[str] = None
     provider_id: Optional[str] = None
-    node_id: Optional[str] = None
+    parent_node_id: Optional[str] = None
+    focus_new_node: bool = True
     reasoning_effort: Optional[str] = None
     thinking_enabled: Optional[bool] = None
     import_files: Optional[List[Dict[str, Any]]] = None
     image_refs: Optional[List[Dict[str, Any]]] = None
-    tool_permission_mode: Optional[str] = None
-    synthetic_input_id: Optional[str] = None
-    synthetic_origin: Optional[str] = None
-    synthetic_kind: Optional[str] = None
-    synthetic_metadata: Optional[Dict[str, Any]] = None
-
-
-class SyntheticInputStartRequest(BaseModel):
-    model_id: Optional[str] = None
-    provider_id: Optional[str] = None
-    reasoning_effort: Optional[str] = None
-    thinking_enabled: Optional[bool] = None
     tool_permission_mode: Optional[str] = None
 
 
@@ -163,7 +146,7 @@ def _direct_response_runtime_context(
 ) -> Dict[str, Any]:
     context: Dict[str, Any] = {
         "conversation_id": conversation_id,
-        "anchor_node_id": request.node_id,
+        "anchor_node_id": request.parent_node_id,
         "tool_permission_mode": request.tool_permission_mode,
         "active_runs": run_manager.list_active(conversation_id),
     }
@@ -191,22 +174,6 @@ def _direct_response_runtime_context(
         }
     return context
 
-
-def _synthetic_run_metadata(request: SendMessageRequest) -> Dict[str, Any]:
-    if not request.synthetic_input_id:
-        return {}
-    synthetic_metadata = dict(request.synthetic_metadata or {})
-    return {
-        "origin": request.synthetic_origin or synthetic_metadata.get("origin") or "synthetic_input",
-        "synthetic_input": {
-            **synthetic_metadata,
-            "input_id": request.synthetic_input_id,
-            "kind": request.synthetic_kind,
-            "origin": request.synthetic_origin or synthetic_metadata.get("origin"),
-        },
-    }
-
-
 def _slash_command_metadata(slash_result: Any) -> Dict[str, Any]:
     return {
         "command": slash_result.canonical_name,
@@ -233,56 +200,11 @@ async def _create_visible_slash_anchor_node(
     return await create_anchor(
         conversation_id=conversation_id,
         content=request.content,
-        parent_node_id=request.node_id,
+        parent_node_id=request.parent_node_id,
         model_id=request.model_id,
         tool_permission_mode=request.tool_permission_mode,
         slash_metadata=_slash_command_metadata(slash_result),
     )
-
-
-def build_task_notification_content(item: Dict[str, Any]) -> str:
-    metadata = dict(item.get("metadata") or {})
-    payload = {
-        "kind": item.get("kind"),
-        "summary": item.get("summary"),
-        "source_run_id": item.get("source_run_id"),
-        "source_run_kind": item.get("source_run_kind"),
-        "task_id": metadata.get("task_id"),
-        "source_status": metadata.get("source_status"),
-        "delegated_task": metadata.get("delegated_task"),
-        "original_slash_input": metadata.get("original_slash_input"),
-        "content": item.get("content") or "",
-    }
-    return "<task-notification>\n" + json.dumps(payload, ensure_ascii=False, indent=2) + "\n</task-notification>"
-
-
-def build_synthetic_message_request(
-    item: Dict[str, Any],
-    request: Optional[SyntheticInputStartRequest] = None,
-) -> SendMessageRequest:
-    request = request or SyntheticInputStartRequest()
-    return SendMessageRequest(
-        content=build_task_notification_content(item),
-        model_id=request.model_id,
-        provider_id=request.provider_id,
-        node_id=item.get("anchor_node_id"),
-        reasoning_effort=request.reasoning_effort,
-        thinking_enabled=request.thinking_enabled,
-        tool_permission_mode=request.tool_permission_mode,
-        synthetic_input_id=str(item.get("input_id") or ""),
-        synthetic_origin="task_notification",
-        synthetic_kind=str(item.get("kind") or ""),
-        synthetic_metadata={
-            "origin": "task_notification",
-            "source_run_id": item.get("source_run_id"),
-            "source_run_kind": item.get("source_run_kind"),
-            "task_id": (item.get("metadata") or {}).get("task_id"),
-            "source_status": (item.get("metadata") or {}).get("source_status"),
-            "delegated_task": (item.get("metadata") or {}).get("delegated_task"),
-            "original_slash_input": (item.get("metadata") or {}).get("original_slash_input"),
-        },
-    )
-
 
 _HEAVY_TOOL_RESULT_FIELDS = {"raw_content", "model_visible_content"}
 
@@ -363,7 +285,7 @@ async def start_detached_chat_run(
     run = await run_manager.create_run(
         conversation_id=conversation_id,
         kind=run_kind,
-        anchor_node_id=request.node_id,
+        anchor_node_id=request.parent_node_id,
         summary=request.content[:80],
         metadata={
             "slash_command": {
@@ -381,7 +303,6 @@ async def start_detached_chat_run(
             "reasoning_effort": request.reasoning_effort,
             "thinking_enabled": request.thinking_enabled,
             "tool_permission_mode": request.tool_permission_mode,
-            **_synthetic_run_metadata(request),
         },
     )
 
@@ -389,20 +310,19 @@ async def start_detached_chat_run(
         final_status = RunStatus.COMPLETED
         final_error: str | None = None
         bound_node_id: str | None = None
-        synthetic_consumed = False
         try:
             async for chunk in chat_manager.send_message_stream(
                 conversation_id=conversation_id,
                 content=request.content,
                 model_id=request.model_id,
                 provider_id=request.provider_id,
-                node_id=request.node_id,
+                parent_node_id=request.parent_node_id,
+                focus_new_node=request.focus_new_node,
                 reasoning_effort=request.reasoning_effort,
                 thinking_enabled=request.thinking_enabled,
                 import_files=request.import_files,
                 image_refs=request.image_refs,
                 tool_permission_mode=request.tool_permission_mode,
-                message_subtype=request.synthetic_kind if request.synthetic_input_id else None,
                 run_id=run.run_id,
             ):
                 chunk_data = build_stream_chunk_data(chunk, conversation_id)
@@ -410,9 +330,6 @@ async def start_detached_chat_run(
                 if node_id and node_id != bound_node_id:
                     bound_node_id = node_id
                     await run_manager.bind_target_node(run.run_id, node_id)
-                    if request.synthetic_input_id and not synthetic_consumed:
-                        run_manager.synthetic_inputs.mark_consumed(conversation_id, request.synthetic_input_id)
-                        synthetic_consumed = True
                     legacy_session = LegacyRunStreamSession(run_manager, run.run_id, conversation_id)
                     legacy_session.node_id = node_id
                     _STREAM_SESSIONS[node_id] = legacy_session
@@ -432,80 +349,12 @@ async def start_detached_chat_run(
             final_error = str(e)
             await run_manager.append_event(run.run_id, _stream_error_chunk(conversation_id, str(e)))
         finally:
-            if request.synthetic_input_id and not synthetic_consumed:
-                run_manager.synthetic_inputs.release(conversation_id, request.synthetic_input_id, notify=False)
             await run_manager.finish_run(run.run_id, final_status, final_error)
             if bound_node_id:
                 _STREAM_SESSIONS.pop(bound_node_id, None)
 
     asyncio.create_task(produce())
     return run.to_dict()
-
-
-class SyntheticFollowupScheduler:
-    def __init__(
-        self,
-        *,
-        chat_manager: ChatManager,
-        run_manager: RunManager,
-    ) -> None:
-        self.chat_manager = chat_manager
-        self.run_manager = run_manager
-        self._draining: set[str] = set()
-
-    def install(self) -> None:
-        self.run_manager.synthetic_inputs.set_pending_listener(self.notify)
-        self.run_manager.add_finish_listener(self._handle_run_finished)
-
-    def notify(self, conversation_id: str) -> None:
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        loop.create_task(self.drain(conversation_id))
-
-    def _handle_run_finished(self, run: Dict[str, Any]) -> None:
-        metadata = run.get("metadata") or {}
-        if isinstance(metadata, dict) and metadata.get("origin") == "task_notification":
-            return
-        if run.get("kind") == RunKind.CHAT.value:
-            self.notify(str(run.get("conversation_id") or ""))
-
-    def _has_active_chat(self, conversation_id: str) -> bool:
-        return any(
-            run.get("kind") == RunKind.CHAT.value
-            for run in self.run_manager.list_active(conversation_id)
-        )
-
-    async def drain(self, conversation_id: str) -> bool:
-        if not conversation_id or conversation_id in self._draining:
-            return False
-        if self._has_active_chat(conversation_id):
-            return False
-        self._draining.add(conversation_id)
-        try:
-            if self._has_active_chat(conversation_id):
-                return False
-            item = self.run_manager.synthetic_inputs.claim_next(conversation_id)
-            if item is None:
-                return False
-            if item.get("kind") != "task_notification":
-                self.run_manager.synthetic_inputs.release(conversation_id, str(item.get("input_id") or ""), notify=False)
-                return False
-            try:
-                await start_detached_chat_run(
-                    conversation_id,
-                    build_synthetic_message_request(item),
-                    self.chat_manager,
-                    self.run_manager,
-                )
-            except Exception:
-                self.run_manager.synthetic_inputs.release(conversation_id, str(item.get("input_id") or ""), notify=False)
-                raise
-            return True
-        finally:
-            self._draining.discard(conversation_id)
-
 
 async def detached_stream_event_generator(
     conversation_id: str,
@@ -588,7 +437,7 @@ async def detached_stream_event_generator(
         run = await run_manager.create_run(
             conversation_id=conversation_id,
             kind=RunKind.DIRECT_RESPONSE,
-            anchor_node_id=request.node_id,
+            anchor_node_id=request.parent_node_id,
             summary=request.content[:80],
             metadata={
                 "slash_command": {
@@ -667,7 +516,6 @@ async def stream_message(
     chat_manager: ChatManager = Depends(get_chat_manager),
     run_manager: RunManager = Depends(get_run_manager),
     subagent_executor: SubagentExecutor = Depends(get_subagent_executor),
-    command_executor: Any = Depends(get_command_executor),
     workflow_manager: WorkflowManager = Depends(get_workflow_manager),
 ):
     """流式发送消息 - 返回 SSE 格式"""
@@ -715,67 +563,6 @@ async def get_all_active_streams(
         for run in run_manager.list_active()
         if run.get("kind") in _ACTIVE_MESSAGE_STREAM_KINDS
     ]
-
-
-@router.get("/conversations/{conversation_id}/synthetic-inputs/pending", response_model=List[Dict[str, Any]])
-async def get_pending_synthetic_inputs(
-    conversation_id: str,
-    run_manager: RunManager = Depends(get_run_manager),
-):
-    return run_manager.synthetic_inputs.list_pending(conversation_id)
-
-
-@router.post("/conversations/{conversation_id}/synthetic-inputs/{input_id}/consume", response_model=Dict[str, Any])
-async def consume_synthetic_input(
-    conversation_id: str,
-    input_id: str,
-    run_manager: RunManager = Depends(get_run_manager),
-):
-    item = run_manager.synthetic_inputs.mark_consumed(conversation_id, input_id)
-    if item is None:
-        raise HTTPException(status_code=404, detail="Synthetic input 不存在")
-    return item
-
-
-@router.post("/conversations/{conversation_id}/synthetic-inputs/{input_id}/stream")
-async def stream_synthetic_input(
-    conversation_id: str,
-    input_id: str,
-    request: Optional[SyntheticInputStartRequest] = None,
-    chat_manager: ChatManager = Depends(get_chat_manager),
-    run_manager: RunManager = Depends(get_run_manager),
-    subagent_executor: SubagentExecutor = Depends(get_subagent_executor),
-    command_executor: Any = Depends(get_command_executor),
-    workflow_manager: WorkflowManager = Depends(get_workflow_manager),
-):
-    item = run_manager.synthetic_inputs.get(conversation_id, input_id)
-    if item is None or item.get("status") != "pending":
-        raise HTTPException(status_code=404, detail="Pending synthetic input 不存在")
-    if item.get("kind") != "task_notification":
-        raise HTTPException(status_code=400, detail="不支持的 synthetic input 类型")
-
-    claimed = run_manager.synthetic_inputs.claim(conversation_id, input_id)
-    if claimed is None:
-        raise HTTPException(status_code=404, detail="Pending synthetic input 不存在")
-    try:
-        run = await start_detached_chat_run(
-            conversation_id,
-            build_synthetic_message_request(claimed, request),
-            chat_manager,
-            run_manager,
-        )
-    except Exception:
-        run_manager.synthetic_inputs.release(conversation_id, input_id, notify=False)
-        raise
-    return StreamingResponse(
-        _subscribe_sse(run_manager, str(run["run_id"]), 0),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
 
 
 @router.get("/conversations/{conversation_id}/messages/{node_id}/stream/attach")
@@ -859,7 +646,6 @@ async def stop_stream_message(
 async def get_messages(
     conversation_id: str,
     node_id: str,
-    request: Request,
     chat_manager: ChatManager = Depends(get_chat_manager)
 ):
     """获取消息历史"""
@@ -867,7 +653,6 @@ async def get_messages(
         conversation = chat_manager.get_conversation(conversation_id)
         if not conversation:
             raise HTTPException(status_code=404, detail="对话不存在")
-        _wake_synthetic_followup_scheduler(request, conversation_id)
         return slim_messages_for_ui(conversation.get_message_chain_from_node(node_id))
     except HTTPException:
         raise
@@ -877,7 +662,6 @@ async def get_messages(
 @router.get("/conversations/{conversation_id}/messages", response_model=List[Message])
 async def get_all_messages(
     conversation_id: str,
-    request: Request,
     chat_manager: ChatManager = Depends(get_chat_manager)
 ):
     """获取对话中所有消息"""
@@ -885,7 +669,6 @@ async def get_all_messages(
         conversation = chat_manager.get_conversation(conversation_id)
         if not conversation:
             raise HTTPException(status_code=404, detail="对话不存在")
-        _wake_synthetic_followup_scheduler(request, conversation_id)
         return slim_messages_for_ui(conversation.get_message_chain_from_node())
     except HTTPException:
         raise

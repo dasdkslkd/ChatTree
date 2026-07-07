@@ -368,6 +368,7 @@ class ChatManager:
                     conversation.current_node_id,
                     provider_id=conversation.metadata.get("provider_id"),
                     model_id=conversation.metadata.get("model_id"),
+                    focus_node_id=conversation.current_node_id,
                 )
             except Exception as exc:
                 logger.warning("SQLite branch ensure failed: %s", exc, exc_info=True)
@@ -407,6 +408,7 @@ class ChatManager:
         *,
         provider_id: Optional[str],
         model_id: Optional[str],
+        focus_node_id: Optional[str] = None,
     ) -> None:
         if not self._sqlite_enabled():
             return
@@ -437,6 +439,7 @@ class ChatManager:
                 model_id=item.get("model_id") or model_id,
                 provider_id=provider_id,
                 tool_permission_mode=item.get("tool_permission_mode"),
+                focus=item["id"] == focus_node_id,
             )
 
     def _persist_sqlite_user_turn(
@@ -459,6 +462,7 @@ class ChatManager:
                 node_id,
                 provider_id=provider_id,
                 model_id=model_id,
+                focus_node_id=conversation.current_node_id,
             )
             message_id = self.chat_repository.add_message(
                 conversation_id,
@@ -514,6 +518,7 @@ class ChatManager:
                 node_id,
                 provider_id=provider_id,
                 model_id=model_id,
+                focus_node_id=conversation.current_node_id,
             )
             self.transcript_projection.upsert_control_event(
                 conversation_id,
@@ -654,6 +659,7 @@ class ChatManager:
                 node_id,
                 provider_id=provider_id,
                 model_id=model_id,
+                focus_node_id=conversation.current_node_id,
             )
             content = str(assistant_msg.get("content") or "")
             assistant_message_id: Optional[str] = None
@@ -1033,7 +1039,8 @@ class ChatManager:
         content: str,
         model_id: Optional[str] = None,
         provider_id: Optional[str] = None,
-        node_id: Optional[str] = None,
+        parent_node_id: Optional[str] = None,
+        focus_new_node: bool = True,
         reasoning_effort: Optional[str] = None,
         thinking_enabled: Optional[bool] = None,
         import_files: Optional[List[Dict[str, Any]]] = None,
@@ -1151,7 +1158,7 @@ class ChatManager:
         else:
             meta = {}
 
-        if not node_id:
+        if not parent_node_id:
             auto_result = await self._auto_compact_if_needed(
                 conversation_id,
                 target_model=target_model,
@@ -1185,8 +1192,8 @@ class ChatManager:
         logger.info(f"Stream reasoning: effort={eff_effort}, thinking={eff_thinking}")
         if slash_result.kind == SlashDispatchKind.SIDE_QUESTION:
             side_run_context = Conversation.from_dict(preview.to_dict())
-            if node_id and node_id in side_run_context.nodes:
-                side_run_context.switch_to_node(node_id)
+            if parent_node_id and parent_node_id in side_run_context.nodes:
+                side_run_context.switch_to_node(parent_node_id)
             async for chunk in self._send_side_question_stream(
                 conversation=side_run_context,
                 content=model_content,
@@ -1198,11 +1205,18 @@ class ChatManager:
             ):
                 yield chunk
             return
-        requested_parent_node_id = node_id or preview.current_node_id
-        if not node_id and requested_parent_node_id in self._active_controllers:
-            active_parent = preview.nodes.get(requested_parent_node_id, {}).get("parent_id")
-            if active_parent:
-                requested_parent_node_id = active_parent
+        requested_parent_node_id = parent_node_id
+        if not requested_parent_node_id:
+            yield StreamChunk(
+                status=StreamStatus.ERROR,
+                content="",
+                node_id=None,
+                conversation_id=conversation_id,
+                run_id=run_id,
+                error="parent_node_id is required",
+                tokens_used=0,
+            )
+            return
 
         control_event_payload = dict(control_event or {})
         is_control_event_turn = bool(control_event_payload)
@@ -1268,14 +1282,12 @@ class ChatManager:
                     status=StreamStatus.ERROR, content="", node_id=None,
                     conversation_id=conversation_id, run_id=run_id, error="对话不存在", tokens_used=0)
                 return
-            if node_id:
-                conversation.switch_to_node(node_id)
-            elif requested_parent_node_id and requested_parent_node_id in conversation.nodes:
-                parent_id = requested_parent_node_id
-                if parent_id in self._active_controllers:
-                    parent_id = conversation.nodes.get(parent_id, {}).get("parent_id") or parent_id
-                conversation.switch_to_node(parent_id)
-            current_node_id = conversation.current_node_id
+            if requested_parent_node_id not in conversation.nodes:
+                yield StreamChunk(
+                    status=StreamStatus.ERROR, content="", node_id=None,
+                    conversation_id=conversation_id, run_id=run_id, error="父节点不存在", tokens_used=0)
+                return
+            current_node_id = requested_parent_node_id
             parent_tool_permission_mode = None
             if current_node_id and current_node_id in conversation.nodes:
                 parent_tool_permission_mode = conversation.nodes[current_node_id].get("tool_permission_mode")
@@ -1309,7 +1321,7 @@ class ChatManager:
             )
             if skill_names:
                 new_node["active_skill_names"] = skill_names
-            conversation.add_node(new_node, parent_id=current_node_id)
+            conversation.add_node(new_node, parent_id=current_node_id, focus=focus_new_node)
             self._set_conversation_model_metadata(
                 conversation,
                 provider_id=target_provider,
@@ -1966,7 +1978,7 @@ class ChatManager:
             content="",
             model_id=model_id,
             provider_id=provider_id,
-            node_id=node_id,
+            parent_node_id=node_id,
             reasoning_effort=reasoning_effort,
             thinking_enabled=thinking_enabled,
             import_files=None,

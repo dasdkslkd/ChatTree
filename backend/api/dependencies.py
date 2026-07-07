@@ -103,6 +103,20 @@ def get_task_ledger(request: Request):
         raise HTTPException(status_code=500, detail=f"依赖注入错误: {str(e)}")
 
 
+def get_task_notification_service(request: Request):
+    """获取 task notification 服务。"""
+    try:
+        if not hasattr(request.app.state, 'task_notification_service'):
+            logger.error("❌ task_notification_service 未在 app.state 中初始化")
+            raise HTTPException(status_code=500, detail="TaskNotificationService 未初始化")
+        return request.app.state.task_notification_service
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ 获取 task_notification_service 失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"依赖注入错误: {str(e)}")
+
+
 def get_plan_ledger(request: Request):
     """获取 PlanLedger"""
     try:

@@ -15,6 +15,8 @@ from .runs.types import FINISHED_RUN_STATUSES
 from .shell_profile import ShellProfile, ShellProfileResolver
 from .tasks import TaskLedger, TaskOwnerType, TaskStatus
 
+FINISHED_STATUS_VALUES = {status.value for status in FINISHED_RUN_STATUSES}
+
 
 def _decode_bytes(value: bytes) -> str:
     if not value:
@@ -62,7 +64,6 @@ class CommandExecutor:
         self._stdout_tail: Dict[str, Deque[str]] = {}
         self._stderr_tail: Dict[str, Deque[str]] = {}
         self._lock = asyncio.Lock()
-        self.run_manager.add_finish_listener(self._handle_run_finished)
 
     async def start(
         self,
@@ -106,6 +107,19 @@ class CommandExecutor:
                 run_id=run.run_id,
                 owner_type=TaskOwnerType.COMMAND,
             )
+        service = getattr(self.run_manager, "notification_service", None)
+        if service is not None:
+            await service.register_run_notification(
+                run_id=run.run_id,
+                summary=summary or command[:80] or "Command running",
+                payload={
+                    "command_run_id": run.run_id,
+                    "command": command,
+                    "cwd": cwd_path,
+                    "task_id": task_id or None,
+                },
+                task_id=task_id or None,
+            )
         self._stdout_tail[run.run_id] = deque()
         self._stderr_tail[run.run_id] = deque()
         task = asyncio.create_task(self._run_process(
@@ -141,23 +155,12 @@ class CommandExecutor:
         run = self.run_manager.get_run(run_id)
         if not run or run.get("kind") != RunKind.COMMAND.value:
             return None
-        if run.get("status") not in FINISHED_RUN_STATUSES:
+        if run.get("status") not in FINISHED_STATUS_VALUES:
             return run
-        observer = observer_run_id or ""
-        metadata = {
-            "command_observed_at": time(),
-            "command_observed_via": via,
-            "command_notification_state": "observed",
-            "notification_suppressed_reason": f"Command result observed via {via}",
-        }
-        if observer:
-            metadata["command_observed_by_run_id"] = observer
-        updated = await self.run_manager.update_metadata(run_id, metadata)
-        self.run_manager.synthetic_inputs.mark_consumed_by_source(
-            conversation_id=str(run.get("conversation_id") or ""),
-            kind="task_notification",
-            source_run_kind=RunKind.COMMAND.value,
-            source_run_id=run_id,
+        updated = await self.run_manager.mark_observed(
+            run_id,
+            observer_run_id=observer_run_id,
+            via=via,
         )
         return updated.to_dict()
 
@@ -506,21 +509,9 @@ class CommandExecutor:
     ) -> None:
         run = self.run_manager.get_run(run_id) or {}
         metadata = dict(run.get("metadata") or {})
-        if metadata.get("command_observed_at"):
-            self._record_notification_metadata(run_id, {
-                "command_notification_state": "observed",
-                "notification_suppressed_reason": "Command result already observed",
-            })
+        if metadata.get("result_observed_at"):
             return
-        if metadata.get("command_notification_state") == "sent":
-            return
-        parent_run_id = run.get("parent_run_id")
-        parent_run = self.run_manager.get_run(str(parent_run_id)) if parent_run_id else None
-        if parent_run and parent_run.get("status") not in FINISHED_RUN_STATUSES:
-            self._record_notification_metadata(run_id, {
-                "command_notification_state": "deferred",
-                "notification_suppressed_reason": "parent run is still active",
-            })
+        if getattr(self.run_manager, "notification_service", None) is None:
             return
         status_text = final_status.value
         summary = f"Command {status_text}"
@@ -548,61 +539,18 @@ class CommandExecutor:
         )
         if task_id:
             payload["task_id"] = task_id
-        self.run_manager.synthetic_inputs.enqueue(
-            kind="task_notification",
-            conversation_id=conversation_id,
-            anchor_node_id=anchor_node_id,
-            source_run_id=run_id,
-            source_run_kind=RunKind.COMMAND.value,
+        await self.run_manager.notification_service.publish_run_notification(
+            run_id=run_id,
+            source_status=status_text,
             summary=summary,
             content=json_dumps(payload),
-            metadata={
-                "source_status": status_text,
+            payload={
                 "command_run_id": run_id,
                 "exit_code": exit_code,
                 "task_id": task_id,
             },
+            task_id=task_id,
         )
-        self._record_notification_metadata(run_id, {
-            "command_notification_state": "sent",
-            "command_notification_sent_at": time(),
-            "notification_suppressed_reason": None,
-        })
-
-    def _handle_run_finished(self, run: Dict[str, Any]) -> None:
-        parent_run_id = str(run.get("run_id") or "")
-        if not parent_run_id:
-            return
-        for child in self.run_manager.list_runs(str(run.get("conversation_id") or "")):
-            if child.get("kind") != RunKind.COMMAND.value:
-                continue
-            if child.get("parent_run_id") != parent_run_id:
-                continue
-            if child.get("status") not in FINISHED_RUN_STATUSES:
-                continue
-            metadata = dict(child.get("metadata") or {})
-            if metadata.get("command_observed_at") or metadata.get("command_notification_state") == "sent":
-                continue
-            snapshot = self.snapshot(str(child.get("run_id") or ""))
-            if not snapshot:
-                continue
-            status = snapshot.get("status")
-            if status not in FINISHED_RUN_STATUSES:
-                continue
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                continue
-            loop.create_task(self._enqueue_completion(
-                run_id=str(child["run_id"]),
-                conversation_id=str(child["conversation_id"]),
-                anchor_node_id=child.get("anchor_node_id"),
-                command=str(snapshot.get("command") or metadata.get("command") or ""),
-                cwd=str(snapshot.get("cwd") or metadata.get("cwd") or ""),
-                exit_code=snapshot.get("exit_code"),
-                final_status=RunStatus(str(status)),
-                error=snapshot.get("error"),
-            ))
 
     async def _ensure_notification_task(
         self,
@@ -651,13 +599,6 @@ class CommandExecutor:
             evidence_summary=error or f"Command {final_status.value}",
         )
         return task_id or None
-
-    def _record_notification_metadata(self, run_id: str, metadata: Dict[str, Any]) -> None:
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        loop.create_task(self.run_manager.update_metadata(run_id, metadata))
 
     async def _kill_process_tree(self, process: asyncio.subprocess.Process) -> None:
         if process.returncode is not None:

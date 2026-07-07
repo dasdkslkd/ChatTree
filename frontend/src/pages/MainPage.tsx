@@ -66,11 +66,12 @@ import {
 import {
   Plus, X, MoreHorizontal, ChevronRight, Square,
   Copy, Check, Pencil, Loader2, Network, MessageSquare, FileText, Download, FolderOpen, FolderPlus, Search, Settings,
-  PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, ArrowLeft,
+  PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, ArrowLeft, Bell,
 } from 'lucide-react';
 import { conversationApi } from '../api/conversation';
 import { messageApi, type ActiveStreamInfo, type ToolResultSlice } from '../api/message';
 import { runsApi } from '../api/runs';
+import { taskNotificationsApi, type TaskNotificationRecord } from '../api/taskNotifications';
 import { plansService } from '../services/plans';
 import { transcriptService } from '../services/transcript';
 import type {
@@ -97,7 +98,7 @@ import {
   isRunVisibleInMainTranscript,
   shouldPatchRunIntoMainConversation,
 } from '../utils/runVisibility';
-import { resolveSendNodeId, resolveSlashStreamNodeId, shouldSendSlashAnchorNode } from '../utils/sendTarget';
+import { resolveSendNodeId, resolveSlashStreamNodeId } from '../utils/sendTarget';
 import { getSlashRunLabel, shouldQueueForMainThread, shouldRenderRunDraft } from '../utils/slashRuntime';
 import {
   groupDetachedSideRuns,
@@ -987,6 +988,7 @@ export default function ChatPage() {
   const [attachedImageRefs, setAttachedImageRefs] = useState<Array<{ filename: string; mime_type?: string }>>([]);
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([]);
   const [hiddenSideRunIdsByConversation, setHiddenSideRunIdsByConversation] = useState<Record<string, string[]>>({});
+  const [taskNotifications, setTaskNotifications] = useState<TaskNotificationRecord[]>([]);
   const [transcriptItems, setTranscriptItems] = useState<TranscriptItem[]>([]);
   const [transcriptLoading, setTranscriptLoading] = useState(false);
   const [transcriptError, setTranscriptError] = useState<string | null>(null);
@@ -1268,6 +1270,10 @@ export default function ChatPage() {
     () => activeRunStates.filter((run) => !hiddenSideRunIds.has(run.runId)),
     [activeRunStates, hiddenSideRunIds],
   );
+  const visibleTaskNotifications = useMemo(
+    () => taskNotifications.filter((item) => ['unbound', 'bound', 'delivering'].includes(item.status)),
+    [taskNotifications],
+  );
 
   const hideSideRun = useCallback((conversationId: string, runId: string) => {
     setHiddenSideRunIdsByConversation((current) => {
@@ -1279,6 +1285,28 @@ export default function ChatPage() {
       };
     });
   }, []);
+  const refreshTaskNotifications = useCallback(async (conversationId: string | null | undefined) => {
+    if (!conversationId) {
+      setTaskNotifications([]);
+      return;
+    }
+    try {
+      setTaskNotifications(await taskNotificationsApi.list(conversationId));
+    } catch (error) {
+      console.error('刷新 task notification 失败:', error);
+    }
+  }, []);
+  useEffect(() => {
+    void refreshTaskNotifications(currentConversation?.id);
+  }, [currentConversation?.id, activeRunStates.length, refreshTaskNotifications]);
+  useEffect(() => {
+    if (!currentConversation?.id) return;
+    const conversationId = currentConversation.id;
+    const timer = window.setInterval(() => {
+      void refreshTaskNotifications(conversationId);
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [currentConversation?.id, refreshTaskNotifications]);
   useEffect(() => {
     void slashRegistry.refresh().catch(() => {});
   }, []);
@@ -1457,8 +1485,8 @@ export default function ChatPage() {
     [sideRunDrafts],
   );
   const sideRunTopLevelCount = useMemo(
-    () => sideRunGroups.reduce((total, group) => total + group.runs.length, 0),
-    [sideRunGroups],
+    () => sideRunGroups.reduce((total, group) => total + group.runs.length, 0) + visibleTaskNotifications.length,
+    [sideRunGroups, visibleTaskNotifications.length],
   );
   const selectedSideRunItem = useMemo((): SideRunGroupItem<SideRunDraft> | null => {
     if (!selectedSideRunId) return null;
@@ -2123,6 +2151,20 @@ export default function ChatPage() {
     await refreshMessages(conversationId, { retries: 0 });
     await refreshTranscript(conversationId, run?.targetNodeId ?? run?.nodeId ?? selectedBranchTipId);
   }, [activeRunStates, currentConversation?.id, refreshMessages, refreshPendingToolApprovals, refreshTranscript, selectedBranchTipId]);
+
+  const handleBindTaskNotification = useCallback(async (notificationId: string) => {
+    const conversationId = currentConversation?.id;
+    const deliveryNodeId = selectedBranchTipId || currentConversation?.current_node_id || null;
+    if (!conversationId || !deliveryNodeId) return;
+    await taskNotificationsApi.bind(notificationId, deliveryNodeId, { trigger: true, focusNewNode: false });
+    await refreshTaskNotifications(conversationId);
+  }, [currentConversation?.current_node_id, currentConversation?.id, refreshTaskNotifications, selectedBranchTipId]);
+
+  const handleDeleteTaskNotification = useCallback(async (notificationId: string) => {
+    const conversationId = currentConversation?.id;
+    await taskNotificationsApi.delete(notificationId);
+    await refreshTaskNotifications(conversationId);
+  }, [currentConversation?.id, refreshTaskNotifications]);
 
   const handleCopyTranscriptItem = useCallback(async (_item: TranscriptItem, text: string) => {
     try {
@@ -2801,9 +2843,8 @@ export default function ChatPage() {
       sendNodeId,
       streamTargetPolicy: slashCommand?.stream_target_policy,
     });
-    if (shouldSendSlashAnchorNode(slashCommand?.stream_target_policy)) {
-      request.node_id = sendNodeId ?? undefined;
-    }
+    request.parent_node_id = sendNodeId ?? undefined;
+    request.focus_new_node = true;
 
     if (conversationId && shouldQueueForMainThread({ currentBranchHasStreamingChat, slashCommand })) {
       const queuedConversationId = conversationId;
@@ -2849,9 +2890,7 @@ export default function ChatPage() {
         sendNodeId,
         streamTargetPolicy: slashCommand?.stream_target_policy,
       });
-      if (shouldSendSlashAnchorNode(slashCommand?.stream_target_policy)) {
-        request.node_id = sendNodeId ?? undefined;
-      }
+      request.parent_node_id = sendNodeId ?? undefined;
     }
 
     clearAttachments();
@@ -3040,6 +3079,66 @@ export default function ChatPage() {
         </button>
       </TextTooltip>
     </>
+  );
+
+  const renderTaskNotificationList = () => (
+    <section className="flex flex-col gap-2">
+      <div className="px-1 text-xs font-semibold" style={{ color: 'var(--fg-tertiary)' }}>
+        通知
+      </div>
+      {visibleTaskNotifications.map((notification) => (
+        <div
+          key={notification.id}
+          className="rounded-lg border px-3 py-2"
+          style={{ borderColor: 'var(--border)', background: 'var(--bg-elevated-secondary, rgba(255,255,255,0.03))' }}
+        >
+          <div className="flex min-w-0 items-start gap-2">
+            <Bell className="mt-0.5 h-3.5 w-3.5 shrink-0" style={{ color: 'var(--icon-accent)' }} />
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-sm font-semibold" style={{ color: 'var(--fg-secondary)' }}>
+                {notification.summary || `${notification.source_run_kind} ${notification.status}`}
+              </div>
+              <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs" style={{ color: 'var(--fg-tertiary)' }}>
+                <span>{notification.status}</span>
+                <span>·</span>
+                <span className="truncate">{notification.source_run_id.slice(0, 12)}</span>
+              </div>
+            </div>
+            <div className="flex shrink-0 items-center gap-1">
+              <TextTooltip content="绑定到当前分支并触发">
+                <button
+                  type="button"
+                  className="rounded border-0 bg-transparent p-1"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void handleBindTaskNotification(notification.id);
+                  }}
+                  style={{ color: 'var(--fg-tertiary)' }}
+                  aria-label="绑定并触发"
+                  disabled={notification.status === 'delivering'}
+                >
+                  <MessageSquare className="h-3.5 w-3.5" />
+                </button>
+              </TextTooltip>
+              <TextTooltip content="删除">
+                <button
+                  type="button"
+                  className="rounded border-0 bg-transparent p-1"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void handleDeleteTaskNotification(notification.id);
+                  }}
+                  style={{ color: 'var(--fg-tertiary)' }}
+                  aria-label="删除通知"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </TextTooltip>
+            </div>
+          </div>
+        </div>
+      ))}
+    </section>
   );
 
   const renderCommandRunBody = (run: StreamState) => {
@@ -3728,6 +3827,7 @@ export default function ChatPage() {
                       暂无运行任务。
                     </div>
                   )}
+                  {visibleTaskNotifications.length > 0 && renderTaskNotificationList()}
                   {sideRunGroups.map((group) => (
                     <section key={group.kind} className="flex flex-col gap-2">
                       <div className="px-1 text-xs font-semibold" style={{ color: 'var(--fg-tertiary)' }}>

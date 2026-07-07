@@ -11,7 +11,7 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 # ---------- 导入路由 ----------
-from backend.api.routes import agents, capabilities, config, conversations, messages, models, plans, prompts, runs, slash, tasks, tool_approvals, tool_results, workflows
+from backend.api.routes import agents, capabilities, config, conversations, messages, models, notifications, plans, prompts, runs, slash, tasks, tool_approvals, tool_results, workflows
 
 # ---------- 导入核心 ----------
 from backend.core.chat.chat_manager import ChatManager
@@ -30,10 +30,12 @@ from backend.core.persistence import (
     SQLitePlanRepository,
     SQLiteRunRepository,
     SQLiteTaskRepository,
+    SQLiteTaskNotificationRepository,
     TranscriptProjection,
 )
 from backend.core.tasks import TaskLedger
 from backend.core.workflows import WorkflowManager
+from backend.core.notifications import TaskNotificationService
 from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
 from backend.core.tools.orchestrator import ToolOrchestrator
@@ -86,6 +88,7 @@ async def startup_event():
     run_repository = SQLiteRunRepository(persistence)
     plan_repository = SQLitePlanRepository(persistence)
     task_repository = SQLiteTaskRepository(persistence)
+    task_notification_repository = SQLiteTaskNotificationRepository(persistence)
     capability_registry = build_capability_registry(PROJECT_ROOT, config_manager.data)
     runtime_config = build_runtime_config_with_plugin_mcp(
         config_manager.data,
@@ -150,6 +153,13 @@ async def startup_event():
         task_ledger=task_ledger,
     )
     workflow_manager.agent_runtime = agent_runtime
+    task_notification_service = TaskNotificationService(
+        repository=task_notification_repository,
+        run_manager=run_manager,
+        chat_manager=chat_manager,
+    )
+    run_manager.notification_service = task_notification_service
+    run_manager.add_finish_listener(task_notification_service.handle_run_finished)
     register_agent_management_tools(
         tool_manager,
         agent_runtime=agent_runtime,
@@ -158,12 +168,6 @@ async def startup_event():
     )
     register_plan_tools(tool_manager, plan_ledger)
     register_task_tools(tool_manager, task_ledger)
-    synthetic_followup_scheduler = messages.SyntheticFollowupScheduler(
-        chat_manager=chat_manager,
-        run_manager=run_manager,
-    )
-    synthetic_followup_scheduler.install()
-
     app.state.persistence = persistence
     app.state.chat_repository = chat_repository
     app.state.transcript_projection = transcript_projection
@@ -171,6 +175,7 @@ async def startup_event():
     app.state.interrupted_run_ids = interrupted_run_ids
     app.state.plan_repository = plan_repository
     app.state.task_repository = task_repository
+    app.state.task_notification_repository = task_notification_repository
     app.state.config_manager = config_manager
     app.state.project_root = PROJECT_ROOT
     app.state.capability_registry = capability_registry
@@ -187,7 +192,7 @@ async def startup_event():
     app.state.chat_manager = chat_manager
     app.state.subagent_executor = subagent_executor
     app.state.workflow_manager = workflow_manager
-    app.state.synthetic_followup_scheduler = synthetic_followup_scheduler
+    app.state.task_notification_service = task_notification_service
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -207,6 +212,7 @@ app.include_router(capabilities.router, prefix="", tags=["能力"])
 app.include_router(runs.router, prefix="", tags=["运行"])
 app.include_router(plans.router, prefix="", tags=["计划"])
 app.include_router(tasks.router, prefix="", tags=["任务"])
+app.include_router(notifications.router, prefix="", tags=["Task Notification"])
 app.include_router(slash.router, prefix="", tags=["Slash"])
 app.include_router(agents.router, prefix="", tags=["Agent"])
 app.include_router(workflows.router, prefix="", tags=["Workflow"])

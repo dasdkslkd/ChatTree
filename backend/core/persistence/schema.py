@@ -294,6 +294,39 @@ CREATE INDEX IF NOT EXISTS idx_tasks_owner_run
 CREATE INDEX IF NOT EXISTS idx_task_events_task
   ON task_events(task_id, created_at);
 
+CREATE TABLE IF NOT EXISTS task_notifications (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  source_run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  source_run_kind TEXT NOT NULL,
+  task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+  status TEXT NOT NULL,
+  delivery_node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL,
+  bound_at INTEGER,
+  bound_by TEXT,
+  summary TEXT NOT NULL DEFAULT '',
+  content TEXT NOT NULL DEFAULT '',
+  payload_json TEXT,
+  delivered_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  delivered_node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(conversation_id, source_run_id),
+  FOREIGN KEY (conversation_id, source_run_id)
+    REFERENCES runs(conversation_id, id),
+  FOREIGN KEY (conversation_id, delivery_node_id)
+    REFERENCES nodes(conversation_id, id),
+  FOREIGN KEY (conversation_id, delivered_run_id)
+    REFERENCES runs(conversation_id, id),
+  FOREIGN KEY (conversation_id, delivered_node_id)
+    REFERENCES nodes(conversation_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_notifications_conversation_status
+  ON task_notifications(conversation_id, status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_task_notifications_delivery_node
+  ON task_notifications(delivery_node_id, status);
+
 CREATE TABLE IF NOT EXISTS transcript_items (
   id TEXT PRIMARY KEY,
   conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,

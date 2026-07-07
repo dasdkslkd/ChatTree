@@ -750,7 +750,12 @@ export class StreamManager {
     ));
     this.addToConversation(conversationId, runId);
     this.notify(conversationId, true);
-    await this.consume(runId, () => messageApi.stream(conversationId, request, requestNodeId, abortController.signal));
+    const payload = {
+      ...request,
+      parent_node_id: requestNodeId ?? request.parent_node_id ?? null,
+      focus_new_node: request.focus_new_node ?? true,
+    };
+    await this.consume(runId, () => messageApi.stream(conversationId, payload, requestNodeId, abortController.signal));
   }
 
   async startPlanApprovalStream(
