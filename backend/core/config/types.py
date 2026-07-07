@@ -12,6 +12,7 @@ class Role(str, Enum):
     """消息角色枚举"""
     SYSTEM = "system"
     USER = "user"
+    NOTIFY = "notify"
     ASSISTANT = "assistant"
     TOOL = "tool"
 

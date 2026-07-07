@@ -13,6 +13,7 @@ from backend.core.persistence.database import SQLitePersistence
 from backend.core.persistence.repository import ChatRepository
 from backend.core.persistence.transcript import TranscriptProjection
 from backend.core.plans import PlanLedger
+from backend.core.notifications import format_task_notification_content
 from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
 from backend.core.storage.tool_result_storage import ToolResultStorage
@@ -281,6 +282,47 @@ def test_send_message_stream_writes_transcript_projection(tmp_path: Path):
         "assistant_answer",
     ]
     assert [item["preview"] for item in items] == ["hello sqlite", "ok"]
+
+
+def test_task_notification_turn_writes_notify_transcript_item(tmp_path: Path):
+    manager, _repository, projection = _make_manager(tmp_path)
+    conversation = manager.create_conversation("notify transcript")
+    parent_node_id = conversation.current_node_id
+    content = format_task_notification_content({
+        "summary": "Command completed",
+        "source_run_id": "run-1",
+        "source_run_kind": "command",
+        "task_id": "task-1",
+        "content": "{\"stdout_tail\":\"ok\"}",
+        "payload": {
+            "source_status": "completed",
+        },
+    })
+
+    chunks = asyncio.run(
+        collect_chunks(
+            manager.send_message_stream(
+                conversation.metadata["id"],
+                content,
+                model_id="fake-model",
+                parent_node_id=parent_node_id,
+                message_subtype="task_notification",
+            )
+        )
+    )
+
+    assert chunks[-1]["status"] == "complete"
+    reloaded = manager.get_conversation(conversation.metadata["id"])
+    items = projection.list_for_branch(conversation.metadata["id"], reloaded.current_node_id)
+
+    assert [item["item_type"] for item in items] == [
+        "task_notification",
+        "assistant_answer",
+    ]
+    notify_item = items[0]
+    assert notify_item["status"] == "completed"
+    assert notify_item["summary"] == "Command completed"
+    assert notify_item["preview"] == "Command completed"
 
 
 def test_send_message_stream_updates_run_draft_item(tmp_path: Path):

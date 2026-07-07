@@ -5,6 +5,7 @@ from backend.core.chat.node import NodeManager
 from backend.core.config.types import Message, Role
 from backend.core.notifications.task_notifications import TaskNotificationService
 from backend.core.runs import RunKind, RunManager, RunStatus
+from backend.core.config.types import StreamChunk, StreamStatus
 
 
 class MemoryNotificationRepository:
@@ -34,6 +35,47 @@ class MemoryNotificationRepository:
         if item:
             item["status"] = "observed"
         return dict(item) if item else None
+
+    def get(self, notification_id):
+        for item in self.items.values():
+            if item["id"] == notification_id:
+                return dict(item)
+        return None
+
+    def bind(self, notification_id, delivery_node_id, *, bound_by):
+        for item in self.items.values():
+            if item["id"] == notification_id:
+                item["status"] = "bound"
+                item["delivery_node_id"] = delivery_node_id
+                item["bound_by"] = bound_by
+                return dict(item)
+        raise KeyError(notification_id)
+
+    def mark_delivering(self, notification_id, delivered_run_id):
+        for item in self.items.values():
+            if item["id"] == notification_id:
+                item["status"] = "delivering"
+                item["delivered_run_id"] = delivered_run_id
+                return dict(item)
+        raise KeyError(notification_id)
+
+    def mark_delivered(self, notification_id, *, delivered_run_id, delivered_node_id):
+        for item in self.items.values():
+            if item["id"] == notification_id:
+                item["status"] = "delivered"
+                item["delivered_run_id"] = delivered_run_id
+                item["delivered_node_id"] = delivered_node_id
+                return dict(item)
+        raise KeyError(notification_id)
+
+    def list_bound_for_node(self, conversation_id, node_id):
+        return [
+            dict(item)
+            for item in self.items.values()
+            if item.get("conversation_id") == conversation_id
+            and item.get("delivery_node_id") == node_id
+            and item.get("status") == "delivering"
+        ]
 
 
 def test_conversation_add_node_can_avoid_focus_change():
@@ -86,5 +128,102 @@ def test_observed_run_suppresses_pending_task_notification():
         assert observed["result_observed_by_run_id"] == "parent-run"
         assert observed["result_observed_via"] == "wait_agent"
         assert repository.items[source.run_id]["status"] == "observed"
+
+    asyncio.run(scenario())
+
+
+def test_bound_notification_focuses_only_when_delivery_node_is_current():
+    class FakeChatManager:
+        def __init__(self, conversation):
+            self.conversation = conversation
+            self.calls = []
+            self._active_controllers = {}
+
+        def get_conversation(self, conversation_id):
+            return self.conversation if conversation_id == self.conversation.metadata["id"] else None
+
+        async def send_message_stream(self, **kwargs):
+            self.calls.append(kwargs)
+            yield StreamChunk(
+                status=StreamStatus.START,
+                content="",
+                node_id="notify-node",
+                conversation_id=kwargs["conversation_id"],
+                run_id=kwargs["run_id"],
+            )
+            yield StreamChunk(
+                status=StreamStatus.COMPLETE,
+                content="done",
+                node_id="notify-node",
+                conversation_id=kwargs["conversation_id"],
+                run_id=kwargs["run_id"],
+            )
+
+    async def scenario():
+        conversation = Conversation(conversation_id="conv-1")
+        conversation.initialize_with_system_message()
+        root_id = conversation.current_node_id
+        first = NodeManager.create_node(
+            Message({"role": Role.USER, "content": "first"}),
+            parent_id=root_id,
+            model_id="m",
+        )
+        conversation.add_node(first, parent_id=root_id)
+        second = NodeManager.create_node(
+            Message({"role": Role.USER, "content": "second"}),
+            parent_id=first["id"],
+            model_id="m",
+        )
+        conversation.add_node(second, parent_id=first["id"])
+
+        repository = MemoryNotificationRepository()
+        run_manager = RunManager()
+        chat_manager = FakeChatManager(conversation)
+        service = TaskNotificationService(
+            repository=repository,
+            run_manager=run_manager,
+            chat_manager=chat_manager,
+        )
+        source = await run_manager.create_run(
+            conversation_id=conversation.metadata["id"],
+            kind=RunKind.COMMAND,
+            anchor_node_id=first["id"],
+            summary="command",
+        )
+        await run_manager.finish_run(source.run_id, RunStatus.COMPLETED)
+        notification = await service.publish_run_notification(
+            run_id=source.run_id,
+            source_status="completed",
+            summary="Command completed",
+            content="done",
+        )
+
+        await service.bind(
+            notification_id=notification["id"],
+            delivery_node_id=first["id"],
+        )
+        await asyncio.sleep(0)
+        assert chat_manager.calls[-1]["focus_new_node"] is False
+
+        source2 = await run_manager.create_run(
+            conversation_id=conversation.metadata["id"],
+            kind=RunKind.COMMAND,
+            anchor_node_id=second["id"],
+            summary="command",
+        )
+        await run_manager.finish_run(source2.run_id, RunStatus.COMPLETED)
+        notification2 = await service.publish_run_notification(
+            run_id=source2.run_id,
+            source_status="completed",
+            summary="Command completed",
+            content="done",
+        )
+
+        await service.bind(
+            notification_id=notification2["id"],
+            delivery_node_id=second["id"],
+        )
+        await asyncio.sleep(0)
+        assert chat_manager.calls[-1]["focus_new_node"] is True
 
     asyncio.run(scenario())

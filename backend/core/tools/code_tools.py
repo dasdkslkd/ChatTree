@@ -97,6 +97,16 @@ def _run_command_env() -> Dict[str, str]:
     return env
 
 
+def _should_suppress_command_notification(runtime_context: Dict[str, Any]) -> bool:
+    if runtime_context.get("suppress_task_notification") is True:
+        return True
+    if runtime_context.get("agent_name") == "workflow-worker":
+        return True
+    if runtime_context.get("delivery_policy") == "silent":
+        return True
+    return runtime_context.get("run_kind") in {"workflow", "workflow_step"}
+
+
 def _windows_python_c_args(command: str) -> Optional[List[str]]:
     if os.name != "nt":
         return None
@@ -705,6 +715,11 @@ class RunCommandTool(_CodeTool):
                 "workspace_relative_cwd": self.workspace.relative(cwd),
                 "run_command_managed": True,
                 "task_id": runtime_context.get("task_id"),
+                "agent_name": runtime_context.get("agent_name"),
+                "source_run_id": runtime_context.get("run_id"),
+                "source_run_kind": runtime_context.get("run_kind"),
+                "root_run_id": runtime_context.get("root_run_id"),
+                "suppress_task_notification": _should_suppress_command_notification(runtime_context),
             },
         )
         run_id = str(run["run_id"])

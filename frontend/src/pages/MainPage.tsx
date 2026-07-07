@@ -144,6 +144,9 @@ import {
   getActiveStreamPollingDelay,
   getConversationActiveStreamLookupLimit,
   shouldProbeBackendScheduledFollowup,
+  shouldProbeTaskNotificationDelivery,
+  TASK_NOTIFICATION_DELIVERY_LOOKUPS,
+  TASK_NOTIFICATION_DELIVERY_POLL_MS,
 } from '../utils/activeStreamPolling';
 import { ChatInput } from '../components/ChatInput';
 import { TranscriptList } from '../components/transcript/TranscriptList';
@@ -176,6 +179,7 @@ const MarkdownContent = lazy(() => import('../components/MarkdownContent'));
 const MANUAL_PROJECTS_STORAGE_KEY = 'chattree.manualProjectWorkspaces';
 const PROJECT_ORDER_STORAGE_KEY = 'chattree.projectOrder';
 const PLAN_MODE_TOOL_NAMES = new Set(['enter_plan_mode', 'update_plan', 'exit_plan_mode', 'ask_user_question']);
+const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 
 type SidebarResizeSession = {
   side: SidebarResizeSide;
@@ -665,6 +669,45 @@ type SideRunDraft = {
   activeReasoningKey: string | null;
 };
 
+function createSideRunDraft(run: StreamState): SideRunDraft {
+  const timeline = getSideRunAssistantTimeline({
+    content: run.content,
+    reasoning: run.reasoning,
+    tool_interactions: run.toolInteractions,
+  });
+  const streamingFoldedContentBlocks = getAssistantFoldedContentBlocks({
+    content: run.content,
+    reasoning: run.reasoning,
+    tool_interactions: run.toolInteractions,
+  });
+  const streamingFoldState = getStreamingTimelineFoldState(
+    timeline,
+    streamingFoldedContentBlocks.map((block) => block.key),
+    { allowProcessOnly: true },
+  );
+  let activeReasoningIndex = -1;
+  let activeReasoningKey: string | null = null;
+  if (run.status === 'streaming') {
+    for (let i = timeline.length - 1; i >= 0; i -= 1) {
+      if (timeline[i].type === 'reasoning') {
+        const hasLaterBlock = timeline.slice(i + 1).some((block) => block.type !== 'reasoning');
+        activeReasoningIndex = run.reasoningActive || !hasLaterBlock ? i : -1;
+        activeReasoningKey = activeReasoningIndex >= 0 ? timeline[activeReasoningIndex].key : null;
+        break;
+      }
+    }
+  }
+  return {
+    run,
+    showPendingBubble: !!run.pendingUserMessage,
+    showStreamBlock: run.status !== 'idle',
+    timeline,
+    streamingFoldState,
+    activeReasoningIndex,
+    activeReasoningKey,
+  };
+}
+
 type QueuedMessage = {
   id: string;
   conversationId: string;
@@ -989,6 +1032,7 @@ export default function ChatPage() {
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([]);
   const [hiddenSideRunIdsByConversation, setHiddenSideRunIdsByConversation] = useState<Record<string, string[]>>({});
   const [taskNotifications, setTaskNotifications] = useState<TaskNotificationRecord[]>([]);
+  const [selectedTaskNotificationId, setSelectedTaskNotificationId] = useState<string | null>(null);
   const [transcriptItems, setTranscriptItems] = useState<TranscriptItem[]>([]);
   const [transcriptLoading, setTranscriptLoading] = useState(false);
   const [transcriptError, setTranscriptError] = useState<string | null>(null);
@@ -1285,17 +1329,64 @@ export default function ChatPage() {
       };
     });
   }, []);
+  const showSideRun = useCallback((conversationId: string, runId: string) => {
+    setHiddenSideRunIdsByConversation((current) => {
+      const existing = current[conversationId] ?? [];
+      if (!existing.includes(runId)) return current;
+      return {
+        ...current,
+        [conversationId]: existing.filter((id) => id !== runId),
+      };
+    });
+  }, []);
   const refreshTaskNotifications = useCallback(async (conversationId: string | null | undefined) => {
     if (!conversationId) {
       setTaskNotifications([]);
-      return;
+      return [];
     }
     try {
-      setTaskNotifications(await taskNotificationsApi.list(conversationId));
+      const notifications = await taskNotificationsApi.list(conversationId);
+      setTaskNotifications(notifications);
+      return notifications;
     } catch (error) {
       console.error('刷新 task notification 失败:', error);
+      return [];
     }
   }, []);
+  const attachDeliveringTaskNotifications = useCallback((
+    conversationId: string,
+    notifications: TaskNotificationRecord[],
+  ) => {
+    for (const notification of notifications) {
+      if (notification.status !== 'delivering' || !notification.delivered_run_id) continue;
+      if (streamManager.hasRun(notification.delivered_run_id)) continue;
+      void streamManager.resumeStream(
+        conversationId,
+        notification.delivered_node_id ?? null,
+        notification.delivered_run_id,
+        0,
+        notification.delivery_node_id ?? null,
+        'chat',
+        { anchorUntilTargetLands: true },
+      );
+    }
+  }, []);
+  const probeTaskNotificationDelivery = useCallback(async (conversationId: string) => {
+    for (let attempt = 0; attempt < TASK_NOTIFICATION_DELIVERY_LOOKUPS; attempt += 1) {
+      if (attempt > 0) {
+        await new Promise((resolve) => window.setTimeout(resolve, TASK_NOTIFICATION_DELIVERY_POLL_MS));
+      }
+      const notifications = await refreshTaskNotifications(conversationId);
+      attachDeliveringTaskNotifications(conversationId, notifications);
+      if (notifications.some((notification) =>
+        notification.status === 'delivering'
+        && notification.delivered_run_id
+        && streamManager.hasRun(notification.delivered_run_id)
+      )) {
+        return;
+      }
+    }
+  }, [attachDeliveringTaskNotifications, refreshTaskNotifications]);
   useEffect(() => {
     void refreshTaskNotifications(currentConversation?.id);
   }, [currentConversation?.id, activeRunStates.length, refreshTaskNotifications]);
@@ -1307,6 +1398,11 @@ export default function ChatPage() {
     }, 2500);
     return () => window.clearInterval(timer);
   }, [currentConversation?.id, refreshTaskNotifications]);
+  useEffect(() => {
+    const conversationId = currentConversation?.id;
+    if (!conversationId) return;
+    attachDeliveringTaskNotifications(conversationId, taskNotifications);
+  }, [attachDeliveringTaskNotifications, currentConversation?.id, taskNotifications]);
   useEffect(() => {
     void slashRegistry.refresh().catch(() => {});
   }, []);
@@ -1366,6 +1462,15 @@ export default function ChatPage() {
     [messages],
   );
   const selectedBranchTipId = currentNodeId || currentConversation?.current_node_id || null;
+  const liveSelectedBranchTipId = useMemo(() => {
+    const liveMainRun = activeRunStates
+      .filter((run) => run.kind === 'chat')
+      .filter((run) => run.status === 'streaming' || run.status === 'waiting_approval' || run.status === 'stopping')
+      .filter((run) => isRunVisibleInSelectedTranscript(run, selectedBranchTipId, currentBranchNodeIds))
+      .filter((run) => run.targetNodeId || run.nodeId)
+      .sort((a, b) => b.createdAt - a.createdAt)[0];
+    return liveMainRun?.targetNodeId || liveMainRun?.nodeId || selectedBranchTipId;
+  }, [activeRunStates, currentBranchNodeIds, selectedBranchTipId]);
   currentVisibleTranscriptKeyRef.current = currentConversation?.id
     ? getTranscriptRequestKey(currentConversation.id, selectedBranchTipId)
     : null;
@@ -1438,42 +1543,7 @@ export default function ChatPage() {
     .filter((run) => shouldRenderRunDraft(run))
     .map((run) => {
       if (!isDetachedRunView(run, selectedBranchTipId, currentBranchNodeIds)) return null;
-      const timeline = getSideRunAssistantTimeline({
-        content: run.content,
-        reasoning: run.reasoning,
-        tool_interactions: run.toolInteractions,
-      });
-      const streamingFoldedContentBlocks = getAssistantFoldedContentBlocks({
-        content: run.content,
-        reasoning: run.reasoning,
-        tool_interactions: run.toolInteractions,
-      });
-      const streamingFoldState = getStreamingTimelineFoldState(
-        timeline,
-        streamingFoldedContentBlocks.map((block) => block.key),
-        { allowProcessOnly: true },
-      );
-      let activeReasoningIndex = -1;
-      let activeReasoningKey: string | null = null;
-      if (run.status === 'streaming') {
-        for (let i = timeline.length - 1; i >= 0; i -= 1) {
-          if (timeline[i].type === 'reasoning') {
-            const hasLaterBlock = timeline.slice(i + 1).some((block) => block.type !== 'reasoning');
-            activeReasoningIndex = run.reasoningActive || !hasLaterBlock ? i : -1;
-            activeReasoningKey = activeReasoningIndex >= 0 ? timeline[activeReasoningIndex].key : null;
-            break;
-          }
-        }
-      }
-      return {
-        run,
-        showPendingBubble: !!run.pendingUserMessage,
-        showStreamBlock: run.status !== 'idle',
-        timeline,
-        streamingFoldState,
-        activeReasoningIndex,
-        activeReasoningKey,
-      };
+      return createSideRunDraft(run);
     })
     .filter((draft): draft is SideRunDraft => Boolean(draft))
     .filter((draft) => draft.showPendingBubble || draft.showStreamBlock),
@@ -1503,8 +1573,24 @@ export default function ChatPage() {
         }
       }
     }
+    const selectedRun = sidePanelRunStates.find((run) => run.runId === selectedSideRunId)
+      || activeRunStates.find((run) => run.runId === selectedSideRunId);
+    if (selectedRun && SIDE_RUN_KINDS.has(selectedRun.kind) && shouldRenderRunDraft(selectedRun)) {
+      const draft = createSideRunDraft(selectedRun);
+      const steps = activeRunStates
+        .filter((run) => run.parentRunId === selectedRun.runId)
+        .filter((run) => SIDE_RUN_KINDS.has(run.kind))
+        .filter((run) => shouldRenderRunDraft(run))
+        .map(createSideRunDraft)
+        .sort((a, b) => (a.run.createdAt || 0) - (b.run.createdAt || 0));
+      return {
+        draft,
+        run: selectedRun,
+        steps,
+      };
+    }
     return null;
-  }, [selectedSideRunId, sideRunGroups]);
+  }, [activeRunStates, selectedSideRunId, sidePanelRunStates, sideRunGroups]);
 
   const sideRunActivity = useMemo(
     () => sideRunDrafts.map((draft) => [
@@ -1674,6 +1760,12 @@ export default function ChatPage() {
       setSelectedSideRunId(null);
     }
   }, [selectedSideRunId, selectedSideRunItem]);
+
+  useEffect(() => {
+    if (selectedTaskNotificationId && !visibleTaskNotifications.some((item) => item.id === selectedTaskNotificationId)) {
+      setSelectedTaskNotificationId(null);
+    }
+  }, [selectedTaskNotificationId, visibleTaskNotifications]);
 
   const visibleQueuedMessages = useMemo(
     () => queuedMessages
@@ -2154,17 +2246,80 @@ export default function ChatPage() {
 
   const handleBindTaskNotification = useCallback(async (notificationId: string) => {
     const conversationId = currentConversation?.id;
-    const deliveryNodeId = selectedBranchTipId || currentConversation?.current_node_id || null;
+    const deliveryNodeId = liveSelectedBranchTipId || currentConversation?.current_node_id || null;
     if (!conversationId || !deliveryNodeId) return;
-    await taskNotificationsApi.bind(notificationId, deliveryNodeId, { trigger: true, focusNewNode: false });
-    await refreshTaskNotifications(conversationId);
-  }, [currentConversation?.current_node_id, currentConversation?.id, refreshTaskNotifications, selectedBranchTipId]);
+    const notification = await taskNotificationsApi.bind(notificationId, deliveryNodeId, { trigger: true });
+    const refreshedNotifications = await refreshTaskNotifications(conversationId);
+    attachDeliveringTaskNotifications(conversationId, refreshedNotifications);
+    if (notification.delivered_run_id) {
+      void streamManager.resumeStream(
+        conversationId,
+        notification.delivered_node_id ?? null,
+        notification.delivered_run_id,
+        0,
+        notification.delivery_node_id ?? deliveryNodeId,
+        'chat',
+        { anchorUntilTargetLands: true },
+      );
+    } else {
+      void probeTaskNotificationDelivery(conversationId);
+    }
+    if (notification.status === 'delivered' && notification.delivered_node_id) {
+      await refreshMessages(conversationId, { awaitNodeId: notification.delivered_node_id, retries: 6 });
+      await refreshTranscript(conversationId, notification.delivered_node_id);
+      await loadConversations();
+    }
+  }, [
+    currentConversation?.current_node_id,
+    currentConversation?.id,
+    attachDeliveringTaskNotifications,
+    loadConversations,
+    probeTaskNotificationDelivery,
+    refreshMessages,
+    refreshTaskNotifications,
+    refreshTranscript,
+    liveSelectedBranchTipId,
+  ]);
 
   const handleDeleteTaskNotification = useCallback(async (notificationId: string) => {
     const conversationId = currentConversation?.id;
+    if (selectedTaskNotificationId === notificationId) setSelectedTaskNotificationId(null);
     await taskNotificationsApi.delete(notificationId);
     await refreshTaskNotifications(conversationId);
-  }, [currentConversation?.id, refreshTaskNotifications]);
+  }, [currentConversation?.id, refreshTaskNotifications, selectedTaskNotificationId]);
+
+  const handleInspectTaskNotification = useCallback(async (notification: TaskNotificationRecord) => {
+    const conversationId = currentConversation?.id;
+    if (!conversationId || notification.conversation_id !== conversationId) return;
+    const runId = notification.source_run_id;
+    if (!runId) return;
+    setSelectedTaskNotificationId(notification.id);
+    showSideRun(conversationId, runId);
+    setOutlineCollapsed(false);
+    setRightPanelView('side');
+    const existing = streamManager.getConversationStates(conversationId).find((run) => run.runId === runId);
+    if (existing) {
+      setSelectedSideRunId(runId);
+      return;
+    }
+    const runs = await runsApi.listConversation(conversationId);
+    const run = runs.find((item) => item.run_id === runId);
+    if (!run) return;
+    if (TERMINAL_RUN_STATUSES.has(run.status)) {
+      const events = await runsApi.events(runId, 0);
+      streamManager.restoreRunFromEvents(run, events);
+    } else {
+      void streamManager.resumeStream(
+        conversationId,
+        run.target_node_id ?? null,
+        run.run_id,
+        0,
+        run.anchor_node_id ?? null,
+        run.kind,
+      );
+    }
+    setSelectedSideRunId(runId);
+  }, [currentConversation?.id, showSideRun]);
 
   const handleCopyTranscriptItem = useCallback(async (_item: TranscriptItem, text: string) => {
     try {
@@ -2399,6 +2554,9 @@ export default function ChatPage() {
         message.conversationId === finishedId
         && message.content.trim()
       );
+      if (shouldProbeTaskNotificationDelivery({ finishStatus: status })) {
+        void probeTaskNotificationDelivery(finishedId);
+      }
 
       if (!shouldPatchMainConversation || (!targetNodeId && !nodeId)) {
         if (!finishedRun || !shouldRenderRunDraft(finishedRun)) {
@@ -2479,6 +2637,7 @@ export default function ChatPage() {
     syncSelectedConversationSideRuns,
     sendNextQueuedMessage,
     syncBackendScheduledFollowup,
+    probeTaskNotificationDelivery,
   ]);
 
   const shouldAutoScrollRef = useRef(shouldAutoScroll);
@@ -3048,35 +3207,37 @@ export default function ChatPage() {
     <>
       {(draft.run.status === 'streaming' || draft.run.status === 'waiting_approval') && (
         <TextTooltip content="停止">
-          <button
+          <Button
             type="button"
-            className="rounded border-0 bg-transparent p-1"
+            variant="ghost"
+            size="icon-xs"
+            className="app-run-action-button"
             onClick={(event) => {
               event.stopPropagation();
               void streamManager.stopRun(draft.run.runId);
             }}
-            style={{ color: 'var(--fg-tertiary)' }}
             aria-label="停止"
           >
             <Square className="h-3.5 w-3.5" />
-          </button>
+          </Button>
         </TextTooltip>
       )}
       <TextTooltip content="关闭">
-        <button
+        <Button
           type="button"
-          className="rounded border-0 bg-transparent p-1"
+          variant="ghost"
+          size="icon-xs"
+          className="app-run-action-button"
           onClick={(event) => {
             event.stopPropagation();
             if (selectedSideRunId === draft.run.runId) setSelectedSideRunId(null);
             if (currentConversation?.id) hideSideRun(currentConversation.id, draft.run.runId);
             streamManager.cleanupRun(draft.run.runId);
           }}
-          style={{ color: 'var(--fg-tertiary)' }}
           aria-label="关闭"
         >
           <X className="h-3.5 w-3.5" />
-        </button>
+        </Button>
       </TextTooltip>
     </>
   );
@@ -3086,11 +3247,24 @@ export default function ChatPage() {
       <div className="px-1 text-xs font-semibold" style={{ color: 'var(--fg-tertiary)' }}>
         通知
       </div>
-      {visibleTaskNotifications.map((notification) => (
+      {visibleTaskNotifications.map((notification) => {
+        const isSelected = selectedTaskNotificationId === notification.id || selectedSideRunId === notification.source_run_id;
+        const bindDisabled = notification.status === 'delivering' || !liveSelectedBranchTipId;
+        return (
         <div
           key={notification.id}
-          className="rounded-lg border px-3 py-2"
-          style={{ borderColor: 'var(--border)', background: 'var(--bg-elevated-secondary, rgba(255,255,255,0.03))' }}
+          role="button"
+          tabIndex={0}
+          aria-current={isSelected ? 'true' : undefined}
+          className={cn('app-run-list-row px-3 py-2 text-left', isSelected && 'is-active')}
+          onClick={() => {
+            void handleInspectTaskNotification(notification);
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== 'Enter' && event.key !== ' ') return;
+            event.preventDefault();
+            void handleInspectTaskNotification(notification);
+          }}
         >
           <div className="flex min-w-0 items-start gap-2">
             <Bell className="mt-0.5 h-3.5 w-3.5 shrink-0" style={{ color: 'var(--icon-accent)' }} />
@@ -3102,42 +3276,68 @@ export default function ChatPage() {
                 <span>{notification.status}</span>
                 <span>·</span>
                 <span className="truncate">{notification.source_run_id.slice(0, 12)}</span>
+                {isSelected && (
+                  <>
+                    <span>·</span>
+                    <span>查看中</span>
+                  </>
+                )}
               </div>
             </div>
             <div className="flex shrink-0 items-center gap-1">
-              <TextTooltip content="绑定到当前分支并触发">
-                <button
+              <TextTooltip content="查看运行详情">
+                <Button
                   type="button"
-                  className="rounded border-0 bg-transparent p-1"
+                  variant="ghost"
+                  size="icon-xs"
+                  className={cn('app-run-action-button', isSelected && 'is-active')}
                   onClick={(event) => {
                     event.stopPropagation();
+                    void handleInspectTaskNotification(notification);
+                  }}
+                  aria-label="查看运行详情"
+                  aria-pressed={isSelected}
+                >
+                  <FileText className="h-3.5 w-3.5" />
+                </Button>
+              </TextTooltip>
+              <TextTooltip content={bindDisabled ? '选择一个当前分支后可绑定' : '绑定到当前分支并触发'}>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    if (bindDisabled) return;
                     void handleBindTaskNotification(notification.id);
                   }}
-                  style={{ color: 'var(--fg-tertiary)' }}
                   aria-label="绑定并触发"
-                  disabled={notification.status === 'delivering'}
+                  aria-disabled={bindDisabled}
+                  className={cn('app-run-action-button', bindDisabled && 'opacity-50')}
                 >
                   <MessageSquare className="h-3.5 w-3.5" />
-                </button>
+                </Button>
               </TextTooltip>
               <TextTooltip content="删除">
-                <button
+                <Button
                   type="button"
-                  className="rounded border-0 bg-transparent p-1"
+                  variant="ghost"
+                  size="icon-xs"
                   onClick={(event) => {
                     event.stopPropagation();
                     void handleDeleteTaskNotification(notification.id);
                   }}
-                  style={{ color: 'var(--fg-tertiary)' }}
                   aria-label="删除通知"
+                  className="app-run-action-button"
                 >
                   <X className="h-3.5 w-3.5" />
-                </button>
+                </Button>
               </TextTooltip>
             </div>
           </div>
         </div>
-      ))}
+        );
+      })}
     </section>
   );
 
@@ -3797,9 +3997,17 @@ export default function ChatPage() {
                       variant="ghost"
                       size="sm"
                       className="h-8 px-2"
-                      onClick={() => setSelectedSideRunId(
-                        selectedSideRunItem.run.parentRunId || null,
-                      )}
+                      onClick={() => {
+                        const parentRunId = selectedSideRunItem.run.parentRunId;
+                        const parentRun = parentRunId
+                          ? activeRunStates.find((run) => run.runId === parentRunId)
+                          : null;
+                        const nextRunId = parentRun && SIDE_RUN_KINDS.has(parentRun.kind)
+                          ? parentRun.runId
+                          : null;
+                        setSelectedSideRunId(nextRunId);
+                        if (!nextRunId) setSelectedTaskNotificationId(null);
+                      }}
                     >
                       <ArrowLeft className="h-3.5 w-3.5" />
                     </Button>
@@ -3838,8 +4046,7 @@ export default function ChatPage() {
                           key={item.run.runId}
                           role="button"
                           tabIndex={0}
-                          className="rounded-lg border p-0 text-left transition-colors"
-                          style={{ borderColor: 'var(--border)', background: 'var(--bg-elevated-secondary, rgba(255,255,255,0.03))' }}
+                          className="app-run-list-row p-0 text-left"
                           onClick={() => setSelectedSideRunId(item.run.runId)}
                           onKeyDown={(event) => {
                             if (event.key !== 'Enter' && event.key !== ' ') return;

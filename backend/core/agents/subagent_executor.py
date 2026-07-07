@@ -374,6 +374,7 @@ class SubagentExecutor:
                 messages.append(assistant_tool_message)
                 approval_events: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
                 run_snapshot = self.run_manager.get_run(run_id) or {}
+                run_metadata = dict(run_snapshot.get("metadata") or {})
                 tool_node_id = str(
                     parent_node_id
                     or run_snapshot.get("target_node_id")
@@ -408,13 +409,16 @@ class SubagentExecutor:
                             "run_id": run_id,
                             "run_kind": RunKind.SUBAGENT.value,
                             "parent_run_id": run_snapshot.get("parent_run_id"),
-                            "root_run_id": (run_snapshot.get("metadata") or {}).get("root_run_id") or run_id,
+                            "root_run_id": run_metadata.get("root_run_id") or run_id,
                             "conversation_id": conversation_id,
                             "anchor_node_id": tool_node_id,
                             "node_id": tool_node_id,
                             "agent_name": agent_name,
-                            "task_id": (run_snapshot.get("metadata") or {}).get("task_id"),
+                            "delivery_policy": run_metadata.get("delivery_policy"),
+                            "task_id": run_metadata.get("task_id"),
                             "task_summary": str(input_data)[:160],
+                            "suppress_task_notification": agent_name == "workflow-worker"
+                            or run_metadata.get("delivery_policy") == "silent",
                         },
                     )
                 )

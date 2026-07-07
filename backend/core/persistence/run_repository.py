@@ -76,6 +76,27 @@ class SQLiteRunRepository:
             return None
         return self._run_from_row(row)
 
+    def update_target_node(self, run_id: str, target_node_id: str) -> dict[str, Any]:
+        with self.persistence.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE runs
+                SET target_node_id = ?,
+                    updated_at = strftime('%s', 'now')
+                WHERE id = ?
+                """,
+                (target_node_id, run_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(run_id)
+            row = conn.execute(
+                "SELECT * FROM runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(run_id)
+        return self._run_from_row(row)
+
     def list_runs(self, conversation_id: str | None = None) -> list[dict[str, Any]]:
         if conversation_id is None:
             sql = "SELECT * FROM runs ORDER BY created_at, id"

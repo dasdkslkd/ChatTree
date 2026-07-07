@@ -85,6 +85,7 @@ export function shouldRenderRunDraft(run: RunDraftLike): boolean {
   }
   if (run.kind === 'command' && (run.status === 'streaming' || run.status === 'stopping')) return true;
   if (run.kind === 'subagent' && (run.status === 'streaming' || run.status === 'waiting_approval' || run.status === 'stopping')) return true;
+  if ((run.kind === 'workflow' || run.kind === 'workflow_step') && (run.status === 'streaming' || run.status === 'waiting_approval' || run.status === 'stopping')) return true;
   if (run.pendingUserMessage) return true;
   if (run.status === 'error' || run.status === 'stopped' || run.status === 'stopping') return true;
   if (run.content || run.reasoning) return true;

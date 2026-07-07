@@ -73,7 +73,7 @@ function taskStatusLabel(status: unknown): string {
 
 export function isTaskNotificationMessage(message: MessageLike): boolean {
   return (
-    (message.role === 'user' && message.subtype === 'task_notification')
+    ((message.role === 'user' || message.role === 'notify') && message.subtype === 'task_notification')
     || message.metadata?.message_kind === 'task_notification'
     || message.metadata?.display === 'hidden'
     || containsTaskNotificationTag(message.content)
@@ -82,7 +82,7 @@ export function isTaskNotificationMessage(message: MessageLike): boolean {
 
 export function isRenderableTaskNotificationMessage(message: MessageLike): boolean {
   return (
-    (message.role === 'user' && message.subtype === 'task_notification')
+    ((message.role === 'user' || message.role === 'notify') && message.subtype === 'task_notification')
     || message.metadata?.message_kind === 'task_notification'
     || containsTaskNotificationTag(message.content)
   );

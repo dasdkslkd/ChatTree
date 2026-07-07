@@ -536,6 +536,53 @@ async function testWaitingApprovalRunStaysBlockingAndCanBeStopped() {
   });
 }
 
+async function testAttachedNotificationRunCanStayAnchoredUntilTargetLands() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    runsApi.attach = controlled.stream;
+    const running = manager.resumeStream(
+      'conv-1',
+      null,
+      'run_notification',
+      0,
+      'node-anchor',
+      'chat',
+      { anchorUntilTargetLands: true },
+    );
+
+    await controlled.push({
+      type: 'run_target_bound',
+      run_id: 'run_notification',
+      conversation_id: 'conv-1',
+      kind: 'chat',
+      target_node_id: 'node-notify',
+      status: 'content',
+      event_index: 1,
+    });
+    await controlled.push({
+      run_id: 'run_notification',
+      conversation_id: 'conv-1',
+      kind: 'chat',
+      status: 'content',
+      node_id: 'node-notify',
+      target_node_id: 'node-notify',
+      content: '通知回复',
+      event_index: 2,
+    });
+
+    try {
+      const state = manager.getConversationStates('conv-1')[0];
+      assert.equal(state.anchorNodeId, 'node-anchor');
+      assert.equal(state.targetNodeId, 'node-notify');
+      assert.equal(state.anchorUntilTargetLands, true);
+      assert.equal(state.content, '通知回复');
+    } finally {
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
 async function testPermissionModeChangedEventUpdatesRunStateImmediately() {
   await withManager(async (manager) => {
     const controlled = createControlledStream();
@@ -1258,6 +1305,7 @@ async function main() {
   await testPlanQuestionAnswerUsesControlStreamWithoutPendingUserMessage();
   await testBlockingRunAliasesFollowServerRunId();
   await testWaitingApprovalRunStaysBlockingAndCanBeStopped();
+  await testAttachedNotificationRunCanStayAnchoredUntilTargetLands();
   await testPermissionModeChangedEventUpdatesRunStateImmediately();
   await testStopRunAbortsLocalStreamWithoutWaitingForServerAck();
   await testResumeStreamPreservesAttachedRunKindBeforeFirstEvent();

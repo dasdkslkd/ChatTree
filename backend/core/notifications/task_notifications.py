@@ -26,6 +26,21 @@ def format_task_notification_content(notification: dict[str, Any]) -> str:
     return "<task-notification>\n" + json.dumps(payload, ensure_ascii=False, indent=2) + "\n</task-notification>"
 
 
+def parse_task_notification_content(content: Any) -> dict[str, Any]:
+    if not isinstance(content, str):
+        return {}
+    start = content.find("<task-notification>")
+    end = content.find("</task-notification>")
+    if start < 0 or end < 0 or end <= start:
+        return {}
+    raw_json = content[start + len("<task-notification>"):end].strip()
+    try:
+        parsed = json.loads(raw_json)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 class TaskNotificationService:
     def __init__(
         self,
@@ -122,7 +137,6 @@ class TaskNotificationService:
         delivery_node_id: str,
         bound_by: str = "user",
         trigger: bool = True,
-        focus_new_node: bool = False,
     ) -> dict[str, Any]:
         notification = self.repository.get(notification_id)
         if notification is None:
@@ -130,12 +144,12 @@ class TaskNotificationService:
         self._validate_delivery_node(notification, delivery_node_id)
         bound = self.repository.bind(notification_id, delivery_node_id, bound_by=bound_by)
         if trigger:
-            delivered = await self.try_deliver(notification_id, focus_new_node=focus_new_node)
+            delivered = await self.try_deliver(notification_id)
             if delivered is not None:
                 return delivered
         return bound
 
-    async def try_deliver(self, notification_id: str, *, focus_new_node: bool = False) -> dict[str, Any] | None:
+    async def try_deliver(self, notification_id: str) -> dict[str, Any] | None:
         notification = self.repository.get(notification_id)
         if notification is None:
             return None
@@ -154,7 +168,7 @@ class TaskNotificationService:
             return notification
         self._delivering.add(notification_id)
         try:
-            run = await self._start_notification_chat_run(notification, focus_new_node=focus_new_node)
+            run = await self._start_notification_chat_run(notification)
             return self.repository.mark_delivering(notification_id, str(run["run_id"]))
         finally:
             self._delivering.discard(notification_id)
@@ -193,13 +207,12 @@ class TaskNotificationService:
     async def _start_notification_chat_run(
         self,
         notification: dict[str, Any],
-        *,
-        focus_new_node: bool,
     ) -> dict[str, Any]:
         if self.chat_manager is None:
             raise RuntimeError("TaskNotificationService requires chat_manager to deliver notifications")
         conversation_id = str(notification["conversation_id"])
         delivery_node_id = str(notification["delivery_node_id"])
+        focus_new_node = self._should_focus_delivery(conversation_id, delivery_node_id)
         content = format_task_notification_content(notification)
         run = await self.run_manager.create_run(
             conversation_id=conversation_id,
@@ -258,6 +271,12 @@ class TaskNotificationService:
 
         asyncio.create_task(produce())
         return run.to_dict()
+
+    def _should_focus_delivery(self, conversation_id: str, delivery_node_id: str) -> bool:
+        if self.chat_manager is None:
+            return False
+        conversation = self.chat_manager.get_conversation(conversation_id)
+        return bool(conversation and conversation.current_node_id == delivery_node_id)
 
     def _validate_delivery_node(self, notification: dict[str, Any], delivery_node_id: str) -> None:
         if self.chat_manager is None:

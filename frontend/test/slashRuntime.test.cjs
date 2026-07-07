@@ -202,8 +202,13 @@ function testUnknownBackgroundRunWithoutTranscriptStateDoesNotRenderAsDraft() {
   assert.equal(shouldRenderRunDraft(run({ kind: 'unknown_background' })), false);
 }
 
-function testBackgroundWorkflowWithoutTranscriptStateDoesNotRenderAsDraft() {
-  assert.equal(shouldRenderRunDraft(run({ kind: 'workflow' })), false);
+function testCompletedBackgroundWorkflowWithoutTranscriptStateDoesNotRenderAsDraft() {
+  assert.equal(shouldRenderRunDraft(run({ kind: 'workflow', status: 'completed' })), false);
+}
+
+function testRunningWorkflowWithoutEventsRendersAsDraft() {
+  assert.equal(shouldRenderRunDraft(run({ kind: 'workflow', status: 'streaming' })), true);
+  assert.equal(shouldRenderRunDraft(run({ kind: 'workflow_step', status: 'streaming' })), true);
 }
 
 function testWorkflowEventsRenderAsDraftState() {
@@ -218,7 +223,7 @@ function testObservedCompletedCommandDoesNotRenderAsDraftState() {
     kind: 'command',
     status: 'completed',
     command: { stdout: 'short command output\n', stderr: '', events: [] },
-    metadata: { command_notification_state: 'observed' },
+    metadata: { result_observed_at: 1 },
   })), false);
 }
 
@@ -227,7 +232,7 @@ function testObservedFailedCommandDoesNotRenderAsDraftState() {
     kind: 'command',
     status: 'failed',
     command: { stdout: '', stderr: 'command failed\n', events: [] },
-    metadata: { command_notification_state: 'observed' },
+    metadata: { result_observed_at: 1 },
   })), false);
 }
 
@@ -236,7 +241,7 @@ function testObservedCancelledCommandDoesNotRenderAsDraftState() {
     kind: 'command',
     status: 'cancelled',
     command: { stdout: 'stopped\n', stderr: '', events: [] },
-    metadata: { command_notification_state: 'observed' },
+    metadata: { result_observed_at: 1 },
   })), false);
 }
 
@@ -259,7 +264,8 @@ testBtwSideQuestionRunsRenderAsDrafts();
 testDirectResponseRunsRenderAsDrafts();
 testSidePanelRunLabelsUseSlashNames();
 testUnknownBackgroundRunWithoutTranscriptStateDoesNotRenderAsDraft();
-testBackgroundWorkflowWithoutTranscriptStateDoesNotRenderAsDraft();
+testCompletedBackgroundWorkflowWithoutTranscriptStateDoesNotRenderAsDraft();
+testRunningWorkflowWithoutEventsRendersAsDraft();
 testWorkflowEventsRenderAsDraftState();
 testObservedCompletedCommandDoesNotRenderAsDraftState();
 testObservedFailedCommandDoesNotRenderAsDraftState();

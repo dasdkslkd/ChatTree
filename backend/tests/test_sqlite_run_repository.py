@@ -179,6 +179,29 @@ def test_run_manager_uses_optional_repository_backend(tmp_path):
     asyncio.run(scenario())
 
 
+def test_run_manager_bind_target_node_persists_sqlite_run_record(tmp_path):
+    async def scenario():
+        _persistence, chat, runs, conv_id, node_id = _repositories(tmp_path)
+        target_node_id = chat.create_node(conv_id, parent_id=node_id)
+        manager = RunManager(repository=runs)
+        record = await manager.create_run(
+            conversation_id=conv_id,
+            kind="chat",
+            anchor_node_id=node_id,
+        )
+
+        updated = await manager.bind_target_node(record.run_id, target_node_id)
+
+        assert updated.target_node_id == target_node_id
+        assert manager.get_run(record.run_id)["target_node_id"] == target_node_id
+        assert runs.get_run(record.run_id)["target_node_id"] == target_node_id
+        events = runs.read_events(record.run_id)
+        assert events[-1]["payload"]["type"] == "run_target_bound"
+        assert events[-1]["payload"]["target_node_id"] == target_node_id
+
+    asyncio.run(scenario())
+
+
 def test_run_manager_rehydrates_repository_runs_after_restart(tmp_path):
     async def scenario():
         _persistence, _chat, runs, conv_id, node_id = _repositories(tmp_path)

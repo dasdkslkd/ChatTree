@@ -1,4 +1,4 @@
-export type MessageRole = 'user' | 'assistant' | 'system' | 'tool';
+export type MessageRole = 'user' | 'notify' | 'assistant' | 'system' | 'tool';
 
 export interface GenerationInfo {
   duration_ms: number;  // 生成用时（毫秒）

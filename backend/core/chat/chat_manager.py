@@ -40,6 +40,7 @@ from ..slash import (
 from ..tools.security.permissions import PermissionMode, normalize_permission_mode
 from ..tools.agent_tools import AGENT_TOOL_NAMES, LEGACY_AGENT_TOOL_NAMES
 from ..tasks import TaskRecord, TaskStatus
+from ..notifications.task_notifications import parse_task_notification_content
 from .turn_timeline import (
     has_blocking_plan_tool_result,
     should_emit_as_intermediate_text,
@@ -478,7 +479,26 @@ class ChatManager:
                 },
                 message_id=user_msg.get("id"),
             )
-            if not user_msg.get("is_hidden_from_transcript"):
+            if not user_msg.get("is_hidden_from_transcript") and user_msg.get("subtype") == "task_notification":
+                payload = parse_task_notification_content(user_msg.get("content"))
+                props = {
+                    key: value
+                    for key, value in payload.items()
+                    if key not in {"content"}
+                }
+                props["content"] = payload.get("content") or str(user_msg.get("content") or "")
+                self.transcript_projection.upsert_message_item(
+                    conversation_id,
+                    node_id,
+                    message_id,
+                    "task_notification",
+                    local_order=10,
+                    status=str(payload.get("source_status") or ""),
+                    summary=str(payload.get("summary") or "Task notification"),
+                    preview=str(payload.get("summary") or payload.get("content") or "Task notification"),
+                    props=props,
+                )
+            elif not user_msg.get("is_hidden_from_transcript"):
                 self.transcript_projection.upsert_message_item(
                     conversation_id,
                     node_id,
@@ -1225,7 +1245,7 @@ class ChatManager:
             # 创建用户消息
             user_msg = Message({
                 "id": str(uuid.uuid4()),
-                "role": Role.USER,
+                "role": Role.NOTIFY if message_subtype == "task_notification" else Role.USER,
                 "content": model_content,
                 "name": None,
                 "tool_calls": None,
@@ -1373,8 +1393,13 @@ class ChatManager:
             tool_permission_mode=new_node.get("tool_permission_mode"),
         )
 
-        # 准备消息链（使用锁内加载的最新 conversation）
-        messages = self._build_prompt_messages(conversation, skill_names)
+        # 准备消息链。即使调用方要求不切换 UI 焦点，模型也必须基于刚创建的
+        # new_node 回复，否则后台通知这类 focus_new_node=False 的消息不会进入上下文。
+        prompt_conversation = conversation
+        if conversation.current_node_id != new_node["id"]:
+            prompt_conversation = Conversation.from_dict(conversation.to_dict())
+            prompt_conversation.switch_to_node(new_node["id"])
+        messages = self._build_prompt_messages(prompt_conversation, skill_names)
         messages.extend(self._plan_context_messages(pending_plan_context))
         if continuation_messages:
             self._apply_continuation_messages(messages, continuation_messages)
@@ -1385,8 +1410,8 @@ class ChatManager:
         )
 
         multi_agent_mode = self._resolve_multi_agent_mode(
-            self._multi_agent_intent_text(conversation, model_content),
-            conversation.metadata if conversation is not None else (preview.metadata if preview is not None else {}),
+            self._multi_agent_intent_text(prompt_conversation, model_content),
+            prompt_conversation.metadata if prompt_conversation is not None else (preview.metadata if preview is not None else {}),
         )
         available_tools = self.tool_manager.get_openai_tools() if self.tool_manager else []
         tools = self._filter_agent_tools_for_mode(available_tools, multi_agent_mode)
@@ -3019,6 +3044,8 @@ class ChatManager:
             role = msg["role"]
             if not isinstance(role, str) or role.startswith("Role."):
                 role = role.value if hasattr(role, 'value') else str(role).split(".")[-1].lower()
+            if role == "notify":
+                role = "user"
             content = msg.get("content") or ""
             if role == "tool" and msg.get("model_visible_content") is not None:
                 content = str(msg.get("model_visible_content") or "")

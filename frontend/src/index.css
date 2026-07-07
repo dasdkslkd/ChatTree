@@ -587,6 +587,50 @@
   color: var(--fg-85);
 }
 
+.app-run-list-row {
+  border: 0.5px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elevated-secondary, rgba(255,255,255,0.03));
+  color: var(--fg-secondary);
+  cursor: pointer;
+  transition:
+    background-color var(--transition-basic),
+    border-color var(--transition-basic),
+    color var(--transition-basic);
+}
+
+.app-run-list-row:hover {
+  background: color-mix(in srgb, var(--bg-elevated) 66%, transparent);
+  color: var(--fg-85);
+}
+
+.app-run-list-row.is-active {
+  border-color: var(--icon-accent);
+  background: color-mix(in srgb, var(--bg-elevated) 84%, var(--accent-soft) 16%);
+  color: var(--fg-85);
+}
+
+.app-run-action-button {
+  border: 0.5px solid transparent;
+  background: transparent;
+  color: var(--fg-tertiary);
+  transition:
+    background-color var(--transition-basic),
+    border-color var(--transition-basic),
+    color var(--transition-basic);
+}
+
+.app-run-action-button:hover {
+  background: var(--bg-button-tertiary-hover);
+  color: var(--fg-secondary);
+}
+
+.app-run-action-button.is-active {
+  border-color: var(--icon-accent);
+  background: color-mix(in srgb, var(--bg-elevated) 78%, var(--accent-soft) 22%);
+  color: var(--icon-accent);
+}
+
 .app-session-title {
   min-width: 0;
   overflow: hidden;

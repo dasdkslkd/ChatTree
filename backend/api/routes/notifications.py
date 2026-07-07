@@ -15,7 +15,6 @@ router = APIRouter()
 class BindTaskNotificationRequest(BaseModel):
     delivery_node_id: str
     trigger: bool = True
-    focus_new_node: bool = False
 
 
 @router.get("/conversations/{conversation_id}/task-notifications", response_model=List[Dict[str, Any]])
@@ -37,7 +36,6 @@ async def bind_task_notification(
             notification_id=notification_id,
             delivery_node_id=request.delivery_node_id,
             trigger=request.trigger,
-            focus_new_node=request.focus_new_node,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Task notification 不存在: {exc}") from exc

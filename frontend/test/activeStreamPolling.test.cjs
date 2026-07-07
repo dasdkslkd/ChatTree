@@ -22,9 +22,12 @@ const {
   ACTIVE_STREAM_VISIBLE_POLL_MS,
   CONVERSATION_ACTIVE_STREAM_HINTED_LOOKUPS,
   CONVERSATION_ACTIVE_STREAM_IDLE_LOOKUPS,
+  TASK_NOTIFICATION_DELIVERY_LOOKUPS,
+  TASK_NOTIFICATION_DELIVERY_POLL_MS,
   getConversationActiveStreamLookupLimit,
   getActiveStreamPollingDelay,
   shouldProbeBackendScheduledFollowup,
+  shouldProbeTaskNotificationDelivery,
 } = require(path.join(__dirname, '../src/utils/activeStreamPolling.ts'));
 
 function testUsesFastPollingWhenStreamsAreActive() {
@@ -73,6 +76,14 @@ function testOnlyCompletedStreamsProbeForScheduledFollowup() {
   );
 }
 
+function testTaskNotificationDeliveryUsesFastPostFinishProbe() {
+  assert.equal(TASK_NOTIFICATION_DELIVERY_POLL_MS <= 250, true);
+  assert.equal(TASK_NOTIFICATION_DELIVERY_LOOKUPS >= 8, true);
+  assert.equal(shouldProbeTaskNotificationDelivery({ finishStatus: 'completed' }), true);
+  assert.equal(shouldProbeTaskNotificationDelivery({ finishStatus: 'error' }), false);
+  assert.equal(shouldProbeTaskNotificationDelivery({ finishStatus: 'stopped' }), false);
+}
+
 function main() {
   testUsesFastPollingWhenStreamsAreActive();
   testUsesSlowPollingWhenIdle();
@@ -80,6 +91,7 @@ function main() {
   testUsesThreeShortLookupsWithoutActiveHint();
   testAllowsRetryWhenSelectedConversationHasActiveHint();
   testOnlyCompletedStreamsProbeForScheduledFollowup();
+  testTaskNotificationDeliveryUsesFastPostFinishProbe();
   console.log('activeStreamPolling tests passed');
 }
 

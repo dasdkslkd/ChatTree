@@ -108,7 +108,7 @@ class CommandExecutor:
                 owner_type=TaskOwnerType.COMMAND,
             )
         service = getattr(self.run_manager, "notification_service", None)
-        if service is not None:
+        if service is not None and not self._suppresses_task_notification(run.to_dict()):
             await service.register_run_notification(
                 run_id=run.run_id,
                 summary=summary or command[:80] or "Command running",
@@ -508,6 +508,8 @@ class CommandExecutor:
         error: Optional[str],
     ) -> None:
         run = self.run_manager.get_run(run_id) or {}
+        if self._suppresses_task_notification(run):
+            return
         metadata = dict(run.get("metadata") or {})
         if metadata.get("result_observed_at"):
             return
@@ -551,6 +553,29 @@ class CommandExecutor:
             },
             task_id=task_id,
         )
+
+    def _suppresses_task_notification(self, run: Dict[str, Any]) -> bool:
+        metadata = dict(run.get("metadata") or {})
+        if metadata.get("suppress_task_notification") is True:
+            return True
+        parent_run_id = str(run.get("parent_run_id") or "")
+        seen: set[str] = set()
+        while parent_run_id and parent_run_id not in seen:
+            seen.add(parent_run_id)
+            parent = self.run_manager.get_run(parent_run_id)
+            if not parent:
+                return False
+            parent_kind = str(parent.get("kind") or "")
+            metadata = dict(parent.get("metadata") or {})
+            if parent_kind in {RunKind.WORKFLOW.value, RunKind.WORKFLOW_STEP.value}:
+                return True
+            if parent_kind == RunKind.SUBAGENT.value and (
+                metadata.get("agent_name") == "workflow-worker"
+                or metadata.get("delivery_policy") == "silent"
+            ):
+                return True
+            parent_run_id = str(parent.get("parent_run_id") or "")
+        return False
 
     async def _ensure_notification_task(
         self,

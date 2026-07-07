@@ -110,6 +110,44 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("terminal_run_id", payload)
             self.assertEqual(notifications.items[payload["command_run_id"]]["status"], "observed")
 
+    async def test_workflow_worker_run_command_does_not_create_task_notification(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_manager = RunManager()
+            notifications = install_notification_service(run_manager)
+            command_executor = CommandExecutor(run_manager)
+            worker = await run_manager.create_run(
+                conversation_id="conv_1",
+                kind=RunKind.SUBAGENT,
+                anchor_node_id="node_1",
+                summary="workflow worker",
+                metadata={"agent_name": "workflow-worker", "delivery_policy": "silent"},
+            )
+            tool = RunCommandTool(CodeToolConfig.from_dict({
+                "workspace_roots": [tmpdir],
+                "command_timeout_seconds": 10,
+                "run_command_initial_wait_seconds": 5,
+            }))
+
+            raw = await tool.execute(
+                command=f"{sys.executable} -c \"print('workflow-worker-managed')\"",
+                cwd=".",
+                _runtime_context={
+                    "conversation_id": "conv_1",
+                    "node_id": "node_1",
+                    "run_id": worker.run_id,
+                    "run_kind": RunKind.SUBAGENT.value,
+                    "agent_name": "workflow-worker",
+                    "delivery_policy": "silent",
+                    "command_executor": command_executor,
+                },
+            )
+            payload = json.loads(raw)
+
+            self.assertEqual(payload["exit_code"], 0)
+            run = run_manager.get_run(payload["command_run_id"]) or {}
+            self.assertIs((run.get("metadata") or {}).get("suppress_task_notification"), True)
+            self.assertEqual(notifications.items, {})
+
     async def test_run_command_short_managed_command_truncates_output(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_manager = RunManager()
@@ -291,6 +329,75 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(payload["command_run_id"], run["run_id"])
             self.assertNotIn("terminal_run_id", payload)
             self.assertIn("hello-command", payload["stdout_tail"])
+
+    async def test_workflow_child_command_does_not_create_task_notification(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_manager = RunManager()
+            notifications = install_notification_service(run_manager)
+            command_executor = CommandExecutor(run_manager)
+            workflow = await run_manager.create_run(
+                conversation_id="conv_1",
+                kind=RunKind.WORKFLOW,
+                anchor_node_id="node_1",
+                summary="workflow",
+            )
+            worker = await run_manager.create_run(
+                conversation_id="conv_1",
+                kind=RunKind.SUBAGENT,
+                anchor_node_id="node_1",
+                parent_run_id=workflow.run_id,
+                summary="workflow worker",
+                metadata={"agent_name": "workflow-worker", "delivery_policy": "silent"},
+            )
+
+            run = await command_executor.start(
+                conversation_id="conv_1",
+                command=f"{sys.executable} -c \"print('workflow-command')\"",
+                cwd=tmpdir,
+                anchor_node_id="node_1",
+                parent_run_id=worker.run_id,
+                summary="workflow command",
+            )
+            await command_executor.wait(run["run_id"], timeout=5)
+
+            self.assertEqual(notifications.items, {})
+
+    async def test_workflow_worker_command_tool_marks_notification_suppressed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_manager = RunManager()
+            notifications = install_notification_service(run_manager)
+            command_executor = CommandExecutor(run_manager)
+            worker = await run_manager.create_run(
+                conversation_id="conv_1",
+                kind=RunKind.SUBAGENT,
+                anchor_node_id="node_1",
+                summary="workflow worker",
+                metadata={"agent_name": "workflow-worker"},
+            )
+            tool = StartBackgroundCommandTool(CodeToolConfig.from_dict({
+                "workspace_roots": [tmpdir],
+                "command_timeout_seconds": 10,
+            }))
+
+            raw = await tool.execute(
+                command=f"{sys.executable} -c \"print('workflow-worker-command')\"",
+                cwd=tmpdir,
+                _runtime_context={
+                    "conversation_id": "conv_1",
+                    "run_id": worker.run_id,
+                    "run_kind": RunKind.SUBAGENT.value,
+                    "anchor_node_id": "node_1",
+                    "agent_name": "workflow-worker",
+                    "delivery_policy": "silent",
+                    "command_executor": command_executor,
+                },
+            )
+            result = json.loads(raw)
+            await command_executor.wait(result["run_id"], timeout=5)
+
+            run = run_manager.get_run(result["run_id"]) or {}
+            self.assertIs((run.get("metadata") or {}).get("suppress_task_notification"), True)
+            self.assertEqual(notifications.items, {})
 
     async def test_command_snapshot_reads_repository_events(self):
         with tempfile.TemporaryDirectory() as tmpdir:

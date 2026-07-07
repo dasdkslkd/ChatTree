@@ -80,6 +80,38 @@ def test_chat_manager_build_prompt_messages_uses_unified_builder(tmp_path: Path)
     assert any("检查代码" in content for content in contents)
 
 
+def test_focus_preserving_turn_still_sends_new_user_message_to_model(tmp_path: Path):
+    async def scenario():
+        manager, model_manager = make_stream_manager(tmp_path)
+        conversation = manager.create_conversation("focus false")
+        parent_node_id = conversation.current_node_id
+
+        await collect_chunks(manager.send_message_stream(
+            conversation.metadata["id"],
+            "background result arrived",
+            model_id="fake-model",
+            provider_id="fake",
+            parent_node_id=parent_node_id,
+            focus_new_node=False,
+            message_subtype="task_notification",
+        ))
+
+        stored = manager.get_conversation(conversation.metadata["id"])
+        assert stored.current_node_id == parent_node_id
+        notification_node_id = next(
+            node_id
+            for node_id, node in stored.nodes.items()
+            if (node.get("user_message") or {}).get("subtype") == "task_notification"
+        )
+        assert stored.nodes[notification_node_id]["user_message"]["role"] == Role.NOTIFY
+        sent_contents = [message.get("content") for message in model_manager.provider.messages]
+        assert "background result arrived" in sent_contents
+        sent_roles = [message.get("role") for message in model_manager.provider.messages]
+        assert "notify" not in sent_roles
+
+    asyncio.run(scenario())
+
+
 class CapturingProvider:
     def __init__(self):
         self.messages = None
@@ -496,6 +528,7 @@ def test_send_message_stream_expands_review_slash_prompt(tmp_path: Path):
                 conversation.metadata["id"],
                 "/review focus on auth",
                 model_id="fake-model",
+                parent_node_id=conversation.current_node_id,
             )
         )
     )
@@ -535,6 +568,7 @@ def test_send_message_stream_enter_plan_mode_blocks_same_round_write(tmp_path: P
                 conversation.metadata["id"],
                 "先做计划再实现",
                 model_id="fake-model",
+                parent_node_id=conversation.current_node_id,
             )
         )
     )
@@ -573,6 +607,7 @@ def test_send_message_stream_consumes_approved_plan_context_and_restores_permiss
                 conversation.metadata["id"],
                 "继续实现已批准的计划。",
                 model_id="fake-model",
+                parent_node_id=conversation.current_node_id,
             )
         )
     )
@@ -613,6 +648,7 @@ def test_send_message_stream_plan_mode_retries_until_exit_or_question_tool(tmp_p
                 conversation.metadata["id"],
                 "设置页增加项目栏",
                 model_id="fake-model",
+                parent_node_id=conversation.current_node_id,
             )
         )
     )
@@ -668,6 +704,7 @@ def test_continue_plan_question_answer_stream_uses_hidden_control_response(tmp_p
                 content="默认显示",
                 model_id="fake-model",
                 message_subtype="plan_question_response",
+                node_id=conversation.current_node_id,
             )
         )
     )
@@ -708,6 +745,7 @@ def test_continue_plan_approval_stream_uses_hidden_control_response(tmp_path: Pa
                 content="Plan approved. Continue with the approved implementation.",
                 model_id="fake-model",
                 message_subtype="plan_approval_response",
+                node_id=conversation.current_node_id,
             )
         )
     )
@@ -751,6 +789,7 @@ def test_send_message_stream_does_not_auto_approve_pending_plan_from_user_text(t
                 conversation.metadata["id"],
                 "继续实现已批准的计划。",
                 model_id="fake-model",
+                parent_node_id=conversation.current_node_id,
             )
         )
     )
@@ -773,6 +812,7 @@ def test_send_message_stream_rejects_manual_plan_permission_without_session(tmp_
                 "实现一个清晰的小改动",
                 model_id="fake-model",
                 tool_permission_mode="plan",
+                parent_node_id=conversation.current_node_id,
             )
         )
     )
@@ -803,6 +843,7 @@ def test_send_message_stream_task_guard_suppresses_unresolved_final_text(tmp_pat
                 conversation.metadata["id"],
                 "直接回答",
                 model_id="fake-model",
+                parent_node_id=conversation.current_node_id,
             )
         )
     )
@@ -834,6 +875,7 @@ def test_send_message_stream_task_guard_continues_after_tool_retry(tmp_path: Pat
                 conversation.metadata["id"],
                 "直接回答",
                 model_id="fake-model",
+                parent_node_id=conversation.current_node_id,
             )
         )
     )
@@ -878,6 +920,7 @@ def test_send_message_stream_allows_final_after_real_start_workflow(tmp_path: Pa
                 conversation.metadata["id"],
                 "启动一个 3 层 workflow 来验证积分结果",
                 model_id="fake-model",
+                parent_node_id=conversation.current_node_id,
             )
         )
     )
@@ -954,6 +997,7 @@ def test_send_message_stream_removed_side_command_is_plain_message(tmp_path: Pat
                 conversation.metadata["id"],
                 "/side quick question",
                 model_id="fake-model",
+                parent_node_id=conversation.current_node_id,
             )
         )
     )

@@ -33,6 +33,16 @@ def _command_run_id(kwargs: Dict[str, Any]) -> str:
     return str(kwargs.get("command_run_id") or "")
 
 
+def _should_suppress_task_notification(context: Dict[str, Any]) -> bool:
+    if context.get("suppress_task_notification") is True:
+        return True
+    if context.get("agent_name") == "workflow-worker":
+        return True
+    if context.get("delivery_policy") == "silent":
+        return True
+    return context.get("run_kind") in {"workflow", "workflow_step"}
+
+
 class StartBackgroundCommandTool(BaseTool):
     def __init__(self, config: CodeToolConfig):
         self.workspace = CodeWorkspace(config)
@@ -98,6 +108,11 @@ class StartBackgroundCommandTool(BaseTool):
                 "tool_call_id": context.get("tool_call_id"),
                 "workspace_relative_cwd": self.workspace.relative(cwd),
                 "task_id": kwargs.get("task_id") or context.get("task_id"),
+                "agent_name": context.get("agent_name"),
+                "source_run_id": context.get("run_id"),
+                "source_run_kind": context.get("run_kind"),
+                "root_run_id": context.get("root_run_id"),
+                "suppress_task_notification": _should_suppress_task_notification(context),
             },
         )
         snapshot = executor.snapshot(str(run["run_id"])) or {}

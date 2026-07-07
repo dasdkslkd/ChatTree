@@ -8,6 +8,8 @@ export interface TaskNotificationRecord {
   task_id?: string | null;
   status: 'unbound' | 'bound' | 'delivering' | 'delivered' | 'observed' | 'deleted';
   delivery_node_id?: string | null;
+  delivered_run_id?: string | null;
+  delivered_node_id?: string | null;
   summary: string;
   content: string;
   payload?: Record<string, unknown>;
@@ -24,12 +26,11 @@ export const taskNotificationsApi = {
   bind: async (
     notificationId: string,
     deliveryNodeId: string,
-    options: { trigger?: boolean; focusNewNode?: boolean } = {},
+    options: { trigger?: boolean } = {},
   ): Promise<TaskNotificationRecord> => {
     const response = await apiClient.post(`/task-notifications/${encodeURIComponent(notificationId)}/bind`, {
       delivery_node_id: deliveryNodeId,
       trigger: options.trigger ?? true,
-      focus_new_node: options.focusNewNode ?? false,
     });
     return response.data;
   },

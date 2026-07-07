@@ -147,11 +147,23 @@ class RunManager:
             record = self._require_run_locked(run_id)
             if record.target_node_id == target_node_id:
                 return deepcopy(record)
+            previous_writer = self._writers_by_node.get(target_node_id)
             self._acquire_writer_locked(target_node_id, run_id)
+            persisted: Optional[Dict[str, Any]] = None
+            try:
+                if self.repository and hasattr(self.repository, "update_target_node"):
+                    persisted = self.repository.update_target_node(run_id, target_node_id)
+            except Exception:
+                if previous_writer is None:
+                    if self._writers_by_node.get(target_node_id) == run_id:
+                        self._writers_by_node.pop(target_node_id, None)
+                else:
+                    self._writers_by_node[target_node_id] = previous_writer
+                raise
             if record.target_node_id and self._writers_by_node.get(record.target_node_id) == run_id:
                 self._writers_by_node.pop(record.target_node_id, None)
             record.target_node_id = target_node_id
-            record.updated_at = time()
+            record.updated_at = float((persisted or {}).get("updated_at") or time())
             snapshot = deepcopy(record)
         await self.append_event(run_id, {
             "type": "run_target_bound",

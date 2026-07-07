@@ -96,6 +96,10 @@ interface FinishInfo {
 }
 type FinishListener = (info: FinishInfo) => void;
 
+export interface ResumeStreamOptions {
+  anchorUntilTargetLands?: boolean;
+}
+
 function mergeToolCalls(existing: any[], incoming: any[]): any[] {
   const merged = incoming.length > 0
     ? existing.filter((toolCall) => !toolCall?.pending)
@@ -851,6 +855,7 @@ export class StreamManager {
     fromEvent = 0,
     anchorNodeId?: string | null,
     kind = 'chat',
+    options: ResumeStreamOptions = {},
   ): Promise<void> {
     const existing = this.getConversationStates(conversationId)
       .find((state) => (runId && state.runId === runId) || (nodeId && state.targetNodeId === nodeId));
@@ -858,7 +863,7 @@ export class StreamManager {
     if (!runId && !nodeId) return;
     const resolvedRunId = runId || `attach_${nodeId}`;
     const abortController = new AbortController();
-    this.streams.set(resolvedRunId, this.createState(
+    const state = this.createState(
       resolvedRunId,
       conversationId,
       abortController,
@@ -866,7 +871,9 @@ export class StreamManager {
       nodeId,
       kind,
       anchorNodeId,
-    ));
+    );
+    state.anchorUntilTargetLands = options.anchorUntilTargetLands ?? false;
+    this.streams.set(resolvedRunId, state);
     this.addToConversation(conversationId, resolvedRunId);
     this.notify(conversationId, true);
     await this.consume(resolvedRunId, () => runId

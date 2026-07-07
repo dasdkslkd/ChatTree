@@ -2,6 +2,8 @@ export const ACTIVE_STREAM_VISIBLE_POLL_MS = 5000;
 export const ACTIVE_STREAM_IDLE_POLL_MS = 30000;
 export const CONVERSATION_ACTIVE_STREAM_IDLE_LOOKUPS = 3;
 export const CONVERSATION_ACTIVE_STREAM_HINTED_LOOKUPS = 10;
+export const TASK_NOTIFICATION_DELIVERY_POLL_MS = 200;
+export const TASK_NOTIFICATION_DELIVERY_LOOKUPS = 12;
 
 export function getActiveStreamPollingDelay(options: {
   activeStreamCount: number;
@@ -26,4 +28,10 @@ export function shouldProbeBackendScheduledFollowup(options: {
   hasQueuedFollowup: boolean;
 }): boolean {
   return options.finishStatus === 'completed' && !options.hasQueuedFollowup;
+}
+
+export function shouldProbeTaskNotificationDelivery(options: {
+  finishStatus: 'completed' | 'error' | 'stopped';
+}): boolean {
+  return options.finishStatus === 'completed';
 }
