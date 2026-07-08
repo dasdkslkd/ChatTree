@@ -208,3 +208,83 @@ async def _wait_agent_reads_workflow_error_from_repository_events(tmp_path):
 
 def test_wait_agent_reads_workflow_error_from_repository_events(tmp_path):
     asyncio.run(_wait_agent_reads_workflow_error_from_repository_events(tmp_path))
+
+
+async def _wait_agent_timeout_reports_running_progress():
+    run_manager = RunManager()
+    runtime = AgentRuntime(
+        run_manager=run_manager,
+        mailbox=AgentMailbox(),
+        subagent_executor=object(),
+        capability_registry=object(),
+    )
+    run = await run_manager.create_run(
+        conversation_id="conversation-1",
+        kind=RunKind.SUBAGENT,
+        created_by_run_id="chat-1",
+        cancellation_parent_run_id=None,
+        summary="explorer: scan",
+        metadata={"agent_name": "explorer"},
+    )
+    await run_manager.append_event(run.run_id, {
+        "status": "content",
+        "event_type": "tool_call",
+        "tool_calls": [{"function": {"name": "list_files"}}],
+    })
+
+    result = await runtime.wait_agent(
+        source=AgentSource(
+            conversation_id="conversation-1",
+            run_id="chat-1",
+            run_kind=RunKind.CHAT.value,
+        ),
+        run_ids=[run.run_id],
+        timeout_seconds=0.01,
+    )
+
+    assert result["status"] == "running"
+    assert result["wait_status"] == "timeout"
+    assert result["runs"][0]["status"] == "running"
+    assert result["runs"][0]["message_type"] == "in_progress"
+    assert result["runs"][0]["wait_status"] == "timeout"
+    assert result["runs"][0]["timed_out"] is True
+    assert result["runs"][0]["last_event"]["event_type"] == "tool_call"
+    assert result["runs"][0]["last_event"]["tool_name"] == "list_files"
+
+
+def test_wait_agent_timeout_reports_running_progress():
+    asyncio.run(_wait_agent_timeout_reports_running_progress())
+
+
+async def _resume_agent_reports_running_progress():
+    run_manager = RunManager()
+    runtime = AgentRuntime(
+        run_manager=run_manager,
+        mailbox=AgentMailbox(),
+        subagent_executor=object(),
+        capability_registry=object(),
+    )
+    run = await run_manager.create_run(
+        conversation_id="conversation-1",
+        kind=RunKind.SUBAGENT,
+        created_by_run_id="chat-1",
+        cancellation_parent_run_id=None,
+        summary="explorer: scan",
+        metadata={"agent_name": "explorer"},
+    )
+    await run_manager.append_event(run.run_id, {
+        "status": "content",
+        "event_type": "tool_result",
+        "tool_call": {"name": "list_files"},
+    })
+
+    result = await runtime.resume_agent(run_id=run.run_id)
+
+    assert result["status"] == "running"
+    assert result["event_count"] == 2
+    assert result["last_event"]["event_type"] == "tool_result"
+    assert result["last_event"]["tool_name"] == "list_files"
+
+
+def test_resume_agent_reports_running_progress():
+    asyncio.run(_resume_agent_reports_running_progress())

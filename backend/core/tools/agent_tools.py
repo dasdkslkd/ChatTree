@@ -157,7 +157,10 @@ class WaitAgentTool(AgentRuntimeTool):
 
     @property
     def description(self) -> str:
-        return "Wait for one or more spawned ChatTree agent/workflow runs and read their terminal run results."
+        return (
+            "Wait for one or more spawned ChatTree agent/workflow runs and read their terminal run results. "
+            "A wait timeout only means this wait call expired; it does not mean the run failed."
+        )
 
     def parameters_schema(self) -> Dict[str, Any]:
         return {
@@ -171,7 +174,7 @@ class WaitAgentTool(AgentRuntimeTool):
                 },
                 "timeout_seconds": {
                     "type": "number",
-                    "description": "Maximum seconds to wait. Defaults to 30.",
+                    "description": "Maximum wait duration in seconds for this call. Defaults to 30.",
                 },
             },
             "required": ["run_ids"],

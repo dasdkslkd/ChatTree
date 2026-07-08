@@ -149,10 +149,13 @@ def test_spawn_agent_schema_names_delivery_and_forbids_simulation():
 
 def test_wait_agent_schema_uses_run_ids():
     tool = WaitAgentTool(agent_runtime=object())
-    schema = tool.to_openai_tool()["function"]["parameters"]
+    function = tool.to_openai_tool()["function"]
+    schema = function["parameters"]
 
     assert "run_ids" in schema["required"]
     assert schema["properties"]["run_ids"]["type"] == "array"
+    assert "does not mean the run failed" in function["description"]
+    assert "wait duration" in schema["properties"]["timeout_seconds"]["description"]
 
 
 def test_start_subagent_schema_names_common_agent_roles_and_forbids_simulation():

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import Any, Dict, Optional
 
 from backend.core.capabilities.registry import CapabilityRegistry
@@ -199,6 +200,58 @@ class AgentRuntime:
         if task is None:
             raise KeyError(resolved_task_id)
 
+    def _compact_event_for_status(self, event: Dict[str, Any] | None) -> Optional[Dict[str, Any]]:
+        if not event:
+            return None
+        compact: Dict[str, Any] = {}
+        for key in ("event_index", "type", "event_type", "status"):
+            if event.get(key) is not None:
+                compact[key] = event.get(key)
+        tool_name = None
+        tool_call = event.get("tool_call")
+        if isinstance(tool_call, dict):
+            tool_name = tool_call.get("name")
+        if tool_name is None:
+            tool_calls = event.get("tool_calls")
+            if isinstance(tool_calls, list) and tool_calls:
+                first_call = tool_calls[0]
+                if isinstance(first_call, dict):
+                    function = first_call.get("function")
+                    if isinstance(function, dict):
+                        tool_name = function.get("name")
+        if tool_name:
+            compact["tool_name"] = tool_name
+        content = event.get("content")
+        if isinstance(content, str) and content:
+            compact["content_preview"] = content[:500]
+        error = event.get("error")
+        if error:
+            compact["error"] = str(error)[:500]
+        return compact
+
+    def _run_progress_snapshot(self, run_id: str, run: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        current = run or self.run_manager.get_run(run_id) or {}
+        try:
+            events = self.run_manager.read_events(run_id)
+        except Exception:
+            events = []
+        created_at = current.get("created_at")
+        updated_at = current.get("updated_at")
+        snapshot: Dict[str, Any] = {
+            "run_id": run_id,
+            "kind": current.get("kind"),
+            "status": current.get("status") or "missing",
+            "agent_name": (current.get("metadata") or {}).get("agent_name"),
+            "task_id": (current.get("metadata") or {}).get("task_id"),
+            "event_count": current.get("event_count") if current.get("event_count") is not None else len(events),
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "elapsed_seconds": max(0.0, time.time() - float(created_at)) if created_at else None,
+            "last_activity_at": updated_at,
+            "last_event": self._compact_event_for_status(events[-1] if events else None),
+        }
+        return {key: value for key, value in snapshot.items() if value is not None}
+
     async def wait_agent(
         self,
         *,
@@ -226,17 +279,17 @@ class AgentRuntime:
                 )
             except asyncio.TimeoutError:
                 current = self.run_manager.get_run(run_id) or run
-                return {
-                    "run_id": run_id,
-                    "kind": current.get("kind"),
-                    "status": current.get("status") or "timeout",
-                    "agent_name": (current.get("metadata") or {}).get("agent_name"),
-                    "message_type": "timeout",
+                snapshot = self._run_progress_snapshot(run_id, current)
+                snapshot.update({
+                    "wait_status": "timeout",
+                    "message_type": "in_progress",
                     "content": "",
                     "result": None,
                     "error": None,
                     "timed_out": True,
-                }
+                    "message": "wait_agent reached its wait timeout; the run is still active unless status is terminal.",
+                })
+                return snapshot
             current = self.run_manager.get_run(run_id) or run
             await self.run_manager.mark_observed(
                 run_id,
@@ -245,19 +298,27 @@ class AgentRuntime:
             )
             terminal["agent_name"] = (current.get("metadata") or {}).get("agent_name")
             terminal["task_id"] = (current.get("metadata") or {}).get("task_id")
+            terminal["wait_status"] = "completed"
             terminal["timed_out"] = False
             return terminal
 
         runs = list(await asyncio.gather(*(wait_one(str(run_id)) for run_id in run_ids)))
-        if any(run.get("timed_out") for run in runs):
-            status = "timeout"
+        if any(run.get("wait_status") == "timeout" for run in runs):
+            if any(run.get("status") in {"running", "waiting", "stopping"} for run in runs):
+                status = "running"
+            else:
+                status = "timeout"
+            wait_status = "timeout"
         elif any(run.get("status") == "missing" for run in runs):
             status = "error"
+            wait_status = "completed"
         elif all(run.get("message_type") != "error" for run in runs):
             status = "completed"
+            wait_status = "completed"
         else:
             status = "completed"
-        return {"status": status, "runs": runs}
+            wait_status = "completed"
+        return {"status": status, "wait_status": wait_status, "runs": runs}
 
     async def list_agents(
         self,
@@ -306,7 +367,7 @@ class AgentRuntime:
 
     async def resume_agent(self, *, run_id: str) -> Dict[str, Any]:
         run = self.run_manager.get_run(run_id)
-        return {"run_id": run_id, "status": run.get("status") if run else "missing"}
+        return self._run_progress_snapshot(run_id, run)
 
     async def close_agent(self, *, run_id: str) -> Dict[str, Any]:
         await self._stop_owned_run(run_id)
