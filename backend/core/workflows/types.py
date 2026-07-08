@@ -16,5 +16,6 @@ class WorkflowRequest:
     script: str
     args: Dict[str, Any] = field(default_factory=dict)
     parent_node_id: Optional[str] = None
-    parent_run_id: Optional[str] = None
+    created_by_run_id: Optional[str] = None
+    cancellation_parent_run_id: Optional[str] = None
     budget: WorkflowBudget = field(default_factory=WorkflowBudget)

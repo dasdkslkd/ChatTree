@@ -6,7 +6,7 @@ export interface SideRunLike {
   runId: string;
   kind: string;
   createdAt: number;
-  parentRunId?: string | null;
+  createdByRunId?: string | null;
   summary?: string;
   metadata?: Record<string, unknown>;
   workflowEvents?: WorkflowEventLike[];
@@ -83,8 +83,8 @@ function compareWorkflowSteps<TDraft extends SideRunDraftLike>(a: TDraft, b: TDr
 }
 
 function isWorkflowChildRun<TDraft extends SideRunDraftLike>(draft: TDraft, workflowRunIds: Set<string>): boolean {
-  if (draft.run.kind === 'workflow_step') return Boolean(draft.run.parentRunId);
-  return Boolean(draft.run.parentRunId && workflowRunIds.has(draft.run.parentRunId));
+  if (draft.run.kind === 'workflow_step') return Boolean(draft.run.createdByRunId);
+  return Boolean(draft.run.createdByRunId && workflowRunIds.has(draft.run.createdByRunId));
 }
 
 export function groupDetachedSideRuns<TDraft extends SideRunDraftLike>(drafts: TDraft[]): Array<SideRunGroup<TDraft>> {
@@ -93,12 +93,12 @@ export function groupDetachedSideRuns<TDraft extends SideRunDraftLike>(drafts: T
     .map((draft) => draft.run.runId));
   const stepsByParent = new Map<string, TDraft[]>();
   for (const draft of drafts) {
-    const parentRunId = draft.run.parentRunId;
-    if (!parentRunId) continue;
+    const createdByRunId = draft.run.createdByRunId;
+    if (!createdByRunId) continue;
     if (!isWorkflowChildRun(draft, workflowRunIds)) continue;
-    const steps = stepsByParent.get(parentRunId) ?? [];
+    const steps = stepsByParent.get(createdByRunId) ?? [];
     steps.push(draft);
-    stepsByParent.set(parentRunId, steps);
+    stepsByParent.set(createdByRunId, steps);
   }
 
   return SIDE_RUN_GROUP_ORDER

@@ -42,7 +42,8 @@ class AgentRuntime:
         task: str,
         context_mode: str = "fresh",
         delivery_policy: str = "auto",
-        parent_run_id: Optional[str] = None,
+        created_by_run_id: Optional[str] = None,
+        cancellation_parent_run_id: Optional[str] = None,
         provider_id: Optional[str] = None,
         model_id: Optional[str] = None,
         permission_mode: Optional[str] = None,
@@ -62,7 +63,8 @@ class AgentRuntime:
             agent_name=agent_name,
             input_data=task,
             parent_node_id=source.anchor_node_id,
-            parent_run_id=parent_run_id or source.run_id,
+            created_by_run_id=created_by_run_id or source.run_id,
+            cancellation_parent_run_id=cancellation_parent_run_id,
             context_mode=context_mode,
             provider_id=provider_id,
             model_id=model_id,
@@ -125,7 +127,8 @@ class AgentRuntime:
             script=script,
             args=args or {},
             parent_node_id=source.anchor_node_id,
-            parent_run_id=source.run_id,
+            created_by_run_id=source.run_id,
+            cancellation_parent_run_id=None,
             permission_mode=normalize_permission_mode(permission_mode),
             delegated_task=script,
             delivery_policy=delivery_policy,
@@ -260,14 +263,14 @@ class AgentRuntime:
         self,
         *,
         conversation_id: str,
-        parent_run_id: Optional[str] = None,
+        created_by_run_id: Optional[str] = None,
         include_completed: bool = True,
     ) -> Dict[str, Any]:
         runs = []
         for run in self.run_manager.list_runs(conversation_id):
             if run.get("kind") not in {RunKind.SUBAGENT.value, RunKind.WORKFLOW.value, RunKind.WORKFLOW_STEP.value}:
                 continue
-            if parent_run_id and run.get("parent_run_id") != parent_run_id:
+            if created_by_run_id and run.get("created_by_run_id") != created_by_run_id:
                 continue
             if not include_completed and run.get("status") in {"completed", "failed", "cancelled"}:
                 continue

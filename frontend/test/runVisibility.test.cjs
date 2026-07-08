@@ -19,6 +19,7 @@ require.extensions['.ts'] = function loadTs(module, filename) {
 
 const {
   isDetachedRunView,
+  getStoppableRunIdsForSelectedBranch,
   isRunVisibleInMainTranscript,
   isRunBlockingSelectedBranch,
   isRunStoppableFromSelectedBranch,
@@ -28,11 +29,14 @@ const {
 
 function chatRun(overrides = {}) {
   return {
+    runId: overrides.runId ?? 'run-1',
     kind: 'chat',
     status: 'streaming',
     anchorNodeId: null,
     nodeId: null,
     targetNodeId: null,
+    createdByRunId: null,
+    cancellationParentRunId: null,
     ...overrides,
   };
 }
@@ -156,6 +160,21 @@ function testPendingChatRunStaysVisibleFromAnchorUntilTargetLands() {
   assert.equal(isRunBlockingSelectedBranch(run, 'node-hello', new Set(['node-hello'])), true);
 }
 
+function testStoppedChatRunStaysVisibleFromAnchorUntilTargetLands() {
+  const run = chatRun({
+    kind: 'chat',
+    status: 'stopped',
+    anchorNodeId: 'node-hello',
+    nodeId: 'node-new',
+    targetNodeId: 'node-new',
+    pendingUserMessage: '被中断的用户消息',
+  });
+
+  assert.equal(isRunVisibleInSelectedTranscript(run, 'node-hello', new Set(['node-hello'])), true);
+  assert.equal(isRunVisibleInMainTranscript(run, 'node-hello', new Set(['node-hello'])), true);
+  assert.equal(isRunBlockingSelectedBranch(run, 'node-hello', new Set(['node-hello'])), false);
+}
+
 function testControlChatRunStaysVisibleFromAnchorUntilTargetLands() {
   const run = chatRun({
     kind: 'chat',
@@ -187,7 +206,7 @@ function testPendingRootChatRunStaysVisibleBeforeFirstHistoryRefresh() {
   assert.equal(isRunBlockingSelectedBranch(run, null, new Set()), true);
 }
 
-function testDetachedSubagentCanBeStoppedFromSelectedAnchorWithoutBlockingTranscript() {
+function testDetachedSubagentIsNotStoppedFromSelectedAnchorWithoutOwnership() {
   const run = chatRun({
     kind: 'subagent',
     status: 'streaming',
@@ -197,7 +216,7 @@ function testDetachedSubagentCanBeStoppedFromSelectedAnchorWithoutBlockingTransc
   });
 
   assert.equal(isRunBlockingSelectedBranch(run, 'node-hello', new Set(['node-hello'])), false);
-  assert.equal(isRunStoppableFromSelectedBranch(run, 'node-hello', new Set(['node-hello'])), true);
+  assert.equal(isRunStoppableFromSelectedBranch(run, 'node-hello', new Set(['node-hello'])), false);
 }
 
 function testDetachedRunIsVisibleWhenAnchorIsInSelectedBranchHistory() {
@@ -211,7 +230,7 @@ function testDetachedRunIsVisibleWhenAnchorIsInSelectedBranchHistory() {
 
   assert.equal(isDetachedRunView(run, 'node-child', new Set(['node-root', 'node-hello', 'node-child'])), true);
   assert.equal(isRunVisibleInMainTranscript(run, 'node-child', new Set(['node-root', 'node-hello', 'node-child'])), false);
-  assert.equal(isRunStoppableFromSelectedBranch(run, 'node-child', new Set(['node-root', 'node-hello', 'node-child'])), true);
+  assert.equal(isRunStoppableFromSelectedBranch(run, 'node-child', new Set(['node-root', 'node-hello', 'node-child'])), false);
 }
 
 function testDetachedRunIsHiddenWhenAnchorIsOutsideSelectedBranch() {
@@ -238,7 +257,7 @@ function testCommandRunIsSideViewAndStoppableFromAnchor() {
 
   assert.equal(isDetachedRunView(run, 'node-hello', new Set(['node-hello'])), true);
   assert.equal(isRunVisibleInMainTranscript(run, 'node-hello', new Set(['node-hello'])), false);
-  assert.equal(isRunStoppableFromSelectedBranch(run, 'node-hello', new Set(['node-hello'])), true);
+  assert.equal(isRunStoppableFromSelectedBranch(run, 'node-hello', new Set(['node-hello'])), false);
 }
 
 function testSubagentWithTargetNodeStillUsesSideView() {
@@ -252,7 +271,50 @@ function testSubagentWithTargetNodeStillUsesSideView() {
 
   assert.equal(isDetachedRunView(run, 'node-hello', new Set(['node-hello'])), true);
   assert.equal(isRunVisibleInMainTranscript(run, 'node-hello', new Set(['node-hello'])), false);
-  assert.equal(isRunStoppableFromSelectedBranch(run, 'node-hello', new Set(['node-hello'])), true);
+  assert.equal(isRunStoppableFromSelectedBranch(run, 'node-hello', new Set(['node-hello'])), false);
+}
+
+function testCurrentBranchStopIncludesCancellationChildTreeOnly() {
+  const runs = [
+    chatRun({
+      runId: 'main-chat',
+      kind: 'chat',
+      anchorNodeId: 'node-root',
+      nodeId: 'node-main',
+      targetNodeId: 'node-main',
+    }),
+    chatRun({
+      runId: 'visible-background-command',
+      kind: 'command',
+      createdByRunId: 'main-chat',
+      cancellationParentRunId: null,
+      anchorNodeId: 'node-main',
+    }),
+    chatRun({
+      runId: 'internal-command',
+      kind: 'command',
+      createdByRunId: 'main-chat',
+      cancellationParentRunId: 'main-chat',
+      anchorNodeId: 'node-main',
+    }),
+    chatRun({
+      runId: 'owned-nested-subagent',
+      kind: 'subagent',
+      createdByRunId: 'internal-command',
+      cancellationParentRunId: 'internal-command',
+      anchorNodeId: 'node-main',
+    }),
+    chatRun({
+      runId: 'unbound-background-command',
+      kind: 'command',
+      anchorNodeId: 'node-main',
+    }),
+  ];
+
+  assert.deepEqual(
+    getStoppableRunIdsForSelectedBranch(runs, 'node-main', new Set(['node-root', 'node-main'])),
+    ['main-chat', 'internal-command', 'owned-nested-subagent'],
+  );
 }
 
 function testOnlyChatRunsPatchMainConversation() {
@@ -276,13 +338,15 @@ testDirectResponseRunIsSideViewNotMainTranscriptWithoutNode();
 testDirectResponseRunNeverEntersMainTranscriptEvenWithTargetNode();
 testDetachedChatRunStaysInMainTranscriptDuringPreTargetPhase();
 testPendingChatRunStaysVisibleFromAnchorUntilTargetLands();
+testStoppedChatRunStaysVisibleFromAnchorUntilTargetLands();
 testControlChatRunStaysVisibleFromAnchorUntilTargetLands();
 testPendingRootChatRunStaysVisibleBeforeFirstHistoryRefresh();
-testDetachedSubagentCanBeStoppedFromSelectedAnchorWithoutBlockingTranscript();
+testDetachedSubagentIsNotStoppedFromSelectedAnchorWithoutOwnership();
 testDetachedRunIsVisibleWhenAnchorIsInSelectedBranchHistory();
 testDetachedRunIsHiddenWhenAnchorIsOutsideSelectedBranch();
 testCommandRunIsSideViewAndStoppableFromAnchor();
 testSubagentWithTargetNodeStillUsesSideView();
+testCurrentBranchStopIncludesCancellationChildTreeOnly();
 testOnlyChatRunsPatchMainConversation();
 
 console.log('runVisibility tests passed');

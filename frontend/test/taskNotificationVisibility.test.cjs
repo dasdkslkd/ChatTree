@@ -20,6 +20,8 @@ require.extensions['.ts'] = function loadTs(module, filename) {
 const {
   getTaskNotificationSummary,
   getTreeUserContent,
+  createTaskNotificationTranscriptItem,
+  hasTaskNotificationTranscriptItem,
   isRenderableTaskNotificationMessage,
   isTaskNotificationMessage,
   shouldExportMessage,
@@ -92,5 +94,34 @@ assert.equal(getTreeUserContent({
   user_content: 'normal user task',
   user_subtype: null,
 }), 'normal user task');
+
+const notificationRecord = {
+  id: 'notification-1',
+  conversation_id: 'conversation-1',
+  source_run_id: 'command-run-1',
+  source_run_kind: 'command',
+  task_id: 'task-1',
+  status: 'delivering',
+  delivery_node_id: 'anchor-node',
+  delivered_run_id: 'delivery-run-1',
+  delivered_node_id: 'delivery-node',
+  summary: 'Command completed',
+  content: 'done',
+  payload: { source_status: 'completed', stdout_tail: 'done' },
+};
+const liveItem = createTaskNotificationTranscriptItem(notificationRecord, {
+  runId: 'delivery-run-1',
+  nodeId: 'delivery-node',
+});
+assert.equal(liveItem.type, 'task_notification');
+assert.equal(liveItem.run_id, 'delivery-run-1');
+assert.equal(liveItem.node_id, 'delivery-node');
+assert.equal(liveItem.anchor_node_id, 'anchor-node');
+assert.equal(liveItem.status, 'completed');
+assert.equal(liveItem.summary, 'Command completed');
+assert.equal(liveItem.props.source_run_id, 'command-run-1');
+assert.equal(liveItem.props.content, 'done');
+assert.equal(hasTaskNotificationTranscriptItem([liveItem], notificationRecord, 'delivery-node'), true);
+assert.equal(hasTaskNotificationTranscriptItem([], notificationRecord, 'delivery-node'), false);
 
 console.log('taskNotificationVisibility tests passed');

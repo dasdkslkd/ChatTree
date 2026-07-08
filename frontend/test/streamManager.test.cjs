@@ -776,7 +776,8 @@ async function testRestoreRunKeepsParentSummaryAndMetadata() {
         status: 'completed',
         anchor_node_id: 'node-anchor',
         target_node_id: null,
-        parent_run_id: 'run_workflow',
+        created_by_run_id: 'run_workflow',
+        cancellation_parent_run_id: 'run_workflow',
         summary: '检查实现',
         event_count: 1,
         metadata: {
@@ -794,7 +795,8 @@ async function testRestoreRunKeepsParentSummaryAndMetadata() {
           conversation_id: 'conv-1',
           kind: 'workflow_step',
           status: 'running',
-          parent_run_id: 'run_workflow',
+          created_by_run_id: 'run_workflow',
+          cancellation_parent_run_id: 'run_workflow',
           summary: '检查实现',
           metadata: {
             workflow_step_index: 1,
@@ -806,7 +808,8 @@ async function testRestoreRunKeepsParentSummaryAndMetadata() {
     );
 
     const state = manager.getConversationStates('conv-1')[0];
-    assert.equal(state.parentRunId, 'run_workflow');
+    assert.equal(state.createdByRunId, 'run_workflow');
+    assert.equal(state.cancellationParentRunId, 'run_workflow');
     assert.equal(state.summary, '检查实现');
     assert.equal(state.metadata.workflow_step_index, 1);
     assert.equal(state.metadata.workflow_step_name, '检查实现');
@@ -946,7 +949,8 @@ async function testChildRunStartedEventAddsSideRunNotification() {
     try {
       const state = manager.getConversationStates('conv-1')[0];
       assert.deepEqual(state.sideRunNotifications, [{ runId: 'run-child', kind: 'subagent' }]);
-      assert.equal(state.parentRunId, null);
+      assert.equal(state.createdByRunId, null);
+      assert.equal(state.cancellationParentRunId, null);
     } finally {
       await controlled.close();
       await runTimersUntil(running);

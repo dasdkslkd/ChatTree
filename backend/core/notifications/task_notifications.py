@@ -10,7 +10,7 @@ from backend.core.runs import FINISHED_RUN_STATUSES, RunKind, RunManager, RunSta
 logger = logging.getLogger(__name__)
 
 TERMINAL_STATUS_VALUES = {status.value for status in FINISHED_RUN_STATUSES}
-VISIBLE_NOTIFICATION_STATUSES = {"unbound", "bound", "delivering"}
+VISIBLE_NOTIFICATION_STATUSES = {"unbound", "bound", "delivering", "delivery_failed", "delivery_cancelled"}
 
 
 def format_task_notification_content(notification: dict[str, Any]) -> str:
@@ -263,11 +263,26 @@ class TaskNotificationService:
                 })
             finally:
                 await self.run_manager.finish_run(run.run_id, final_status, final_error)
-                self.repository.mark_delivered(
-                    str(notification["id"]),
-                    delivered_run_id=run.run_id,
-                    delivered_node_id=delivered_node_id,
-                )
+                notification_id = str(notification["id"])
+                if final_status == RunStatus.COMPLETED:
+                    self.repository.mark_delivered(
+                        notification_id,
+                        delivered_run_id=run.run_id,
+                        delivered_node_id=delivered_node_id,
+                    )
+                elif final_status == RunStatus.CANCELLED:
+                    self.repository.mark_delivery_cancelled(
+                        notification_id,
+                        delivered_run_id=run.run_id,
+                        delivered_node_id=delivered_node_id,
+                    )
+                else:
+                    self.repository.mark_delivery_failed(
+                        notification_id,
+                        delivered_run_id=run.run_id,
+                        delivered_node_id=delivered_node_id,
+                        error=final_error,
+                    )
 
         asyncio.create_task(produce())
         return run.to_dict()

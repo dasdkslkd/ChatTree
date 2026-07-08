@@ -8,7 +8,8 @@ export interface RunRecord {
   status: RunStatus;
   anchor_node_id?: string | null;
   target_node_id?: string | null;
-  parent_run_id?: string | null;
+  created_by_run_id?: string | null;
+  cancellation_parent_run_id?: string | null;
   summary?: string;
   event_count: number;
   metadata?: Record<string, unknown>;
@@ -24,6 +25,8 @@ export interface RunEventPayload {
   status?: string;
   event_type?: string;
   event_index?: number;
+  created_by_run_id?: string | null;
+  cancellation_parent_run_id?: string | null;
   target_node_id?: string | null;
   content?: string | null;
   reasoning?: string | null;

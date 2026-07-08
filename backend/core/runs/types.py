@@ -45,7 +45,8 @@ class RunRecord:
     status: RunStatus = RunStatus.QUEUED
     anchor_node_id: Optional[str] = None
     target_node_id: Optional[str] = None
-    parent_run_id: Optional[str] = None
+    created_by_run_id: Optional[str] = None
+    cancellation_parent_run_id: Optional[str] = None
     summary: str = ""
     event_count: int = 0
     metadata: Dict[str, Any] = field(default_factory=dict)

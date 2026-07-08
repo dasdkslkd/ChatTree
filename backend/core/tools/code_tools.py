@@ -706,7 +706,8 @@ class RunCommandTool(_CodeTool):
             command=command,
             cwd=str(cwd),
             anchor_node_id=str(runtime_context.get("anchor_node_id") or runtime_context.get("node_id") or "") or None,
-            parent_run_id=str(runtime_context.get("run_id") or "") or None,
+            created_by_run_id=str(runtime_context.get("run_id") or "") or None,
+            cancellation_parent_run_id=str(runtime_context.get("run_id") or "") or None,
             summary=command[:80],
             timeout_seconds=timeout,
             metadata={
@@ -729,6 +730,7 @@ class RunCommandTool(_CodeTool):
             await command_executor.wait(run_id, timeout=initial_wait)
         except asyncio.TimeoutError:
             if hasattr(command_executor, "run_manager"):
+                await command_executor.run_manager.update_cancellation_parent(run_id, None)
                 await command_executor.run_manager.update_metadata(run_id, {
                     "run_command_auto_backgrounded": True,
                     "run_command_initial_wait_seconds": initial_wait,

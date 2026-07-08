@@ -969,7 +969,7 @@ class SlashRuntimeDispatchTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RunLifecycleContractTests(unittest.IsolatedAsyncioTestCase):
-    async def test_create_child_run_emits_standard_parent_child_event(self):
+    async def test_create_child_run_emits_standard_created_by_event(self):
         run_manager = RunManager()
         parent = await run_manager.create_run(
             conversation_id="conversation-1",
@@ -982,7 +982,8 @@ class RunLifecycleContractTests(unittest.IsolatedAsyncioTestCase):
             conversation_id="conversation-1",
             kind=RunKind.SUBAGENT,
             anchor_node_id="assistant-node-1",
-            parent_run_id=parent.run_id,
+            created_by_run_id=parent.run_id,
+            cancellation_parent_run_id=None,
             summary="reviewer: inspect",
             metadata={"agent_name": "reviewer"},
         )
@@ -999,10 +1000,11 @@ class RunLifecycleContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(child_events), 1)
         self.assertEqual(child_events[0]["child_run_id"], child.run_id)
         self.assertEqual(child_events[0]["child_kind"], RunKind.SUBAGENT.value)
-        self.assertEqual(child_events[0]["payload"]["parent_run_id"], parent.run_id)
+        self.assertEqual(child_events[0]["payload"]["created_by_run_id"], parent.run_id)
+        self.assertIsNone(child_events[0]["payload"]["cancellation_parent_run_id"])
         self.assertEqual(child_events[0]["payload"]["metadata"]["agent_name"], "reviewer")
 
-    async def test_legacy_start_subagent_tool_preserves_parent_run_id(self):
+    async def test_start_subagent_tool_sets_created_by_without_cancellation_parent(self):
         class FakeSubagentExecutor:
             def __init__(self):
                 self.kwargs = None
@@ -1026,10 +1028,11 @@ class RunLifecycleContractTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-        self.assertEqual(executor.kwargs["parent_run_id"], "run-parent")
+        self.assertEqual(executor.kwargs["created_by_run_id"], "run-parent")
+        self.assertIsNone(executor.kwargs["cancellation_parent_run_id"])
         self.assertEqual(executor.kwargs["parent_node_id"], "branch-anchor-1")
 
-    async def test_legacy_start_workflow_tool_preserves_parent_run_id(self):
+    async def test_start_workflow_tool_sets_created_by_without_cancellation_parent(self):
         class FakeWorkflowManager:
             def __init__(self):
                 self.kwargs = None
@@ -1052,7 +1055,8 @@ class RunLifecycleContractTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-        self.assertEqual(manager.kwargs["parent_run_id"], "run-parent")
+        self.assertEqual(manager.kwargs["created_by_run_id"], "run-parent")
+        self.assertIsNone(manager.kwargs["cancellation_parent_run_id"])
         self.assertEqual(manager.kwargs["parent_node_id"], "branch-anchor-1")
 
 
@@ -1133,7 +1137,8 @@ class TaskNotificationTests(unittest.IsolatedAsyncioTestCase):
             agent_name="implementer",
             input_data="inspect",
             parent_node_id="node-1",
-            parent_run_id=None,
+            created_by_run_id=None,
+            cancellation_parent_run_id=None,
             provider_id=None,
             model_id=None,
             permission_mode=None,
@@ -1232,7 +1237,8 @@ class TaskNotificationTests(unittest.IsolatedAsyncioTestCase):
             agent_name="implementer",
             input_data="inspect",
             parent_node_id="node-anchor-1",
-            parent_run_id=None,
+            created_by_run_id=None,
+            cancellation_parent_run_id=None,
             provider_id=None,
             model_id=None,
             permission_mode="modify_only",
@@ -1260,7 +1266,8 @@ class TaskNotificationTests(unittest.IsolatedAsyncioTestCase):
             agent_name="implementer",
             input_data="inspect",
             parent_node_id="node-1",
-            parent_run_id=None,
+            created_by_run_id=None,
+            cancellation_parent_run_id=None,
             provider_id=None,
             model_id=None,
             permission_mode=None,
@@ -1280,7 +1287,8 @@ class TaskNotificationTests(unittest.IsolatedAsyncioTestCase):
             conversation_id="conversation-1",
             kind=RunKind.SUBAGENT,
             anchor_node_id="node-1",
-            parent_run_id="workflow-1",
+            created_by_run_id="workflow-1",
+            cancellation_parent_run_id="workflow-1",
             summary="workflow-worker: inspect",
             metadata={"agent_name": "workflow-worker"},
         )
@@ -1291,7 +1299,8 @@ class TaskNotificationTests(unittest.IsolatedAsyncioTestCase):
             agent_name="implementer",
             input_data="inspect",
             parent_node_id="node-1",
-            parent_run_id="workflow-1",
+            created_by_run_id="workflow-1",
+            cancellation_parent_run_id="workflow-1",
             provider_id=None,
             model_id=None,
             permission_mode=None,
@@ -1309,7 +1318,8 @@ class TaskNotificationTests(unittest.IsolatedAsyncioTestCase):
             conversation_id="conversation-1",
             kind=RunKind.SUBAGENT,
             anchor_node_id="node-1",
-            parent_run_id="chat-1",
+            created_by_run_id="chat-1",
+            cancellation_parent_run_id=None,
             summary="implementer: inspect",
             metadata={"agent_name": "implementer", "delivery_policy": "silent"},
         )
@@ -1320,7 +1330,8 @@ class TaskNotificationTests(unittest.IsolatedAsyncioTestCase):
             agent_name="implementer",
             input_data="inspect",
             parent_node_id="node-1",
-            parent_run_id="chat-1",
+            created_by_run_id="chat-1",
+            cancellation_parent_run_id=None,
             provider_id=None,
             model_id=None,
             permission_mode=None,
@@ -1346,7 +1357,8 @@ class TaskNotificationTests(unittest.IsolatedAsyncioTestCase):
             conversation_id="conversation-1",
             kind=RunKind.SUBAGENT,
             anchor_node_id="node-1",
-            parent_run_id=parent.run_id,
+            created_by_run_id=parent.run_id,
+            cancellation_parent_run_id=None,
             summary="implementer: inspect",
             metadata={"agent_name": "implementer", "delivery_policy": "auto"},
         )
@@ -1357,7 +1369,8 @@ class TaskNotificationTests(unittest.IsolatedAsyncioTestCase):
             agent_name="implementer",
             input_data="inspect",
             parent_node_id="node-1",
-            parent_run_id=parent.run_id,
+            created_by_run_id=parent.run_id,
+            cancellation_parent_run_id=None,
             provider_id=None,
             model_id=None,
             permission_mode=None,
@@ -1399,7 +1412,8 @@ class TaskNotificationTests(unittest.IsolatedAsyncioTestCase):
             script="return 1",
             args={},
             parent_node_id="node-1",
-            parent_run_id=None,
+            created_by_run_id=None,
+            cancellation_parent_run_id=None,
             budget={"max_seconds": 10, "max_parallel": 1},
         )
 
@@ -1498,7 +1512,8 @@ class TaskNotificationTests(unittest.IsolatedAsyncioTestCase):
             agent_name="implementer",
             input_data="inspect",
             parent_node_id="slash-node-1",
-            parent_run_id=None,
+            created_by_run_id=None,
+            cancellation_parent_run_id=None,
             provider_id=None,
             model_id=None,
             permission_mode="ask_always",
@@ -1624,7 +1639,8 @@ class TaskNotificationTests(unittest.IsolatedAsyncioTestCase):
             agent_name="implementer",
             input_data="inspect",
             parent_node_id="slash-node-1",
-            parent_run_id=None,
+            created_by_run_id=None,
+            cancellation_parent_run_id=None,
             provider_id=None,
             model_id=None,
             permission_mode="ask_always",
@@ -1784,7 +1800,7 @@ class DetachedSlashStopRouteTests(unittest.TestCase):
         self.assertEqual(subagent_executor.stopped_run_id, run.run_id)
         self.assertEqual(run_manager.get_run(run.run_id)["status"], "stopping")
 
-    def test_stop_stream_message_stops_child_subagent_by_parent_run_id(self):
+    def test_stop_stream_message_stops_child_subagent_by_cancellation_parent(self):
         run_manager = RunManager()
         parent = asyncio.run(run_manager.create_run(
             conversation_id="conversation-1",
@@ -1796,7 +1812,8 @@ class DetachedSlashStopRouteTests(unittest.TestCase):
             conversation_id="conversation-1",
             kind=RunKind.SUBAGENT,
             anchor_node_id="assistant-node-1",
-            parent_run_id=parent.run_id,
+            created_by_run_id=parent.run_id,
+            cancellation_parent_run_id=parent.run_id,
             summary="child agent",
         ))
         subagent_executor = self.FakeSubagentExecutor()
@@ -1814,7 +1831,7 @@ class DetachedSlashStopRouteTests(unittest.TestCase):
         self.assertEqual(run_manager.get_run(parent.run_id)["status"], "stopping")
         self.assertEqual(run_manager.get_run(child.run_id)["status"], "stopping")
 
-    def test_stop_run_stops_child_subagent_by_parent_run_id(self):
+    def test_stop_run_stops_child_subagent_by_cancellation_parent(self):
         run_manager = RunManager()
         parent = asyncio.run(run_manager.create_run(
             conversation_id="conversation-1",
@@ -1826,7 +1843,8 @@ class DetachedSlashStopRouteTests(unittest.TestCase):
             conversation_id="conversation-1",
             kind=RunKind.SUBAGENT,
             anchor_node_id="assistant-node-1",
-            parent_run_id=parent.run_id,
+            created_by_run_id=parent.run_id,
+            cancellation_parent_run_id=parent.run_id,
             summary="child agent",
         ))
         chat_manager = self.FakeChatManager()
@@ -2083,7 +2101,8 @@ class RuntimePolicyTests(unittest.TestCase):
                             conversation_id=kwargs["conversation_id"],
                             kind=RunKind.SUBAGENT,
                             anchor_node_id=kwargs.get("parent_node_id"),
-                            parent_run_id=kwargs.get("parent_run_id"),
+                            created_by_run_id=kwargs.get("created_by_run_id"),
+                            cancellation_parent_run_id=kwargs.get("cancellation_parent_run_id"),
                             summary=kwargs.get("delegated_task") or "",
                             metadata={"agent_name": kwargs.get("agent_name")},
                         )
@@ -2119,8 +2138,8 @@ class RuntimePolicyTests(unittest.TestCase):
                 self.assertEqual(len(child_events), 1)
                 self.assertEqual(child_events[0]["child_run_id"], result["run_id"])
                 self.assertEqual(child_events[0]["child_kind"], RunKind.SUBAGENT.value)
-                self.assertIsNone(child_events[0].get("parent_run_id"))
-                self.assertEqual(child_events[0]["payload"]["parent_run_id"], parent.run_id)
+                self.assertEqual(child_events[0]["payload"]["created_by_run_id"], parent.run_id)
+                self.assertIsNone(child_events[0]["payload"]["cancellation_parent_run_id"])
 
         asyncio.run(run_case())
 
@@ -2140,7 +2159,8 @@ class RuntimePolicyTests(unittest.TestCase):
                         conversation_id=kwargs["conversation_id"],
                         kind=RunKind.SUBAGENT,
                         anchor_node_id=kwargs.get("parent_node_id"),
-                        parent_run_id=kwargs.get("parent_run_id"),
+                        created_by_run_id=kwargs.get("created_by_run_id"),
+                        cancellation_parent_run_id=kwargs.get("cancellation_parent_run_id"),
                         summary=kwargs.get("delegated_task") or "",
                         metadata={"agent_name": kwargs.get("agent_name")},
                     )).to_dict()
@@ -2195,7 +2215,8 @@ class RuntimePolicyTests(unittest.TestCase):
                         conversation_id=kwargs["conversation_id"],
                         kind=RunKind.WORKFLOW,
                         anchor_node_id=kwargs.get("parent_node_id"),
-                        parent_run_id=kwargs.get("parent_run_id"),
+                        created_by_run_id=kwargs.get("created_by_run_id"),
+                        cancellation_parent_run_id=kwargs.get("cancellation_parent_run_id"),
                         summary="workflow",
                         metadata={"delegated_task": kwargs.get("delegated_task")},
                     )).to_dict()
@@ -2485,7 +2506,8 @@ class WorkflowRuntimeBridgeTests(unittest.IsolatedAsyncioTestCase):
             conversation_id="conversation-1",
             kind=RunKind.SUBAGENT,
             anchor_node_id="node-1",
-            parent_run_id=workflow.run_id,
+            created_by_run_id=workflow.run_id,
+            cancellation_parent_run_id=workflow.run_id,
             summary="child",
         )
 

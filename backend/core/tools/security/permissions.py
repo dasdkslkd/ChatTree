@@ -43,7 +43,8 @@ class PermissionContext:
     session_grants: List[PermissionRule] = field(default_factory=list)
     run_id: Optional[str] = None
     run_kind: Optional[str] = None
-    parent_run_id: Optional[str] = None
+    created_by_run_id: Optional[str] = None
+    cancellation_parent_run_id: Optional[str] = None
     root_run_id: Optional[str] = None
     agent_name: Optional[str] = None
     task_summary: Optional[str] = None

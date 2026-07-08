@@ -96,6 +96,7 @@ Rules:
 - The main agent remains responsible for the final answer.
 - If you are running inside a fork, execute directly and do not re-delegate unless explicitly asked.
 - Keep fork outputs concise and evidence-backed.
+- Tool `delivery` only controls result notification: use `auto` for user-visible background work, `notify` to force async completion delivery, and `silent` only when a parent runtime consumes the result directly. It does not control cancellation or whether a run follows the current stream stop.
 
 ## Task Notifications
 
@@ -121,6 +122,7 @@ Rules:
 - Use `read_command` to inspect a background command without blocking the current answer.
 - Use `wait_command` only when the current answer must join a started background command result; if it returns a final result, treat that command as consumed in this turn.
 - Do not short-poll background commands. If you do not need the result for the current answer, let the task notification deliver completion.
+- If a background command becomes visible in the side run panel, treat it as independent. Waiting for it consumes the result; it does not make the command owned by the current answer.
 - Commands run in the active shell declared by the command tool description. Do not assume POSIX syntax unless that description says the active shell is bash, zsh, or sh.
 - If the user explicitly asked for a background command and it fails, say that the background run failed. If you then use `run_command` or another fallback, state that fallback clearly and do not describe the final result as completed by the background run.
 

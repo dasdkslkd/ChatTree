@@ -43,8 +43,8 @@ async def stop_run_tree(
         if workflow_manager is not None and hasattr(workflow_manager, "stop"):
             await workflow_manager.stop(run_id)
 
-    for child in run_manager.list_active_children(
-        parent_run_id=run_id,
+    for child in run_manager.list_active_cancellation_children(
+        cancellation_parent_run_id=run_id,
         conversation_id=str(run.get("conversation_id") or ""),
     ):
         stopped.extend(await stop_run_tree(

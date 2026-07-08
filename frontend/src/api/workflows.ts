@@ -5,7 +5,8 @@ export interface StartWorkflowRequest {
   script: string;
   args?: Record<string, unknown>;
   parent_node_id?: string | null;
-  parent_run_id?: string | null;
+  created_by_run_id?: string | null;
+  cancellation_parent_run_id?: string | null;
   budget?: Record<string, unknown>;
 }
 

@@ -13,6 +13,22 @@ from .database import SQLitePersistence
 
 
 FINISHED_STATUSES = {"completed", "failed", "cancelled", "interrupted", "stopped"}
+RUN_COLUMNS = """
+id,
+conversation_id,
+kind,
+status,
+created_by_run_id,
+cancellation_parent_run_id,
+anchor_node_id,
+target_node_id,
+summary,
+metadata_json,
+event_count,
+created_at,
+updated_at,
+finished_at
+"""
 
 
 class SQLiteRunRepository:
@@ -26,7 +42,8 @@ class SQLiteRunRepository:
         kind: str,
         anchor_node_id: str | None = None,
         target_node_id: str | None = None,
-        parent_run_id: str | None = None,
+        created_by_run_id: str | None = None,
+        cancellation_parent_run_id: str | None = None,
         summary: str = "",
         metadata: dict[str, Any] | None = None,
     ) -> str:
@@ -39,7 +56,8 @@ class SQLiteRunRepository:
                   conversation_id,
                   kind,
                   status,
-                  parent_run_id,
+                  created_by_run_id,
+                  cancellation_parent_run_id,
                   anchor_node_id,
                   target_node_id,
                   summary,
@@ -48,7 +66,7 @@ class SQLiteRunRepository:
                   updated_at
                 )
                 VALUES (
-                  ?, ?, ?, 'running', ?, ?, ?, ?, ?,
+                  ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?,
                   strftime('%s', 'now'),
                   strftime('%s', 'now')
                 )
@@ -57,7 +75,8 @@ class SQLiteRunRepository:
                     run_id,
                     conversation_id,
                     kind,
-                    parent_run_id,
+                    created_by_run_id,
+                    cancellation_parent_run_id,
                     anchor_node_id,
                     target_node_id,
                     summary,
@@ -69,7 +88,7 @@ class SQLiteRunRepository:
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         with self.persistence.connect() as conn:
             row = conn.execute(
-                "SELECT * FROM runs WHERE id = ?",
+                f"SELECT {RUN_COLUMNS} FROM runs WHERE id = ?",
                 (run_id,),
             ).fetchone()
         if row is None:
@@ -90,7 +109,28 @@ class SQLiteRunRepository:
             if cursor.rowcount == 0:
                 raise KeyError(run_id)
             row = conn.execute(
-                "SELECT * FROM runs WHERE id = ?",
+                f"SELECT {RUN_COLUMNS} FROM runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(run_id)
+        return self._run_from_row(row)
+
+    def update_cancellation_parent(self, run_id: str, cancellation_parent_run_id: str | None) -> dict[str, Any]:
+        with self.persistence.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE runs
+                SET cancellation_parent_run_id = ?,
+                    updated_at = strftime('%s', 'now')
+                WHERE id = ?
+                """,
+                (cancellation_parent_run_id, run_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(run_id)
+            row = conn.execute(
+                f"SELECT {RUN_COLUMNS} FROM runs WHERE id = ?",
                 (run_id,),
             ).fetchone()
         if row is None:
@@ -99,11 +139,11 @@ class SQLiteRunRepository:
 
     def list_runs(self, conversation_id: str | None = None) -> list[dict[str, Any]]:
         if conversation_id is None:
-            sql = "SELECT * FROM runs ORDER BY created_at, id"
+            sql = f"SELECT {RUN_COLUMNS} FROM runs ORDER BY created_at, id"
             params: tuple[Any, ...] = ()
         else:
-            sql = """
-                SELECT *
+            sql = f"""
+                SELECT {RUN_COLUMNS}
                 FROM runs
                 WHERE conversation_id = ?
                 ORDER BY created_at, id
@@ -123,7 +163,7 @@ class SQLiteRunRepository:
         with self.persistence.connect() as conn:
             rows = conn.execute(
                 f"""
-                SELECT *
+                SELECT {RUN_COLUMNS}
                 FROM runs
                 WHERE status NOT IN ({placeholders})
                   {conversation_clause}

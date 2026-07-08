@@ -30,7 +30,7 @@ function run(overrides = {}) {
       kind: overrides.kind || 'subagent',
       status: overrides.status || 'streaming',
       createdAt: overrides.createdAt ?? 1000,
-      parentRunId: overrides.parentRunId ?? null,
+      createdByRunId: overrides.createdByRunId ?? null,
       metadata: overrides.metadata ?? {},
     },
     timeline: overrides.timeline || [],
@@ -45,7 +45,7 @@ function run(overrides = {}) {
 function testTopLevelRunsAreGroupedInDefinitionOrderAndSortedNewestFirst() {
   const groups = groupDetachedSideRuns([
     run({ runId: 'chat-main', kind: 'chat', createdAt: 9000 }),
-    run({ runId: 'workflow-step-a', kind: 'workflow_step', parentRunId: 'workflow-1', createdAt: 7000 }),
+    run({ runId: 'workflow-step-a', kind: 'workflow_step', createdByRunId: 'workflow-1', createdAt: 7000 }),
     run({ runId: 'workflow-old', kind: 'workflow', createdAt: 1000 }),
     run({ runId: 'fork-old', kind: 'subagent', createdAt: 2000 }),
     run({ runId: 'command-new', kind: 'command', createdAt: 6500 }),
@@ -67,9 +67,9 @@ function testTopLevelRunsAreGroupedInDefinitionOrderAndSortedNewestFirst() {
 function testWorkflowStepsAttachToParentWorkflowAndUseDefinitionOrder() {
   const groups = groupDetachedSideRuns([
     run({ runId: 'workflow-1', kind: 'workflow', createdAt: 1000 }),
-    run({ runId: 'step-third', kind: 'workflow_step', parentRunId: 'workflow-1', createdAt: 9000, metadata: { step_index: 2 } }),
-    run({ runId: 'step-first', kind: 'workflow_step', parentRunId: 'workflow-1', createdAt: 8000, metadata: { order: 0 } }),
-    run({ runId: 'step-second', kind: 'workflow_step', parentRunId: 'workflow-1', createdAt: 7000, metadata: { workflow_step_index: 1 } }),
+    run({ runId: 'step-third', kind: 'workflow_step', createdByRunId: 'workflow-1', createdAt: 9000, metadata: { step_index: 2 } }),
+    run({ runId: 'step-first', kind: 'workflow_step', createdByRunId: 'workflow-1', createdAt: 8000, metadata: { order: 0 } }),
+    run({ runId: 'step-second', kind: 'workflow_step', createdByRunId: 'workflow-1', createdAt: 7000, metadata: { workflow_step_index: 1 } }),
   ]);
 
   const workflowGroup = groups.find((group) => group.kind === 'workflow');
@@ -83,7 +83,7 @@ function testParentedSubagentRunsAttachToWorkflowInsteadOfTopLevelForks() {
   const groups = groupDetachedSideRuns([
     run({ runId: 'workflow-1', kind: 'workflow', createdAt: 1000 }),
     run({ runId: 'top-fork', kind: 'subagent', createdAt: 5000 }),
-    run({ runId: 'workflow-child', kind: 'subagent', parentRunId: 'workflow-1', createdAt: 6000, metadata: { workflow_step_index: 0 } }),
+    run({ runId: 'workflow-child', kind: 'subagent', createdByRunId: 'workflow-1', createdAt: 6000, metadata: { workflow_step_index: 0 } }),
   ]);
 
   const forkGroup = groups.find((group) => group.kind === 'subagent');
@@ -95,7 +95,7 @@ function testParentedSubagentRunsAttachToWorkflowInsteadOfTopLevelForks() {
 
 function testParentedSubagentFromMainRunStillAppearsAsTopLevelFork() {
   const groups = groupDetachedSideRuns([
-    run({ runId: 'main-child-fork', kind: 'subagent', parentRunId: 'run-main-chat', createdAt: 6000 }),
+    run({ runId: 'main-child-fork', kind: 'subagent', createdByRunId: 'run-main-chat', createdAt: 6000 }),
     run({ runId: 'top-fork', kind: 'subagent', createdAt: 5000 }),
   ]);
 

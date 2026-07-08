@@ -91,9 +91,9 @@ import { streamManager, type StreamState } from '../services/streamManager';
 import { slashRegistry } from '../services/slashRegistry';
 import { getStreamStatusText as getStreamStatusLabel } from '../utils/generationStatus';
 import {
+  getStoppableRunIdsForSelectedBranch,
   isDetachedRunView,
   isRunBlockingSelectedBranch,
-  isRunStoppableFromSelectedBranch,
   isRunVisibleInSelectedTranscript,
   isRunVisibleInMainTranscript,
   shouldPatchRunIntoMainConversation,
@@ -112,6 +112,8 @@ import {
 } from '../utils/sideRunSync';
 import { collectSideRunNotifications } from '../utils/sideRunNotifications';
 import {
+  createTaskNotificationTranscriptItem,
+  hasTaskNotificationTranscriptItem,
   isTaskNotificationMessage,
   shouldExportMessage,
 } from '../utils/taskNotificationVisibility';
@@ -1315,9 +1317,18 @@ export default function ChatPage() {
     [activeRunStates, hiddenSideRunIds],
   );
   const visibleTaskNotifications = useMemo(
-    () => taskNotifications.filter((item) => ['unbound', 'bound', 'delivering'].includes(item.status)),
+    () => taskNotifications.filter((item) => ['unbound', 'bound', 'delivering', 'delivery_failed', 'delivery_cancelled'].includes(item.status)),
     [taskNotifications],
   );
+  const deliveringTaskNotificationByRunId = useMemo(() => {
+    const byRunId = new Map<string, TaskNotificationRecord>();
+    for (const notification of taskNotifications) {
+      if (notification.status === 'delivering' && notification.delivered_run_id) {
+        byRunId.set(notification.delivered_run_id, notification);
+      }
+    }
+    return byRunId;
+  }, [taskNotifications]);
 
   const hideSideRun = useCallback((conversationId: string, runId: string) => {
     setHiddenSideRunIdsByConversation((current) => {
@@ -1578,7 +1589,7 @@ export default function ChatPage() {
     if (selectedRun && SIDE_RUN_KINDS.has(selectedRun.kind) && shouldRenderRunDraft(selectedRun)) {
       const draft = createSideRunDraft(selectedRun);
       const steps = activeRunStates
-        .filter((run) => run.parentRunId === selectedRun.runId)
+        .filter((run) => run.createdByRunId === selectedRun.runId)
         .filter((run) => SIDE_RUN_KINDS.has(run.kind))
         .filter((run) => shouldRenderRunDraft(run))
         .map(createSideRunDraft)
@@ -1611,9 +1622,7 @@ export default function ChatPage() {
     [activeRunStates, currentBranchNodeIds, selectedBranchTipId],
   );
   const currentBranchStoppableRunIds = useMemo(
-    () => activeRunStates
-      .filter((run) => isRunStoppableFromSelectedBranch(run, selectedBranchTipId, currentBranchNodeIds))
-      .map((run) => run.runId),
+    () => getStoppableRunIdsForSelectedBranch(activeRunStates, selectedBranchTipId, currentBranchNodeIds),
     [activeRunStates, currentBranchNodeIds, selectedBranchTipId],
   );
   const currentBranchHasStreamingChat = currentBranchStreamingRunIds.length > 0;
@@ -1644,15 +1653,30 @@ export default function ChatPage() {
       .filter((run) => run.status !== 'completed')
       .filter((run) => shouldRenderRunDraft(run))
       .filter((run) => isRunVisibleInMainTranscript(run, selectedBranchTipId, currentBranchNodeIds))
-      .map((run) => ({
-        runId: run.runId,
-        nodeId: run.nodeId,
-        targetNodeId: run.targetNodeId,
-        anchorNodeId: run.anchorNodeId,
-        items: [createLiveRunTranscriptItem(run)],
-      }))
+      .map((run) => {
+        const items: TranscriptItem[] = [];
+        const notification = deliveringTaskNotificationByRunId.get(run.runId);
+        const targetNodeId = run.targetNodeId || run.nodeId || null;
+        if (
+          notification
+          && !hasTaskNotificationTranscriptItem(transcriptItems, notification, targetNodeId)
+        ) {
+          items.push(createTaskNotificationTranscriptItem(notification, {
+            runId: run.runId,
+            nodeId: targetNodeId,
+          }));
+        }
+        items.push(createLiveRunTranscriptItem(run));
+        return {
+          runId: run.runId,
+          nodeId: run.nodeId,
+          targetNodeId: run.targetNodeId,
+          anchorNodeId: run.anchorNodeId,
+          items,
+        };
+      })
       .filter((overlay) => overlay.items.length > 0),
-    [activeRunStates, currentBranchNodeIds, selectedBranchTipId],
+    [activeRunStates, currentBranchNodeIds, deliveringTaskNotificationByRunId, selectedBranchTipId, transcriptItems],
   );
   const displayTranscriptItems = useMemo(() => {
     const merged = mergeLiveRunTranscriptItems(transcriptItems, liveMainTranscriptRunOverlays);
@@ -3998,9 +4022,9 @@ export default function ChatPage() {
                       size="sm"
                       className="h-8 px-2"
                       onClick={() => {
-                        const parentRunId = selectedSideRunItem.run.parentRunId;
-                        const parentRun = parentRunId
-                          ? activeRunStates.find((run) => run.runId === parentRunId)
+                        const createdByRunId = selectedSideRunItem.run.createdByRunId;
+                        const parentRun = createdByRunId
+                          ? activeRunStates.find((run) => run.runId === createdByRunId)
                           : null;
                         const nextRunId = parentRun && SIDE_RUN_KINDS.has(parentRun.kind)
                           ? parentRun.runId

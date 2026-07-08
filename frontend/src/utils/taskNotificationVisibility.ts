@@ -1,4 +1,5 @@
 import type { Message } from '../types/message';
+import type { TranscriptItem } from '../types/transcript';
 
 type MessageLike = Pick<Message, 'role' | 'subtype'> & {
   content?: unknown;
@@ -16,6 +17,21 @@ export interface TaskNotificationSummary {
   status: string;
   kind: string;
   taskId: string;
+}
+
+export interface TaskNotificationRecordLike {
+  id: string;
+  conversation_id: string;
+  source_run_id: string;
+  source_run_kind: string;
+  task_id?: string | null;
+  status: string;
+  delivery_node_id?: string | null;
+  delivered_run_id?: string | null;
+  delivered_node_id?: string | null;
+  summary?: string | null;
+  content?: string | null;
+  payload?: Record<string, unknown> | null;
 }
 
 function containsTaskNotificationTag(value: unknown): boolean {
@@ -127,6 +143,55 @@ export function getTaskNotificationSummary(message: MessageLike): TaskNotificati
     kind: kindLabel,
     taskId,
   };
+}
+
+export function createTaskNotificationTranscriptItem(
+  notification: TaskNotificationRecordLike,
+  options: {
+    runId?: string | null;
+    nodeId?: string | null;
+  } = {},
+): TranscriptItem {
+  const payload = notification.payload || {};
+  const summary = notification.summary || 'Task notification';
+  const content = notification.content || '';
+  const status = String(payload.source_status || notification.status || '');
+  return {
+    id: `live-task-notification-${options.runId || notification.delivered_run_id || notification.id}`,
+    type: 'task_notification',
+    conversation_id: notification.conversation_id,
+    node_id: options.nodeId || notification.delivered_node_id || null,
+    anchor_node_id: notification.delivery_node_id || null,
+    run_id: options.runId || notification.delivered_run_id || null,
+    task_id: notification.task_id || null,
+    status,
+    summary,
+    preview: summary || content || 'Task notification',
+    visibility: 'main',
+    props: {
+      kind: 'task_notification',
+      summary,
+      source_run_id: notification.source_run_id,
+      source_run_kind: notification.source_run_kind,
+      task_id: notification.task_id || null,
+      ...payload,
+      content,
+    },
+  };
+}
+
+export function hasTaskNotificationTranscriptItem(
+  items: TranscriptItem[],
+  notification: TaskNotificationRecordLike,
+  nodeId?: string | null,
+): boolean {
+  return items.some((item) => {
+    if (item.type !== 'task_notification' && item.item_type !== 'task_notification') return false;
+    if (nodeId && item.node_id && item.node_id !== nodeId) return false;
+    return item.props?.source_run_id === notification.source_run_id
+      || Boolean(notification.task_id && item.task_id === notification.task_id)
+      || Boolean(notification.task_id && item.props?.task_id === notification.task_id);
+  });
 }
 
 export function shouldExportMessage(message: MessageLike): boolean {

@@ -32,7 +32,8 @@ function run(overrides = {}) {
     status: overrides.status || 'running',
     anchor_node_id: overrides.anchor_node_id ?? 'node-anchor',
     target_node_id: overrides.target_node_id ?? null,
-    parent_run_id: overrides.parent_run_id ?? null,
+    created_by_run_id: overrides.created_by_run_id ?? null,
+    cancellation_parent_run_id: overrides.cancellation_parent_run_id ?? null,
     event_count: 1,
     created_at: 10,
     updated_at: 11,
@@ -47,10 +48,10 @@ function testSideRunKindSetIncludesDetachedRunTypes() {
 
 function testVisibleSideRunsIncludeToolSpawnedParentedSubagents() {
   const visible = getVisibleSideRunRecords([
-    run({ run_id: 'main-chat', kind: 'chat', parent_run_id: null }),
-    run({ run_id: 'tool-spawned-subagent', kind: 'subagent', parent_run_id: 'run-main-chat' }),
-    run({ run_id: 'workflow-child', kind: 'subagent', parent_run_id: 'run-workflow', metadata: { source_run_id: 'run-workflow' } }),
-    run({ run_id: 'command-child', kind: 'command', parent_run_id: 'run-main-chat' }),
+    run({ run_id: 'main-chat', kind: 'chat', created_by_run_id: null }),
+    run({ run_id: 'tool-spawned-subagent', kind: 'subagent', created_by_run_id: 'run-main-chat' }),
+    run({ run_id: 'workflow-child', kind: 'subagent', created_by_run_id: 'run-workflow', metadata: { source_run_id: 'run-workflow' } }),
+    run({ run_id: 'command-child', kind: 'command', created_by_run_id: 'run-main-chat' }),
   ], new Set());
 
   assert.deepEqual(visible.map((item) => item.run_id), ['tool-spawned-subagent', 'workflow-child', 'command-child']);

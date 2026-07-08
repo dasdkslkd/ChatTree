@@ -345,7 +345,8 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
                 conversation_id="conv_1",
                 kind=RunKind.SUBAGENT,
                 anchor_node_id="node_1",
-                parent_run_id=workflow.run_id,
+                created_by_run_id=workflow.run_id,
+                cancellation_parent_run_id=workflow.run_id,
                 summary="workflow worker",
                 metadata={"agent_name": "workflow-worker", "delivery_policy": "silent"},
             )
@@ -355,7 +356,8 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
                 command=f"{sys.executable} -c \"print('workflow-command')\"",
                 cwd=tmpdir,
                 anchor_node_id="node_1",
-                parent_run_id=worker.run_id,
+                created_by_run_id=worker.run_id,
+                cancellation_parent_run_id=worker.run_id,
                 summary="workflow command",
             )
             await command_executor.wait(run["run_id"], timeout=5)
@@ -574,7 +576,8 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
                 command=f"{sys.executable} -c \"print('joined-command')\"",
                 cwd=tmpdir,
                 anchor_node_id="node_1",
-                parent_run_id=parent.run_id,
+                created_by_run_id=parent.run_id,
+                cancellation_parent_run_id=parent.run_id,
             )
 
             waited = json.loads(await WaitCommandTool().execute(
@@ -618,7 +621,7 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("failing command", snapshot["error"])
             self.assertIn(str(Path(tmpdir).resolve()), snapshot["error"])
 
-    async def test_stop_run_tree_recursively_stops_command_children(self):
+    async def test_stop_run_tree_recursively_stops_cancellation_children(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_manager = RunManager()
             command_executor = CommandExecutor(run_manager)
@@ -633,7 +636,8 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
                 command=f"{sys.executable} -c \"import time; time.sleep(30)\"",
                 cwd=tmpdir,
                 anchor_node_id="node_1",
-                parent_run_id=parent.run_id,
+                created_by_run_id=parent.run_id,
+                cancellation_parent_run_id=parent.run_id,
             )
 
             stopped = await stop_run_tree(
@@ -646,6 +650,46 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(parent.run_id, stopped)
             self.assertIn(child["run_id"], stopped)
             self.assertEqual(run_manager.get_run(child["run_id"])["status"], RunStatus.CANCELLED.value)
+
+    async def test_model_started_background_command_is_not_stopped_with_creator_stream(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_manager = RunManager()
+            command_executor = CommandExecutor(run_manager)
+            parent = await run_manager.create_run(
+                conversation_id="conv_1",
+                kind=RunKind.CHAT,
+                anchor_node_id="node_1",
+                target_node_id="node_2",
+            )
+
+            config = CodeToolConfig(workspace_roots=[Path(tmpdir)], protected_paths=[])
+            started = json.loads(await StartBackgroundCommandTool(config).execute(
+                command=f"{sys.executable} -c \"import time; time.sleep(0.2); print('still-running')\"",
+                cwd=tmpdir,
+                _runtime_context={
+                    "conversation_id": "conv_1",
+                    "anchor_node_id": "node_1",
+                    "node_id": "node_2",
+                    "run_id": parent.run_id,
+                    "run_kind": "chat",
+                    "command_executor": command_executor,
+                },
+            ))
+
+            child = run_manager.get_run(started["run_id"])
+            self.assertEqual(child["created_by_run_id"], parent.run_id)
+            self.assertIsNone(child["cancellation_parent_run_id"])
+
+            stopped = await stop_run_tree(
+                parent.run_id,
+                run_manager=run_manager,
+                command_executor=command_executor,
+            )
+            await command_executor.wait(started["run_id"], timeout=5)
+
+            self.assertIn(parent.run_id, stopped)
+            self.assertNotIn(started["run_id"], stopped)
+            self.assertEqual(run_manager.get_run(started["run_id"])["status"], RunStatus.COMPLETED.value)
 
 
 if __name__ == "__main__":

@@ -72,7 +72,8 @@ class CommandExecutor:
         command: str,
         cwd: str | os.PathLike[str],
         anchor_node_id: Optional[str] = None,
-        parent_run_id: Optional[str] = None,
+        created_by_run_id: Optional[str] = None,
+        cancellation_parent_run_id: Optional[str] = None,
         summary: str = "",
         timeout_seconds: Optional[int] = None,
         metadata: Optional[Dict[str, Any]] = None,
@@ -88,7 +89,8 @@ class CommandExecutor:
             conversation_id=conversation_id,
             kind=RunKind.COMMAND,
             anchor_node_id=anchor_node_id,
-            parent_run_id=parent_run_id,
+            created_by_run_id=created_by_run_id,
+            cancellation_parent_run_id=cancellation_parent_run_id,
             summary=summary or command[:80],
             metadata={
                 "command": command,
@@ -558,11 +560,11 @@ class CommandExecutor:
         metadata = dict(run.get("metadata") or {})
         if metadata.get("suppress_task_notification") is True:
             return True
-        parent_run_id = str(run.get("parent_run_id") or "")
+        created_by_run_id = str(run.get("created_by_run_id") or "")
         seen: set[str] = set()
-        while parent_run_id and parent_run_id not in seen:
-            seen.add(parent_run_id)
-            parent = self.run_manager.get_run(parent_run_id)
+        while created_by_run_id and created_by_run_id not in seen:
+            seen.add(created_by_run_id)
+            parent = self.run_manager.get_run(created_by_run_id)
             if not parent:
                 return False
             parent_kind = str(parent.get("kind") or "")
@@ -574,7 +576,7 @@ class CommandExecutor:
                 or metadata.get("delivery_policy") == "silent"
             ):
                 return True
-            parent_run_id = str(parent.get("parent_run_id") or "")
+            created_by_run_id = str(parent.get("created_by_run_id") or "")
         return False
 
     async def _ensure_notification_task(
@@ -588,7 +590,8 @@ class CommandExecutor:
     ) -> Optional[str]:
         if self.task_ledger is None:
             return None
-        metadata = dict((self.run_manager.get_run(run_id) or {}).get("metadata") or {})
+        run_snapshot = self.run_manager.get_run(run_id) or {}
+        metadata = dict(run_snapshot.get("metadata") or {})
         task_id = str(metadata.get("task_id") or "")
         if not task_id:
             existing = await self.task_ledger.find_by_owner_run(conversation_id, run_id)
@@ -599,7 +602,7 @@ class CommandExecutor:
                     conversation_id=conversation_id,
                     title=(command or "Command")[:160],
                     detail=command or "",
-                    created_by_run_id=str(metadata.get("parent_run_id") or "") or None,
+                    created_by_run_id=str(run_snapshot.get("created_by_run_id") or "") or None,
                     owner_type=TaskOwnerType.COMMAND,
                     metadata={"origin": "command_notification"},
                 )

@@ -21,8 +21,10 @@ class SQLitePersistence:
         self.blobs_dir.mkdir(parents=True, exist_ok=True)
         self.tmp_dir.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
+            self._repair_run_lifecycle_schema(conn)
             conn.executescript(SCHEMA_SQL)
             self._repair_scoped_tool_call_schema(conn)
+            self._repair_run_lifecycle_schema(conn)
             conn.executescript(SCHEMA_SQL)
 
     def _repair_scoped_tool_call_schema(self, conn: sqlite3.Connection) -> None:
@@ -104,6 +106,18 @@ class SQLitePersistence:
             if len(rows) == 1 and rows[0]["from"] == "tool_call_id" and rows[0]["to"] == "id":
                 return True
         return False
+
+    def _repair_run_lifecycle_schema(self, conn: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(runs)").fetchall()
+        }
+        if not columns:
+            return
+        if "created_by_run_id" not in columns:
+            conn.execute("ALTER TABLE runs ADD COLUMN created_by_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL")
+        if "cancellation_parent_run_id" not in columns:
+            conn.execute("ALTER TABLE runs ADD COLUMN cancellation_parent_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL")
 
     def _copy_common_columns(
         self,

@@ -24,7 +24,8 @@ export interface StreamState {
   targetNodeId: string | null;
   conversationId: string;
   kind: string;
-  parentRunId: string | null;
+  createdByRunId: string | null;
+  cancellationParentRunId: string | null;
   summary: string;
   metadata: Record<string, unknown>;
   workflowEvents: WorkflowEventState[];
@@ -359,7 +360,8 @@ export class StreamManager {
       state.runId,
       state.kind,
       state.status,
-      state.parentRunId ?? '',
+      state.createdByRunId ?? '',
+      state.cancellationParentRunId ?? '',
       state.summary,
       JSON.stringify(state.metadata || {}),
       state.workflowEvents.length,
@@ -514,8 +516,11 @@ export class StreamManager {
     if (chunk.kind) {
       next.kind = String(chunk.kind);
     }
-    if (chunk.parent_run_id !== undefined) {
-      next.parentRunId = chunk.parent_run_id || null;
+    if (chunk.created_by_run_id !== undefined) {
+      next.createdByRunId = chunk.created_by_run_id || null;
+    }
+    if (chunk.cancellation_parent_run_id !== undefined) {
+      next.cancellationParentRunId = chunk.cancellation_parent_run_id || null;
     }
     if (typeof chunk.summary === 'string') {
       next.summary = chunk.summary;
@@ -652,7 +657,8 @@ export class StreamManager {
       targetNodeId: nodeId,
       conversationId,
       kind,
-      parentRunId: null,
+      createdByRunId: null,
+      cancellationParentRunId: null,
       summary: '',
       metadata: {},
       workflowEvents: [],
@@ -688,7 +694,8 @@ export class StreamManager {
       targetNodeId: record.target_node_id ?? null,
       conversationId: record.conversation_id,
       kind: record.kind,
-      parentRunId: record.parent_run_id ?? null,
+      createdByRunId: record.created_by_run_id ?? null,
+      cancellationParentRunId: record.cancellation_parent_run_id ?? null,
       summary: record.summary || '',
       metadata: { ...(record.metadata || {}) },
       workflowEvents: [],
@@ -723,7 +730,8 @@ export class StreamManager {
         errorMessage: restored.errorMessage ?? (typeof record.metadata?.error === 'string' ? record.metadata.error : null),
         abortController: null,
         reasoningActive: false,
-        parentRunId: record.parent_run_id ?? restored.parentRunId ?? null,
+        createdByRunId: record.created_by_run_id ?? restored.createdByRunId ?? null,
+        cancellationParentRunId: record.cancellation_parent_run_id ?? restored.cancellationParentRunId ?? null,
         summary: record.summary || restored.summary || '',
         metadata: {
           ...(record.metadata || {}),

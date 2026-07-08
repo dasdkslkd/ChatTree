@@ -120,7 +120,8 @@ async def _wait_agent_reads_terminal_subagent_result():
     run = await run_manager.create_run(
         conversation_id="conversation-1",
         kind=RunKind.SUBAGENT,
-        parent_run_id="chat-1",
+        created_by_run_id="chat-1",
+        cancellation_parent_run_id=None,
         summary="general: ok",
         metadata={"agent_name": "general"},
     )
@@ -175,7 +176,8 @@ async def _wait_agent_reads_workflow_error_from_repository_events(tmp_path):
     run = await run_manager.create_run(
         conversation_id=conversation_id,
         kind=RunKind.WORKFLOW,
-        parent_run_id=chat_run.run_id,
+        created_by_run_id=chat_run.run_id,
+        cancellation_parent_run_id=None,
         anchor_node_id=node_id,
         summary="Dynamic workflow",
     )

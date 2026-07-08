@@ -128,6 +128,8 @@ def _run_to_active_stream_info(run: Dict[str, Any]) -> Dict[str, Any]:
         "anchor_node_id": run.get("anchor_node_id"),
         "node_id": run.get("target_node_id"),
         "target_node_id": run.get("target_node_id"),
+        "created_by_run_id": run.get("created_by_run_id"),
+        "cancellation_parent_run_id": run.get("cancellation_parent_run_id"),
         "kind": run.get("kind"),
         "status": run.get("status"),
         "event_count": run.get("event_count", 0),

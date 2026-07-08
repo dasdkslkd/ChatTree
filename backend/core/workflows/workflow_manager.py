@@ -39,7 +39,8 @@ class WorkflowManager:
         script: str,
         args: Optional[Dict[str, Any]] = None,
         parent_node_id: Optional[str] = None,
-        parent_run_id: Optional[str] = None,
+        created_by_run_id: Optional[str] = None,
+        cancellation_parent_run_id: Optional[str] = None,
         budget: Optional[Dict[str, Any]] = None,
         permission_mode: Optional[str] = None,
         delegated_task: Any = None,
@@ -59,7 +60,8 @@ class WorkflowManager:
             conversation_id=conversation_id,
             kind=RunKind.WORKFLOW,
             anchor_node_id=parent_node_id,
-            parent_run_id=parent_run_id,
+            created_by_run_id=created_by_run_id,
+            cancellation_parent_run_id=cancellation_parent_run_id,
             summary="Dynamic workflow",
             metadata={
                 "args": args or {},
@@ -78,7 +80,8 @@ class WorkflowManager:
             script=script,
             args=args or {},
             parent_node_id=parent_node_id,
-            parent_run_id=parent_run_id,
+            created_by_run_id=created_by_run_id,
+            cancellation_parent_run_id=cancellation_parent_run_id,
             budget=budget,
             permission_mode=permission_mode,
         ))
@@ -108,7 +111,7 @@ class WorkflowManager:
 
     async def stop(self, run_id: str) -> bool:
         requested = await self.run_manager.request_stop(run_id)
-        for child in self.run_manager.list_active_children(parent_run_id=run_id):
+        for child in self.run_manager.list_active_cancellation_children(cancellation_parent_run_id=run_id):
             if child.get("kind") in {RunKind.SUBAGENT.value, RunKind.WORKFLOW_STEP.value}:
                 await self.subagent_executor.stop(str(child["run_id"]))
         task = self._tasks.get(run_id)
@@ -125,7 +128,8 @@ class WorkflowManager:
         script: str,
         args: Dict[str, Any],
         parent_node_id: Optional[str],
-        parent_run_id: Optional[str],
+        created_by_run_id: Optional[str],
+        cancellation_parent_run_id: Optional[str],
         budget: Dict[str, Any],
         permission_mode: Optional[str] = None,
     ) -> None:

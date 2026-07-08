@@ -408,7 +408,8 @@ def _create_legacy_tool_call_schema(db_path: Path):
               conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
               kind TEXT NOT NULL,
               status TEXT NOT NULL,
-              parent_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+              created_by_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+              cancellation_parent_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
               anchor_node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL,
               target_node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL,
               summary TEXT NOT NULL DEFAULT '',
@@ -418,7 +419,8 @@ def _create_legacy_tool_call_schema(db_path: Path):
               updated_at INTEGER NOT NULL,
               finished_at INTEGER,
               UNIQUE(conversation_id, id),
-              FOREIGN KEY (conversation_id, parent_run_id) REFERENCES runs(conversation_id, id),
+              FOREIGN KEY (conversation_id, created_by_run_id) REFERENCES runs(conversation_id, id),
+              FOREIGN KEY (conversation_id, cancellation_parent_run_id) REFERENCES runs(conversation_id, id),
               FOREIGN KEY (conversation_id, anchor_node_id) REFERENCES nodes(conversation_id, id),
               FOREIGN KEY (conversation_id, target_node_id) REFERENCES nodes(conversation_id, id)
             );
@@ -508,6 +510,112 @@ def _create_legacy_tool_call_schema(db_path: Path):
             );
             """
         )
+
+
+def _create_legacy_run_lifecycle_schema(db_path: Path):
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.executescript(
+            """
+            CREATE TABLE conversations (
+              id TEXT PRIMARY KEY,
+              title TEXT NOT NULL,
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE nodes (
+              id TEXT PRIMARY KEY,
+              conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+              parent_id TEXT REFERENCES nodes(id) ON DELETE CASCADE,
+              child_order INTEGER NOT NULL DEFAULT 0,
+              depth INTEGER NOT NULL DEFAULT 0,
+              status TEXT NOT NULL DEFAULT 'complete',
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL,
+              UNIQUE(conversation_id, id),
+              FOREIGN KEY (conversation_id, parent_id) REFERENCES nodes(conversation_id, id)
+            );
+
+            CREATE TABLE runs (
+              id TEXT PRIMARY KEY,
+              conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+              kind TEXT NOT NULL,
+              status TEXT NOT NULL,
+              parent_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+              anchor_node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL,
+              target_node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL,
+              summary TEXT NOT NULL DEFAULT '',
+              metadata_json TEXT,
+              event_count INTEGER NOT NULL DEFAULT 0,
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL,
+              finished_at INTEGER,
+              UNIQUE(conversation_id, id),
+              FOREIGN KEY (conversation_id, parent_run_id) REFERENCES runs(conversation_id, id),
+              FOREIGN KEY (conversation_id, anchor_node_id) REFERENCES nodes(conversation_id, id),
+              FOREIGN KEY (conversation_id, target_node_id) REFERENCES nodes(conversation_id, id)
+            );
+
+            INSERT INTO conversations (id, title, created_at, updated_at)
+            VALUES ('legacy-conversation', 'Legacy', 1, 1);
+            INSERT INTO nodes (id, conversation_id, created_at, updated_at)
+            VALUES ('legacy-node', 'legacy-conversation', 1, 1);
+            INSERT INTO runs (
+              id,
+              conversation_id,
+              kind,
+              status,
+              anchor_node_id,
+              summary,
+              created_at,
+              updated_at
+            )
+            VALUES (
+              'legacy-run',
+              'legacy-conversation',
+              'chat',
+              'completed',
+              'legacy-node',
+              'legacy run',
+              1,
+              1
+            );
+            """
+        )
+
+
+def test_initialize_migrates_legacy_run_lifecycle_before_indexes(tmp_path: Path):
+    persistence = SQLitePersistence(tmp_path)
+    _create_legacy_run_lifecycle_schema(persistence.db_path)
+
+    persistence.initialize()
+
+    with persistence.connect() as conn:
+        run_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(runs)").fetchall()
+        }
+        assert "created_by_run_id" in run_columns
+        assert "cancellation_parent_run_id" in run_columns
+
+        indexes = {
+            row["name"]
+            for row in conn.execute("PRAGMA index_list(runs)").fetchall()
+        }
+        assert "idx_runs_created_by" in indexes
+        assert "idx_runs_cancellation_parent" in indexes
+
+        legacy = conn.execute(
+            """
+            SELECT id, created_by_run_id, cancellation_parent_run_id
+            FROM runs
+            WHERE id = 'legacy-run'
+            """
+        ).fetchone()
+        assert legacy["created_by_run_id"] is None
+        assert legacy["cancellation_parent_run_id"] is None
 
 
 def test_initialize_migrates_legacy_global_tool_call_primary_key(tmp_path: Path):

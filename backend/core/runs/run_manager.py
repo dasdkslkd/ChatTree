@@ -48,7 +48,8 @@ class RunManager:
         kind: RunKind | str,
         anchor_node_id: Optional[str] = None,
         target_node_id: Optional[str] = None,
-        parent_run_id: Optional[str] = None,
+        created_by_run_id: Optional[str] = None,
+        cancellation_parent_run_id: Optional[str] = None,
         summary: str = "",
         metadata: Optional[Dict[str, Any]] = None,
     ) -> RunRecord:
@@ -71,7 +72,8 @@ class RunManager:
                     kind=run_kind.value,
                     anchor_node_id=anchor_node_id,
                     target_node_id=target_node_id,
-                    parent_run_id=parent_run_id,
+                    created_by_run_id=created_by_run_id,
+                    cancellation_parent_run_id=cancellation_parent_run_id,
                     summary=summary,
                     metadata=metadata,
                 )
@@ -89,7 +91,8 @@ class RunManager:
                 status=RunStatus.RUNNING,
                 anchor_node_id=anchor_node_id,
                 target_node_id=target_node_id,
-                parent_run_id=parent_run_id,
+                created_by_run_id=created_by_run_id,
+                cancellation_parent_run_id=cancellation_parent_run_id,
                 summary=summary,
                 metadata=dict(metadata or {}),
                 created_at=created_at,
@@ -109,19 +112,20 @@ class RunManager:
             "status": record.status.value,
             "anchor_node_id": anchor_node_id,
             "target_node_id": target_node_id,
-            "parent_run_id": parent_run_id,
+            "created_by_run_id": created_by_run_id,
+            "cancellation_parent_run_id": cancellation_parent_run_id,
             "summary": summary,
             "metadata": record.metadata,
             "created_at": record.created_at,
         })
-        if parent_run_id:
-            await self._append_child_started_event(parent_run_id, record)
+        if created_by_run_id:
+            await self._append_child_started_event(created_by_run_id, record)
         return record
 
-    async def _append_child_started_event(self, parent_run_id: str, child: RunRecord) -> None:
-        if not self.get_run(parent_run_id):
+    async def _append_child_started_event(self, created_by_run_id: str, child: RunRecord) -> None:
+        if not self.get_run(created_by_run_id):
             return
-        await self.append_event(parent_run_id, {
+        await self.append_event(created_by_run_id, {
             "type": "child_run_started",
             "event_type": "child_run_started",
             "status": "content",
@@ -135,7 +139,8 @@ class RunManager:
                 "kind": child.kind.value,
                 "status": child.status.value,
                 "summary": child.summary,
-                "parent_run_id": parent_run_id,
+                "created_by_run_id": created_by_run_id,
+                "cancellation_parent_run_id": child.cancellation_parent_run_id,
                 "anchor_node_id": child.anchor_node_id,
                 "target_node_id": child.target_node_id,
                 "metadata": dict(child.metadata or {}),
@@ -169,6 +174,28 @@ class RunManager:
             "type": "run_target_bound",
             "run_id": run_id,
             "target_node_id": target_node_id,
+        })
+        return snapshot
+
+    async def update_cancellation_parent(
+        self,
+        run_id: str,
+        cancellation_parent_run_id: Optional[str],
+    ) -> RunRecord:
+        async with self._lock:
+            record = self._require_run_locked(run_id)
+            if record.cancellation_parent_run_id == cancellation_parent_run_id:
+                return deepcopy(record)
+            persisted: Optional[Dict[str, Any]] = None
+            if self.repository and hasattr(self.repository, "update_cancellation_parent"):
+                persisted = self.repository.update_cancellation_parent(run_id, cancellation_parent_run_id)
+            record.cancellation_parent_run_id = cancellation_parent_run_id
+            record.updated_at = float((persisted or {}).get("updated_at") or time())
+            snapshot = deepcopy(record)
+        await self.append_event(run_id, {
+            "type": "run_cancellation_parent_updated",
+            "run_id": run_id,
+            "cancellation_parent_run_id": cancellation_parent_run_id,
         })
         return snapshot
 
@@ -489,10 +516,10 @@ class RunManager:
             and (conversation_id is None or record.conversation_id == conversation_id)
         ]
 
-    def list_active_children(
+    def list_active_cancellation_children(
         self,
         *,
-        parent_run_id: str,
+        cancellation_parent_run_id: str,
         conversation_id: Optional[str] = None,
     ) -> list[Dict[str, Any]]:
         if self.repository and hasattr(self.repository, "list_active"):
@@ -502,13 +529,13 @@ class RunManager:
                     self._normalize_repository_run(item)
                     for item in self.repository.list_active(conversation_id)
                 )
-                if run.get("parent_run_id") == parent_run_id
+                if run.get("cancellation_parent_run_id") == cancellation_parent_run_id
             ]
         return [
             record.to_dict()
             for record in self._runs.values()
             if record.status not in FINISHED_RUN_STATUSES
-            and record.parent_run_id == parent_run_id
+            and record.cancellation_parent_run_id == cancellation_parent_run_id
             and (conversation_id is None or record.conversation_id == conversation_id)
         ]
 
@@ -692,7 +719,8 @@ class RunManager:
                 status=status,
                 anchor_node_id=run.get("anchor_node_id"),
                 target_node_id=run.get("target_node_id"),
-                parent_run_id=run.get("parent_run_id"),
+                created_by_run_id=run.get("created_by_run_id"),
+                cancellation_parent_run_id=run.get("cancellation_parent_run_id"),
                 summary=str(run.get("summary") or ""),
                 event_count=int(run.get("event_count") or 0),
                 metadata=dict(run.get("metadata") or {}),
@@ -733,5 +761,7 @@ class RunManager:
         data["run_id"] = str(data.get("run_id") or data.get("id"))
         data["kind"] = str(data.get("kind") or RunKind.CHAT.value)
         data["status"] = str(data.get("status") or RunStatus.RUNNING.value)
+        data["created_by_run_id"] = data.get("created_by_run_id") or None
+        data["cancellation_parent_run_id"] = data.get("cancellation_parent_run_id") or None
         data["metadata"] = dict(data.get("metadata") or {})
         return data

@@ -141,7 +141,8 @@ CREATE TABLE IF NOT EXISTS runs (
   conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   kind TEXT NOT NULL,
   status TEXT NOT NULL,
-  parent_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  created_by_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  cancellation_parent_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
   anchor_node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL,
   target_node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL,
   summary TEXT NOT NULL DEFAULT '',
@@ -151,7 +152,9 @@ CREATE TABLE IF NOT EXISTS runs (
   updated_at INTEGER NOT NULL,
   finished_at INTEGER,
   UNIQUE(conversation_id, id),
-  FOREIGN KEY (conversation_id, parent_run_id)
+  FOREIGN KEY (conversation_id, created_by_run_id)
+    REFERENCES runs(conversation_id, id),
+  FOREIGN KEY (conversation_id, cancellation_parent_run_id)
     REFERENCES runs(conversation_id, id),
   FOREIGN KEY (conversation_id, anchor_node_id)
     REFERENCES nodes(conversation_id, id),
@@ -178,6 +181,10 @@ CREATE INDEX IF NOT EXISTS idx_runs_target_node
   ON runs(target_node_id);
 CREATE INDEX IF NOT EXISTS idx_runs_anchor_node
   ON runs(anchor_node_id);
+CREATE INDEX IF NOT EXISTS idx_runs_created_by
+  ON runs(created_by_run_id);
+CREATE INDEX IF NOT EXISTS idx_runs_cancellation_parent
+  ON runs(cancellation_parent_run_id);
 CREATE INDEX IF NOT EXISTS idx_run_events_run_index
   ON run_events(run_id, event_index);
 

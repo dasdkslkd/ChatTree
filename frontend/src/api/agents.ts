@@ -4,7 +4,8 @@ import type { RunRecord } from '../types/run';
 export interface StartSubagentRequest {
   input: unknown;
   parent_node_id?: string | null;
-  parent_run_id?: string | null;
+  created_by_run_id?: string | null;
+  cancellation_parent_run_id?: string | null;
   provider_id?: string | null;
   model_id?: string | null;
   permission_mode?: string | null;

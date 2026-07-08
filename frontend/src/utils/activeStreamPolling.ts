@@ -33,5 +33,7 @@ export function shouldProbeBackendScheduledFollowup(options: {
 export function shouldProbeTaskNotificationDelivery(options: {
   finishStatus: 'completed' | 'error' | 'stopped';
 }): boolean {
-  return options.finishStatus === 'completed';
+  return options.finishStatus === 'completed'
+    || options.finishStatus === 'error'
+    || options.finishStatus === 'stopped';
 }

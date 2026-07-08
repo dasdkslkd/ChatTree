@@ -43,7 +43,8 @@ class SubagentExecutor:
         agent_name: str,
         input_data: Any,
         parent_node_id: Optional[str] = None,
-        parent_run_id: Optional[str] = None,
+        created_by_run_id: Optional[str] = None,
+        cancellation_parent_run_id: Optional[str] = None,
         provider_id: Optional[str] = None,
         model_id: Optional[str] = None,
         permission_mode: Optional[str] = None,
@@ -65,7 +66,8 @@ class SubagentExecutor:
             conversation_id=conversation_id,
             kind=RunKind.SUBAGENT,
             anchor_node_id=parent_node_id,
-            parent_run_id=parent_run_id,
+            created_by_run_id=created_by_run_id,
+            cancellation_parent_run_id=cancellation_parent_run_id,
             summary=summary,
             metadata={
                 "agent_name": agent.name,
@@ -86,7 +88,8 @@ class SubagentExecutor:
             agent_name=agent_name,
             input_data=input_data,
             parent_node_id=parent_node_id,
-            parent_run_id=parent_run_id,
+            created_by_run_id=created_by_run_id,
+            cancellation_parent_run_id=cancellation_parent_run_id,
             provider_id=provider_id,
             model_id=model_id,
             permission_mode=permission_mode,
@@ -103,10 +106,10 @@ class SubagentExecutor:
         metadata = dict(run.get("metadata") or {})
         if str(metadata.get("delivery_policy") or "auto") == "silent":
             return
-        parent_run_id = run.get("parent_run_id")
-        parent_run = self.run_manager.get_run(str(parent_run_id)) if parent_run_id else None
+        created_by_run_id = run.get("created_by_run_id")
+        parent_run = self.run_manager.get_run(str(created_by_run_id)) if created_by_run_id else None
         parent_kind = str((parent_run or {}).get("kind") or "")
-        if parent_run_id and (
+        if created_by_run_id and (
             parent_kind in {RunKind.WORKFLOW.value, RunKind.WORKFLOW_STEP.value}
             or agent_name == "workflow-worker"
         ):
@@ -147,7 +150,8 @@ class SubagentExecutor:
         agent_name: str,
         input_data: Any,
         parent_node_id: Optional[str],
-        parent_run_id: Optional[str],
+        created_by_run_id: Optional[str],
+        cancellation_parent_run_id: Optional[str],
         provider_id: Optional[str],
         model_id: Optional[str],
         permission_mode: Optional[str],
@@ -396,8 +400,6 @@ class SubagentExecutor:
                     await approval_events.put(event)
 
                 execute_task = asyncio.create_task(
-                    # Use the persisted run snapshot here because _produce_inner
-                    # does not receive parent_run_id directly.
                     self.chat_manager._execute_tool_calls(
                         round_tool_calls,
                         node_id=tool_node_id,
@@ -408,7 +410,8 @@ class SubagentExecutor:
                         run_context={
                             "run_id": run_id,
                             "run_kind": RunKind.SUBAGENT.value,
-                            "parent_run_id": run_snapshot.get("parent_run_id"),
+                            "created_by_run_id": run_snapshot.get("created_by_run_id"),
+                            "cancellation_parent_run_id": run_snapshot.get("cancellation_parent_run_id"),
                             "root_run_id": run_metadata.get("root_run_id") or run_id,
                             "conversation_id": conversation_id,
                             "anchor_node_id": tool_node_id,
@@ -706,11 +709,11 @@ class SubagentExecutor:
         delivery_policy = str(metadata.get("delivery_policy") or "auto")
         if delivery_policy == "silent":
             return None
-        parent_run_id = run.get("parent_run_id")
-        parent_run = self.run_manager.get_run(str(parent_run_id)) if parent_run_id else None
+        created_by_run_id = run.get("created_by_run_id")
+        parent_run = self.run_manager.get_run(str(created_by_run_id)) if created_by_run_id else None
         parent_kind = str((parent_run or {}).get("kind") or "")
         agent_name = str(metadata.get("agent_name") or event_payload.get("agent_name") or "")
-        if parent_run_id and (
+        if created_by_run_id and (
             parent_kind in {RunKind.WORKFLOW.value, RunKind.WORKFLOW_STEP.value}
             or agent_name == "workflow-worker"
         ):

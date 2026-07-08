@@ -80,8 +80,8 @@ function testTaskNotificationDeliveryUsesFastPostFinishProbe() {
   assert.equal(TASK_NOTIFICATION_DELIVERY_POLL_MS <= 250, true);
   assert.equal(TASK_NOTIFICATION_DELIVERY_LOOKUPS >= 8, true);
   assert.equal(shouldProbeTaskNotificationDelivery({ finishStatus: 'completed' }), true);
-  assert.equal(shouldProbeTaskNotificationDelivery({ finishStatus: 'error' }), false);
-  assert.equal(shouldProbeTaskNotificationDelivery({ finishStatus: 'stopped' }), false);
+  assert.equal(shouldProbeTaskNotificationDelivery({ finishStatus: 'error' }), true);
+  assert.equal(shouldProbeTaskNotificationDelivery({ finishStatus: 'stopped' }), true);
 }
 
 function main() {

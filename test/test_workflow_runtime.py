@@ -132,7 +132,8 @@ def test_wait_agent_reads_completed_workflow_result():
                 record = await run_manager.create_run(
                     conversation_id=kwargs["conversation_id"],
                     kind=RunKind.SUBAGENT,
-                    parent_run_id=kwargs.get("parent_run_id"),
+                    created_by_run_id=kwargs.get("created_by_run_id"),
+                    cancellation_parent_run_id=kwargs.get("cancellation_parent_run_id"),
                     anchor_node_id=kwargs.get("parent_node_id"),
                     summary=str(kwargs.get("input_data") or "")[:80],
                     metadata={"agent_name": kwargs.get("agent_name")},
@@ -185,7 +186,8 @@ export default async function workflow(ctx) {
 }
 """,
             parent_node_id="node-1",
-            parent_run_id=chat_run.run_id,
+            created_by_run_id=chat_run.run_id,
+            cancellation_parent_run_id=None,
             delivery_policy="silent",
         )
 

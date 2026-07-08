@@ -68,6 +68,25 @@ class MemoryNotificationRepository:
                 return dict(item)
         raise KeyError(notification_id)
 
+    def mark_delivery_failed(self, notification_id, *, delivered_run_id, delivered_node_id, error):
+        for item in self.items.values():
+            if item["id"] == notification_id:
+                item["status"] = "delivery_failed"
+                item["delivered_run_id"] = delivered_run_id
+                item["delivered_node_id"] = delivered_node_id
+                item["delivery_error"] = error
+                return dict(item)
+        raise KeyError(notification_id)
+
+    def mark_delivery_cancelled(self, notification_id, *, delivered_run_id, delivered_node_id):
+        for item in self.items.values():
+            if item["id"] == notification_id:
+                item["status"] = "delivery_cancelled"
+                item["delivered_run_id"] = delivered_run_id
+                item["delivered_node_id"] = delivered_node_id
+                return dict(item)
+        raise KeyError(notification_id)
+
     def list_bound_for_node(self, conversation_id, node_id):
         return [
             dict(item)
@@ -225,5 +244,123 @@ def test_bound_notification_focuses_only_when_delivery_node_is_current():
         )
         await asyncio.sleep(0)
         assert chat_manager.calls[-1]["focus_new_node"] is True
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_source_run_still_delivers_bound_notification():
+    class FakeChatManager:
+        def __init__(self):
+            self._active_controllers = {}
+
+        def get_conversation(self, conversation_id):
+            class FakeConversation:
+                current_node_id = "node-other"
+                nodes = {"node-1": {}, "node-other": {}}
+            return FakeConversation()
+
+        async def send_message_stream(self, **kwargs):
+            yield StreamChunk(
+                status=StreamStatus.START,
+                content="",
+                node_id="notify-node",
+                conversation_id=kwargs["conversation_id"],
+                run_id=kwargs["run_id"],
+            )
+            yield StreamChunk(
+                status=StreamStatus.COMPLETE,
+                content="cancelled source noted",
+                node_id="notify-node",
+                conversation_id=kwargs["conversation_id"],
+                run_id=kwargs["run_id"],
+            )
+
+    async def scenario():
+        repository = MemoryNotificationRepository()
+        run_manager = RunManager()
+        service = TaskNotificationService(
+            repository=repository,
+            run_manager=run_manager,
+            chat_manager=FakeChatManager(),
+        )
+        source = await run_manager.create_run(
+            conversation_id="conv-1",
+            kind=RunKind.COMMAND,
+            anchor_node_id="node-1",
+            summary="command",
+        )
+        notification = await service.register_run_notification(
+            run_id=source.run_id,
+            summary="Command running",
+        )
+        await service.bind(
+            notification_id=notification["id"],
+            delivery_node_id="node-1",
+            trigger=False,
+        )
+        await run_manager.finish_run(source.run_id, RunStatus.CANCELLED, "user stop")
+        await service.try_deliver(notification["id"])
+        await asyncio.sleep(0)
+
+        assert repository.items[source.run_id]["status"] == "delivered"
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_notification_delivery_is_not_marked_delivered():
+    class FakeChatManager:
+        def __init__(self):
+            self._active_controllers = {}
+
+        def get_conversation(self, conversation_id):
+            class FakeConversation:
+                current_node_id = "node-1"
+                nodes = {"node-1": {}}
+            return FakeConversation()
+
+        async def send_message_stream(self, **kwargs):
+            yield StreamChunk(
+                status=StreamStatus.START,
+                content="",
+                node_id="notify-node",
+                conversation_id=kwargs["conversation_id"],
+                run_id=kwargs["run_id"],
+            )
+            yield StreamChunk(
+                status=StreamStatus.STOPPED,
+                content="",
+                node_id="notify-node",
+                conversation_id=kwargs["conversation_id"],
+                run_id=kwargs["run_id"],
+            )
+
+    async def scenario():
+        repository = MemoryNotificationRepository()
+        run_manager = RunManager()
+        service = TaskNotificationService(
+            repository=repository,
+            run_manager=run_manager,
+            chat_manager=FakeChatManager(),
+        )
+        source = await run_manager.create_run(
+            conversation_id="conv-1",
+            kind=RunKind.COMMAND,
+            anchor_node_id="node-1",
+            summary="command",
+        )
+        await run_manager.finish_run(source.run_id, RunStatus.COMPLETED)
+        notification = await service.publish_run_notification(
+            run_id=source.run_id,
+            source_status="completed",
+            summary="Command completed",
+            content="done",
+        )
+        await service.bind(
+            notification_id=notification["id"],
+            delivery_node_id="node-1",
+        )
+        await asyncio.sleep(0)
+
+        assert repository.items[source.run_id]["status"] == "delivery_cancelled"
 
     asyncio.run(scenario())

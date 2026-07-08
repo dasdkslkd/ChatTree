@@ -19,7 +19,8 @@ class WorkflowStartRequest(BaseModel):
     script: str
     args: Dict[str, Any] = {}
     parent_node_id: Optional[str] = None
-    parent_run_id: Optional[str] = None
+    created_by_run_id: Optional[str] = None
+    cancellation_parent_run_id: Optional[str] = None
     budget: Optional[Dict[str, Any]] = None
 
 
@@ -46,7 +47,8 @@ async def start_workflow(
             script=request.script,
             args=request.args,
             parent_node_id=request.parent_node_id,
-            parent_run_id=request.parent_run_id,
+            created_by_run_id=request.created_by_run_id,
+            cancellation_parent_run_id=request.cancellation_parent_run_id,
             budget=request.budget,
         )
     except Exception as exc:

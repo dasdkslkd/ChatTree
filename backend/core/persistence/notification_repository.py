@@ -68,7 +68,7 @@ class SQLiteTaskNotificationRepository:
                 )
             else:
                 notification_id = existing["id"]
-                if existing["status"] not in {"observed", "deleted", "delivered", "delivering"}:
+                if existing["status"] not in {"observed", "deleted", "delivered", "delivering", "delivery_failed", "delivery_cancelled"}:
                     conn.execute(
                         """
                         UPDATE task_notifications
@@ -209,6 +209,35 @@ class SQLiteTaskNotificationRepository:
         return self._update(
             notification_id,
             status="delivered",
+            delivered_run_id=delivered_run_id,
+            delivered_node_id=delivered_node_id,
+        )
+
+    def mark_delivery_failed(
+        self,
+        notification_id: str,
+        *,
+        delivered_run_id: str | None = None,
+        delivered_node_id: str | None = None,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        return self._update(
+            notification_id,
+            status="delivery_failed",
+            delivered_run_id=delivered_run_id,
+            delivered_node_id=delivered_node_id,
+        )
+
+    def mark_delivery_cancelled(
+        self,
+        notification_id: str,
+        *,
+        delivered_run_id: str | None = None,
+        delivered_node_id: str | None = None,
+    ) -> dict[str, Any]:
+        return self._update(
+            notification_id,
+            status="delivery_cancelled",
             delivered_run_id=delivered_run_id,
             delivered_node_id=delivered_node_id,
         )

@@ -16,7 +16,8 @@ router = APIRouter()
 class StartSubagentRequest(BaseModel):
     input: Any
     parent_node_id: Optional[str] = None
-    parent_run_id: Optional[str] = None
+    created_by_run_id: Optional[str] = None
+    cancellation_parent_run_id: Optional[str] = None
     provider_id: Optional[str] = None
     model_id: Optional[str] = None
     permission_mode: Optional[str] = None
@@ -62,18 +63,18 @@ async def start_agent_run(
         return await agent_runtime.spawn_agent(
             source=AgentSource(
                 conversation_id=conversation_id,
-                run_id=request.parent_run_id or request.parent_node_id or "",
+                run_id=request.created_by_run_id or request.parent_node_id or "",
                 run_kind="chat",
                 anchor_node_id=request.parent_node_id,
-                parent_run_id=request.parent_run_id,
-                root_run_id=request.parent_run_id,
+                root_run_id=request.created_by_run_id,
                 task_summary=task[:160],
             ),
             agent_name=agent_name,
             task=task,
             context_mode="fresh",
             delivery_policy="auto",
-            parent_run_id=request.parent_run_id,
+            created_by_run_id=request.created_by_run_id,
+            cancellation_parent_run_id=request.cancellation_parent_run_id,
             provider_id=request.provider_id,
             model_id=request.model_id,
             permission_mode=request.permission_mode,

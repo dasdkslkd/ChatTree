@@ -100,7 +100,8 @@ class StartBackgroundCommandTool(BaseTool):
             command=command,
             cwd=str(cwd),
             anchor_node_id=str(context.get("anchor_node_id") or context.get("node_id") or "") or None,
-            parent_run_id=str(context.get("run_id") or "") or None,
+            created_by_run_id=str(context.get("run_id") or "") or None,
+            cancellation_parent_run_id=None,
             summary=command[:80],
             timeout_seconds=timeout,
             metadata={

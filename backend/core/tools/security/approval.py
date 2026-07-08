@@ -24,7 +24,8 @@ class ApprovalRequest:
     suggested_actions: List[str]
     run_id: Optional[str] = None
     run_kind: Optional[str] = None
-    parent_run_id: Optional[str] = None
+    created_by_run_id: Optional[str] = None
+    cancellation_parent_run_id: Optional[str] = None
     root_run_id: Optional[str] = None
     agent_name: Optional[str] = None
     task_summary: Optional[str] = None
@@ -49,7 +50,8 @@ class ApprovalRequest:
             "status": self.status,
             "run_id": self.run_id,
             "run_kind": self.run_kind,
-            "parent_run_id": self.parent_run_id,
+            "created_by_run_id": self.created_by_run_id,
+            "cancellation_parent_run_id": self.cancellation_parent_run_id,
             "root_run_id": self.root_run_id,
             "agent_name": self.agent_name,
             "task_summary": self.task_summary,

@@ -205,7 +205,8 @@ def test_tool_manager_preserves_start_workflow_script_argument():
     payload = json.loads(result)
     assert payload["run_id"] == "workflow-1"
     assert fake.kwargs["script"] == "export default async function workflow(ctx) { await ctx.log('hello'); }"
-    assert fake.kwargs["parent_run_id"] == "run-parent"
+    assert fake.kwargs["created_by_run_id"] == "run-parent"
+    assert fake.kwargs["cancellation_parent_run_id"] is None
 
 
 def test_start_subagent_tool_requires_runtime_context():

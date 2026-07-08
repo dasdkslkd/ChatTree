@@ -110,7 +110,8 @@ export interface ToolApprovalPayload {
   tool_name?: string;
   run_id?: string | null;
   run_kind?: string | null;
-  parent_run_id?: string | null;
+  created_by_run_id?: string | null;
+  cancellation_parent_run_id?: string | null;
   root_run_id?: string | null;
   agent_name?: string | null;
   task_summary?: string | null;

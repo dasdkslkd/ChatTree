@@ -39,7 +39,6 @@ class AgentSource:
     run_id: str
     run_kind: str
     anchor_node_id: Optional[str] = None
-    parent_run_id: Optional[str] = None
     root_run_id: Optional[str] = None
     agent_name: Optional[str] = None
     task_summary: str = ""
