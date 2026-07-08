@@ -184,6 +184,24 @@ function appendToolResult(toolInteractions: any[], toolResult: any): any[] {
   return next;
 }
 
+function appendProcessContent(toolInteractions: any[], content: string): any[] {
+  const next = toolInteractions.length > 0
+    ? [...toolInteractions]
+    : [{ assistant: { role: 'assistant', content: '', tool_calls: [] }, tools: [], reasoning: null }];
+  const index = next.length - 1;
+  const interaction = next[index];
+  next[index] = {
+    ...interaction,
+    assistant: {
+      role: 'assistant',
+      ...(interaction.assistant || {}),
+      content: `${interaction.assistant?.content || ''}${content}`,
+      tool_calls: Array.isArray(interaction.assistant?.tool_calls) ? interaction.assistant.tool_calls : [],
+    },
+  };
+  return next;
+}
+
 function mergeApproval(
   pendingApprovals: Record<string, ToolApprovalPayload>,
   approval: ToolApprovalPayload | undefined,
@@ -573,7 +591,10 @@ export class StreamManager {
         next.sideRunNotifications = [...next.sideRunNotifications, notification];
       }
     }
-    if (chunk.content && !isAggregateResultEvent(chunk) && !isCommandEvent(chunk)) {
+    if (chunk.content && chunk.event_type === 'process_content') {
+      next.toolInteractions = appendProcessContent(next.toolInteractions, chunk.content);
+      next.reasoningActive = false;
+    } else if (chunk.content && !isAggregateResultEvent(chunk) && !isCommandEvent(chunk)) {
       next.content += chunk.content;
       next.reasoningActive = false;
     }

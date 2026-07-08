@@ -258,6 +258,49 @@ async function testMergesToolResultIntoExistingInteraction() {
   });
 }
 
+async function testProcessContentStaysWithCurrentToolInteraction() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    messageApi.stream = controlled.stream;
+    const toolCalls = [
+      {
+        id: 'call-1',
+        type: 'function',
+        function: { name: 'create_task', arguments: '{"title":"step 1"}' },
+      },
+      {
+        id: 'call-2',
+        type: 'function',
+        function: { name: 'create_task', arguments: '{"title":"step 2"}' },
+      },
+    ];
+    const results = toolCalls.map((toolCall) => ({
+      tool_call_id: toolCall.id,
+      name: 'create_task',
+      content: '{"ok":true}',
+    }));
+    const running = manager.startStream('conv-1', { content: 'hello' });
+
+    await controlled.push(chunk({ event_type: 'tool_call_start' }));
+    await controlled.push(chunk({ event_type: 'tool_call', tool_calls: toolCalls }));
+    await controlled.push(chunk({ event_type: 'process_content', content: '\n\n' }));
+    await controlled.push(chunk({ event_type: 'tool_result', tool_call: results[0] }));
+    await controlled.push(chunk({ event_type: 'tool_result', tool_call: results[1] }));
+
+    try {
+      const state = manager.getState('conv-1');
+      assert.equal(state.content, '');
+      assert.equal(state.toolInteractions.length, 1);
+      assert.equal(state.toolInteractions[0].assistant.content, '\n\n');
+      assert.deepEqual(state.toolInteractions[0].assistant.tool_calls, toolCalls);
+      assert.equal(state.toolInteractions[0].tools.length, 2);
+    } finally {
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
 async function testToolCallStartFlushesBufferedTextBeforeToolCallCompletes() {
   await withManager(async (manager) => {
     const controlled = createControlledStream();
@@ -1300,6 +1343,7 @@ async function main() {
   await testFlushesReasoningBeforeContentStarts();
   await testFlushesBufferedTextIntoSingleToolCall();
   await testMergesToolResultIntoExistingInteraction();
+  await testProcessContentStaysWithCurrentToolInteraction();
   await testToolCallStartFlushesBufferedTextBeforeToolCallCompletes();
   await testToolCallStartCreatesRunningPlaceholder();
   await testToolCallDeltaUpdatesRunningPlaceholder();
