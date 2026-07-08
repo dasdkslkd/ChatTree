@@ -18,6 +18,7 @@ function testAssistantTimelineModuleExistsAndExportsNormalizers() {
   assert.match(source, /export function normalizePersistedAssistantTimeline/);
   assert.match(source, /export function normalizeLegacyToolInteractions/);
   assert.match(source, /export function createLiveAssistantProcessItem/);
+  assert.match(source, /export function createLiveAssistantTranscriptItems/);
 }
 
 function testNoPlanProposalNormalization() {
@@ -29,9 +30,17 @@ function testNoPlanProposalNormalization() {
 
 function testMainPageDelegatesLiveRenderingToSharedProcessPath() {
   const source = read(mainPagePath);
-  assert.match(source, /createLiveAssistantProcessItem/);
+  assert.match(source, /createLiveAssistantTranscriptItems/);
   assert.doesNotMatch(source, /function renderLiveRunDraftTranscriptItem/);
   assert.doesNotMatch(source, /const renderLiveRunDraftTranscriptItem\s*=/);
+}
+
+function testLiveAssistantTranscriptSplitsProcessAndAnswer() {
+  const source = read(assistantTimelinePath);
+  assert.match(source, /createLiveAssistantTranscriptItems\(run: StreamState\)/);
+  assert.match(source, /createLiveAssistantProcessItem\(run,\s*\{\s*splitAnswer:\s*hasAnswer/);
+  assert.match(source, /type:\s*'assistant_answer'/);
+  assert.match(source, /stream_status:\s*run\.status/);
 }
 
 function testAssistantProcessItemIsThinAdapter() {
@@ -48,6 +57,7 @@ function testSharedTimelineRendererOwnsLiveStyle() {
   assert.match(source, /setProcessExpanded/);
   assert.match(source, /aria-expanded=\{processExpanded\}/);
   assert.match(source, /!props\.streamingFoldState\?\.canFoldProcess && timeline\.length === 0/);
+  assert.match(source, /props\.showStatusLabel === false/);
   assert.doesNotMatch(source, /PlanProposalCard/);
   assert.match(source, /ToolCallGroup/);
   assert.match(source, /getStreamStatusLabel/);
@@ -64,6 +74,7 @@ function testLiveRunsUseProcessedShellBeforeTimelineArrives() {
 testAssistantTimelineModuleExistsAndExportsNormalizers();
 testNoPlanProposalNormalization();
 testMainPageDelegatesLiveRenderingToSharedProcessPath();
+testLiveAssistantTranscriptSplitsProcessAndAnswer();
 testAssistantProcessItemIsThinAdapter();
 testSharedTimelineRendererOwnsLiveStyle();
 testLiveRunsUseProcessedShellBeforeTimelineArrives();

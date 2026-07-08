@@ -60,6 +60,7 @@ export type AssistantProcessRenderProps = {
   pendingUserMessage?: string | null;
   showPendingBubble?: boolean;
   showStreamBlock?: boolean;
+  showStatusLabel?: boolean;
   timeline: AssistantTimelineBlock[];
   streamingFoldState: StreamingTimelineFoldState<AssistantTimelineBlock>;
   activeReasoningKey: string | null;
@@ -349,6 +350,15 @@ export function normalizeLiveAssistantTimeline(run: StreamState): AssistantTimel
   });
 }
 
+function withoutTimelineKeys(
+  timeline: AssistantTimelineBlock[],
+  keys: Iterable<string>,
+): AssistantTimelineBlock[] {
+  const keySet = new Set(keys);
+  if (keySet.size === 0) return timeline;
+  return timeline.filter((block) => !keySet.has(block.key));
+}
+
 export function getActiveReasoningKey(
   timeline: AssistantTimelineBlock[],
   run: Pick<StreamState, 'status' | 'reasoningActive'>,
@@ -363,13 +373,22 @@ export function getActiveReasoningKey(
   return null;
 }
 
-export function createProcessRenderPropsFromRun(run: StreamState): AssistantProcessRenderProps {
-  const timeline = normalizeLiveAssistantTimeline(run);
+export function createProcessRenderPropsFromRun(
+  run: StreamState,
+  options?: {
+    splitAnswer?: boolean;
+  },
+): AssistantProcessRenderProps {
+  const fullTimeline = normalizeLiveAssistantTimeline(run);
   const streamingFoldedContentBlocks = getAssistantFoldedContentBlocks({
     content: run.content,
     reasoning: run.reasoning,
     tool_interactions: run.toolInteractions,
   });
+  const finalContentKeys = streamingFoldedContentBlocks.map((block) => block.key);
+  const timeline = options?.splitAnswer
+    ? withoutTimelineKeys(fullTimeline, finalContentKeys)
+    : fullTimeline;
   const continuationOfNodeId = typeof run.metadata?.continuation_of_node_id === 'string'
     ? run.metadata.continuation_of_node_id
     : run.metadata?.origin === 'plan_approval' || run.metadata?.origin === 'plan_question_answer' || run.metadata?.origin === 'plan_reject' || run.metadata?.origin === 'plan_rejection'
@@ -389,10 +408,11 @@ export function createProcessRenderPropsFromRun(run: StreamState): AssistantProc
     pendingUserMessage: run.pendingUserMessage,
     showPendingBubble: Boolean(run.pendingUserMessage),
     showStreamBlock: run.status !== 'idle',
+    showStatusLabel: options?.splitAnswer ? false : true,
     timeline,
     streamingFoldState: getStreamingTimelineFoldState(
       timeline,
-      streamingFoldedContentBlocks.map((block) => block.key),
+      options?.splitAnswer ? [] : finalContentKeys,
       { allowProcessOnly: true },
     ),
     activeReasoningKey: getActiveReasoningKey(timeline, run),
@@ -403,7 +423,12 @@ export function createProcessRenderPropsFromRun(run: StreamState): AssistantProc
   };
 }
 
-export function createLiveAssistantProcessItem(run: StreamState): TranscriptItem {
+export function createLiveAssistantProcessItem(
+  run: StreamState,
+  options?: {
+    splitAnswer?: boolean;
+  },
+): TranscriptItem {
   const nodeId = run.targetNodeId || run.nodeId || null;
   return {
     id: `live-${run.runId}-process`,
@@ -415,6 +440,32 @@ export function createLiveAssistantProcessItem(run: StreamState): TranscriptItem
     status: run.status,
     visibility: 'main',
     preview: run.content || run.reasoning || run.pendingUserMessage || '',
-    props: createProcessRenderPropsFromRun(run) as unknown as Record<string, unknown>,
+    props: createProcessRenderPropsFromRun(run, options) as unknown as Record<string, unknown>,
   };
+}
+
+export function createLiveAssistantTranscriptItems(run: StreamState): TranscriptItem[] {
+  const hasAnswer = run.content.trim().length > 0;
+  const processItem = createLiveAssistantProcessItem(run, { splitAnswer: hasAnswer });
+  if (!hasAnswer) return [processItem];
+  const processProps = processItem.props as unknown as AssistantProcessRenderProps;
+  const hasProcess = Boolean(processProps.showPendingBubble)
+    || (Array.isArray(processProps.timeline) && processProps.timeline.length > 0);
+  const nodeId = run.targetNodeId || run.nodeId || null;
+  const answerItem: TranscriptItem = {
+    id: `live-${run.runId}-answer`,
+    type: 'assistant_answer',
+    conversation_id: run.conversationId,
+    node_id: nodeId,
+    anchor_node_id: run.anchorNodeId,
+    run_id: run.runId,
+    status: run.status,
+    visibility: 'main',
+    preview: run.content,
+    props: {
+      stream_status: run.status,
+      stream_error_message: run.errorMessage,
+    },
+  };
+  return hasProcess ? [processItem, answerItem] : [answerItem];
 }

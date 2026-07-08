@@ -75,7 +75,7 @@ function testPlanProposalCardUsesTranscriptPlanCallbacks() {
 
 function testMainTranscriptUsesSharedLiveProcessRenderer() {
   const mainPage = fs.readFileSync(path.join(__dirname, '../src/pages/MainPage.tsx'), 'utf8');
-  assert.match(mainPage, /createLiveAssistantProcessItem/);
+  assert.match(mainPage, /createLiveAssistantTranscriptItems/);
   assert.doesNotMatch(mainPage, /renderLiveRunDraftTranscriptItem/);
   assert.doesNotMatch(mainPage, /getLiveRunDraftTranscriptProps/);
 }

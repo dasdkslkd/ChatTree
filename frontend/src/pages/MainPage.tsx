@@ -141,7 +141,7 @@ import {
   getStreamingTimelineFoldState,
   type StreamingTimelineFoldState,
 } from '../utils/assistantTimelineFolding';
-import { createLiveAssistantProcessItem } from '../utils/assistantTimeline';
+import { createLiveAssistantTranscriptItems } from '../utils/assistantTimeline';
 import {
   getActiveStreamPollingDelay,
   getConversationActiveStreamLookupLimit,
@@ -856,8 +856,8 @@ function getSideRunAssistantTimeline(message: {
   return blocks;
 }
 
-function createLiveRunTranscriptItem(run: StreamState): TranscriptItem {
-  return createLiveAssistantProcessItem(run);
+function createLiveRunTranscriptItems(run: StreamState): TranscriptItem[] {
+  return createLiveAssistantTranscriptItems(run);
 }
 
 function ToolCallCard({ item }: { item: ToolRenderItem }) {
@@ -1666,7 +1666,7 @@ export default function ChatPage() {
             nodeId: targetNodeId,
           }));
         }
-        items.push(createLiveRunTranscriptItem(run));
+        items.push(...createLiveRunTranscriptItems(run));
         return {
           runId: run.runId,
           nodeId: run.nodeId,

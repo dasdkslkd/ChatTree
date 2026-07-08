@@ -5,11 +5,15 @@ import { cn } from '@/lib/utils';
 import MarkdownContent from '../../MarkdownContent';
 import type { TranscriptCopyHandler, TranscriptItem } from '../../../types/transcript';
 import { getItemText } from './itemText';
+import { getStreamStatusText } from '../../../utils/generationStatus';
 
 export function AssistantAnswerItem({ item, onCopy }: { item: TranscriptItem; onCopy?: TranscriptCopyHandler }) {
   const [copied, setCopied] = useState(false);
   const text = getItemText(item);
   const compactAfterProcess = item.props?.compact_after_process === true;
+  const streamStatus = typeof item.props?.stream_status === 'string' ? item.props.stream_status : item.status;
+  const streamErrorMessage = typeof item.props?.stream_error_message === 'string' ? item.props.stream_error_message : null;
+  const statusLabel = getStreamStatusText(streamStatus || '', streamErrorMessage);
   if (!text) return null;
 
   const handleCopy = async () => {
@@ -42,6 +46,11 @@ export function AssistantAnswerItem({ item, onCopy }: { item: TranscriptItem; on
             >
               {copied ? <Check className="h-3.5 w-3.5 text-green-500" /> : <Copy className="h-3.5 w-3.5" />}
             </Button>
+          </div>
+        )}
+        {statusLabel && (
+          <div className="mt-1 text-xs text-destructive">
+            {statusLabel}
           </div>
         )}
       </div>

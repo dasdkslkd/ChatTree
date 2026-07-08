@@ -377,8 +377,8 @@ function testMainPageUsesLiveTranscriptOverlayWithSharedProcessRendering() {
 
   assert.doesNotMatch(source, /\bgetAssistantTimeline\b/);
   assert.match(source, /\bgetSideRunAssistantTimeline\b/);
-  assert.match(source, /\bcreateLiveRunTranscriptItem\b/);
-  assert.match(source, /\bcreateLiveAssistantProcessItem\b/);
+  assert.match(source, /\bcreateLiveRunTranscriptItems\b/);
+  assert.match(source, /\bcreateLiveAssistantTranscriptItems\b/);
   assert.match(source, /\bliveMainTranscriptRunOverlays\b/);
   assert.match(source, /\bmergeLiveRunTranscriptItems\b/);
   assert.doesNotMatch(source, /\brenderLiveRunDraftTranscriptItem\b/);
@@ -527,6 +527,17 @@ function testAssistantProcessRendersIntermediateTextButNoCopy() {
   assert.match(assistantAnswer, /aria-label="复制消息"/);
 }
 
+function testStoppedStatusBelongsAfterAssistantAnswerWhenProcessIsCompacted() {
+  const assistantProcessTimeline = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/AssistantProcessTimeline.tsx'), 'utf8');
+  const assistantAnswer = fs.readFileSync(path.join(__dirname, '../src/components/transcript/items/AssistantAnswerItem.tsx'), 'utf8');
+
+  assert.match(assistantProcessTimeline, /props\.compactWithNextAnswer \|\| props\.showStatusLabel === false \? null : getStreamStatusLabel/);
+  assert.match(assistantAnswer, /getStreamStatusText/);
+  assert.match(assistantAnswer, /stream_status/);
+  assert.match(assistantAnswer, /statusLabel &&/);
+  assert.match(assistantAnswer, /text-destructive/);
+}
+
 function testAssistantProcessUsesToolResultOnToolCallTimelineBlocks() {
   const assistantTimeline = fs.readFileSync(path.join(__dirname, '../src/utils/assistantTimeline.ts'), 'utf8');
 
@@ -640,6 +651,7 @@ testPlanQuestionAnswerUsesTranscriptItemPlanIdInsteadOfActivePlanFallback();
 testTranscriptFallbackAndCopySurfacesAreVisible();
 testTranscriptMessageItemsUseLegacyChatBubbleStyling();
 testAssistantProcessRendersIntermediateTextButNoCopy();
+testStoppedStatusBelongsAfterAssistantAnswerWhenProcessIsCompacted();
 testAssistantProcessUsesToolResultOnToolCallTimelineBlocks();
 testStreamStateContentStaysFinalAnswerOnly();
 testPlanApprovalDoesNotRenderControlEvents();

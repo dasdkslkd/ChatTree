@@ -203,7 +203,7 @@ export function AssistantProcessTimeline({
   props: AssistantProcessRenderProps;
 }) {
   const timeline = Array.isArray(props.timeline) ? props.timeline : [];
-  const statusLabel = getStreamStatusLabel(props.status, props.errorMessage);
+  const statusLabel = props.compactWithNextAnswer || props.showStatusLabel === false ? null : getStreamStatusLabel(props.status, props.errorMessage);
   const showPendingBubble = Boolean(props.showPendingBubble && props.pendingUserMessage);
   const showStreamBlock = props.showStreamBlock !== false;
   const [processExpanded, setProcessExpanded] = useState(props.streamingFoldState?.processExpanded ?? true);
