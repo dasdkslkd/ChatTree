@@ -1,6 +1,21 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const ts = require('typescript');
+
+require.extensions['.ts'] = function loadTs(module, filename) {
+  const source = fs.readFileSync(filename, 'utf8');
+  const output = ts.transpileModule(source, {
+    compilerOptions: {
+      module: ts.ModuleKind.CommonJS,
+      target: ts.ScriptTarget.ES2022,
+      esModuleInterop: true,
+      importsNotUsedAsValues: ts.ImportsNotUsedAsValues.Remove,
+    },
+    fileName: filename,
+  }).outputText;
+  module._compile(output, filename);
+};
 
 const assistantTimelinePath = path.join(__dirname, '../src/utils/assistantTimeline.ts');
 const mainPagePath = path.join(__dirname, '../src/pages/MainPage.tsx');
@@ -9,6 +24,30 @@ const processTimelinePath = path.join(__dirname, '../src/components/transcript/i
 
 function read(filePath) {
   return fs.readFileSync(filePath, 'utf8');
+}
+
+function testPersistedTimelineAggregatesAdjacentToolCalls() {
+  const { normalizePersistedAssistantTimeline } = require(assistantTimelinePath);
+  const blocks = normalizePersistedAssistantTimeline([
+    { type: 'reasoning', key: 'reasoning-1', reasoning: 'thinking' },
+    {
+      type: 'tool_call',
+      key: 'call-1',
+      tool_call: { id: 'call-1', function: { name: 'read_file', arguments: '{"path":"a"}' } },
+      tool_result: { tool_call_id: 'call-1', content: 'a' },
+    },
+    {
+      type: 'tool_call',
+      key: 'call-2',
+      tool_call: { id: 'call-2', function: { name: 'write_file', arguments: '{"path":"b"}' } },
+      tool_result: { tool_call_id: 'call-2', content: 'b' },
+    },
+    { type: 'content', key: 'content-1', content: 'done' },
+  ]);
+
+  assert.deepEqual(blocks.map((block) => block.type), ['reasoning', 'tools', 'content']);
+  assert.equal(blocks[1].items.length, 2);
+  assert.deepEqual(blocks[1].items.map((item) => item.name), ['read_file', 'write_file']);
 }
 
 function testAssistantTimelineModuleExistsAndExportsNormalizers() {
@@ -72,6 +111,7 @@ function testLiveRunsUseProcessedShellBeforeTimelineArrives() {
 }
 
 testAssistantTimelineModuleExistsAndExportsNormalizers();
+testPersistedTimelineAggregatesAdjacentToolCalls();
 testNoPlanProposalNormalization();
 testMainPageDelegatesLiveRenderingToSharedProcessPath();
 testLiveAssistantTranscriptSplitsProcessAndAnswer();

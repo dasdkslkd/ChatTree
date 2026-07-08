@@ -174,38 +174,66 @@ function normalizeToolItems(items: unknown[], key: string): ToolRenderItem[] {
 
 export function normalizePersistedAssistantTimeline(rawTimeline: unknown): AssistantTimelineBlock[] {
   const timeline = Array.isArray(rawTimeline) ? rawTimeline : [];
-  return timeline
-    .map((rawBlock, index): AssistantTimelineBlock | null => {
-      const record = asRecord(rawBlock);
-      if (!record) return null;
-      const type = getStringField(record, 'type');
-      const key = getStringField(record, 'key') || `${type || 'timeline'}-${index}`;
+  const blocks: AssistantTimelineBlock[] = [];
+  let pendingToolKey: string | null = null;
+  let pendingToolItems: ToolRenderItem[] = [];
 
-      if (type === 'reasoning') {
-        const reasoning = getStringField(record, 'reasoning') || getStringField(record, 'content');
-        return reasoning.trim() ? { type: 'reasoning', key, reasoning } : null;
-      }
-      if (type === 'marker') {
-        const content = getStringField(record, 'content') || getStringField(record, 'text') || getStringField(record, 'marker');
-        return content.trim() ? { type: 'marker', key, content } : null;
-      }
-      if (type === 'content' || type === 'text') {
-        const content = getStringField(record, 'content') || getStringField(record, 'text');
-        return content.trim() ? { type: 'content', key, content } : null;
-      }
-      if (type === 'tools' && Array.isArray(record.items)) {
-        const items = normalizeToolItems(record.items, key);
-        return items.length > 0 ? { type: 'tools', key, items } : null;
-      }
-      if (type === 'tool_call') {
-        return { type: 'tools', key, items: [makeToolItem(normalizeTimelineToolCall(record), normalizeTimelineToolMessage(record), key)] };
-      }
-      if (type === 'tool_result') {
-        return { type: 'tools', key, items: [makeToolItem(null, normalizeTimelineToolMessage(record), key)] };
-      }
-      return null;
-    })
-    .filter((block): block is AssistantTimelineBlock => Boolean(block));
+  const flushTools = () => {
+    if (pendingToolItems.length === 0) return;
+    blocks.push({
+      type: 'tools',
+      key: pendingToolKey || `tools-${blocks.length}`,
+      items: pendingToolItems,
+    });
+    pendingToolKey = null;
+    pendingToolItems = [];
+  };
+
+  const appendTools = (key: string, items: ToolRenderItem[]) => {
+    if (items.length === 0) return;
+    pendingToolKey = pendingToolKey || key;
+    pendingToolItems.push(...items);
+  };
+
+  timeline.forEach((rawBlock, index) => {
+    const record = asRecord(rawBlock);
+    if (!record) return;
+    const type = getStringField(record, 'type');
+    const key = getStringField(record, 'key') || `${type || 'timeline'}-${index}`;
+
+    if (type === 'tools' && Array.isArray(record.items)) {
+      appendTools(key, normalizeToolItems(record.items, key));
+      return;
+    }
+    if (type === 'tool_call') {
+      appendTools(key, [makeToolItem(normalizeTimelineToolCall(record), normalizeTimelineToolMessage(record), key)]);
+      return;
+    }
+    if (type === 'tool_result') {
+      appendTools(key, [makeToolItem(null, normalizeTimelineToolMessage(record), key)]);
+      return;
+    }
+
+    let block: AssistantTimelineBlock | null = null;
+    if (type === 'reasoning') {
+      const reasoning = getStringField(record, 'reasoning') || getStringField(record, 'content');
+      block = reasoning.trim() ? { type: 'reasoning', key, reasoning } : null;
+    } else if (type === 'marker') {
+      const content = getStringField(record, 'content') || getStringField(record, 'text') || getStringField(record, 'marker');
+      block = content.trim() ? { type: 'marker', key, content } : null;
+    } else if (type === 'content' || type === 'text') {
+      const content = getStringField(record, 'content') || getStringField(record, 'text');
+      block = content.trim() ? { type: 'content', key, content } : null;
+    }
+
+    if (block) {
+      flushTools();
+      blocks.push(block);
+    }
+  });
+
+  flushTools();
+  return blocks;
 }
 
 export function appendAssistantContinuations(
