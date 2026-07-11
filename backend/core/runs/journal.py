@@ -4,12 +4,14 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
+from backend.core.persistence.home import resolve_chattree_home
+
 
 class RunJournal:
     """Append-only UTF-8 run event journal."""
 
-    def __init__(self, root: str | Path = "data/conversations") -> None:
-        self.root = Path(root)
+    def __init__(self, root: str | Path | None = None) -> None:
+        self.root = Path(root) if root is not None else resolve_chattree_home() / "conversations"
 
     def _path_for(self, conversation_id: str, run_id: str) -> Path:
         safe_conversation = conversation_id.replace("/", "_").replace("\\", "_")

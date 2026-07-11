@@ -2,6 +2,7 @@ import os
 import json
 from time import time
 from typing import List, Dict, Any, Optional
+from backend.core.persistence.home import resolve_chattree_home
 from .base import StorageInterface
 from .atomic import atomic_write_json, atomic_write_text
 from ..utils.logger import setup_logger
@@ -9,8 +10,8 @@ from ..utils.logger import setup_logger
 logger = setup_logger('PromptStorage')
 
 class PromptStorage(StorageInterface):
-    def __init__(self, storage_dir: str = "data/prompts"):
-        self.storage_dir = storage_dir
+    def __init__(self, storage_dir: str | None = None):
+        self.storage_dir = str(storage_dir or resolve_chattree_home() / "prompts")
         os.makedirs(self.storage_dir, exist_ok=True)
         self.index_file = os.path.join(self.storage_dir, "index.json")
         self._load_index()

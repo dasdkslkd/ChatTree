@@ -9,28 +9,30 @@ from backend.core.capabilities.plugin_loader import load_plugins_from_roots
 from backend.core.capabilities.registry import CapabilityRegistry
 from backend.core.capabilities.skill_loader import load_skill_roots
 from backend.core.capabilities.types import CapabilitySource
+from backend.core.persistence.home import resolve_chattree_home
 
 
 def build_capability_registry(
     project_root: Path,
     config_data: dict | None = None,
+    capability_home: Path | str | None = None,
 ) -> CapabilityRegistry:
     """Build the read-only capability registry for a project."""
-    root = Path(project_root)
+    home = resolve_chattree_home(capability_home)
     capabilities_config = _capabilities_config(config_data)
     skill_roots = _roots_from_config(
-        root,
-        [root / ".chattree" / "skills"],
+        home,
+        [home / "skills"],
         capabilities_config.get("skill_roots"),
     )
     agent_roots = _roots_from_config(
-        root,
-        [root / ".chattree" / "agents"],
+        home,
+        [home / "agents"],
         capabilities_config.get("agent_roots"),
     )
     plugin_roots = _roots_from_config(
-        root,
-        [root / ".chattree" / "plugins"],
+        home,
+        [home / "plugins"],
         capabilities_config.get("plugin_roots"),
     )
 

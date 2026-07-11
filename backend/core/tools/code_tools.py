@@ -18,6 +18,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from .base import BaseTool
 from .security.logical_sandbox import DEFAULT_PROTECTED_PATHS
 from .task_contract import task_step_parameter_schema
+from ..persistence.home import resolve_chattree_home
 from ..runs.types import FINISHED_RUN_STATUSES
 from ..shell_profile import ShellProfileResolver, render_command_tool_guidance
 
@@ -33,7 +34,7 @@ def _project_root() -> Path:
 
 
 def _default_ripgrep_install_dir() -> Path:
-    return _project_root() / "data" / "tools" / "ripgrep"
+    return resolve_chattree_home() / "tools" / "ripgrep"
 
 
 class CodeToolError(ValueError):
@@ -152,7 +153,7 @@ class CodeToolConfig:
         )
         ripgrep_install_path = Path(str(ripgrep_install_dir)).expanduser()
         if not ripgrep_install_path.is_absolute():
-            ripgrep_install_path = _project_root() / ripgrep_install_path
+            ripgrep_install_path = resolve_chattree_home() / ripgrep_install_path
         return cls(
             workspace_roots=[Path(root).expanduser().resolve() for root in roots],
             protected_paths=[Path(path) for path in protected],

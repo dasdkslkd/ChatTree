@@ -55,32 +55,33 @@ def write_manifest(plugin_root: Path, manifest: dict) -> Path:
 
 def test_build_capability_registry_loads_project_configured_and_active_plugin_capabilities(tmp_path):
     project_root = tmp_path / "project"
+    capability_home = tmp_path / "home" / ".chattree"
     default_skill = write_skill(
-        project_root / ".chattree" / "skills",
+        capability_home / "skills",
         "project-skill",
         "project-skill",
         "Project skill",
     )
     default_agent = write_agent(
-        project_root / ".chattree" / "agents",
+        capability_home / "agents",
         "project-agent",
         "project-agent",
         "Project agent",
     )
     extra_skill = write_skill(
-        project_root / "extra" / "skills",
+        capability_home / "extra" / "skills",
         "extra-skill",
         "extra-skill",
         "Extra skill",
     )
     extra_agent = write_agent(
-        project_root / "extra" / "agents",
+        capability_home / "extra" / "agents",
         "extra-agent",
         "extra-agent",
         "Extra agent",
     )
 
-    plugin_root = project_root / ".chattree" / "plugins" / "demo-plugin"
+    plugin_root = capability_home / "plugins" / "demo-plugin"
     plugin_skill = write_skill(
         plugin_root / "skills",
         "review",
@@ -103,7 +104,7 @@ def test_build_capability_registry_loads_project_configured_and_active_plugin_ca
             },
         },
     )
-    disabled_root = project_root / ".chattree" / "plugins" / "disabled-plugin"
+    disabled_root = capability_home / "plugins" / "disabled-plugin"
     write_skill(disabled_root / "skills", "ignored", "ignored", "Ignored skill")
     write_manifest(disabled_root, {"enabled": False, "paths": {"skills": "skills"}})
 
@@ -112,9 +113,10 @@ def test_build_capability_registry_loads_project_configured_and_active_plugin_ca
         {
             "capabilities": {
                 "skill_roots": "extra/skills",
-                "agent_roots": [project_root / "extra" / "agents"],
+                "agent_roots": [capability_home / "extra" / "agents"],
             },
         },
+        capability_home=capability_home,
     )
 
     inventory = registry.inventory()
@@ -138,13 +140,14 @@ def test_build_capability_registry_loads_project_configured_and_active_plugin_ca
 
 def test_capabilities_api_returns_inventory_and_summary(tmp_path):
     project_root = tmp_path / "project"
+    capability_home = tmp_path / "home" / ".chattree"
     write_skill(
-        project_root / ".chattree" / "skills",
+        capability_home / "skills",
         "project-skill",
         "project-skill",
         "Project skill",
     )
-    registry = build_capability_registry(project_root)
+    registry = build_capability_registry(project_root, capability_home=capability_home)
     app = FastAPI()
     app.state.capability_registry = registry
     app.include_router(router)
@@ -179,8 +182,10 @@ def test_capabilities_reload_rebuilds_registry_from_disk(tmp_path, monkeypatch):
         pass
 
     project_root = tmp_path / "project"
+    capability_home = tmp_path / "home" / ".chattree"
+    monkeypatch.setenv("CHATTREE_HOME", str(capability_home))
     write_skill(
-        project_root / ".chattree" / "skills",
+        capability_home / "skills",
         "initial-skill",
         "initial-skill",
         "Initial skill",
@@ -188,7 +193,11 @@ def test_capabilities_reload_rebuilds_registry_from_disk(tmp_path, monkeypatch):
     config_manager = Config(str(tmp_path / "config.json"))
     config_manager.data = {"provider": {}, "default_provider": "", "tools": {}}
     config_manager.save()
-    registry = build_capability_registry(project_root, config_manager.data)
+    registry = build_capability_registry(
+        project_root,
+        config_manager.data,
+        capability_home=capability_home,
+    )
     old_tool_manager = FakeToolManager(config_manager.data)
     chat_manager = SimpleNamespace(
         model_manager=object(),
@@ -207,7 +216,7 @@ def test_capabilities_reload_rebuilds_registry_from_disk(tmp_path, monkeypatch):
     client = TestClient(app)
 
     write_skill(
-        project_root / ".chattree" / "skills",
+        capability_home / "skills",
         "new-skill",
         "new-skill",
         "New skill",

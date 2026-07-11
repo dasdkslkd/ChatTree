@@ -36,3 +36,14 @@ def test_main_wires_legacy_file_stores_under_persistence_home():
     assert 'PromptStorage(str(persistence.home / "prompts"))' in main_source
     assert 'ToolResultStorage(\n        str(persistence.home / "tool_results")' in main_source
     assert "run_repository.mark_unfinished_as_interrupted()" in main_source
+
+
+def test_default_config_uses_chattree_home(monkeypatch, tmp_path):
+    from backend.core.config.config import Config
+
+    configured_home = tmp_path / "home"
+    monkeypatch.setenv("CHATTREE_HOME", str(configured_home))
+
+    config = Config()
+
+    assert Path(config.config_path) == configured_home / "config.json"

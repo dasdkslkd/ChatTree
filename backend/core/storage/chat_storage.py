@@ -2,6 +2,7 @@
 import os
 import json
 from typing import List, Dict, Any, Optional
+from backend.core.persistence.home import resolve_chattree_home
 from .base import StorageInterface
 from .atomic import atomic_write_json, atomic_write_bytes
 from ..utils.logger import setup_logger
@@ -10,9 +11,9 @@ logger = setup_logger('ChatStorage')
 
 class ChatStorage(StorageInterface):
     """多文件JSON存储 - 每个节点独立文件"""
-    
-    def __init__(self, storage_dir: str = "data/conversations"):
-        self.storage_dir = storage_dir
+
+    def __init__(self, storage_dir: str | None = None):
+        self.storage_dir = str(storage_dir or resolve_chattree_home() / "conversations")
         os.makedirs(self.storage_dir, exist_ok=True)
         self.index_file = os.path.join(self.storage_dir, "index.json")
         self._load_index()
@@ -182,7 +183,7 @@ class ChatStorage(StorageInterface):
         return id in self.index and os.path.exists(self._get_conversation_dir(id))
 
     # ── 导入文件管理 ──
-    # 文件存放于 data/conversations/{id}/imports/。路由使用 {filename:path}，
+    # 文件存放于 ChatTree home 的 conversations/{id}/imports/。路由使用 {filename:path}，
     # filename 可能含 "/" 或 ".."，因此所有访问都先经 _safe_import_path 做
     # realpath 边界校验，阻断路径穿越（../../etc/passwd、绝对路径等）。
 

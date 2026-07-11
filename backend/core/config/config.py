@@ -1,7 +1,9 @@
 # config.py - 配置管理（动态提供商）
 import os
 import json
+from pathlib import Path
 from typing import Dict, Any, Optional, List
+from backend.core.persistence.home import resolve_chattree_home
 from .types import ModelProviderConfig, APIFormat
 
 # 旧的预设提供商ID列表，用于迁移检测
@@ -27,8 +29,12 @@ _DEFAULT_PROVIDER_TEMPLATE: ModelProviderConfig = {
 class Config:
     """配置管理器"""
 
-    def __init__(self, config_path: str = "data/config.json"):
-        self.config_path = config_path
+    def __init__(self, config_path: str | None = None):
+        self.config_path = str(
+            Path(config_path)
+            if config_path is not None
+            else resolve_chattree_home() / "config.json"
+        )
         self.data = self._load_config()
 
     def _load_config(self) -> Dict[str, Any]:

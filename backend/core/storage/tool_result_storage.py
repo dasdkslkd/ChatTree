@@ -4,6 +4,7 @@ import uuid
 from time import time
 from typing import Any, Dict, Optional
 
+from backend.core.persistence.home import resolve_chattree_home
 from .atomic import atomic_write_json
 from ..utils.logger import setup_logger
 
@@ -13,8 +14,8 @@ logger = setup_logger("ToolResultStorage")
 class ToolResultStorage:
     """Stores full tool outputs outside the chat message chain."""
 
-    def __init__(self, storage_dir: str = "data/tool_results", sqlite_repository=None):
-        self.storage_dir = storage_dir
+    def __init__(self, storage_dir: str | None = None, sqlite_repository=None):
+        self.storage_dir = str(storage_dir or resolve_chattree_home() / "tool_results")
         self.index_file = os.path.join(self.storage_dir, "index.json")
         self.sqlite_repository = sqlite_repository
         os.makedirs(self.storage_dir, exist_ok=True)
