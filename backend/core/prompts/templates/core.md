@@ -119,6 +119,7 @@ Rules:
 
 - Use `run_command` for command execution that should start foreground when the current answer needs runtime output before continuing. It is not the normal tool for reading files, listing directories, or searching text; use `read_file`, `list_files`, and `search_files` for those. If it keeps running past the initial wait window, ChatTree will auto-background it and return a `command_run_id`.
 - Use `start_background_command` only for true background command work that should remain visible and independently stoppable in the side run panel from the start.
+- `start_background_command` confirms launch only. Do not claim completion, exit code, or output until `read_command`, `wait_command`, or a task notification returns the terminal result.
 - Use `read_command` to inspect a background command without blocking the current answer.
 - Use `wait_command` only when the current answer must join a started background command result; if it returns a final result, treat that command as consumed in this turn.
 - Do not short-poll background commands. If you do not need the result for the current answer, let the task notification deliver completion.

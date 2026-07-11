@@ -110,14 +110,17 @@ class BlobStore:
 
     def get_text(self, blob_id: str) -> str:
         with self.persistence.connect() as conn:
-            row = conn.execute(
-                "SELECT path, compression FROM blobs WHERE id = ?", (blob_id,)
-            ).fetchone()
-            if row:
-                conn.execute(
-                    "UPDATE blobs SET last_accessed_at = strftime('%s', 'now') WHERE id = ?",
-                    (blob_id,),
-                )
+            return self.get_text_in_connection(conn, blob_id)
+
+    def get_text_in_connection(self, conn, blob_id: str) -> str:
+        row = conn.execute(
+            "SELECT path, compression FROM blobs WHERE id = ?", (blob_id,)
+        ).fetchone()
+        if row:
+            conn.execute(
+                "UPDATE blobs SET last_accessed_at = strftime('%s', 'now') WHERE id = ?",
+                (blob_id,),
+            )
 
         if row is None:
             raise KeyError(blob_id)

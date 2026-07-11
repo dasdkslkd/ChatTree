@@ -570,4 +570,25 @@ class ToolInventoryTool(BaseTool):
         }
 
     async def execute(self, **kwargs) -> str:
-        return json.dumps(self._manager.describe_inventory(), ensure_ascii=False, indent=2)
+        inventory = self._manager.describe_inventory()
+        context = kwargs.get("_runtime_context")
+        if isinstance(context, dict) and context.get("task_context_mode") == "detached":
+            from .task_tools import TASK_TOOL_NAMES, filter_task_tools_for_context
+
+            visible_tools = filter_task_tools_for_context(
+                self._manager.get_openai_tools(),
+                "detached",
+            )
+            inventory["model_visible_tools"] = [
+                tool.get("function", {}).get("name")
+                for tool in visible_tools
+            ]
+            inventory["local_tools"] = [
+                name for name in inventory.get("local_tools", [])
+                if name not in TASK_TOOL_NAMES
+            ]
+            inventory["hidden_local_tools"] = [
+                name for name in inventory.get("hidden_local_tools", [])
+                if name not in TASK_TOOL_NAMES
+            ]
+        return json.dumps(inventory, ensure_ascii=False, indent=2)

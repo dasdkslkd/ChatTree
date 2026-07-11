@@ -17,12 +17,15 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from .base import BaseTool
 from .security.logical_sandbox import DEFAULT_PROTECTED_PATHS
+from .task_contract import task_step_parameter_schema
+from ..runs.types import FINISHED_RUN_STATUSES
 from ..shell_profile import ShellProfileResolver, render_command_tool_guidance
 
 
 DEFAULT_CODE_WORKSPACE = r"D:\Workspace\ChatTree\tmp"
 DEFAULT_RIPGREP_VERSION = "15.1.0"
 TEXT_READ_CHUNK_CHARS = 8192
+FINISHED_STATUS_VALUES = {status.value for status in FINISHED_RUN_STATUSES}
 
 
 def _project_root() -> Path:
@@ -621,7 +624,7 @@ class RunCommandTool(_CodeTool):
                 "command": {"type": "string"},
                 "cwd": {"type": "string", "default": "."},
                 "timeout_seconds": {"type": "integer", "minimum": 1},
-                "task_id": {"type": "string", "description": "Optional TaskLedger task id to bind this command run."},
+                "step": task_step_parameter_schema(),
             },
             "required": ["command"],
         }
@@ -647,11 +650,11 @@ class RunCommandTool(_CodeTool):
                 command=command,
                 cwd=cwd,
                 timeout=timeout,
-                runtime_context={
-                    **runtime_context,
-                    "task_id": kwargs.get("task_id") or runtime_context.get("task_id"),
-                },
+                runtime_context=runtime_context,
+                step=kwargs.get("step"),
             )
+        if kwargs.get("step") is not None:
+            return _error("missing_runtime_context", "step binding requires ChatTree runtime context")
         python_c_args = _windows_python_c_args(command)
         profile = ShellProfileResolver().resolve()
         try:
@@ -697,6 +700,7 @@ class RunCommandTool(_CodeTool):
         cwd: Path,
         timeout: int,
         runtime_context: Dict[str, Any],
+        step: Any = None,
     ) -> str:
         command_executor = runtime_context.get("command_executor")
         if command_executor is None or not hasattr(command_executor, "start"):
@@ -710,12 +714,19 @@ class RunCommandTool(_CodeTool):
             cancellation_parent_run_id=str(runtime_context.get("run_id") or "") or None,
             summary=command[:80],
             timeout_seconds=timeout,
+            step=step,
+            task_context_mode=str(runtime_context.get("task_context_mode") or "attached"),
+            task_generation_id=str(runtime_context.get("task_generation_id") or "") or None,
+            task_revision=(
+                int(runtime_context["task_revision"])
+                if runtime_context.get("task_revision") is not None
+                else None
+            ),
             metadata={
                 "tool_name": self.name,
                 "tool_call_id": runtime_context.get("tool_call_id"),
                 "workspace_relative_cwd": self.workspace.relative(cwd),
                 "run_command_managed": True,
-                "task_id": runtime_context.get("task_id"),
                 "agent_name": runtime_context.get("agent_name"),
                 "source_run_id": runtime_context.get("run_id"),
                 "source_run_kind": runtime_context.get("run_kind"),
@@ -741,14 +752,29 @@ class RunCommandTool(_CodeTool):
         snapshot = command_executor.snapshot(run_id)
         if snapshot is None:
             return _error("not_found", "managed command run not found", command=command)
-        if snapshot.get("status") in {"completed", "failed", "cancelled"} and hasattr(command_executor, "mark_observed"):
+        if snapshot.get("status") in FINISHED_STATUS_VALUES and hasattr(command_executor, "mark_observed"):
             await command_executor.mark_observed(
                 run_id,
                 observer_run_id=str(runtime_context.get("run_id") or "") or None,
                 via=self.name,
             )
             snapshot = command_executor.snapshot(run_id) or snapshot
-        return _json({
+        return _json(self._managed_finished_payload(
+            command=command,
+            cwd=cwd,
+            run_id=run_id,
+            snapshot=snapshot,
+        ))
+
+    def _managed_finished_payload(
+        self,
+        *,
+        command: str,
+        cwd: Path,
+        run_id: str,
+        snapshot: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
             "command": command,
             "cwd": self.workspace.relative(cwd),
             "exit_code": snapshot.get("exit_code"),
@@ -762,7 +788,9 @@ class RunCommandTool(_CodeTool):
             "run_id": run_id,
             "status": snapshot.get("status"),
             "shell": snapshot.get("shell"),
-        })
+        }
+        self._attach_public_task_outcome(payload, snapshot)
+        return payload
 
     def _managed_background_payload(
         self,
@@ -774,7 +802,7 @@ class RunCommandTool(_CodeTool):
         auto_backgrounded: bool,
     ) -> Dict[str, Any]:
         action = "auto-backgrounded" if auto_backgrounded else "running in the background"
-        return {
+        payload: Dict[str, Any] = {
             "command": command,
             "cwd": self.workspace.relative(cwd),
             "status": "running",
@@ -792,6 +820,16 @@ class RunCommandTool(_CodeTool):
                 "Use read_command to inspect it, wait_command only when this answer must join the result, or stop_command to cancel it."
             ),
         }
+        self._attach_public_task_outcome(payload, snapshot)
+        return payload
+
+    @staticmethod
+    def _attach_public_task_outcome(payload: Dict[str, Any], snapshot: Dict[str, Any]) -> None:
+        task_outcome = snapshot.get("task_outcome")
+        if isinstance(task_outcome, dict):
+            payload["task_outcome"] = task_outcome
+        if snapshot.get("step") is not None:
+            payload["step"] = snapshot["step"]
 
 
 class ApplyPatchTool(_CodeTool):

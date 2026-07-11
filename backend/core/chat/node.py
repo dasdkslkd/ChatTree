@@ -47,6 +47,7 @@ class NodeManager:
             "timestamp": int(time()),
             "model_id": None,
             "tool_permission_mode": None,
+            "task_context_mode": "attached",
             "total_tokens": 0,
             "branch_usage_info": estimated_usage(0),
             "usage": _empty_node_usage(),
@@ -58,6 +59,7 @@ class NodeManager:
         parent_id: Optional[str] = None,
         model_id: Optional[str] = None,
         tool_permission_mode: Optional[str] = None,
+        task_context_mode: str = "attached",
     ) -> ConversationTreeNode:
         """创建新节点（一轮交互）"""
         node_id = str(uuid.uuid4())
@@ -73,6 +75,7 @@ class NodeManager:
             "timestamp": int(time()),
             "model_id": model_id,
             "tool_permission_mode": tool_permission_mode,
+            "task_context_mode": task_context_mode,
             "total_tokens": 0,
             "branch_usage_info": estimated_usage(0),
             "usage": _empty_node_usage(),
@@ -89,6 +92,7 @@ class NodeManager:
         messages_to_keep: int = 1,
         restored_files: Optional[List[Dict[str, Any]]] = None,
         suppress_follow_up_questions: bool = True,
+        task_context_mode: str = "attached",
     ) -> ConversationTreeNode:
         """创建 Claude Code 风格 compact boundary + summary 节点。"""
         node_id = str(uuid.uuid4())
@@ -134,6 +138,7 @@ class NodeManager:
             "timestamp": now,
             "model_id": model_id,
             "tool_permission_mode": None,
+            "task_context_mode": task_context_mode,
             "total_tokens": 0,
             "branch_usage_info": estimated_usage(0),
             "usage": _empty_node_usage(),

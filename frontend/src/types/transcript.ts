@@ -23,7 +23,6 @@ export interface TranscriptItem {
   message_id?: string | null;
   run_id?: string | null;
   plan_id?: string | null;
-  task_id?: string | null;
   local_order?: number | null;
   status?: string | null;
   summary?: string | null;

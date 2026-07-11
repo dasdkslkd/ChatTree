@@ -7,9 +7,9 @@ from ...core.capabilities.bootstrap import build_runtime_config_with_plugin_mcp
 from ...core.agents import AgentMailbox, AgentRuntime
 from ...core.config.config import Config, cfg
 from ...core.model.model_manager import ModelManager
-from ...core.persistence import SQLitePlanRepository
+from ...core.persistence import SQLitePlanRepository, SQLiteTaskRepository
 from ...core.plans import PlanLedger
-from ...core.tasks import TaskLedger
+from ...core.tasks import ActiveTaskService
 from ...core.tools.orchestrator import ToolOrchestrator
 from ...core.tools.agent_tools import register_agent_management_tools
 from ...core.tools.plan_tools import register_plan_tools
@@ -90,21 +90,24 @@ def _sync_runtime_managers(app, config_data: Dict[str, Any], model_manager, tool
             app.state.plan_repository = plan_repository
         plan_ledger = PlanLedger(repository=plan_repository)
         app.state.plan_ledger = plan_ledger
-    task_ledger = getattr(app.state, 'task_ledger', None)
-    if task_ledger is None:
-        task_ledger = TaskLedger()
-        app.state.task_ledger = task_ledger
+    task_service = getattr(app.state, 'task_service', None)
+    if task_service is None:
+        persistence = getattr(app.state, 'persistence', None)
+        task_repository = SQLiteTaskRepository(persistence) if persistence is not None else None
+        task_service = ActiveTaskService(repository=task_repository)
+        app.state.task_service = task_service
     if run_manager is not None:
-        task_ledger.install_run_finish_listener(run_manager)
+        run_manager.task_service = task_service
+        task_service.run_manager = run_manager
     if chat_manager is not None:
-        chat_manager.task_ledger = task_ledger
+        chat_manager.task_service = task_service
         chat_manager.plan_ledger = plan_ledger
     command_executor = getattr(app.state, 'command_executor', None)
     if command_executor is None and run_manager is not None:
-        command_executor = CommandExecutor(run_manager, task_ledger=task_ledger)
+        command_executor = CommandExecutor(run_manager, task_service=task_service)
         app.state.command_executor = command_executor
     elif command_executor is not None and hasattr(command_executor, "__dict__"):
-        command_executor.task_ledger = task_ledger
+        command_executor.task_service = task_service
     tool_manager.command_executor = command_executor
     agent_mailbox = getattr(app.state, 'agent_mailbox', None)
     if agent_mailbox is None:
@@ -133,7 +136,7 @@ def _sync_runtime_managers(app, config_data: Dict[str, Any], model_manager, tool
             subagent_executor=subagent_executor,
             workflow_manager=workflow_manager,
             capability_registry=capability_registry,
-            task_ledger=task_ledger,
+            task_service=task_service,
         )
         app.state.agent_runtime = agent_runtime
     elif agent_runtime is not None:
@@ -142,7 +145,7 @@ def _sync_runtime_managers(app, config_data: Dict[str, Any], model_manager, tool
         agent_runtime.subagent_executor = subagent_executor
         agent_runtime.workflow_manager = workflow_manager
         agent_runtime.capability_registry = capability_registry
-        agent_runtime.task_ledger = task_ledger
+        agent_runtime.task_service = task_service
     if workflow_manager is not None:
         workflow_manager.agent_runtime = agent_runtime
     register_agent_management_tools(
@@ -152,7 +155,7 @@ def _sync_runtime_managers(app, config_data: Dict[str, Any], model_manager, tool
         workflow_manager=workflow_manager,
     )
     register_plan_tools(tool_manager, plan_ledger)
-    register_task_tools(tool_manager, task_ledger)
+    register_task_tools(tool_manager, task_service)
 
 
 def _runtime_config_for_app(app, config_data: Dict[str, Any]) -> Dict[str, Any]:

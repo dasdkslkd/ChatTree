@@ -33,7 +33,7 @@ from backend.core.persistence import (
     SQLiteTaskNotificationRepository,
     TranscriptProjection,
 )
-from backend.core.tasks import TaskLedger
+from backend.core.tasks import ActiveTaskService
 from backend.core.workflows import WorkflowManager
 from backend.core.notifications import TaskNotificationService
 from backend.core.storage.chat_storage import ChatStorage
@@ -85,9 +85,9 @@ async def startup_event():
     persistence.initialize()
     chat_repository = ChatRepository(persistence)
     transcript_projection = TranscriptProjection(persistence)
-    run_repository = SQLiteRunRepository(persistence)
     plan_repository = SQLitePlanRepository(persistence)
     task_repository = SQLiteTaskRepository(persistence)
+    run_repository = SQLiteRunRepository(persistence, task_repository=task_repository)
     task_notification_repository = SQLiteTaskNotificationRepository(persistence)
     capability_registry = build_capability_registry(PROJECT_ROOT, config_manager.data)
     runtime_config = build_runtime_config_with_plugin_mcp(
@@ -107,9 +107,10 @@ async def startup_event():
     approval_manager = ApprovalManager()
     run_manager = RunManager(repository=run_repository)
     plan_ledger = PlanLedger(repository=plan_repository)
-    task_ledger = TaskLedger(repository=task_repository)
-    task_ledger.install_run_finish_listener(run_manager)
-    command_executor = CommandExecutor(run_manager, task_ledger=task_ledger)
+    task_service = ActiveTaskService(repository=task_repository)
+    run_manager.task_service = task_service
+    task_service.run_manager = run_manager
+    command_executor = CommandExecutor(run_manager, task_service=task_service)
     tool_manager.command_executor = command_executor
     agent_mailbox = AgentMailbox()
     run_manager.agent_mailbox = agent_mailbox
@@ -125,7 +126,7 @@ async def startup_event():
         chat_storage,
         prompt_storage,
         tool_manager,
-        task_ledger=task_ledger,
+        task_service=task_service,
         plan_ledger=plan_ledger,
         chat_repository=chat_repository,
         transcript_projection=transcript_projection,
@@ -150,7 +151,7 @@ async def startup_event():
         subagent_executor=subagent_executor,
         workflow_manager=workflow_manager,
         capability_registry=capability_registry,
-        task_ledger=task_ledger,
+        task_service=task_service,
     )
     workflow_manager.agent_runtime = agent_runtime
     task_notification_service = TaskNotificationService(
@@ -167,7 +168,8 @@ async def startup_event():
         workflow_manager=workflow_manager,
     )
     register_plan_tools(tool_manager, plan_ledger)
-    register_task_tools(tool_manager, task_ledger)
+    register_task_tools(tool_manager, task_service)
+    await task_notification_service.reconcile_terminal_publications()
     app.state.persistence = persistence
     app.state.chat_repository = chat_repository
     app.state.transcript_projection = transcript_projection
@@ -184,7 +186,7 @@ async def startup_event():
     app.state.approval_manager = approval_manager
     app.state.run_manager = run_manager
     app.state.plan_ledger = plan_ledger
-    app.state.task_ledger = task_ledger
+    app.state.task_service = task_service
     app.state.command_executor = command_executor
     app.state.agent_mailbox = agent_mailbox
     app.state.agent_runtime = agent_runtime

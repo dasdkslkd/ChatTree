@@ -22,10 +22,135 @@ class SQLitePersistence:
         self.tmp_dir.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
             self._repair_run_lifecycle_schema(conn)
+            self._ensure_node_context_schema(conn)
+            self._replace_obsolete_task_schema(conn)
             conn.executescript(SCHEMA_SQL)
             self._repair_scoped_tool_call_schema(conn)
             self._repair_run_lifecycle_schema(conn)
+            self._ensure_node_context_schema(conn)
             conn.executescript(SCHEMA_SQL)
+
+    def _replace_obsolete_task_schema(self, conn: sqlite3.Connection) -> None:
+        notification_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(task_notifications)")
+        }
+        transcript_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(transcript_items)")
+        }
+        legacy_tables = {
+            row["name"]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('tasks', 'task_steps', 'task_events')"
+            )
+        }
+        active_tables = {
+            row["name"]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('active_tasks', 'active_task_steps', 'task_run_bindings')"
+            )
+        }
+        reset_active_schema = self._active_task_schema_is_obsolete(conn, active_tables)
+        if (
+            not legacy_tables
+            and not reset_active_schema
+            and "task_id" not in notification_columns
+            and "task_id" not in transcript_columns
+        ):
+            return
+
+        conn.commit()
+        conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            conn.execute("BEGIN")
+            if legacy_tables or reset_active_schema:
+                conn.execute("DROP TABLE IF EXISTS task_run_bindings")
+            if reset_active_schema:
+                conn.execute("DROP TABLE IF EXISTS active_task_steps")
+                conn.execute("DROP TABLE IF EXISTS active_tasks")
+            if "task_id" in notification_columns:
+                conn.execute("ALTER TABLE task_notifications RENAME TO task_notifications_obsolete")
+                conn.execute(_TASK_NOTIFICATIONS_TABLE_SQL)
+                conn.execute(
+                    """
+                    INSERT INTO task_notifications (
+                      id, conversation_id, source_run_id, source_run_kind, status,
+                      delivery_node_id, bound_at, bound_by, summary, content, payload_json,
+                      delivered_run_id, delivered_node_id, created_at, updated_at
+                    )
+                    SELECT
+                      id, conversation_id, source_run_id, source_run_kind, status,
+                      delivery_node_id, bound_at, bound_by, summary, content, payload_json,
+                      delivered_run_id, delivered_node_id, created_at, updated_at
+                    FROM task_notifications_obsolete
+                    """
+                )
+                conn.execute("DROP TABLE task_notifications_obsolete")
+            if "task_id" in transcript_columns:
+                conn.execute("ALTER TABLE transcript_items RENAME TO transcript_items_obsolete")
+                conn.execute(_TRANSCRIPT_ITEMS_TABLE_SQL)
+                conn.execute(
+                    """
+                    INSERT INTO transcript_items (
+                      id, conversation_id, node_id, anchor_node_id, run_id, plan_id,
+                      message_id, item_type, local_order, visibility, status, summary,
+                      preview, props_json, created_at, updated_at
+                    )
+                    SELECT
+                      id, conversation_id, node_id, anchor_node_id, run_id, plan_id,
+                      message_id, item_type, local_order, visibility, status, summary,
+                      preview, props_json, created_at, updated_at
+                    FROM transcript_items_obsolete
+                    """
+                )
+                conn.execute("DROP TABLE transcript_items_obsolete")
+            conn.execute("DROP TABLE IF EXISTS task_events")
+            conn.execute("DROP TABLE IF EXISTS task_steps")
+            conn.execute("DROP TABLE IF EXISTS tasks")
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.execute("PRAGMA foreign_keys = ON")
+
+    def _active_task_schema_is_obsolete(
+        self,
+        conn: sqlite3.Connection,
+        active_tables: set[str],
+    ) -> bool:
+        if not active_tables:
+            return False
+        if active_tables != {"active_tasks", "active_task_steps", "task_run_bindings"}:
+            return True
+        expected_columns = {
+            "active_tasks": {
+                "conversation_id", "generation_id", "revision", "title", "detail_inline",
+                "detail_blob_id", "created_by_run_id", "created_by_tool_call_id",
+                "created_at", "updated_at",
+            },
+            "active_task_steps": {
+                "conversation_id", "position", "title", "detail_inline", "detail_blob_id",
+                "status", "evidence_run_id", "evidence_summary", "updated_at",
+            },
+            "task_run_bindings": {
+                "run_id", "conversation_id", "task_generation_id", "step_position",
+                "base_revision", "created_at",
+            },
+        }
+        for table, expected in expected_columns.items():
+            columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+            if columns != expected:
+                return True
+        binding_fks = conn.execute("PRAGMA foreign_key_list(task_run_bindings)").fetchall()
+        generation_fk = {
+            (row["table"], row["from"], row["to"], row["on_delete"])
+            for row in binding_fks
+            if row["table"] == "active_tasks"
+        }
+        return generation_fk != {
+            ("active_tasks", "conversation_id", "conversation_id", "CASCADE"),
+            ("active_tasks", "task_generation_id", "generation_id", "CASCADE"),
+        }
 
     def _repair_scoped_tool_call_schema(self, conn: sqlite3.Connection) -> None:
         if not self._needs_scoped_tool_call_repair(conn):
@@ -119,6 +244,16 @@ class SQLitePersistence:
         if "cancellation_parent_run_id" not in columns:
             conn.execute("ALTER TABLE runs ADD COLUMN cancellation_parent_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL")
 
+    def _ensure_node_context_schema(self, conn: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(nodes)").fetchall()
+        }
+        if columns and "task_context_mode" not in columns:
+            conn.execute(
+                "ALTER TABLE nodes ADD COLUMN task_context_mode TEXT NOT NULL DEFAULT 'attached'"
+            )
+
     def _copy_common_columns(
         self,
         conn: sqlite3.Connection,
@@ -152,6 +287,7 @@ class SQLitePersistence:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA busy_timeout = 5000")
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = NORMAL")
         conn.execute("PRAGMA temp_store = MEMORY")
@@ -164,6 +300,58 @@ class SQLitePersistence:
         finally:
             conn.close()
 
+
+_TASK_NOTIFICATIONS_TABLE_SQL = """
+CREATE TABLE task_notifications (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  source_run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  source_run_kind TEXT NOT NULL,
+  status TEXT NOT NULL,
+  delivery_node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL,
+  bound_at INTEGER,
+  bound_by TEXT,
+  summary TEXT NOT NULL DEFAULT '',
+  content TEXT NOT NULL DEFAULT '',
+  payload_json TEXT,
+  delivered_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  delivered_node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(conversation_id, source_run_id),
+  FOREIGN KEY (conversation_id, source_run_id) REFERENCES runs(conversation_id, id),
+  FOREIGN KEY (conversation_id, delivery_node_id) REFERENCES nodes(conversation_id, id),
+  FOREIGN KEY (conversation_id, delivered_run_id) REFERENCES runs(conversation_id, id),
+  FOREIGN KEY (conversation_id, delivered_node_id) REFERENCES nodes(conversation_id, id)
+);
+"""
+
+_TRANSCRIPT_ITEMS_TABLE_SQL = """
+CREATE TABLE transcript_items (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  node_id TEXT REFERENCES nodes(id) ON DELETE CASCADE,
+  anchor_node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL,
+  run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  plan_id TEXT REFERENCES plans(id) ON DELETE SET NULL,
+  message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
+  item_type TEXT NOT NULL,
+  local_order INTEGER NOT NULL,
+  visibility TEXT NOT NULL DEFAULT 'main',
+  status TEXT,
+  summary TEXT NOT NULL DEFAULT '',
+  preview TEXT NOT NULL DEFAULT '',
+  props_json TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(conversation_id, id),
+  FOREIGN KEY (conversation_id, node_id) REFERENCES nodes(conversation_id, id),
+  FOREIGN KEY (conversation_id, anchor_node_id) REFERENCES nodes(conversation_id, id),
+  FOREIGN KEY (conversation_id, run_id) REFERENCES runs(conversation_id, id),
+  FOREIGN KEY (conversation_id, plan_id) REFERENCES plans(conversation_id, id),
+  FOREIGN KEY (conversation_id, message_id) REFERENCES messages(conversation_id, id)
+);
+"""
 
 _SCOPED_TOOL_CALL_REPAIR_TABLES_SQL = """
 CREATE TABLE tool_calls (

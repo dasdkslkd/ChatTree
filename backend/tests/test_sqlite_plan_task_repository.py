@@ -11,10 +11,7 @@ from backend.core.persistence.database import SQLitePersistence
 from backend.core.persistence.content import INLINE_TEXT_LIMIT
 from backend.core.persistence.plan_repository import SQLitePlanRepository
 from backend.core.persistence.repository import ChatRepository
-from backend.core.persistence.task_repository import SQLiteTaskRepository
 from backend.core.plans import PlanContextInjection, PlanLedger, PlanSession, PlanStatus
-from backend.core.tasks import TaskLedger, TaskRecord, TaskStatus
-from backend.core.persistence import task_repository as task_repository_module
 
 
 def run(coro):
@@ -84,55 +81,6 @@ def test_plan_repository_persists_proposal_revisions(tmp_path):
     ]
     assert second["proposals"][0]["tool_call_id"] == "call-exit-1"
     assert second["proposals"][1]["tool_call_id"] == "call-exit-2"
-
-
-def test_task_repository_persists_open_tasks(tmp_path):
-    persistence = SQLitePersistence(tmp_path)
-    persistence.initialize()
-    chat = ChatRepository(persistence)
-    tasks = SQLiteTaskRepository(persistence)
-    conv_id = chat.create_conversation(title="Tasks")
-
-    task_id = tasks.create_task(
-        conv_id,
-        title="Build storage",
-        detail="Implement SQLite",
-    )
-    tasks.update_task(
-        conv_id,
-        task_id,
-        status="blocked",
-        evidence_summary="waiting",
-    )
-
-    open_tasks = tasks.list_tasks(conv_id, statuses=["blocked"])
-
-    assert len(open_tasks) == 1
-    assert open_tasks[0]["id"] == task_id
-    assert open_tasks[0]["evidence_summary"] == "waiting"
-
-
-def test_task_repository_and_ledger_keep_insertion_order_for_same_timestamp(tmp_path, monkeypatch):
-    class FixedUuid:
-        def __init__(self, value: str) -> None:
-            self.hex = value
-
-    persistence = SQLitePersistence(tmp_path)
-    persistence.initialize()
-    chat = ChatRepository(persistence)
-    repository = SQLiteTaskRepository(persistence)
-    ledger = TaskLedger(repository=repository)
-    conv_id = chat.create_conversation(title="Tasks")
-
-    uuids = iter([FixedUuid("f" * 32), FixedUuid("0" * 32)])
-    monkeypatch.setattr(task_repository_module.uuid, "uuid4", lambda: next(uuids))
-    monkeypatch.setattr(task_repository_module, "time", lambda: 1234.0)
-
-    first_id = repository.create_task(conv_id, title="First")
-    second_id = repository.create_task(conv_id, title="Second")
-
-    assert [task["id"] for task in repository.list_tasks(conv_id)] == [first_id, second_id]
-    assert [task.task_id for task in run(ledger.list_open_tasks(conv_id))] == [first_id, second_id]
 
 
 async def _plan_ledger_repository_loads_legacy_snapshot_case(tmp_path):
@@ -391,111 +339,3 @@ async def _plan_ledger_repository_active_approve_reject_context_case(tmp_path):
 
 def test_plan_ledger_repository_active_approve_reject_context(tmp_path):
     run(_plan_ledger_repository_active_approve_reject_context_case(tmp_path))
-
-
-async def _task_ledger_repository_open_task_listing_and_update_case(tmp_path):
-    persistence = SQLitePersistence(tmp_path)
-    persistence.initialize()
-    chat = ChatRepository(persistence)
-    conv_id = chat.create_conversation(title="Task ledger")
-    ledger = TaskLedger(repository=SQLiteTaskRepository(persistence))
-
-    first = await ledger.create_task(
-        conversation_id=conv_id,
-        title="Keep open",
-        detail="Still pending",
-    )
-    second = await ledger.create_task(
-        conversation_id=conv_id,
-        title="Finish me",
-        detail="Needs evidence",
-    )
-    completed = await ledger.update_task(
-        conversation_id=conv_id,
-        task_id=second.task_id,
-        status=TaskStatus.COMPLETED,
-        evidence_summary="SQLite-backed ledger test passed",
-    )
-    open_tasks = await ledger.list_open_tasks(conv_id)
-    all_tasks = await ledger.list_tasks(conv_id, include_finished=True)
-
-    assert completed.status == TaskStatus.COMPLETED
-    assert completed.finished_at is not None
-    assert [task.task_id for task in open_tasks] == [first.task_id]
-    assert [task.task_id for task in all_tasks] == [first.task_id, second.task_id]
-    assert all_tasks[1].evidence_summary == "SQLite-backed ledger test passed"
-
-
-def test_task_ledger_repository_open_task_listing_and_update(tmp_path):
-    run(_task_ledger_repository_open_task_listing_and_update_case(tmp_path))
-
-
-async def _task_ledger_repository_load_snapshot_persists_to_sqlite_case(tmp_path):
-    persistence = SQLitePersistence(tmp_path)
-    persistence.initialize()
-    chat = ChatRepository(persistence)
-    conv_id = chat.create_conversation(title="Task snapshot")
-    repository = SQLiteTaskRepository(persistence)
-    ledger = TaskLedger(repository=repository)
-    record = TaskRecord(
-        task_id="task_restored",
-        conversation_id=conv_id,
-        title="Restore me",
-        detail="Visible through SQLite",
-        status=TaskStatus.IN_PROGRESS,
-        created_by_run_id="run_legacy",
-        metadata={"source": "legacy"},
-        created_at=11.0,
-        updated_at=12.0,
-    )
-
-    await ledger.load_snapshot(conv_id, [record.to_dict()])
-
-    listed = await ledger.list_tasks(conv_id)
-    loaded = await ledger.get_task(conv_id, record.task_id)
-    snapshot = await ledger.snapshot(conv_id)
-
-    assert [task.task_id for task in listed] == [record.task_id]
-    assert loaded == record
-    assert snapshot == [record.to_dict()]
-
-
-def test_task_ledger_repository_load_snapshot_persists_to_sqlite(tmp_path):
-    run(_task_ledger_repository_load_snapshot_persists_to_sqlite_case(tmp_path))
-
-
-async def _task_ledger_repository_snapshot_reflects_sqlite_after_mutation_case(tmp_path):
-    persistence = SQLitePersistence(tmp_path)
-    persistence.initialize()
-    chat = ChatRepository(persistence)
-    conv_id = chat.create_conversation(title="Task snapshot")
-    repository = SQLiteTaskRepository(persistence)
-    ledger = TaskLedger(repository=repository)
-    legacy = TaskRecord(
-        task_id="task_legacy",
-        conversation_id=conv_id,
-        title="Legacy",
-        detail="Loaded before new mutations",
-        created_at=10.0,
-        updated_at=10.0,
-    )
-    await ledger.load_snapshot(conv_id, [legacy.to_dict()])
-
-    created = await ledger.create_task(
-        conversation_id=conv_id,
-        title="New task",
-        detail="Created in SQLite",
-    )
-    updated = await ledger.update_task(
-        conversation_id=conv_id,
-        task_id=created.task_id,
-        status=TaskStatus.COMPLETED,
-        evidence_summary="done",
-    )
-    snapshot = await ledger.snapshot(conv_id)
-
-    assert snapshot == [legacy.to_dict(), updated.to_dict()]
-
-
-def test_task_ledger_repository_snapshot_reflects_sqlite_after_mutation(tmp_path):
-    run(_task_ledger_repository_snapshot_reflects_sqlite_after_mutation_case(tmp_path))

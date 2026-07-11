@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Any, Dict, Optional
 
 from backend.core.agents import SubagentExecutor
@@ -9,6 +10,9 @@ from backend.core.agents.types import AgentDeliveryPolicy
 from backend.core.runs import RunKind, RunManager, RunStatus
 from .js_runner import WorkflowJsRunner
 from .runtime_bridge import WorkflowRuntimeBridge
+
+
+logger = logging.getLogger(__name__)
 
 
 class WorkflowManager:
@@ -46,7 +50,7 @@ class WorkflowManager:
         delegated_task: Any = None,
         original_slash_input: Optional[str] = None,
         delivery_policy: str = "auto",
-        task_id: Optional[str] = None,
+        task_binding: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         self.runner.validate_script(script)
         delivery_policy = AgentDeliveryPolicy(str(delivery_policy or "auto")).value
@@ -70,10 +74,13 @@ class WorkflowManager:
                 "delegated_task": delegated_task if delegated_task is not None else script,
                 "original_slash_input": original_slash_input,
                 "delivery_policy": delivery_policy,
-                "task_id": task_id,
             },
+            task_binding=task_binding,
         )
-        await self._register_task_notification(run.run_id)
+        try:
+            await self._register_task_notification(run.run_id)
+        except Exception:
+            logger.exception("Failed to register workflow notification for %s", run.run_id)
         task = asyncio.create_task(self._produce(
             run_id=run.run_id,
             conversation_id=conversation_id,
@@ -104,9 +111,7 @@ class WorkflowManager:
             payload={
                 "delegated_task": metadata.get("delegated_task"),
                 "original_slash_input": metadata.get("original_slash_input"),
-                "task_id": metadata.get("task_id"),
             },
-            task_id=metadata.get("task_id"),
         )
 
     async def stop(self, run_id: str) -> bool:
@@ -158,11 +163,12 @@ class WorkflowManager:
             )
             if await self.run_manager.is_stop_requested(run_id):
                 final_status = RunStatus.CANCELLED
-                await self.run_manager.append_event(run_id, {
+                notification_payload = {
                     "status": "stopped",
                     "event_type": "workflow_cancelled",
                     "content": "",
-                })
+                }
+                await self.run_manager.append_event(run_id, notification_payload)
                 return
             notification_payload = {
                 "status": "complete",
@@ -173,11 +179,12 @@ class WorkflowManager:
             await self.run_manager.append_event(run_id, notification_payload)
         except asyncio.CancelledError:
             final_status = RunStatus.CANCELLED
-            await self.run_manager.append_event(run_id, {
+            notification_payload = {
                 "status": "stopped",
                 "event_type": "workflow_cancelled",
                 "content": "",
-            })
+            }
+            await self.run_manager.append_event(run_id, notification_payload)
         except Exception as exc:
             final_status = RunStatus.FAILED
             final_error = str(exc) or exc.__class__.__name__
@@ -191,14 +198,25 @@ class WorkflowManager:
         finally:
             self._tasks.pop(run_id, None)
             await self.run_manager.finish_run(run_id, final_status, final_error)
-            if notification_payload and final_status in {RunStatus.COMPLETED, RunStatus.FAILED}:
-                source_status = "completed" if final_status == RunStatus.COMPLETED else "failed"
-                await self._publish_task_notification(
-                    run_id,
-                    source_status,
-                    notification_payload.get("content") or notification_payload.get("error") or "",
-                    event_payload=notification_payload,
-                )
+            if notification_payload and final_status in {
+                RunStatus.COMPLETED,
+                RunStatus.FAILED,
+                RunStatus.CANCELLED,
+            }:
+                source_status = {
+                    RunStatus.COMPLETED: "completed",
+                    RunStatus.FAILED: "failed",
+                    RunStatus.CANCELLED: "cancelled",
+                }[final_status]
+                try:
+                    await self._publish_task_notification(
+                        run_id,
+                        source_status,
+                        notification_payload.get("content") or notification_payload.get("error") or "",
+                        event_payload=notification_payload,
+                    )
+                except Exception:
+                    logger.exception("Failed to publish workflow notification for %s", run_id)
 
     async def _publish_task_notification(
         self,
@@ -232,9 +250,7 @@ class WorkflowManager:
                 "event_type": event_payload.get("event_type"),
                 "delegated_task": metadata.get("delegated_task"),
                 "original_slash_input": original_slash_input,
-                "task_id": metadata.get("task_id"),
             },
-            task_id=metadata.get("task_id"),
         )
 
 

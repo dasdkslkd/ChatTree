@@ -110,7 +110,11 @@ class FailingChatManager:
 def test_detached_stream_continues_after_client_disconnect():
     async def run():
         manager = FakeChatManager()
-        request = messages_route.SendMessageRequest(content="hello", model_id="fake-model")
+        request = messages_route.SendMessageRequest(
+            content="hello",
+            parent_node_id="node-anchor",
+            model_id="fake-model",
+        )
         stream = messages_route.detached_stream_event_generator("conv-1", request, manager)
 
         started_event = await anext(stream)
@@ -134,7 +138,11 @@ def test_detached_stream_continues_after_client_disconnect():
 def test_detached_stream_attach_replays_buffer_and_continues_live():
     async def run():
         manager = FakeChatManager()
-        request = messages_route.SendMessageRequest(content="hello", model_id="fake-model")
+        request = messages_route.SendMessageRequest(
+            content="hello",
+            parent_node_id="node-anchor",
+            model_id="fake-model",
+        )
         stream = messages_route.detached_stream_event_generator("conv-1", request, manager)
 
         started_event = await anext(stream)
@@ -176,8 +184,8 @@ def test_detached_btw_stream_uses_side_question_run_without_target_bind():
         run_manager = RunManager()
         request = messages_route.SendMessageRequest(
             content="/btw explain this",
+            parent_node_id="node-anchor",
             model_id="fake-model",
-            node_id="node-anchor",
         )
         stream = messages_route.detached_stream_event_generator("conv-1", request, manager, run_manager)
 
@@ -209,8 +217,8 @@ def test_detached_direct_response_stream_creates_run_without_target_or_chat_node
         run_manager = RunManager()
         request = messages_route.SendMessageRequest(
             content="/status",
+            parent_node_id="node-anchor",
             model_id="fake-model",
-            node_id="node-anchor",
         )
         stream = messages_route.detached_stream_event_generator(
             "conv-1",
@@ -262,6 +270,8 @@ def test_active_streams_include_direct_response_runs_without_target_node():
                 "anchor_node_id": "node-anchor",
                 "node_id": None,
                 "target_node_id": None,
+                "created_by_run_id": None,
+                "cancellation_parent_run_id": None,
                 "kind": "direct_response",
                 "status": "running",
                 "event_count": 1,
@@ -278,7 +288,11 @@ def test_stop_before_target_bind_is_applied_when_node_arrives():
     async def run():
         manager = DelayedStartChatManager()
         run_manager = RunManager()
-        request = messages_route.SendMessageRequest(content="hello", model_id="fake-model")
+        request = messages_route.SendMessageRequest(
+            content="hello",
+            parent_node_id="node-anchor",
+            model_id="fake-model",
+        )
         stream = messages_route.detached_stream_event_generator("conv-1", request, manager, run_manager)
 
         started_event = await anext(stream)

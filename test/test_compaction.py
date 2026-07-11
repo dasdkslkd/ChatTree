@@ -390,14 +390,28 @@ def test_send_message_auto_compacts_when_context_usage_reaches_90_percent():
             "total_tokens": 180000,
             "source": "api",
         }
+        target_parent_id = old["id"]
+        sibling = NodeManager.create_node(
+            _message(Role.USER, "other branch"),
+            conv.root_node_id,
+            "fake-model",
+        )
+        sibling["assistant_message"] = _message(Role.ASSISTANT, "other answer")
+        conv.add_node(sibling, conv.root_node_id)
         manager._save(conv)
 
-        asyncio.run(_drain(manager.send_message_stream(conv.metadata["id"], "new question", model_id="fake-model")))
+        asyncio.run(_drain(manager.send_message_stream(
+            conv.metadata["id"],
+            "new question",
+            model_id="fake-model",
+            parent_node_id=target_parent_id,
+        )))
 
         reloaded = Conversation.from_dict(storage.load(conv.metadata["id"]))
         chain = reloaded.get_node_chain(reloaded.current_node_id)
         assert any((node.get("system_message") or {}).get("subtype") == "compact_boundary" for node in chain)
         assert chain[-2]["system_message"]["compact_metadata"]["trigger"] == "auto"
+        assert chain[-2]["parent_id"] == target_parent_id
         assert chain[-1]["user_message"]["content"] == "new question"
         assert chain[-1]["parent_id"] == chain[-2]["id"]
         assert manager.model_manager.provider.calls

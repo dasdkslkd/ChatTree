@@ -13,7 +13,7 @@ from backend.core.persistence.repository import ChatRepository
 from backend.core.persistence.run_repository import SQLiteRunRepository
 from backend.core.notifications import TaskNotificationService
 from backend.core.runs import RunKind, RunManager, RunStatus
-from backend.core.tasks import TaskLedger, TaskStatus
+from backend.core.tasks import ActiveTaskService, TaskContextDisabledError
 from backend.core.tools.code_tools import CodeToolConfig, RunCommandTool
 from backend.core.tools.command_tools import (
     ReadCommandTool,
@@ -54,6 +54,14 @@ def install_notification_service(run_manager: RunManager) -> MemoryNotificationR
     return repository
 
 
+class FailingNotificationService:
+    async def register_run_notification(self, **kwargs):
+        raise RuntimeError("notification store unavailable")
+
+    async def publish_run_notification(self, **kwargs):
+        raise RuntimeError("notification store unavailable")
+
+
 class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
     async def test_command_tool_descriptions_expose_shell_profile_and_background_boundaries(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -69,6 +77,38 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("start_terminal", run_tool.description)
             self.assertIn("true background command", start_tool.description)
             self.assertIn("active shell", start_tool.description)
+            self.assertIn("Do not report completion", start_tool.description)
+
+    async def test_background_start_result_is_explicitly_launch_only(self):
+        class StartOnlyExecutor:
+            async def start(self, **kwargs):
+                return {
+                    "run_id": "run-background",
+                    "metadata": {"shell": {"id": "powershell"}},
+                }
+
+            def snapshot(self, run_id):
+                return {"status": "running", "shell": {"id": "powershell"}}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tool = StartBackgroundCommandTool(CodeToolConfig.from_dict({
+                "workspace_roots": [tmpdir],
+                "command_timeout_seconds": 10,
+            }))
+            payload = json.loads(await tool.execute(
+                command="Write-Output 1",
+                cwd=".",
+                _runtime_context={
+                    "conversation_id": "conv_1",
+                    "node_id": "node_1",
+                    "run_id": "parent_run_1",
+                    "command_executor": StartOnlyExecutor(),
+                },
+            ))
+
+        self.assertEqual(payload["status"], "running")
+        self.assertIs(payload["result_observed"], False)
+        self.assertIn("does not contain the command result", payload["message"])
 
     async def test_run_command_short_managed_command_returns_sync_output_and_suppresses_notification(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -330,6 +370,23 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("terminal_run_id", payload)
             self.assertIn("hello-command", payload["stdout_tail"])
 
+    async def test_notification_failure_does_not_block_or_fail_command_run(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_manager = RunManager()
+            run_manager.notification_service = FailingNotificationService()
+            command_executor = CommandExecutor(run_manager)
+
+            run = await command_executor.start(
+                conversation_id="conv_1",
+                command=f'{sys.executable} -c "print(\'still-runs\')"',
+                cwd=tmpdir,
+                anchor_node_id="node_1",
+            )
+            await command_executor.wait(run["run_id"], timeout=5)
+
+            record = run_manager.get_run(run["run_id"])
+            self.assertEqual(record["status"], RunStatus.COMPLETED.value)
+
     async def test_workflow_child_command_does_not_create_task_notification(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_manager = RunManager()
@@ -445,13 +502,13 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(snapshot["exit_code"], 0)
             self.assertEqual(snapshot["status"], RunStatus.COMPLETED.value)
 
-    async def test_background_command_auto_creates_task_for_standalone_notification(self):
+    async def test_background_command_notification_does_not_create_task(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_manager = RunManager()
             notifications = install_notification_service(run_manager)
-            task_ledger = TaskLedger()
-            task_ledger.install_run_finish_listener(run_manager)
-            command_executor = CommandExecutor(run_manager, task_ledger=task_ledger)
+            task_service = ActiveTaskService(run_manager=run_manager)
+            run_manager.task_service = task_service
+            command_executor = CommandExecutor(run_manager, task_service=task_service)
 
             run = await command_executor.start(
                 conversation_id="conv_1",
@@ -462,103 +519,131 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             )
             await command_executor.wait(run["run_id"], timeout=5)
 
-            tasks = await task_ledger.list_tasks("conv_1")
-            self.assertEqual(len(tasks), 1)
-            self.assertEqual(tasks[0].owner_run_id, run["run_id"])
-            self.assertEqual(tasks[0].status, TaskStatus.COMPLETED)
+            self.assertIsNone(await task_service.get_active_task("conv_1"))
             record = run_manager.get_run(run["run_id"])
-            self.assertEqual(record["metadata"]["task_id"], tasks[0].task_id)
             notification = notifications.items[run["run_id"]]
-            self.assertEqual(notification["task_id"], tasks[0].task_id)
+            self.assertNotIn("task_id", notification)
+            self.assertNotIn("task_id", record["metadata"])
 
-    async def test_command_binds_existing_task_id_from_metadata(self):
+    async def test_command_binds_only_the_explicit_numbered_step(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_manager = RunManager()
-            task_ledger = TaskLedger()
-            task_ledger.install_run_finish_listener(run_manager)
-            command_executor = CommandExecutor(run_manager, task_ledger=task_ledger)
-            task = await task_ledger.create_task(
+            install_notification_service(run_manager)
+            task_service = ActiveTaskService(run_manager=run_manager)
+            run_manager.task_service = task_service
+            command_executor = CommandExecutor(run_manager, task_service=task_service)
+            task = await task_service.create_task(
                 conversation_id="conv_1",
-                title="已有命令任务",
-                created_by_run_id="chat-run-1",
+                title="三步任务",
+                steps=[{"title": "输出 1"}, {"title": "输出 2"}],
             )
 
             run = await command_executor.start(
                 conversation_id="conv_1",
-                command=f"{sys.executable} -c \"print('bound-command')\"",
+                command=f"{sys.executable} -c \"print('active-step')\"",
                 cwd=tmpdir,
                 anchor_node_id="node_1",
-                metadata={"task_id": task.task_id},
+                summary="active step command",
+                step=1,
+                task_context_mode="attached",
+                task_generation_id=task.generation_id,
+                task_revision=task.revision,
             )
             await command_executor.wait(run["run_id"], timeout=5)
 
-            updated = await task_ledger.get_task("conv_1", task.task_id)
-            self.assertEqual(updated.owner_run_id, run["run_id"])
-            self.assertEqual(updated.status, TaskStatus.COMPLETED)
+            updated = await task_service.get_active_task("conv_1")
+            self.assertEqual(updated.steps[0].evidence_run_id, run["run_id"])
+            self.assertEqual(updated.steps[0].status.value, "completed")
+            self.assertEqual(updated.steps[1].status.value, "pending")
+            record = run_manager.get_run(run["run_id"])
+            self.assertNotIn("task_id", record["metadata"])
+            self.assertNotIn("task_step_id", record["metadata"])
+            self.assertEqual(record["metadata"]["task_step_position"], 1)
+            self.assertEqual(record["metadata"]["task_outcome"]["step"], 1)
+            self.assertEqual(record["metadata"]["task_outcome"]["step_status"], "completed")
+            self.assertEqual(record["metadata"]["task_outcome"]["task_status"], "active")
+            snapshot = command_executor.snapshot(run["run_id"])
+            self.assertEqual(snapshot["step"], 1)
+            self.assertEqual(
+                snapshot["task_outcome"]["task_snapshot"]["steps"][0]["status"],
+                "completed",
+            )
+            self.assertNotIn("task_outcome", snapshot["metadata"])
+            self.assertNotIn("task_generation_id", json.dumps(snapshot))
+            self.assertNotIn("task_step_position", json.dumps(snapshot))
 
-    async def test_command_rejects_missing_task_id_before_creating_run(self):
+    async def test_run_command_foreground_result_exposes_public_task_outcome(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_manager = RunManager()
-            task_ledger = TaskLedger()
-            command_executor = CommandExecutor(run_manager, task_ledger=task_ledger)
+            task_service = ActiveTaskService(run_manager=run_manager)
+            run_manager.task_service = task_service
+            command_executor = CommandExecutor(run_manager, task_service=task_service)
+            task = await task_service.create_task(
+                conversation_id="conv_1",
+                title="前台命令任务",
+                steps=[{"title": "输出结果"}],
+            )
+            parent = await run_manager.create_run(
+                conversation_id="conv_1",
+                kind=RunKind.CHAT,
+                anchor_node_id="node_1",
+                target_node_id="node_2",
+            )
+            tool = RunCommandTool(CodeToolConfig.from_dict({
+                "workspace_roots": [tmpdir],
+                "command_timeout_seconds": 10,
+                "run_command_initial_wait_seconds": 5,
+            }))
 
-            with self.assertRaises(Exception):
+            payload = json.loads(await tool.execute(
+                command=f"{sys.executable} -c \"print('task-finished')\"",
+                cwd=".",
+                step=1,
+                _runtime_context={
+                    "conversation_id": "conv_1",
+                    "node_id": "node_2",
+                    "anchor_node_id": "node_1",
+                    "run_id": parent.run_id,
+                    "task_context_mode": "attached",
+                    "task_generation_id": task.generation_id,
+                    "task_revision": task.revision,
+                    "command_executor": command_executor,
+                },
+            ))
+
+            self.assertEqual(payload["status"], RunStatus.COMPLETED.value)
+            self.assertEqual(payload["task_outcome"]["task_status"], "completed")
+            self.assertEqual(payload["task_outcome"]["step"], 1)
+            self.assertEqual(payload["task_outcome"]["task_snapshot"]["steps"][0]["status"], "completed")
+            self.assertEqual(payload["step"], 1)
+            self.assertNotIn("task_generation_id", json.dumps(payload))
+            self.assertNotIn("task_step_position", json.dumps(payload))
+
+    async def test_detached_command_step_is_rejected_before_run_creation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_manager = RunManager()
+            task_service = ActiveTaskService(run_manager=run_manager)
+            run_manager.task_service = task_service
+            command_executor = CommandExecutor(run_manager, task_service=task_service)
+            task = await task_service.create_task(
+                conversation_id="conv_1",
+                title="命令任务",
+                steps=[{"title": "执行"}],
+            )
+
+            with self.assertRaises(TaskContextDisabledError):
                 await command_executor.start(
                     conversation_id="conv_1",
                     command=f"{sys.executable} -c \"print('no-run')\"",
                     cwd=tmpdir,
                     anchor_node_id="node_1",
-                    metadata={"task_id": "task_missing"},
+                    step=1,
+                    task_context_mode="detached",
+                    task_generation_id=task.generation_id,
+                    task_revision=task.revision,
                 )
 
             self.assertEqual(run_manager.list_runs("conv_1"), [])
-
-    async def test_command_tools_pass_explicit_task_id(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            run_manager = RunManager()
-            task_ledger = TaskLedger()
-            task_ledger.install_run_finish_listener(run_manager)
-            command_executor = CommandExecutor(run_manager, task_ledger=task_ledger)
-            task = await task_ledger.create_task(conversation_id="conv_1", title="命令任务")
-            config = CodeToolConfig.from_dict({
-                "workspace_roots": [tmpdir],
-                "command_timeout_seconds": 10,
-                "run_command_initial_wait_seconds": 5,
-            })
-
-            result = json.loads(await RunCommandTool(config).execute(
-                command=f"{sys.executable} -c \"print('explicit-task')\"",
-                task_id=task.task_id,
-                _runtime_context={
-                    "conversation_id": "conv_1",
-                    "anchor_node_id": "node_anchor",
-                    "node_id": "node_1",
-                    "run_id": "chat-run-1",
-                    "command_executor": command_executor,
-                },
-            ))
-
-            updated = await task_ledger.get_task("conv_1", task.task_id)
-            self.assertEqual(updated.owner_run_id, result["run_id"])
-            self.assertEqual(updated.status, TaskStatus.COMPLETED)
-            self.assertEqual(run_manager.get_run(result["run_id"])["anchor_node_id"], "node_anchor")
-
-            other = await task_ledger.create_task(conversation_id="conv_1", title="后台命令任务")
-            started = json.loads(await StartBackgroundCommandTool(config).execute(
-                command=f"{sys.executable} -c \"import time; time.sleep(0.1); print('background-task')\"",
-                task_id=other.task_id,
-                _runtime_context={
-                    "conversation_id": "conv_1",
-                    "anchor_node_id": "node_anchor",
-                    "node_id": "node_1",
-                    "run_id": "chat-run-1",
-                    "command_executor": command_executor,
-                },
-            ))
-            await command_executor.wait(started["run_id"], timeout=5)
-            other_updated = await task_ledger.get_task("conv_1", other.task_id)
-            self.assertEqual(other_updated.owner_run_id, started["run_id"])
-            self.assertEqual(run_manager.get_run(started["run_id"])["anchor_node_id"], "node_anchor")
 
     async def test_wait_command_marks_final_result_observed_and_suppresses_notification(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -596,6 +681,82 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(updated["metadata"]["result_observed_by_run_id"], parent.run_id)
             self.assertEqual(updated["metadata"]["result_observed_via"], "wait_command")
             self.assertEqual(notifications.items[run["run_id"]]["status"], "observed")
+
+    async def test_wait_command_marks_stopped_result_observed(self):
+        class StoppedExecutor:
+            def __init__(self):
+                self.observed = None
+
+            async def wait(self, run_id, timeout=None):
+                return None
+
+            def snapshot(self, run_id):
+                return {"command_run_id": run_id, "status": RunStatus.STOPPED.value}
+
+            async def mark_observed(self, run_id, *, observer_run_id, via):
+                self.observed = (run_id, observer_run_id, via)
+
+        executor = StoppedExecutor()
+        result = json.loads(await WaitCommandTool().execute(
+            command_run_id="run_stopped",
+            timeout_seconds=5,
+            _runtime_context={
+                "command_executor": executor,
+                "run_id": "run_parent",
+            },
+        ))
+
+        self.assertEqual(result["status"], RunStatus.STOPPED.value)
+        self.assertEqual(executor.observed, ("run_stopped", "run_parent", "wait_command"))
+
+    async def test_run_command_foreground_marks_stopped_result_observed(self):
+        class StoppedForegroundExecutor:
+            def __init__(self):
+                self.observed = None
+
+            async def start(self, **kwargs):
+                return {"run_id": "run_stopped_foreground", "metadata": {}}
+
+            async def wait(self, run_id, timeout=None):
+                return None
+
+            def snapshot(self, run_id):
+                return {
+                    "command_run_id": run_id,
+                    "status": RunStatus.STOPPED.value,
+                    "exit_code": None,
+                    "stdout": "",
+                    "stderr": "",
+                    "shell": {"id": "powershell"},
+                }
+
+            async def mark_observed(self, run_id, *, observer_run_id, via):
+                self.observed = (run_id, observer_run_id, via)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            executor = StoppedForegroundExecutor()
+            tool = RunCommandTool(CodeToolConfig.from_dict({
+                "workspace_roots": [tmpdir],
+                "command_timeout_seconds": 10,
+                "run_command_initial_wait_seconds": 5,
+            }))
+
+            result = json.loads(await tool.execute(
+                command="echo stopped",
+                cwd=".",
+                _runtime_context={
+                    "command_executor": executor,
+                    "conversation_id": "conv_1",
+                    "node_id": "node_1",
+                    "run_id": "run_parent",
+                },
+            ))
+
+        self.assertEqual(result["status"], RunStatus.STOPPED.value)
+        self.assertEqual(
+            executor.observed,
+            ("run_stopped_foreground", "run_parent", "run_command"),
+        )
 
     async def test_command_start_exception_records_actionable_error_context(self):
         with tempfile.TemporaryDirectory() as tmpdir:

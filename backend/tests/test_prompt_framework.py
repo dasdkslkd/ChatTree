@@ -39,9 +39,10 @@ from backend.core.prompts.types import PromptBuildRequest
 from backend.core.notifications import TaskNotificationService
 from backend.core.runs import RunKind, RunManager, RunStatus
 from backend.core.runs.journal import RunJournal
+from backend.core.storage.tool_result_storage import ToolResultStorage
 from backend.core.tools.agent_tools import StartSubagentTool, StartWorkflowTool
 from backend.core.plans import PlanLedger
-from backend.core.tasks import TaskLedger, TaskStatus
+from backend.core.tasks import ActiveTaskService, TaskContextMode, TaskOutcome, TaskTurnContext
 from backend.core.workflows.workflow_manager import WorkflowManager
 from backend.core.slash.dispatcher import SlashCommandDispatcher
 from backend.core.slash.registry import SlashCommandRegistry
@@ -103,6 +104,7 @@ class PromptCatalogTests(unittest.TestCase):
         self.assertIn("Use `run_command` for command execution that should start foreground", text)
         self.assertIn("Use `start_background_command` only for true background command work", text)
         self.assertIn("Use `wait_command` only when the current answer must join", text)
+        self.assertIn("Do not claim completion, exit code, or output", text)
         self.assertIn("auto-background", text)
         self.assertIn("active shell declared by the command tool description", text)
         self.assertNotIn("start_terminal", text)
@@ -434,116 +436,725 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(normal_names, {"enter_plan_mode", "read_file"})
         self.assertEqual(plan_names, {"update_plan", "exit_plan_mode", "ask_user_question", "read_file"})
 
-    async def test_main_runtime_context_lists_open_tasks(self):
-        task_ledger = TaskLedger()
+    async def test_attached_runtime_context_lists_active_task_without_internal_ids(self):
+        task_service = ActiveTaskService()
         manager = ChatManager(
             model_manager=None,
             storage=self.FakeStorage(),
             prompts=self.FakePromptStorage(),
-            task_ledger=task_ledger,
+            task_service=task_service,
         )
         conversation = manager.create_conversation("title")
-        task = await task_ledger.create_task(
+        await task_service.create_task(
             conversation_id=conversation.metadata["id"],
             title="检查 reference 中的 plan 模式",
             detail="x" * 260,
+            steps=[
+                {"title": "读取实现", "detail": "核对任务持久化与分支注入"},
+                {"title": "验证行为"},
+            ],
             created_by_run_id="run-1",
-        )
-        await task_ledger.bind_run(
-            conversation_id=conversation.metadata["id"],
-            task_id=task.task_id,
-            run_id="run-subagent",
-            owner_type="subagent",
         )
 
         messages = manager._build_prompt_messages(conversation, [])
 
-        self.assertIn("Open Tasks:", messages[1]["content"])
-        self.assertIn(task.task_id, messages[1]["content"])
-        self.assertIn("run-subagent", messages[1]["content"])
-        self.assertIn("Before final response", messages[1]["content"])
+        self.assertIn("Active Conversation Task", messages[1]["content"])
+        self.assertIn("Task detail:", messages[1]["content"])
+        self.assertIn("x" * 120, messages[1]["content"])
+        self.assertIn("1. [pending] 读取实现", messages[1]["content"])
+        self.assertIn("核对任务持久化与分支注入", messages[1]["content"])
+        self.assertIn("2. [pending] 验证行为", messages[1]["content"])
+        self.assertIn("pass `step`", messages[1]["content"])
+        self.assertNotIn("taskgen_", messages[1]["content"])
+        self.assertNotIn("task_id", messages[1]["content"])
         self.assertNotIn("x" * 200, messages[1]["content"])
 
-    async def test_task_completion_guard_requires_nudge_for_unresolved_task(self):
-        task_ledger = TaskLedger()
+    async def test_terminal_task_outcome_preserves_sibling_progress_for_final_model_round(self):
+        task_service = ActiveTaskService()
+
         manager = ChatManager(
             model_manager=None,
             storage=self.FakeStorage(),
             prompts=self.FakePromptStorage(),
-            task_ledger=task_ledger,
+            task_service=task_service,
         )
         conversation = manager.create_conversation("title")
-        await task_ledger.create_task(
+        task = await task_service.create_task(
+            conversation_id=conversation.metadata["id"],
+            title="三步任务",
+            steps=[{"title": "第一步"}, {"title": "第二步"}, {"title": "第三步"}],
+        )
+        first = await task_service.set_step_result(
+            conversation_id=conversation.metadata["id"],
+            step=1,
+            status="completed",
+            evidence_summary="branch one",
+            expected_generation=task.generation_id,
+            expected_revision=task.revision,
+        )
+        second = await task_service.set_step_result(
+            conversation_id=conversation.metadata["id"],
+            step=2,
+            status="completed",
+            evidence_summary="sibling branch",
+            expected_generation=task.generation_id,
+            expected_revision=first.task.revision,
+        )
+        turn_context = manager._start_task_turn_context(conversation)
+        messages = manager._build_prompt_messages(
+            conversation,
+            [],
+            task_turn_context=turn_context,
+        )
+        run_context = {
+            "task_generation_id": second.task.generation_id,
+            "task_revision": second.task.revision,
+        }
+        final = await task_service.set_step_result(
+            conversation_id=conversation.metadata["id"],
+            step=3,
+            status="completed",
+            evidence_summary="current branch",
+            expected_generation=task.generation_id,
+            expected_revision=second.task.revision,
+        )
+
+        manager._refresh_task_turn_context(
+            run_context=run_context,
+            turn_context=turn_context,
+            conversation_id=conversation.metadata["id"],
+            tool_call={
+                "function": {
+                    "name": "run_command",
+                    "arguments": json.dumps({"command": "echo 3", "step": 3}),
+                }
+            },
+            tool_message=Message({
+                "role": Role.TOOL,
+                "content": json.dumps({
+                    "run_id": "run-step-3",
+                    "status": "completed",
+                    "task_outcome": {
+                        "kind": "run_finished",
+                        "task_status": "completed",
+                        "step": 3,
+                        "step_status": "completed",
+                        "run_status": "completed",
+                        "task_snapshot": final.task_snapshot.public_dict(),
+                    },
+                }),
+                "tool_call_id": "call-step-3",
+            }),
+        )
+        runtime = manager._runtime_prompt_context(
+            "main",
+            conversation,
+            task_turn_context=turn_context,
+        )
+        manager._replace_main_runtime_context_message(messages, runtime)
+        runtime_messages = [
+            message
+            for message in messages
+            if (message.get("metadata") or {}).get("runtime_context") == "main"
+        ]
+
+        self.assertIn("2. [completed] 第二步", runtime.content)
+        self.assertIn("step 3 -> completed", runtime.content)
+        self.assertIn("task -> completed", runtime.content)
+        self.assertIn("sibling branches", runtime.content)
+        self.assertEqual(len(runtime_messages), 1)
+        self.assertEqual(runtime_messages[0]["content"], runtime.content)
+        self.assertIsNone(run_context["task_generation_id"])
+        self.assertIsNone(run_context["task_revision"])
+
+    async def test_chat_tool_loop_reprojects_authoritative_task_state_before_final_round(self):
+        task_service = ActiveTaskService()
+
+        class TwoRoundProvider:
+            def __init__(self):
+                self.calls = []
+
+            async def generate_response_stream(self, **kwargs):
+                self.calls.append(list(kwargs["messages"]))
+                if len(self.calls) == 1:
+                    yield {
+                        "status": StreamStatus.COMPLETE,
+                        "content": "",
+                        "tool_calls": [{
+                            "id": "call-step-3",
+                            "type": "function",
+                            "function": {
+                                "name": "run_command",
+                                "arguments": json.dumps({"command": "echo 3", "step": 3}),
+                            },
+                        }],
+                        "tokens_used": 0,
+                    }
+                    return
+                yield {"status": StreamStatus.CONTENT, "content": "全部完成", "tokens_used": 1}
+                yield {"status": StreamStatus.COMPLETE, "content": "", "tokens_used": 1}
+
+        class ModelManager:
+            def __init__(self, provider):
+                self.provider = provider
+                self.model_list = {"fake": ["model"]}
+
+            def get_model(self, provider_id, stream=False):
+                return self.provider
+
+            def get_model_info(self, provider_id, model_id):
+                return {}
+
+        class ToolManager:
+            def get_openai_tools(self):
+                return [{
+                    "type": "function",
+                    "function": {
+                        "name": "run_command",
+                        "parameters": {"type": "object", "properties": {"step": {"type": "integer"}}},
+                    },
+                }]
+
+            async def execute_tool(self, name, arguments, **kwargs):
+                current = await task_service.get_active_task(conversation.metadata["id"])
+                final = await task_service.set_step_result(
+                    conversation_id=conversation.metadata["id"],
+                    step=3,
+                    status="completed",
+                    evidence_summary="current branch",
+                    expected_generation=current.generation_id,
+                    expected_revision=current.revision,
+                )
+                return json.dumps({
+                    "run_id": "run-step-3",
+                    "status": "completed",
+                    "task_outcome": {
+                        "kind": "run_finished",
+                        "task_status": "completed",
+                        "step": 3,
+                        "step_status": "completed",
+                        "run_status": "completed",
+                        "task_snapshot": final.task_snapshot.public_dict(),
+                    },
+                })
+
+        provider = TwoRoundProvider()
+        tool_manager = ToolManager()
+        manager = ChatManager(
+            model_manager=ModelManager(provider),
+            storage=self.FakeStorage(),
+            prompts=self.FakePromptStorage(),
+            tool_manager=tool_manager,
+            task_service=task_service,
+        )
+        conversation = manager.create_conversation("title")
+        task = await task_service.create_task(
+            conversation_id=conversation.metadata["id"],
+            title="三步任务",
+            steps=[{"title": "第一步"}, {"title": "第二步"}, {"title": "第三步"}],
+        )
+        first = await task_service.set_step_result(
+            conversation_id=conversation.metadata["id"],
+            step=1,
+            status="completed",
+            evidence_summary="ancestor branch",
+            expected_generation=task.generation_id,
+            expected_revision=task.revision,
+        )
+        await task_service.set_step_result(
+            conversation_id=conversation.metadata["id"],
+            step=2,
+            status="completed",
+            evidence_summary="sibling branch",
+            expected_generation=task.generation_id,
+            expected_revision=first.task.revision,
+        )
+
+        chunks = [
+            chunk
+            async for chunk in manager.send_message_stream(
+                conversation.metadata["id"],
+                "现在执行第三步",
+                model_id="model",
+                provider_id="fake",
+                parent_node_id=conversation.current_node_id,
+            )
+        ]
+
+        self.assertEqual(chunks[-1]["status"], StreamStatus.COMPLETE)
+        self.assertEqual(len(provider.calls), 2)
+        first_runtime = next(
+            message["content"]
+            for message in provider.calls[0]
+            if (message.get("metadata") or {}).get("runtime_context") == "main"
+        )
+        final_runtime = next(
+            message["content"]
+            for message in provider.calls[1]
+            if (message.get("metadata") or {}).get("runtime_context") == "main"
+        )
+        self.assertIn("2. [completed] 第二步", first_runtime)
+        self.assertIn("3. [pending] 第三步", first_runtime)
+        self.assertIn("2. [completed] 第二步", final_runtime)
+        self.assertIn("step 3 -> completed", final_runtime)
+        self.assertIn("task -> completed", final_runtime)
+
+    async def test_direct_final_step_produces_terminal_turn_outcome_without_a_run(self):
+        task_service = ActiveTaskService()
+        manager = ChatManager(
+            model_manager=None,
+            storage=self.FakeStorage(),
+            prompts=self.FakePromptStorage(),
+            task_service=task_service,
+        )
+        conversation = manager.create_conversation("title")
+        task = await task_service.create_task(
+            conversation_id=conversation.metadata["id"],
+            title="直接任务",
+            steps=[{"title": "完成"}],
+        )
+        turn_context = manager._start_task_turn_context(conversation)
+        run_context = {
+            "task_generation_id": task.generation_id,
+            "task_revision": task.revision,
+        }
+        result = await task_service.set_step_result(
+            conversation_id=conversation.metadata["id"],
+            step=1,
+            status="completed",
+            evidence_summary="direct work",
+            expected_generation=task.generation_id,
+            expected_revision=task.revision,
+        )
+
+        manager._refresh_task_turn_context(
+            run_context=run_context,
+            turn_context=turn_context,
+            conversation_id=conversation.metadata["id"],
+            tool_call={
+                "function": {
+                    "name": "set_task_step",
+                    "arguments": json.dumps({"step": 1, "status": "completed"}),
+                }
+            },
+            tool_message=Message({
+                "role": Role.TOOL,
+                "content": json.dumps(result.public_dict()),
+                "tool_call_id": "call-direct-step",
+            }),
+        )
+        runtime = manager._runtime_prompt_context(
+            "main",
+            conversation,
+            task_turn_context=turn_context,
+        )
+
+        self.assertIn("step 1 -> completed", runtime.content)
+        self.assertIn("task -> completed", runtime.content)
+        self.assertIsNone(run_context["task_generation_id"])
+
+    async def test_persisted_task_tool_results_use_raw_payload_for_runtime_outcomes(self):
+        task_service = ActiveTaskService()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tool_manager = type("ToolManager", (), {
+                "tool_result_store": ToolResultStorage(str(Path(temp_dir) / "tool-results")),
+            })()
+            manager = ChatManager(
+                model_manager=None,
+                storage=self.FakeStorage(),
+                prompts=self.FakePromptStorage(),
+                tool_manager=tool_manager,
+                task_service=task_service,
+            )
+            conversation = manager.create_conversation("title")
+            conversation_id = conversation.metadata["id"]
+            task = await task_service.create_task(
+                conversation_id=conversation_id,
+                title="持久化工具结果任务",
+                steps=[{"title": "完成"}],
+            )
+            turn_context = manager._start_task_turn_context(conversation)
+            result = await task_service.set_step_result(
+                conversation_id=conversation_id,
+                step=1,
+                status="completed",
+                evidence_summary="direct work",
+                expected_generation=task.generation_id,
+                expected_revision=task.revision,
+            )
+            visible_message = manager._model_visible_tool_message(
+                Message({
+                    "role": Role.TOOL,
+                    "content": json.dumps(result.public_dict()),
+                    "tool_call_id": "call-persisted-step",
+                }),
+                name="set_task_step",
+                conversation_id=conversation_id,
+                node_id=conversation.current_node_id,
+                tool_call_id="call-persisted-step",
+            )
+
+            manager._refresh_task_turn_context(
+                run_context={
+                    "task_generation_id": task.generation_id,
+                    "task_revision": task.revision,
+                },
+                turn_context=turn_context,
+                conversation_id=conversation_id,
+                tool_call={
+                    "function": {
+                        "name": "set_task_step",
+                        "arguments": json.dumps({"step": 1, "status": "completed"}),
+                    }
+                },
+                tool_message=visible_message,
+            )
+            completed_runtime = manager._runtime_prompt_context(
+                "main",
+                conversation,
+                task_turn_context=turn_context,
+            )
+
+            self.assertNotEqual(visible_message["content"], visible_message["raw_content"])
+            self.assertIn("task -> completed", completed_runtime.content)
+            self.assertIn("Authoritative Task State After Outcome", completed_runtime.content)
+            self.assertIn("1. [completed] 完成", completed_runtime.content)
+
+            cancel_task = await task_service.create_task(
+                conversation_id=conversation_id,
+                title="取消任务",
+                steps=[{"title": "等待"}],
+            )
+            cancel_context = manager._start_task_turn_context(conversation)
+            cancelled = await task_service.cancel_task(
+                conversation_id=conversation_id,
+                reason="用户取消",
+                expected_generation=cancel_task.generation_id,
+                expected_revision=cancel_task.revision,
+            )
+            cancel_message = manager._model_visible_tool_message(
+                Message({
+                    "role": Role.TOOL,
+                    "content": json.dumps({
+                        "cancelled": cancelled,
+                        "task": None,
+                        "task_outcome": {
+                            "kind": "task_cancelled",
+                            "task_status": "cancelled",
+                        },
+                    }),
+                    "tool_call_id": "call-persisted-cancel",
+                }),
+                name="cancel_task",
+                conversation_id=conversation_id,
+                node_id=conversation.current_node_id,
+                tool_call_id="call-persisted-cancel",
+            )
+
+            manager._refresh_task_turn_context(
+                run_context={
+                    "task_generation_id": cancel_task.generation_id,
+                    "task_revision": cancel_task.revision,
+                },
+                turn_context=cancel_context,
+                conversation_id=conversation_id,
+                tool_call={
+                    "function": {
+                        "name": "cancel_task",
+                        "arguments": json.dumps({"reason": "用户取消"}),
+                    }
+                },
+                tool_message=cancel_message,
+            )
+            cancelled_runtime = manager._runtime_prompt_context(
+                "main",
+                conversation,
+                task_turn_context=cancel_context,
+            )
+
+            self.assertNotEqual(cancel_message["content"], cancel_message["raw_content"])
+            self.assertIn("task -> cancelled", cancelled_runtime.content)
+
+    def test_background_launch_does_not_consume_fast_terminal_run_outcome(self):
+        class CompletedRunManager:
+            def get_run(self, run_id):
+                return {
+                    "run_id": run_id,
+                    "metadata": {
+                        "task_outcome": {
+                            "kind": "run_finished",
+                            "task_status": "completed",
+                            "step": 1,
+                            "step_status": "completed",
+                            "run_status": "completed",
+                        }
+                    },
+                }
+
+        manager = ChatManager(
+            model_manager=None,
+            storage=self.FakeStorage(),
+            prompts=self.FakePromptStorage(),
+            task_service=ActiveTaskService(),
+        )
+        manager.run_manager = CompletedRunManager()
+
+        outcome = manager._task_outcome_from_tool_execution(
+            {
+                "function": {
+                    "name": "start_background_command",
+                    "arguments": json.dumps({"command": "echo 1", "step": 1}),
+                }
+            },
+            Message({
+                "role": Role.TOOL,
+                "content": json.dumps({
+                    "status": "running",
+                    "run_id": "run-fast",
+                    "command_run_id": "run-fast",
+                    "result_observed": False,
+                }),
+                "tool_call_id": "call-fast",
+            }),
+        )
+
+        self.assertIsNone(outcome)
+
+    def test_task_outcome_parser_uses_only_top_level_tool_result_contract(self):
+        manager = ChatManager(
+            model_manager=None,
+            storage=self.FakeStorage(),
+            prompts=self.FakePromptStorage(),
+            task_service=ActiveTaskService(),
+        )
+
+        outcome = manager._task_outcome_from_tool_execution(
+            {
+                "function": {
+                    "name": "run_command",
+                    "arguments": json.dumps({"command": "echo 1", "step": 1}),
+                }
+            },
+            Message({
+                "role": Role.TOOL,
+                "content": json.dumps({
+                    "run_id": "run-nested",
+                    "status": "completed",
+                    "metadata": {
+                        "task_outcome": {
+                            "kind": "run_finished",
+                            "task_status": "completed",
+                            "step": 1,
+                        },
+                    },
+                }),
+                "tool_call_id": "call-nested",
+            }),
+        )
+
+        self.assertIsNone(outcome)
+
+    async def test_turn_start_task_snapshot_survives_task_replacement_in_same_turn(self):
+        task_service = ActiveTaskService()
+        manager = ChatManager(
+            model_manager=None,
+            storage=self.FakeStorage(),
+            prompts=self.FakePromptStorage(),
+            task_service=task_service,
+        )
+        conversation = manager.create_conversation("title")
+        conversation_id = conversation.metadata["id"]
+        first_task = await task_service.create_task(
+            conversation_id=conversation_id,
+            title="任务 A",
+            steps=[{"title": "完成 A"}],
+        )
+        turn_context = manager._start_task_turn_context(conversation)
+        result = await task_service.set_step_result(
+            conversation_id=conversation_id,
+            step=1,
+            status="completed",
+            evidence_summary="A complete",
+            expected_generation=first_task.generation_id,
+            expected_revision=first_task.revision,
+        )
+        manager._refresh_task_turn_context(
+            run_context={
+                "task_generation_id": first_task.generation_id,
+                "task_revision": first_task.revision,
+            },
+            turn_context=turn_context,
+            conversation_id=conversation_id,
+            tool_call={
+                "function": {
+                    "name": "set_task_step",
+                    "arguments": json.dumps({"step": 1, "status": "completed"}),
+                }
+            },
+            tool_message=Message({
+                "role": Role.TOOL,
+                "content": json.dumps(result.public_dict()),
+                "tool_call_id": "call-task-a",
+            }),
+        )
+        second_task = await task_service.create_task(
+            conversation_id=conversation_id,
+            title="任务 B",
+            steps=[{"title": "开始 B"}],
+        )
+
+        turn_context.refresh(second_task)
+        runtime = manager._runtime_prompt_context(
+            "main",
+            conversation,
+            task_turn_context=turn_context,
+        )
+
+        self.assertEqual(turn_context.baseline_task.title, "任务 A")
+        self.assertEqual(turn_context.current_task.title, "任务 B")
+        self.assertIn("任务 A", runtime.content)
+        self.assertIn("step 1 -> completed", runtime.content)
+        self.assertIn("任务 B", runtime.content)
+
+    def test_terminal_outcome_snapshot_keeps_all_conversation_wide_step_facts(self):
+        manager = ChatManager(
+            model_manager=None,
+            storage=self.FakeStorage(),
+            prompts=self.FakePromptStorage(),
+            task_service=ActiveTaskService(),
+        )
+        outcome = TaskOutcome.from_dict({
+            "kind": "run_finished",
+            "task_status": "completed",
+            "step": 3,
+            "step_status": "completed",
+            "run_status": "completed",
+            "task_snapshot": {
+                "title": "三步任务",
+                "detail": "",
+                "steps": [
+                    {"position": 1, "title": "第一步", "status": "completed"},
+                    {"position": 2, "title": "第二步", "status": "completed"},
+                    {"position": 3, "title": "第三步", "status": "completed"},
+                ],
+            },
+        })
+        context = TaskTurnContext.start(TaskContextMode.ATTACHED, None)
+        context.refresh(None, outcome)
+
+        prompt = "\n".join(manager._format_task_turn_context_for_prompt(context))
+
+        self.assertIn("Authoritative Task State After Outcome", prompt)
+        self.assertIn("2. [completed] 第二步", prompt)
+        self.assertIn("never relabel a completed step as skipped or unexecuted", prompt)
+
+    async def test_terminal_outcome_snapshot_supersedes_same_task_turn_start_copy(self):
+        task_service = ActiveTaskService()
+        manager = ChatManager(
+            model_manager=None,
+            storage=self.FakeStorage(),
+            prompts=self.FakePromptStorage(),
+            task_service=task_service,
+        )
+        conversation = manager.create_conversation("title")
+        conversation_id = conversation.metadata["id"]
+        task = await task_service.create_task(
+            conversation_id=conversation_id,
+            title="三步任务",
+            steps=[{"title": "第一步"}, {"title": "第二步"}, {"title": "第三步"}],
+        )
+        first = await task_service.set_step_result(
+            conversation_id=conversation_id,
+            step=1,
+            status="completed",
+            evidence_summary="one",
+            expected_generation=task.generation_id,
+            expected_revision=task.revision,
+        )
+        second = await task_service.set_step_result(
+            conversation_id=conversation_id,
+            step=2,
+            status="completed",
+            evidence_summary="two",
+            expected_generation=task.generation_id,
+            expected_revision=first.task.revision,
+        )
+        context = TaskTurnContext.start(TaskContextMode.ATTACHED, second.task)
+        final = await task_service.set_step_result(
+            conversation_id=conversation_id,
+            step=3,
+            status="completed",
+            evidence_summary="three",
+            expected_generation=task.generation_id,
+            expected_revision=second.task.revision,
+        )
+        context.refresh(None, TaskOutcome.from_dict({
+            "kind": "step_updated",
+            "task_status": "completed",
+            "step": 3,
+            "step_status": "completed",
+            "task_snapshot": final.task_snapshot.public_dict(),
+        }))
+
+        prompt = "\n".join(manager._format_task_turn_context_for_prompt(context))
+
+        self.assertNotIn("Authoritative Task Snapshot At Turn Start", prompt)
+        self.assertEqual(prompt.count("2. [completed] 第二步"), 1)
+
+    def test_attached_runtime_context_without_task_still_explains_step_ownership(self):
+        manager = ChatManager(
+            model_manager=None,
+            storage=self.FakeStorage(),
+            prompts=self.FakePromptStorage(),
+            task_service=ActiveTaskService(),
+        )
+        conversation = manager.create_conversation("title")
+
+        messages = manager._build_prompt_messages(conversation, [])
+        runtime_prompt = messages[1]["content"]
+
+        self.assertIn("there is no active conversation task", runtime_prompt)
+        self.assertIn("pass `step`", runtime_prompt)
+        self.assertIn("updates the step automatically", runtime_prompt)
+        self.assertIn("do not call `set_task_step` for the same work", runtime_prompt)
+        self.assertIn("without a bound run", runtime_prompt)
+        self.assertIn("Omit `step` for exploration", runtime_prompt)
+
+    async def test_detached_runtime_context_omits_task_and_task_capabilities(self):
+        task_service = ActiveTaskService()
+        manager = ChatManager(
+            model_manager=None,
+            storage=self.FakeStorage(),
+            prompts=self.FakePromptStorage(),
+            task_service=task_service,
+        )
+        conversation = manager.create_conversation("title")
+        await task_service.create_task(
             conversation_id=conversation.metadata["id"],
             title="检查实现",
+            steps=[{"title": "检查"}],
             created_by_run_id="run-1",
         )
+        conversation.nodes[conversation.current_node_id]["task_context_mode"] = "detached"
 
-        needs_nudge, open_tasks = await manager._needs_task_completion_nudge(
-            conversation.metadata["id"],
-            "已经完成。",
-        )
-
-        self.assertTrue(needs_nudge)
-        self.assertEqual(len(open_tasks), 1)
-
-    async def test_task_completion_guard_allows_reported_blocked_tasks(self):
-        task_ledger = TaskLedger()
-        manager = ChatManager(
-            model_manager=None,
-            storage=self.FakeStorage(),
-            prompts=self.FakePromptStorage(),
-            task_ledger=task_ledger,
-        )
-        conversation = manager.create_conversation("title")
-        task = await task_ledger.create_task(
-            conversation_id=conversation.metadata["id"],
-            title="联网验证",
-            created_by_run_id="run-1",
-        )
-        await task_ledger.update_task(
-            conversation_id=conversation.metadata["id"],
-            task_id=task.task_id,
-            status=TaskStatus.BLOCKED,
-            evidence_summary="searxng connection refused",
+        messages = manager._build_prompt_messages(conversation, [])
+        tools = [
+            {"type": "function", "function": {"name": "create_task", "parameters": {"type": "object"}}},
+            {"type": "function", "function": {"name": "set_task_step", "parameters": {"type": "object"}}},
+            {"type": "function", "function": {"name": "run_command", "parameters": {"type": "object", "properties": {"step": {"type": "integer"}, "command": {"type": "string"}}}}},
+        ]
+        filtered = manager._filter_tools_for_runtime(
+            tools,
+            multi_agent_mode="proactive",
+            permission_mode="default",
+            task_context_mode="detached",
         )
 
-        needs_nudge, open_tasks = await manager._needs_task_completion_nudge(
-            conversation.metadata["id"],
-            f"{task.task_id} 已阻塞：searxng connection refused",
-        )
-
-        self.assertFalse(needs_nudge)
-        self.assertEqual(len(open_tasks), 1)
-
-    async def test_task_completion_guard_allows_blocked_tasks_with_evidence_without_restatement(self):
-        task_ledger = TaskLedger()
-        manager = ChatManager(
-            model_manager=None,
-            storage=self.FakeStorage(),
-            prompts=self.FakePromptStorage(),
-            task_ledger=task_ledger,
-        )
-        conversation = manager.create_conversation("title")
-        task = await task_ledger.create_task(
-            conversation_id=conversation.metadata["id"],
-            title="联网验证",
-            created_by_run_id="run-1",
-        )
-        await task_ledger.update_task(
-            conversation_id=conversation.metadata["id"],
-            task_id=task.task_id,
-            status=TaskStatus.BLOCKED,
-            evidence_summary="searxng connection refused",
-        )
-
-        needs_nudge, open_tasks = await manager._needs_task_completion_nudge(
-            conversation.metadata["id"],
-            "该验证无法继续，已按失败路径收口。",
-        )
-
-        self.assertFalse(needs_nudge)
-        self.assertEqual(len(open_tasks), 1)
+        self.assertNotIn("Active Conversation Task", messages[1]["content"])
+        self.assertNotIn("Task rules:", messages[1]["content"])
+        self.assertNotIn("pass `step`", messages[1]["content"])
+        self.assertEqual([tool["function"]["name"] for tool in filtered], ["run_command"])
+        self.assertNotIn("step", filtered[0]["function"]["parameters"]["properties"])
 
     def test_explicit_subagent_request_builds_multi_agent_runtime_context(self):
         manager = ChatManager(
@@ -1126,8 +1737,14 @@ class TaskNotificationTests(unittest.IsolatedAsyncioTestCase):
             metadata={
                 "agent_name": "implementer",
                 "delegated_task": "inspect",
-                "task_id": "task_abc123",
                 "slash_command": {"original_input": "/fork inspect"},
+                "task_outcome": {
+                    "kind": "run_finished",
+                    "task_status": "completed",
+                    "step": 2,
+                    "step_status": "completed",
+                    "run_status": "completed",
+                },
             },
         )
 
@@ -1152,14 +1769,14 @@ class TaskNotificationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pending[0]["source_run_kind"], "subagent")
         self.assertEqual(pending[0]["payload"]["source_status"], "completed")
         self.assertEqual(pending[0]["payload"]["delegated_task"], "inspect")
-        self.assertEqual(pending[0]["task_id"], "task_abc123")
         self.assertEqual(pending[0]["payload"]["original_slash_input"], "/fork inspect")
+        self.assertEqual(pending[0]["payload"]["task_outcome"]["task_status"], "completed")
         self.assertIn("duplicate", pending[0]["content"])
         from backend.core.notifications import format_task_notification_content
         wrapped = format_task_notification_content(pending[0])
         self.assertIn('"delegated_task": "inspect"', wrapped)
-        self.assertIn('"task_id": "task_abc123"', wrapped)
         self.assertIn('"/fork inspect"', wrapped)
+        self.assertIn('"task_status": "completed"', wrapped)
 
     async def test_subagent_tool_execution_uses_anchor_node_id_for_tool_context(self):
         class ToolCallingProvider:
@@ -2143,155 +2760,83 @@ class RuntimePolicyTests(unittest.TestCase):
 
         asyncio.run(run_case())
 
-    def test_agent_runtime_auto_creates_and_completes_subagent_task(self):
+    def test_agent_runtime_binds_only_an_explicit_numbered_step(self):
         async def run_case():
             registry = CapabilityRegistry()
             registry.add_agents([
                 AgentDefinition(name="reviewer", system_prompt="Reviewer worker body")
             ])
             run_manager = RunManager()
-            task_ledger = TaskLedger()
-            task_ledger.install_run_finish_listener(run_manager)
+            task_service = ActiveTaskService(run_manager=run_manager)
+            run_manager.task_service = task_service
+            task = await task_service.create_task(
+                conversation_id="conversation-1",
+                title="父任务",
+                steps=[{"title": "检查实现"}, {"title": "汇总结果"}],
+            )
 
             class FakeSubagentExecutor:
+                def __init__(self):
+                    self.calls = []
+
                 async def start(self, **kwargs):
-                    return (await run_manager.create_run(
+                    self.calls.append(kwargs)
+                    run = await run_manager.create_run(
                         conversation_id=kwargs["conversation_id"],
                         kind=RunKind.SUBAGENT,
                         anchor_node_id=kwargs.get("parent_node_id"),
                         created_by_run_id=kwargs.get("created_by_run_id"),
-                        cancellation_parent_run_id=kwargs.get("cancellation_parent_run_id"),
                         summary=kwargs.get("delegated_task") or "",
                         metadata={"agent_name": kwargs.get("agent_name")},
-                    )).to_dict()
+                        task_binding=kwargs.get("task_binding"),
+                    )
+                    return run.to_dict()
 
+            executor = FakeSubagentExecutor()
             runtime = AgentRuntime(
                 run_manager=run_manager,
                 mailbox=AgentMailbox(),
-                subagent_executor=FakeSubagentExecutor(),
+                subagent_executor=executor,
                 capability_registry=registry,
-                task_ledger=task_ledger,
+                task_service=task_service,
+            )
+            source = AgentSource(
+                conversation_id="conversation-1",
+                run_id="chat-run-1",
+                run_kind=RunKind.CHAT.value,
+                anchor_node_id="node-1",
             )
 
             result = await runtime.spawn_agent(
-                source=AgentSource(
-                    conversation_id="conversation-1",
-                    run_id="chat-run-1",
-                    run_kind=RunKind.CHAT.value,
-                    anchor_node_id="node-1",
-                ),
+                source=source,
                 agent_name="reviewer",
                 task="检查实现",
+                step=1,
+                task_generation_id=task.generation_id,
+                task_revision=task.revision,
             )
 
-            self.assertTrue(str(result.get("task_id") or "").startswith("task_"))
-            task = await task_ledger.get_task("conversation-1", result["task_id"])
-            self.assertEqual(task.status, TaskStatus.IN_PROGRESS)
-            self.assertEqual(task.owner_run_id, result["run_id"])
-
+            self.assertEqual(result["step"], 1)
+            self.assertNotIn("task_id", result)
+            self.assertNotIn("task_step_id", result)
+            active = await task_service.get_active_task("conversation-1")
+            self.assertEqual(active.active_run_id, result["run_id"])
+            self.assertEqual(active.active_step, 1)
             await run_manager.finish_run(result["run_id"], RunStatus.COMPLETED)
-            await asyncio.sleep(0)
-            completed = await task_ledger.get_task("conversation-1", result["task_id"])
-            self.assertEqual(completed.status, TaskStatus.COMPLETED)
-            self.assertEqual(completed.evidence_run_id, result["run_id"])
-
-        asyncio.run(run_case())
-
-    def test_agent_runtime_binds_existing_workflow_task_and_blocks_on_failure(self):
-        async def run_case():
-            registry = CapabilityRegistry()
-            run_manager = RunManager()
-            task_ledger = TaskLedger()
-            task_ledger.install_run_finish_listener(run_manager)
-            created = await task_ledger.create_task(
-                conversation_id="conversation-1",
-                title="运行 workflow",
-                created_by_run_id="chat-run-1",
-            )
-
-            class FakeWorkflowManager:
-                async def start(self, **kwargs):
-                    return (await run_manager.create_run(
-                        conversation_id=kwargs["conversation_id"],
-                        kind=RunKind.WORKFLOW,
-                        anchor_node_id=kwargs.get("parent_node_id"),
-                        created_by_run_id=kwargs.get("created_by_run_id"),
-                        cancellation_parent_run_id=kwargs.get("cancellation_parent_run_id"),
-                        summary="workflow",
-                        metadata={"delegated_task": kwargs.get("delegated_task")},
-                    )).to_dict()
-
-            runtime = AgentRuntime(
-                run_manager=run_manager,
-                mailbox=AgentMailbox(),
-                subagent_executor=object(),
-                workflow_manager=FakeWorkflowManager(),
-                capability_registry=registry,
-                task_ledger=task_ledger,
-            )
-
-            result = await runtime.start_workflow(
-                source=AgentSource(
-                    conversation_id="conversation-1",
-                    run_id="chat-run-1",
-                    run_kind=RunKind.CHAT.value,
-                    anchor_node_id="node-1",
-                ),
-                script="throw new Error('boom')",
-                task_id=created.task_id,
-            )
-
-            self.assertEqual(result["task_id"], created.task_id)
-            bound = await task_ledger.get_task("conversation-1", created.task_id)
-            self.assertEqual(bound.status, TaskStatus.IN_PROGRESS)
-            self.assertEqual(bound.owner_run_id, result["run_id"])
-
-            await run_manager.finish_run(result["run_id"], RunStatus.FAILED, "boom")
-            await asyncio.sleep(0)
-            blocked = await task_ledger.get_task("conversation-1", created.task_id)
-            self.assertEqual(blocked.status, TaskStatus.BLOCKED)
-            self.assertIn("boom", blocked.evidence_summary)
-
-        asyncio.run(run_case())
-
-    def test_agent_runtime_rejects_missing_task_id_before_spawning(self):
-        async def run_case():
-            registry = CapabilityRegistry()
-            registry.add_agents([
-                AgentDefinition(name="reviewer", system_prompt="Reviewer worker body")
-            ])
-            run_manager = RunManager()
-            task_ledger = TaskLedger()
-            starts = 0
-
-            class FakeSubagentExecutor:
-                async def start(self, **kwargs):
-                    nonlocal starts
-                    starts += 1
-                    return {"run_id": "agent-run-1", "kind": "subagent", "status": "running", "metadata": {}}
-
-            runtime = AgentRuntime(
-                run_manager=run_manager,
-                mailbox=AgentMailbox(),
-                subagent_executor=FakeSubagentExecutor(),
-                capability_registry=registry,
-                task_ledger=task_ledger,
-            )
+            active = await task_service.get_active_task("conversation-1")
+            self.assertEqual(active.steps[0].status.value, "completed")
 
             with self.assertRaises(Exception):
                 await runtime.spawn_agent(
-                    source=AgentSource(
-                        conversation_id="conversation-1",
-                        run_id="chat-run-1",
-                        run_kind=RunKind.CHAT.value,
-                        anchor_node_id="node-1",
-                    ),
+                    source=source,
                     agent_name="reviewer",
-                    task="检查实现",
-                    task_id="task_missing",
+                    task="隔离分支",
+                    step=2,
+                    task_context_mode="detached",
+                    task_generation_id=task.generation_id,
+                    task_revision=task.revision,
                 )
-
-            self.assertEqual(starts, 0)
+            self.assertEqual(len(executor.calls), 1)
 
         asyncio.run(run_case())
 

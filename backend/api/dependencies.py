@@ -89,17 +89,17 @@ def get_run_manager(request: Request):
         raise HTTPException(status_code=500, detail=f"依赖注入错误: {str(e)}")
 
 
-def get_task_ledger(request: Request):
-    """获取 TaskLedger"""
+def get_task_service(request: Request):
+    """获取全局活动任务服务。"""
     try:
-        if not hasattr(request.app.state, 'task_ledger'):
-            logger.error("❌ task_ledger 未在 app.state 中初始化")
-            raise HTTPException(status_code=500, detail="TaskLedger 未初始化")
-        return request.app.state.task_ledger
+        if not hasattr(request.app.state, 'task_service'):
+            logger.error("❌ task_service 未在 app.state 中初始化")
+            raise HTTPException(status_code=500, detail="活动任务服务未初始化")
+        return request.app.state.task_service
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ 获取 task_ledger 失败: {e}", exc_info=True)
+        logger.error(f"❌ 获取 task_service 失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"依赖注入错误: {str(e)}")
 
 

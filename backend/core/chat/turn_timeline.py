@@ -51,6 +51,5 @@ def has_blocking_plan_tool_result(messages: Iterable[dict[str, Any]]) -> bool:
     return any(is_blocking_plan_tool_result(message) for message in messages)
 
 
-def should_emit_as_intermediate_text(*, has_tool_calls: bool, plan_or_task_guard_active: bool) -> bool:
-    return has_tool_calls or plan_or_task_guard_active
-
+def should_emit_as_intermediate_text(*, has_tool_calls: bool, plan_guard_active: bool) -> bool:
+    return has_tool_calls or plan_guard_active

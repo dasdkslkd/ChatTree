@@ -18,7 +18,6 @@ from backend.core.plans import PlanLedger
 from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
 from backend.core.slash import SlashCommandDispatcher, SlashDispatchKind
-from backend.core.tasks import TaskLedger
 from backend.core.tools.orchestrator import ToolOrchestrator
 from backend.core.tools.plan_tools import register_plan_tools
 from backend.core.tools.security.approval import ApprovalManager
@@ -168,31 +167,19 @@ class CapturingModelManager:
 
 
 class FakeToolManager:
-    def __init__(self, task_ledger=None):
-        self.task_ledger = task_ledger
-
     def get_openai_tools(self, include_disabled=False):
         return [
             {
                 "type": "function",
                 "function": {
-                    "name": "update_task",
-                    "description": "Update a task",
+                    "name": "test_tool",
+                    "description": "Test tool",
                     "parameters": {"type": "object", "properties": {}},
                 },
             }
         ]
 
     async def execute_tool(self, name, arguments, workspace=None, runtime_context=None):
-        if name == "update_task" and self.task_ledger is not None:
-            task = await self.task_ledger.update_task(
-                conversation_id=runtime_context["conversation_id"],
-                task_id=arguments["task_id"],
-                status=arguments.get("status"),
-                evidence_summary=arguments.get("evidence_summary"),
-                evidence_run_id=runtime_context.get("run_id"),
-            )
-            return json.dumps({"task_id": task.task_id, "status": task.status.value}, ensure_ascii=False)
         return json.dumps({"ok": True}, ensure_ascii=False)
 
 
@@ -255,80 +242,6 @@ class WorkflowToolThenFinalProvider(CapturingProvider):
             yield StreamChunk(
                 status=StreamStatus.CONTENT,
                 content="workflow done",
-                node_id=stream_controller.node_id,
-                conversation_id=stream_controller.conversation_id,
-                error=None,
-                tokens_used=1,
-            )
-        yield StreamChunk(
-            status=StreamStatus.COMPLETE,
-            content=None,
-            node_id=stream_controller.node_id,
-            conversation_id=stream_controller.conversation_id,
-            error=None,
-            tokens_used=1,
-            usage_info={
-                "input_tokens": 1,
-                "output_tokens": 0,
-                "total_tokens": 1,
-                "source": "test",
-                "raw": {},
-            },
-        )
-
-
-class ResolvingAfterGuardProvider(CapturingProvider):
-    def __init__(self, task_id):
-        super().__init__()
-        self.task_id = task_id
-
-    async def generate_response_stream(
-        self,
-        model,
-        messages,
-        stream_controller: StreamController = None,
-        **kwargs,
-    ):
-        self.messages = messages
-        self.kwargs = kwargs
-        self.calls.append({"messages": list(messages), "kwargs": kwargs})
-        call_number = len(self.calls)
-        if call_number < 3:
-            yield StreamChunk(
-                status=StreamStatus.CONTENT,
-                content=f"premature final {call_number}",
-                node_id=stream_controller.node_id,
-                conversation_id=stream_controller.conversation_id,
-                error=None,
-                tokens_used=1,
-            )
-        elif call_number == 3:
-            yield StreamChunk(
-                status=StreamStatus.CONTENT,
-                content="",
-                node_id=stream_controller.node_id,
-                conversation_id=stream_controller.conversation_id,
-                error=None,
-                tokens_used=1,
-                tool_calls=[
-                    {
-                        "id": "call_update_task",
-                        "type": "function",
-                        "function": {
-                            "name": "update_task",
-                            "arguments": json.dumps({
-                                "task_id": self.task_id,
-                                "status": "completed",
-                                "evidence_summary": "resolved after TaskLedger reminder",
-                            }),
-                        },
-                    }
-                ],
-            )
-        else:
-            yield StreamChunk(
-                status=StreamStatus.CONTENT,
-                content="task resolved",
                 node_id=stream_controller.node_id,
                 conversation_id=stream_controller.conversation_id,
                 error=None,
@@ -827,87 +740,6 @@ def test_send_message_stream_rejects_manual_plan_permission_without_session(tmp_
     assert all(msg.get("content") != "实现一个清晰的小改动" for msg in visible_messages)
 
 
-def test_send_message_stream_task_guard_suppresses_unresolved_final_text(tmp_path: Path):
-    manager, _model_manager = make_stream_manager(tmp_path)
-    task_ledger = TaskLedger()
-    manager.task_ledger = task_ledger
-    conversation = manager.create_conversation("task guard")
-    asyncio.run(task_ledger.create_task(
-        conversation_id=conversation.metadata["id"],
-        title="未完成任务",
-    ))
-
-    chunks = asyncio.run(
-        collect_chunks(
-            manager.send_message_stream(
-                conversation.metadata["id"],
-                "直接回答",
-                model_id="fake-model",
-                parent_node_id=conversation.current_node_id,
-            )
-        )
-    )
-
-    content_chunks = [chunk.get("content") for chunk in chunks if chunk.get("content")]
-    assert "ok" not in content_chunks
-    assert any("仍有未完成任务" in str(content) for content in content_chunks)
-    reloaded = manager.get_conversation(conversation.metadata["id"])
-    assistant = reloaded.nodes[reloaded.current_node_id]["assistant_message"]
-    assert "仍有未完成任务" in assistant["content"]
-    assert assistant["generation_info"]["task_guard"]["open_task_count"] == 1
-
-
-def test_send_message_stream_task_guard_continues_after_tool_retry(tmp_path: Path):
-    manager, model_manager = make_stream_manager(tmp_path)
-    task_ledger = TaskLedger()
-    manager.tool_manager = FakeToolManager(task_ledger)
-    manager.task_ledger = task_ledger
-    conversation = manager.create_conversation("task guard retry")
-    task = asyncio.run(task_ledger.create_task(
-        conversation_id=conversation.metadata["id"],
-        title="仍未完成",
-    ))
-    model_manager.provider = ResolvingAfterGuardProvider(task.task_id)
-
-    chunks = asyncio.run(
-        collect_chunks(
-            manager.send_message_stream(
-                conversation.metadata["id"],
-                "直接回答",
-                model_id="fake-model",
-                parent_node_id=conversation.current_node_id,
-            )
-        )
-    )
-
-    assert len(model_manager.provider.calls) == 4
-    content_chunks = [chunk.get("content") for chunk in chunks if chunk.get("content")]
-    assert "premature final 1" not in content_chunks
-    assert "premature final 2" not in content_chunks
-    assert not any("仍有未完成任务" in str(content) for content in content_chunks)
-    assert "task resolved" in content_chunks
-    assert any(
-        message.get("role") == "system"
-        and "<system-reminder>" in str(message.get("content") or "")
-        and "TaskLedger" in str(message.get("content") or "")
-        for call in model_manager.provider.calls
-        for message in call["messages"]
-    )
-    reminder_text = "\n".join(
-        str(message.get("content") or "")
-        for call in model_manager.provider.calls
-        for message in call["messages"]
-        if message.get("role") == "system" and "<system-reminder>" in str(message.get("content") or "")
-    )
-    assert "Previous final response was discarded: TaskLedger still has unresolved work." in reminder_text
-    assert "Use tools to complete open tasks, or mark them blocked with evidence before replying." in reminder_text
-    assert "Use the available tools to inspect, run commands, delegate, or update TaskLedger." not in reminder_text
-    reloaded = manager.get_conversation(conversation.metadata["id"])
-    assistant = reloaded.nodes[reloaded.current_node_id]["assistant_message"]
-    assert assistant["content"] == "task resolved"
-    assert assistant["generation_info"]["task_guard"]["nudged"] is True
-
-
 def test_send_message_stream_allows_final_after_real_start_workflow(tmp_path: Path):
     manager, model_manager = make_stream_manager(tmp_path)
     manager.tool_manager = FakeWorkflowToolManager()
@@ -961,6 +793,7 @@ def test_send_message_stream_btw_runs_isolated_side_question_without_tools(tmp_p
                 conversation.metadata["id"],
                 "/btw what changed here?",
                 model_id="fake-model",
+                parent_node_id=conversation.current_node_id,
             )
         )
     )

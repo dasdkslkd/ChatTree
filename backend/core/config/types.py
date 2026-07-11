@@ -78,6 +78,7 @@ class Message(TypedDict, total=False):
     import_files: Optional[List[Dict[str, Any]]]  # 用户显式引用的导入文件元数据
     image_refs: Optional[List[Dict[str, Any]]]  # 用户显式引用的图片附件元数据
     tool_permission_mode: Optional[str]  # 所在节点的工具审批模式
+    task_context_mode: Optional[str]
 
 class ConversationTreeNode(TypedDict):
     """对话树节点 - 一轮完整交互"""
@@ -91,6 +92,7 @@ class ConversationTreeNode(TypedDict):
     timestamp: int
     model_id: Optional[str]
     tool_permission_mode: Optional[str]
+    task_context_mode: str
     total_tokens: int
 
     branch_usage_info: UsageInfo
@@ -189,6 +191,7 @@ class StreamChunk(TypedDict, total=False):
     tool_calls: Optional[List[Dict[str, Any]]]  # 完整工具调用列表（provider 聚合后填充）
     approval: Optional[Dict[str, Any]]   # 工具审批请求/结果载荷
     tool_permission_mode: Optional[str]  # 当前节点工具权限模式发生变化时随流同步
+    task_context_mode: Optional[str]
 
     usage_info: UsageInfo
 

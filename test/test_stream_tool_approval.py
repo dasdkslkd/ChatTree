@@ -445,6 +445,7 @@ async def _closing_stream_cancels_pending_tool_execution(tmp_path):
         conversation.metadata["id"],
         "read notes",
         model_id="fake-model",
+        parent_node_id=conversation.current_node_id,
     )
 
     try:
@@ -482,6 +483,7 @@ async def _stream_persists_tool_approval_events_on_assistant_node(tmp_path):
         conversation.metadata["id"],
         "write notes",
         model_id="fake-model",
+        parent_node_id=conversation.current_node_id,
     ):
         chunks.append(chunk)
 
@@ -564,6 +566,7 @@ async def _stream_updates_metadata_updated_at_after_tool_completion(tmp_path, mo
             conversation.metadata["id"],
             "write notes",
             model_id="fake-model",
+            parent_node_id=conversation.current_node_id,
         )
     ]
 
@@ -600,6 +603,7 @@ async def _stream_updates_metadata_updated_at_after_plain_assistant_completion(t
             conversation.metadata["id"],
             "hello",
             model_id="fake-model",
+            parent_node_id=conversation.current_node_id,
         )
     ]
 
@@ -635,6 +639,7 @@ async def _stop_stream_cancels_pending_approval_and_stream_finishes(tmp_path):
         conversation.metadata["id"],
         "read notes",
         model_id="fake-model",
+        parent_node_id=conversation.current_node_id,
     )
 
     approval_id = None

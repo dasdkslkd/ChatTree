@@ -39,7 +39,19 @@ from ..slash import (
 )
 from ..tools.security.permissions import PermissionMode, normalize_permission_mode
 from ..tools.agent_tools import AGENT_TOOL_NAMES, LEGACY_AGENT_TOOL_NAMES
-from ..tasks import TaskRecord, TaskStatus
+from ..tools.task_tools import (
+    TASK_BOUND_RUN_TOOL_NAMES,
+    TASK_OBSERVATION_TOOL_NAMES,
+    TASK_TOOL_NAMES,
+    filter_task_tools_for_context,
+)
+from ..tools.task_contract import TASK_RUNTIME_RULES
+from ..tasks import (
+    TaskContextMode,
+    TaskOutcome,
+    TaskTurnContext,
+    normalize_context_mode,
+)
 from ..notifications.task_notifications import parse_task_notification_content
 from .turn_timeline import (
     has_blocking_plan_tool_result,
@@ -107,7 +119,7 @@ class ChatManager:
         storage: ChatStorage,
         prompts: PromptStorage,
         tool_manager=None,
-        task_ledger=None,
+        task_service=None,
         plan_ledger=None,
         chat_repository=None,
         transcript_projection=None,
@@ -116,7 +128,7 @@ class ChatManager:
         self.storage = storage
         self.prompts = prompts
         self.tool_manager = tool_manager
-        self.task_ledger = task_ledger
+        self.task_service = task_service
         self.plan_ledger = plan_ledger
         self.chat_repository = chat_repository
         self.transcript_projection = transcript_projection
@@ -161,6 +173,7 @@ class ChatManager:
         parent_node_id: Optional[str] = None,
         model_id: Optional[str] = None,
         tool_permission_mode: Optional[str] = None,
+        task_context_mode: Optional[str] = None,
         slash_metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Create a visible user-only node for detached slash runs."""
@@ -168,9 +181,11 @@ class ChatManager:
             conversation = self.get_conversation(conversation_id)
             if conversation is None:
                 raise ValueError("对话不存在")
-            if parent_node_id and parent_node_id in conversation.nodes:
-                conversation.switch_to_node(parent_node_id)
-            current_node_id = conversation.current_node_id
+            if not parent_node_id:
+                raise ValueError("parent_node_id is required")
+            if parent_node_id not in conversation.nodes:
+                raise ValueError("父节点不存在")
+            current_node_id = parent_node_id
             parent_tool_permission_mode = None
             if current_node_id and current_node_id in conversation.nodes:
                 parent_tool_permission_mode = conversation.nodes[current_node_id].get("tool_permission_mode")
@@ -179,6 +194,14 @@ class ChatManager:
                 if tool_permission_mode not in (None, "")
                 else parent_tool_permission_mode or "ask_always"
             )
+            parent_task_context_mode = "attached"
+            if current_node_id and current_node_id in conversation.nodes:
+                parent_task_context_mode = str(
+                    conversation.nodes[current_node_id].get("task_context_mode") or "attached"
+                )
+            eff_task_context_mode = normalize_context_mode(
+                task_context_mode if task_context_mode not in (None, "") else parent_task_context_mode
+            ).value
             user_msg = Message({
                 "id": str(uuid.uuid4()),
                 "role": Role.USER,
@@ -195,6 +218,7 @@ class ChatManager:
                 parent_id=current_node_id,
                 model_id=model_id or conversation.current_model,
                 tool_permission_mode=eff_tool_permission_mode,
+                task_context_mode=eff_task_context_mode,
             )
             conversation.add_node(new_node, parent_id=current_node_id)
             self._save(conversation)
@@ -440,6 +464,7 @@ class ChatManager:
                 model_id=item.get("model_id") or model_id,
                 provider_id=provider_id,
                 tool_permission_mode=item.get("tool_permission_mode"),
+                task_context_mode=item.get("task_context_mode") or "attached",
                 focus=item["id"] == focus_node_id,
             )
 
@@ -953,7 +978,11 @@ class ChatManager:
         self,
         conversation: Conversation,
         skill_names: List[str],
+        *,
+        task_turn_context: Optional[TaskTurnContext] = None,
     ) -> List[Message]:
+        if task_turn_context is None:
+            task_turn_context = self._start_task_turn_context(conversation)
         base_messages = self._prepare_messages_for_api_with_conversation(conversation)
         custom_prompt, custom_mode = self._selected_system_prompt(conversation)
         latest_user_content = self._latest_user_content(conversation)
@@ -965,6 +994,7 @@ class ChatManager:
                     "main",
                     conversation,
                     latest_user_content=latest_user_content,
+                    task_turn_context=task_turn_context,
                 ),
                 custom_system_prompt=custom_prompt,
                 custom_system_prompt_mode=custom_mode,
@@ -1066,6 +1096,7 @@ class ChatManager:
         import_files: Optional[List[Dict[str, Any]]] = None,
         image_refs: Optional[List[Dict[str, Any]]] = None,
         tool_permission_mode: Optional[str] = None,
+        task_context_mode: Optional[str] = None,
         message_subtype: Optional[str] = None,
         hidden_user_message: bool = False,
         run_id: Optional[str] = None,
@@ -1095,6 +1126,30 @@ class ChatManager:
             return
 
         preview = Conversation.from_dict(conversation_data)
+        requested_parent_node_id = str(parent_node_id or "").strip()
+        if not requested_parent_node_id:
+            yield StreamChunk(
+                status=StreamStatus.ERROR,
+                content="",
+                node_id=None,
+                conversation_id=conversation_id,
+                run_id=run_id,
+                error="parent_node_id is required",
+                tokens_used=0,
+            )
+            return
+        if requested_parent_node_id not in preview.nodes:
+            yield StreamChunk(
+                status=StreamStatus.ERROR,
+                content="",
+                node_id=None,
+                conversation_id=conversation_id,
+                run_id=run_id,
+                error="父节点不存在",
+                tokens_used=0,
+            )
+            return
+        preview.switch_to_node(requested_parent_node_id)
         # 确定模型：请求值 > 会话 metadata > 当前分支节点 > 第一个可用模型。
         target_model = model_id or preview.current_model or self._current_branch_model(preview)
         if not target_model:
@@ -1178,17 +1233,21 @@ class ChatManager:
         else:
             meta = {}
 
-        if not parent_node_id:
-            auto_result = await self._auto_compact_if_needed(
-                conversation_id,
-                target_model=target_model,
-                target_provider=target_provider,
-                model_context_window=meta.get("context_length"),
-            )
-            if auto_result.get("was_compacted"):
-                latest_preview = self.get_conversation(conversation_id)
-                if latest_preview is not None:
-                    preview = latest_preview
+        auto_result = await self._auto_compact_if_needed(
+            conversation_id,
+            parent_node_id=requested_parent_node_id,
+            target_model=target_model,
+            target_provider=target_provider,
+            model_context_window=meta.get("context_length"),
+        )
+        if auto_result.get("was_compacted"):
+            compact_node_id = str((auto_result.get("result") or {}).get("node_id") or "")
+            if compact_node_id:
+                requested_parent_node_id = compact_node_id
+            latest_preview = self.get_conversation(conversation_id)
+            if latest_preview is not None:
+                preview = latest_preview
+                preview.switch_to_node(requested_parent_node_id)
 
         conv_meta = preview.metadata
         effort_spec = meta.get("reasoning_effort") or {}
@@ -1212,8 +1271,7 @@ class ChatManager:
         logger.info(f"Stream reasoning: effort={eff_effort}, thinking={eff_thinking}")
         if slash_result.kind == SlashDispatchKind.SIDE_QUESTION:
             side_run_context = Conversation.from_dict(preview.to_dict())
-            if parent_node_id and parent_node_id in side_run_context.nodes:
-                side_run_context.switch_to_node(parent_node_id)
+            side_run_context.switch_to_node(requested_parent_node_id)
             async for chunk in self._send_side_question_stream(
                 conversation=side_run_context,
                 content=model_content,
@@ -1225,19 +1283,6 @@ class ChatManager:
             ):
                 yield chunk
             return
-        requested_parent_node_id = parent_node_id
-        if not requested_parent_node_id:
-            yield StreamChunk(
-                status=StreamStatus.ERROR,
-                content="",
-                node_id=None,
-                conversation_id=conversation_id,
-                run_id=run_id,
-                error="parent_node_id is required",
-                tokens_used=0,
-            )
-            return
-
         control_event_payload = dict(control_event or {})
         is_control_event_turn = bool(control_event_payload)
         user_msg: Optional[Message] = None
@@ -1309,8 +1354,13 @@ class ChatManager:
                 return
             current_node_id = requested_parent_node_id
             parent_tool_permission_mode = None
+            parent_task_context_mode = TaskContextMode.ATTACHED.value
             if current_node_id and current_node_id in conversation.nodes:
                 parent_tool_permission_mode = conversation.nodes[current_node_id].get("tool_permission_mode")
+                parent_task_context_mode = str(
+                    conversation.nodes[current_node_id].get("task_context_mode")
+                    or TaskContextMode.ATTACHED.value
+                )
             if (
                 parent_tool_permission_mode == "plan"
                 and plan_context_permission_mode != "plan"
@@ -1322,6 +1372,21 @@ class ChatManager:
                 if requested_tool_permission_mode
                 else plan_context_permission_mode or active_plan_permission_mode or parent_tool_permission_mode or "ask_always"
             )
+            try:
+                eff_task_context_mode = normalize_context_mode(
+                    task_context_mode if task_context_mode not in (None, "") else parent_task_context_mode
+                ).value
+            except ValueError:
+                yield StreamChunk(
+                    status=StreamStatus.ERROR,
+                    content="",
+                    node_id=None,
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    error="task_context_mode must be attached or detached",
+                    tokens_used=0,
+                )
+                return
             if (
                 self.capability_registry is not None
                 and not hidden_user_message
@@ -1338,6 +1403,7 @@ class ChatManager:
                 parent_id=current_node_id,
                 model_id=target_model,
                 tool_permission_mode=eff_tool_permission_mode,
+                task_context_mode=eff_task_context_mode,
             )
             if skill_names:
                 new_node["active_skill_names"] = skill_names
@@ -1391,6 +1457,7 @@ class ChatManager:
             run_id=run_id,
             tokens_used=0,
             tool_permission_mode=new_node.get("tool_permission_mode"),
+            task_context_mode=new_node.get("task_context_mode"),
         )
 
         # 准备消息链。即使调用方要求不切换 UI 焦点，模型也必须基于刚创建的
@@ -1399,7 +1466,12 @@ class ChatManager:
         if conversation.current_node_id != new_node["id"]:
             prompt_conversation = Conversation.from_dict(conversation.to_dict())
             prompt_conversation.switch_to_node(new_node["id"])
-        messages = self._build_prompt_messages(prompt_conversation, skill_names)
+        task_turn_context = self._start_task_turn_context(prompt_conversation)
+        messages = self._build_prompt_messages(
+            prompt_conversation,
+            skill_names,
+            task_turn_context=task_turn_context,
+        )
         messages.extend(self._plan_context_messages(pending_plan_context))
         if continuation_messages:
             self._apply_continuation_messages(messages, continuation_messages)
@@ -1414,12 +1486,30 @@ class ChatManager:
             prompt_conversation.metadata if prompt_conversation is not None else (preview.metadata if preview is not None else {}),
         )
         available_tools = self.tool_manager.get_openai_tools() if self.tool_manager else []
-        tools = self._filter_agent_tools_for_mode(available_tools, multi_agent_mode)
-        tools = self._filter_plan_tools_for_mode(tools, new_node.get("tool_permission_mode") or "default")
+        tools = self._filter_tools_for_runtime(
+            available_tools,
+            multi_agent_mode=multi_agent_mode,
+            permission_mode=new_node.get("tool_permission_mode") or "default",
+            task_context_mode=(
+                new_node.get("task_context_mode") or TaskContextMode.ATTACHED.value
+            ),
+        )
         tools = tools or None
         if slash_result.tool_policy == SlashToolPolicy.DISABLED:
             tools = None
         max_tool_rounds = int(cfg.data.get("tools", {}).get("max_rounds", 5)) if isinstance(cfg.data, dict) else 5
+        tool_run_context: Dict[str, Any] = {
+            "run_id": run_id,
+            "run_kind": "chat",
+            "root_run_id": run_id,
+            "conversation_id": conversation_id,
+            "anchor_node_id": current_node_id,
+            "node_id": new_node["id"],
+            "task_summary": model_content[:160],
+            "task_context_mode": new_node.get("task_context_mode") or TaskContextMode.ATTACHED.value,
+            "task_generation_id": task_turn_context.generation_id,
+            "task_revision": task_turn_context.revision,
+        }
 
         total_content = ""
         total_reasoning = ""
@@ -1438,9 +1528,7 @@ class ChatManager:
             tool_interactions: List[Dict[str, Any]] = []
             all_approval_events: List[Dict[str, Any]] = []
             tool_round = 0
-            task_guard_nudge_count = 0
             plan_guard_nudge_count = 0
-            max_task_guard_nudges = self._max_task_guard_nudges(cfg.data)
             max_plan_guard_nudges = 3
 
             while True:
@@ -1463,12 +1551,21 @@ class ChatManager:
                 round_status = "completed"
                 complete_chunk = None
                 round_tool_calls: List[Dict[str, Any]] = []
-                defer_round_content = (
-                    await self._has_open_tasks(conversation_id)
-                    or await self._has_active_plan_mode(conversation_id, new_node.get("tool_permission_mode"))
+                defer_round_content = await self._has_active_plan_mode(
+                    conversation_id,
+                    new_node.get("tool_permission_mode"),
                 )
                 deferred_content_chunks: List[Dict[str, Any]] = []
 
+                self._replace_main_runtime_context_message(
+                    messages,
+                    self._runtime_prompt_context(
+                        "main",
+                        prompt_conversation,
+                        latest_user_content=self._latest_user_content(prompt_conversation),
+                        task_turn_context=task_turn_context,
+                    ),
+                )
                 # provider 引用已在循环前捕获（见上方 get_model）。即便此刻 config 变更
                 # 重建了 model_manager，在途流仍用这个局部 provider，不受影响。
                 # 不要在循环内重新读取 self.model_manager。
@@ -1561,37 +1658,10 @@ class ChatManager:
                             complete_chunk["target_node_id"] = new_node["id"]
                             yield complete_chunk
                         break
-                    needs_task_nudge, open_tasks = await self._needs_task_completion_nudge(
-                        conversation_id,
-                        round_content,
-                    )
-                    if needs_task_nudge and tools and task_guard_nudge_count < max_task_guard_nudges:
-                        task_guard_nudge_count += 1
-                        messages.append({
-                            "role": "system",
-                            "content": self._task_completion_nudge(open_tasks, attempt=task_guard_nudge_count),
-                        })
-                        continue
-                    if needs_task_nudge:
-                        guard_message = self._task_guard_blocked_message(open_tasks)
-                        final_content = guard_message
-                        persisted_final_content = guard_message
-                        total_content = guard_message
-                        yield StreamChunk(
-                            status=StreamStatus.CONTENT,
-                            content=guard_message,
-                            node_id=new_node["id"],
-                            target_node_id=new_node["id"],
-                            conversation_id=conversation_id,
-                            run_id=run_id,
-                            error=None,
-                            tokens_used=0,
-                        )
-                    else:
-                        for deferred_chunk in deferred_content_chunks:
-                            yield deferred_chunk
-                        final_content = round_content
-                        persisted_final_content = round_content
+                    for deferred_chunk in deferred_content_chunks:
+                        yield deferred_chunk
+                    final_content = round_content
+                    persisted_final_content = round_content
                     final_reasoning = round_reasoning
                     if complete_chunk:
                         complete_chunk["conversation_id"] = conversation_id
@@ -1632,7 +1702,7 @@ class ChatManager:
                 round_has_tool_calls = bool(round_tool_calls)
                 round_text_is_intermediate = should_emit_as_intermediate_text(
                     has_tool_calls=round_has_tool_calls,
-                    plan_or_task_guard_active=defer_round_content,
+                    plan_guard_active=defer_round_content,
                 )
 
                 if not round_text_is_intermediate:
@@ -1673,15 +1743,8 @@ class ChatManager:
                         emit_event=emit_tool_event,
                         workspace=workspace_context,
                         permission_mode=new_node.get("tool_permission_mode") or "default",
-                        run_context={
-                            "run_id": run_id,
-                            "run_kind": "chat",
-                            "root_run_id": run_id,
-                            "conversation_id": conversation_id,
-                            "anchor_node_id": current_node_id,
-                            "node_id": new_node["id"],
-                            "task_summary": model_content[:160],
-                        },
+                        run_context=tool_run_context,
+                        task_turn_context=task_turn_context,
                     )
                 )
                 event_get_task = asyncio.create_task(approval_events.get())
@@ -1763,8 +1826,15 @@ class ChatManager:
                                     tool_permission_mode=next_permission_mode,
                                 )
                                 if slash_result.tool_policy != SlashToolPolicy.DISABLED:
-                                    tools = self._filter_agent_tools_for_mode(available_tools, multi_agent_mode)
-                                    tools = self._filter_plan_tools_for_mode(tools, next_permission_mode) or None
+                                    tools = self._filter_tools_for_runtime(
+                                        available_tools,
+                                        multi_agent_mode=multi_agent_mode,
+                                        permission_mode=next_permission_mode,
+                                        task_context_mode=(
+                                            new_node.get("task_context_mode")
+                                            or TaskContextMode.ATTACHED.value
+                                        ),
+                                    ) or None
                             break
                 finally:
                     if not event_get_task.done():
@@ -1856,17 +1926,6 @@ class ChatManager:
                 "tokens_used": tokens_used,
                 "usage_info": usage_info
             }
-            needs_final_task_nudge, final_open_tasks = await self._needs_task_completion_nudge(
-                conversation_id,
-                persisted_final_content if persisted_final_content is not None else (final_content if tool_interactions else total_content),
-            )
-            if needs_final_task_nudge or task_guard_nudge_count > 0:
-                generation_info["task_guard"] = {
-                    "open_task_count": len(final_open_tasks),
-                    "nudged": task_guard_nudge_count > 0,
-                    "nudge_count": task_guard_nudge_count,
-                }
-
             # 助手消息（包含生成信息）
             assistant_msg = Message({
                 "id": str(uuid.uuid4()),
@@ -2163,6 +2222,7 @@ class ChatManager:
         conversation: Optional[Conversation] = None,
         *,
         latest_user_content: str = "",
+        task_turn_context: Optional[TaskTurnContext] = None,
     ) -> RuntimePromptContext:
         details = self._runtime_context_details(conversation)
         if runtime == "side_question":
@@ -2195,7 +2255,7 @@ class ChatManager:
                 multi_agent_lines.append("- You may proactively delegate independent multi-step investigation or verification work to subagents.")
             else:
                 multi_agent_lines.append("- Do not proactively spawn agents unless the user explicitly requested agent delegation.")
-        task_lines = self._format_open_tasks_for_prompt(conversation)
+        task_lines = self._format_task_turn_context_for_prompt(task_turn_context)
         plan_lines = self._plan_mode_runtime_lines(conversation)
         return RuntimePromptContext(
             name="main",
@@ -2243,34 +2303,144 @@ class ChatManager:
             "- When plan mode is active, call `update_plan` to write the plan artifact. When the plan is ready, call `exit_plan_mode` with no arguments and wait for user approval before implementing.",
         ]
 
-    def _format_open_tasks_for_prompt(self, conversation: Optional[Conversation]) -> list[str]:
-        task_ledger = getattr(self, "task_ledger", None)
-        if conversation is None or task_ledger is None:
+    def _start_task_turn_context(
+        self,
+        conversation: Optional[Conversation],
+    ) -> TaskTurnContext:
+        mode = normalize_context_mode(self._current_node_task_context_mode(conversation))
+        task = None
+        conversation_id = str(((conversation.metadata if conversation is not None else {}) or {}).get("id") or "")
+        task_service = getattr(self, "task_service", None)
+        if mode == TaskContextMode.ATTACHED and conversation_id and task_service is not None:
+            task = task_service.get_active_task_snapshot(conversation_id)
+        return TaskTurnContext.start(mode, task)
+
+    @staticmethod
+    def _replace_main_runtime_context_message(
+        messages: List[Message],
+        runtime_context: RuntimePromptContext,
+    ) -> None:
+        replacement = Message(runtime_context.as_section(priority=15).as_message())
+        for index, message in enumerate(messages):
+            metadata = message.get("metadata")
+            if isinstance(metadata, dict) and metadata.get("runtime_context") == "main":
+                messages[index] = replacement
+                return
+        raise RuntimeError("main runtime context message is missing")
+
+    def _format_task_turn_context_for_prompt(
+        self,
+        context: Optional[TaskTurnContext],
+    ) -> list[str]:
+        if context is None or context.mode != TaskContextMode.ATTACHED:
             return []
-        conversation_id = str((conversation.metadata or {}).get("id") or "")
-        if not conversation_id:
-            return []
-        try:
-            tasks = task_ledger.list_open_tasks_snapshot(conversation_id, limit=8)
-        except Exception:
-            logger.exception("Failed to snapshot open tasks for prompt")
-            return []
-        if not tasks:
-            return []
-        lines = ["", "Open Tasks:"]
-        for task in tasks:
-            owner = f"{task.owner_type.value}"
-            if task.owner_run_id:
-                owner += f" {task.owner_run_id}"
-            evidence = f" blocked: {self._compact_task_text(task.evidence_summary, 90)}" if task.status == TaskStatus.BLOCKED and task.evidence_summary else ""
-            title = self._compact_task_text(task.title or task.detail or task.task_id, 120)
-            lines.append(f"- {task.task_id} [{task.status.value}] {title} (owner: {owner}){evidence}")
-        lines.extend([
-            "",
-            "TaskLedger rules:",
-            "- If you create a task, update it to completed, blocked, or cancelled.",
-            "- Before final response, all open tasks must be resolved or explicitly marked blocked with evidence.",
-        ])
+        baseline = context.baseline_task
+        current = context.current_task
+        observations = context.outcomes
+        outcomes = [observed.outcome for observed in observations]
+        latest_snapshot_observation = next(
+            (observed for observed in reversed(observations) if observed.outcome.task_snapshot is not None),
+            None,
+        )
+        baseline_superseded = (
+            baseline is not None
+            and current is None
+            and latest_snapshot_observation is not None
+            and latest_snapshot_observation.generation_id == baseline.generation_id
+        )
+        task_replaced = (
+            baseline is not None
+            and current is not None
+            and baseline.generation_id != current.generation_id
+        )
+        if current is not None and not task_replaced:
+            lines = self._format_task_snapshot_for_prompt(
+                current,
+                heading="Authoritative Active Conversation Task State",
+            )
+            self._append_task_outcomes_for_prompt(lines, outcomes)
+            lines.extend(["", *TASK_RUNTIME_RULES])
+            return lines
+        if baseline is None and current is None and not outcomes:
+            return [
+                "",
+                "Task context is attached; there is no active conversation task.",
+                "",
+                *TASK_RUNTIME_RULES,
+            ]
+        lines = [""]
+        if baseline is not None and not baseline_superseded:
+            lines.extend(self._format_task_snapshot_for_prompt(
+                baseline,
+                heading="Authoritative Task Snapshot At Turn Start",
+                leading_blank=False,
+            ))
+        self._append_task_outcomes_for_prompt(lines, outcomes)
+        if current is not None:
+            lines.extend(self._format_task_snapshot_for_prompt(
+                current,
+                heading="Authoritative Active Conversation Task State Now",
+                leading_blank=False,
+            ))
+        else:
+            lines.append("There is no active conversation task now.")
+        lines.extend(["", *TASK_RUNTIME_RULES])
+        return lines
+
+    def _append_task_outcomes_for_prompt(
+        self,
+        lines: list[str],
+        outcomes: list[TaskOutcome],
+    ) -> None:
+        if not outcomes:
+            return
+        lines.append("Authoritative Task Outcomes This Turn:")
+        latest_snapshot_index = next(
+            (index for index in range(len(outcomes) - 1, -1, -1) if outcomes[index].task_snapshot is not None),
+            None,
+        )
+        for index, outcome in enumerate(outcomes):
+            outcome_parts = []
+            if outcome.step is not None:
+                outcome_parts.append(f"step {outcome.step} -> {outcome.step_status or 'updated'}")
+            outcome_parts.append(f"task -> {outcome.task_status.value}")
+            if outcome.run_status:
+                outcome_parts.append(f"run -> {outcome.run_status}")
+            lines.append("- " + "; ".join(outcome_parts) + ".")
+            if outcome.task_snapshot is not None and index == latest_snapshot_index:
+                snapshot = outcome.task_snapshot
+                lines.append(
+                    "Authoritative Task State After Outcome "
+                    f"[{outcome.task_status.value}]: {self._compact_task_text(snapshot.title, 120)}"
+                )
+                for step in snapshot.steps:
+                    step_text = self._compact_task_text(step.title, 100)
+                    lines.append(f"{step.position}. [{step.status.value}] {step_text}")
+
+    def _format_task_snapshot_for_prompt(
+        self,
+        task: Any,
+        *,
+        heading: str,
+        leading_blank: bool = True,
+    ) -> list[str]:
+        execution = f", {task.execution_state} step {task.active_step}" if task.active_step else ""
+        lines = [""] if leading_blank else []
+        lines.append(
+            f"{heading} [{task.status}{execution}]: {self._compact_task_text(task.title, 120)}"
+        )
+        if task.detail:
+            lines.append(f"Task detail: {self._compact_task_text(task.detail, 180)}")
+        for step in task.steps:
+            evidence = (
+                f" evidence: {self._compact_task_text(step.evidence_summary, 80)}"
+                if step.evidence_summary
+                else ""
+            )
+            step_text = self._compact_task_text(step.title or step.detail, 100)
+            if step.detail and step.detail != step.title:
+                step_text += f"; detail: {self._compact_task_text(step.detail, 140)}"
+            lines.append(f"{step.position}. [{step.status.value}] {step_text}{evidence}")
         return lines
 
     @staticmethod
@@ -2452,47 +2622,6 @@ class ChatManager:
             return {}
         return payload if isinstance(payload, dict) else {}
 
-    @staticmethod
-    def _max_task_guard_nudges(config_data: Any) -> int:
-        if not isinstance(config_data, dict):
-            return 3
-        tasks_config = config_data.get("tasks", {})
-        if not isinstance(tasks_config, dict):
-            return 3
-        try:
-            return max(1, int(tasks_config.get("max_guard_nudges", 3)))
-        except (TypeError, ValueError):
-            return 3
-
-    async def _needs_task_completion_nudge(self, conversation_id: str, assistant_text: str) -> tuple[bool, list[TaskRecord]]:
-        task_ledger = getattr(self, "task_ledger", None)
-        if task_ledger is None or not conversation_id:
-            return False, []
-        try:
-            open_tasks = await task_ledger.list_open_tasks(conversation_id)
-        except Exception:
-            logger.exception("Failed to list open tasks for completion guard")
-            return False, []
-        if not open_tasks:
-            return False, []
-        for task in open_tasks:
-            if task.status != TaskStatus.BLOCKED:
-                return True, open_tasks
-            evidence = (task.evidence_summary or "").strip()
-            if not (task.evidence_run_id or evidence):
-                return True, open_tasks
-        return False, open_tasks
-
-    async def _has_open_tasks(self, conversation_id: str) -> bool:
-        task_ledger = getattr(self, "task_ledger", None)
-        if task_ledger is None or not conversation_id:
-            return False
-        try:
-            return bool(await task_ledger.list_open_tasks(conversation_id))
-        except Exception:
-            logger.exception("Failed to check open tasks for stream guard")
-            return False
-
     async def _has_active_plan_mode(self, conversation_id: str, permission_mode: Any) -> bool:
         needs_nudge = await self._needs_plan_mode_nudge(conversation_id, permission_mode)
         return needs_nudge
@@ -2528,32 +2657,6 @@ class ChatManager:
         return "\n".join([
             "计划模式仍在等待模型调用 `ask_user_question` 或 `exit_plan_mode`。",
             "已丢弃普通最终回复，避免绕过计划审批流程。",
-        ])
-
-    def _task_completion_nudge(self, open_tasks: list[TaskRecord], *, attempt: int = 1) -> str:
-        task_lines = [
-            f"- {task.task_id} [{task.status.value}] {self._compact_task_text(task.title or task.detail, 120)}"
-            for task in open_tasks[:8]
-        ]
-        return "\n".join([
-            "<system-reminder>",
-            "Previous final response was discarded: TaskLedger still has unresolved work.",
-            "Continue the task. Use tools to complete open tasks, or mark them blocked with evidence before replying.",
-            f"Attempt: {attempt}",
-            "Open tasks:",
-            *task_lines,
-            "</system-reminder>",
-        ])
-
-    def _task_guard_blocked_message(self, open_tasks: list[TaskRecord]) -> str:
-        task_lines = [
-            f"- {task.task_id}: {self._compact_task_text(task.title or task.detail, 120)}"
-            for task in open_tasks[:8]
-        ]
-        return "\n".join([
-            "仍有未完成任务，当前无法直接给出最终回复。",
-            "需要先通过 TaskLedger 将任务标记为 completed、blocked 或 cancelled，并提供证据。",
-            *task_lines,
         ])
 
     def _latest_user_content(self, conversation: Conversation) -> str:
@@ -2648,6 +2751,73 @@ class ChatManager:
             filtered.append(tool)
         return filtered
 
+    def _filter_task_tools_for_mode(
+        self,
+        tools: List[Dict[str, Any]],
+        mode: str,
+    ) -> List[Dict[str, Any]]:
+        return filter_task_tools_for_context(tools, mode)
+
+    def _filter_tools_for_runtime(
+        self,
+        tools: List[Dict[str, Any]],
+        *,
+        multi_agent_mode: str,
+        permission_mode: str,
+        task_context_mode: str,
+    ) -> List[Dict[str, Any]]:
+        filtered = self._filter_agent_tools_for_mode(tools, multi_agent_mode)
+        filtered = self._filter_plan_tools_for_mode(filtered, permission_mode)
+        return self._filter_task_tools_for_mode(filtered, task_context_mode)
+
+    def _refresh_task_turn_context(
+        self,
+        *,
+        run_context: Optional[Dict[str, Any]],
+        turn_context: Optional[TaskTurnContext],
+        conversation_id: Optional[str],
+        tool_call: Dict[str, Any],
+        tool_message: Message,
+    ) -> None:
+        if (
+            run_context is None
+            or turn_context is None
+            or turn_context.mode != TaskContextMode.ATTACHED
+            or not conversation_id
+            or self.task_service is None
+        ):
+            return
+        outcome = self._task_outcome_from_tool_execution(tool_call, tool_message)
+        task = self.task_service.get_active_task_snapshot(conversation_id)
+        turn_context.refresh(task, outcome)
+        run_context["task_generation_id"] = turn_context.generation_id
+        run_context["task_revision"] = turn_context.revision
+
+    def _task_outcome_from_tool_execution(
+        self,
+        tool_call: Dict[str, Any],
+        tool_message: Message,
+    ) -> Optional[TaskOutcome]:
+        payload = self._parse_structured_tool_result(
+            tool_message.get("raw_content", tool_message.get("content"))
+        )
+        if isinstance(payload, dict):
+            outcome = TaskOutcome.from_dict(payload.get("task_outcome"))
+            if outcome is not None:
+                return outcome
+        return None
+
+    @staticmethod
+    def _parse_structured_tool_result(content: Any) -> Any:
+        if isinstance(content, (dict, list)):
+            return content
+        if not isinstance(content, str):
+            return None
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            return None
+
     def _runtime_context_details(self, conversation: Optional[Conversation]) -> list[str]:
         if conversation is None:
             return []
@@ -2661,10 +2831,12 @@ class ChatManager:
         cwd = workspace.get("cwd") or ""
         mode = self._normalize_selected_system_prompt_mode(str(prompt.get("mode") or "override")) if prompt else "none"
         permission_mode = self._current_node_permission_mode(conversation)
+        task_context_mode = self._current_node_task_context_mode(conversation)
         return [
             f"- Conversation id: {metadata.get('id') or ''}",
             f"- Current node id: {conversation.current_node_id or ''}",
             f"- Current tool permission mode: {permission_mode}",
+            f"- Current task context mode: {task_context_mode}",
             f"- Provider/model: {(metadata.get('provider_id') or conversation.current_provider or '')}/{(metadata.get('model_id') or conversation.current_model or '')}",
             f"- Workspace cwd: {cwd}",
             f"- Workspace roots: {', '.join(map(str, workspace_roots[:3])) if workspace_roots else 'none'}",
@@ -2676,6 +2848,12 @@ class ChatManager:
             return "default"
         node = conversation.nodes.get(conversation.current_node_id or "") or {}
         return normalize_permission_mode(node.get("tool_permission_mode") or "default")
+
+    def _current_node_task_context_mode(self, conversation: Optional[Conversation]) -> str:
+        if conversation is None:
+            return TaskContextMode.ATTACHED.value
+        node = conversation.nodes.get(conversation.current_node_id or "") or {}
+        return normalize_context_mode(node.get("task_context_mode")).value
 
     @staticmethod
     def _normalize_selected_system_prompt_mode(mode: str) -> str:
@@ -2907,6 +3085,7 @@ class ChatManager:
         self,
         conversation_id: str,
         *,
+        parent_node_id: str,
         target_model: str,
         target_provider: str,
         model_context_window: Optional[int],
@@ -2916,7 +3095,10 @@ class ChatManager:
         conversation = self.get_conversation(conversation_id)
         if conversation is None:
             return {"was_compacted": False}
-        current_node = conversation.nodes.get(conversation.current_node_id or "")
+        if parent_node_id not in conversation.nodes:
+            return {"was_compacted": False}
+        conversation.switch_to_node(parent_node_id)
+        current_node = conversation.nodes.get(parent_node_id)
         if current_node and self._is_compact_boundary_node(current_node):
             return {"was_compacted": False}
 
@@ -2930,6 +3112,8 @@ class ChatManager:
             model_id=target_model,
             provider_id=target_provider,
             trigger="auto",
+            parent_node_id=parent_node_id,
+            focus_new_node=False,
         )
         return {
             "was_compacted": True,
@@ -2947,11 +3131,17 @@ class ChatManager:
         trigger: str = "manual",
         suppress_follow_up_questions: bool = True,
         messages_to_keep: int = 1,
+        parent_node_id: Optional[str] = None,
+        focus_new_node: bool = True,
     ) -> Dict[str, Any]:
         """手动执行 Claude Code 风格上下文压缩，并把结果追加为当前分支节点。"""
         conversation = self.get_conversation(conversation_id)
         if conversation is None:
             raise ValueError("对话不存在")
+        requested_parent_node_id = parent_node_id or conversation.current_node_id
+        if not requested_parent_node_id or requested_parent_node_id not in conversation.nodes:
+            raise ValueError("父节点不存在")
+        conversation.switch_to_node(requested_parent_node_id)
 
         target_model, target_provider = self._resolve_model_for_conversation(
             conversation,
@@ -2994,7 +3184,13 @@ class ChatManager:
             latest = self.get_conversation(conversation_id)
             if latest is None:
                 raise ValueError("对话不存在")
-            parent_id = latest.current_node_id
+            parent_id = requested_parent_node_id
+            if parent_id not in latest.nodes:
+                raise ValueError("父节点不存在")
+            parent_task_context_mode = str(
+                (latest.nodes.get(parent_id or "") or {}).get("task_context_mode")
+                or TaskContextMode.ATTACHED.value
+            )
             compact_node = NodeManager.create_compact_node(
                 parent_id=parent_id,
                 summary=summary,
@@ -3005,13 +3201,14 @@ class ChatManager:
                 messages_to_keep=messages_to_keep,
                 restored_files=restored_files,
                 suppress_follow_up_questions=suppress_follow_up_questions,
+                task_context_mode=parent_task_context_mode,
             )
             compact_node["usage"] = self._node_usage_snapshot(
                 turn_usage=estimated_usage(tokens_used),
                 branch_usage=estimated_usage(0),
                 model_context_window=self._model_context_window(target_provider, target_model),
             )
-            latest.add_node(compact_node, parent_id=parent_id)
+            latest.add_node(compact_node, parent_id=parent_id, focus=focus_new_node)
             self._mark_conversation_updated_at(latest, int(time()))
             self._save(latest)
 
@@ -3423,6 +3620,7 @@ class ChatManager:
         workspace: Optional[Dict[str, Any]] = None,
         permission_mode: PermissionMode = "default",
         run_context: Optional[Dict[str, Any]] = None,
+        task_turn_context: Optional[TaskTurnContext] = None,
     ) -> List[Message]:
         results: List[Message] = []
         current_permission_mode = permission_mode
@@ -3432,6 +3630,7 @@ class ChatManager:
             nonlocal batch, current_permission_mode
             if not batch:
                 return
+            tool_call_batch = list(batch)
             messages = await asyncio.gather(*[
                 self._execute_single_tool_call(
                     tool_call,
@@ -3442,10 +3641,17 @@ class ChatManager:
                     permission_mode=current_permission_mode,
                     run_context=run_context,
                 )
-                for tool_call in batch
+                for tool_call in tool_call_batch
             ])
-            for message in messages:
+            for tool_call, message in zip(tool_call_batch, messages):
                 results.append(message)
+                self._refresh_task_context_after_relevant_tool(
+                    tool_call=tool_call,
+                    tool_message=message,
+                    run_context=run_context,
+                    task_turn_context=task_turn_context,
+                    conversation_id=conversation_id,
+                )
                 current_permission_mode = self._permission_mode_after_plan_tools(
                     [message],
                     current_permission_mode,
@@ -3469,6 +3675,13 @@ class ChatManager:
                 run_context=run_context,
             )
             results.append(model_message)
+            self._refresh_task_context_after_relevant_tool(
+                tool_call=tool_call,
+                tool_message=model_message,
+                run_context=run_context,
+                task_turn_context=task_turn_context,
+                conversation_id=conversation_id,
+            )
             current_permission_mode = self._permission_mode_after_plan_tools(
                 [model_message],
                 current_permission_mode,
@@ -3476,6 +3689,31 @@ class ChatManager:
 
         await flush_read_only_batch()
         return results
+
+    def _refresh_task_context_after_relevant_tool(
+        self,
+        *,
+        tool_call: Dict[str, Any],
+        tool_message: Message,
+        run_context: Optional[Dict[str, Any]],
+        task_turn_context: Optional[TaskTurnContext],
+        conversation_id: Optional[str],
+    ) -> None:
+        name = _tool_call_function_name(tool_call)
+        arguments = self._parse_tool_arguments((tool_call.get("function") or {}).get("arguments"))
+        if not (
+            name in TASK_TOOL_NAMES
+            or name in TASK_OBSERVATION_TOOL_NAMES
+            or (name in TASK_BOUND_RUN_TOOL_NAMES and arguments.get("step") is not None)
+        ):
+            return
+        self._refresh_task_turn_context(
+            run_context=run_context,
+            turn_context=task_turn_context,
+            conversation_id=conversation_id,
+            tool_call=tool_call,
+            tool_message=tool_message,
+        )
 
     async def _execute_single_tool_call(
         self,

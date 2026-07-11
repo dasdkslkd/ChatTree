@@ -131,6 +131,7 @@ def test_skill_injection_uses_turn_intent_and_inherits_active_skill(tmp_path):
                 "打开 bilibili",
                 model_id="deepseek-v4-pro",
                 provider_id="ustc",
+                parent_node_id=conversation.current_node_id,
             )
         )
     )
@@ -147,6 +148,7 @@ def test_skill_injection_uses_turn_intent_and_inherits_active_skill(tmp_path):
                 "截图一下",
                 model_id="deepseek-v4-pro",
                 provider_id="ustc",
+                parent_node_id=reloaded.current_node_id,
             )
         )
     )

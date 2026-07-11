@@ -38,15 +38,16 @@ _ANCHOR_STOP_RUN_KINDS = (
 
 class SendMessageRequest(BaseModel):
     content: str
+    parent_node_id: str
     model_id: Optional[str] = None
     provider_id: Optional[str] = None
-    parent_node_id: Optional[str] = None
     focus_new_node: bool = True
     reasoning_effort: Optional[str] = None
     thinking_enabled: Optional[bool] = None
     import_files: Optional[List[Dict[str, Any]]] = None
     image_refs: Optional[List[Dict[str, Any]]] = None
     tool_permission_mode: Optional[str] = None
+    task_context_mode: Optional[str] = None
 
 
 class LegacyRunStreamSession:
@@ -95,6 +96,7 @@ def build_stream_chunk_data(chunk: StreamChunk, conversation_id: str) -> Dict[st
         "child_status",
         "child_summary",
         "payload",
+        "task_context_mode",
     ):
         val = chunk.get(opt_key)
         if val is not None:
@@ -205,6 +207,7 @@ async def _create_visible_slash_anchor_node(
         parent_node_id=request.parent_node_id,
         model_id=request.model_id,
         tool_permission_mode=request.tool_permission_mode,
+        task_context_mode=request.task_context_mode,
         slash_metadata=_slash_command_metadata(slash_result),
     )
 
@@ -305,6 +308,7 @@ async def start_detached_chat_run(
             "reasoning_effort": request.reasoning_effort,
             "thinking_enabled": request.thinking_enabled,
             "tool_permission_mode": request.tool_permission_mode,
+            "task_context_mode": request.task_context_mode,
         },
     )
 
@@ -325,6 +329,7 @@ async def start_detached_chat_run(
                 import_files=request.import_files,
                 image_refs=request.image_refs,
                 tool_permission_mode=request.tool_permission_mode,
+                task_context_mode=request.task_context_mode,
                 run_id=run.run_id,
             ):
                 chunk_data = build_stream_chunk_data(chunk, conversation_id)

@@ -421,6 +421,7 @@ async def get_conversation_tree(
                 "user_subtype": user_subtype,
                 "assistant_content": assistant_content,
                 "model_id": node.get("model_id"),
+                "task_context_mode": node.get("task_context_mode") or "attached",
                 "timestamp": node.get("timestamp"),
                 "is_current": node_id == conv.current_node_id,
                 "is_root": node_id == conv.root_node_id,

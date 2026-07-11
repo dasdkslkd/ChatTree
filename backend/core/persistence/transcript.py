@@ -122,7 +122,6 @@ class TranscriptProjection:
         props: dict[str, Any] | None = None,
     ) -> str:
         with self.persistence.connect() as conn:
-            self._ensure_run(conn, conversation_id, run_id, status, summary)
             return self._upsert_item(
                 conn,
                 lookup_sql="""
@@ -167,8 +166,6 @@ class TranscriptProjection:
         event_props = dict(props or {})
         event_props.setdefault("event_type", event_type)
         with self.persistence.connect() as conn:
-            if run_id:
-                self._ensure_run(conn, conversation_id, run_id, "running", summary)
             return self._upsert_item(
                 conn,
                 lookup_sql="""
@@ -264,48 +261,6 @@ class TranscriptProjection:
             )
             return str(row["id"])
 
-    def upsert_task_item(
-        self,
-        conversation_id: str,
-        node_id: str,
-        *,
-        task_id: str,
-        item_type: str = "task_notification",
-        status: str = "",
-        preview: str = "",
-        local_order: int = 0,
-        visibility: str = "main",
-        summary: str = "",
-        anchor_node_id: str | None = None,
-        props: dict[str, Any] | None = None,
-    ) -> str:
-        with self.persistence.connect() as conn:
-            self._ensure_task(conn, conversation_id, task_id, status, preview)
-            return self._upsert_item(
-                conn,
-                lookup_sql="""
-                    SELECT id
-                    FROM transcript_items
-                    WHERE conversation_id = ?
-                      AND task_id = ?
-                      AND item_type = ?
-                """,
-                lookup_params=(conversation_id, task_id, item_type),
-                values={
-                    "conversation_id": conversation_id,
-                    "node_id": node_id,
-                    "anchor_node_id": anchor_node_id,
-                    "task_id": task_id,
-                    "item_type": item_type,
-                    "local_order": local_order,
-                    "visibility": visibility,
-                    "status": status,
-                    "summary": summary,
-                    "preview": preview,
-                    "props_json": self._json_field(props),
-                },
-            )
-
     def list_for_branch(
         self, conversation_id: str, tip_node_id: str | None
     ) -> list[dict[str, Any]]:
@@ -393,7 +348,6 @@ class TranscriptProjection:
                     anchor_node_id = ?,
                     run_id = ?,
                     plan_id = ?,
-                    task_id = ?,
                     message_id = ?,
                     item_type = ?,
                     local_order = ?,
@@ -411,7 +365,6 @@ class TranscriptProjection:
                     values.get("anchor_node_id"),
                     values.get("run_id"),
                     values.get("plan_id"),
-                    values.get("task_id"),
                     values.get("message_id"),
                     values.get("item_type"),
                     values.get("local_order"),
@@ -433,7 +386,6 @@ class TranscriptProjection:
                   anchor_node_id,
                   run_id,
                   plan_id,
-                  task_id,
                   message_id,
                   item_type,
                   local_order,
@@ -446,7 +398,7 @@ class TranscriptProjection:
                   updated_at
                 )
                 VALUES (
-                  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                   strftime('%s', 'now'),
                   strftime('%s', 'now')
                 )
@@ -458,7 +410,6 @@ class TranscriptProjection:
                     values.get("anchor_node_id"),
                     values.get("run_id"),
                     values.get("plan_id"),
-                    values.get("task_id"),
                     values.get("message_id"),
                     values.get("item_type"),
                     values.get("local_order"),
@@ -491,52 +442,6 @@ class TranscriptProjection:
               updated_at = strftime('%s', 'now')
             """,
             (plan_id, conversation_id, status, preview),
-        )
-
-    def _ensure_run(
-        self, conn: Any, conversation_id: str, run_id: str, status: str, summary: str
-    ) -> None:
-        conn.execute(
-            """
-            INSERT INTO runs (
-              id,
-              conversation_id,
-              kind,
-              status,
-              summary,
-              created_at,
-              updated_at
-            )
-            VALUES (?, ?, 'chat', ?, ?, strftime('%s', 'now'), strftime('%s', 'now'))
-            ON CONFLICT(id) DO UPDATE SET
-              status = excluded.status,
-              summary = excluded.summary,
-              updated_at = strftime('%s', 'now')
-            """,
-            (run_id, conversation_id, status, summary),
-        )
-
-    def _ensure_task(
-        self, conn: Any, conversation_id: str, task_id: str, status: str, title: str
-    ) -> None:
-        conn.execute(
-            """
-            INSERT INTO tasks (
-              id,
-              conversation_id,
-              status,
-              owner_type,
-              title,
-              created_at,
-              updated_at
-            )
-            VALUES (?, ?, ?, 'system', ?, strftime('%s', 'now'), strftime('%s', 'now'))
-            ON CONFLICT(id) DO UPDATE SET
-              status = excluded.status,
-              title = excluded.title,
-              updated_at = strftime('%s', 'now')
-            """,
-            (task_id, conversation_id, status, title),
         )
 
     def _json_field(self, value: Any) -> str | None:

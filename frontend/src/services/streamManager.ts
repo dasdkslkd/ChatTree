@@ -37,6 +37,7 @@ export interface StreamState {
   abortController: AbortController | null;
   pendingUserMessage: string | null;
   toolPermissionMode: string | null;
+  taskContextMode: 'attached' | 'detached' | null;
   anchorUntilTargetLands: boolean;
   eventCount: number;
   createdAt: number;
@@ -270,6 +271,10 @@ function normalizeToolPermissionMode(value: unknown): string | null {
   return value === 'auto_approve' || value === 'modify_only' || value === 'ask_always' || value === 'plan'
     ? value
     : null;
+}
+
+function normalizeTaskContextMode(value: unknown): 'attached' | 'detached' | null {
+  return value === 'attached' || value === 'detached' ? value : null;
 }
 
 function isWorkflowEvent(chunk: any): boolean {
@@ -560,6 +565,17 @@ export class StreamManager {
         tool_permission_mode: chunkPermissionMode,
       };
     }
+    const metadataTaskContextMode = chunk.metadata && typeof chunk.metadata === 'object'
+      ? normalizeTaskContextMode((chunk.metadata as Record<string, unknown>).task_context_mode)
+      : null;
+    const chunkTaskContextMode = normalizeTaskContextMode(chunk.task_context_mode) ?? metadataTaskContextMode;
+    if (chunkTaskContextMode) {
+      next.taskContextMode = chunkTaskContextMode;
+      next.metadata = {
+        ...next.metadata,
+        task_context_mode: chunkTaskContextMode,
+      };
+    }
     const createdAt = normalizeTimestampMs(chunk.created_at);
     if (createdAt !== null) {
       next.createdAt = createdAt;
@@ -691,6 +707,7 @@ export class StreamManager {
       abortController: controller,
       pendingUserMessage,
       toolPermissionMode: null,
+      taskContextMode: null,
       anchorUntilTargetLands: false,
       eventCount: 0,
       createdAt: Date.now(),
@@ -728,6 +745,7 @@ export class StreamManager {
       abortController: null,
       pendingUserMessage: null,
       toolPermissionMode: normalizeToolPermissionMode(record.metadata?.tool_permission_mode),
+      taskContextMode: normalizeTaskContextMode(record.metadata?.task_context_mode),
       anchorUntilTargetLands: false,
       eventCount: 0,
       createdAt,
@@ -772,7 +790,7 @@ export class StreamManager {
   ): Promise<void> {
     let runId = `client_${Date.now()}_${this.tempSeq++}`;
     const abortController = new AbortController();
-    this.streams.set(runId, this.createState(
+    const state = this.createState(
       runId,
       conversationId,
       abortController,
@@ -780,7 +798,9 @@ export class StreamManager {
       null,
       getRequestRunKind(request),
       anchorNodeId ?? requestNodeId ?? null,
-    ));
+    );
+    state.taskContextMode = normalizeTaskContextMode(request.task_context_mode);
+    this.streams.set(runId, state);
     this.addToConversation(conversationId, runId);
     this.notify(conversationId, true);
     const payload = {

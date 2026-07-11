@@ -6,11 +6,9 @@ export interface GenerationInfo {
   error_message?: string | null;  // 错误信息
   tokens_used?: number;  // 使用的token数
   usage_info?: UsageInfo | null;
-  task_guard?: {
-    open_task_count?: number;
-    nudged?: boolean;
-  } | null;
 }
+
+export type TaskContextMode = 'attached' | 'detached';
 
 export interface UsageInfo {
   input_tokens?: number;
@@ -74,17 +72,19 @@ export interface Message {
     mime_type?: string;
   }>;
   tool_permission_mode?: ToolPermissionMode | null;
+  task_context_mode?: TaskContextMode | null;
 }
 
 export interface SendMessageRequest {
   content: string;
-  parent_node_id?: string | null;
+  parent_node_id: string;
   focus_new_node?: boolean;
   model_id?: string;
   provider_id?: string;
   reasoning_effort?: string | null;
   thinking_enabled?: boolean | null;
   tool_permission_mode?: ToolPermissionMode;
+  task_context_mode?: TaskContextMode;
   import_files?: Array<{
     filename: string;
   }>;
@@ -144,4 +144,6 @@ export interface StreamChunk {
   tool_call?: any;
   tool_calls?: any[];
   approval?: ToolApprovalPayload;
+  tool_permission_mode?: ToolPermissionMode | null;
+  task_context_mode?: TaskContextMode | null;
 }

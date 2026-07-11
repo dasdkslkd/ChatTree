@@ -78,7 +78,7 @@ def _role_value(role):
     return getattr(role, "value", role)
 
 
-def test_concurrent_streams_without_explicit_node_id_use_same_start_parent():
+def test_concurrent_streams_with_explicit_parent_create_sibling_nodes():
     async def run():
         tmp = tempfile.mkdtemp(prefix="chattree_test_")
         try:
@@ -92,8 +92,8 @@ def test_concurrent_streams_without_explicit_node_id_use_same_start_parent():
             root_id = conv.root_node_id
 
             await asyncio.gather(
-                drain(cm.send_message_stream(cid, "msg A", model_id="fake-model")),
-                drain(cm.send_message_stream(cid, "msg B", model_id="fake-model")),
+                drain(cm.send_message_stream(cid, "msg A", model_id="fake-model", parent_node_id=root_id)),
+                drain(cm.send_message_stream(cid, "msg B", model_id="fake-model", parent_node_id=root_id)),
             )
 
             reloaded = Conversation.from_dict(storage.load(cid))
@@ -121,11 +121,12 @@ async def main():
 
         conv = cm.create_conversation("race test")
         cid = conv.metadata["id"]
+        root_id = conv.root_node_id
 
         # 两路并发流式，同一对话
         await asyncio.gather(
-            drain(cm.send_message_stream(cid, "msg A", model_id="fake-model")),
-            drain(cm.send_message_stream(cid, "msg B", model_id="fake-model")),
+            drain(cm.send_message_stream(cid, "msg A", model_id="fake-model", parent_node_id=root_id)),
+            drain(cm.send_message_stream(cid, "msg B", model_id="fake-model", parent_node_id=root_id)),
         )
 
         # 断言：两个新节点都在盘上（root + 2），无节点文件被并发保存删除

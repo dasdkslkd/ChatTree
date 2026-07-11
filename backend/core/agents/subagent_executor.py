@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from contextlib import suppress
 from typing import Any, Dict, Optional
 
@@ -13,7 +14,11 @@ from backend.core.prompts.catalog import load_prompt_template
 from backend.core.prompts.types import RuntimePromptContext
 from backend.core.runs import RunKind, RunManager, RunStatus
 from backend.core.tools.security.permissions import normalize_permission_mode
+from backend.core.tools.task_tools import filter_task_tools_for_context
 from .types import AgentDeliveryPolicy
+
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_MAX_TOOL_ROUNDS = 500
@@ -53,7 +58,7 @@ class SubagentExecutor:
         original_slash_input: Optional[str] = None,
         delivery_policy: str = "auto",
         context_mode: str = "fresh",
-        task_id: Optional[str] = None,
+        task_binding: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         delivery_policy = AgentDeliveryPolicy(str(delivery_policy or "auto")).value
         agent = self.capability_registry.get_agent(agent_name)
@@ -78,10 +83,13 @@ class SubagentExecutor:
                 "original_slash_input": original_slash_input,
                 "delivery_policy": delivery_policy,
                 "context_mode": context_mode if context_mode in {"fresh", "fork"} else "fresh",
-                "task_id": task_id,
             },
+            task_binding=task_binding,
         )
-        await self._register_task_notification(run.run_id, agent_name=agent.name)
+        try:
+            await self._register_task_notification(run.run_id, agent_name=agent.name)
+        except Exception:
+            logger.exception("Failed to register subagent notification for %s", run.run_id)
         task = asyncio.create_task(self._produce(
             run_id=run.run_id,
             conversation_id=conversation_id,
@@ -124,9 +132,7 @@ class SubagentExecutor:
                 "agent_name": agent_name,
                 "delegated_task": metadata.get("delegated_task"),
                 "original_slash_input": metadata.get("original_slash_input"),
-                "task_id": metadata.get("task_id"),
             },
-            task_id=metadata.get("task_id"),
         )
 
     async def stop(self, run_id: str) -> bool:
@@ -198,13 +204,14 @@ class SubagentExecutor:
                 )
         except asyncio.CancelledError:
             final_status = RunStatus.CANCELLED
-            await self.run_manager.append_event(run_id, {
+            notification_payload = {
                 "status": "stopped",
                 "event_type": "subagent_result",
                 "agent_name": agent_name,
                 "content": "",
                 "reasoning": None,
-            })
+            }
+            await self.run_manager.append_event(run_id, notification_payload)
         except asyncio.TimeoutError:
             final_status = RunStatus.FAILED
             agent = self.capability_registry.get_agent(agent_name)
@@ -232,14 +239,25 @@ class SubagentExecutor:
             self._controllers.pop(run_id, None)
             self._tasks.pop(run_id, None)
             await self.run_manager.finish_run(run_id, final_status, final_error)
-            if notification_payload and final_status in {RunStatus.COMPLETED, RunStatus.FAILED}:
-                source_status = "completed" if final_status == RunStatus.COMPLETED else "failed"
-                await self._publish_task_notification(
-                    run_id,
-                    source_status,
-                    notification_payload.get("content") or notification_payload.get("error") or "",
-                    event_payload=notification_payload,
-                )
+            if notification_payload and final_status in {
+                RunStatus.COMPLETED,
+                RunStatus.FAILED,
+                RunStatus.CANCELLED,
+            }:
+                source_status = {
+                    RunStatus.COMPLETED: "completed",
+                    RunStatus.FAILED: "failed",
+                    RunStatus.CANCELLED: "cancelled",
+                }[final_status]
+                try:
+                    await self._publish_task_notification(
+                        run_id,
+                        source_status,
+                        notification_payload.get("content") or notification_payload.get("error") or "",
+                        event_payload=notification_payload,
+                    )
+                except Exception:
+                    logger.exception("Failed to publish subagent notification for %s", run_id)
 
     async def _produce_inner(
         self,
@@ -418,7 +436,7 @@ class SubagentExecutor:
                             "node_id": tool_node_id,
                             "agent_name": agent_name,
                             "delivery_policy": run_metadata.get("delivery_policy"),
-                            "task_id": run_metadata.get("task_id"),
+                            "task_context_mode": "detached",
                             "task_summary": str(input_data)[:160],
                             "suppress_task_notification": agent_name == "workflow-worker"
                             or run_metadata.get("delivery_policy") == "silent",
@@ -609,6 +627,7 @@ class SubagentExecutor:
         tools = self.chat_manager.tool_manager.get_openai_tools()
         if not allowed_names:
             return []
+        tools = filter_task_tools_for_context(tools, "detached")
         if "*" in allowed_names:
             return tools
         allowed = set(allowed_names)
@@ -731,7 +750,5 @@ class SubagentExecutor:
                 "agent_name": metadata.get("agent_name") or event_payload.get("agent_name"),
                 "delegated_task": metadata.get("delegated_task"),
                 "original_slash_input": original_slash_input,
-                "task_id": metadata.get("task_id"),
             },
-            task_id=metadata.get("task_id"),
         )

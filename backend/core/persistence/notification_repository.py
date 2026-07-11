@@ -17,7 +17,6 @@ class SQLiteTaskNotificationRepository:
         conversation_id: str,
         source_run_id: str,
         source_run_kind: str,
-        task_id: str | None = None,
         summary: str = "",
         content: str = "",
         payload: dict[str, Any] | None = None,
@@ -41,7 +40,6 @@ class SQLiteTaskNotificationRepository:
                       conversation_id,
                       source_run_id,
                       source_run_kind,
-                      task_id,
                       status,
                       summary,
                       content,
@@ -50,7 +48,7 @@ class SQLiteTaskNotificationRepository:
                       updated_at
                     )
                     VALUES (
-                      ?, ?, ?, ?, ?, 'unbound', ?, ?, ?,
+                      ?, ?, ?, ?, 'unbound', ?, ?, ?,
                       strftime('%s', 'now'),
                       strftime('%s', 'now')
                     )
@@ -60,7 +58,6 @@ class SQLiteTaskNotificationRepository:
                         conversation_id,
                         source_run_id,
                         source_run_kind,
-                        task_id,
                         summary,
                         content,
                         payload_json,
@@ -73,7 +70,6 @@ class SQLiteTaskNotificationRepository:
                         """
                         UPDATE task_notifications
                         SET source_run_kind = ?,
-                            task_id = ?,
                             summary = ?,
                             content = ?,
                             payload_json = ?,
@@ -82,7 +78,6 @@ class SQLiteTaskNotificationRepository:
                         """,
                         (
                             source_run_kind,
-                            task_id,
                             summary,
                             content,
                             payload_json,
@@ -164,6 +159,18 @@ class SQLiteTaskNotificationRepository:
             ).fetchall()
         return [self._from_row(row) for row in rows]
 
+    def list_pending_publications(self) -> list[dict[str, Any]]:
+        with self.persistence.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM task_notifications
+                WHERE status IN ('unbound', 'bound', 'delivering')
+                ORDER BY updated_at, id
+                """
+            ).fetchall()
+        return [self._from_row(row) for row in rows]
+
     def bind(self, notification_id: str, delivery_node_id: str, *, bound_by: str) -> dict[str, Any]:
         with self.persistence.connect() as conn:
             row = conn.execute(
@@ -172,7 +179,7 @@ class SQLiteTaskNotificationRepository:
             ).fetchone()
             if row is None:
                 raise KeyError(notification_id)
-            if row["status"] in {"observed", "deleted", "delivered"}:
+            if row["status"] in {"observed", "deleted", "delivered", "delivering"}:
                 raise ValueError(f"notification {notification_id} is {row['status']}")
             conn.execute(
                 """

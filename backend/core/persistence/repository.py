@@ -161,7 +161,7 @@ class ChatRepository:
             if parent_id is not None:
                 parent = conn.execute(
                     """
-                    SELECT depth
+                    SELECT depth, task_context_mode
                     FROM nodes
                     WHERE conversation_id = ? AND id = ?
                     """,
@@ -175,6 +175,15 @@ class ChatRepository:
             model_id = fields.pop("model_id", None)
             provider_id = fields.pop("provider_id", None)
             tool_permission_mode = fields.pop("tool_permission_mode", None)
+            task_context_mode = fields.pop("task_context_mode", None)
+            if task_context_mode is None:
+                task_context_mode = (
+                    str(parent["task_context_mode"] or "attached")
+                    if parent is not None
+                    else "attached"
+                )
+            if task_context_mode not in {"attached", "detached"}:
+                raise ValueError("task_context_mode must be attached or detached")
             turn_usage_json = self._json_field(fields.pop("turn_usage", None))
             branch_usage_json = self._json_field(fields.pop("branch_usage", None))
             active_context_usage_json = self._json_field(
@@ -196,6 +205,7 @@ class ChatRepository:
                   model_id,
                   provider_id,
                   tool_permission_mode,
+                  task_context_mode,
                   turn_usage_json,
                   branch_usage_json,
                   active_context_usage_json,
@@ -203,7 +213,7 @@ class ChatRepository:
                   updated_at
                 )
                 VALUES (
-                  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                   strftime('%s', 'now'),
                   strftime('%s', 'now')
                 )
@@ -218,6 +228,7 @@ class ChatRepository:
                     model_id,
                     provider_id,
                     tool_permission_mode,
+                    task_context_mode,
                     turn_usage_json,
                     branch_usage_json,
                     active_context_usage_json,

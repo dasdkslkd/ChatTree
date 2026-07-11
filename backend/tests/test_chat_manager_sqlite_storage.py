@@ -1,6 +1,9 @@
 import asyncio
 import json
+import sqlite3
 from pathlib import Path
+
+import pytest
 
 import sys
 
@@ -11,8 +14,10 @@ from backend.core.chat.chat_manager import ChatManager
 from backend.core.config.types import Message, Role, StreamChunk, StreamController, StreamStatus
 from backend.core.persistence.database import SQLitePersistence
 from backend.core.persistence.repository import ChatRepository
+from backend.core.persistence.run_repository import SQLiteRunRepository
 from backend.core.persistence.transcript import TranscriptProjection
 from backend.core.plans import PlanLedger
+from backend.core.runs import RunManager, RunStatus
 from backend.core.notifications import format_task_notification_content
 from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
@@ -22,6 +27,7 @@ from backend.core.tools.security.approval import ApprovalManager
 from backend.core.tools.security.logical_sandbox import LogicalSandbox
 from backend.core.tools.security.permissions import PermissionEngine
 from backend.api.routes.conversations import to_transcript_item_dto
+from backend.api.routes.messages import SendMessageRequest, start_detached_chat_run
 from test_chat_manager_prompt_slash import (
     CapturingProvider,
     CapturingModelManager,
@@ -208,6 +214,7 @@ def test_delete_conversation_removes_sqlite_transcript_projection(tmp_path: Path
                 conversation.metadata["id"],
                 "to delete",
                 model_id="fake-model",
+                parent_node_id=conversation.current_node_id,
             )
         )
     )
@@ -234,6 +241,7 @@ def test_delete_node_removes_sqlite_branch_items(tmp_path: Path):
                 conversation.metadata["id"],
                 "delete node content",
                 model_id="fake-model",
+                parent_node_id=conversation.current_node_id,
             )
         )
     )
@@ -263,6 +271,7 @@ def test_send_message_stream_writes_transcript_projection(tmp_path: Path):
                 conversation.metadata["id"],
                 "hello sqlite",
                 model_id="fake-model",
+                parent_node_id=conversation.current_node_id,
             )
         )
     )
@@ -292,7 +301,6 @@ def test_task_notification_turn_writes_notify_transcript_item(tmp_path: Path):
         "summary": "Command completed",
         "source_run_id": "run-1",
         "source_run_kind": "command",
-        "task_id": "task-1",
         "content": "{\"stdout_tail\":\"ok\"}",
         "payload": {
             "source_status": "completed",
@@ -328,6 +336,13 @@ def test_task_notification_turn_writes_notify_transcript_item(tmp_path: Path):
 def test_send_message_stream_updates_run_draft_item(tmp_path: Path):
     manager, _repository, projection = _make_manager(tmp_path)
     conversation = manager.create_conversation("sqlite run draft")
+    run_repository = SQLiteRunRepository(projection.persistence)
+    run_id = run_repository.create_run(
+        conversation.metadata["id"],
+        kind="chat",
+        anchor_node_id=conversation.current_node_id,
+        summary="hello run",
+    )
 
     chunks = asyncio.run(
         collect_chunks(
@@ -335,7 +350,8 @@ def test_send_message_stream_updates_run_draft_item(tmp_path: Path):
                 conversation.metadata["id"],
                 "hello run",
                 model_id="fake-model",
-                run_id="run-chat-1",
+                run_id=run_id,
+                parent_node_id=conversation.current_node_id,
             )
         )
     )
@@ -349,9 +365,75 @@ def test_send_message_stream_updates_run_draft_item(tmp_path: Path):
 
     run_items = [item for item in items if item["item_type"] == "run_draft"]
     assert len(run_items) == 1
-    assert run_items[0]["run_id"] == "run-chat-1"
+    assert run_items[0]["run_id"] == run_id
     assert run_items[0]["status"] == "completed"
     assert run_items[0]["preview"] == "ok"
+
+    running = run_repository.get_run(run_id)
+    assert running["status"] == "running"
+    assert running["summary"] == "hello run"
+    assert running["finished_at"] is None
+    assert not any(
+        event["payload"].get("type") == "run_finished"
+        for event in run_repository.read_events(run_id)
+    )
+
+    run_manager = RunManager(repository=run_repository)
+    asyncio.run(run_manager.finish_run(run_id, RunStatus.COMPLETED))
+    finished = run_repository.get_run(run_id)
+    assert finished["status"] == "completed"
+    assert finished["summary"] == "hello run"
+    assert finished["finished_at"] is not None
+    assert sum(
+        event["payload"].get("type") == "run_finished"
+        for event in run_repository.read_events(run_id)
+    ) == 1
+
+
+def test_run_draft_requires_an_existing_run(tmp_path: Path):
+    manager, _repository, projection = _make_manager(tmp_path)
+    conversation = manager.create_conversation("missing run")
+
+    with pytest.raises(sqlite3.IntegrityError):
+        projection.upsert_run_draft(
+            conversation.metadata["id"],
+            conversation.current_node_id,
+            run_id="missing-run",
+        )
+
+
+def test_detached_chat_run_finishes_durable_lifecycle_once(tmp_path: Path):
+    manager, _repository, projection = _make_manager(tmp_path)
+    conversation = manager.create_conversation("durable lifecycle")
+    run_repository = SQLiteRunRepository(projection.persistence)
+    run_manager = RunManager(repository=run_repository)
+
+    async def scenario():
+        run = await start_detached_chat_run(
+            conversation.metadata["id"],
+            SendMessageRequest(
+                content="hello lifecycle",
+                parent_node_id=conversation.current_node_id,
+                model_id="fake-model",
+            ),
+            manager,
+            run_manager,
+        )
+        await run_manager.wait_for_terminal_result(
+            run["run_id"],
+            result_event_types=set(),
+            timeout=5,
+        )
+        return run["run_id"]
+
+    run_id = asyncio.run(scenario())
+    finished = run_repository.get_run(run_id)
+    assert finished["status"] == "completed"
+    assert finished["summary"] == "hello lifecycle"
+    assert finished["finished_at"] is not None
+    events = run_repository.read_events(run_id)
+    assert sum(event["payload"].get("type") == "run_finished" for event in events) == 1
+    assert events[-1]["payload"]["type"] == "run_finished"
 
 
 def test_plan_control_turn_writes_process_timeline_without_answer(tmp_path: Path):
@@ -381,6 +463,7 @@ def test_plan_control_turn_writes_process_timeline_without_answer(tmp_path: Path
                 conversation.metadata["id"],
                 "写计划",
                 model_id="fake-model",
+                parent_node_id=conversation.current_node_id,
             )
         )
     )
@@ -423,6 +506,12 @@ def test_exit_plan_mode_treats_same_round_text_as_process_not_answer(tmp_path: P
     )
     manager.model_manager.provider = TextThenExitPlanProvider()
     conversation = manager.create_conversation("blocking exit plan")
+    run_id = SQLiteRunRepository(projection.persistence).create_run(
+        conversation.metadata["id"],
+        kind="chat",
+        anchor_node_id=conversation.current_node_id,
+        summary="写计划",
+    )
     asyncio.run(plan_ledger.enter_plan_mode(
         conversation_id=conversation.metadata["id"],
         previous_permission_mode="modify_only",
@@ -432,7 +521,8 @@ def test_exit_plan_mode_treats_same_round_text_as_process_not_answer(tmp_path: P
         conversation.metadata["id"],
         "写计划",
         model_id="fake-model",
-        run_id="run-plan-blocking",
+        run_id=run_id,
+        parent_node_id=conversation.current_node_id,
     )))
 
     main_text = "".join(
@@ -463,7 +553,7 @@ def test_exit_plan_mode_treats_same_round_text_as_process_not_answer(tmp_path: P
 
 
 def test_plan_tool_permission_change_streams_immediately(tmp_path: Path):
-    manager, _repository, _projection = _make_manager(tmp_path)
+    manager, _repository, projection = _make_manager(tmp_path)
     plan_ledger = PlanLedger()
     tool_manager = PlanModeToolManager(plan_ledger)
     manager.plan_ledger = plan_ledger
@@ -476,12 +566,19 @@ def test_plan_tool_permission_change_streams_immediately(tmp_path: Path):
     )
     manager.model_manager.provider = EnterPlanModeProvider()
     conversation = manager.create_conversation("permission mode stream")
+    run_id = SQLiteRunRepository(projection.persistence).create_run(
+        conversation.metadata["id"],
+        kind="chat",
+        anchor_node_id=conversation.current_node_id,
+        summary="先进入计划模式",
+    )
 
     chunks = asyncio.run(collect_chunks(manager.send_message_stream(
         conversation.metadata["id"],
         "先进入计划模式",
         model_id="fake-model",
-        run_id="run-plan-permission",
+        run_id=run_id,
+        parent_node_id=conversation.current_node_id,
     )))
 
     permission_chunks = [
@@ -502,6 +599,7 @@ def test_tool_turn_uses_last_non_tool_text_as_assistant_answer(tmp_path: Path):
         conversation.metadata["id"],
         "检查后总结",
         model_id="fake-model",
+        parent_node_id=conversation.current_node_id,
     )))
 
     assert chunks[-1]["status"] == "complete"
@@ -522,6 +620,12 @@ def test_completed_assistant_process_persists_duration(tmp_path: Path):
     manager, _repository, projection = _make_manager(tmp_path)
     conversation = manager.create_conversation("process duration")
     node = conversation.nodes[conversation.current_node_id]
+    run_id = SQLiteRunRepository(projection.persistence).create_run(
+        conversation.metadata["id"],
+        kind="chat",
+        target_node_id=conversation.current_node_id,
+        summary="process duration",
+    )
 
     manager._persist_sqlite_assistant_turn(
         conversation=conversation,
@@ -539,7 +643,7 @@ def test_completed_assistant_process_persists_duration(tmp_path: Path):
         }),
         provider_id="fake-provider",
         model_id="fake-model",
-        run_id="run-duration",
+        run_id=run_id,
         generation_status="completed",
         tool_interactions=[{
             "assistant": {
@@ -591,6 +695,7 @@ def test_plan_approval_stream_uses_tool_result_continuation(tmp_path: Path):
                 conversation.metadata["id"],
                 "写计划",
                 model_id="fake-model",
+                parent_node_id=conversation.current_node_id,
             )
         )
     )
@@ -602,6 +707,12 @@ def test_plan_approval_stream_uses_tool_result_continuation(tmp_path: Path):
         conversation_id=conversation.metadata["id"],
         plan_id=awaiting_plan.plan_id,
     ))
+    implementation_run_id = SQLiteRunRepository(projection.persistence).create_run(
+        conversation.metadata["id"],
+        kind="chat",
+        anchor_node_id=plan_node_id,
+        summary="continue approved plan",
+    )
 
     approval_chunks = asyncio.run(
         collect_chunks(
@@ -614,7 +725,7 @@ def test_plan_approval_stream_uses_tool_result_continuation(tmp_path: Path):
                 model_id="fake-model",
                 node_id=plan_node_id,
                 tool_permission_mode="modify_only",
-                run_id="run-impl-1",
+                run_id=implementation_run_id,
             )
         )
     )
@@ -636,7 +747,7 @@ def test_plan_approval_stream_uses_tool_result_continuation(tmp_path: Path):
     assert "plan_card" not in item_types
     assert not any(
         item["item_type"] == "run_draft"
-        and item["run_id"] == "run-impl-1"
+        and item["run_id"] == implementation_run_id
         and item["visibility"] == "main"
         for item in items
     )
@@ -671,7 +782,7 @@ def test_plan_approval_stream_uses_tool_result_continuation(tmp_path: Path):
     )
     continuations = to_transcript_item_dto(process_item)["props"].get("continuations")
     assert isinstance(continuations, list)
-    assert continuations[0]["run_id"] == "run-impl-1"
+    assert continuations[0]["run_id"] == implementation_run_id
     assert continuations[0]["continuation_of_node_id"] == plan_node_id
     assert continuations[0]["tool_result_for"] == approved_plan.exit_tool_call_id
     assert continuations[0]["marker"] == "计划已批准，开始实现"
@@ -857,6 +968,7 @@ def test_tool_results_are_copied_to_sqlite_blobs(tmp_path: Path):
                 conversation.metadata["id"],
                 "run tool",
                 model_id="fake-model",
+                parent_node_id=conversation.current_node_id,
             )
         )
     )
@@ -900,6 +1012,7 @@ def test_tool_result_persistence_preserves_tool_call_arguments_and_index(tmp_pat
                 conversation.metadata["id"],
                 "run two tools",
                 model_id="fake-model",
+                parent_node_id=conversation.current_node_id,
             )
         )
     )
@@ -945,6 +1058,7 @@ def test_tool_runtime_context_uses_parent_branch_anchor(tmp_path: Path):
                 conversation.metadata["id"],
                 "first turn",
                 model_id="fake-model",
+                parent_node_id=conversation.current_node_id,
             )
         )
     )
@@ -960,6 +1074,7 @@ def test_tool_runtime_context_uses_parent_branch_anchor(tmp_path: Path):
                 conversation.metadata["id"],
                 "run two tools",
                 model_id="fake-model",
+                parent_node_id=first_chunks[-1]["node_id"],
             )
         )
     )
@@ -969,3 +1084,49 @@ def test_tool_runtime_context_uses_parent_branch_anchor(tmp_path: Path):
     assert tool_manager.runtime_contexts
     assert {context["anchor_node_id"] for context in tool_manager.runtime_contexts} == {parent_node_id}
     assert {context["node_id"] for context in tool_manager.runtime_contexts} == {second_node_id}
+
+
+def test_task_context_mode_is_stored_per_node_and_inherited_by_children(tmp_path: Path):
+    manager, repository, _projection = _make_manager(tmp_path)
+    conversation = manager.create_conversation("task context branches")
+    root_id = conversation.current_node_id
+
+    detached_chunks = asyncio.run(collect_chunks(manager.send_message_stream(
+        conversation.metadata["id"],
+        "explore separately",
+        model_id="fake-model",
+        parent_node_id=root_id,
+        task_context_mode="detached",
+    )))
+    detached_id = detached_chunks[0]["node_id"]
+    assert detached_chunks[0]["task_context_mode"] == "detached"
+
+    inherited_chunks = asyncio.run(collect_chunks(manager.send_message_stream(
+        conversation.metadata["id"],
+        "continue exploration",
+        model_id="fake-model",
+        parent_node_id=detached_id,
+    )))
+    inherited_id = inherited_chunks[0]["node_id"]
+    assert inherited_chunks[0]["task_context_mode"] == "detached"
+
+    attached_chunks = asyncio.run(collect_chunks(manager.send_message_stream(
+        conversation.metadata["id"],
+        "coding branch",
+        model_id="fake-model",
+        parent_node_id=root_id,
+    )))
+    attached_id = attached_chunks[0]["node_id"]
+    assert attached_chunks[0]["task_context_mode"] == "attached"
+
+    with repository.persistence.connect() as conn:
+        rows = conn.execute(
+            "SELECT id, task_context_mode FROM nodes WHERE id IN (?, ?, ?)",
+            (detached_id, inherited_id, attached_id),
+        ).fetchall()
+    modes = {row["id"]: row["task_context_mode"] for row in rows}
+    assert modes == {
+        detached_id: "detached",
+        inherited_id: "detached",
+        attached_id: "attached",
+    }

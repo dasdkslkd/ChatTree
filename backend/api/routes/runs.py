@@ -9,6 +9,7 @@ from backend.api.dependencies import get_chat_manager, get_run_manager, get_suba
 from backend.core.agents import SubagentExecutor
 from backend.core.chat.chat_manager import ChatManager
 from backend.core.runs import RunManager, RunNotFoundError
+from backend.core.runs.public import public_run_dict
 from backend.core.workflows import WorkflowManager
 from .run_control import stop_run_tree
 
@@ -33,7 +34,7 @@ async def list_active_runs(
     conversation_id: Optional[str] = None,
     run_manager: RunManager = Depends(get_run_manager),
 ):
-    return run_manager.list_active(conversation_id)
+    return [public_run_dict(run) for run in run_manager.list_active(conversation_id)]
 
 
 @router.get("/conversations/{conversation_id}/runs", response_model=List[Dict[str, Any]])
@@ -41,7 +42,7 @@ async def list_conversation_runs(
     conversation_id: str,
     run_manager: RunManager = Depends(get_run_manager),
 ):
-    return run_manager.list_runs(conversation_id)
+    return [public_run_dict(run) for run in run_manager.list_runs(conversation_id)]
 
 
 @router.get("/runs/{run_id}", response_model=Dict[str, Any])
@@ -52,7 +53,7 @@ async def get_run(
     run = run_manager.get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="运行不存在")
-    return run
+    return public_run_dict(run)
 
 
 @router.get("/runs/{run_id}/attach")

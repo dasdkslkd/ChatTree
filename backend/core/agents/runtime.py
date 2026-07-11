@@ -6,13 +6,16 @@ import time
 from typing import Any, Dict, Optional
 
 from backend.core.capabilities.registry import CapabilityRegistry
-from backend.core.runs import RunKind, RunManager
-from backend.core.tasks import TaskLedger, TaskOwnerType
+from backend.core.runs import FINISHED_RUN_STATUSES, RunKind, RunManager
+from backend.core.tasks import ActiveTaskService
 from backend.core.tools.security.permissions import normalize_permission_mode
 
 from .mailbox import AgentMailbox
 from .subagent_executor import SubagentExecutor
 from .types import AgentSource
+
+
+FINISHED_AGENT_STATUS_VALUES = {status.value for status in FINISHED_RUN_STATUSES}
 
 
 class AgentRuntime:
@@ -26,14 +29,14 @@ class AgentRuntime:
         subagent_executor: SubagentExecutor,
         workflow_manager: Any = None,
         capability_registry: CapabilityRegistry,
-        task_ledger: TaskLedger | None = None,
+        task_service: ActiveTaskService | None = None,
     ) -> None:
         self.run_manager = run_manager
         self.mailbox = mailbox
         self.subagent_executor = subagent_executor
         self.workflow_manager = workflow_manager
         self.capability_registry = capability_registry
-        self.task_ledger = task_ledger
+        self.task_service = task_service
 
     async def spawn_agent(
         self,
@@ -49,8 +52,10 @@ class AgentRuntime:
         model_id: Optional[str] = None,
         permission_mode: Optional[str] = None,
         workspace: Optional[Dict[str, Any]] = None,
-        task_id: Optional[str] = None,
-        auto_create_task: bool = True,
+        step: Optional[int] = None,
+        task_context_mode: str = "attached",
+        task_generation_id: Optional[str] = None,
+        task_revision: Optional[int] = None,
     ) -> Dict[str, Any]:
         agent_name = (agent_name or "implementer").strip() or "implementer"
         task = (task or "").strip()
@@ -58,7 +63,17 @@ class AgentRuntime:
             raise ValueError("task is required")
         if self.capability_registry.get_agent(agent_name) is None:
             raise KeyError(agent_name)
-        await self._validate_existing_task(source.conversation_id, task_id)
+        task_binding = None
+        if step is not None:
+            if self.task_service is None:
+                raise RuntimeError("task service is not configured")
+            task_binding = await self.task_service.prepare_run_binding(
+                conversation_id=source.conversation_id,
+                step=step,
+                context_mode=task_context_mode,
+                expected_generation=task_generation_id,
+                expected_revision=task_revision,
+            )
         run = await self.subagent_executor.start(
             conversation_id=source.conversation_id,
             agent_name=agent_name,
@@ -74,17 +89,9 @@ class AgentRuntime:
             delegated_task=task,
             original_slash_input=None,
             delivery_policy=delivery_policy,
-            task_id=task_id,
+            task_binding=task_binding,
         )
         run_id = str(run.get("run_id") or "")
-        task_id = await self._bind_task_for_run(
-            source=source,
-            run_id=run_id,
-            owner_type=TaskOwnerType.SUBAGENT,
-            task_id=task_id,
-            auto_create_task=auto_create_task,
-            title=task,
-        )
         metadata = dict(run.get("metadata") or {})
         metadata.update({
             "agent_name": agent_name,
@@ -94,8 +101,6 @@ class AgentRuntime:
             "root_run_id": source.root_run_id or source.run_id,
             "source_run_id": source.run_id,
         })
-        if task_id:
-            metadata["task_id"] = task_id
         await self.run_manager.update_metadata(run_id, metadata)
         return {
             "run_id": run_id,
@@ -103,7 +108,7 @@ class AgentRuntime:
             "status": run.get("status"),
             "agent_name": agent_name,
             "task": task,
-            "task_id": task_id,
+            "step": step,
             "context_mode": context_mode,
             "delivery_policy": delivery_policy,
             "message": "Agent spawned.",
@@ -117,12 +122,24 @@ class AgentRuntime:
         args: Optional[Dict[str, Any]] = None,
         delivery_policy: str = "auto",
         permission_mode: Optional[str] = None,
-        task_id: Optional[str] = None,
-        auto_create_task: bool = True,
+        step: Optional[int] = None,
+        task_context_mode: str = "attached",
+        task_generation_id: Optional[str] = None,
+        task_revision: Optional[int] = None,
     ) -> Dict[str, Any]:
         if self.workflow_manager is None:
             raise RuntimeError("workflow manager is not configured")
-        await self._validate_existing_task(source.conversation_id, task_id)
+        task_binding = None
+        if step is not None:
+            if self.task_service is None:
+                raise RuntimeError("task service is not configured")
+            task_binding = await self.task_service.prepare_run_binding(
+                conversation_id=source.conversation_id,
+                step=step,
+                context_mode=task_context_mode,
+                expected_generation=task_generation_id,
+                expected_revision=task_revision,
+            )
         run = await self.workflow_manager.start(
             conversation_id=source.conversation_id,
             script=script,
@@ -133,72 +150,17 @@ class AgentRuntime:
             permission_mode=normalize_permission_mode(permission_mode),
             delegated_task=script,
             delivery_policy=delivery_policy,
-            task_id=task_id,
+            task_binding=task_binding,
         )
         run_id = str(run.get("run_id") or "")
-        task_id = await self._bind_task_for_run(
-            source=source,
-            run_id=run_id,
-            owner_type=TaskOwnerType.WORKFLOW,
-            task_id=task_id,
-            auto_create_task=auto_create_task,
-            title=script,
-        )
         metadata = {
                 "delivery_policy": delivery_policy,
                 "root_run_id": source.root_run_id or source.run_id,
                 "source_run_id": source.run_id,
         }
-        if task_id:
-            metadata["task_id"] = task_id
         await self.run_manager.update_metadata(run_id, metadata)
-        run["task_id"] = task_id
+        run["step"] = step
         return run
-
-    async def _bind_task_for_run(
-        self,
-        *,
-        source: AgentSource,
-        run_id: str,
-        owner_type: TaskOwnerType,
-        task_id: Optional[str],
-        auto_create_task: bool,
-        title: str,
-    ) -> Optional[str]:
-        if self.task_ledger is None or not run_id:
-            return task_id
-        resolved_task_id = str(task_id or "").strip()
-        if not resolved_task_id and auto_create_task:
-            task = await self.task_ledger.create_task(
-                conversation_id=source.conversation_id,
-                title=(title or owner_type.value)[:160],
-                detail=title or "",
-                created_by_run_id=source.run_id,
-                owner_type=owner_type,
-                metadata={
-                    "source_run_id": source.run_id,
-                    "source_run_kind": source.run_kind,
-                },
-            )
-            resolved_task_id = task.task_id
-        if resolved_task_id:
-            await self.task_ledger.bind_run(
-                conversation_id=source.conversation_id,
-                task_id=resolved_task_id,
-                run_id=run_id,
-                owner_type=owner_type,
-            )
-        return resolved_task_id or None
-
-    async def _validate_existing_task(self, conversation_id: str, task_id: Optional[str]) -> None:
-        if self.task_ledger is None:
-            return
-        resolved_task_id = str(task_id or "").strip()
-        if not resolved_task_id:
-            return
-        task = await self.task_ledger.get_task(conversation_id, resolved_task_id)
-        if task is None:
-            raise KeyError(resolved_task_id)
 
     def _compact_event_for_status(self, event: Dict[str, Any] | None) -> Optional[Dict[str, Any]]:
         if not event:
@@ -242,7 +204,7 @@ class AgentRuntime:
             "kind": current.get("kind"),
             "status": current.get("status") or "missing",
             "agent_name": (current.get("metadata") or {}).get("agent_name"),
-            "task_id": (current.get("metadata") or {}).get("task_id"),
+            "step": (current.get("metadata") or {}).get("task_step_position"),
             "event_count": current.get("event_count") if current.get("event_count") is not None else len(events),
             "created_at": created_at,
             "updated_at": updated_at,
@@ -297,7 +259,10 @@ class AgentRuntime:
                 via="wait_agent",
             )
             terminal["agent_name"] = (current.get("metadata") or {}).get("agent_name")
-            terminal["task_id"] = (current.get("metadata") or {}).get("task_id")
+            terminal["step"] = (current.get("metadata") or {}).get("task_step_position")
+            task_outcome = (current.get("metadata") or {}).get("task_outcome")
+            if isinstance(task_outcome, dict):
+                terminal["task_outcome"] = dict(task_outcome)
             terminal["wait_status"] = "completed"
             terminal["timed_out"] = False
             return terminal
@@ -333,10 +298,31 @@ class AgentRuntime:
                 continue
             if created_by_run_id and run.get("created_by_run_id") != created_by_run_id:
                 continue
-            if not include_completed and run.get("status") in {"completed", "failed", "cancelled"}:
+            if not include_completed and run.get("status") in FINISHED_AGENT_STATUS_VALUES:
                 continue
-            runs.append(run)
+            runs.append(self._public_agent_run(run))
         return {"runs": runs}
+
+    def _public_agent_run(self, run: Dict[str, Any]) -> Dict[str, Any]:
+        metadata = dict(run.get("metadata") or {})
+        delegated_task = metadata.get("delegated_task") or metadata.get("task")
+        result = {
+            "run_id": run.get("run_id"),
+            "kind": run.get("kind"),
+            "status": run.get("status"),
+            "agent_name": metadata.get("agent_name"),
+            "summary": run.get("summary"),
+            "task": str(delegated_task)[:500] if delegated_task is not None else None,
+            "step": metadata.get("task_step_position"),
+            "delivery": metadata.get("delivery_policy"),
+            "event_count": run.get("event_count"),
+            "created_at": run.get("created_at"),
+            "updated_at": run.get("updated_at"),
+            "finished_at": run.get("finished_at"),
+            "error": metadata.get("error"),
+            "task_outcome": metadata.get("task_outcome"),
+        }
+        return {key: value for key, value in result.items() if value is not None}
 
     async def send_message(self, *, source: AgentSource, run_id: str, message: str) -> Dict[str, Any]:
         item = await self.mailbox.publish(

@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS nodes (
   model_id TEXT,
   provider_id TEXT,
   tool_permission_mode TEXT,
+  task_context_mode TEXT NOT NULL DEFAULT 'attached'
+    CHECK (task_context_mode IN ('attached', 'detached')),
   turn_usage_json TEXT,
   branch_usage_json TEXT,
   active_context_usage_json TEXT,
@@ -263,50 +265,57 @@ CREATE INDEX IF NOT EXISTS idx_plan_events_plan
 CREATE INDEX IF NOT EXISTS idx_plan_proposals_plan
   ON plan_proposals(plan_id, revision);
 
-CREATE TABLE IF NOT EXISTS tasks (
-  id TEXT PRIMARY KEY,
-  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-  status TEXT NOT NULL,
-  owner_type TEXT NOT NULL,
-  owner_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+CREATE TABLE IF NOT EXISTS active_tasks (
+  conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+  generation_id TEXT NOT NULL UNIQUE,
+  revision INTEGER NOT NULL DEFAULT 0,
   title TEXT NOT NULL,
   detail_inline TEXT,
   detail_blob_id TEXT REFERENCES blobs(id),
-  evidence_summary TEXT,
-  evidence_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
-  metadata_json TEXT,
+  created_by_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  created_by_tool_call_id TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
-  UNIQUE(conversation_id, id),
-  FOREIGN KEY (conversation_id, owner_run_id)
-    REFERENCES runs(conversation_id, id),
+  UNIQUE(conversation_id, generation_id),
+  FOREIGN KEY (conversation_id, created_by_run_id)
+    REFERENCES runs(conversation_id, id)
+);
+
+CREATE TABLE IF NOT EXISTS active_task_steps (
+  conversation_id TEXT NOT NULL REFERENCES active_tasks(conversation_id) ON DELETE CASCADE,
+  position INTEGER NOT NULL CHECK (position > 0),
+  title TEXT NOT NULL,
+  detail_inline TEXT,
+  detail_blob_id TEXT REFERENCES blobs(id),
+  status TEXT NOT NULL CHECK (status IN ('pending', 'blocked', 'completed')),
+  evidence_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  evidence_summary TEXT NOT NULL DEFAULT '',
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (conversation_id, position),
   FOREIGN KEY (conversation_id, evidence_run_id)
     REFERENCES runs(conversation_id, id)
 );
 
-CREATE TABLE IF NOT EXISTS task_events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS task_run_bindings (
+  run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
   conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-  event_type TEXT NOT NULL,
-  payload_json TEXT,
+  task_generation_id TEXT NOT NULL,
+  step_position INTEGER NOT NULL CHECK (step_position > 0),
+  base_revision INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
-  FOREIGN KEY (conversation_id, task_id) REFERENCES tasks(conversation_id, id)
+  FOREIGN KEY (conversation_id, run_id) REFERENCES runs(conversation_id, id),
+  FOREIGN KEY (conversation_id, task_generation_id)
+    REFERENCES active_tasks(conversation_id, generation_id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_tasks_conversation_status
-  ON tasks(conversation_id, status, updated_at);
-CREATE INDEX IF NOT EXISTS idx_tasks_owner_run
-  ON tasks(owner_run_id);
-CREATE INDEX IF NOT EXISTS idx_task_events_task
-  ON task_events(task_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_task_run_bindings_conversation
+  ON task_run_bindings(conversation_id);
 
 CREATE TABLE IF NOT EXISTS task_notifications (
   id TEXT PRIMARY KEY,
   conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   source_run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
   source_run_kind TEXT NOT NULL,
-  task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
   status TEXT NOT NULL,
   delivery_node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL,
   bound_at INTEGER,
@@ -341,7 +350,6 @@ CREATE TABLE IF NOT EXISTS transcript_items (
   anchor_node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL,
   run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
   plan_id TEXT REFERENCES plans(id) ON DELETE SET NULL,
-  task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
   message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
   item_type TEXT NOT NULL,
   local_order INTEGER NOT NULL,
@@ -358,7 +366,6 @@ CREATE TABLE IF NOT EXISTS transcript_items (
     REFERENCES nodes(conversation_id, id),
   FOREIGN KEY (conversation_id, run_id) REFERENCES runs(conversation_id, id),
   FOREIGN KEY (conversation_id, plan_id) REFERENCES plans(conversation_id, id),
-  FOREIGN KEY (conversation_id, task_id) REFERENCES tasks(conversation_id, id),
   FOREIGN KEY (conversation_id, message_id)
     REFERENCES messages(conversation_id, id)
 );

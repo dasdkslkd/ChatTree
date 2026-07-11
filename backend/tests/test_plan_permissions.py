@@ -30,7 +30,6 @@ def make_context(tool_name: str, mode: str = "plan", arguments=None) -> Permissi
         "fetch_url",
         "read_tool_result",
         "list_available_tools",
-        "list_tasks",
     ],
 )
 def test_plan_mode_allows_read_only_and_plan_tools(tool_name):
@@ -50,7 +49,8 @@ def test_plan_mode_allows_read_only_and_plan_tools(tool_name):
         "spawn_agent",
         "start_workflow",
         "create_task",
-        "update_task",
+        "set_task_step",
+        "cancel_task",
     ],
 )
 def test_plan_mode_denies_implementation_and_mutating_tools(tool_name):

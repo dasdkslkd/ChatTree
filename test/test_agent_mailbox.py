@@ -123,7 +123,16 @@ async def _wait_agent_reads_terminal_subagent_result():
         created_by_run_id="chat-1",
         cancellation_parent_run_id=None,
         summary="general: ok",
-        metadata={"agent_name": "general"},
+        metadata={
+            "agent_name": "general",
+            "task_outcome": {
+                "kind": "run_finished",
+                "task_status": "completed",
+                "step": 2,
+                "step_status": "completed",
+                "run_status": "completed",
+            },
+        },
     )
     await run_manager.append_event(run.run_id, {
         "status": "complete",
@@ -147,6 +156,7 @@ async def _wait_agent_reads_terminal_subagent_result():
     assert result["runs"][0]["content"] == "OK"
     assert result["runs"][0]["message_type"] == "result"
     assert result["runs"][0]["event_type"] == "subagent_result"
+    assert result["runs"][0]["task_outcome"]["task_status"] == "completed"
 
 
 def test_wait_agent_reads_terminal_subagent_result():

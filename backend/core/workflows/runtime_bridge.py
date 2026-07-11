@@ -83,6 +83,7 @@ class WorkflowRuntimeBridge:
                     model_id=options.get("model_id"),
                     permission_mode=options.get("permission_mode") or self.permission_mode,
                     workspace=options.get("workspace"),
+                    task_context_mode="detached",
                 )
             else:
                 run = await self.subagent_executor.start(

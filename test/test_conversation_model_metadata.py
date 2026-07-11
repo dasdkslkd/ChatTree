@@ -91,13 +91,24 @@ async def collect_chunks(stream):
     return chunks
 
 
+def stream_from_current(manager, conversation_id, content, **kwargs):
+    conversation = manager.get_conversation(conversation_id)
+    assert conversation is not None
+    return manager.send_message_stream(
+        conversation_id,
+        content,
+        parent_node_id=conversation.current_node_id,
+        **kwargs,
+    )
+
+
 def test_stream_persists_resolved_provider_and_model_to_conversation_metadata(tmp_path):
     manager = make_chat_manager(tmp_path)
     conversation = manager.create_conversation("metadata")
     conversation_id = conversation.metadata["id"]
 
     asyncio.run(
-        drain(manager.send_message_stream(
+        drain(stream_from_current(manager,
             conversation_id,
             "hello",
             model_id="deepseek-v4-pro",
@@ -120,7 +131,7 @@ def test_list_conversations_falls_back_to_current_node_model_for_legacy_metadata
     conversation_id = conversation.metadata["id"]
 
     asyncio.run(
-        drain(manager.send_message_stream(
+        drain(stream_from_current(manager,
             conversation_id,
             "hello",
             model_id="deepseek-v4-pro",
@@ -144,7 +155,7 @@ def test_stream_without_request_model_uses_current_node_model_for_legacy_metadat
     conversation_id = conversation.metadata["id"]
 
     asyncio.run(
-        drain(manager.send_message_stream(
+        drain(stream_from_current(manager,
             conversation_id,
             "hello",
             model_id="deepseek-v4-pro",
@@ -157,7 +168,7 @@ def test_stream_without_request_model_uses_current_node_model_for_legacy_metadat
     data["metadata"].pop("provider_id", None)
     manager.storage.save(data)
 
-    asyncio.run(drain(manager.send_message_stream(conversation_id, "again")))
+    asyncio.run(drain(stream_from_current(manager, conversation_id, "again")))
 
     reloaded = manager.get_conversation(conversation_id)
     assert reloaded is not None
@@ -173,7 +184,7 @@ def test_stream_respects_request_provider_when_model_name_is_shared(tmp_path):
     conversation_id = conversation.metadata["id"]
 
     asyncio.run(
-        drain(manager.send_message_stream(
+        drain(stream_from_current(manager,
             conversation_id,
             "hello",
             model_id="shared-model",
@@ -194,7 +205,7 @@ def test_stream_persists_tool_permission_mode_per_new_leaf_node(tmp_path):
     conversation_id = conversation.metadata["id"]
 
     asyncio.run(
-        drain(manager.send_message_stream(
+        drain(stream_from_current(manager,
             conversation_id,
             "first",
             model_id="deepseek-v4-pro",
@@ -204,7 +215,7 @@ def test_stream_persists_tool_permission_mode_per_new_leaf_node(tmp_path):
     first_node_id = manager.get_conversation(conversation_id).current_node_id
 
     asyncio.run(
-        drain(manager.send_message_stream(
+        drain(stream_from_current(manager,
             conversation_id,
             "second",
             model_id="deepseek-v4-pro",
@@ -228,7 +239,7 @@ def test_stream_defaults_tool_permission_mode_to_ask_always(tmp_path):
     conversation_id = conversation.metadata["id"]
 
     asyncio.run(
-        drain(manager.send_message_stream(
+        drain(stream_from_current(manager,
             conversation_id,
             "first",
             model_id="deepseek-v4-pro",
@@ -247,7 +258,7 @@ def test_stream_inherits_tool_permission_mode_from_parent_node(tmp_path):
     conversation_id = conversation.metadata["id"]
 
     asyncio.run(
-        drain(manager.send_message_stream(
+        drain(stream_from_current(manager,
             conversation_id,
             "first",
             model_id="deepseek-v4-pro",
@@ -257,7 +268,7 @@ def test_stream_inherits_tool_permission_mode_from_parent_node(tmp_path):
     first_node_id = manager.get_conversation(conversation_id).current_node_id
 
     asyncio.run(
-        drain(manager.send_message_stream(
+        drain(stream_from_current(manager,
             conversation_id,
             "second",
             model_id="deepseek-v4-pro",
@@ -277,7 +288,7 @@ def test_list_conversations_does_not_guess_provider_for_legacy_shared_model(tmp_
     conversation_id = conversation.metadata["id"]
 
     asyncio.run(
-        drain(manager.send_message_stream(
+        drain(stream_from_current(manager,
             conversation_id,
             "hello",
             model_id="shared-model",
@@ -302,7 +313,7 @@ def test_stream_without_provider_errors_for_legacy_shared_model(tmp_path):
     conversation_id = conversation.metadata["id"]
 
     asyncio.run(
-        drain(manager.send_message_stream(
+        drain(stream_from_current(manager,
             conversation_id,
             "hello",
             model_id="shared-model",
@@ -317,7 +328,7 @@ def test_stream_without_provider_errors_for_legacy_shared_model(tmp_path):
     manager.storage.save(data)
 
     manager.model_manager.get_model_calls.clear()
-    chunks = asyncio.run(collect_chunks(manager.send_message_stream(conversation_id, "again")))
+    chunks = asyncio.run(collect_chunks(stream_from_current(manager, conversation_id, "again")))
 
     assert chunks[-1]["status"] == StreamStatus.ERROR
     assert chunks[-1]["error"] == "无法找到模型 shared-model 对应的提供商"

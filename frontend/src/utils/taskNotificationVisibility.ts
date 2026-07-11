@@ -16,7 +16,6 @@ export interface TaskNotificationSummary {
   output: string;
   status: string;
   kind: string;
-  taskId: string;
 }
 
 export interface TaskNotificationRecordLike {
@@ -24,7 +23,6 @@ export interface TaskNotificationRecordLike {
   conversation_id: string;
   source_run_id: string;
   source_run_kind: string;
-  task_id?: string | null;
   status: string;
   delivery_node_id?: string | null;
   delivered_run_id?: string | null;
@@ -109,7 +107,6 @@ export function getTaskNotificationSummary(message: MessageLike): TaskNotificati
   const embedded = parseJsonObject(payload.content) || {};
   const kind = payload.source_run_kind || payload.kind;
   const status = payload.source_status;
-  const taskId = typeof payload.task_id === 'string' ? payload.task_id : '';
   const kindLabel = taskKindLabel(kind);
   const statusLabel = taskStatusLabel(status);
   const command = compactText(
@@ -141,7 +138,6 @@ export function getTaskNotificationSummary(message: MessageLike): TaskNotificati
     output,
     status: statusLabel,
     kind: kindLabel,
-    taskId,
   };
 }
 
@@ -163,7 +159,6 @@ export function createTaskNotificationTranscriptItem(
     node_id: options.nodeId || notification.delivered_node_id || null,
     anchor_node_id: notification.delivery_node_id || null,
     run_id: options.runId || notification.delivered_run_id || null,
-    task_id: notification.task_id || null,
     status,
     summary,
     preview: summary || content || 'Task notification',
@@ -173,7 +168,6 @@ export function createTaskNotificationTranscriptItem(
       summary,
       source_run_id: notification.source_run_id,
       source_run_kind: notification.source_run_kind,
-      task_id: notification.task_id || null,
       ...payload,
       content,
     },
@@ -188,9 +182,7 @@ export function hasTaskNotificationTranscriptItem(
   return items.some((item) => {
     if (item.type !== 'task_notification' && item.item_type !== 'task_notification') return false;
     if (nodeId && item.node_id && item.node_id !== nodeId) return false;
-    return item.props?.source_run_id === notification.source_run_id
-      || Boolean(notification.task_id && item.task_id === notification.task_id)
-      || Boolean(notification.task_id && item.props?.task_id === notification.task_id);
+    return item.props?.source_run_id === notification.source_run_id;
   });
 }
 

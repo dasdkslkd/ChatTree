@@ -4,6 +4,7 @@ import json
 from typing import Any, Dict, Optional
 
 from .base import BaseTool
+from .task_contract import task_step_parameter_schema
 
 
 AGENT_TOOL_NAMES = {
@@ -59,6 +60,20 @@ def _context_permission_mode(context: Dict[str, Any]) -> Optional[str]:
     return context.get("permission_mode") or context.get("tool_permission_mode")
 
 
+def _context_task_mode(context: Dict[str, Any]) -> str:
+    return str(context.get("task_context_mode") or "attached")
+
+
+def _context_task_generation(context: Dict[str, Any]) -> Optional[str]:
+    value = str(context.get("task_generation_id") or "").strip()
+    return value or None
+
+
+def _context_task_revision(context: Dict[str, Any]) -> Optional[int]:
+    value = context.get("task_revision")
+    return int(value) if value is not None else None
+
+
 class AgentRuntimeTool(BaseTool):
     def __init__(self, *, agent_runtime: Any) -> None:
         self._agent_runtime = agent_runtime
@@ -110,14 +125,7 @@ class SpawnAgentTool(AgentRuntimeTool):
                     "enum": ["auto", "notify", "silent"],
                     "description": "Result delivery only: auto is default for user-visible background work; notify forces asynchronous notification; silent suppresses notification when a parent runtime will consume the result. This does not control cancellation.",
                 },
-                "task_id": {
-                    "type": "string",
-                    "description": "Optional existing TaskLedger task id to bind to the spawned agent.",
-                },
-                "auto_create_task": {
-                    "type": "boolean",
-                    "description": "Whether to create and bind a TaskLedger task when task_id is omitted. Defaults to true.",
-                },
+                "step": task_step_parameter_schema(),
             },
             "required": ["agent_name", "task"],
         }
@@ -142,8 +150,10 @@ class SpawnAgentTool(AgentRuntimeTool):
                 model_id=context.get("model_id"),
                 permission_mode=_context_permission_mode(context),
                 workspace=context.get("workspace"),
-                task_id=str(kwargs.get("task_id") or "") or None,
-                auto_create_task=bool(kwargs.get("auto_create_task", True)),
+                step=kwargs.get("step"),
+                task_context_mode=_context_task_mode(context),
+                task_generation_id=_context_task_generation(context),
+                task_revision=_context_task_revision(context),
             )
             return json.dumps(result, ensure_ascii=False)
         except Exception as exc:
@@ -404,14 +414,7 @@ class StartSubagentTool(BaseTool):
                     "type": "string",
                     "description": "Role agent to use. Common roles: explorer, planner, implementer, reviewer, verifier.",
                 },
-                "task_id": {
-                    "type": "string",
-                    "description": "Optional existing TaskLedger task id to bind to the spawned agent.",
-                },
-                "auto_create_task": {
-                    "type": "boolean",
-                    "description": "Whether to create and bind a TaskLedger task when task_id is omitted. Defaults to true.",
-                },
+                "step": task_step_parameter_schema(),
             },
             "required": ["task"],
         }
@@ -437,8 +440,10 @@ class StartSubagentTool(BaseTool):
                 model_id=context.get("model_id"),
                 permission_mode=_context_permission_mode(context),
                 workspace=context.get("workspace"),
-                task_id=str(kwargs.get("task_id") or "") or None,
-                auto_create_task=bool(kwargs.get("auto_create_task", True)),
+                step=kwargs.get("step"),
+                task_context_mode=_context_task_mode(context),
+                task_generation_id=_context_task_generation(context),
+                task_revision=_context_task_revision(context),
             )
             result["replacement_tool"] = "spawn_agent"
             return json.dumps(result, ensure_ascii=False)
@@ -502,16 +507,12 @@ class StartWorkflowTool(BaseTool):
                     ),
                 },
                 "args": {"type": "object", "description": "Optional workflow arguments object."},
-                "task_id": {"type": "string", "description": "Optional existing TaskLedger task id to bind to the workflow."},
-                "auto_create_task": {
-                    "type": "boolean",
-                    "description": "Whether to create and bind a TaskLedger task when task_id is omitted. Defaults to true.",
-                },
                 "delivery": {
                     "type": "string",
                     "enum": ["auto", "notify", "silent"],
                     "description": "Result delivery only. Use auto for user-visible workflows; silent only when another runtime consumes the result directly. This does not control cancellation.",
                 },
+                "step": task_step_parameter_schema(),
             },
             "required": ["script"],
         }
@@ -531,8 +532,10 @@ class StartWorkflowTool(BaseTool):
                 args=args,
                 delivery_policy=str(kwargs.get("delivery") or "auto"),
                 permission_mode=_context_permission_mode(context),
-                task_id=str(kwargs.get("task_id") or "") or None,
-                auto_create_task=bool(kwargs.get("auto_create_task", True)),
+                step=kwargs.get("step"),
+                task_context_mode=_context_task_mode(context),
+                task_generation_id=_context_task_generation(context),
+                task_revision=_context_task_revision(context),
             )
         elif self._workflow_manager is not None:
             run = await self._workflow_manager.start(
@@ -553,7 +556,7 @@ class StartWorkflowTool(BaseTool):
             "run_id": run.get("run_id"),
             "kind": run.get("kind", "workflow"),
             "status": run.get("status"),
-            "task_id": run.get("task_id"),
+            "step": run.get("step"),
             "message": "Workflow started. Its result will be delivered back to this conversation when complete.",
         }, ensure_ascii=False)
 

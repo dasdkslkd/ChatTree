@@ -105,8 +105,20 @@ def test_streaming_updates_each_node_layered_usage_to_that_point():
         cid = conv.metadata["id"]
 
         async def run():
-            await drain(cm.send_message_stream(cid, "first", model_id="fake-model"))
-            await drain(cm.send_message_stream(cid, "second", model_id="fake-model"))
+            await drain(cm.send_message_stream(
+                cid,
+                "first",
+                model_id="fake-model",
+                parent_node_id=conv.root_node_id,
+            ))
+            current = cm.get_conversation(cid)
+            assert current is not None
+            await drain(cm.send_message_stream(
+                cid,
+                "second",
+                model_id="fake-model",
+                parent_node_id=current.current_node_id,
+            ))
 
         asyncio.run(run())
 

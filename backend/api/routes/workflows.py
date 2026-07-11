@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from backend.api.dependencies import get_workflow_manager
 from backend.core.workflows import WorkflowManager
+from backend.core.runs.public import public_run_dict
 
 router = APIRouter()
 
@@ -65,6 +66,6 @@ async def get_workflow_graph(
         raise HTTPException(status_code=404, detail="Workflow 不存在")
     events = manager.run_manager.read_events(run_id, 0)
     return {
-        "run": run,
+        "run": public_run_dict(run),
         "events": events,
     }

@@ -5,7 +5,6 @@ export interface TaskNotificationRecord {
   conversation_id: string;
   source_run_id: string;
   source_run_kind: string;
-  task_id?: string | null;
   status: 'unbound' | 'bound' | 'delivering' | 'delivery_failed' | 'delivery_cancelled' | 'delivered' | 'observed' | 'deleted';
   delivery_node_id?: string | null;
   delivered_run_id?: string | null;

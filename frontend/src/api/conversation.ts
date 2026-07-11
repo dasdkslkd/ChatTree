@@ -10,6 +10,7 @@ export interface TreeNode {
   user_subtype?: string | null;
   assistant_content: string;
   model_id: string | null;
+  task_context_mode: 'attached' | 'detached';
   timestamp: number;
   is_current: boolean;
   is_root: boolean;

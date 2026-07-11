@@ -149,6 +149,7 @@ class Conversation:
                 msg["context_usage"] = node.get("usage")
             if node.get("tool_permission_mode") is not None:
                 msg["tool_permission_mode"] = node.get("tool_permission_mode")
+            msg["task_context_mode"] = node.get("task_context_mode") or "attached"
             return msg
         
         for node in node_chain:

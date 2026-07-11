@@ -17,8 +17,10 @@ REQUIRED_TABLES = {
     "run_events",
     "plans",
     "plan_events",
-    "tasks",
-    "task_events",
+    "active_tasks",
+    "active_task_steps",
+    "task_run_bindings",
+    "task_notifications",
     "transcript_items",
 }
 
@@ -34,8 +36,17 @@ def test_initialize_creates_database_tables(tmp_path: Path):
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             ).fetchall()
         }
+        binding_fks = conn.execute("PRAGMA foreign_key_list(task_run_bindings)").fetchall()
 
     assert REQUIRED_TABLES <= names
+    assert {"tasks", "task_steps", "task_events"}.isdisjoint(names)
+    assert {
+        (row["table"], row["from"], row["to"], row["on_delete"])
+        for row in binding_fks
+    } >= {
+        ("active_tasks", "conversation_id", "conversation_id", "CASCADE"),
+        ("active_tasks", "task_generation_id", "generation_id", "CASCADE"),
+    }
     assert (tmp_path / "chattree.sqlite").exists()
 
 
@@ -49,6 +60,50 @@ def test_initialize_applies_wal_and_foreign_keys(tmp_path: Path):
 
     assert journal.lower() == "wal"
     assert foreign_keys == 1
+
+
+def test_initialize_replaces_obsolete_task_schema_without_losing_transcript(tmp_path: Path):
+    persistence = SQLitePersistence(tmp_path)
+    persistence.initialize()
+    with persistence.connect() as conn:
+        _insert_conversation(conn, "conversation-a")
+        _insert_root_node(conn, "conversation-a", "node-a")
+        conn.execute(
+            """
+            INSERT INTO transcript_items (
+              id, conversation_id, node_id, item_type, local_order,
+              visibility, summary, preview, created_at, updated_at
+            ) VALUES ('item-a', 'conversation-a', 'node-a', 'assistant_answer', 1,
+                      'main', 'kept', 'kept', 1, 1)
+            """
+        )
+        conn.execute("ALTER TABLE task_notifications ADD COLUMN task_id TEXT")
+        conn.execute("ALTER TABLE transcript_items ADD COLUMN task_id TEXT")
+        conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
+        conn.execute("CREATE TABLE task_steps (id TEXT PRIMARY KEY)")
+        conn.execute("CREATE TABLE task_events (id INTEGER PRIMARY KEY)")
+
+    persistence.initialize()
+
+    with persistence.connect() as conn:
+        names = {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        notification_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(task_notifications)")
+        }
+        transcript_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(transcript_items)")
+        }
+        kept = conn.execute(
+            "SELECT preview FROM transcript_items WHERE id = 'item-a'"
+        ).fetchone()
+
+    assert {"tasks", "task_steps", "task_events"}.isdisjoint(names)
+    assert "task_id" not in notification_columns
+    assert "task_id" not in transcript_columns
+    assert kept["preview"] == "kept"
 
 
 def _insert_conversation(conn, conversation_id: str):

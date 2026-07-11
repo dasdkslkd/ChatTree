@@ -9,6 +9,7 @@ from backend.api.dependencies import get_agent_mailbox, get_agent_runtime, get_c
 from backend.core.agents import AgentMailbox, AgentRuntime, AgentSource
 from backend.core.capabilities.registry import CapabilityRegistry
 from backend.core.runs import RunManager
+from backend.core.runs.public import public_run_dict
 
 router = APIRouter()
 
@@ -106,7 +107,7 @@ async def get_agent_run(
     run = run_manager.get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Agent run 不存在")
-    return run
+    return public_run_dict(run)
 
 
 @router.post("/agents/runs/{run_id}/interrupt", response_model=Dict[str, Any])

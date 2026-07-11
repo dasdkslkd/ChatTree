@@ -1,18 +1,16 @@
 from __future__ import annotations
 
-import gzip
-import hashlib
-import json
-import os
+import sqlite3
 import uuid
 from time import time
 from typing import Any, Iterable
 
-from backend.core.tasks.types import FINISHED_TASK_STATUSES, OPEN_TASK_STATUSES
-
 from .blob_store import BlobStore
-from .content import INLINE_TEXT_LIMIT, StoredText, store_text_content
+from .content import store_text_content
 from .database import SQLitePersistence
+
+
+TERMINAL_RUN_STATUSES = {"completed", "failed", "cancelled", "interrupted", "stopped"}
 
 
 class SQLiteTaskRepository:
@@ -24,454 +22,499 @@ class SQLiteTaskRepository:
         conversation_id: str,
         *,
         title: str,
-        detail: str = "",
+        detail: str,
+        steps: Iterable[dict[str, Any]],
         created_by_run_id: str | None = None,
-        owner_type: str = "assistant",
-        metadata: dict[str, Any] | None = None,
-    ) -> str:
-        task_id = f"task_{uuid.uuid4().hex}"
-        stored = store_text_content(self.persistence, detail)
+        created_by_tool_call_id: str | None = None,
+    ) -> dict[str, Any]:
+        generation_id = f"taskgen_{uuid.uuid4().hex}"
+        task_detail = store_text_content(self.persistence, detail)
+        prepared_steps = []
+        for position, item in enumerate(steps, start=1):
+            data = dict(item)
+            step_detail = store_text_content(self.persistence, str(data.get("detail") or ""))
+            prepared_steps.append((position, data, step_detail))
+
         now = time()
         with self.persistence.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = self._get_active_task_in_connection(conn, conversation_id)
+            if existing is not None:
+                if (
+                    created_by_tool_call_id
+                    and existing.get("created_by_tool_call_id") == created_by_tool_call_id
+                ):
+                    return existing
+                raise RuntimeError("conversation already has an active task")
             conn.execute(
                 """
-                INSERT INTO tasks (
-                  id,
+                INSERT INTO active_tasks (
                   conversation_id,
-                  status,
-                  owner_type,
+                  generation_id,
+                  revision,
                   title,
                   detail_inline,
                   detail_blob_id,
-                  evidence_summary,
-                  metadata_json,
+                  created_by_run_id,
+                  created_by_tool_call_id,
                   created_at,
                   updated_at
                 )
-                VALUES (?, ?, 'pending', ?, ?, ?, ?, '', ?, ?, ?)
+                VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    task_id,
                     conversation_id,
-                    self._value(owner_type),
+                    generation_id,
                     title,
-                    stored.inline,
-                    stored.blob_id,
-                    self._metadata_field(
-                        metadata or {},
-                        created_by_run_id=created_by_run_id,
-                        finished_at=None,
-                    ),
+                    task_detail.inline,
+                    task_detail.blob_id,
+                    created_by_run_id,
+                    created_by_tool_call_id,
                     now,
                     now,
                 ),
             )
-            self._append_event(
-                conn,
-                conversation_id,
-                task_id,
-                "created",
-                {
-                    "title": title,
-                    "created_by_run_id": created_by_run_id,
-                    "owner_type": self._value(owner_type),
-                },
-                now,
-            )
-        return task_id
+            for position, item, step_detail in prepared_steps:
+                conn.execute(
+                    """
+                    INSERT INTO active_task_steps (
+                      conversation_id,
+                      position,
+                      title,
+                      detail_inline,
+                      detail_blob_id,
+                      status,
+                      evidence_summary,
+                      updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, 'pending', '', ?)
+                    """,
+                    (
+                        conversation_id,
+                        position,
+                        str(item.get("title") or ""),
+                        step_detail.inline,
+                        step_detail.blob_id,
+                        now,
+                    ),
+                )
+            created = self._get_active_task_in_connection(conn, conversation_id)
+            if created is None:
+                raise RuntimeError("active task insert did not produce a row")
+            return created
 
-    def update_task(
+    def get_active_task(self, conversation_id: str) -> dict[str, Any] | None:
+        with self.persistence.connect() as conn:
+            return self._get_active_task_in_connection(conn, conversation_id)
+
+    def set_step_result(
         self,
         conversation_id: str,
-        task_id: str,
         *,
-        status: str | None = None,
-        title: str | None = None,
-        detail: str | None = None,
-        owner_type: str | None = None,
-        owner_run_id: str | None = None,
-        evidence_run_id: str | None = None,
-        evidence_summary: str | None = None,
-        metadata: dict[str, Any] | None = None,
-        metadata_patch: dict[str, Any] | None = None,
-        finished_at: float | None = None,
+        step: int,
+        status: str,
+        evidence_summary: str,
+        evidence_run_id: str | None,
+        expected_generation: str | None,
+        expected_revision: int | None,
     ) -> dict[str, Any]:
-        current = self._require_task(conversation_id, task_id)
-        next_metadata = dict(current.get("metadata") or {})
-        if metadata is not None:
-            next_metadata = dict(metadata)
-        if metadata_patch:
-            next_metadata.update(dict(metadata_patch))
-
-        next_status = self._value(status) if status is not None else current["status"]
-        if finished_at is None:
-            if next_status in {self._value(value) for value in FINISHED_TASK_STATUSES}:
-                finished_at = current.get("finished_at") or time()
-            elif next_status in {self._value(value) for value in OPEN_TASK_STATUSES}:
-                finished_at = None
-            else:
-                finished_at = current.get("finished_at")
-
-        detail_inline = current["detail_inline"]
-        detail_blob_id = current["detail_blob_id"]
-        if detail is not None:
-            stored = store_text_content(self.persistence, detail)
-            detail_inline = stored.inline
-            detail_blob_id = stored.blob_id
-
-        now = time()
         with self.persistence.connect() as conn:
-            updated = conn.execute(
+            conn.execute("BEGIN IMMEDIATE")
+            task = self._require_version(
+                conn,
+                conversation_id,
+                expected_generation,
+                expected_revision,
+            )
+            self._ensure_no_active_binding(conn, conversation_id)
+            current = conn.execute(
                 """
-                UPDATE tasks
+                SELECT status
+                FROM active_task_steps
+                WHERE conversation_id = ? AND position = ?
+                """,
+                (conversation_id, step),
+            ).fetchone()
+            if current is None:
+                raise KeyError(step)
+            unfinished_previous = conn.execute(
+                """
+                SELECT position
+                FROM active_task_steps
+                WHERE conversation_id = ?
+                  AND position < ?
+                  AND status != 'completed'
+                LIMIT 1
+                """,
+                (conversation_id, step),
+            ).fetchone()
+            if unfinished_previous is not None:
+                raise RuntimeError("previous task steps must be completed first")
+            if current["status"] == "completed" and status != "completed":
+                raise ValueError("completed task steps are immutable")
+            now = time()
+            conn.execute(
+                """
+                UPDATE active_task_steps
                 SET status = ?,
-                    owner_type = ?,
-                    owner_run_id = ?,
-                    title = ?,
-                    detail_inline = ?,
-                    detail_blob_id = ?,
-                    evidence_summary = ?,
                     evidence_run_id = ?,
-                    metadata_json = ?,
+                    evidence_summary = ?,
                     updated_at = ?
-                WHERE conversation_id = ? AND id = ?
+                WHERE conversation_id = ? AND position = ?
+                """,
+                (status, evidence_run_id, evidence_summary, now, conversation_id, step),
+            )
+            conn.execute(
+                """
+                UPDATE active_tasks
+                SET revision = revision + 1,
+                    updated_at = ?
+                WHERE conversation_id = ? AND generation_id = ?
+                """,
+                (now, conversation_id, task["generation_id"]),
+            )
+            updated_task = self._get_active_task_in_connection(conn, conversation_id)
+            if updated_task is None:
+                raise RuntimeError("task step update did not produce a task snapshot")
+            task_snapshot = self._public_task_snapshot(updated_task)
+            if self._all_steps_completed(conn, conversation_id):
+                conn.execute("DELETE FROM active_tasks WHERE conversation_id = ?", (conversation_id,))
+                return {
+                    "completed": True,
+                    "task": None,
+                    "task_snapshot": task_snapshot,
+                }
+            return {
+                "completed": False,
+                "task": updated_task,
+                "task_snapshot": task_snapshot,
+            }
+
+    def cancel_task(
+        self,
+        conversation_id: str,
+        *,
+        expected_generation: str | None,
+        expected_revision: int | None,
+    ) -> bool:
+        with self.persistence.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            task = self._require_version(
+                conn,
+                conversation_id,
+                expected_generation,
+                expected_revision,
+            )
+            deleted = conn.execute(
+                "DELETE FROM active_tasks WHERE conversation_id = ? AND generation_id = ?",
+                (conversation_id, task["generation_id"]),
+            )
+            return deleted.rowcount > 0
+
+    def bind_run_in_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        run_id: str,
+        binding: dict[str, Any],
+    ) -> dict[str, Any]:
+        conversation_id = str(binding.get("conversation_id") or "")
+        expected_generation = str(binding.get("task_generation_id") or "")
+        step = int(binding.get("step_position") or 0)
+        task = self._require_version(
+            conn,
+            conversation_id,
+            expected_generation,
+            int(binding.get("base_revision", -1)),
+        )
+        expected_revision = int(binding.get("base_revision", -1))
+        if expected_revision != int(task["revision"]):
+            raise RuntimeError("active task revision changed")
+        step_row = conn.execute(
+            """
+            SELECT status
+            FROM active_task_steps
+            WHERE conversation_id = ? AND position = ?
+            """,
+            (conversation_id, step),
+        ).fetchone()
+        if step_row is None:
+            raise KeyError(step)
+        if step_row["status"] == "completed":
+            raise RuntimeError("task step is already completed")
+        unfinished_previous = conn.execute(
+            """
+            SELECT position
+            FROM active_task_steps
+            WHERE conversation_id = ?
+              AND position < ?
+              AND status != 'completed'
+            LIMIT 1
+            """,
+            (conversation_id, step),
+        ).fetchone()
+        if unfinished_previous is not None:
+            raise RuntimeError("previous task steps must be completed first")
+        self._ensure_no_active_binding(conn, conversation_id)
+        conn.execute(
+            """
+            INSERT INTO task_run_bindings (
+              run_id,
+              conversation_id,
+              task_generation_id,
+              step_position,
+              base_revision,
+              created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                conversation_id,
+                task["generation_id"],
+                step,
+                expected_revision,
+                time(),
+            ),
+        )
+        return {
+            "task_generation_id": task["generation_id"],
+            "task_step_position": step,
+        }
+
+    def finish_run_binding_in_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        run_id: str,
+        terminal_status: str,
+        error: str | None,
+        summary: str = "",
+    ) -> dict[str, Any] | None:
+        binding = conn.execute(
+            """
+            SELECT *
+            FROM task_run_bindings
+            WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        if binding is None:
+            return None
+        now = time()
+        task = conn.execute(
+            """
+            SELECT generation_id
+            FROM active_tasks
+            WHERE conversation_id = ?
+            """,
+            (binding["conversation_id"],),
+        ).fetchone()
+        if task is None or task["generation_id"] != binding["task_generation_id"]:
+            conn.execute(
+                "DELETE FROM task_run_bindings WHERE run_id = ?",
+                (run_id,),
+            )
+            return None
+
+        next_status = None
+        if terminal_status == "completed":
+            next_status = "completed"
+        elif terminal_status == "failed":
+            next_status = "blocked"
+        if next_status is not None:
+            evidence = error or (f"Run completed: {summary}" if summary else f"Run {terminal_status}")
+            conn.execute(
+                """
+                UPDATE active_task_steps
+                SET status = ?,
+                    evidence_run_id = ?,
+                    evidence_summary = ?,
+                    updated_at = ?
+                WHERE conversation_id = ? AND position = ?
                 """,
                 (
                     next_status,
-                    self._value(owner_type) if owner_type is not None else current["owner_type"],
-                    owner_run_id if owner_run_id is not None else current["owner_run_id"],
-                    title if title is not None else current["title"],
-                    detail_inline,
-                    detail_blob_id,
-                    evidence_summary
-                    if evidence_summary is not None
-                    else current["evidence_summary"],
-                    evidence_run_id if evidence_run_id is not None else current["evidence_run_id"],
-                    self._metadata_field(
-                        next_metadata,
-                        created_by_run_id=current.get("created_by_run_id"),
-                        finished_at=finished_at,
-                    ),
+                    run_id,
+                    evidence,
                     now,
-                    conversation_id,
-                    task_id,
+                    binding["conversation_id"],
+                    binding["step_position"],
                 ),
             )
-            if updated.rowcount == 0:
-                raise KeyError(task_id)
-            self._append_event(
-                conn,
-                conversation_id,
-                task_id,
-                "updated",
-                {
-                    "status": next_status,
-                    "title": title,
-                    "evidence_run_id": evidence_run_id,
-                    "evidence_summary": evidence_summary,
-                },
-                now,
-            )
-        return self._require_task(conversation_id, task_id)
-
-    def get_task(self, conversation_id: str, task_id: str) -> dict[str, Any] | None:
-        with self.persistence.connect() as conn:
-            row = conn.execute(
-                """
-                SELECT *
-                FROM tasks
-                WHERE conversation_id = ? AND id = ?
-                """,
-                (conversation_id, task_id),
-            ).fetchone()
-        return self._task_from_row(row) if row is not None else None
-
-    def list_tasks(
-        self,
-        conversation_id: str,
-        *,
-        statuses: Iterable[str] | None = None,
-        include_finished: bool = True,
-    ) -> list[dict[str, Any]]:
-        params: list[Any] = [conversation_id]
-        where = ["conversation_id = ?"]
-        if statuses is not None:
-            status_values = [self._value(status) for status in statuses]
-            if not status_values:
-                return []
-            where.append(f"status IN ({','.join('?' for _ in status_values)})")
-            params.extend(status_values)
-        if not include_finished:
-            finished_values = [self._value(status) for status in FINISHED_TASK_STATUSES]
-            where.append(f"status NOT IN ({','.join('?' for _ in finished_values)})")
-            params.extend(finished_values)
-        with self.persistence.connect() as conn:
-            rows = conn.execute(
-                f"""
-                SELECT *
-                FROM tasks
-                WHERE {' AND '.join(where)}
-                ORDER BY created_at, rowid
-                """,
-                tuple(params),
-            ).fetchall()
-        return [self._task_from_row(row) for row in rows]
-
-    def list_open_tasks(self, conversation_id: str) -> list[dict[str, Any]]:
-        return self.list_tasks(
-            conversation_id,
-            statuses=[self._value(status) for status in OPEN_TASK_STATUSES],
-            include_finished=False,
+        conn.execute("DELETE FROM task_run_bindings WHERE run_id = ?", (run_id,))
+        conn.execute(
+            """
+            UPDATE active_tasks
+            SET revision = revision + 1, updated_at = ?
+            WHERE conversation_id = ? AND generation_id = ?
+            """,
+            (now, binding["conversation_id"], binding["task_generation_id"]),
         )
+        task_completed = next_status == "completed" and self._all_steps_completed(
+            conn,
+            binding["conversation_id"],
+        )
+        updated_task = self._get_active_task_in_connection(conn, binding["conversation_id"])
+        if updated_task is None:
+            raise RuntimeError("run completion did not produce a task snapshot")
+        task_snapshot = self._public_task_snapshot(updated_task)
+        if task_completed:
+            conn.execute(
+                "DELETE FROM active_tasks WHERE conversation_id = ? AND generation_id = ?",
+                (binding["conversation_id"], binding["task_generation_id"]),
+            )
+        return {
+            "kind": "run_finished",
+            "task_status": "completed" if task_completed else "active",
+            "step": int(binding["step_position"]),
+            "step_status": next_status or "released",
+            "run_status": terminal_status,
+            "task_snapshot": task_snapshot,
+        }
 
-    def replace_snapshot(
+    def finish_run_binding(
         self,
-        conversation_id: str,
-        records: Iterable[dict[str, Any]],
-    ) -> None:
+        *,
+        run_id: str,
+        terminal_status: str,
+        error: str | None,
+        summary: str = "",
+    ) -> dict[str, Any] | None:
         with self.persistence.connect() as conn:
-            conn.execute(
-                "DELETE FROM task_events WHERE conversation_id = ?",
-                (conversation_id,),
+            conn.execute("BEGIN IMMEDIATE")
+            return self.finish_run_binding_in_connection(
+                conn,
+                run_id=run_id,
+                terminal_status=terminal_status,
+                error=error,
+                summary=summary,
             )
-            conn.execute(
-                "DELETE FROM tasks WHERE conversation_id = ?",
-                (conversation_id,),
-            )
-            for item in records:
-                self._insert_task_snapshot(conn, conversation_id, dict(item))
 
-    def _require_task(self, conversation_id: str, task_id: str) -> dict[str, Any]:
-        task = self.get_task(conversation_id, task_id)
-        if task is None:
-            raise KeyError(task_id)
-        return task
-
-    def _task_from_row(self, row: Any) -> dict[str, Any]:
+    def _get_active_task_in_connection(
+        self,
+        conn: sqlite3.Connection,
+        conversation_id: str,
+    ) -> dict[str, Any] | None:
+        row = conn.execute(
+            "SELECT * FROM active_tasks WHERE conversation_id = ?",
+            (conversation_id,),
+        ).fetchone()
+        if row is None:
+            return None
         data = dict(row)
-        data["task_id"] = data["id"]
-        data["detail"] = data["detail_inline"]
-        if data["detail"] is None and data.get("detail_blob_id"):
-            data["detail"] = BlobStore(self.persistence).get_text(data["detail_blob_id"])
-        data["detail"] = data["detail"] or ""
-        envelope = self._load_json(data.pop("metadata_json")) or {}
-        if isinstance(envelope, dict) and "metadata" in envelope:
-            data["metadata"] = dict(envelope.get("metadata") or {})
-            data["created_by_run_id"] = envelope.get("created_by_run_id")
-            data["finished_at"] = envelope.get("finished_at")
+        data["detail"] = self._read_text(
+            conn,
+            data.pop("detail_inline"),
+            data.pop("detail_blob_id"),
+        )
+        step_rows = conn.execute(
+            """
+            SELECT *
+            FROM active_task_steps
+            WHERE conversation_id = ?
+            ORDER BY position
+            """,
+            (conversation_id,),
+        ).fetchall()
+        data["steps"] = [self._step_from_row(conn, step) for step in step_rows]
+        binding = conn.execute(
+            """
+            SELECT binding.run_id, binding.step_position, run.status
+            FROM task_run_bindings AS binding
+            JOIN runs AS run ON run.id = binding.run_id
+            WHERE binding.conversation_id = ?
+            LIMIT 1
+            """,
+            (conversation_id,),
+        ).fetchone()
+        data["active_run_id"] = binding["run_id"] if binding is not None else None
+        data["active_step"] = int(binding["step_position"]) if binding is not None else None
+        run_status = str(binding["status"] or "") if binding is not None else ""
+        if run_status == "stopping":
+            data["execution_state"] = "stopping"
+        elif binding is not None and run_status not in TERMINAL_RUN_STATUSES:
+            data["execution_state"] = "running"
         else:
-            data["metadata"] = dict(envelope or {})
-            data["created_by_run_id"] = None
-            data["finished_at"] = None
-        data["evidence_summary"] = data["evidence_summary"] or ""
+            data["execution_state"] = "idle"
         return data
 
-    def _append_event(
-        self,
-        conn: Any,
-        conversation_id: str,
-        task_id: str,
-        event_type: str,
-        payload: dict[str, Any],
-        created_at: float,
-    ) -> None:
-        conn.execute(
-            """
-            INSERT INTO task_events (
-              task_id,
-              conversation_id,
-              event_type,
-              payload_json,
-              created_at
-            )
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (task_id, conversation_id, event_type, self._json_field(payload), created_at),
+    def _step_from_row(self, conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        data["detail"] = self._read_text(
+            conn,
+            data.pop("detail_inline"),
+            data.pop("detail_blob_id"),
         )
+        data["evidence_summary"] = str(data.get("evidence_summary") or "")
+        return data
 
-    def _insert_task_snapshot(
+    @staticmethod
+    def _public_task_snapshot(task: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "title": str(task.get("title") or ""),
+            "steps": [
+                {
+                    "position": int(step["position"]),
+                    "title": str(step.get("title") or ""),
+                    "status": str(step.get("status") or "pending"),
+                }
+                for step in task.get("steps") or []
+            ],
+        }
+
+    def _read_text(
         self,
-        conn: Any,
+        conn: sqlite3.Connection,
+        inline: str | None,
+        blob_id: str | None,
+    ) -> str:
+        if inline is not None:
+            return inline
+        if blob_id:
+            return BlobStore(self.persistence).get_text_in_connection(conn, blob_id)
+        return ""
+
+    def _require_version(
+        self,
+        conn: sqlite3.Connection,
         conversation_id: str,
-        item: dict[str, Any],
-    ) -> str:
-        task_id = str(item.get("task_id") or item.get("id") or "")
-        if not task_id:
-            raise KeyError(task_id)
-        if str(item.get("conversation_id") or "") != conversation_id:
-            raise ValueError("snapshot record conversation_id mismatch")
-        detail = str(item.get("detail") or "")
-        stored = self._store_text_content(conn, detail)
-        created_at = self._float_field(item.get("created_at"), time())
-        updated_at = self._float_field(item.get("updated_at"), created_at)
-        finished_at = item.get("finished_at")
-        conn.execute(
+        expected_generation: str | None,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        task = conn.execute(
+            "SELECT * FROM active_tasks WHERE conversation_id = ?",
+            (conversation_id,),
+        ).fetchone()
+        if task is None:
+            raise KeyError(conversation_id)
+        data = dict(task)
+        if expected_generation and data["generation_id"] != expected_generation:
+            raise RuntimeError("active task generation changed")
+        if expected_revision is not None and int(data["revision"]) != expected_revision:
+            raise RuntimeError("active task revision changed")
+        return data
+
+    def _ensure_no_active_binding(self, conn: sqlite3.Connection, conversation_id: str) -> None:
+        active = conn.execute(
             """
-            INSERT INTO tasks (
-              id,
-              conversation_id,
-              status,
-              owner_type,
-              owner_run_id,
-              title,
-              detail_inline,
-              detail_blob_id,
-              evidence_summary,
-              evidence_run_id,
-              metadata_json,
-              created_at,
-              updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            SELECT run_id
+            FROM task_run_bindings
+            WHERE conversation_id = ?
+            LIMIT 1
             """,
-            (
-                task_id,
-                conversation_id,
-                self._value(item.get("status") or "pending"),
-                self._value(item.get("owner_type") or "assistant"),
-                item.get("owner_run_id"),
-                str(item.get("title") or ""),
-                stored.inline,
-                stored.blob_id,
-                str(item.get("evidence_summary") or ""),
-                item.get("evidence_run_id"),
-                self._metadata_field(
-                    dict(item.get("metadata") or {}),
-                    created_by_run_id=item.get("created_by_run_id"),
-                    finished_at=self._float_or_none(finished_at),
-                ),
-                created_at,
-                updated_at,
-            ),
-        )
-        return task_id
+            (conversation_id,),
+        ).fetchone()
+        if active is not None:
+            raise RuntimeError("active task already has a running step")
 
-    def _metadata_field(
-        self,
-        metadata: dict[str, Any],
-        *,
-        created_by_run_id: str | None,
-        finished_at: float | None,
-    ) -> str:
-        return self._json_field(
-            {
-                "metadata": dict(metadata),
-                "created_by_run_id": created_by_run_id,
-                "finished_at": finished_at,
-            }
-        ) or "{}"
-
-    def _json_field(self, value: Any) -> str | None:
-        if value is None:
-            return None
-        return json.dumps(value, ensure_ascii=False, sort_keys=True)
-
-    def _load_json(self, value: str | None) -> Any:
-        if not value:
-            return None
-        return json.loads(value)
-
-    def _value(self, value: Any) -> str:
-        return str(getattr(value, "value", value))
-
-    def _float_field(self, value: Any, default: float) -> float:
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return default
-
-    def _float_or_none(self, value: Any) -> float | None:
-        if value is None:
-            return None
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None
-
-    def _store_text_content(
-        self,
-        conn: Any,
-        text: str,
-        *,
-        preview_limit: int = 4096,
-        inline_limit: int = INLINE_TEXT_LIMIT,
-    ) -> StoredText:
-        value = text or ""
-        preview = value[:preview_limit]
-        data = value.encode("utf-8")
-        size = len(data)
-        if size <= inline_limit:
-            return StoredText(
-                inline=value,
-                blob_id=None,
-                preview=preview,
-                size=size,
-            )
-
-        blob_id = hashlib.sha256(data).hexdigest()
-        relative_path = f"blobs/{blob_id[:2]}/{blob_id}.gz"
-        final_path = self.persistence.blobs_dir / blob_id[:2] / f"{blob_id}.gz"
-        compressed = gzip.compress(data)
+    def _all_steps_completed(self, conn: sqlite3.Connection, conversation_id: str) -> bool:
         row = conn.execute(
             """
-            SELECT id
-            FROM blobs
-            WHERE id = ?
+            SELECT COUNT(*) AS remaining
+            FROM active_task_steps
+            WHERE conversation_id = ? AND status != 'completed'
             """,
-            (blob_id,),
+            (conversation_id,),
         ).fetchone()
-        if row:
-            conn.execute(
-                """
-                UPDATE blobs
-                SET ref_count = ref_count + 1,
-                    last_accessed_at = strftime('%s', 'now')
-                WHERE id = ?
-                """,
-                (blob_id,),
-            )
-        else:
-            final_path.parent.mkdir(parents=True, exist_ok=True)
-            self.persistence.tmp_dir.mkdir(parents=True, exist_ok=True)
-            tmp_path = (
-                self.persistence.tmp_dir
-                / f"{blob_id}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
-            )
-            tmp_path.write_bytes(compressed)
-            try:
-                os.replace(tmp_path, final_path)
-            finally:
-                if tmp_path.exists():
-                    tmp_path.unlink()
-            conn.execute(
-                """
-                INSERT INTO blobs (
-                  id,
-                  path,
-                  mime_type,
-                  compression,
-                  byte_size,
-                  stored_size,
-                  char_count,
-                  ref_count,
-                  created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, 1, strftime('%s', 'now'))
-                """,
-                (
-                    blob_id,
-                    relative_path,
-                    "text/plain; charset=utf-8",
-                    "gzip",
-                    size,
-                    len(compressed),
-                    len(value),
-                ),
-            )
-
-        return StoredText(
-            inline=None,
-            blob_id=blob_id,
-            preview=preview,
-            size=size,
-        )
+        return row is not None and int(row["remaining"]) == 0

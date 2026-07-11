@@ -44,6 +44,7 @@ import yaml from 'react-syntax-highlighter/dist/esm/languages/prism/yaml';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Switch } from '@/components/ui/switch';
 import {
   Tooltip,
   TooltipContent,
@@ -73,14 +74,17 @@ import { messageApi, type ActiveStreamInfo, type ToolResultSlice } from '../api/
 import { runsApi } from '../api/runs';
 import { taskNotificationsApi, type TaskNotificationRecord } from '../api/taskNotifications';
 import { plansService } from '../services/plans';
+import { activeTaskService } from '../services/tasks';
 import { transcriptService } from '../services/transcript';
 import type {
   Message,
   SendMessageRequest,
   ToolApprovalPayload,
   ToolPermissionMode,
+  TaskContextMode,
 } from '../types/message';
 import type { PlanSession } from '../types/plan';
+import type { ActiveTaskRecord } from '../types/task';
 import type { TranscriptItem } from '../types/transcript';
 import type { MultiAgentMode, WorkspaceContext } from '../types/conversation';
 import { useConversationStore } from '../store/conversationStore';
@@ -176,12 +180,14 @@ import {
   normalizeTranscriptItems,
   type LiveRunTranscriptOverlay,
 } from '../utils/transcriptItems';
+import { createTaskPanelItem, shouldPollTaskState } from '../utils/activeTask';
 
+const TASK_STATE_POLL_MS = 2500;
 const MarkdownContent = lazy(() => import('../components/MarkdownContent'));
 const MANUAL_PROJECTS_STORAGE_KEY = 'chattree.manualProjectWorkspaces';
 const PROJECT_ORDER_STORAGE_KEY = 'chattree.projectOrder';
 const PLAN_MODE_TOOL_NAMES = new Set(['enter_plan_mode', 'update_plan', 'exit_plan_mode', 'ask_user_question']);
-const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled']);
+const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled', 'interrupted', 'stopped']);
 
 type SidebarResizeSession = {
   side: SidebarResizeSide;
@@ -791,6 +797,25 @@ function getBranchToolPermissionMode(
   return undefined;
 }
 
+function normalizeTaskContextMode(value: unknown): TaskContextMode | undefined {
+  return value === 'attached' || value === 'detached' ? value : undefined;
+}
+
+function getBranchTaskContextMode(
+  messages: Array<{ node_id?: string | null; task_context_mode?: TaskContextMode | null }>,
+  nodeId: string | null,
+): TaskContextMode | undefined {
+  if (!nodeId) return undefined;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.node_id === nodeId) {
+      const mode = normalizeTaskContextMode(message.task_context_mode);
+      if (mode) return mode;
+    }
+  }
+  return undefined;
+}
+
 function stripChronologicalPrefix(raw: unknown, snippets: string[]): string {
   if (typeof raw !== 'string' || raw.length === 0) return '';
   let remaining = raw;
@@ -1012,7 +1037,7 @@ export default function ChatPage() {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [outlineCollapsed, setOutlineCollapsed] = useState(false);
-  const [rightPanelView, setRightPanelView] = useState<'outline' | 'side'>('outline');
+  const [rightPanelView, setRightPanelView] = useState<'outline' | 'side' | 'tasks'>('outline');
   const [selectedSideRunId, setSelectedSideRunId] = useState<string | null>(null);
   const [leftSidebarWidth, setLeftSidebarWidth] = useState(() =>
     readStoredSidebarWidth(getBrowserStorage(), LEFT_SIDEBAR_WIDTH_STORAGE_KEY, LEFT_SIDEBAR_WIDTH),
@@ -1034,6 +1059,8 @@ export default function ChatPage() {
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([]);
   const [hiddenSideRunIdsByConversation, setHiddenSideRunIdsByConversation] = useState<Record<string, string[]>>({});
   const [taskNotifications, setTaskNotifications] = useState<TaskNotificationRecord[]>([]);
+  const [activeTask, setActiveTask] = useState<ActiveTaskRecord | null>(null);
+  const [taskContextMode, setTaskContextMode] = useState<TaskContextMode>('attached');
   const [selectedTaskNotificationId, setSelectedTaskNotificationId] = useState<string | null>(null);
   const [transcriptItems, setTranscriptItems] = useState<TranscriptItem[]>([]);
   const [transcriptLoading, setTranscriptLoading] = useState(false);
@@ -1260,6 +1287,10 @@ export default function ChatPage() {
   };
 
   const activeRunStates = useRunManager(currentConversation?.id ?? null);
+  const activeRunCount = useMemo(
+    () => activeRunStates.filter((run) => !['completed', 'error', 'stopped'].includes(run.status)).length,
+    [activeRunStates],
+  );
   const [serverPendingToolApprovals, setServerPendingToolApprovals] = useState<ToolApprovalPayload[]>([]);
   const [activePlan, setActivePlan] = useState<PlanSession | null>(null);
   const [planActionPending, setPlanActionPending] = useState<'approve' | 'reject' | 'answer' | null>(null);
@@ -1364,6 +1395,20 @@ export default function ChatPage() {
       return [];
     }
   }, []);
+  const refreshActiveTask = useCallback(async (conversationId: string | null | undefined) => {
+    if (!conversationId) {
+      setActiveTask(null);
+      return null;
+    }
+    try {
+      const task = await activeTaskService.fetch(conversationId);
+      setActiveTask(task);
+      return task;
+    } catch (error) {
+      console.error('刷新活动任务失败:', error);
+      return null;
+    }
+  }, []);
   const attachDeliveringTaskNotifications = useCallback((
     conversationId: string,
     notifications: TaskNotificationRecord[],
@@ -1398,17 +1443,26 @@ export default function ChatPage() {
       }
     }
   }, [attachDeliveringTaskNotifications, refreshTaskNotifications]);
+  const shouldPollTaskNotifications = shouldPollTaskState({
+    conversationId: currentConversation?.id,
+    activeRunCount,
+    visibleNotificationCount: visibleTaskNotifications.length,
+  });
   useEffect(() => {
     void refreshTaskNotifications(currentConversation?.id);
-  }, [currentConversation?.id, activeRunStates.length, refreshTaskNotifications]);
+  }, [currentConversation?.id, refreshTaskNotifications]);
   useEffect(() => {
-    if (!currentConversation?.id) return;
+    if (!currentConversation?.id || activeRunCount === 0) return;
+    void refreshTaskNotifications(currentConversation.id);
+  }, [activeRunCount, currentConversation?.id, refreshTaskNotifications]);
+  useEffect(() => {
+    if (!currentConversation?.id || !shouldPollTaskNotifications) return;
     const conversationId = currentConversation.id;
     const timer = window.setInterval(() => {
       void refreshTaskNotifications(conversationId);
-    }, 2500);
+    }, TASK_STATE_POLL_MS);
     return () => window.clearInterval(timer);
-  }, [currentConversation?.id, refreshTaskNotifications]);
+  }, [currentConversation?.id, refreshTaskNotifications, shouldPollTaskNotifications]);
   useEffect(() => {
     const conversationId = currentConversation?.id;
     if (!conversationId) return;
@@ -1496,6 +1550,17 @@ export default function ChatPage() {
       .sort((a, b) => b.createdAt - a.createdAt);
     return normalizeToolPermissionMode(runs[0]?.toolPermissionMode);
   }, [activeRunStates, currentBranchNodeIds, selectedBranchTipId]);
+  const currentBranchTaskContextMode = useMemo(
+    () => getBranchTaskContextMode(messages, selectedBranchTipId),
+    [messages, selectedBranchTipId],
+  );
+  const liveBranchTaskContextMode = useMemo(() => {
+    const runs = activeRunStates
+      .filter((run) => isRunVisibleInSelectedTranscript(run, selectedBranchTipId, currentBranchNodeIds))
+      .filter((run) => normalizeTaskContextMode(run.taskContextMode))
+      .sort((a, b) => b.createdAt - a.createdAt);
+    return normalizeTaskContextMode(runs[0]?.taskContextMode);
+  }, [activeRunStates, currentBranchNodeIds, selectedBranchTipId]);
   const activePlanToolSignal = useMemo(() => activeRunStates
     .map((run) => {
       const toolNames: string[] = [];
@@ -1525,6 +1590,10 @@ export default function ChatPage() {
   }, [currentBranchToolPermissionMode, liveBranchToolPermissionMode, updateToolPermissionDraft]);
 
   useEffect(() => {
+    setTaskContextMode(liveBranchTaskContextMode ?? currentBranchTaskContextMode ?? 'attached');
+  }, [currentBranchTaskContextMode, liveBranchTaskContextMode, currentConversation?.id]);
+
+  useEffect(() => {
     const conversationId = currentConversation?.id;
     if (!conversationId || !activePlanToolSignal) return;
     void refreshActivePlan(conversationId);
@@ -1537,6 +1606,33 @@ export default function ChatPage() {
       updateToolPermissionDraft(createToolPermissionDraft());
     }
   }, [currentConversation, updateToolPermissionDraft]);
+
+  useEffect(() => {
+    if (!currentConversation?.id) {
+      void refreshActiveTask(null);
+      return;
+    }
+    void refreshActiveTask(currentConversation.id);
+  }, [currentConversation?.id, refreshActiveTask]);
+
+  const shouldPollActiveTask = shouldPollTaskState({
+    conversationId: currentConversation?.id,
+    activeRunCount,
+    activeTask,
+  });
+  useEffect(() => {
+    const conversationId = currentConversation?.id;
+    if (!conversationId || activeRunCount === 0) return;
+    void refreshActiveTask(conversationId);
+  }, [activeRunCount, currentConversation?.id, refreshActiveTask]);
+  useEffect(() => {
+    const conversationId = currentConversation?.id;
+    if (!conversationId || !shouldPollActiveTask) return;
+    const timer = window.setInterval(() => {
+      void refreshActiveTask(conversationId);
+    }, TASK_STATE_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [currentConversation?.id, refreshActiveTask, shouldPollActiveTask]);
 
   useEffect(() => {
     const activeKeys = new Set<string>();
@@ -1640,6 +1736,8 @@ export default function ChatPage() {
     ].join(':')).join('|'),
     [activeRunStates, currentBranchNodeIds, selectedBranchTipId],
   );
+  const taskPanelItem = useMemo(() => createTaskPanelItem(activeTask), [activeTask]);
+  const taskPanelOpenCount = taskPanelItem ? 1 : 0;
   const currentBranchHasPendingUserMessage = useMemo(
     () => activeRunStates.some((run) =>
       shouldRenderRunDraft(run)
@@ -3005,16 +3103,19 @@ export default function ChatPage() {
       if (imageRefs.length > 0) setAttachedImageRefs([]);
     };
     const { currentReasoningEffort, currentThinkingEnabled } = useModelStore.getState();
-    const request: SendMessageRequest = {
+    const buildRequest = (parentNodeId: string): SendMessageRequest => ({
       content: val,
+      parent_node_id: parentNodeId,
+      focus_new_node: true,
       model_id: modelId,
       provider_id: providerId,
       reasoning_effort: currentReasoningEffort,
       thinking_enabled: currentThinkingEnabled,
       tool_permission_mode: toolPermissionMode ?? (editTargetNodeId ? editToolPermissionMode ?? undefined : undefined),
+      task_context_mode: taskContextMode,
       import_files: importFiles.length > 0 ? importFiles : undefined,
       image_refs: imageRefs.length > 0 ? imageRefs : undefined,
-    };
+    });
     let sendNodeId = resolveSendNodeId({
       editTargetNodeId,
       currentNodeId,
@@ -3026,11 +3127,11 @@ export default function ChatPage() {
       sendNodeId,
       streamTargetPolicy: slashCommand?.stream_target_policy,
     });
-    request.parent_node_id = sendNodeId ?? undefined;
-    request.focus_new_node = true;
+    let request = sendNodeId ? buildRequest(sendNodeId) : null;
 
-    if (conversationId && shouldQueueForMainThread({ currentBranchHasStreamingChat, slashCommand })) {
+    if (conversationId && request && shouldQueueForMainThread({ currentBranchHasStreamingChat, slashCommand })) {
       const queuedConversationId = conversationId;
+      const queuedRequest = request;
       clearAttachments();
       setEditTargetNodeId(null);
       setEditToolPermissionMode(null);
@@ -3045,7 +3146,7 @@ export default function ChatPage() {
           anchorNodeId: sendNodeId ?? null,
           blockingRunIds: currentBranchStreamingRunIds,
           content: val,
-          request,
+          request: queuedRequest,
         },
       ]);
       return;
@@ -3073,7 +3174,12 @@ export default function ChatPage() {
         sendNodeId,
         streamTargetPolicy: slashCommand?.stream_target_policy,
       });
-      request.parent_node_id = sendNodeId ?? undefined;
+      request = sendNodeId ? buildRequest(sendNodeId) : null;
+    }
+
+    if (!conversationId || !sendNodeId || !request) {
+      console.error('无法确定消息父节点');
+      return;
     }
 
     clearAttachments();
@@ -3266,6 +3372,116 @@ export default function ChatPage() {
     </>
   );
 
+  const renderTaskPanel = () => (
+    <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overflow-x-hidden px-3 pb-4 custom-scrollbar">
+      <div className="flex h-8 shrink-0 items-center justify-between px-1">
+        <span className="text-xs font-semibold" style={{ color: 'var(--fg-tertiary)' }}>
+          任务上下文
+        </span>
+        <div className="flex items-center gap-2">
+          <span className="text-xs" style={{ color: 'var(--fg-secondary)' }}>
+            {taskContextMode === 'attached' ? '接入' : '隔离'}
+          </span>
+          <TextTooltip content={taskContextMode === 'attached' ? '下一条消息接入任务上下文' : '下一条消息不接入任务上下文'}>
+            <Switch
+              size="sm"
+              checked={taskContextMode === 'attached'}
+              onCheckedChange={(checked) => setTaskContextMode(checked ? 'attached' : 'detached')}
+              aria-label="切换下一条消息的任务上下文"
+            />
+          </TextTooltip>
+        </div>
+      </div>
+      {!taskPanelItem && (
+        <div className="rounded-lg border px-3 py-4 text-sm" style={{ borderColor: 'var(--border)', color: 'var(--fg-tertiary)' }}>
+          当前对话暂无任务。
+        </div>
+      )}
+      {taskPanelItem && (() => {
+        const item = taskPanelItem;
+        const statusColor = item.task.status === 'blocked'
+          ? 'var(--destructive)'
+          : 'var(--icon-accent)';
+        return (
+          <div
+            key="active-task"
+            className="app-run-list-row cursor-default p-3"
+          >
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full" style={{ color: statusColor }}>
+                {item.running || item.stopping ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : item.task.status === 'blocked' ? (
+                  <X className="h-3.5 w-3.5" />
+                ) : (
+                  <span className="h-2 w-2 rounded-full" style={{ background: statusColor }} />
+                )}
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-sm font-semibold" style={{ color: 'var(--fg-secondary)' }}>
+                  {item.title}
+                </div>
+              </div>
+              <span className="shrink-0 text-xs" style={{ color: statusColor }}>
+                {item.statusLabel}
+              </span>
+            </div>
+            <div className="mt-2 flex flex-col gap-1 pl-7 text-xs" style={{ color: 'var(--fg-tertiary)' }}>
+              <div className="truncate" style={{ color: 'var(--fg-secondary)' }}>
+                {item.progressText}
+              </div>
+              {item.task.detail && (
+                <div className="line-clamp-2">{item.task.detail}</div>
+              )}
+              {item.steps.length > 0 && (
+                <div className="mt-1 flex flex-col gap-1.5">
+                  {item.steps.map((step) => {
+                    const stepColor = step.step.status === 'blocked'
+                      ? 'var(--destructive)'
+                      : step.step.status === 'completed'
+                        ? 'var(--fg-tertiary)'
+                        : 'var(--icon-accent)';
+                    return (
+                      <div key={step.step.position} className="flex min-w-0 items-start gap-2">
+                        <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center" style={{ color: stepColor }}>
+                          {step.step.status === 'completed' ? (
+                            <Check className="h-3 w-3" />
+                          ) : step.running ? (
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                          ) : step.step.status === 'blocked' ? (
+                            <X className="h-3 w-3" />
+                          ) : (
+                            <span className="h-1.5 w-1.5 rounded-full" style={{ background: stepColor }} />
+                          )}
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex min-w-0 items-center gap-2">
+                            <span className="min-w-0 flex-1 truncate" style={{ color: 'var(--fg-secondary)' }}>
+                              {step.step.position}. {step.title}
+                            </span>
+                            <span className="shrink-0" style={{ color: stepColor }}>
+                              {step.statusLabel}
+                            </span>
+                          </div>
+                          {step.step.detail && step.step.detail !== step.step.title && (
+                            <div className="mt-0.5 line-clamp-2">{step.step.detail}</div>
+                          )}
+                          {step.step.evidence_summary && (
+                            <div className="mt-0.5 truncate">{step.step.evidence_summary}</div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
+    </div>
+  );
+
   const renderTaskNotificationList = () => (
     <section className="flex flex-col gap-2">
       <div className="px-1 text-xs font-semibold" style={{ color: 'var(--fg-tertiary)' }}>
@@ -3325,7 +3541,13 @@ export default function ChatPage() {
                   <FileText className="h-3.5 w-3.5" />
                 </Button>
               </TextTooltip>
-              <TextTooltip content={bindDisabled ? '选择一个当前分支后可绑定' : '绑定到当前分支并触发'}>
+              <TextTooltip content={
+                notification.status === 'delivering'
+                  ? '通知正在投递'
+                  : bindDisabled
+                    ? '选择一个当前分支后可绑定'
+                    : '绑定到当前分支并触发'
+              }>
                 <Button
                   type="button"
                   variant="ghost"
@@ -3977,6 +4199,24 @@ export default function ChatPage() {
                     </span>
                   )}
                 </Button>
+                <Button
+                  variant={rightPanelView === 'tasks' ? 'secondary' : 'ghost'}
+                  size="sm"
+                  className="h-8 min-w-0 gap-1.5 px-2 text-xs"
+                  onClick={() => setRightPanelView('tasks')}
+                  aria-label="任务"
+                >
+                  <Check className="h-3.5 w-3.5" />
+                  <span className="min-w-0 truncate">任务</span>
+                  {taskPanelOpenCount > 0 && (
+                    <span
+                      className="ml-0.5 rounded-full px-1.5 py-0.5 text-[10px]"
+                      style={{ background: 'var(--bg-button-tertiary-hover)', color: 'var(--fg-secondary)' }}
+                    >
+                      {taskPanelOpenCount}
+                    </span>
+                  )}
+                </Button>
               </div>
             )}
             <TextTooltip content={outlineCollapsed ? '展开大纲' : '收起大纲'}>
@@ -4014,6 +4254,8 @@ export default function ChatPage() {
                     </TextTooltip>
                   ))}
                 </div>
+              ) : rightPanelView === 'tasks' ? (
+                renderTaskPanel()
               ) : selectedSideRunItem ? (
                 <div className="flex min-h-0 flex-1 flex-col">
                   <div className="flex shrink-0 items-center gap-2 px-3 pb-3">

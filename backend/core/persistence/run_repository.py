@@ -32,8 +32,9 @@ finished_at
 
 
 class SQLiteRunRepository:
-    def __init__(self, persistence: SQLitePersistence) -> None:
+    def __init__(self, persistence: SQLitePersistence, *, task_repository: Any = None) -> None:
         self.persistence = persistence
+        self.task_repository = task_repository
 
     def create_run(
         self,
@@ -46,9 +47,12 @@ class SQLiteRunRepository:
         cancellation_parent_run_id: str | None = None,
         summary: str = "",
         metadata: dict[str, Any] | None = None,
+        task_binding: dict[str, Any] | None = None,
     ) -> str:
         run_id = str(uuid.uuid4())
+        run_metadata = dict(metadata or {})
         with self.persistence.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 """
                 INSERT INTO runs (
@@ -80,9 +84,22 @@ class SQLiteRunRepository:
                     anchor_node_id,
                     target_node_id,
                     summary,
-                    self._json_field(metadata or {}),
+                    self._json_field(run_metadata),
                 ),
             )
+            if task_binding is not None:
+                if self.task_repository is None:
+                    raise RuntimeError("task repository is required for bound runs")
+                bound = self.task_repository.bind_run_in_connection(
+                    conn,
+                    run_id=run_id,
+                    binding=task_binding,
+                )
+                run_metadata.update(bound)
+                conn.execute(
+                    "UPDATE runs SET metadata_json = ? WHERE id = ?",
+                    (self._json_field(run_metadata), run_id),
+                )
         return run_id
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
@@ -174,80 +191,9 @@ class SQLiteRunRepository:
         return [self._run_from_row(row) for row in rows]
 
     def append_event(self, run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        event_row = None
         with self.persistence.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            run = conn.execute(
-                """
-                SELECT conversation_id, kind, target_node_id, event_count
-                FROM runs
-                WHERE id = ?
-                """,
-                (run_id,),
-            ).fetchone()
-            if run is None:
-                raise KeyError(run_id)
-
-            event_index = int(run["event_count"])
-            event_payload = dict(payload)
-            event_payload.setdefault("run_id", run_id)
-            event_payload.setdefault("conversation_id", run["conversation_id"])
-            event_payload.setdefault("kind", run["kind"])
-            event_payload.setdefault("target_node_id", run["target_node_id"])
-            event_payload["event_index"] = event_index
-            payload_json = self._json_field(event_payload) or "{}"
-            stored = self._store_text_content(conn, payload_json)
-            event_type = (
-                str(
-                    event_payload.get("type")
-                    or event_payload.get("event_type")
-                    or event_payload.get("status")
-                    or "event"
-                )
-            )
-
-            conn.execute(
-                """
-                INSERT INTO run_events (
-                  run_id,
-                  conversation_id,
-                  event_index,
-                  event_type,
-                  payload_inline,
-                  payload_blob_id,
-                  created_at
-                )
-                VALUES (
-                  ?, ?, ?, ?, ?, ?,
-                  strftime('%s', 'now')
-                )
-                """,
-                (
-                    run_id,
-                    run["conversation_id"],
-                    event_index,
-                    event_type,
-                    stored.inline,
-                    stored.blob_id,
-                ),
-            )
-            conn.execute(
-                """
-                UPDATE runs
-                SET event_count = event_count + 1,
-                    updated_at = strftime('%s', 'now')
-                WHERE id = ?
-                """,
-                (run_id,),
-            )
-            event_row = conn.execute(
-                """
-                SELECT *
-                FROM run_events
-                WHERE run_id = ? AND event_index = ?
-                """,
-                (run_id, event_index),
-            ).fetchone()
+            event_row = self._append_event_in_connection(conn, run_id, payload)
         return self._event_from_row(event_row)
 
     def read_events(self, run_id: str, from_event: int = 0) -> list[dict[str, Any]]:
@@ -271,21 +217,29 @@ class SQLiteRunRepository:
     ) -> dict[str, Any]:
         status_value = str(status)
         with self.persistence.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT status, metadata_json FROM runs WHERE id = ?",
+                f"SELECT {RUN_COLUMNS} FROM runs WHERE id = ?",
                 (run_id,),
             ).fetchone()
             if row is None:
                 raise KeyError(run_id)
             if row["status"] in FINISHED_STATUSES:
-                current = self.get_run(run_id)
-                if current is None:
-                    raise KeyError(run_id)
-                return current
+                return self._run_from_row(row)
 
             metadata = self._load_json(row["metadata_json"]) or {}
             if error:
                 metadata["error"] = error
+            if self.task_repository is not None:
+                task_outcome = self.task_repository.finish_run_binding_in_connection(
+                    conn,
+                    run_id=run_id,
+                    terminal_status=status_value,
+                    error=error,
+                    summary=str(row["summary"] or ""),
+                )
+                if task_outcome is not None:
+                    metadata["task_outcome"] = task_outcome
             conn.execute(
                 """
                 UPDATE runs
@@ -297,24 +251,34 @@ class SQLiteRunRepository:
                 """,
                 (status_value, self._json_field(metadata), run_id),
             )
-
-        finished = self.get_run(run_id)
-        if finished is None:
-            raise KeyError(run_id)
-        self.append_event(
-            run_id,
-            {
-                "type": "run_finished",
-                "run_id": run_id,
-                "conversation_id": finished["conversation_id"],
-                "kind": finished["kind"],
-                "target_node_id": finished["target_node_id"],
-                "status": status_value,
-                "error": error,
-                "finished_at": finished["finished_at"],
-            },
-        )
-        return self.get_run(run_id) or finished
+            finished_row = conn.execute(
+                f"SELECT {RUN_COLUMNS} FROM runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+            if finished_row is None:
+                raise KeyError(run_id)
+            finished = self._run_from_row(finished_row)
+            self._append_event_in_connection(
+                conn,
+                run_id,
+                {
+                    "type": "run_finished",
+                    "run_id": run_id,
+                    "conversation_id": finished["conversation_id"],
+                    "kind": finished["kind"],
+                    "target_node_id": finished["target_node_id"],
+                    "status": status_value,
+                    "error": error,
+                    "finished_at": finished["finished_at"],
+                },
+            )
+            current_row = conn.execute(
+                f"SELECT {RUN_COLUMNS} FROM runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+            if current_row is None:
+                raise KeyError(run_id)
+            return self._run_from_row(current_row)
 
     def request_stop(self, run_id: str) -> bool:
         with self.persistence.connect() as conn:
@@ -347,9 +311,10 @@ class SQLiteRunRepository:
     def mark_unfinished_as_interrupted(self) -> list[str]:
         placeholders = ",".join("?" for _ in FINISHED_STATUSES)
         with self.persistence.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
                 f"""
-                SELECT id
+                SELECT id, summary, metadata_json
                 FROM runs
                 WHERE status NOT IN ({placeholders})
                 ORDER BY created_at, id
@@ -357,36 +322,125 @@ class SQLiteRunRepository:
                 tuple(sorted(FINISHED_STATUSES)),
             ).fetchall()
             run_ids = [row["id"] for row in rows]
-            for run_id in run_ids:
+            for row in rows:
+                run_id = row["id"]
+                metadata = self._load_json(row["metadata_json"]) or {}
+                metadata["error"] = "interrupted on startup"
+                if self.task_repository is not None:
+                    task_outcome = self.task_repository.finish_run_binding_in_connection(
+                        conn,
+                        run_id=run_id,
+                        terminal_status="interrupted",
+                        error="interrupted on startup",
+                        summary=str(row["summary"] or ""),
+                    )
+                    if task_outcome is not None:
+                        metadata["task_outcome"] = task_outcome
                 conn.execute(
                     """
                     UPDATE runs
                     SET status = 'interrupted',
+                        metadata_json = ?,
                         finished_at = strftime('%s', 'now'),
                         updated_at = strftime('%s', 'now')
                     WHERE id = ?
                     """,
-                    (run_id,),
+                    (self._json_field(metadata), run_id),
                 )
-
-        for run_id in run_ids:
-            run = self.get_run(run_id)
-            if run is None:
-                continue
-            self.append_event(
-                run_id,
-                {
-                    "type": "run_finished",
-                    "run_id": run_id,
-                    "conversation_id": run["conversation_id"],
-                    "kind": run["kind"],
-                    "target_node_id": run["target_node_id"],
-                    "status": "interrupted",
-                    "error": "interrupted on startup",
-                    "finished_at": run["finished_at"],
-                },
-            )
+                run = conn.execute(
+                    f"SELECT {RUN_COLUMNS} FROM runs WHERE id = ?",
+                    (run_id,),
+                ).fetchone()
+                if run is not None:
+                    snapshot = self._run_from_row(run)
+                    self._append_event_in_connection(
+                        conn,
+                        run_id,
+                        {
+                            "type": "run_finished",
+                            "run_id": run_id,
+                            "conversation_id": snapshot["conversation_id"],
+                            "kind": snapshot["kind"],
+                            "target_node_id": snapshot["target_node_id"],
+                            "status": "interrupted",
+                            "error": "interrupted on startup",
+                            "finished_at": snapshot["finished_at"],
+                        },
+                    )
         return run_ids
+
+    def _append_event_in_connection(
+        self,
+        conn: Any,
+        run_id: str,
+        payload: dict[str, Any],
+    ) -> Any:
+        run = conn.execute(
+            """
+            SELECT conversation_id, kind, target_node_id, event_count
+            FROM runs
+            WHERE id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        if run is None:
+            raise KeyError(run_id)
+        event_index = int(run["event_count"])
+        event_payload = dict(payload)
+        event_payload.setdefault("run_id", run_id)
+        event_payload.setdefault("conversation_id", run["conversation_id"])
+        event_payload.setdefault("kind", run["kind"])
+        event_payload.setdefault("target_node_id", run["target_node_id"])
+        event_payload["event_index"] = event_index
+        stored = self._store_text_content(
+            conn,
+            self._json_field(event_payload) or "{}",
+        )
+        event_type = str(
+            event_payload.get("type")
+            or event_payload.get("event_type")
+            or event_payload.get("status")
+            or "event"
+        )
+        conn.execute(
+            """
+            INSERT INTO run_events (
+              run_id,
+              conversation_id,
+              event_index,
+              event_type,
+              payload_inline,
+              payload_blob_id,
+              created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, strftime('%s', 'now'))
+            """,
+            (
+                run_id,
+                run["conversation_id"],
+                event_index,
+                event_type,
+                stored.inline,
+                stored.blob_id,
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE runs
+            SET event_count = event_count + 1,
+                updated_at = strftime('%s', 'now')
+            WHERE id = ?
+            """,
+            (run_id,),
+        )
+        return conn.execute(
+            """
+            SELECT *
+            FROM run_events
+            WHERE run_id = ? AND event_index = ?
+            """,
+            (run_id, event_index),
+        ).fetchone()
 
     def _event_from_row(self, row: Any) -> dict[str, Any]:
         payload_text = row["payload_inline"]

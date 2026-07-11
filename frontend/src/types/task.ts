@@ -1,31 +1,22 @@
-export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'blocked' | 'cancelled';
-export type TaskOwnerType = 'assistant' | 'subagent' | 'workflow' | 'command';
+export type TaskStepStatus = 'pending' | 'blocked' | 'completed';
+export type TaskStatus = 'pending' | 'blocked';
+export type TaskExecutionState = 'idle' | 'running' | 'stopping';
+export type TaskContextMode = 'attached' | 'detached';
 
-export interface TaskRecord {
-  task_id: string;
-  conversation_id: string;
+export interface ActiveTaskStep {
+  position: number;
   title: string;
   detail: string;
-  status: TaskStatus | string;
-  owner_type: TaskOwnerType | string;
-  owner_run_id?: string | null;
-  created_by_run_id?: string | null;
-  evidence_run_id?: string | null;
+  status: TaskStepStatus;
   evidence_summary: string;
-  metadata?: Record<string, unknown>;
-  created_at: number;
-  updated_at: number;
-  finished_at?: number | null;
 }
 
-export interface CreateTaskRequest {
+export interface ActiveTaskRecord {
   title: string;
-  detail?: string;
-}
-
-export interface UpdateTaskRequest {
-  title?: string;
-  detail?: string;
-  status?: TaskStatus | string;
-  evidence_summary?: string;
+  detail: string;
+  status: TaskStatus;
+  execution_state: TaskExecutionState;
+  active_run_id?: string | null;
+  active_step?: number | null;
+  steps: ActiveTaskStep[];
 }

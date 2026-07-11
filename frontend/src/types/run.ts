@@ -1,5 +1,5 @@
 export type RunKind = 'chat' | 'side_question' | 'subagent' | 'command' | 'workflow' | 'workflow_step' | 'direct_response';
-export type RunStatus = 'queued' | 'running' | 'waiting_approval' | 'stopping' | 'completed' | 'failed' | 'cancelled';
+export type RunStatus = 'queued' | 'running' | 'waiting_approval' | 'stopping' | 'completed' | 'failed' | 'cancelled' | 'interrupted' | 'stopped';
 
 export interface RunRecord {
   run_id: string;
@@ -11,6 +11,7 @@ export interface RunRecord {
   created_by_run_id?: string | null;
   cancellation_parent_run_id?: string | null;
   summary?: string;
+  step?: number | null;
   event_count: number;
   metadata?: Record<string, unknown>;
   created_at: number;

@@ -6,7 +6,12 @@ from typing import Any, Dict, Optional
 
 from .base import BaseTool
 from .code_tools import CodeToolConfig, CodeToolError, CodeWorkspace
+from .task_contract import task_step_parameter_schema
+from ..runs.types import FINISHED_RUN_STATUSES
 from ..shell_profile import ShellProfileResolver, render_command_tool_guidance
+
+
+FINISHED_STATUS_VALUES = {status.value for status in FINISHED_RUN_STATUSES}
 
 
 def _runtime_context(kwargs: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -59,7 +64,8 @@ class StartBackgroundCommandTool(BaseTool):
             "Start a true background command in the code workspace and return a command_run_id immediately. "
             "Use command tools for runtime work such as tests, builds, scripts, servers, git, or package-manager commands. "
             "Do not use command tools for ordinary file listing, file reading, or text search; use list_files, read_file, and search_files instead. "
-            "Use run_command for foreground command execution; it auto-backgrounds commands that keep running past the initial wait window.\n\n"
+            "Use run_command for foreground command execution; it auto-backgrounds commands that keep running past the initial wait window. "
+            "Do not report completion, exit code, or output from this launch response; consume a terminal read_command or wait_command result first.\n\n"
             f"{render_command_tool_guidance(profile)}"
         )
 
@@ -71,7 +77,7 @@ class StartBackgroundCommandTool(BaseTool):
                 "command": {"type": "string"},
                 "cwd": {"type": "string", "default": "."},
                 "timeout_seconds": {"type": "integer", "minimum": 1},
-                "task_id": {"type": "string", "description": "Optional TaskLedger task id to bind this command run."},
+                "step": task_step_parameter_schema(),
             },
             "required": ["command"],
         }
@@ -104,11 +110,18 @@ class StartBackgroundCommandTool(BaseTool):
             cancellation_parent_run_id=None,
             summary=command[:80],
             timeout_seconds=timeout,
+            step=kwargs.get("step"),
+            task_context_mode=str(context.get("task_context_mode") or "attached"),
+            task_generation_id=str(context.get("task_generation_id") or "") or None,
+            task_revision=(
+                int(context["task_revision"])
+                if context.get("task_revision") is not None
+                else None
+            ),
             metadata={
                 "tool_name": self.name,
                 "tool_call_id": context.get("tool_call_id"),
                 "workspace_relative_cwd": self.workspace.relative(cwd),
-                "task_id": kwargs.get("task_id") or context.get("task_id"),
                 "agent_name": context.get("agent_name"),
                 "source_run_id": context.get("run_id"),
                 "source_run_kind": context.get("run_kind"),
@@ -124,9 +137,11 @@ class StartBackgroundCommandTool(BaseTool):
             "kind": "command",
             "command_run_id": run["run_id"],
             "run_id": run["run_id"],
+            "result_observed": False,
             "shell": snapshot.get("shell") or run.get("metadata", {}).get("shell"),
             "message": (
-                "Command is running in the background as a managed side run. "
+                "Command launch is confirmed, but this response does not contain the command result. "
+                "Do not report completion, exit code, or output from it. "
                 "Use read_command to inspect it, wait_command only when this answer must join the result, "
                 "or stop_command to cancel it."
             ),
@@ -175,7 +190,7 @@ class WaitCommandTool(BaseTool):
             return _json({"error": {"type": "not_found", "message": "command run not found", "command_run_id": run_id}})
         snapshot["wait_timed_out"] = False
         context = _runtime_context(kwargs) or {}
-        if snapshot.get("status") in {"completed", "failed", "cancelled"} and hasattr(executor, "mark_observed"):
+        if snapshot.get("status") in FINISHED_STATUS_VALUES and hasattr(executor, "mark_observed"):
             await executor.mark_observed(
                 run_id,
                 observer_run_id=str(context.get("run_id") or "") or None,
@@ -219,7 +234,7 @@ class ReadCommandTool(BaseTool):
         if snapshot is None:
             return _json({"error": {"type": "not_found", "message": "command run not found", "command_run_id": run_id}})
         context = _runtime_context(kwargs) or {}
-        if snapshot.get("status") in {"completed", "failed", "cancelled"} and context.get("run_id") and hasattr(executor, "mark_observed"):
+        if snapshot.get("status") in FINISHED_STATUS_VALUES and context.get("run_id") and hasattr(executor, "mark_observed"):
             await executor.mark_observed(
                 run_id,
                 observer_run_id=str(context.get("run_id") or "") or None,

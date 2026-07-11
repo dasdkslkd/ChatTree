@@ -51,6 +51,7 @@ async def _provider_exception_streams_and_persists_real_error(tmp_path):
             conversation.metadata["id"],
             "hello",
             model_id="fake-model",
+            parent_node_id=conversation.current_node_id,
         )
     ]
 

@@ -1,5 +1,7 @@
 import asyncio
 
+import pytest
+
 from backend.core.chat.conversation import Conversation
 from backend.core.chat.node import NodeManager
 from backend.core.config.types import Message, Role
@@ -12,7 +14,7 @@ class MemoryNotificationRepository:
     def __init__(self):
         self.items = {}
 
-    def upsert_for_run(self, *, conversation_id, source_run_id, source_run_kind, task_id=None, summary="", content="", payload=None):
+    def upsert_for_run(self, *, conversation_id, source_run_id, source_run_kind, summary="", content="", payload=None):
         item = self.items.get(source_run_id) or {
             "id": f"notification-{source_run_id}",
             "conversation_id": conversation_id,
@@ -22,7 +24,6 @@ class MemoryNotificationRepository:
             "delivery_node_id": None,
         }
         item.update({
-            "task_id": task_id,
             "summary": summary,
             "content": content,
             "payload": payload or {},
@@ -42,9 +43,15 @@ class MemoryNotificationRepository:
                 return dict(item)
         return None
 
+    def get_by_source_run(self, source_run_id):
+        item = self.items.get(source_run_id)
+        return dict(item) if item else None
+
     def bind(self, notification_id, delivery_node_id, *, bound_by):
         for item in self.items.values():
             if item["id"] == notification_id:
+                if item.get("status") == "delivering":
+                    raise ValueError(f"notification {notification_id} is delivering")
                 item["status"] = "bound"
                 item["delivery_node_id"] = delivery_node_id
                 item["bound_by"] = bound_by
@@ -94,6 +101,13 @@ class MemoryNotificationRepository:
             if item.get("conversation_id") == conversation_id
             and item.get("delivery_node_id") == node_id
             and item.get("status") == "delivering"
+        ]
+
+    def list_pending_publications(self):
+        return [
+            dict(item)
+            for item in self.items.values()
+            if item.get("status") in {"unbound", "bound", "delivering"}
         ]
 
 
@@ -252,6 +266,7 @@ def test_cancelled_source_run_still_delivers_bound_notification():
     class FakeChatManager:
         def __init__(self):
             self._active_controllers = {}
+            self.calls = []
 
         def get_conversation(self, conversation_id):
             class FakeConversation:
@@ -260,6 +275,7 @@ def test_cancelled_source_run_still_delivers_bound_notification():
             return FakeConversation()
 
         async def send_message_stream(self, **kwargs):
+            self.calls.append(kwargs)
             yield StreamChunk(
                 status=StreamStatus.START,
                 content="",
@@ -278,11 +294,13 @@ def test_cancelled_source_run_still_delivers_bound_notification():
     async def scenario():
         repository = MemoryNotificationRepository()
         run_manager = RunManager()
+        chat_manager = FakeChatManager()
         service = TaskNotificationService(
             repository=repository,
             run_manager=run_manager,
-            chat_manager=FakeChatManager(),
+            chat_manager=chat_manager,
         )
+        run_manager.add_finish_listener(service.handle_run_finished)
         source = await run_manager.create_run(
             conversation_id="conv-1",
             kind=RunKind.COMMAND,
@@ -299,7 +317,15 @@ def test_cancelled_source_run_still_delivers_bound_notification():
             trigger=False,
         )
         await run_manager.finish_run(source.run_id, RunStatus.CANCELLED, "user stop")
-        await service.try_deliver(notification["id"])
+        await asyncio.sleep(0)
+        assert chat_manager.calls == []
+
+        await service.publish_run_notification(
+            run_id=source.run_id,
+            source_status="cancelled",
+            summary="Command cancelled",
+            content="user stop",
+        )
         await asyncio.sleep(0)
 
         assert repository.items[source.run_id]["status"] == "delivered"
@@ -362,5 +388,115 @@ def test_cancelled_notification_delivery_is_not_marked_delivered():
         await asyncio.sleep(0)
 
         assert repository.items[source.run_id]["status"] == "delivery_cancelled"
+
+    asyncio.run(scenario())
+
+
+def test_startup_reconciliation_recovers_terminal_notification_content():
+    async def scenario():
+        repository = MemoryNotificationRepository()
+        run_manager = RunManager()
+        service = TaskNotificationService(repository=repository, run_manager=run_manager)
+        source = await run_manager.create_run(
+            conversation_id="conv-1",
+            kind=RunKind.COMMAND,
+            anchor_node_id="node-1",
+            summary="command",
+            metadata={
+                "command": "echo ok",
+                "cwd": ".",
+                "task_outcome": {
+                    "kind": "run_finished",
+                    "task_status": "active",
+                    "step": 2,
+                    "step_status": "released",
+                    "run_status": "interrupted",
+                },
+            },
+        )
+        await service.register_run_notification(
+            run_id=source.run_id,
+            summary="Command running",
+        )
+        await run_manager.finish_run(source.run_id, RunStatus.INTERRUPTED, "restart")
+
+        await service.reconcile_terminal_publications()
+
+        recovered = repository.items[source.run_id]
+        assert recovered["payload"]["source_status"] == "interrupted"
+        assert recovered["payload"]["task_outcome"] == {
+            "kind": "run_finished",
+            "task_status": "active",
+            "step": 2,
+            "step_status": "released",
+            "run_status": "interrupted",
+        }
+        assert recovered["summary"] == "Command interrupted"
+        assert '"status": "interrupted"' in recovered["content"]
+
+    asyncio.run(scenario())
+
+
+def test_startup_reconciliation_releases_interrupted_delivery():
+    async def scenario():
+        repository = MemoryNotificationRepository()
+        run_manager = RunManager()
+        service = TaskNotificationService(repository=repository, run_manager=run_manager)
+        source = await run_manager.create_run(
+            conversation_id="conv-1",
+            kind=RunKind.COMMAND,
+            anchor_node_id="node-1",
+        )
+        await run_manager.finish_run(source.run_id, RunStatus.COMPLETED)
+        notification = await service.publish_run_notification(
+            run_id=source.run_id,
+            source_status="completed",
+            summary="Command completed",
+            content="done",
+        )
+        delivery = await run_manager.create_run(
+            conversation_id="conv-1",
+            kind=RunKind.CHAT,
+            anchor_node_id="node-1",
+        )
+        repository.mark_delivering(notification["id"], delivery.run_id)
+        await run_manager.finish_run(delivery.run_id, RunStatus.INTERRUPTED)
+
+        await service.reconcile_terminal_publications()
+
+        assert repository.get(notification["id"])["status"] == "delivery_cancelled"
+
+    asyncio.run(scenario())
+
+
+def test_delivering_notification_cannot_be_rebound():
+    async def scenario():
+        repository = MemoryNotificationRepository()
+        run_manager = RunManager()
+        service = TaskNotificationService(repository=repository, run_manager=run_manager)
+        source = await run_manager.create_run(
+            conversation_id="conv-1",
+            kind=RunKind.COMMAND,
+            anchor_node_id="node-1",
+        )
+        await run_manager.finish_run(source.run_id, RunStatus.COMPLETED)
+        notification = await service.publish_run_notification(
+            run_id=source.run_id,
+            source_status="completed",
+            summary="done",
+            content="done",
+        )
+        delivery = await run_manager.create_run(
+            conversation_id="conv-1",
+            kind=RunKind.CHAT,
+            anchor_node_id="node-1",
+        )
+        repository.mark_delivering(notification["id"], delivery.run_id)
+
+        with pytest.raises(ValueError, match="delivering"):
+            await service.bind(
+                notification_id=notification["id"],
+                delivery_node_id="node-2",
+            )
 
     asyncio.run(scenario())

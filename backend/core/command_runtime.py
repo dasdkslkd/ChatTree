@@ -2,6 +2,7 @@
 
 import asyncio
 import locale
+import logging
 import os
 import subprocess
 import signal
@@ -11,11 +12,13 @@ from time import time
 from typing import Any, Deque, Dict, Optional
 
 from .runs import RunKind, RunManager, RunStatus
+from .runs.public import public_run_dict
 from .runs.types import FINISHED_RUN_STATUSES
 from .shell_profile import ShellProfile, ShellProfileResolver
-from .tasks import TaskLedger, TaskOwnerType, TaskStatus
+from .tasks import ActiveTaskService
 
 FINISHED_STATUS_VALUES = {status.value for status in FINISHED_RUN_STATUSES}
+logger = logging.getLogger(__name__)
 
 
 def _decode_bytes(value: bytes) -> str:
@@ -53,12 +56,12 @@ class CommandExecutor:
         *,
         max_tail_chars: int = 12000,
         shell_profile: Optional[ShellProfile] = None,
-        task_ledger: Optional[TaskLedger] = None,
+        task_service: Optional[ActiveTaskService] = None,
     ) -> None:
         self.run_manager = run_manager
         self.max_tail_chars = max(1000, int(max_tail_chars))
         self.shell_profile = shell_profile or ShellProfileResolver().resolve()
-        self.task_ledger = task_ledger
+        self.task_service = task_service
         self._processes: Dict[str, Any] = {}
         self._tasks: Dict[str, asyncio.Task[None]] = {}
         self._stdout_tail: Dict[str, Deque[str]] = {}
@@ -77,13 +80,24 @@ class CommandExecutor:
         summary: str = "",
         timeout_seconds: Optional[int] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        step: Optional[int] = None,
+        task_context_mode: str = "attached",
+        task_generation_id: Optional[str] = None,
+        task_revision: Optional[int] = None,
     ) -> Dict[str, Any]:
         cwd_path = str(Path(cwd).expanduser().resolve())
-        task_id = str((metadata or {}).get("task_id") or "")
-        if self.task_ledger is not None and task_id:
-            task = await self.task_ledger.get_task(conversation_id, task_id)
-            if task is None:
-                raise KeyError(task_id)
+        run_metadata = dict(metadata or {})
+        task_binding = None
+        if step is not None:
+            if self.task_service is None:
+                raise RuntimeError("task service is not configured")
+            task_binding = await self.task_service.prepare_run_binding(
+                conversation_id=conversation_id,
+                step=step,
+                context_mode=task_context_mode,
+                expected_generation=task_generation_id,
+                expected_revision=task_revision,
+            )
         shell_snapshot = self.shell_profile.snapshot()
         run = await self.run_manager.create_run(
             conversation_id=conversation_id,
@@ -99,29 +113,24 @@ class CommandExecutor:
                 "shell_id": self.shell_profile.id,
                 "platform": self.shell_profile.platform,
                 "timeout_seconds": timeout_seconds,
-                **dict(metadata or {}),
+                **run_metadata,
             },
+            task_binding=task_binding,
         )
-        if self.task_ledger is not None and task_id:
-            await self.task_ledger.bind_run(
-                conversation_id=conversation_id,
-                task_id=task_id,
-                run_id=run.run_id,
-                owner_type=TaskOwnerType.COMMAND,
-            )
         service = getattr(self.run_manager, "notification_service", None)
         if service is not None and not self._suppresses_task_notification(run.to_dict()):
-            await service.register_run_notification(
-                run_id=run.run_id,
-                summary=summary or command[:80] or "Command running",
-                payload={
-                    "command_run_id": run.run_id,
-                    "command": command,
-                    "cwd": cwd_path,
-                    "task_id": task_id or None,
-                },
-                task_id=task_id or None,
-            )
+            try:
+                await service.register_run_notification(
+                    run_id=run.run_id,
+                    summary=summary or command[:80] or "Command running",
+                    payload={
+                        "command_run_id": run.run_id,
+                        "command": command,
+                        "cwd": cwd_path,
+                    },
+                )
+            except Exception:
+                logger.exception("Failed to register command notification for %s", run.run_id)
         self._stdout_tail[run.run_id] = deque()
         self._stderr_tail[run.run_id] = deque()
         task = asyncio.create_task(self._run_process(
@@ -175,6 +184,9 @@ class CommandExecutor:
         command_status = run.get("status")
         error = (run.get("metadata") or {}).get("error")
         events = self.run_manager.read_events(run_id, 0)
+        public_run = public_run_dict(run)
+        public_metadata = dict(public_run["metadata"])
+        task_outcome = public_metadata.pop("task_outcome", None)
         stdout_parts: list[str] = []
         stderr_parts: list[str] = []
         for payload in events:
@@ -190,12 +202,16 @@ class CommandExecutor:
                 error = payload.get("error", error)
         stdout = "".join(stdout_parts)
         stderr = "".join(stderr_parts)
-        return {
+        snapshot = {
             "command_run_id": run_id,
             "run_id": run_id,
             "status": run.get("status"),
             "command_status": command_status,
             "kind": run.get("kind"),
+        }
+        if isinstance(task_outcome, dict):
+            snapshot["task_outcome"] = task_outcome
+        snapshot.update({
             "command": (run.get("metadata") or {}).get("command"),
             "cwd": (run.get("metadata") or {}).get("cwd"),
             "shell": (run.get("metadata") or {}).get("shell"),
@@ -208,8 +224,11 @@ class CommandExecutor:
             "stdout_tail": stdout[-self.max_tail_chars:],
             "stderr_tail": stderr[-self.max_tail_chars:],
             "error": error,
-            "metadata": dict(run.get("metadata") or {}),
-        }
+            "metadata": public_metadata,
+        })
+        if public_run.get("step") is not None:
+            snapshot["step"] = public_run["step"]
+        return snapshot
 
     async def stop(self, run_id: str) -> bool:
         run = self.run_manager.get_run(run_id)
@@ -237,6 +256,7 @@ class CommandExecutor:
         error: str | None = None
         exit_code: int | None = None
         started_at = time()
+        completion_handled_by_fallback = False
         argv = self.shell_profile.command_argv(command)
         try:
             try:
@@ -262,6 +282,7 @@ class CommandExecutor:
                 run = self.run_manager.get_run(run_id) or {}
                 final_status = RunStatus(str(run.get("status") or RunStatus.FAILED.value))
                 error = (run.get("metadata") or {}).get("error")
+                completion_handled_by_fallback = True
                 return
             self._processes[run_id] = process
             await self.run_manager.append_event(run_id, {
@@ -311,16 +332,6 @@ class CommandExecutor:
                 "shell": shell_snapshot,
                 "shell_id": self.shell_profile.id,
             })
-            await self._enqueue_completion(
-                run_id=run_id,
-                conversation_id=conversation_id,
-                anchor_node_id=anchor_node_id,
-                command=command,
-                cwd=cwd,
-                exit_code=exit_code,
-                final_status=final_status,
-                error=error,
-            )
         except Exception as exc:
             final_status = RunStatus.FAILED
             error = f"{type(exc).__name__}: {exc} while starting Command {command!r} in {cwd}"
@@ -334,18 +345,22 @@ class CommandExecutor:
                 "shell": shell_snapshot,
                 "shell_id": self.shell_profile.id,
             })
-            await self._enqueue_completion(
-                run_id=run_id,
-                conversation_id=conversation_id,
-                anchor_node_id=anchor_node_id,
-                command=command,
-                cwd=cwd,
-                exit_code=exit_code,
-                final_status=final_status,
-                error=error,
-            )
         finally:
             await self.run_manager.finish_run(run_id, final_status, error)
+            if not completion_handled_by_fallback:
+                try:
+                    await self._enqueue_completion(
+                        run_id=run_id,
+                        conversation_id=conversation_id,
+                        anchor_node_id=anchor_node_id,
+                        command=command,
+                        cwd=cwd,
+                        exit_code=exit_code,
+                        final_status=final_status,
+                        error=error,
+                    )
+                except Exception:
+                    logger.exception("Failed to publish command notification for %s", run_id)
             self._processes.pop(run_id, None)
             self._tasks.pop(run_id, None)
 
@@ -450,17 +465,20 @@ class CommandExecutor:
             "shell_id": self.shell_profile.id,
             "backend": "popen",
         })
-        await self._enqueue_completion(
-            run_id=run_id,
-            conversation_id=conversation_id,
-            anchor_node_id=anchor_node_id,
-            command=command,
-            cwd=cwd,
-            exit_code=exit_code,
-            final_status=final_status,
-            error=error,
-        )
         await self.run_manager.finish_run(run_id, final_status, error)
+        try:
+            await self._enqueue_completion(
+                run_id=run_id,
+                conversation_id=conversation_id,
+                anchor_node_id=anchor_node_id,
+                command=command,
+                cwd=cwd,
+                exit_code=exit_code,
+                final_status=final_status,
+                error=error,
+            )
+        except Exception:
+            logger.exception("Failed to publish command notification for %s", run_id)
 
     async def _read_blocking_stream(
         self,
@@ -534,15 +552,6 @@ class CommandExecutor:
             "stderr_tail": self._tail_text(run_id, "stderr"),
             "error": error,
         }
-        task_id = await self._ensure_notification_task(
-            run_id=run_id,
-            conversation_id=conversation_id,
-            command=command,
-            final_status=final_status,
-            error=error,
-        )
-        if task_id:
-            payload["task_id"] = task_id
         await self.run_manager.notification_service.publish_run_notification(
             run_id=run_id,
             source_status=status_text,
@@ -551,9 +560,7 @@ class CommandExecutor:
             payload={
                 "command_run_id": run_id,
                 "exit_code": exit_code,
-                "task_id": task_id,
             },
-            task_id=task_id,
         )
 
     def _suppresses_task_notification(self, run: Dict[str, Any]) -> bool:
@@ -578,55 +585,6 @@ class CommandExecutor:
                 return True
             created_by_run_id = str(parent.get("created_by_run_id") or "")
         return False
-
-    async def _ensure_notification_task(
-        self,
-        *,
-        run_id: str,
-        conversation_id: str,
-        command: str,
-        final_status: RunStatus,
-        error: Optional[str],
-    ) -> Optional[str]:
-        if self.task_ledger is None:
-            return None
-        run_snapshot = self.run_manager.get_run(run_id) or {}
-        metadata = dict(run_snapshot.get("metadata") or {})
-        task_id = str(metadata.get("task_id") or "")
-        if not task_id:
-            existing = await self.task_ledger.find_by_owner_run(conversation_id, run_id)
-            if existing is not None:
-                task_id = existing.task_id
-            else:
-                task = await self.task_ledger.create_task(
-                    conversation_id=conversation_id,
-                    title=(command or "Command")[:160],
-                    detail=command or "",
-                    created_by_run_id=str(run_snapshot.get("created_by_run_id") or "") or None,
-                    owner_type=TaskOwnerType.COMMAND,
-                    metadata={"origin": "command_notification"},
-                )
-                task_id = task.task_id
-                await self.task_ledger.bind_run(
-                    conversation_id=conversation_id,
-                    task_id=task_id,
-                    run_id=run_id,
-                    owner_type=TaskOwnerType.COMMAND,
-                )
-                await self.run_manager.update_metadata(run_id, {"task_id": task_id})
-        status = TaskStatus.COMPLETED
-        if final_status == RunStatus.FAILED:
-            status = TaskStatus.BLOCKED
-        elif final_status == RunStatus.CANCELLED:
-            status = TaskStatus.CANCELLED
-        await self.task_ledger.update_task(
-            conversation_id=conversation_id,
-            task_id=task_id,
-            status=status,
-            evidence_run_id=run_id,
-            evidence_summary=error or f"Command {final_status.value}",
-        )
-        return task_id or None
 
     async def _kill_process_tree(self, process: asyncio.subprocess.Process) -> None:
         if process.returncode is not None:
