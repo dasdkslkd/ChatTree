@@ -103,7 +103,7 @@ export function getSlashRunLabel(kind: string, pendingUserMessage?: string | nul
   if (kind === 'command') return 'command';
   if (kind === 'workflow') return 'workflow';
   if (kind === 'direct_response') {
-    const match = pendingUserMessage?.match(/^\s*\/(status|help|capabilities)\b/i);
+    const match = pendingUserMessage?.match(/^\s*\/(status|help|capabilities|prune-summary|prune)\b/i);
     return match ? match[1].toLowerCase() : 'status/help/capabilities';
   }
   return kind;

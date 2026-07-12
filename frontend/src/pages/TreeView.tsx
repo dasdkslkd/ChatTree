@@ -3,10 +3,20 @@ import dagre from 'dagre';
 import { useConversationStore, conversationStore } from '../store/conversationStore';
 import { useNavigationStore } from '../store/navigationStore';
 import { Button } from '@/components/ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { TextTooltip } from '@/components/ui/text-tooltip';
+import { Textarea } from '@/components/ui/textarea';
 import { ZoomIn, ZoomOut, Maximize2, ArrowDown, ArrowRight, Trash2, Scissors, FileText, Loader2, X } from 'lucide-react';
-import { conversationApi, type PruneSummaryRecord, type TreeNode } from '../api/conversation';
+import type { PruneSummaryRecord, TreeNode } from '../api/conversation';
 import { getTreeUserContent } from '../utils/taskNotificationVisibility';
+import { useRunManager } from '../hooks/useRunManager';
+import { streamManager } from '../services/streamManager';
 
 interface LayoutNode {
   id: string;
@@ -29,6 +39,14 @@ interface ContextMenuState {
   nodeId: string;
   label: string;
   isRoot: boolean;
+}
+
+interface PrunePromptState {
+  nodeId: string;
+  label: string;
+  instructions: string;
+  isSubmitting: boolean;
+  error: string | null;
 }
 
 const NODE_WIDTH = 220;
@@ -54,14 +72,32 @@ export default function TreeView() {
   const containerRef = useRef<HTMLDivElement>(null);
   const { currentConversation, treeData, loadTree, deleteNode } = useConversationStore();
   const { setChatViewMode } = useNavigationStore();
+  const runStates = useRunManager(currentConversation?.id ?? null);
 
   const [transform, setTransform] = useState({ x: 0, y: 0, scale: 1 });
   const [isPanning, setIsPanning] = useState(false);
   const [direction, setDirection] = useState<'TB' | 'LR'>('TB');
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
-  const [generatingNodeId, setGeneratingNodeId] = useState<string | null>(null);
+  const [prunePrompt, setPrunePrompt] = useState<PrunePromptState | null>(null);
   const [summaryModal, setSummaryModal] = useState<{ nodeLabel: string; summary: PruneSummaryRecord } | null>(null);
   const panStartRef = useRef({ x: 0, y: 0, tx: 0, ty: 0 });
+
+  const activePruneSummaryNodeIds = useMemo(() => {
+    const activeStatuses = new Set(['streaming', 'waiting_approval', 'stopping']);
+    const ids = new Set<string>();
+    for (const run of runStates) {
+      if (!activeStatuses.has(run.status)) continue;
+      const metadata = run.metadata || {};
+      const slashCommand = metadata.slash_command as { command?: unknown } | undefined;
+      const pendingPruneCommand = /^\s*\/(?:prune-summary|prune)\b/i.test(run.pendingUserMessage || '');
+      if (slashCommand?.command !== 'prune-summary' && !pendingPruneCommand) continue;
+      const targetNodeId = typeof metadata.target_node_id === 'string' && metadata.target_node_id
+        ? metadata.target_node_id
+        : run.anchorNodeId;
+      if (targetNodeId) ids.add(targetNodeId);
+    }
+    return ids;
+  }, [runStates]);
 
   useEffect(() => {
     if (currentConversation) {
@@ -222,42 +258,48 @@ export default function TreeView() {
     setContextMenu(null);
   }, [contextMenu, currentConversation, deleteNode]);
 
-  const handleGeneratePruneSummary = useCallback(async () => {
+  const handleGeneratePruneSummary = useCallback(() => {
     if (!contextMenu || !currentConversation) return;
-    const instructions = window.prompt(
-      `为「${contextMenu.label}」生成剪枝摘要。可选：输入摘要侧重点。`,
-      '',
-    );
-    if (instructions === null) return;
-    setGeneratingNodeId(contextMenu.nodeId);
+    setPrunePrompt({
+      nodeId: contextMenu.nodeId,
+      label: contextMenu.label,
+      instructions: '',
+      isSubmitting: false,
+      error: null,
+    });
     setContextMenu(null);
+  }, [contextMenu, currentConversation]);
+
+  const handleConfirmPruneSummary = useCallback(async () => {
+    if (!prunePrompt || !currentConversation) return;
+    setPrunePrompt((current) => current ? { ...current, isSubmitting: true, error: null } : current);
     try {
-      const result = await conversationApi.pruneSummary(currentConversation.id, contextMenu.nodeId, {
-        custom_instructions: instructions.trim() || null,
-      });
-      await loadTree(currentConversation.id);
-      setSummaryModal({
-        nodeLabel: contextMenu.label,
-        summary: {
-          id: result.summary_id,
-          type: 'prune_summary',
-          parent_node_id: result.parent_node_id,
-          created_at: Math.floor(Date.now() / 1000),
-          summary: result.summary,
-          covered_node_ids: result.covered_node_ids || [],
-          covered_direct_child_ids: result.covered_direct_child_ids || [],
-          compact_node_ids: result.compact_node_ids || [],
-          truncated_node_ids: result.truncated_node_ids || [],
-          coverage_notes: result.coverage_notes || [],
-          status: 'completed',
+      const instructions = prunePrompt.instructions.trim();
+      const content = `/prune-summary node:${prunePrompt.nodeId}${instructions ? ` ${instructions}` : ''}`;
+      setPrunePrompt(null);
+      void streamManager.startStream(
+        currentConversation.id,
+        {
+          content,
+          parent_node_id: prunePrompt.nodeId,
+          focus_new_node: false,
+          model_id: currentConversation.model_id,
+          provider_id: currentConversation.provider_id,
+          reasoning_effort: currentConversation.reasoning_effort,
+          thinking_enabled: currentConversation.thinking_enabled,
         },
-      });
+        content,
+        prunePrompt.nodeId,
+        prunePrompt.nodeId,
+      );
     } catch (err: any) {
-      window.alert(err?.response?.data?.detail || err?.message || '剪枝摘要生成失败');
-    } finally {
-      setGeneratingNodeId(null);
+      setPrunePrompt((current) => current ? {
+        ...current,
+        isSubmitting: false,
+        error: err?.message || '剪枝摘要启动失败',
+      } : current);
     }
-  }, [contextMenu, currentConversation, loadTree]);
+  }, [prunePrompt, currentConversation]);
 
   const handleViewPruneSummary = useCallback(() => {
     if (!contextMenu || !treeData) return;
@@ -414,7 +456,7 @@ export default function TreeView() {
                       </span>
                     </TextTooltip>
                   )}
-                  {generatingNodeId === node.id && (
+                  {activePruneSummaryNodeIds.has(node.id) && (
                     <span className="absolute bottom-1 left-2 inline-flex items-center gap-1 text-[9px] text-muted-foreground">
                       <Loader2 className="h-3 w-3 animate-spin" />
                       摘要中
@@ -460,6 +502,46 @@ export default function TreeView() {
           </button>
         </div>
       )}
+
+      <Dialog open={!!prunePrompt} onOpenChange={(open) => {
+        if (!open) setPrunePrompt(null);
+      }}>
+        <DialogContent className="max-w-[480px]">
+          <DialogHeader>
+            <DialogTitle>生成剪枝摘要</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="text-sm text-muted-foreground">
+              目标节点：{prunePrompt?.label}
+            </div>
+            <Textarea
+              value={prunePrompt?.instructions || ''}
+              onChange={(event) => setPrunePrompt((current) => current ? {
+                ...current,
+                instructions: event.target.value,
+              } : current)}
+              placeholder="可选：输入摘要侧重点，例如保留决策依据、工具结果或跨分支差异"
+              className="min-h-[120px]"
+              disabled={prunePrompt?.isSubmitting}
+              autoFocus
+            />
+            {prunePrompt?.error && (
+              <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                {prunePrompt.error}
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPrunePrompt(null)} disabled={prunePrompt?.isSubmitting}>
+              取消
+            </Button>
+            <Button onClick={handleConfirmPruneSummary} disabled={prunePrompt?.isSubmitting}>
+              {prunePrompt?.isSubmitting && <Loader2 className="h-4 w-4 animate-spin" />}
+              开始生成
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {summaryModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/60 p-4 backdrop-blur-sm">
