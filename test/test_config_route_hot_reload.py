@@ -114,3 +114,54 @@ def test_update_config_refreshes_tool_orchestrator_runtime_references(tmp_path, 
         ]
 
     asyncio.run(run())
+
+
+def test_update_config_stores_global_default_model_and_strips_provider_default(tmp_path, monkeypatch):
+    async def run():
+        FakeToolManager.instances = []
+        monkeypatch.setattr(config_route, "ToolManager", FakeToolManager)
+        monkeypatch.setattr(config_route, "ModelManager", FakeModelManager)
+
+        config_manager = Config(str(tmp_path / "config.json"))
+        config_manager.data = {
+            "provider": {
+                "demo": {
+                    "name": "Demo",
+                    "models": ["alpha"],
+                    "enabled": True,
+                    "default_model": "legacy",
+                }
+            },
+            "default_provider": "demo",
+            "default_model": "",
+        }
+        config_manager.save()
+
+        old_tool_manager = FakeToolManager(config_manager.data)
+        app = SimpleNamespace(
+            state=SimpleNamespace(
+                config_manager=config_manager,
+                tool_manager=old_tool_manager,
+            )
+        )
+
+        await config_route.update_config(
+            config_route.ConfigUpdateRequest(
+                default_model="alpha",
+                provider_configs={
+                    "demo": {
+                        "name": "Demo",
+                        "models": ["alpha", "beta"],
+                        "enabled": True,
+                        "default_model": "should-be-dropped",
+                    }
+                },
+            ),
+            SimpleNamespace(app=app),
+            config_manager,
+        )
+
+        assert config_manager.data["default_model"] == "alpha"
+        assert "default_model" not in config_manager.data["provider"]["demo"]
+
+    asyncio.run(run())

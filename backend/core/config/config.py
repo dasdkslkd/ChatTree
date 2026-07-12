@@ -23,7 +23,6 @@ _DEFAULT_PROVIDER_TEMPLATE: ModelProviderConfig = {
     'api_format': APIFormat.CHAT_COMPLETIONS,
     'hidden_models': [],
     'enabled': False,
-    'default_model': '',
 }
 
 class Config:
@@ -57,7 +56,7 @@ class Config:
     @staticmethod
     def _fresh_config() -> Dict[str, Any]:
         """返回空白配置"""
-        return {'provider': {}, 'default_provider': '', 'projects': {}}
+        return {'provider': {}, 'default_provider': '', 'default_model': '', 'projects': {}}
 
     def _save_data(self, data: Dict[str, Any]):
         """直接写入指定数据"""
@@ -93,6 +92,7 @@ class Config:
         if self.data.get('default_provider') == provider_id:
             providers = list(self.data['provider'].keys())
             self.data['default_provider'] = providers[0] if providers else ''
+            self.data['default_model'] = ''
         self.save()
         return True
 

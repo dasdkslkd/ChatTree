@@ -84,6 +84,17 @@ function defaultsFromMeta(meta: ModelMetadata | undefined): {
   };
 }
 
+export function selectVisibleDefaultModel(
+  configuredDefaultModel: string | null | undefined,
+  visibleModels: string[],
+): string | null {
+  const candidate = configuredDefaultModel || '';
+  if (candidate && visibleModels.includes(candidate)) {
+    return candidate;
+  }
+  return visibleModels[0] || null;
+}
+
 const CONFIG_REFRESH_TTL_MS = 30_000;
 let configLoadPromise: Promise<void> | null = null;
 let lastConfigLoadedAt = 0;
@@ -270,12 +281,10 @@ export const useModelStore = create<ModelState & ModelActions>()(
       const hiddenModels = pId ? (config.provider?.[pId]?.hidden_models || []) : [];
       const visibleModels = providerModels.filter(m => !hiddenModels.includes(m));
 
-      // 确定模型：metadata 中的 > provider 的 default_model > 第一个可见模型
+      // 确定模型：会话保存值 > 全局 default_model > 第一个可见模型。
       const mId = modelId && visibleModels.includes(modelId)
         ? modelId
-        : (pId && config.provider?.[pId]?.default_model && visibleModels.includes(config.provider[pId].default_model)
-          ? config.provider[pId].default_model
-          : visibleModels[0] || null);
+        : selectVisibleDefaultModel(config.default_model, visibleModels);
 
       // 推理设置：对话保存值优先；缺省回退到所选模型元数据的默认。
       const meta = get().getMetadata(pId, mId);
@@ -303,10 +312,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
         const providerModels = updatedModels[pId] || [];
         const hiddenModels = config.provider?.[pId]?.hidden_models || [];
         const visibleModels = providerModels.filter(m => !hiddenModels.includes(m));
-        const defaultModel = config.provider?.[pId]?.default_model;
-        const mId = defaultModel && visibleModels.includes(defaultModel)
-          ? defaultModel
-          : visibleModels[0] || null;
+        const mId = selectVisibleDefaultModel(config.default_model, visibleModels);
         const defs = defaultsFromMeta(get().getMetadata(pId, mId));
         set({
           currentProvider: pId,

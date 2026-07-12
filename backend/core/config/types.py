@@ -131,7 +131,6 @@ class ModelProviderConfig(TypedDict, total=False):
     api_format: str  # APIFormat 值: chat_completions, responses, anthropic, gemini
     hidden_models: List[str]  # 被隐藏的模型名称列表
     enabled: bool
-    default_model: str
 
 # class MultiModelConfig(TypedDict, total=False):
 #     """多模型配置"""

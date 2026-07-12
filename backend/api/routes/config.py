@@ -27,6 +27,7 @@ router = APIRouter()
 
 class ConfigUpdateRequest(BaseModel):
     default_provider: Optional[str] = None
+    default_model: Optional[str] = None
     provider_configs: Optional[Dict[str, Dict[str, Any]]] = None
     tools: Optional[Dict[str, Any]] = None
     projects: Optional[Dict[str, Dict[str, Any]]] = None
@@ -38,6 +39,12 @@ class AddProviderRequest(BaseModel):
     api_format: str = "chat_completions"
     base_url: str = ""
     api_key: str = ""
+
+
+def _provider_config_without_default_model(conf: Dict[str, Any]) -> Dict[str, Any]:
+    cleaned = dict(conf)
+    cleaned.pop("default_model", None)
+    return cleaned
 
 
 def _sync_runtime_managers(app, config_data: Dict[str, Any], model_manager, tool_manager: ToolManager) -> None:
@@ -260,13 +267,15 @@ async def update_config(
     try:
         if request.provider_configs:
             for provider, conf in request.provider_configs.items():
-                config_manager.data['provider'][provider] = conf
+                config_manager.data['provider'][provider] = _provider_config_without_default_model(conf)
         if request.tools is not None:
             config_manager.data['tools'] = request.tools
         if request.projects is not None:
             config_manager.data['projects'] = normalize_projects_config(request.projects)
         if request.default_provider is not None:
             config_manager.data['default_provider'] = request.default_provider
+        if request.default_model is not None:
+            config_manager.data['default_model'] = request.default_model
         config_manager.save()
 
         # 同步全局配置与运行中的模型管理器

@@ -36,7 +36,6 @@ export interface ModelProviderConfig {
   api_format: APIFormat;
   hidden_models: string[];
   enabled: boolean;
-  default_model: string;
 }
 
 export type McpTransport = 'streamable_http' | 'stdio';
@@ -233,6 +232,7 @@ export interface ProjectSettingsResponse {
 // 完整配置数据
 export interface ConfigData {
   default_provider: string;
+  default_model: string;
   provider: Record<string, ModelProviderConfig>;
   tools?: ToolsConfig;
   projects?: Record<string, ProjectCapabilityConfig>;
@@ -241,6 +241,7 @@ export interface ConfigData {
 // 配置更新请求
 export interface ConfigUpdateRequest {
   default_provider?: string;
+  default_model?: string;
   provider_configs?: Record<string, Partial<ModelProviderConfig>>;
   tools?: ToolsConfig;
   projects?: Record<string, ProjectCapabilityConfig>;

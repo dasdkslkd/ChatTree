@@ -47,7 +47,6 @@ const DEFAULT_PROVIDER_CONFIG: ModelProviderConfig = {
   api_format: 'chat_completions',
   hidden_models: [],
   enabled: false,
-  default_model: '',
 };
 
 function slugify(text: string): string {
@@ -105,6 +104,18 @@ export default function SettingsPage() {
     return config?.provider?.[providerId]?.name || providerId;
   };
 
+  const getVisibleProviderModels = (providerId: string): string[] => {
+    const provider = config?.provider?.[providerId];
+    if (!provider) return [];
+    const hidden = new Set(provider.hidden_models || []);
+    return (provider.models || []).filter((model) => !hidden.has(model));
+  };
+
+  const sanitizeProviderConfig = (provider: ModelProviderConfig): ModelProviderConfig => {
+    const { default_model: _ignored, ...rest } = provider as ModelProviderConfig & { default_model?: string };
+    return rest;
+  };
+
   const getApiFormatLabel = (format: string): string => {
     return API_FORMAT_OPTIONS.find(f => f.value === format)?.label || format;
   };
@@ -113,12 +124,28 @@ export default function SettingsPage() {
   const handleDefaultProviderChange = async (provider: string) => {
     if (!config) return;
     const prev = config.default_provider;
-    setConfig({ ...config, default_provider: provider });
+    const prevModel = config.default_model || '';
+    const visibleModels = getVisibleProviderModels(provider);
+    const nextModel = visibleModels.includes(prevModel) ? prevModel : (visibleModels[0] || '');
+    setConfig({ ...config, default_provider: provider, default_model: nextModel });
     try {
-      await configApi.update({ default_provider: provider });
+      await configApi.update({ default_provider: provider, default_model: nextModel });
       toast.success('默认提供商已更新');
     } catch {
-      setConfig(c => c ? { ...c, default_provider: prev } : c);
+      setConfig(c => c ? { ...c, default_provider: prev, default_model: prevModel } : c);
+      toast.error('保存失败');
+    }
+  };
+
+  const handleDefaultModelChange = async (model: string) => {
+    if (!config) return;
+    const prev = config.default_model || '';
+    setConfig({ ...config, default_model: model });
+    try {
+      await configApi.update({ default_model: model });
+      toast.success('默认模型已更新');
+    } catch {
+      setConfig(c => c ? { ...c, default_model: prev } : c);
       toast.error('保存失败');
     }
   };
@@ -162,7 +189,7 @@ export default function SettingsPage() {
   const openEditDialog = (providerId: string) => {
     const cfg = config?.provider?.[providerId] ?? { ...DEFAULT_PROVIDER_CONFIG, name: providerId };
     setEditProviderId(providerId);
-    setEditForm({ ...cfg, hidden_models: [...(cfg.hidden_models || [])] });
+    setEditForm(sanitizeProviderConfig({ ...cfg, hidden_models: [...(cfg.hidden_models || [])] }));
     setEditNewModelInput('');
     setEditDialogOpen(true);
   };
@@ -174,7 +201,7 @@ export default function SettingsPage() {
       setEditFetchingModels(true);
       // 先把对话框中的值保存到后端，确保获取列表用的是最新配置
       await configApi.update({
-        provider_configs: { [editProviderId]: editForm },
+        provider_configs: { [editProviderId]: sanitizeProviderConfig(editForm) },
       });
       const models = await modelApi.list(editProviderId);
       if (models?.length) {
@@ -220,9 +247,19 @@ export default function SettingsPage() {
     if (!editProviderId) return;
     try {
       setEditSaving(true);
-      await configApi.update({
-        provider_configs: { [editProviderId]: editForm },
-      });
+      const providerConfig = sanitizeProviderConfig(editForm);
+      const update = { provider_configs: { [editProviderId]: providerConfig } } as {
+        provider_configs: Record<string, Partial<ModelProviderConfig>>;
+        default_model?: string;
+      };
+      if (config?.default_provider === editProviderId) {
+        const hidden = new Set(providerConfig.hidden_models || []);
+        const visibleModels = (providerConfig.models || []).filter((model) => !hidden.has(model));
+        if (!visibleModels.includes(config.default_model || '')) {
+          update.default_model = visibleModels[0] || '';
+        }
+      }
+      await configApi.update(update);
       toast.success('已保存');
       setEditDialogOpen(false);
       await loadConfig();
@@ -260,6 +297,7 @@ export default function SettingsPage() {
 
   const enabledProviders = getEnabledProviders();
   const providerIds = config ? Object.keys(config.provider) : [];
+  const defaultProviderModels = config?.default_provider ? getVisibleProviderModels(config.default_provider) : [];
 
   return (
     <div className="flex flex-col h-screen bg-muted overflow-y-auto">
@@ -278,27 +316,48 @@ export default function SettingsPage() {
             </div>
             <Card>
               <CardContent className="pt-6">
-                <div className="space-y-2 mb-4">
-                  <Label>默认提供商</Label>
-                  {enabledProviders.length > 0 ? (
-                    <Select
-                      value={config?.default_provider || ''}
-                      onValueChange={handleDefaultProviderChange}
-                    >
-                      <SelectTrigger>
-                        <SelectValue placeholder="选择默认提供商" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {enabledProviders.map((p) => (
-                          <SelectItem key={p} value={p}>{getProviderDisplayName(p)}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  ) : (
-                    <p className="text-xs text-muted-foreground">请先在下方启用至少一个提供商</p>
-                  )}
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label>默认提供商</Label>
+                    {enabledProviders.length > 0 ? (
+                      <Select
+                        value={config?.default_provider || ''}
+                        onValueChange={handleDefaultProviderChange}
+                      >
+                        <SelectTrigger>
+                          <SelectValue placeholder="选择默认提供商" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {enabledProviders.map((p) => (
+                            <SelectItem key={p} value={p}>{getProviderDisplayName(p)}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">请先在下方启用至少一个提供商</p>
+                    )}
+                  </div>
+                  <div className="space-y-2">
+                    <Label>默认模型</Label>
+                    {config?.default_provider && defaultProviderModels.length > 0 ? (
+                      <Select
+                        value={config.default_model || ''}
+                        onValueChange={handleDefaultModelChange}
+                      >
+                        <SelectTrigger>
+                          <SelectValue placeholder="选择默认模型" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {defaultProviderModels.map((model) => (
+                            <SelectItem key={model} value={model}>{model}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">默认提供商暂无可见模型</p>
+                    )}
+                  </div>
                 </div>
-                <p className="text-xs text-muted-foreground">默认提供商将用于新对话的初始模型选择</p>
               </CardContent>
             </Card>
           </div>
@@ -547,23 +606,6 @@ export default function SettingsPage() {
               )}
             </div>
 
-            {/* 默认模型 */}
-            {editForm.models.length > 0 && (
-              <div className="space-y-2">
-                <Label>默认模型</Label>
-                <Select
-                  value={editForm.default_model || ''}
-                  onValueChange={(v) => setEditForm(f => ({ ...f, default_model: v }))}
-                >
-                  <SelectTrigger><SelectValue placeholder="选择默认模型" /></SelectTrigger>
-                  <SelectContent>
-                    {editForm.models.map((m) => (
-                      <SelectItem key={m} value={m}>{m}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
           </div>
 
           <DialogFooter className="flex justify-between">
