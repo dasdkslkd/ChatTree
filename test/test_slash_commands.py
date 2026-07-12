@@ -46,6 +46,19 @@ def test_dispatch_review_keeps_custom_instructions():
     assert "focus on regressions" in result.model_input
 
 
+def test_dispatch_refer_is_refer_prompt_with_inherited_tools():
+    result = SlashCommandDispatcher().dispatch("/refer node:abc inspect old evidence")
+
+    assert result.kind == SlashDispatchKind.REFER_PROMPT
+    assert result.canonical_name == "refer"
+    assert result.args == "node:abc inspect old evidence"
+    assert result.model_input is None
+    assert result.tool_policy == SlashToolPolicy.INHERIT
+    assert result.persistence_policy == SlashPersistencePolicy.MAIN_THREAD
+    assert result.run_kind == "chat"
+    assert result.blocks_main_thread is True
+
+
 def test_dispatch_unsupported_inline_args_falls_back_to_plain_message():
     result = SlashCommandDispatcher().dispatch("/init with extra words")
 
@@ -115,8 +128,20 @@ def test_builtin_registry_lists_direct_response_commands_without_side():
     registry = SlashCommandRegistry.builtins()
     names = [definition.name for definition in registry.list()]
 
-    assert names == ["init", "review", "btw", "fork", "workflow", "status", "help", "capabilities"]
+    assert names == [
+        "init",
+        "review",
+        "refer",
+        "btw",
+        "fork",
+        "workflow",
+        "status",
+        "help",
+        "capabilities",
+        "prune-summary",
+    ]
     assert registry.get("side") is None
+    assert registry.get("refer").stream_target_policy == "target_node"
     assert registry.get("btw").stream_target_policy == "anchor_only"
     assert registry.get("review").stream_target_policy == "target_node"
     assert registry.get("status").stream_target_policy == "none"

@@ -8,6 +8,7 @@ from typing import Any, Callable, Optional
 class SlashDispatchKind(str, Enum):
     PASSTHROUGH = "passthrough"
     MAIN_PROMPT = "main_prompt"
+    REFER_PROMPT = "refer_prompt"
     SIDE_QUESTION = "side_question"
     SUBAGENT = "subagent"
     WORKFLOW = "workflow"

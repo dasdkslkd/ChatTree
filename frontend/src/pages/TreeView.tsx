@@ -12,7 +12,7 @@ import {
 } from '@/components/ui/dialog';
 import { TextTooltip } from '@/components/ui/text-tooltip';
 import { Textarea } from '@/components/ui/textarea';
-import { ZoomIn, ZoomOut, Maximize2, ArrowDown, ArrowRight, Trash2, Scissors, FileText, Loader2, X } from 'lucide-react';
+import { ZoomIn, ZoomOut, Maximize2, ArrowDown, ArrowRight, Trash2, Scissors, FileText, Loader2, X, Copy, Check } from 'lucide-react';
 import type { PruneSummaryRecord, TreeNode } from '../api/conversation';
 import { getTreeUserContent } from '../utils/taskNotificationVisibility';
 import { useRunManager } from '../hooks/useRunManager';
@@ -80,7 +80,9 @@ export default function TreeView() {
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [prunePrompt, setPrunePrompt] = useState<PrunePromptState | null>(null);
   const [summaryModal, setSummaryModal] = useState<{ nodeLabel: string; summary: PruneSummaryRecord } | null>(null);
+  const [copiedNodeId, setCopiedNodeId] = useState<string | null>(null);
   const panStartRef = useRef({ x: 0, y: 0, tx: 0, ty: 0 });
+  const copiedTimerRef = useRef<number | null>(null);
 
   const activePruneSummaryNodeIds = useMemo(() => {
     const activeStatuses = new Set(['streaming', 'waiting_approval', 'stopping']);
@@ -104,6 +106,12 @@ export default function TreeView() {
       loadTree(currentConversation.id);
     }
   }, [currentConversation?.id]);
+
+  useEffect(() => () => {
+    if (copiedTimerRef.current != null) {
+      window.clearTimeout(copiedTimerRef.current);
+    }
+  }, []);
 
   // Close context menu on outside click
   useEffect(() => {
@@ -246,6 +254,19 @@ export default function TreeView() {
     const label = root ? '对话开始' : userContent ? truncate(stripFileMention(userContent), 20) : nodeId.slice(0, 8);
     setContextMenu({ x: e.clientX, y: e.clientY, nodeId, label, isRoot: root });
   }, [treeData]);
+
+  const copyNodeId = useCallback(async (nodeId: string) => {
+    try {
+      await navigator.clipboard.writeText(nodeId);
+      setCopiedNodeId(nodeId);
+      if (copiedTimerRef.current != null) {
+        window.clearTimeout(copiedTimerRef.current);
+      }
+      copiedTimerRef.current = window.setTimeout(() => setCopiedNodeId(null), 1200);
+    } catch (error) {
+      console.error('Failed to copy node id:', error);
+    }
+  }, []);
 
   const handleDeleteBranch = useCallback(async () => {
     if (!contextMenu || !currentConversation) return;
@@ -419,13 +440,31 @@ export default function TreeView() {
               onContextMenu={(e) => handleContextMenu(e, node.id)}
             >
               {isRoot ? (
-                <div className="w-full h-full flex items-center justify-center">
+                <div className="relative w-full h-full flex items-center justify-center">
                   <span className="text-xs text-muted-foreground/70 font-medium">对话开始</span>
+                  <TextTooltip content={copiedNodeId === node.id ? '已复制' : '复制节点 ID'}>
+                    <button
+                      type="button"
+                      className="absolute right-1 top-1 inline-flex h-5 w-5 items-center justify-center rounded-sm text-muted-foreground/70 hover:bg-accent hover:text-foreground"
+                      aria-label="复制节点 ID"
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                      }}
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        void copyNodeId(node.id);
+                      }}
+                    >
+                      {copiedNodeId === node.id ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                    </button>
+                  </TextTooltip>
                 </div>
               ) : (
                 <div
                   className={`
-                    w-full h-full rounded-xl border px-3 py-2 flex flex-col justify-center
+                    group relative w-full h-full rounded-xl border px-3 py-2 flex flex-col justify-center
                     transition-all duration-150
                     hover:shadow-lg hover:scale-[1.03]
                     ${isActive
@@ -445,10 +484,32 @@ export default function TreeView() {
                     </p>
                   )}
                   {node.data.model_id && (
-                    <span className="absolute top-1 right-2 text-[9px] text-muted-foreground/60">
+                    <span className="absolute top-1 left-2 max-w-[150px] truncate text-[9px] text-muted-foreground/60">
                       {node.data.model_id}
                     </span>
                   )}
+                  <TextTooltip content={copiedNodeId === node.id ? '已复制' : '复制节点 ID'}>
+                    <button
+                      type="button"
+                      className="absolute right-1 top-1 inline-flex h-5 w-5 items-center justify-center rounded-sm text-muted-foreground/70 opacity-0 transition-opacity hover:bg-accent hover:text-foreground group-hover:opacity-100 focus:opacity-100"
+                      aria-label="复制节点 ID"
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                      }}
+                      onDoubleClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                      }}
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        void copyNodeId(node.id);
+                      }}
+                    >
+                      {copiedNodeId === node.id ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                    </button>
+                  </TextTooltip>
                   {pruneSummaryCount > 0 && (
                     <TextTooltip content={`${pruneSummaryCount} 份剪枝摘要`}>
                       <span className="absolute bottom-1 right-2 inline-flex h-4 min-w-4 items-center justify-center rounded-sm border border-primary/40 bg-primary/10 px-1 text-[9px] font-medium text-primary">
@@ -476,6 +537,16 @@ export default function TreeView() {
           style={{ left: contextMenu.x, top: contextMenu.y }}
           onClick={(e) => e.stopPropagation()}
         >
+          <button
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none hover:bg-accent cursor-default"
+            onClick={() => {
+              void copyNodeId(contextMenu.nodeId);
+              setContextMenu(null);
+            }}
+          >
+            {copiedNodeId === contextMenu.nodeId ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+            复制节点 ID
+          </button>
           <button
             className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none hover:bg-accent cursor-default"
             onClick={handleGeneratePruneSummary}

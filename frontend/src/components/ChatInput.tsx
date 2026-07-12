@@ -19,7 +19,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { ArrowRight, Bot, StickyNote, X, Settings, Square, Plus, FileText, Pencil, Trash2, Check, Loader2, Workflow } from 'lucide-react'
-import { useState, useEffect, useRef, type ReactNode } from 'react'
+import { useState, useEffect, useMemo, useRef, type ReactNode } from 'react'
 import { useModelStore } from '../store/modelStore'
 import { usePromptStore } from '../store/promtStore'
 import { useNavigationStore } from '../store/navigationStore'
@@ -37,11 +37,17 @@ import {
   type ToolPermissionDraft,
 } from '../utils/toolPermissionDraft'
 import {
+  applyReferNodeCompletion,
   applySlashCommandCompletion,
+  getReferNodeCompletionCandidates,
+  getReferNodeCompletionState,
   getSlashCompletionCandidates,
 } from '../utils/slashRuntime'
 
 type SystemPromptMode = 'override' | 'append';
+type SuggestionItem =
+  | { kind: 'slash'; key: string; command: SlashCommandInfo }
+  | { kind: 'node'; key: string; node: ReturnType<typeof getReferNodeCompletionCandidates>[number] };
 
 const MULTI_AGENT_MODE_OPTIONS: Array<{ value: MultiAgentMode; label: string; title: string }> = [
   { value: 'explicit_request_only', label: '显式', title: '显式请求时启用 subagent/workflow 工具' },
@@ -117,6 +123,7 @@ export function ChatInput({
   const { openSettings } = useNavigationStore();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const suggestionItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const [value, setValue] = useState('');
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const [promptDialogOpen, setPromptDialogOpen] = useState(false);
@@ -155,6 +162,8 @@ export function ChatInput({
 
   const { prompts, loadPrompts, loadPrompt } = usePromptStore();
   const currentConversation = useConversationStore((s) => s.currentConversation);
+  const treeData = useConversationStore((s) => s.treeData);
+  const loadTree = useConversationStore((s) => s.loadTree);
   const updateMultiAgentMode = useConversationStore((s) => s.updateMultiAgentMode);
   const currentMultiAgentMode: MultiAgentMode = currentConversation?.multi_agent_mode ?? pendingMultiAgentMode;
   const currentMultiAgentModeOption = MULTI_AGENT_MODE_OPTIONS.find((option) => option.value === currentMultiAgentMode)
@@ -227,6 +236,15 @@ export function ChatInput({
   useEffect(() => {
     setSlashHighlightIndex(0);
   }, [value, slashCommands]);
+
+  const referNodeCompletionState = useMemo(() => getReferNodeCompletionState(value), [value]);
+
+  useEffect(() => {
+    if (!conversationId || !referNodeCompletionState.active) return;
+    loadTree(conversationId).catch((err) => {
+      console.error('加载节点建议失败:', err);
+    });
+  }, [conversationId, currentConversation?.current_node_id, referNodeCompletionState.active, loadTree]);
 
   const handleSend = async () => {
     if (!value.trim() || (disabled && !isStreaming)) return;
@@ -372,11 +390,20 @@ export function ChatInput({
   const inputDisabled = disabled && !isStreaming;
   const sendDisabled = !value.trim() || (disabled && !isStreaming);
   const showStreamingSend = !!isStreaming && !!value.trim();
-  const slashCandidates = getSlashCompletionCandidates(value, slashCommands);
   const approvalPopupOpen = pendingToolApprovals.length > 0;
-  const slashCompletionOpen = !approvalPopupOpen && slashCandidates.length > 0 && slashDismissedForValue !== value;
-  const highlightedSlashCommand = slashCompletionOpen
-    ? slashCandidates[Math.min(slashHighlightIndex, slashCandidates.length - 1)]
+  const referNodeCandidates = referNodeCompletionState.active
+    ? getReferNodeCompletionCandidates(value, treeData)
+    : [];
+  const slashCandidates = referNodeCompletionState.active
+    ? []
+    : getSlashCompletionCandidates(value, slashCommands);
+  const suggestionItems: SuggestionItem[] = [
+    ...slashCandidates.map((command) => ({ kind: 'slash' as const, key: `slash:${command.name}`, command })),
+    ...referNodeCandidates.map((node) => ({ kind: 'node' as const, key: `node:${node.id}`, node })),
+  ];
+  const suggestionOpen = !approvalPopupOpen && suggestionItems.length > 0 && slashDismissedForValue !== value;
+  const highlightedSuggestion = suggestionOpen
+    ? suggestionItems[Math.min(slashHighlightIndex, suggestionItems.length - 1)]
     : null;
   const currentPermissionLabel = {
     auto_approve: '自动批准',
@@ -390,11 +417,33 @@ export function ChatInput({
   const effortSpec = activeMeta?.reasoning_effort;
   const thinkingSpec = activeMeta?.thinking;
 
+  useEffect(() => {
+    if (!suggestionOpen) return;
+    const index = Math.min(slashHighlightIndex, Math.max(0, suggestionItems.length - 1));
+    suggestionItemRefs.current[index]?.scrollIntoView({ block: 'nearest' });
+  }, [slashHighlightIndex, suggestionItems.length, suggestionOpen]);
+
   const completeSlashCommand = (command: SlashCommandInfo) => {
     const nextValue = applySlashCommandCompletion(value, command);
     setValue(nextValue);
     setSlashHighlightIndex(0);
-    setSlashDismissedForValue(nextValue);
+    setSlashDismissedForValue(command.name === 'refer' ? null : nextValue);
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+      const length = nextValue.length;
+      textareaRef.current?.setSelectionRange(length, length);
+    });
+  };
+
+  const completeSuggestion = (item: SuggestionItem) => {
+    if (item.kind === 'slash') {
+      completeSlashCommand(item.command);
+      return;
+    }
+    const nextValue = applyReferNodeCompletion(value, item.node);
+    setValue(nextValue);
+    setSlashHighlightIndex(0);
+    setSlashDismissedForValue(null);
     requestAnimationFrame(() => {
       textareaRef.current?.focus();
       const length = nextValue.length;
@@ -535,13 +584,13 @@ export function ChatInput({
           </div>
         </div>
       )}
-      {slashCompletionOpen && (
+      {suggestionOpen && (
         <div
           className="absolute left-0 right-0 z-50 px-1"
           style={{ bottom: 'calc(100% + 8px)' }}
         >
           <div
-            className="overflow-hidden rounded-xl"
+            className="max-h-[320px] overflow-y-auto rounded-xl custom-scrollbar"
             style={{
               border: '0.5px solid var(--border)',
               background: 'color-mix(in srgb, var(--bg-input) 96%, var(--bg-button-tertiary-hover))',
@@ -549,11 +598,80 @@ export function ChatInput({
               backdropFilter: 'blur(12px)',
             }}
           >
-            {slashCandidates.map((command, index) => {
-              const highlighted = index === Math.min(slashHighlightIndex, slashCandidates.length - 1);
+            {suggestionItems.map((item, index) => {
+              const highlighted = index === Math.min(slashHighlightIndex, suggestionItems.length - 1);
+              if (item.kind === 'node') {
+                const node = item.node;
+                return (
+                  <button
+                    ref={(element) => {
+                      suggestionItemRefs.current[index] = element;
+                    }}
+                    key={item.key}
+                    type="button"
+                    className="flex min-h-[64px] w-full items-start gap-3 border-0 px-3 py-2 text-left text-xs transition-colors"
+                    style={{
+                      background: highlighted ? 'var(--accent-soft)' : 'transparent',
+                      color: 'var(--fg-secondary)',
+                    }}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      completeSuggestion(item);
+                    }}
+                    onMouseEnter={() => setSlashHighlightIndex(index)}
+                  >
+                    <span
+                      className="mt-0.5 shrink-0 rounded-sm px-1.5 py-0.5 font-mono text-[10px]"
+                      style={{
+                        background: highlighted
+                          ? 'color-mix(in srgb, var(--icon-accent) 16%, transparent)'
+                          : 'var(--bg-button-tertiary-hover)',
+                        color: highlighted ? 'var(--icon-accent)' : 'var(--fg-85)',
+                      }}
+                    >
+                      node
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="flex min-w-0 items-center gap-1.5">
+                        <span
+                          className="truncate font-mono text-[11px]"
+                          style={{ color: highlighted ? 'var(--icon-accent)' : 'var(--fg-85)' }}
+                        >
+                          {node.insertText}
+                        </span>
+                        {node.isCurrent && (
+                          <span className="shrink-0 rounded-full px-1.5 py-0.5 text-[10px]" style={{ background: 'var(--accent-soft)', color: 'var(--icon-accent)' }}>
+                            当前
+                          </span>
+                        )}
+                        {!node.isCurrent && node.isOnCurrentBranch && (
+                          <span className="shrink-0 rounded-full px-1.5 py-0.5 text-[10px]" style={{ background: 'var(--bg-button-tertiary-hover)', color: 'var(--fg-tertiary)' }}>
+                            本分支
+                          </span>
+                        )}
+                        {node.hasPruneSummary && (
+                          <span className="shrink-0 rounded-full px-1.5 py-0.5 text-[10px]" style={{ background: 'var(--bg-button-tertiary-hover)', color: 'var(--fg-tertiary)' }}>
+                            摘要
+                          </span>
+                        )}
+                      </span>
+                      <span className="mt-1 block truncate" style={{ color: 'var(--fg-secondary)' }}>
+                        {node.userPreview || '无用户消息预览'}
+                      </span>
+                      <span className="mt-0.5 block truncate text-[11px]" style={{ color: 'var(--fg-tertiary)' }}>
+                        {node.assistantPreview || node.modelId || '无助手回复预览'}
+                      </span>
+                    </span>
+                  </button>
+                );
+              }
+              const command = item.command;
               return (
                 <button
-                  key={command.name}
+                  ref={(element) => {
+                    suggestionItemRefs.current[index] = element;
+                  }}
+                  key={item.key}
                   type="button"
                   className="flex h-11 w-full items-center gap-3 border-0 px-3 text-left text-xs transition-colors"
                   style={{
@@ -562,7 +680,7 @@ export function ChatInput({
                   }}
                   onMouseDown={(e) => {
                     e.preventDefault();
-                    completeSlashCommand(command);
+                    completeSuggestion(item);
                   }}
                   onMouseEnter={() => setSlashHighlightIndex(index)}
                 >
@@ -772,20 +890,20 @@ export function ChatInput({
             }
           }}
           onKeyDown={(e) => {
-            if (slashCompletionOpen) {
+            if (suggestionOpen) {
               if (e.key === 'ArrowDown') {
                 e.preventDefault();
-                setSlashHighlightIndex((index) => (index + 1) % slashCandidates.length);
+                setSlashHighlightIndex((index) => (index + 1) % suggestionItems.length);
                 return;
               }
               if (e.key === 'ArrowUp') {
                 e.preventDefault();
-                setSlashHighlightIndex((index) => (index - 1 + slashCandidates.length) % slashCandidates.length);
+                setSlashHighlightIndex((index) => (index - 1 + suggestionItems.length) % suggestionItems.length);
                 return;
               }
-              if ((e.key === 'Enter' || e.key === 'Tab') && highlightedSlashCommand) {
+              if ((e.key === 'Enter' || e.key === 'Tab') && highlightedSuggestion) {
                 e.preventDefault();
-                completeSlashCommand(highlightedSlashCommand);
+                completeSuggestion(highlightedSuggestion);
                 return;
               }
               if (e.key === 'Escape') {

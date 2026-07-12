@@ -17,8 +17,27 @@ def test_list_slash_commands_exposes_registry_without_side():
     assert response.status_code == 200
     commands = response.json()
     names = [command["name"] for command in commands]
-    assert names == ["init", "review", "btw", "fork", "workflow"]
+    assert names == [
+        "init",
+        "review",
+        "refer",
+        "btw",
+        "fork",
+        "workflow",
+        "status",
+        "help",
+        "capabilities",
+        "prune-summary",
+    ]
     assert "side" not in names
+
+    refer = next(command for command in commands if command["name"] == "refer")
+    assert refer["dispatch_kind"] == "refer_prompt"
+    assert refer["run_kind"] == "chat"
+    assert refer["tool_policy"] == "inherit"
+    assert refer["persistence_policy"] == "main_thread"
+    assert refer["stream_target_policy"] == "target_node"
+    assert refer["blocks_main_thread"] is True
 
     btw = next(command for command in commands if command["name"] == "btw")
     assert btw["dispatch_kind"] == "side_question"
@@ -27,4 +46,3 @@ def test_list_slash_commands_exposes_registry_without_side():
     assert btw["persistence_policy"] == "side_run"
     assert btw["stream_target_policy"] == "anchor_only"
     assert btw["blocks_main_thread"] is False
-

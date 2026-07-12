@@ -1,5 +1,6 @@
 export type SlashDispatchKind =
   | 'main_prompt'
+  | 'refer_prompt'
   | 'side_question'
   | 'subagent'
   | 'workflow'

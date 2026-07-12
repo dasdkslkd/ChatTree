@@ -13,7 +13,8 @@ from backend.core.capabilities.types import (
 )
 from backend.core.chat.chat_manager import ChatManager
 from backend.core.chat.conversation import Conversation
-from backend.core.config.types import Role, StreamChunk, StreamController, StreamStatus
+from backend.core.chat.node import NodeManager
+from backend.core.config.types import Message, Role, StreamChunk, StreamController, StreamStatus
 from backend.core.plans import PlanLedger
 from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
@@ -40,6 +41,17 @@ def test_chat_manager_dispatches_builtin_slash_to_main_prompt():
     assert result.kind == SlashDispatchKind.MAIN_PROMPT
     assert result.model_input is not None
     assert "focus on state bugs" in result.model_input
+
+
+def test_chat_manager_dispatches_refer_to_refer_prompt():
+    manager = make_manager()
+
+    result = manager._dispatch_slash_content("/refer node:abc inspect the prior result")
+
+    assert result.kind == SlashDispatchKind.REFER_PROMPT
+    assert result.model_input is None
+    assert result.args == "node:abc inspect the prior result"
+    assert result.tool_policy.value == "inherit"
 
 
 def test_chat_manager_treats_removed_side_command_as_plain_text():
@@ -109,6 +121,98 @@ def test_focus_preserving_turn_still_sends_new_user_message_to_model(tmp_path: P
         assert "notify" not in sent_roles
 
     asyncio.run(scenario())
+
+
+def test_refer_prompt_injects_history_and_persists_only_inline_prompt(tmp_path: Path):
+    async def scenario():
+        manager, model_manager = make_stream_manager(tmp_path)
+        manager.tool_manager = FakeToolManager()
+        conversation = manager.create_conversation("refer")
+        root_id = conversation.current_node_id
+        old_user = Message({
+            "id": "old-user",
+            "role": Role.USER,
+            "content": "old branch failed because config path was wrong",
+            "timestamp": 1,
+        })
+        old_node = NodeManager.create_node(old_user, parent_id=root_id, model_id="fake-model")
+        old_node["assistant_message"] = Message({
+            "id": "old-assistant",
+            "role": Role.ASSISTANT,
+            "content": "The failure came from using the project-local config root.",
+            "timestamp": 2,
+        })
+        old_node["tool_messages"] = [Message({
+            "id": "old-tool",
+            "role": Role.TOOL,
+            "content": "stderr: missing C:\\Users\\xyz\\.chattree\\config.json",
+            "tool_call_id": "tool-1",
+            "timestamp": 3,
+        })]
+        conversation.add_node(old_node, root_id, focus=False)
+        conversation.switch_to_node(root_id)
+        manager._save(conversation)
+
+        chunks = await collect_chunks(manager.send_message_stream(
+            conversation.metadata["id"],
+            f"/refer node:{old_node['id']} analyze the failure now",
+            model_id="fake-model",
+            provider_id="fake",
+            parent_node_id=root_id,
+            tool_permission_mode="ask_always",
+        ))
+
+        assert not [chunk for chunk in chunks if chunk.get("status") == StreamStatus.ERROR]
+        stored = manager.get_conversation(conversation.metadata["id"])
+        new_nodes = [
+            node for node in stored.nodes.values()
+            if (node.get("user_message") or {}).get("content") == "analyze the failure now"
+        ]
+        assert len(new_nodes) == 1
+        assert new_nodes[0]["refer_context"]["selectors"] == [f"node:{old_node['id']}"]
+        assert new_nodes[0]["refer_context"]["source_node_ids"] == [old_node["id"]]
+        assert "/refer" not in new_nodes[0]["user_message"]["content"]
+
+        sent_contents = [str(message.get("content") or "") for message in model_manager.provider.messages]
+        refer_index = next(index for index, content in enumerate(sent_contents) if "Explicit /refer context" in content)
+        prompt_index = next(index for index, content in enumerate(sent_contents) if content == "analyze the failure now")
+        assert refer_index < prompt_index
+        assert any("old branch failed because config path was wrong" in content for content in sent_contents)
+        assert any("missing C:\\Users\\xyz\\.chattree\\config.json" in content for content in sent_contents)
+        assert model_manager.provider.kwargs["tools"]
+
+    asyncio.run(scenario())
+
+
+def test_refer_prompt_requires_inline_prompt(tmp_path: Path):
+    async def scenario():
+        manager, _ = make_stream_manager(tmp_path)
+        conversation = manager.create_conversation("refer")
+        root_id = conversation.current_node_id
+        old_node = NodeManager.create_node(Message({
+            "id": "old-user",
+            "role": Role.USER,
+            "content": "old",
+            "timestamp": 1,
+        }), parent_id=root_id, model_id="fake-model")
+        conversation.add_node(old_node, root_id, focus=False)
+        conversation.switch_to_node(root_id)
+        manager._save(conversation)
+
+        chunks = await collect_chunks(manager.send_message_stream(
+            conversation.metadata["id"],
+            f"/refer node:{old_node['id']}",
+            model_id="fake-model",
+            provider_id="fake",
+            parent_node_id=root_id,
+        ))
+        return chunks
+
+    chunks = asyncio.run(scenario())
+
+    errors = [chunk for chunk in chunks if chunk.get("status") == StreamStatus.ERROR]
+    assert errors
+    assert "用法: /refer" in errors[0].get("error")
 
 
 class CapturingProvider:

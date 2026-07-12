@@ -29,6 +29,12 @@ from .prune_summary import (
     create_prune_summary_record,
     json_dumps,
 )
+from .refer_context import (
+    ReferContextError,
+    build_refer_bundle,
+    format_refer_context_message,
+    parse_refer_prompt_args,
+)
 from ..config.types import Message, Role, StreamChunk, StreamStatus, StreamController, GenerationInfo
 from ..storage.chat_storage import ChatStorage
 from ..storage.prompt_storage import PromptStorage
@@ -1243,6 +1249,24 @@ class ChatManager:
             )
             return
         model_content = slash_result.model_input or content
+        refer_bundle: Optional[Dict[str, Any]] = None
+        if slash_result.kind == SlashDispatchKind.REFER_PROMPT:
+            try:
+                refer_args = parse_refer_prompt_args(slash_result.args)
+                refer_bundle = build_refer_bundle(preview, refer_args["selectors"])
+                refer_bundle["prompt"] = refer_args["prompt"]
+                model_content = refer_args["prompt"]
+            except ReferContextError as exc:
+                yield StreamChunk(
+                    status=StreamStatus.ERROR,
+                    content="",
+                    node_id=None,
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    error=str(exc),
+                    tokens_used=0,
+                )
+                return
         
         provider = self.model_manager.get_model(target_provider, True)
         if not provider:
@@ -1334,7 +1358,7 @@ class ChatManager:
                 user_msg["subtype"] = message_subtype
             if hidden_user_message:
                 user_msg["is_hidden_from_transcript"] = True
-            if slash_result.kind == SlashDispatchKind.MAIN_PROMPT:
+            if slash_result.kind in {SlashDispatchKind.MAIN_PROMPT, SlashDispatchKind.REFER_PROMPT}:
                 user_msg["slash_command"] = self._slash_command_metadata(slash_result)
         normalized_import_files = self._normalize_import_file_refs(import_files)
         if user_msg is not None and normalized_import_files:
@@ -1349,6 +1373,7 @@ class ChatManager:
         plan_context_permission_mode = self._plan_context_permission_mode(pending_plan_context)
         active_plan_permission_mode = await self._active_plan_permission_mode(conversation_id)
         plan_snapshot_after_context = await self._plan_snapshot_for_metadata(conversation_id)
+        refer_context_messages = self._refer_context_messages(refer_bundle)
         requested_tool_permission_mode = (
             normalize_permission_mode(tool_permission_mode)
             if tool_permission_mode not in (None, "")
@@ -1440,6 +1465,13 @@ class ChatManager:
             )
             if skill_names:
                 new_node["active_skill_names"] = skill_names
+            if refer_bundle is not None:
+                new_node["refer_context"] = {
+                    "selectors": refer_bundle.get("selectors") or [],
+                    "source_node_ids": refer_bundle.get("source_node_ids") or [],
+                    "truncated_sources": refer_bundle.get("truncated_sources") or [],
+                    "truncated": bool(refer_bundle.get("truncated")),
+                }
             conversation.add_node(new_node, parent_id=current_node_id, focus=focus_new_node)
             self._set_conversation_model_metadata(
                 conversation,
@@ -1505,6 +1537,7 @@ class ChatManager:
             skill_names,
             task_turn_context=task_turn_context,
         )
+        self._insert_context_before_history(messages, refer_context_messages)
         messages.extend(self._plan_context_messages(pending_plan_context))
         if continuation_messages:
             self._apply_continuation_messages(messages, continuation_messages)
@@ -2601,6 +2634,29 @@ class ChatManager:
                 ]),
             }))
         return messages
+
+    def _refer_context_messages(self, refer_bundle: Optional[Dict[str, Any]]) -> list[Message]:
+        if not refer_bundle:
+            return []
+        content, truncated = format_refer_context_message(refer_bundle)
+        refer_bundle["truncated"] = bool(refer_bundle.get("truncated") or truncated)
+        return [Message({
+            "role": Role.SYSTEM,
+            "content": content,
+        })]
+
+    @staticmethod
+    def _insert_context_before_history(messages: list[Message], context_messages: list[Message]) -> None:
+        if not context_messages:
+            return
+        index = 0
+        while index < len(messages):
+            role = messages[index].get("role")
+            role_value = role.value if hasattr(role, "value") else str(role or "")
+            if role_value != "system":
+                break
+            index += 1
+        messages[index:index] = context_messages
 
     def _apply_continuation_messages(
         self,
