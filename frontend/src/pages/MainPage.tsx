@@ -1725,18 +1725,6 @@ export default function ChatPage() {
     return null;
   }, [activeRunStates, selectedSideRunId, sidePanelRunStates, sideRunGroups]);
 
-  const sideRunActivity = useMemo(
-    () => sideRunDrafts.map((draft) => [
-      draft.run.runId,
-      draft.run.status,
-      draft.run.content.length,
-      draft.run.reasoning.length,
-      draft.run.toolInteractions.length,
-      Object.keys(draft.run.pendingApprovals).length,
-      draft.run.pendingUserMessage?.length ?? 0,
-    ].join(':')).join('|'),
-    [sideRunDrafts],
-  );
   const currentBranchStreamingRunIds = useMemo(
     () => activeRunStates
       .filter((run) => isRunBlockingSelectedBranch(run, selectedBranchTipId, currentBranchNodeIds))
@@ -1896,12 +1884,6 @@ export default function ChatPage() {
     }
     void refreshTranscript(conversationId, selectedBranchTipId);
   }, [currentConversation?.id, currentBranchStreamActivity, refreshTranscript, selectedBranchTipId]);
-
-  useEffect(() => {
-    if (sideRunTopLevelCount === 0) return;
-    setOutlineCollapsed(false);
-    setRightPanelView('side');
-  }, [sideRunActivity, sideRunTopLevelCount]);
 
   useEffect(() => {
     if (selectedSideRunId && !selectedSideRunItem) {
