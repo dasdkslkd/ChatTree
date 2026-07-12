@@ -70,6 +70,7 @@ import {
   PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, ArrowLeft, Bell,
 } from 'lucide-react';
 import { conversationApi } from '../api/conversation';
+import { configApi } from '../api/config';
 import { messageApi, type ActiveStreamInfo, type ToolResultSlice } from '../api/message';
 import { runsApi } from '../api/runs';
 import { taskNotificationsApi, type TaskNotificationRecord } from '../api/taskNotifications';
@@ -87,6 +88,7 @@ import type { PlanSession } from '../types/plan';
 import type { ActiveTaskRecord } from '../types/task';
 import type { TranscriptItem } from '../types/transcript';
 import type { MultiAgentMode, WorkspaceContext } from '../types/conversation';
+import type { ProjectCapabilityConfig } from '../types/model';
 import { useConversationStore } from '../store/conversationStore';
 import { useModelStore } from '../store/modelStore';
 import { useNavigationStore } from '../store/navigationStore';
@@ -162,6 +164,7 @@ import {
   getWorkspaceForNewConversation,
   groupConversationsByProject,
   encodeProjectId,
+  isProjectVisible,
 } from '../utils/projectGroups';
 import {
   LEFT_SIDEBAR_WIDTH,
@@ -1080,6 +1083,7 @@ export default function ChatPage() {
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [manualProjectWorkspaces, setManualProjectWorkspaces] = useState<WorkspaceContext[]>(() => loadManualProjectWorkspaces());
   const [projectOrder, setProjectOrder] = useState<string[]>(() => loadProjectOrder());
+  const [projectConfigs, setProjectConfigs] = useState<Record<string, ProjectCapabilityConfig>>({});
   const [draggingProjectId, setDraggingProjectId] = useState<string | null>(null);
   const [projectFolderDialogMode, setProjectFolderDialogMode] = useState<'create' | 'existing' | null>(null);
   const [projectFolderPath, setProjectFolderPath] = useState('');
@@ -1279,6 +1283,28 @@ export default function ChatPage() {
     setRenameConversationId(null);
     setRenameTitle('');
   };
+
+  const loadProjectConfigs = useCallback(async () => {
+    try {
+      const data = await configApi.getProjects();
+      setProjectConfigs(data.config || {});
+    } catch {
+      setProjectConfigs({});
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadProjectConfigs();
+  }, [loadProjectConfigs]);
+
+  useEffect(() => {
+    const reloadProjects = () => {
+      void loadProjectConfigs();
+      void loadConversations();
+    };
+    window.addEventListener('chattree-projects-updated', reloadProjects);
+    return () => window.removeEventListener('chattree-projects-updated', reloadProjects);
+  }, [loadConversations, loadProjectConfigs]);
 
   const handleRenameCancel = () => {
     setRenameDialogOpen(false);
@@ -1898,9 +1924,17 @@ export default function ChatPage() {
       .map(({ id, content }) => ({ id, content })),
     [queuedMessages, currentConversation?.id, selectedBranchTipId],
   );
+  const projectVisibility = useMemo(
+    () => Object.fromEntries(
+      Object.entries(projectConfigs).map(([path, project]) => [path, project.visible !== false]),
+    ),
+    [projectConfigs],
+  );
   const defaultWorkspace = useMemo(
-    () => conversations.find((conversation) => conversation.workspace?.cwd)?.workspace || null,
-    [conversations],
+    () => conversations.find((conversation) =>
+      conversation.workspace?.cwd && isProjectVisible(conversation.workspace.cwd, projectVisibility)
+    )?.workspace || null,
+    [conversations, projectVisibility],
   );
   const projectGroups = useMemo(
     () => groupConversationsByProject(conversations, {
@@ -1910,8 +1944,9 @@ export default function ChatPage() {
       expandedHistoryProjectIds,
       searchQuery: conversationSearch,
       projectOrder,
+      projectVisibility,
     }),
-    [conversations, defaultWorkspace, manualProjectWorkspaces, collapsedProjectIds, expandedHistoryProjectIds, conversationSearch, projectOrder],
+    [conversations, defaultWorkspace, manualProjectWorkspaces, collapsedProjectIds, expandedHistoryProjectIds, conversationSearch, projectOrder, projectVisibility],
   );
   const allProjectGroups = useMemo(
     () => groupConversationsByProject(conversations, {
@@ -1920,8 +1955,9 @@ export default function ChatPage() {
       collapsedProjectIds,
       expandedHistoryProjectIds,
       projectOrder,
+      projectVisibility,
     }),
-    [conversations, defaultWorkspace, manualProjectWorkspaces, collapsedProjectIds, expandedHistoryProjectIds, projectOrder],
+    [conversations, defaultWorkspace, manualProjectWorkspaces, collapsedProjectIds, expandedHistoryProjectIds, projectOrder, projectVisibility],
   );
   const measureProjectGroupTops = useCallback((skipProjectId?: string) => {
     const tops = new Map<string, number>();

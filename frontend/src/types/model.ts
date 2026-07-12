@@ -203,11 +203,39 @@ export interface CapabilityInventory {
   plugins: CapabilityPlugin[];
 }
 
+export interface ProjectCapabilityConfig {
+  label?: string;
+  visible?: boolean;
+  enabled_skills?: string[] | null;
+  enabled_mcp_servers?: string[] | null;
+  enabled_agents?: string[] | null;
+}
+
+export interface ProjectSettingsItem {
+  path: string;
+  label: string;
+  workspace: {
+    cwd: string;
+    workspace_roots: string[];
+    protected_paths?: string[];
+    label?: string;
+  };
+  conversation_count: number;
+  latest_updated_at: number;
+  config: ProjectCapabilityConfig;
+}
+
+export interface ProjectSettingsResponse {
+  projects: ProjectSettingsItem[];
+  config: Record<string, ProjectCapabilityConfig>;
+}
+
 // 完整配置数据
 export interface ConfigData {
   default_provider: string;
   provider: Record<string, ModelProviderConfig>;
   tools?: ToolsConfig;
+  projects?: Record<string, ProjectCapabilityConfig>;
 }
 
 // 配置更新请求
@@ -215,6 +243,7 @@ export interface ConfigUpdateRequest {
   default_provider?: string;
   provider_configs?: Record<string, Partial<ModelProviderConfig>>;
   tools?: ToolsConfig;
+  projects?: Record<string, ProjectCapabilityConfig>;
 }
 
 // 添加提供商请求

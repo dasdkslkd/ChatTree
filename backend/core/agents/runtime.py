@@ -61,8 +61,6 @@ class AgentRuntime:
         task = (task or "").strip()
         if not task:
             raise ValueError("task is required")
-        if self.capability_registry.get_agent(agent_name) is None:
-            raise KeyError(agent_name)
         task_binding = None
         if step is not None:
             if self.task_service is None:

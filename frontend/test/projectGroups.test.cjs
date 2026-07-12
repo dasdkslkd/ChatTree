@@ -22,6 +22,7 @@ const {
   groupConversationsByProject,
   getVisibleProjectConversations,
   getWorkspaceForNewConversation,
+  isProjectVisible,
 } = require(path.join(__dirname, '../src/utils/projectGroups.ts'));
 
 function conv(id, title, updatedAt, cwd, label) {
@@ -175,6 +176,31 @@ function testExtraWorkspacesShowAsEmptyProjectGroups() {
   assert.equal(getWorkspaceForNewConversation(groups, extra.id).cwd, 'D:/Projects/New');
 }
 
+function testProjectVisibilityHidesConversationAndManualGroups() {
+  const groups = groupConversationsByProject([
+    conv('visible', 'Visible', 20, 'D:/Projects/Visible', 'Visible'),
+    conv('hidden', 'Hidden', 30, 'D:/Projects/Hidden', 'Hidden'),
+  ], {
+    extraWorkspaces: [{
+      cwd: 'D:/Projects/ManualHidden',
+      workspace_roots: ['D:/Projects/ManualHidden'],
+      protected_paths: ['.git'],
+      label: 'ManualHidden',
+    }],
+    projectVisibility: {
+      'D:\\Projects\\Hidden': false,
+      'D:/Projects/ManualHidden': false,
+    },
+  });
+
+  assert.deepEqual(groups.map((group) => group.path), ['D:/Projects/Visible']);
+}
+
+function testProjectVisibilityNormalizesSlashAndCase() {
+  assert.equal(isProjectVisible('D:/Projects/Hidden', { 'd:\\projects\\hidden\\': false }), false);
+  assert.equal(isProjectVisible('D:/Projects/Visible', { 'd:\\projects\\hidden\\': false }), true);
+}
+
 testGroupsByWorkspaceAndSortsByRecentConversation();
 testProjectOrderOverridesRecentConversationSort();
 testUnknownProjectsSinkAfterSavedOrder();
@@ -182,5 +208,7 @@ testDefaultVisibleHistoryCountAndExpansion();
 testSearchKeepsGroupsAndStillLimitsToFive();
 testNewConversationWorkspaceFallsBackInPriorityOrder();
 testExtraWorkspacesShowAsEmptyProjectGroups();
+testProjectVisibilityHidesConversationAndManualGroups();
+testProjectVisibilityNormalizesSlashAndCase();
 
 console.log('PASS projectGroups');

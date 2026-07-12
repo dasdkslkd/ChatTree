@@ -19,6 +19,7 @@ export interface GroupOptions {
   expandedHistoryProjectIds?: Set<string>;
   searchQuery?: string;
   projectOrder?: string[];
+  projectVisibility?: Record<string, boolean>;
 }
 
 export interface VisibleProjectConversations {
@@ -40,6 +41,7 @@ export function groupConversationsByProject(
     if (query && !conversationMatches(conversation, query)) continue;
     const workspace = normalizeWorkspace(conversation.workspace, defaultWorkspace);
     const path = workspace.cwd;
+    if (!isProjectVisible(path, options.projectVisibility)) continue;
     const existing = byPath.get(path);
     if (existing) {
       existing.conversations.push(conversation);
@@ -60,6 +62,7 @@ export function groupConversationsByProject(
   for (const extraWorkspace of options.extraWorkspaces || []) {
     const workspace = normalizeWorkspace(extraWorkspace, defaultWorkspace);
     if (!workspace.cwd || byPath.has(workspace.cwd)) continue;
+    if (!isProjectVisible(workspace.cwd, options.projectVisibility)) continue;
     if (query && !workspaceMatches(workspace, query)) continue;
     const id = encodeProjectId(workspace.cwd);
     byPath.set(workspace.cwd, {
@@ -175,4 +178,17 @@ function labelFromPath(path: string): string {
   const cleaned = path.replace(/[\\/]+$/, '');
   const parts = cleaned.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] || '默认项目';
+}
+
+export function isProjectVisible(path: string, visibility?: Record<string, boolean>): boolean {
+  if (!visibility) return true;
+  if (visibility[path] === false) return false;
+  const canonical = canonicalProjectPath(path);
+  return !Object.entries(visibility).some(([candidate, visible]) =>
+    visible === false && canonicalProjectPath(candidate) === canonical
+  );
+}
+
+function canonicalProjectPath(path: string): string {
+  return path.replace(/[\\/]+/g, '/').replace(/\/+$/, '').toLowerCase();
 }

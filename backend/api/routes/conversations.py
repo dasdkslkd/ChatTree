@@ -1,14 +1,16 @@
 ﻿# backend/api/routes/conversations.py
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import json
 import logging
 from pathlib import Path
 
-from backend.api.dependencies import get_chat_manager, get_run_manager, get_transcript_projection
+from backend.api.dependencies import get_chat_manager, get_config_manager, get_run_manager, get_transcript_projection
 from backend.core.chat.chat_manager import ChatManager
+from backend.core.config.config import Config, cfg
 from backend.core.persistence.transcript import TranscriptProjection
+from backend.core.projects import normalize_project_path, normalize_projects_config, workspace_project_path
 from backend.core.runs import RunManager
 from backend.core.workspace import normalize_workspace
 
@@ -26,6 +28,18 @@ class ConversationCreateRequest(BaseModel):
 class ProjectFolderRequest(BaseModel):
     path: str
     label: Optional[str] = None
+
+class ProjectConfigUpdateRequest(BaseModel):
+    path: str
+    label: Optional[str] = None
+    visible: Optional[bool] = True
+    enabled_skills: Optional[List[str]] = None
+    enabled_mcp_servers: Optional[List[str]] = None
+    enabled_agents: Optional[List[str]] = None
+
+class ProjectHistoryDeleteRequest(BaseModel):
+    path: str
+    force: bool = False
 
 class ConversationUpdateRequest(BaseModel):
     title: str
@@ -137,6 +151,148 @@ def _workspace_from_project_path(path_value: str, label: Optional[str], create: 
         "workspace_roots": [str(resolved)],
         "label": label,
     })
+
+
+def _project_summary_from_conversation(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    workspace = item.get("workspace")
+    if not isinstance(workspace, dict):
+        return None
+    path = workspace_project_path(workspace)
+    if not path:
+        return None
+    return {
+        "path": path,
+        "label": workspace.get("label") or Path(path).name or "默认项目",
+        "workspace": normalize_workspace(workspace),
+        "conversation_count": 1,
+        "latest_updated_at": item.get("updated_at", 0) or 0,
+    }
+
+
+@router.get("/projects", response_model=Dict[str, Any])
+async def list_projects(
+    chat_manager: ChatManager = Depends(get_chat_manager),
+    config_manager: Config = Depends(get_config_manager),
+):
+    """列出项目、项目配置与对话数量。"""
+    try:
+        projects_by_path: Dict[str, Dict[str, Any]] = {}
+        for item in chat_manager.list_conversations():
+            summary = _project_summary_from_conversation(item)
+            if not summary:
+                continue
+            path = summary["path"]
+            existing = projects_by_path.get(path)
+            if existing:
+                existing["conversation_count"] += 1
+                existing["latest_updated_at"] = max(existing["latest_updated_at"], summary["latest_updated_at"])
+            else:
+                projects_by_path[path] = summary
+
+        configured = normalize_projects_config(config_manager.data.get("projects"))
+        for path, project_config in configured.items():
+            existing = projects_by_path.get(path)
+            if existing:
+                if project_config.get("label"):
+                    existing["label"] = project_config.get("label")
+                continue
+            projects_by_path[path] = {
+                "path": path,
+                "label": project_config.get("label") or Path(path).name or "默认项目",
+                "workspace": normalize_workspace({
+                    "cwd": path,
+                    "workspace_roots": [path],
+                    "label": project_config.get("label") or Path(path).name,
+                }),
+                "conversation_count": 0,
+                "latest_updated_at": 0,
+            }
+
+        for path, project in projects_by_path.items():
+            project["config"] = configured.get(path, {
+                "label": project.get("label") or "",
+                "visible": True,
+                "enabled_skills": None,
+                "enabled_mcp_servers": None,
+                "enabled_agents": None,
+            })
+
+        return {
+            "projects": sorted(
+                projects_by_path.values(),
+                key=lambda item: (item.get("latest_updated_at") or 0, item.get("label") or ""),
+                reverse=True,
+            ),
+            "config": configured,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/projects/{project_path:path}", response_model=Dict[str, Any])
+async def update_project_config(
+    project_path: str,
+    payload: ProjectConfigUpdateRequest,
+    http_request: Request,
+    config_manager: Config = Depends(get_config_manager),
+):
+    """保存项目可见性与项目级能力 allowlist。"""
+    path = normalize_project_path(payload.path or project_path)
+    if not path:
+        raise HTTPException(status_code=400, detail="Project path is required")
+    projects = normalize_projects_config(config_manager.data.get("projects"))
+    projects[path] = {
+        "label": payload.label or projects.get(path, {}).get("label") or Path(path).name,
+        "visible": payload.visible is not False,
+        "enabled_skills": payload.enabled_skills,
+        "enabled_mcp_servers": payload.enabled_mcp_servers,
+        "enabled_agents": payload.enabled_agents,
+    }
+    config_manager.data["projects"] = normalize_projects_config(projects)
+    config_manager.save()
+    cfg.data = config_manager.data
+    tool_manager = getattr(http_request.app.state, "tool_manager", None)
+    if tool_manager is not None and hasattr(tool_manager, "_config"):
+        tool_manager._config = config_manager.data
+    return {"message": "项目配置已保存", "project": config_manager.data["projects"][path]}
+
+
+@router.post("/projects/history/delete", response_model=Dict[str, Any])
+async def delete_project_history(
+    request: ProjectHistoryDeleteRequest,
+    chat_manager: ChatManager = Depends(get_chat_manager),
+    run_manager: RunManager = Depends(get_run_manager),
+):
+    """批量删除指定项目下的对话历史。"""
+    target_path = normalize_project_path(request.path)
+    if not target_path:
+        raise HTTPException(status_code=400, detail="Project path is required")
+    deleted: list[str] = []
+    skipped_active: list[str] = []
+    for item in chat_manager.list_conversations():
+        workspace = item.get("workspace")
+        if workspace_project_path(workspace if isinstance(workspace, dict) else None) != target_path:
+            continue
+        conversation_id = item.get("id")
+        if not conversation_id:
+            continue
+        active_runs = run_manager.list_active(str(conversation_id))
+        if active_runs and not request.force:
+            skipped_active.append(str(conversation_id))
+            continue
+        if active_runs and request.force:
+            for run in active_runs:
+                await run_manager.request_stop(str(run.get("run_id")))
+            skipped_active.append(str(conversation_id))
+            continue
+        chat_manager.delete_conversation(str(conversation_id))
+        deleted.append(str(conversation_id))
+    return {
+        "project_path": target_path,
+        "deleted_count": len(deleted),
+        "deleted_ids": deleted,
+        "skipped_active_ids": skipped_active,
+    }
 
 
 @router.post("/projects/folders", response_model=Dict[str, Any])

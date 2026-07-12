@@ -92,6 +92,10 @@ class ConnectionManager:
     def has_tool(self, callable_name: str) -> bool:
         return callable_name in self._routes
 
+    def server_for_tool(self, callable_name: str) -> str | None:
+        route = self._routes.get(callable_name)
+        return route.get("server") if route else None
+
     def list_server_names(self) -> List[str]:
         return list(self._servers.keys())
 

@@ -1,5 +1,5 @@
 import { apiClient } from './client';
-import type { BuiltinWebStatus, ConfigData, ConfigUpdateRequest, AddProviderRequest, ToolInventoryStatus, CapabilityInventory } from '../types/model';
+import type { BuiltinWebStatus, ConfigData, ConfigUpdateRequest, AddProviderRequest, ToolInventoryStatus, CapabilityInventory, ProjectCapabilityConfig, ProjectSettingsResponse } from '../types/model';
 
 export const configApi = {
   // 获取配置
@@ -48,6 +48,21 @@ export const configApi = {
 
   connectMcpServer: async (serverName: string): Promise<ToolInventoryStatus> => {
     const response = await apiClient.post(`/tools/mcp/servers/${encodeURIComponent(serverName)}/connect`);
+    return response.data;
+  },
+
+  getProjects: async (): Promise<ProjectSettingsResponse> => {
+    const response = await apiClient.get('/projects');
+    return response.data;
+  },
+
+  updateProject: async (path: string, data: ProjectCapabilityConfig): Promise<{ message: string; project: ProjectCapabilityConfig }> => {
+    const response = await apiClient.put(`/projects/${encodeURIComponent(path)}`, { ...data, path });
+    return response.data;
+  },
+
+  deleteProjectHistory: async (path: string, force = false): Promise<{ project_path: string; deleted_count: number; deleted_ids: string[]; skipped_active_ids: string[] }> => {
+    const response = await apiClient.post('/projects/history/delete', { path, force });
     return response.data;
   },
 };

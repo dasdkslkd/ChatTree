@@ -26,6 +26,7 @@ from .tool_arguments import normalize_tool_arguments
 from .tool_filter import ToolFilter
 from .web_search import FetchUrlTool, WebSearchTool
 from ..storage.tool_result_storage import ToolResultStorage
+from ..projects import allowed_project_names
 from ..utils.logger import setup_logger
 
 logger = setup_logger("ToolManager")
@@ -274,7 +275,7 @@ class ToolManager:
     def get_tool(self, name: str) -> Optional[BaseTool]:
         return self._tools.get(name)
 
-    def list_tools(self) -> List[str]:
+    def list_tools(self, workspace: Optional[Dict[str, Any]] = None) -> List[str]:
         names = [
             name for name in self._tools
             if self._is_model_visible_local_tool(name)
@@ -282,6 +283,7 @@ class ToolManager:
         names.extend(
             info["callable_name"]
             for info in self._connection_manager.list_all_tools()
+            if self._is_mcp_server_allowed_for_workspace(info["server"], workspace)
             if self._filter.is_allowed(
                 info["callable_name"],
                 aliases=(info["tool"].get("name", ""), f"{info['server']}.{info['tool'].get('name', '')}"),
@@ -289,7 +291,7 @@ class ToolManager:
         )
         return names
 
-    def get_openai_tools(self) -> List[Dict[str, Any]]:
+    def get_openai_tools(self, workspace: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """Get all model-visible tools as OpenAI function calling schemas."""
         tools: List[Dict[str, Any]] = []
         for name, tool in self._tools.items():
@@ -297,7 +299,7 @@ class ToolManager:
                 tools.append(tool.to_openai_tool())
         for info in self._connection_manager.list_all_tools():
             original_name = info["tool"].get("name", "")
-            if self._filter.is_allowed(
+            if self._is_mcp_server_allowed_for_workspace(info["server"], workspace) and self._filter.is_allowed(
                 info["callable_name"],
                 aliases=(original_name, f"{info['server']}.{original_name}"),
             ):
@@ -318,6 +320,14 @@ class ToolManager:
 
         try:
             if self._connection_manager.has_tool(name):
+                server_name = self._connection_manager.server_for_tool(name)
+                scoped_workspace = workspace
+                if scoped_workspace is None and isinstance(runtime_context, dict):
+                    maybe_workspace = runtime_context.get("workspace")
+                    if isinstance(maybe_workspace, dict):
+                        scoped_workspace = maybe_workspace
+                if not self._is_mcp_server_allowed_for_workspace(server_name, scoped_workspace):
+                    return json.dumps({"error": f"MCP server '{server_name}' is not enabled for this project"}, ensure_ascii=False)
                 logger.info(f"Executing MCP tool route: {name}")
                 result = await self._connection_manager.call_tool(name, arguments)
                 return result
@@ -397,6 +407,16 @@ class ToolManager:
             if server_config.get("plugin_name") is not None:
                 inventory["plugin_name"] = server_config.get("plugin_name")
         return inventory
+
+    def _is_mcp_server_allowed_for_workspace(
+        self,
+        server_name: Optional[str],
+        workspace: Optional[Dict[str, Any]],
+    ) -> bool:
+        if not server_name:
+            return False
+        allowed = allowed_project_names(self._config, workspace, "enabled_mcp_servers")
+        return allowed is None or server_name in allowed
 
     async def describe_inventory_async(self) -> Dict[str, Any]:
         inventory = self.describe_inventory()
@@ -572,11 +592,27 @@ class ToolInventoryTool(BaseTool):
     async def execute(self, **kwargs) -> str:
         inventory = self._manager.describe_inventory()
         context = kwargs.get("_runtime_context")
+        workspace = context.get("workspace") if isinstance(context, dict) else None
+        if isinstance(workspace, dict):
+            visible_mcp_servers = allowed_project_names(self._manager._config, workspace, "enabled_mcp_servers")
+            if visible_mcp_servers is not None:
+                inventory["mcp_servers"] = [
+                    server for server in inventory.get("mcp_servers", [])
+                    if server.get("name") in visible_mcp_servers
+                ]
+                inventory["mcp_tools"] = [
+                    tool for tool in inventory.get("mcp_tools", [])
+                    if tool.get("server") in visible_mcp_servers
+                ]
+                inventory["model_visible_tools"] = [
+                    tool.get("function", {}).get("name")
+                    for tool in self._manager.get_openai_tools(workspace=workspace)
+                ]
         if isinstance(context, dict) and context.get("task_context_mode") == "detached":
             from .task_tools import TASK_TOOL_NAMES, filter_task_tools_for_context
 
             visible_tools = filter_task_tools_for_context(
-                self._manager.get_openai_tools(),
+                self._manager.get_openai_tools(workspace=workspace if isinstance(workspace, dict) else None),
                 "detached",
             )
             inventory["model_visible_tools"] = [

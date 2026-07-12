@@ -7,6 +7,7 @@ from ...core.capabilities.bootstrap import build_runtime_config_with_plugin_mcp
 from ...core.agents import AgentMailbox, AgentRuntime
 from ...core.config.config import Config, cfg
 from ...core.model.model_manager import ModelManager
+from ...core.projects import normalize_projects_config
 from ...core.persistence import SQLitePlanRepository, SQLiteTaskRepository
 from ...core.plans import PlanLedger
 from ...core.tasks import ActiveTaskService
@@ -28,6 +29,7 @@ class ConfigUpdateRequest(BaseModel):
     default_provider: Optional[str] = None
     provider_configs: Optional[Dict[str, Dict[str, Any]]] = None
     tools: Optional[Dict[str, Any]] = None
+    projects: Optional[Dict[str, Dict[str, Any]]] = None
 
 
 class AddProviderRequest(BaseModel):
@@ -261,6 +263,8 @@ async def update_config(
                 config_manager.data['provider'][provider] = conf
         if request.tools is not None:
             config_manager.data['tools'] = request.tools
+        if request.projects is not None:
+            config_manager.data['projects'] = normalize_projects_config(request.projects)
         if request.default_provider is not None:
             config_manager.data['default_provider'] = request.default_provider
         config_manager.save()

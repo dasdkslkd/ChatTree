@@ -26,6 +26,7 @@ from ..model.usage import add_usage, estimated_usage, usage_total
 from ..utils.logger import setup_logger
 from ..config.config import cfg
 from ..workspace import build_default_workspace, normalize_workspace
+from ..projects import filter_capability_registry_for_workspace
 from ..capabilities.prompting import (
     collect_skill_injection_names,
 )
@@ -922,6 +923,14 @@ class ChatManager:
                 break
         return names
 
+    def _scoped_capability_registry(self, conversation: Conversation):
+        workspace = conversation.metadata.get("workspace") if conversation is not None else None
+        return filter_capability_registry_for_workspace(
+            self.capability_registry,
+            cfg.data if isinstance(cfg.data, dict) else None,
+            workspace if isinstance(workspace, dict) else None,
+        )
+
     def _model_summary_for_conversation(
         self,
         conversation: Conversation,
@@ -986,7 +995,7 @@ class ChatManager:
         base_messages = self._prepare_messages_for_api_with_conversation(conversation)
         custom_prompt, custom_mode = self._selected_system_prompt(conversation)
         latest_user_content = self._latest_user_content(conversation)
-        built_messages = PromptBuilder(self.capability_registry).build(
+        built_messages = PromptBuilder(self._scoped_capability_registry(conversation)).build(
             PromptBuildRequest(
                 base_messages=base_messages,
                 active_skill_names=skill_names,
@@ -1017,7 +1026,7 @@ class ChatManager:
         custom_prompt, custom_mode = self._selected_system_prompt(conversation)
         messages = [
             Message(message)
-            for message in PromptBuilder(self.capability_registry).build(
+            for message in PromptBuilder(self._scoped_capability_registry(conversation)).build(
                 PromptBuildRequest(
                     base_messages=base_messages,
                     active_skill_names=[],
@@ -1395,7 +1404,7 @@ class ChatManager:
             ):
                 skill_names = collect_skill_injection_names(
                     model_content,
-                    self.capability_registry,
+                    self._scoped_capability_registry(conversation),
                     active_skill_names=self._recent_active_skill_names(conversation),
                 )
             new_node = NodeManager.create_node(
@@ -1485,7 +1494,7 @@ class ChatManager:
             self._multi_agent_intent_text(prompt_conversation, model_content),
             prompt_conversation.metadata if prompt_conversation is not None else (preview.metadata if preview is not None else {}),
         )
-        available_tools = self.tool_manager.get_openai_tools() if self.tool_manager else []
+        available_tools = self.tool_manager.get_openai_tools(workspace=workspace_context) if self.tool_manager else []
         tools = self._filter_tools_for_runtime(
             available_tools,
             multi_agent_mode=multi_agent_mode,
@@ -1509,6 +1518,7 @@ class ChatManager:
             "task_context_mode": new_node.get("task_context_mode") or TaskContextMode.ATTACHED.value,
             "task_generation_id": task_turn_context.generation_id,
             "task_revision": task_turn_context.revision,
+            "workspace": workspace_context,
         }
 
         total_content = ""

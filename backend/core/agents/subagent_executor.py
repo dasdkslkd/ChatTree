@@ -8,7 +8,9 @@ from typing import Any, Dict, Optional
 
 from backend.core.capabilities.registry import CapabilityRegistry
 from backend.core.chat.chat_manager import ChatManager
+from backend.core.config.config import cfg
 from backend.core.config.types import Message, Role, StreamController, StreamStatus
+from backend.core.projects import filter_capability_registry_for_workspace
 from backend.core.prompts import PromptBuilder, PromptBuildRequest
 from backend.core.prompts.catalog import load_prompt_template
 from backend.core.prompts.types import RuntimePromptContext
@@ -61,7 +63,8 @@ class SubagentExecutor:
         task_binding: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         delivery_policy = AgentDeliveryPolicy(str(delivery_policy or "auto")).value
-        agent = self.capability_registry.get_agent(agent_name)
+        scope_workspace = self._scope_workspace(conversation_id, workspace)
+        agent = self._scoped_registry(scope_workspace).get_agent(agent_name)
         if agent is None:
             raise KeyError(agent_name)
         self._validate_schema(agent.input_schema, input_data, "input_schema")
@@ -101,7 +104,7 @@ class SubagentExecutor:
             provider_id=provider_id,
             model_id=model_id,
             permission_mode=permission_mode,
-            workspace=workspace,
+            workspace=scope_workspace,
             context_mode=context_mode,
         ))
         self._tasks[run.run_id] = task
@@ -168,7 +171,7 @@ class SubagentExecutor:
         final_error: Optional[str] = None
         notification_payload: Optional[Dict[str, Any]] = None
         try:
-            agent = self.capability_registry.get_agent(agent_name)
+            agent = self._scoped_registry(workspace).get_agent(agent_name)
             if agent is None:
                 raise KeyError(agent_name)
             if agent.timeout_seconds:
@@ -214,7 +217,7 @@ class SubagentExecutor:
             await self.run_manager.append_event(run_id, notification_payload)
         except asyncio.TimeoutError:
             final_status = RunStatus.FAILED
-            agent = self.capability_registry.get_agent(agent_name)
+            agent = self._scoped_registry(workspace).get_agent(agent_name)
             final_error = f"subagent timeout after {agent.timeout_seconds if agent else 'configured'} seconds"
             notification_payload = {
                 "status": "error",
@@ -302,7 +305,7 @@ class SubagentExecutor:
                 conversation=conversation,
                 context_mode=context_mode,
             )
-            tools = self._filter_tools(agent.tools)
+            tools = self._filter_tools(agent.tools, workspace=conversation.metadata.get("workspace"))
             permission = normalize_permission_mode(permission_mode or agent.permission_mode)
             max_tool_rounds = agent.max_tool_rounds or DEFAULT_MAX_TOOL_ROUNDS
             max_turns = agent.max_turns or DEFAULT_MAX_TURNS
@@ -516,7 +519,8 @@ class SubagentExecutor:
         conversation: Any = None,
         context_mode: str = "fresh",
     ) -> list[Message]:
-        agent = self.capability_registry.get_agent(agent_name)
+        scoped_registry = self._scoped_registry(conversation.metadata.get("workspace") if conversation is not None else None)
+        agent = scoped_registry.get_agent(agent_name)
         if agent is None:
             raise KeyError(agent_name)
         is_workflow_worker = agent.name == "workflow-worker" or agent.metadata.get("runtime") == "workflow"
@@ -544,7 +548,7 @@ class SubagentExecutor:
         ]
         return [
             Message(message)
-            for message in PromptBuilder(self.capability_registry).build(
+            for message in PromptBuilder(scoped_registry).build(
                 PromptBuildRequest(
                     base_messages=base_messages,
                     active_skill_names=agent.skills,
@@ -621,10 +625,10 @@ class SubagentExecutor:
             metadata={"runtime_mode": "subagent_worker", "agent_name": agent.name},
         )
 
-    def _filter_tools(self, allowed_names: list[str]) -> list[dict[str, Any]]:
+    def _filter_tools(self, allowed_names: list[str], *, workspace: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
         if not self.chat_manager.tool_manager:
             return []
-        tools = self.chat_manager.tool_manager.get_openai_tools()
+        tools = self.chat_manager.tool_manager.get_openai_tools(workspace=workspace)
         if not allowed_names:
             return []
         tools = filter_task_tools_for_context(tools, "detached")
@@ -636,6 +640,29 @@ class SubagentExecutor:
             for tool in tools
             if tool.get("function", {}).get("name") in allowed
         ]
+
+    def _scoped_registry(self, workspace: Optional[dict[str, Any]]) -> CapabilityRegistry:
+        return filter_capability_registry_for_workspace(
+            self.capability_registry,
+            cfg.data if isinstance(cfg.data, dict) else None,
+            workspace if isinstance(workspace, dict) else None,
+        ) or self.capability_registry
+
+    def _scope_workspace(
+        self,
+        conversation_id: str,
+        workspace: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        if isinstance(workspace, dict):
+            return workspace
+        try:
+            conversation = self.chat_manager.get_conversation(conversation_id)
+        except Exception:
+            conversation = None
+        if conversation is None:
+            return None
+        stored_workspace = conversation.metadata.get("workspace")
+        return stored_workspace if isinstance(stored_workspace, dict) else None
 
     def _validate_output_schema(self, schema: Optional[dict[str, Any]], content: str) -> None:
         if not schema:
