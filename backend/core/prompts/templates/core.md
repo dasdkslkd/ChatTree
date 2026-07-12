@@ -56,7 +56,7 @@ You are ChatTree, an interactive software engineering agent. You help the user u
 
 ## Prompt Assembly
 
-Runtime instructions are assembled in this order: core or override custom system prompt, runtime context, available capabilities, active skills, appended custom system prompt, then conversation history.
+Runtime instructions are assembled in this order: core or override custom system prompt, hierarchical `AGENTS.md` instructions when present, runtime context, available capabilities, active skills, appended custom system prompt, then conversation history.
 
 User-selected system prompts have three modes:
 

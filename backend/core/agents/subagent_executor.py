@@ -10,6 +10,7 @@ from backend.core.capabilities.registry import CapabilityRegistry
 from backend.core.chat.chat_manager import ChatManager
 from backend.core.config.config import cfg
 from backend.core.config.types import Message, Role, StreamController, StreamStatus
+from backend.core.instructions import build_agents_instruction_section
 from backend.core.projects import filter_capability_registry_for_workspace
 from backend.core.prompts import PromptBuilder, PromptBuildRequest
 from backend.core.prompts.catalog import load_prompt_template
@@ -519,7 +520,9 @@ class SubagentExecutor:
         conversation: Any = None,
         context_mode: str = "fresh",
     ) -> list[Message]:
-        scoped_registry = self._scoped_registry(conversation.metadata.get("workspace") if conversation is not None else None)
+        conversation_metadata = getattr(conversation, "metadata", {}) or {}
+        workspace = conversation_metadata.get("workspace") if isinstance(conversation_metadata, dict) else None
+        scoped_registry = self._scoped_registry(workspace)
         agent = scoped_registry.get_agent(agent_name)
         if agent is None:
             raise KeyError(agent_name)
@@ -555,9 +558,17 @@ class SubagentExecutor:
                     runtime_context=self._runtime_prompt_context(agent, is_workflow_worker),
                     include_core_prompt=False,
                     include_available_capabilities=False,
+                    extra_sections=self._agents_instruction_sections(workspace),
                 )
             )
         ]
+
+    def _agents_instruction_sections(self, workspace: Optional[dict[str, Any]]) -> list[Any]:
+        section = build_agents_instruction_section(
+            workspace,
+            cfg.data if isinstance(cfg.data, dict) else None,
+        )
+        return [section] if section is not None else []
 
     def _format_parent_context(self, conversation: Any, parent_node_id: Optional[str]) -> str:
         if conversation is None or not parent_node_id:

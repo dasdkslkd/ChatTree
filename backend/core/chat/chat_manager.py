@@ -30,6 +30,7 @@ from ..projects import filter_capability_registry_for_workspace
 from ..capabilities.prompting import (
     collect_skill_injection_names,
 )
+from ..instructions import build_agents_instruction_section
 from ..prompts import PromptBuilder, PromptBuildRequest
 from ..prompts.types import RuntimePromptContext
 from ..slash import (
@@ -1005,6 +1006,7 @@ class ChatManager:
                     latest_user_content=latest_user_content,
                     task_turn_context=task_turn_context,
                 ),
+                extra_sections=self._agents_instruction_sections(conversation),
                 custom_system_prompt=custom_prompt,
                 custom_system_prompt_mode=custom_mode,
             )
@@ -1032,6 +1034,7 @@ class ChatManager:
                     active_skill_names=[],
                     include_available_capabilities=False,
                     runtime_context=self._runtime_prompt_context("side_question", conversation),
+                    extra_sections=self._agents_instruction_sections(conversation),
                     custom_system_prompt=custom_prompt,
                     custom_system_prompt_mode=custom_mode,
                 )
@@ -2852,6 +2855,19 @@ class ChatManager:
             f"- Workspace roots: {', '.join(map(str, workspace_roots[:3])) if workspace_roots else 'none'}",
             f"- Selected system prompt mode: {mode}",
         ]
+
+    def _agents_instruction_sections(self, conversation: Optional[Conversation]) -> list[Any]:
+        if conversation is None:
+            return []
+        workspace = normalize_workspace(
+            conversation.metadata.get("workspace"),
+            build_default_workspace(cfg.data if isinstance(cfg.data, dict) else None),
+        )
+        section = build_agents_instruction_section(
+            workspace,
+            cfg.data if isinstance(cfg.data, dict) else None,
+        )
+        return [section] if section is not None else []
 
     def _current_node_permission_mode(self, conversation: Optional[Conversation]) -> str:
         if conversation is None:
