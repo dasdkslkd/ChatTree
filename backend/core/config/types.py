@@ -2,7 +2,7 @@
 from typing import List, Optional, Dict, Any, Union
 from enum import Enum
 import asyncio
-from typing_extensions import TypedDict, Required
+from typing_extensions import TypedDict, Required, NotRequired
 
 # 持久化 schema 版本。新写入打此版本；加载时若数据版本高于此值则拒绝。
 SCHEMA_VERSION = 1
@@ -97,6 +97,7 @@ class ConversationTreeNode(TypedDict):
 
     branch_usage_info: UsageInfo
     usage: NodeUsage
+    context_summaries: NotRequired[List[Dict[str, Any]]]
 
 class ConversationMetadata(TypedDict, total=False):
     """对话元数据"""

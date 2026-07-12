@@ -18,6 +18,8 @@ def build_direct_response_text(
         return _help_text(command_definitions)
     if command_name == "capabilities":
         return _capabilities_text(command_definitions, runtime_context)
+    if command_name == "prune-summary":
+        return "Use /prune-summary from a conversation node to generate a child-branch prune summary."
     return f"Unknown direct-response command: /{command_name or 'unknown'}"
 
 

@@ -1261,7 +1261,7 @@ export default function ChatPage() {
   const {
     conversations, currentConversation, messages,
     currentNodeId, pendingScrollNodeId, clearPendingScroll,
-    createConversation, selectConversation, deleteConversation, deleteNode, switchNode, loadConversations,
+    createConversation, selectConversation, deleteConversation, deleteNode, switchNode, loadConversations, loadTree,
     clearCurrentConversation, updateConversationTitle, refreshMessages, patchAssistantMessageFromStream,
   } = useConversationStore();
 
@@ -2703,6 +2703,9 @@ export default function ChatPage() {
           streamManager.cleanupIfController(finishedId, controller, runId);
         }
         await loadConversations();
+        if (finishedId === currentConversationIdRef.current) {
+          await loadTree(finishedId);
+        }
         await refreshTranscript(finishedId, awaitNodeId ?? null);
         void syncSelectedConversationSideRuns(finishedId);
         const sentQueued = await sendNextQueuedMessage(finishedId);
@@ -2773,6 +2776,7 @@ export default function ChatPage() {
     refreshMessages,
     patchAssistantMessageFromStream,
     loadConversations,
+    loadTree,
     refreshTranscript,
     syncSelectedConversationSideRuns,
     sendNextQueuedMessage,

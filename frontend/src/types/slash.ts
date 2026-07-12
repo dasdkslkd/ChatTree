@@ -16,6 +16,7 @@ export interface SlashCommandInfo {
   description: string;
   supports_inline_args: boolean;
   requires_args: boolean;
+  usage_args_label?: string;
   dispatch_kind: SlashDispatchKind;
   tool_policy: SlashToolPolicy;
   persistence_policy: SlashPersistencePolicy;

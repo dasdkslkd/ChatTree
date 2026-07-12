@@ -6,6 +6,7 @@ from pydantic import BaseModel
 import asyncio
 import json
 import logging
+import re
 from ...core.agents import SubagentExecutor
 from ...core.chat.chat_manager import ChatManager
 from ..dependencies import get_chat_manager, get_run_manager, get_subagent_executor, get_command_executor, get_workflow_manager
@@ -177,6 +178,107 @@ def _direct_response_runtime_context(
             "plugins": len(registry.plugins()),
         }
     return context
+
+
+def _parse_prune_summary_args(args: str, default_node_id: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    target_node_id = default_node_id
+    remaining: List[str] = []
+    for token in (args or "").split():
+        match = re.match(r"^node:(.+)$", token.strip())
+        if match:
+            target_node_id = match.group(1).strip()
+            continue
+        remaining.append(token)
+    custom_instructions = " ".join(remaining).strip() or None
+    return target_node_id, custom_instructions
+
+
+async def _handle_prune_summary_command(
+    *,
+    conversation_id: str,
+    request: SendMessageRequest,
+    slash_result: Any,
+    chat_manager: ChatManager,
+    run_manager: RunManager,
+) -> AsyncIterator[str]:
+    target_node_id, custom_instructions = _parse_prune_summary_args(
+        slash_result.args,
+        request.parent_node_id,
+    )
+    run = await run_manager.create_run(
+        conversation_id=conversation_id,
+        kind=RunKind.DIRECT_RESPONSE,
+        anchor_node_id=target_node_id or request.parent_node_id,
+        summary=request.content[:80],
+        metadata={
+            "slash_command": _slash_command_metadata(slash_result),
+            "model_id": request.model_id,
+            "provider_id": request.provider_id,
+            "target_node_id": target_node_id,
+        },
+    )
+    start_payload = await run_manager.append_event(run.run_id, {
+        "status": "start",
+        "content": None,
+        "node_id": None,
+        "target_node_id": None,
+        "anchor_node_id": target_node_id or request.parent_node_id,
+        "conversation_id": conversation_id,
+        "run_id": run.run_id,
+        "tokens_used": 0,
+    })
+    yield _format_sse_data(start_payload)
+    try:
+        if not target_node_id:
+            raise ValueError("缺少目标节点")
+        result = await chat_manager.prune_summary(
+            conversation_id,
+            target_node_id,
+            custom_instructions=custom_instructions,
+            model_id=request.model_id,
+            provider_id=request.provider_id,
+        )
+        content = (
+            "剪枝摘要已生成\n\n"
+            f"- 目标节点: {result['parent_node_id']}\n"
+            f"- 摘要 ID: {result['summary_id']}\n"
+            f"- 覆盖节点: {result['covered_node_count']}\n"
+            f"- 直接子分支: {result['covered_direct_child_count']}\n"
+        )
+        if result.get("compact_node_ids"):
+            content += f"- 使用已有 compact: {', '.join(result['compact_node_ids'])}\n"
+        if result.get("truncated_node_ids"):
+            content += f"- 截断节点: {', '.join(result['truncated_node_ids'])}\n"
+        if result.get("coverage_notes"):
+            content += "\nCoverage:\n" + "\n".join(f"- {note}" for note in result["coverage_notes"]) + "\n"
+        content += "\n摘要预览:\n" + str(result.get("summary_preview") or "")
+        await run_manager.append_event(run.run_id, {
+            "status": "content",
+            "content": content,
+            "node_id": None,
+            "target_node_id": None,
+            "anchor_node_id": target_node_id,
+            "conversation_id": conversation_id,
+            "run_id": run.run_id,
+            "tokens_used": 0,
+        })
+        await run_manager.append_event(run.run_id, {
+            "status": "complete",
+            "content": None,
+            "node_id": None,
+            "target_node_id": None,
+            "anchor_node_id": target_node_id,
+            "conversation_id": conversation_id,
+            "run_id": run.run_id,
+            "tokens_used": 0,
+        })
+        await run_manager.finish_run(run.run_id, RunStatus.COMPLETED)
+    except Exception as exc:
+        await run_manager.append_event(run.run_id, _stream_error_chunk(conversation_id, str(exc)))
+        await run_manager.finish_run(run.run_id, RunStatus.FAILED, str(exc))
+
+    async for event in _subscribe_sse(run_manager, run.run_id, int(start_payload.get("event_index") or 0) + 1):
+        yield event
 
 def _slash_command_metadata(slash_result: Any) -> Dict[str, Any]:
     return {
@@ -437,6 +539,20 @@ async def detached_stream_event_generator(
             yield _format_sse_data("[DONE]")
             return
         async for event in _subscribe_sse(run_manager, str(run["run_id"]), 0):
+            yield event
+        return
+
+    if (
+        slash_result.kind == SlashDispatchKind.DIRECT_RESPONSE
+        and slash_result.canonical_name == "prune-summary"
+    ):
+        async for event in _handle_prune_summary_command(
+            conversation_id=conversation_id,
+            request=request,
+            slash_result=slash_result,
+            chat_manager=chat_manager,
+            run_manager=run_manager,
+        ):
             yield event
         return
 

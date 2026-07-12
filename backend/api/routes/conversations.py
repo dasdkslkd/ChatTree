@@ -59,6 +59,11 @@ class ConversationCompactRequest(BaseModel):
     provider_id: Optional[str] = None
     messages_to_keep: Optional[int] = None
 
+class PruneSummaryRequest(BaseModel):
+    custom_instructions: Optional[str] = None
+    model_id: Optional[str] = None
+    provider_id: Optional[str] = None
+
 class ConversationResponse(BaseModel):
     id: str
     title: str
@@ -495,6 +500,33 @@ async def compact_conversation(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/conversations/{conversation_id}/nodes/{node_id}/prune-summary")
+async def prune_summary(
+    conversation_id: str,
+    node_id: str,
+    request: PruneSummaryRequest,
+    chat_manager: ChatManager = Depends(get_chat_manager)
+):
+    """总结指定父节点下的所有子分支，并保存为父节点上下文附件。"""
+    try:
+        return await chat_manager.prune_summary(
+            conversation_id,
+            node_id,
+            custom_instructions=request.custom_instructions,
+            model_id=request.model_id,
+            provider_id=request.provider_id,
+        )
+    except ValueError as e:
+        detail = str(e)
+        if detail == "对话不存在":
+            raise HTTPException(status_code=404, detail=detail)
+        raise HTTPException(status_code=400, detail=detail)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.delete("/conversations/{conversation_id}/nodes/{node_id}")
 async def delete_node(
     conversation_id: str,
@@ -563,6 +595,11 @@ async def get_conversation_tree(
             assistant_content = ""
             if node.get("assistant_message"):
                 assistant_content = node["assistant_message"].get("content", "")
+            context_summaries = [
+                summary for summary in (node.get("context_summaries") or [])
+                if isinstance(summary, dict) and summary.get("type") == "prune_summary"
+            ]
+            context_summaries.sort(key=lambda item: int(item.get("created_at") or 0), reverse=True)
 
             # 处理 parent_id: 根节点的 parent_id 为 "None" 字符串，转为 null
             parent_id = node.get("parent_id")
@@ -584,6 +621,8 @@ async def get_conversation_tree(
                 "total_tokens": node.get("total_tokens", 0),
                 "branch_usage_info": node.get("branch_usage_info"),
                 "usage": node.get("usage"),
+                "context_summaries": context_summaries,
+                "prune_summary_count": len(context_summaries),
             })
 
         return {

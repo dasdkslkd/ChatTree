@@ -124,6 +124,21 @@ def built_in_slash_definitions() -> list[SlashCommandDefinition]:
             stream_target_policy="none",
             blocks_main_thread=False,
         ),
+        SlashCommandDefinition(
+            name="prune-summary",
+            aliases=("prune",),
+            description="summarize child branches under the current or specified node",
+            supports_inline_args=True,
+            requires_args=False,
+            usage_args_label="node:<节点ID> 可选引导",
+            dispatch_kind=SlashDispatchKind.DIRECT_RESPONSE,
+            tool_policy=SlashToolPolicy.DISABLED,
+            persistence_policy=SlashPersistencePolicy.SIDE_RUN,
+            run_kind="direct_response",
+            prompt_builder=None,
+            stream_target_policy="anchor_only",
+            blocks_main_thread=False,
+        ),
     ]
 
 

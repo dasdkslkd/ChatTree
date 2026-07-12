@@ -18,6 +18,17 @@ from .compact import (
     get_compact_prompt,
     microcompact_messages,
 )
+from .prune_summary import (
+    PRUNE_BRANCH_DIGEST_MAX_OUTPUT_TOKENS,
+    PRUNE_PACKET_BUDGET_CHARS,
+    PRUNE_SUMMARY_MAX_OUTPUT_TOKENS,
+    build_branch_digest_messages,
+    build_prune_context_message,
+    build_prune_packets,
+    build_prune_summary_messages,
+    create_prune_summary_record,
+    json_dumps,
+)
 from ..config.types import Message, Role, StreamChunk, StreamStatus, StreamController, GenerationInfo
 from ..storage.chat_storage import ChatStorage
 from ..storage.prompt_storage import PromptStorage
@@ -984,6 +995,16 @@ class ChatManager:
             return f"Slash command '/{command_name}' 是后台 workflow 命令，必须由消息 SSE 入口分派。"
         return f"Slash command '/{command_name}' 暂不可用。"
 
+    def _get_openai_tools_for_workspace(self, workspace_context: Dict[str, Any]) -> List[Dict[str, Any]]:
+        if not self.tool_manager:
+            return []
+        try:
+            return self.tool_manager.get_openai_tools(workspace=workspace_context)
+        except TypeError as exc:
+            if "workspace" not in str(exc):
+                raise
+            return self.tool_manager.get_openai_tools()
+
     def _build_prompt_messages(
         self,
         conversation: Conversation,
@@ -1497,7 +1518,7 @@ class ChatManager:
             self._multi_agent_intent_text(prompt_conversation, model_content),
             prompt_conversation.metadata if prompt_conversation is not None else (preview.metadata if preview is not None else {}),
         )
-        available_tools = self.tool_manager.get_openai_tools(workspace=workspace_context) if self.tool_manager else []
+        available_tools = self._get_openai_tools_for_workspace(workspace_context)
         tools = self._filter_tools_for_runtime(
             available_tools,
             multi_agent_mode=multi_agent_mode,
@@ -3098,6 +3119,44 @@ class ChatManager:
             "is_visible_in_transcript_only": True,
         })
 
+    def _latest_prune_summary_for_context(
+        self,
+        node: Dict[str, Any],
+        target_chain_ids: set[str],
+    ) -> Optional[Dict[str, Any]]:
+        summaries = [
+            item for item in node.get("context_summaries", [])
+            if isinstance(item, dict)
+            and item.get("type") == "prune_summary"
+            and item.get("status") == "completed"
+        ]
+        if not summaries:
+            return None
+        summaries.sort(key=lambda item: int(item.get("created_at") or 0), reverse=True)
+        for summary in summaries:
+            covered = set(str(node_id) for node_id in (summary.get("covered_node_ids") or []))
+            if covered.intersection(target_chain_ids):
+                continue
+            return summary
+        return None
+
+    def _format_prune_summary_context_message(
+        self,
+        node: Dict[str, Any],
+        target_chain_ids: set[str],
+    ) -> Optional[Message]:
+        summary = self._latest_prune_summary_for_context(node, target_chain_ids)
+        if not summary:
+            return None
+        return Message({
+            "id": f"{node.get('id')}:prune_summary:{summary.get('id')}",
+            "role": Role.USER,
+            "content": build_prune_context_message(summary),
+            "timestamp": int(summary.get("created_at") or node.get("timestamp") or time()),
+            "is_visible_in_transcript_only": True,
+            "subtype": "prune_summary_context",
+        })
+
     def _current_context_tokens(self, conversation: Conversation) -> int:
         current = conversation.nodes.get(conversation.current_node_id or "")
         usage = current.get("usage") if current else None
@@ -3246,6 +3305,149 @@ class ChatManager:
             "trigger": compact_node["system_message"]["compact_metadata"]["trigger"],
         }
 
+    async def prune_summary(
+        self,
+        conversation_id: str,
+        parent_node_id: str,
+        custom_instructions: Optional[str] = None,
+        model_id: Optional[str] = None,
+        provider_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """总结父节点下的子树，并把摘要保存为父节点上下文附件。"""
+        conversation = self.get_conversation(conversation_id)
+        if conversation is None:
+            raise ValueError("对话不存在")
+        if not parent_node_id or parent_node_id not in conversation.nodes:
+            raise ValueError("父节点不存在")
+
+        target_model, target_provider = self._resolve_model_for_conversation(
+            conversation,
+            model_id=model_id,
+            provider_id=provider_id,
+        )
+        if not target_model:
+            raise ValueError("未指定模型ID")
+        if not target_provider:
+            raise ValueError(f"无法找到模型 {target_model} 对应的提供商")
+
+        provider = self.model_manager.get_model(target_provider, False)
+        if not provider:
+            raise ValueError(f"无法初始化提供商 {target_provider}")
+
+        # provider.generate_response 是同步网络调用。剪枝摘要可能耗时较长，
+        # 必须放到线程里，避免阻塞 FastAPI 主事件循环和其它 SSE/HTTP 请求。
+        summary_record = await asyncio.to_thread(
+            self._generate_prune_summary_record_sync,
+            conversation,
+            parent_node_id,
+            custom_instructions,
+            target_model,
+            target_provider,
+            provider,
+        )
+
+        async with self._lock_for(conversation_id):
+            latest = self.get_conversation(conversation_id)
+            if latest is None:
+                raise ValueError("对话不存在")
+            parent = latest.nodes.get(parent_node_id)
+            if parent is None:
+                raise ValueError("父节点不存在")
+            summaries = [
+                item for item in parent.get("context_summaries", [])
+                if isinstance(item, dict)
+            ]
+            summaries.append(summary_record)
+            parent["context_summaries"] = summaries
+            self._mark_conversation_updated_at(latest, int(time()))
+            self._save(latest)
+
+        preview = str(summary_record.get("summary") or "").strip()
+        if len(preview) > 800:
+            preview = preview[:800] + "..."
+        return {
+            "conversation_id": conversation_id,
+            "parent_node_id": parent_node_id,
+            "summary_id": summary_record["id"],
+            "covered_node_count": len(summary_record.get("covered_node_ids") or []),
+            "covered_direct_child_count": len(summary_record.get("covered_direct_child_ids") or []),
+            "covered_node_ids": summary_record.get("covered_node_ids") or [],
+            "covered_direct_child_ids": summary_record.get("covered_direct_child_ids") or [],
+            "compact_node_ids": summary_record.get("compact_node_ids") or [],
+            "truncated_node_ids": summary_record.get("truncated_node_ids") or [],
+            "coverage_notes": summary_record.get("coverage_notes") or [],
+            "summary_preview": preview,
+            "summary": summary_record.get("summary") or "",
+        }
+
+    def _generate_prune_summary_record_sync(
+        self,
+        conversation: Conversation,
+        parent_node_id: str,
+        custom_instructions: Optional[str],
+        target_model: str,
+        target_provider: str,
+        provider: Any,
+    ) -> Dict[str, Any]:
+        packet_bundle = build_prune_packets(conversation, parent_node_id)
+        branch_digests: List[Dict[str, Any]] = []
+        summary_packet_bundle = packet_bundle
+        tokens_used_total = 0
+        if len(json_dumps(packet_bundle)) > PRUNE_PACKET_BUDGET_CHARS:
+            for branch_packet in packet_bundle.get("branch_packets") or []:
+                digest_messages = build_branch_digest_messages(
+                    packet_bundle.get("parent") or {},
+                    branch_packet,
+                    custom_instructions,
+                )
+                digest, digest_tokens = provider.generate_response(
+                    target_model,
+                    digest_messages,
+                    max_tokens=PRUNE_BRANCH_DIGEST_MAX_OUTPUT_TOKENS,
+                    temperature=0,
+                    tools=None,
+                    tool_choice=None,
+                )
+                tokens_used_total += int(digest_tokens or 0)
+                branch_digests.append({
+                    "direct_child_node_id": branch_packet.get("direct_child_node_id"),
+                    "branch_order": branch_packet.get("branch_order"),
+                    "is_current_branch": branch_packet.get("is_current_branch"),
+                    "digest": str(digest or "").strip(),
+                    "coverage": branch_packet.get("coverage") or {},
+                })
+            summary_packet_bundle = {
+                "parent": packet_bundle.get("parent") or {},
+                "branch_digests": branch_digests,
+                "coverage": deepcopy(packet_bundle.get("coverage") or {}),
+            }
+            coverage_notes = summary_packet_bundle["coverage"].setdefault("coverage_notes", [])
+            coverage_notes.append("子树 packet 超过全局预算，已先生成分支摘要后再合成剪枝摘要。")
+
+        summary_messages = build_prune_summary_messages(summary_packet_bundle, custom_instructions)
+        summary, tokens_used = provider.generate_response(
+            target_model,
+            summary_messages,
+            max_tokens=PRUNE_SUMMARY_MAX_OUTPUT_TOKENS,
+            temperature=0,
+            tools=None,
+            tool_choice=None,
+        )
+        tokens_used_total += int(tokens_used or 0)
+        summary_record = create_prune_summary_record(
+            parent_node_id=parent_node_id,
+            summary=summary,
+            packet_bundle=packet_bundle,
+            model_id=target_model,
+            provider_id=target_provider,
+            custom_instructions=custom_instructions,
+            tokens_used=tokens_used_total,
+            branch_digests=branch_digests,
+        )
+        if branch_digests:
+            summary_record["coverage_notes"] = list(summary_packet_bundle.get("coverage", {}).get("coverage_notes") or [])
+        return summary_record
+
     def _prepare_messages_for_api_with_conversation(
         self,
         conversation: Conversation,
@@ -3294,6 +3496,7 @@ class ChatManager:
             conversation,
             include_messages_to_keep=include_messages_to_keep,
         )
+        target_chain_ids = {str(node.get("id")) for node in node_chain if node.get("id")}
         for node in node_chain:
             append_message(node.get("system_message"))
             user_message = node.get("user_message")
@@ -3342,6 +3545,7 @@ class ChatManager:
                     )
                     for tool_msg in self._apply_round_tool_result_budget(paired_tools):
                         append_message(tool_msg)
+            append_message(self._format_prune_summary_context_message(node, target_chain_ids))
 
         return microcompact_messages(msg_dict)
 

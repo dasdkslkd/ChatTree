@@ -114,6 +114,21 @@ const DEFAULT_COMMANDS: SlashCommandInfo[] = [
     blocks_main_thread: false,
     enabled: true,
   },
+  {
+    name: 'prune-summary',
+    aliases: ['prune'],
+    description: 'summarize child branches under the current or specified node',
+    supports_inline_args: true,
+    requires_args: false,
+    usage_args_label: 'node:<节点ID> 可选引导',
+    dispatch_kind: 'direct_response',
+    tool_policy: 'disabled',
+    persistence_policy: 'side_run',
+    run_kind: 'direct_response',
+    stream_target_policy: 'anchor_only',
+    blocks_main_thread: false,
+    enabled: true,
+  },
 ];
 
 let commands = DEFAULT_COMMANDS;

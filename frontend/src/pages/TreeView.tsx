@@ -4,8 +4,8 @@ import { useConversationStore, conversationStore } from '../store/conversationSt
 import { useNavigationStore } from '../store/navigationStore';
 import { Button } from '@/components/ui/button';
 import { TextTooltip } from '@/components/ui/text-tooltip';
-import { ZoomIn, ZoomOut, Maximize2, ArrowDown, ArrowRight, Trash2 } from 'lucide-react';
-import type { TreeNode } from '../api/conversation';
+import { ZoomIn, ZoomOut, Maximize2, ArrowDown, ArrowRight, Trash2, Scissors, FileText, Loader2, X } from 'lucide-react';
+import { conversationApi, type PruneSummaryRecord, type TreeNode } from '../api/conversation';
 import { getTreeUserContent } from '../utils/taskNotificationVisibility';
 
 interface LayoutNode {
@@ -28,6 +28,7 @@ interface ContextMenuState {
   y: number;
   nodeId: string;
   label: string;
+  isRoot: boolean;
 }
 
 const NODE_WIDTH = 220;
@@ -58,6 +59,8 @@ export default function TreeView() {
   const [isPanning, setIsPanning] = useState(false);
   const [direction, setDirection] = useState<'TB' | 'LR'>('TB');
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [generatingNodeId, setGeneratingNodeId] = useState<string | null>(null);
+  const [summaryModal, setSummaryModal] = useState<{ nodeLabel: string; summary: PruneSummaryRecord } | null>(null);
   const panStartRef = useRef({ x: 0, y: 0, tx: 0, ty: 0 });
 
   useEffect(() => {
@@ -200,11 +203,12 @@ export default function TreeView() {
   const handleContextMenu = useCallback((e: React.MouseEvent, nodeId: string) => {
     e.preventDefault();
     e.stopPropagation();
-    if (isRootNode(treeData?.nodes.find(n => n.id === nodeId) as TreeNode)) return;
     const node = treeData?.nodes.find(n => n.id === nodeId);
+    if (!node) return;
+    const root = isRootNode(node);
     const userContent = node ? getTreeUserContent(node) : '';
-    const label = userContent ? truncate(stripFileMention(userContent), 20) : nodeId.slice(0, 8);
-    setContextMenu({ x: e.clientX, y: e.clientY, nodeId, label });
+    const label = root ? '对话开始' : userContent ? truncate(stripFileMention(userContent), 20) : nodeId.slice(0, 8);
+    setContextMenu({ x: e.clientX, y: e.clientY, nodeId, label, isRoot: root });
   }, [treeData]);
 
   const handleDeleteBranch = useCallback(async () => {
@@ -217,6 +221,53 @@ export default function TreeView() {
     }
     setContextMenu(null);
   }, [contextMenu, currentConversation, deleteNode]);
+
+  const handleGeneratePruneSummary = useCallback(async () => {
+    if (!contextMenu || !currentConversation) return;
+    const instructions = window.prompt(
+      `为「${contextMenu.label}」生成剪枝摘要。可选：输入摘要侧重点。`,
+      '',
+    );
+    if (instructions === null) return;
+    setGeneratingNodeId(contextMenu.nodeId);
+    setContextMenu(null);
+    try {
+      const result = await conversationApi.pruneSummary(currentConversation.id, contextMenu.nodeId, {
+        custom_instructions: instructions.trim() || null,
+      });
+      await loadTree(currentConversation.id);
+      setSummaryModal({
+        nodeLabel: contextMenu.label,
+        summary: {
+          id: result.summary_id,
+          type: 'prune_summary',
+          parent_node_id: result.parent_node_id,
+          created_at: Math.floor(Date.now() / 1000),
+          summary: result.summary,
+          covered_node_ids: result.covered_node_ids || [],
+          covered_direct_child_ids: result.covered_direct_child_ids || [],
+          compact_node_ids: result.compact_node_ids || [],
+          truncated_node_ids: result.truncated_node_ids || [],
+          coverage_notes: result.coverage_notes || [],
+          status: 'completed',
+        },
+      });
+    } catch (err: any) {
+      window.alert(err?.response?.data?.detail || err?.message || '剪枝摘要生成失败');
+    } finally {
+      setGeneratingNodeId(null);
+    }
+  }, [contextMenu, currentConversation, loadTree]);
+
+  const handleViewPruneSummary = useCallback(() => {
+    if (!contextMenu || !treeData) return;
+    const node = treeData.nodes.find((item) => item.id === contextMenu.nodeId);
+    const summary = node?.context_summaries?.[0];
+    if (summary) {
+      setSummaryModal({ nodeLabel: contextMenu.label, summary });
+    }
+    setContextMenu(null);
+  }, [contextMenu, treeData]);
 
   const buildEdgePath = useCallback((edge: LayoutEdge): string => {
     if (!edge.points || edge.points.length < 2) return '';
@@ -309,6 +360,7 @@ export default function TreeView() {
           const isActive = node.data.is_current;
           const isRoot = isRootNode(node.data);
           const userContent = getTreeUserContent(node.data);
+          const pruneSummaryCount = node.data.prune_summary_count || node.data.context_summaries?.length || 0;
 
           return (
             <div
@@ -355,6 +407,19 @@ export default function TreeView() {
                       {node.data.model_id}
                     </span>
                   )}
+                  {pruneSummaryCount > 0 && (
+                    <TextTooltip content={`${pruneSummaryCount} 份剪枝摘要`}>
+                      <span className="absolute bottom-1 right-2 inline-flex h-4 min-w-4 items-center justify-center rounded-sm border border-primary/40 bg-primary/10 px-1 text-[9px] font-medium text-primary">
+                        {pruneSummaryCount}
+                      </span>
+                    </TextTooltip>
+                  )}
+                  {generatingNodeId === node.id && (
+                    <span className="absolute bottom-1 left-2 inline-flex items-center gap-1 text-[9px] text-muted-foreground">
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      摘要中
+                    </span>
+                  )}
                 </div>
               )}
             </div>
@@ -370,12 +435,67 @@ export default function TreeView() {
           onClick={(e) => e.stopPropagation()}
         >
           <button
-            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm text-destructive outline-none hover:bg-destructive/10 cursor-default"
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none hover:bg-accent cursor-default"
+            onClick={handleGeneratePruneSummary}
+          >
+            <Scissors className="h-4 w-4" />
+            生成剪枝摘要
+          </button>
+          {(treeData?.nodes.find((node) => node.id === contextMenu.nodeId)?.prune_summary_count || 0) > 0 && (
+            <button
+              className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none hover:bg-accent cursor-default"
+              onClick={handleViewPruneSummary}
+            >
+              <FileText className="h-4 w-4" />
+              查看剪枝摘要
+            </button>
+          )}
+          <button
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm text-destructive outline-none hover:bg-destructive/10 disabled:cursor-not-allowed disabled:opacity-50 cursor-default"
             onClick={handleDeleteBranch}
+            disabled={contextMenu.isRoot}
           >
             <Trash2 className="h-4 w-4" />
             删除此分支
           </button>
+        </div>
+      )}
+
+      {summaryModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/60 p-4 backdrop-blur-sm">
+          <div className="flex max-h-[80vh] w-full max-w-2xl flex-col overflow-hidden rounded-lg border bg-popover shadow-xl">
+            <div className="flex items-center justify-between border-b px-4 py-3">
+              <div>
+                <h3 className="text-sm font-semibold">剪枝摘要 · {summaryModal.nodeLabel}</h3>
+                <p className="text-xs text-muted-foreground">
+                  覆盖 {summaryModal.summary.covered_node_ids?.length || 0} 个节点
+                </p>
+              </div>
+              <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => setSummaryModal(null)} aria-label="关闭">
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+            <div className="overflow-auto px-4 py-3">
+              <pre className="whitespace-pre-wrap break-words text-sm leading-relaxed text-foreground">
+                {summaryModal.summary.summary}
+              </pre>
+              {(summaryModal.summary.coverage_notes?.length || 0) > 0 && (
+                <div className="mt-4 border-t pt-3">
+                  <h4 className="mb-2 text-xs font-semibold text-muted-foreground">Coverage</h4>
+                  <ul className="space-y-1 text-xs text-muted-foreground">
+                    {summaryModal.summary.coverage_notes.map((note, index) => (
+                      <li key={index}>- {note}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {(summaryModal.summary.truncated_node_ids?.length || 0) > 0 && (
+                <p className="mt-3 text-xs text-muted-foreground">
+                  可用 /refer node:&lt;node_id&gt; 取回被截断或需要原始证据的轮次。
+                </p>
+              )}
+            </div>
+          </div>
         </div>
       )}
 

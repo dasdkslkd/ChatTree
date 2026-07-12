@@ -17,6 +17,8 @@ export interface TreeNode {
   total_tokens?: number;
   branch_usage_info?: UsageInfo | null;
   usage?: NodeUsage | null;
+  context_summaries?: PruneSummaryRecord[];
+  prune_summary_count?: number;
 }
 
 export interface TreeData {
@@ -27,6 +29,40 @@ export interface TreeData {
 
 export interface DeleteNodeOptions {
   force?: boolean;
+}
+
+export interface PruneSummaryRecord {
+  id: string;
+  type: 'prune_summary';
+  parent_node_id: string;
+  created_at: number;
+  model_id?: string | null;
+  provider_id?: string | null;
+  user_instructions?: string | null;
+  summary: string;
+  covered_node_ids: string[];
+  covered_direct_child_ids: string[];
+  compact_node_ids: string[];
+  truncated_node_ids: string[];
+  coverage_notes: string[];
+  branch_digests?: Array<Record<string, unknown>>;
+  tokens_used?: number;
+  status: 'completed' | 'failed';
+}
+
+export interface PruneSummaryResult {
+  conversation_id: string;
+  parent_node_id: string;
+  summary_id: string;
+  covered_node_count: number;
+  covered_direct_child_count: number;
+  covered_node_ids?: string[];
+  covered_direct_child_ids?: string[];
+  compact_node_ids: string[];
+  truncated_node_ids: string[];
+  coverage_notes: string[];
+  summary_preview: string;
+  summary: string;
 }
 
 export const conversationApi = {
@@ -108,6 +144,15 @@ export const conversationApi = {
     data: { custom_instructions?: string | null; model_id?: string | null; provider_id?: string | null; messages_to_keep?: number | null } = {},
   ): Promise<{ conversation_id: string; node_id: string; pre_tokens?: number; tokens_used?: number; trigger?: string }> => {
     const response = await apiClient.post(`/conversations/${id}/compact`, data);
+    return response.data;
+  },
+
+  pruneSummary: async (
+    conversationId: string,
+    nodeId: string,
+    data: { custom_instructions?: string | null; model_id?: string | null; provider_id?: string | null } = {},
+  ): Promise<PruneSummaryResult> => {
+    const response = await apiClient.post(`/conversations/${conversationId}/nodes/${nodeId}/prune-summary`, data);
     return response.data;
   },
 
