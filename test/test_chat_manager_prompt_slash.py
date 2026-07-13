@@ -680,7 +680,7 @@ def test_send_message_stream_plan_mode_retries_until_exit_or_question_tool(tmp_p
         if message.get("role") == "system"
     )
     assert "Plan mode final response was discarded" in reminder_text
-    assert "exit_plan_mode" in reminder_text
+    assert "action `exit`" in reminder_text
     current_plan = asyncio.run(plan_ledger.get_active_or_awaiting(conversation.metadata["id"]))
     assert current_plan is not None
     assert current_plan.status.value == "awaiting_approval"

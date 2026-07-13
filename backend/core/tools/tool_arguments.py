@@ -8,7 +8,7 @@ COMMAND_ARGUMENT_TOOLS = {"shell"}
 
 
 def normalize_tool_arguments(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize compact or alias-heavy tool arguments into canonical shapes."""
+    """Normalize compact single-argument tool calls into canonical shapes."""
     if not isinstance(arguments, dict):
         return {}
 
@@ -21,17 +21,7 @@ def normalize_tool_arguments(tool_name: str, arguments: Dict[str, Any]) -> Dict[
         if compact is not None:
             return compact
 
-    normalized = dict(arguments)
-    _rename_first(normalized, "path", ("file_path", "filepath", "file"))
-    if tool_name.lower() in COMMAND_ARGUMENT_TOOLS:
-        _rename_first(normalized, "command", ("cmd", "script"))
-    else:
-        _rename_first(normalized, "command", ("cmd",))
-    if tool_name.lower() == "grep":
-        _rename_first(normalized, "pattern", ("q", "query"))
-    else:
-        _rename_first(normalized, "query", ("q", "pattern"))
-    return normalized
+    return dict(arguments)
 
 
 def _single_raw_argument(arguments: Dict[str, Any]) -> str | None:
@@ -57,15 +47,8 @@ def _compact_argument_for_tool(tool_name: str, raw: str) -> Dict[str, Any] | Non
         return {"pattern": raw}
     if name == "shell":
         return {"command": raw}
-    if name == "patch":
-        return {"patch": raw}
+    if name == "edit":
+        return {"operation": "patch", "patch": raw} if raw.lstrip().startswith(("--- ", "diff ")) else None
+    if name in {"web", "tools"}:
+        return {"query": raw}
     return None
-
-
-def _rename_first(target: Dict[str, Any], canonical: str, aliases: tuple[str, ...]) -> None:
-    if canonical in target:
-        return
-    for alias in aliases:
-        if alias in target:
-            target[canonical] = target.pop(alias)
-            return

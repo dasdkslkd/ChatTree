@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
 from copy import deepcopy
 from time import time
@@ -21,6 +22,166 @@ class RunWriterConflictError(Exception):
     pass
 
 
+class _RunEventWriteBuffer:
+    """Batch run-event persistence without delaying live stream subscribers."""
+
+    def __init__(
+        self,
+        repository: Any,
+        *,
+        max_batch_size: int = 128,
+        flush_interval_seconds: float = 0.05,
+    ) -> None:
+        self._repository = repository
+        self._max_batch_size = max(1, int(max_batch_size))
+        self._flush_interval_seconds = max(0.0, float(flush_interval_seconds))
+        self._condition = asyncio.Condition()
+        self._pending: Dict[str, list[Dict[str, Any]]] = {}
+        self._inflight: Dict[str, int] = {}
+        self._flush_requested: set[str] = set()
+        self._flush_all_requested = False
+        self._closed = False
+        self._task: Optional[asyncio.Task[None]] = None
+        self._error: Optional[BaseException] = None
+
+    async def enqueue_many(self, events: list[Dict[str, Any]]) -> None:
+        if not events:
+            return
+        async with self._condition:
+            self._raise_if_failed_locked()
+            if self._closed:
+                raise RuntimeError("run event writer is closed")
+            self._ensure_started_locked()
+            for event in events:
+                self._pending.setdefault(str(event["run_id"]), []).append(deepcopy(event))
+            self._condition.notify_all()
+
+    async def flush_run(self, run_id: str) -> None:
+        run_key = str(run_id)
+        async with self._condition:
+            self._raise_if_failed_locked()
+            if self._pending.get(run_key):
+                self._ensure_started_locked()
+            self._flush_requested.add(run_key)
+            self._condition.notify_all()
+            while self._pending.get(run_key) or self._inflight.get(run_key, 0):
+                await self._condition.wait()
+                self._raise_if_failed_locked()
+            self._flush_requested.discard(run_key)
+
+    async def flush_all(self) -> None:
+        async with self._condition:
+            self._raise_if_failed_locked()
+            if self._pending:
+                self._ensure_started_locked()
+            self._flush_all_requested = True
+            self._condition.notify_all()
+            while self._pending or any(self._inflight.values()):
+                await self._condition.wait()
+                self._raise_if_failed_locked()
+            self._flush_all_requested = False
+
+    async def close(self) -> None:
+        async with self._condition:
+            if self._pending:
+                self._ensure_started_locked()
+            if self._task is not None:
+                self._flush_all_requested = True
+            self._closed = True
+            self._condition.notify_all()
+        task = self._task
+        if task is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        async with self._condition:
+            self._raise_if_failed_locked()
+
+    def _ensure_started_locked(self) -> None:
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._run(), name="run-event-writer")
+
+    async def _run(self) -> None:
+        while True:
+            async with self._condition:
+                while not self._pending and not self._closed and self._error is None:
+                    await self._condition.wait()
+                if self._error is not None:
+                    self._condition.notify_all()
+                    return
+                if not self._pending and self._closed:
+                    self._condition.notify_all()
+                    return
+
+                if (
+                    not self._closed
+                    and not self._flush_all_requested
+                    and not self._pending_has_flush_request_locked()
+                    and self._pending_count_locked() < self._max_batch_size
+                ):
+                    try:
+                        await asyncio.wait_for(
+                            self._condition.wait(),
+                            timeout=self._flush_interval_seconds,
+                        )
+                    except asyncio.TimeoutError:
+                        pass
+                    if not self._pending:
+                        continue
+
+                run_id, batch = self._take_batch_locked()
+                self._inflight[run_id] = self._inflight.get(run_id, 0) + len(batch)
+
+            error: Optional[BaseException] = None
+            try:
+                await asyncio.to_thread(self._repository.append_indexed_events, run_id, batch)
+            except BaseException as exc:
+                error = exc
+
+            async with self._condition:
+                remaining = self._inflight.get(run_id, 0) - len(batch)
+                if remaining > 0:
+                    self._inflight[run_id] = remaining
+                else:
+                    self._inflight.pop(run_id, None)
+                if not self._pending.get(run_id) and not self._inflight.get(run_id):
+                    self._flush_requested.discard(run_id)
+                if error is not None:
+                    self._error = error
+                self._condition.notify_all()
+                if error is not None:
+                    return
+
+    def _take_batch_locked(self) -> tuple[str, list[Dict[str, Any]]]:
+        run_id = self._select_run_locked()
+        pending = self._pending[run_id]
+        take_count = min(len(pending), self._max_batch_size)
+        batch = pending[:take_count]
+        remaining = pending[take_count:]
+        if remaining:
+            self._pending[run_id] = remaining
+        else:
+            self._pending.pop(run_id, None)
+        return run_id, batch
+
+    def _select_run_locked(self) -> str:
+        if self._flush_all_requested:
+            return next(iter(self._pending))
+        for run_id in self._flush_requested:
+            if self._pending.get(run_id):
+                return run_id
+        return next(iter(self._pending))
+
+    def _pending_count_locked(self) -> int:
+        return sum(len(events) for events in self._pending.values())
+
+    def _pending_has_flush_request_locked(self) -> bool:
+        return any(self._pending.get(run_id) for run_id in self._flush_requested)
+
+    def _raise_if_failed_locked(self) -> None:
+        if self._error is not None:
+            raise RuntimeError("run event writer failed") from self._error
+
+
 class RunManager:
     """In-memory active run registry with durable event replay."""
 
@@ -33,6 +194,11 @@ class RunManager:
         self.repository = repository
         self.notification_service: Any = None
         self.task_service: Any = None
+        self._event_writer: Optional[_RunEventWriteBuffer] = (
+            _RunEventWriteBuffer(repository)
+            if repository is not None and hasattr(repository, "append_indexed_events")
+            else None
+        )
         self._runs: Dict[str, RunRecord] = {}
         self._events: Dict[str, list[Dict[str, Any]]] = {}
         self._conditions: Dict[str, asyncio.Condition] = {}
@@ -243,11 +409,23 @@ class RunManager:
         payloads = await self.append_events(run_id, [payload])
         return payloads[0]
 
+    async def flush_run_events(self, run_id: str) -> None:
+        if self._event_writer is not None:
+            await self._event_writer.flush_run(run_id)
+
+    async def flush_events(self) -> None:
+        if self._event_writer is not None:
+            await self._event_writer.flush_all()
+
+    async def close(self) -> None:
+        if self._event_writer is not None:
+            await self._event_writer.close()
+
     async def append_events(self, run_id: str, payloads: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
         if not payloads:
             return []
         profiler = get_profiler()
-        persist_events: list[Dict[str, Any]] = []
+        writer_events: list[Dict[str, Any]] = []
         journal_events: list[Dict[str, Any]] = []
         journal_conversation_id: Optional[str] = None
         returned_payloads: list[Dict[str, Any]] = []
@@ -261,7 +439,7 @@ class RunManager:
         ):
             async with self._lock:
                 record = self._require_run_locked(run_id)
-                if self.repository:
+                if self.repository and self._event_writer is None:
                     normalized_payloads = []
                     for item in payloads:
                         payload = dict(item)
@@ -271,19 +449,19 @@ class RunManager:
                         payload.setdefault("target_node_id", record.target_node_id)
                         normalized_payloads.append(public_run_event(payload))
                     if hasattr(self.repository, "append_events"):
-                        persist_events = self.repository.append_events(run_id, normalized_payloads)
+                        persisted_events = self.repository.append_events(run_id, normalized_payloads)
                     else:
-                        persist_events = [
-                            self.repository.append_event(run_id, item)
-                            for item in normalized_payloads
+                        persisted_events = [
+                            self.repository.append_event(run_id, payload)
+                            for payload in normalized_payloads
                         ]
-                    for persist_event in persist_events:
-                        payload = deepcopy(persist_event["payload"])
+                    for persisted in persisted_events:
+                        payload = deepcopy(persisted["payload"])
                         event = {
                             "run_id": run_id,
-                            "event_index": persist_event["event_index"],
+                            "event_index": persisted["event_index"],
                             "payload": payload,
-                            "created_at": persist_event["created_at"],
+                            "created_at": persisted["created_at"],
                         }
                         record.event_count = max(record.event_count, event["event_index"] + 1)
                         record.updated_at = event["created_at"]
@@ -308,9 +486,15 @@ class RunManager:
                         record.event_count = event_index + 1
                         record.updated_at = event["created_at"]
                         self._events.setdefault(run_id, []).append(event)
-                        journal_events.append(event)
-                        journal_conversation_id = record.conversation_id
                         returned_payloads.append(payload)
+                        if self._event_writer is not None:
+                            writer_events.append(event)
+                        else:
+                            journal_events.append(event)
+                            journal_conversation_id = record.conversation_id
+                if writer_events and self._event_writer is not None:
+                    await self._event_writer.enqueue_many(writer_events)
+                    writer_events = []
                 condition = self._conditions.setdefault(run_id, asyncio.Condition())
         if journal_events and journal_conversation_id is not None:
             for journal_event in journal_events:
@@ -424,6 +608,8 @@ class RunManager:
                 record = self._require_run_locked(run_id)
                 if record.status in FINISHED_RUN_STATUSES:
                     return deepcopy(record)
+                if self._event_writer is not None:
+                    await self._event_writer.flush_run(run_id)
                 event_index = record.event_count
                 condition = self._conditions.setdefault(run_id, asyncio.Condition())
                 if self.repository:
@@ -529,6 +715,8 @@ class RunManager:
             stop_event.set()
             condition = self._conditions.setdefault(run_id, asyncio.Condition())
             if self.repository:
+                if self._event_writer is not None:
+                    await self._event_writer.flush_run(run_id)
                 if not self.repository.request_stop(run_id):
                     return False
                 persisted_run = self.repository.get_run(run_id) or {}
@@ -762,19 +950,34 @@ class RunManager:
         return None
 
     def read_events(self, run_id: str, from_event: int = 0) -> list[Dict[str, Any]]:
+        start = max(0, int(from_event or 0))
+        record = self._runs.get(run_id)
+        cached = list(self._events.get(run_id, []))
+        if record is not None:
+            if len(cached) >= record.event_count or not self.repository:
+                return [public_run_event(event["payload"]) for event in cached[start:]]
+            if self.repository and hasattr(self.repository, "read_events"):
+                stored = {
+                    int(event["event_index"]): {
+                        "run_id": event["run_id"],
+                        "event_index": event["event_index"],
+                        "payload": deepcopy(event["payload"]),
+                        "created_at": event["created_at"],
+                    }
+                    for event in self.repository.read_events(run_id, 0)
+                }
+                for event in cached:
+                    stored[int(event["event_index"])] = event
+                merged = [stored[index] for index in sorted(stored) if index >= start]
+                return [public_run_event(event["payload"]) for event in merged]
         if self.repository and hasattr(self.repository, "read_events"):
             if not self.get_run(run_id):
                 raise RunNotFoundError(run_id)
             return [
                 public_run_event(event["payload"])
-                for event in self.repository.read_events(run_id, from_event)
+                for event in self.repository.read_events(run_id, start)
             ]
-        record = self._runs.get(run_id)
-        if not record:
-            raise RunNotFoundError(run_id)
-        events = self._events.get(run_id, [])
-        start = max(0, int(from_event or 0))
-        return [public_run_event(event["payload"]) for event in events[start:]]
+        raise RunNotFoundError(run_id)
 
     def _require_run_locked(self, run_id: str) -> RunRecord:
         record = self._runs.get(run_id) or self._hydrate_run_locked(run_id)
@@ -855,7 +1058,7 @@ class RunManager:
         cached = self._events.get(run_id)
         if cached is not None and len(cached) >= record.event_count:
             return
-        self._events[run_id] = [
+        loaded = [
             {
                 "run_id": event["run_id"],
                 "event_index": event["event_index"],
@@ -864,6 +1067,12 @@ class RunManager:
             }
             for event in self.repository.read_events(run_id, 0)
         ]
+        if cached:
+            merged = {int(event["event_index"]): event for event in loaded}
+            for event in cached:
+                merged[int(event["event_index"])] = event
+            loaded = [merged[index] for index in sorted(merged)]
+        self._events[run_id] = loaded
 
     def _normalize_repository_run(self, run: Dict[str, Any]) -> Dict[str, Any]:
         data = dict(run)

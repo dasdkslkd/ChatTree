@@ -17,6 +17,7 @@ from backend.core.capabilities.types import CapabilitySource
 from backend.core.agents.subagent_executor import SubagentExecutor
 from backend.core.config.config import cfg
 from backend.core.projects import filter_capability_registry_for_workspace
+from backend.core.tools.exposure import ToolExposureContext
 from backend.core.tools.tool_manager import ToolManager
 
 
@@ -119,7 +120,10 @@ def test_tool_manager_filters_mcp_servers_by_project_scope(tmp_path):
         ],
     )
 
-    tools = manager.get_openai_tools(workspace={"cwd": str(tmp_path / "project")})
+    tools = manager.get_openai_tools(
+        workspace={"cwd": str(tmp_path / "project")},
+        exposure_context=ToolExposureContext(include_mcp=True),
+    )
 
     names = [tool["function"]["name"] for tool in tools]
     assert "visible_server__search" in names

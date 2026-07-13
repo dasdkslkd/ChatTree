@@ -380,12 +380,12 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
         messages = manager._build_prompt_messages(conversation, [])
 
         self.assertIn("Plan mode rules:", messages[1]["content"])
-        self.assertIn("Use `enter_plan_mode` only when", messages[1]["content"])
+        self.assertIn("Use `plan` action `enter` only when", messages[1]["content"])
         self.assertIn("genuine ambiguity", messages[1]["content"])
         self.assertIn("Do not enter plan mode merely because the task is large", messages[1]["content"])
         self.assertIn("When the user asks you to implement now", messages[1]["content"])
-        self.assertIn("call `update_plan` to write the plan artifact", messages[1]["content"])
-        self.assertIn("call `exit_plan_mode` with no arguments", messages[1]["content"])
+        self.assertIn("call `plan` action `update` to write the plan artifact", messages[1]["content"])
+        self.assertIn("call `plan` action `exit`", messages[1]["content"])
 
     def test_active_plan_mode_prompt_requires_structured_exit_or_question(self):
         manager = ChatManager(
@@ -404,18 +404,17 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("read-only planning phase", messages[1]["content"])
         self.assertIn("must end with exactly one structured plan-mode action", messages[1]["content"])
         self.assertIn("Do not write the full plan in assistant text", messages[1]["content"])
-        self.assertIn("Call update_plan", messages[1]["content"])
-        self.assertIn("Call exit_plan_mode with no arguments", messages[1]["content"])
+        self.assertIn("Call `plan` with action `update`", messages[1]["content"])
+        self.assertIn("Call `plan` with action `exit`", messages[1]["content"])
         self.assertIn("Do not ask whether the plan is acceptable in text", messages[1]["content"])
 
     def test_plan_control_tools_are_visible_only_in_plan_mode(self):
         manager = ChatManager.__new__(ChatManager)
         tools = [
-            {"type": "function", "function": {"name": "enter_plan_mode"}},
-            {"type": "function", "function": {"name": "update_plan"}},
-            {"type": "function", "function": {"name": "exit_plan_mode"}},
-            {"type": "function", "function": {"name": "ask_user_question"}},
+            {"type": "function", "function": {"name": "plan"}},
             {"type": "function", "function": {"name": "read"}},
+            {"type": "function", "function": {"name": "edit"}},
+            {"type": "function", "function": {"name": "shell"}},
         ]
 
         normal_names = {
@@ -427,8 +426,8 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
             for tool in manager._filter_plan_tools_for_mode(tools, "plan")
         }
 
-        self.assertEqual(normal_names, {"enter_plan_mode", "read"})
-        self.assertEqual(plan_names, {"update_plan", "exit_plan_mode", "ask_user_question", "read"})
+        self.assertEqual(normal_names, {"plan", "read", "edit", "shell"})
+        self.assertEqual(plan_names, {"plan", "read"})
 
     async def test_attached_runtime_context_lists_active_task_without_internal_ids(self):
         task_service = ActiveTaskService()
@@ -1164,8 +1163,8 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
 
         messages = manager._build_prompt_messages(conversation, [])
 
-        self.assertIn("spawn_agent", messages[1]["content"])
-        self.assertIn("wait_agent", messages[1]["content"])
+        self.assertIn("`agent` with the appropriate action", messages[1]["content"])
+        self.assertIn("action `wait`", messages[1]["content"])
         self.assertIn("Do not replace an explicit subagent request", messages[1]["content"])
         self.assertNotIn("start_subagent", messages[1]["content"])
 
@@ -1205,16 +1204,15 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
         mode = manager._resolve_multi_agent_mode(inherited_text, conversation.metadata)
         tools = manager._filter_agent_tools_for_mode(
             [
-                {"type": "function", "function": {"name": "spawn_agent"}},
-                {"type": "function", "function": {"name": "start_workflow"}},
+                {"type": "function", "function": {"name": "agent"}},
                 {"type": "function", "function": {"name": "shell"}},
             ],
             mode,
         )
 
-        self.assertIn("spawn_agent", messages[1]["content"])
+        self.assertIn("`agent` with the appropriate action", messages[1]["content"])
         self.assertEqual(mode, "explicit_request_only")
-        self.assertEqual([tool["function"]["name"] for tool in tools], ["spawn_agent", "start_workflow", "shell"])
+        self.assertEqual([tool["function"]["name"] for tool in tools], ["agent", "shell"])
 
     def test_explicit_workflow_request_exposes_real_workflow_tool(self):
         manager = ChatManager(
@@ -1227,16 +1225,14 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
         mode = manager._resolve_multi_agent_mode("启动一个3层workflow", conversation.metadata)
         tools = manager._filter_agent_tools_for_mode(
             [
-                {"type": "function", "function": {"name": "spawn_agent"}},
-                {"type": "function", "function": {"name": "start_workflow"}},
-                {"type": "function", "function": {"name": "start_subagent"}},
+                {"type": "function", "function": {"name": "agent"}},
                 {"type": "function", "function": {"name": "shell"}},
             ],
             mode,
         )
 
         self.assertEqual(mode, "explicit_request_only")
-        self.assertEqual([tool["function"]["name"] for tool in tools], ["spawn_agent", "start_workflow", "shell"])
+        self.assertEqual([tool["function"]["name"] for tool in tools], ["agent", "shell"])
 
     def test_no_multi_agent_request_hides_workflow_tool(self):
         manager = ChatManager(
@@ -1249,8 +1245,7 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
         mode = manager._resolve_multi_agent_mode("普通问题", conversation.metadata)
         tools = manager._filter_agent_tools_for_mode(
             [
-                {"type": "function", "function": {"name": "spawn_agent"}},
-                {"type": "function", "function": {"name": "start_workflow"}},
+                {"type": "function", "function": {"name": "agent"}},
                 {"type": "function", "function": {"name": "shell"}},
             ],
             mode,
@@ -1282,14 +1277,14 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
         mode = manager._resolve_multi_agent_mode(inherited_text, conversation.metadata)
         tools = manager._filter_agent_tools_for_mode(
             [
-                {"type": "function", "function": {"name": "spawn_agent"}},
+                {"type": "function", "function": {"name": "agent"}},
                 {"type": "function", "function": {"name": "shell"}},
             ],
             mode,
         )
 
         self.assertEqual(mode, "explicit_request_only")
-        self.assertEqual([tool["function"]["name"] for tool in tools], ["spawn_agent", "shell"])
+        self.assertEqual([tool["function"]["name"] for tool in tools], ["agent", "shell"])
 
     async def test_conversation_multi_agent_mode_can_be_set_to_proactive(self):
         manager = ChatManager(
@@ -1312,12 +1307,12 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("You may proactively delegate", messages[1]["content"])
         tools = manager._filter_agent_tools_for_mode(
             [
-                {"type": "function", "function": {"name": "spawn_agent"}},
+                {"type": "function", "function": {"name": "agent"}},
                 {"type": "function", "function": {"name": "shell"}},
             ],
             manager._resolve_multi_agent_mode("普通问题", loaded.metadata),
         )
-        self.assertEqual([tool["function"]["name"] for tool in tools], ["spawn_agent", "shell"])
+        self.assertEqual([tool["function"]["name"] for tool in tools], ["agent", "shell"])
 
     async def test_btw_builds_side_question_runtime_context(self):
         manager = ChatManager(
@@ -2477,14 +2472,19 @@ class DetachedSlashStopRouteTests(unittest.TestCase):
 
 
 class AgentRolePromptTests(unittest.TestCase):
-    def test_project_agents_are_role_specific(self):
-        agents = {
+    AGENT_TEMPLATE_ROOT = Path("backend/core/prompts/templates/agents")
+
+    def _load_template_agents(self):
+        return {
             agent.name: agent
             for agent in load_agent_roots(
-                [Path(".chattree/agents")],
+                [self.AGENT_TEMPLATE_ROOT],
                 source=CapabilitySource.PROJECT,
             )
         }
+
+    def test_project_agents_are_role_specific(self):
+        agents = self._load_template_agents()
         for name in ["explorer", "planner", "implementer", "reviewer", "verifier", "workflow-worker"]:
             with self.subTest(name=name):
                 self.assertIn(name, agents)
@@ -2492,41 +2492,10 @@ class AgentRolePromptTests(unittest.TestCase):
                 self.assertGreaterEqual(len(agents[name].system_prompt), 600)
 
     def test_workflow_worker_returns_data_not_user_facing_message(self):
-        agents = {
-            agent.name: agent
-            for agent in load_agent_roots(
-                [Path(".chattree/agents")],
-                source=CapabilitySource.PROJECT,
-            )
-        }
+        agents = self._load_template_agents()
         prompt = agents["workflow-worker"].system_prompt.lower()
         self.assertIn("return value", prompt)
         self.assertIn("workflow", prompt)
-
-    def test_general_agent_is_compatibility_alias(self):
-        agents = {
-            agent.name: agent
-            for agent in load_agent_roots(
-                [Path(".chattree/agents")],
-                source=CapabilitySource.PROJECT,
-            )
-        }
-        prompt = agents["general"].system_prompt
-        self.assertIn("role-specific explorer, planner, implementer, reviewer, verifier, or workflow-worker", prompt)
-        self.assertEqual(agents["general"].permission_mode, "read_only")
-        self.assertEqual(agents["general"].max_turns, 1)
-
-    def test_project_agents_timeout_is_24h(self):
-        agents = {
-            agent.name: agent
-            for agent in load_agent_roots(
-                [Path(".chattree/agents")],
-                source=CapabilitySource.PROJECT,
-            )
-        }
-        for name in ["explorer", "planner", "implementer", "reviewer", "verifier", "workflow-worker", "general"]:
-            with self.subTest(name=name):
-                self.assertEqual(agents[name].timeout_seconds, 24 * 60 * 60)
 
 
 class DummyChatManager:

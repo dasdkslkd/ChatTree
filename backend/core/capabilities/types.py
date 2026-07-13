@@ -51,7 +51,8 @@ class AgentDefinition:
     name: str
     description: str = ""
     system_prompt: str = ""
-    tools: List[str] = field(default_factory=list)
+    tools: Optional[List[str]] = None
+    disallowed_tools: List[str] = field(default_factory=list)
     skills: List[str] = field(default_factory=list)
     model: Optional[str] = None
     model_id: Optional[str] = None

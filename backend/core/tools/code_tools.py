@@ -9,6 +9,7 @@ import os
 import platform
 import re
 import shlex
+import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -267,8 +268,9 @@ class ListFilesTool(_CodeTool):
     @property
     def description(self) -> str:
         return (
-            "Find workspace files by glob and path regex. Use this instead of shell for ls/dir/find/Get-ChildItem/rg --files. "
-            "Paths are returned relative to the workspace root with / separators."
+            "Find workspace files with ripgrep-style file listing. Use `pattern` for one glob, `patterns` for multiple globs, "
+            "and `path_regex` to match returned paths; do not use a `query` argument. "
+            "Use this instead of shell for ls/dir/find/Get-ChildItem/rg --files. Paths are returned relative to the workspace root with / separators."
         )
 
     def parameters_schema(self) -> Dict[str, Any]:
@@ -318,6 +320,26 @@ class ListFilesTool(_CodeTool):
         limit = max(1, min(int(kwargs.get("limit") or 200), 2000))
         offset = max(0, int(kwargs.get("offset") or 0))
 
+        rg_path = _resolve_ripgrep_executable(self.config)
+        fallback_reason = None
+        if rg_path is not None and files_only:
+            rg_result, fallback_reason = _glob_files_with_rg(
+                rg_path=rg_path,
+                workspace=self.workspace,
+                root=root,
+                patterns=patterns,
+                path_regex=compiled_path_regex,
+                respect_gitignore=respect_gitignore,
+                include_hidden=include_hidden,
+                exclude_globs=exclude_globs,
+                sort=sort,
+                limit=limit,
+                offset=offset,
+                timeout_seconds=self.config.command_timeout_seconds,
+            )
+            if rg_result is not None:
+                return _json(rg_result)
+
         files, truncated, scanned_entries, total = _glob_files_python(
             workspace=self.workspace,
             root=root,
@@ -341,10 +363,16 @@ class ListFilesTool(_CodeTool):
             "engine": "python",
             "scanned_entries": scanned_entries,
         }
+        if fallback_reason:
+            payload["fallback_reason"] = fallback_reason
         return _json(payload)
 
 
 class ReadFileTool(_CodeTool):
+    def __init__(self, config: CodeToolConfig, tool_result_store: Any = None):
+        super().__init__(config)
+        self._tool_result_store = tool_result_store
+
     @property
     def name(self) -> str:
         return "read"
@@ -352,8 +380,8 @@ class ReadFileTool(_CodeTool):
     @property
     def description(self) -> str:
         return (
-            "Read UTF-8 text files from the workspace. Use this instead of shell for cat/head/tail/type/Get-Content/sed. "
-            "Supports one or more line ranges and returns numbered lines by default."
+            "Read UTF-8 workspace files or a persisted tool-result slice. Use this instead of shell for cat/head/tail/type/Get-Content/sed. "
+            "File reads support one or more line ranges and return numbered lines by default."
         )
 
     def parameters_schema(self) -> Dict[str, Any]:
@@ -362,6 +390,11 @@ class ReadFileTool(_CodeTool):
             "additionalProperties": False,
             "properties": {
                 "path": {"type": "string"},
+                "source": {"type": "string", "enum": ["file", "tool_result"], "default": "file"},
+                "id": {"type": "string", "description": "Persisted tool result id when source is tool_result."},
+                "tool_result_id": {"type": "string", "description": "Persisted tool result id when source is tool_result."},
+                "offset": {"type": "integer", "minimum": 0, "default": 0},
+                "limit": {"type": "integer", "minimum": 1},
                 "targets": {
                     "type": "array",
                     "items": {
@@ -387,6 +420,10 @@ class ReadFileTool(_CodeTool):
         return await asyncio.to_thread(self._execute_sync, dict(kwargs))
 
     def _execute_sync(self, kwargs: Dict[str, Any]) -> str:
+        if str(kwargs.get("source") or "").lower() == "tool_result" or kwargs.get("tool_result_id") or (
+            kwargs.get("id") and not kwargs.get("path") and not kwargs.get("targets")
+        ):
+            return self._read_tool_result(kwargs)
         targets = _read_targets(kwargs)
         if not targets:
             return _error("invalid_path", "path or targets is required")
@@ -417,6 +454,35 @@ class ReadFileTool(_CodeTool):
         if len(files) == 1:
             return _json(files[0])
         return _json({"files": files})
+
+    def _read_tool_result(self, kwargs: Dict[str, Any]) -> str:
+        if self._tool_result_store is None:
+            return _error("tool_result_unavailable", "tool result storage is not configured")
+        tool_result_id = str(kwargs.get("tool_result_id") or kwargs.get("id") or "").strip()
+        if not tool_result_id:
+            return _error("invalid_path", "tool_result_id or id is required when source is tool_result")
+        offset = max(0, int(kwargs.get("offset") or 0))
+        requested_limit = kwargs.get("limit") or kwargs.get("max_chars_per_file") or self.config.max_read_chars
+        limit = max(1, min(int(requested_limit), self.config.max_read_chars))
+        result = self._tool_result_store.read_slice(tool_result_id, offset=offset, limit=limit)
+        if result is None:
+            return _error("not_found", "tool result not found", tool_result_id=tool_result_id)
+        payload = {
+            "source": "tool_result",
+            "tool_result_id": tool_result_id,
+            "offset": offset,
+            "content": result.get("content", ""),
+        }
+        next_offset = result.get("next_offset")
+        if next_offset is not None:
+            payload["next_offset"] = next_offset
+            payload["read_more"] = {
+                "source": "tool_result",
+                "tool_result_id": tool_result_id,
+                "offset": next_offset,
+                "limit": limit,
+            }
+        return _json(payload)
 
 
 class SearchFilesTool(_CodeTool):
@@ -564,8 +630,8 @@ class EditFileTool(_CodeTool):
     @property
     def description(self) -> str:
         return (
-            "Edit a UTF-8 file by exact replacements. Read the file first and pass expected_version from read. "
-            "Never include read line-number prefixes in old text."
+            "Edit UTF-8 workspace files by exact replacements, create/overwrite content, or apply a unified patch. "
+            "Read existing files first and pass expected_version for replacement or overwrite operations."
         )
 
     def parameters_schema(self) -> Dict[str, Any]:
@@ -574,7 +640,12 @@ class EditFileTool(_CodeTool):
             "additionalProperties": False,
             "properties": {
                 "path": {"type": "string"},
+                "operation": {"type": "string", "enum": ["replace", "create", "overwrite", "patch"], "default": "replace"},
                 "expected_version": {"type": "string"},
+                "content": {"type": "string"},
+                "patch": {"type": "string"},
+                "cwd": {"type": "string", "default": "."},
+                "create_parents": {"type": "boolean", "default": False},
                 "replacements": {
                     "type": "array",
                     "items": {
@@ -590,13 +661,28 @@ class EditFileTool(_CodeTool):
                     },
                 },
             },
-            "required": ["path", "expected_version", "replacements"],
         }
 
     async def execute(self, **kwargs) -> str:
         return await asyncio.to_thread(self._execute_sync, dict(kwargs))
 
     def _execute_sync(self, kwargs: Dict[str, Any]) -> str:
+        operation = str(kwargs.get("operation") or "").strip().lower()
+        if not operation:
+            if kwargs.get("patch") and not kwargs.get("replacements"):
+                operation = "patch"
+            elif "content" in kwargs:
+                operation = str(kwargs.get("mode") or "create").strip().lower()
+            else:
+                operation = "replace"
+        if operation == "patch":
+            return ApplyPatchTool(self.config)._execute_sync(kwargs)
+        if operation in {"create", "overwrite"}:
+            write_args = dict(kwargs)
+            write_args["mode"] = operation
+            return WriteFileTool(self.config)._execute_sync(write_args)
+        if operation != "replace":
+            return _error("invalid_edit", "operation must be replace, create, overwrite, or patch")
         try:
             target = self.workspace.check_write(kwargs.get("path"))
         except CodeToolError as exc:
@@ -1326,6 +1412,9 @@ def _resolve_ripgrep_executable(config: CodeToolConfig) -> Optional[Path]:
         if os.name != "nt" and not os.access(candidate, os.X_OK):
             continue
         return candidate
+    path_executable = shutil.which(executable) or shutil.which("rg")
+    if path_executable:
+        return Path(path_executable)
     return None
 
 
@@ -1471,6 +1560,125 @@ def _grep_with_rg(
         payload["files"] = sorted(matched_files)
         payload["matches"] = []
     return (payload, None)
+
+
+def _glob_files_with_rg(
+    *,
+    rg_path: Path,
+    workspace: CodeWorkspace,
+    root: Path,
+    patterns: List[str],
+    path_regex: Optional[re.Pattern[str]],
+    respect_gitignore: bool,
+    include_hidden: bool,
+    exclude_globs: List[str],
+    sort: str,
+    limit: int,
+    offset: int,
+    timeout_seconds: int,
+) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+    if root.is_file():
+        if not any(_matches_glob(root, pattern) for pattern in patterns):
+            return ({
+                "root": workspace.relative(root),
+                "files": [],
+                "count": 0,
+                "total": 0,
+                "truncated": False,
+                "next_offset": None,
+                "engine": "rg",
+                "scanned_entries": 1,
+            }, None)
+        relative = workspace.relative(root)
+        if path_regex and not path_regex.search(relative):
+            files: List[str] = []
+        else:
+            files = [relative]
+        return ({
+            "root": workspace.relative(root),
+            "files": files[offset:offset + limit],
+            "count": len(files[offset:offset + limit]),
+            "total": len(files),
+            "truncated": offset + limit < len(files),
+            "next_offset": offset + len(files[offset:offset + limit]) if offset + limit < len(files) else None,
+            "engine": "rg",
+            "scanned_entries": 1,
+        }, None)
+
+    argv = [str(rg_path), "--files", "--color", "never", "--no-config"]
+    if not respect_gitignore:
+        argv.append("--no-ignore")
+    if include_hidden:
+        argv.append("--hidden")
+    for pattern in patterns:
+        if pattern and pattern != "**/*":
+            argv.extend(["--glob", pattern])
+    for exclude_glob in exclude_globs:
+        argv.extend(["--glob", f"!{exclude_glob}"])
+    argv.extend(["--", "."])
+
+    try:
+        proc = subprocess.run(
+            argv,
+            cwd=str(root),
+            env=_shell_env(),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_seconds,
+        )
+    except FileNotFoundError:
+        return None, "ripgrep_not_installed"
+    except subprocess.TimeoutExpired:
+        return None, "ripgrep_timeout"
+    except OSError as exc:
+        return None, f"ripgrep_failed:{type(exc).__name__}"
+
+    if proc.returncode not in {0, 1}:
+        return None, _ripgrep_failure_reason(proc.stderr)
+
+    matches: List[Path] = []
+    seen: set[Path] = set()
+    scanned_entries = 0
+    for raw_line in proc.stdout.splitlines():
+        relative_text = raw_line.strip()
+        if not relative_text:
+            continue
+        scanned_entries += 1
+        resolved = (root / relative_text).resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if not resolved.is_file() or not workspace.is_visible(resolved):
+            continue
+        if not any(_matches_glob(resolved, pattern) for pattern in patterns):
+            continue
+        if _matches_excluded_glob(resolved, root, exclude_globs):
+            continue
+        relative = workspace.relative(resolved)
+        if path_regex and not path_regex.search(relative):
+            continue
+        matches.append(resolved)
+
+    if sort == "mtime":
+        matches.sort(key=lambda path: (-path.stat().st_mtime, workspace.relative(path)))
+    else:
+        matches.sort(key=lambda path: workspace.relative(path))
+
+    total = len(matches)
+    page = matches[offset:offset + limit]
+    truncated = offset + limit < total
+    return ({
+        "root": workspace.relative(root),
+        "files": [workspace.relative(path) for path in page],
+        "count": len(page),
+        "total": total,
+        "truncated": truncated,
+        "next_offset": offset + len(page) if truncated else None,
+        "engine": "rg",
+        "scanned_entries": scanned_entries,
+    }, None)
 
 
 def _grep_python(

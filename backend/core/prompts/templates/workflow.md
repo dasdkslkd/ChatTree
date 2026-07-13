@@ -258,7 +258,7 @@ Ask workers for compact outputs:
 
 Be honest about current ChatTree support:
 
-- `/workflow <script>` and `start_workflow.script` run inline workflow module text.
+- `/workflow <script>` and `agent` with action `workflow` run inline workflow module text.
 - `export default async function workflow(ctx) { ... }` is the only accepted entrypoint.
 - Only `ctx.agent(prompt, { agentType })` is accepted for worker calls.
 - `ctx.pipeline`, `ctx.parallel`, `ctx.phase`, `ctx.log`, `ctx.args`, and `ctx.budget` are available.

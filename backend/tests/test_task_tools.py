@@ -242,12 +242,12 @@ def test_sync_runtime_managers_preserves_active_task_service():
     assert expected <= set(second_tools.tools)
 
 
-def test_registered_task_tools_are_model_visible_in_real_tool_manager():
+def test_registered_task_tools_are_internal_in_real_tool_manager():
     tool_manager = ToolManager({"tools": {"enabled": False}})
     register_task_tools(tool_manager, ActiveTaskService())
 
     names = {tool["function"]["name"] for tool in tool_manager.get_openai_tools()}
-    assert {"create_task", "set_task_step", "cancel_task"} <= names
+    assert not {"create_task", "set_task_step", "cancel_task"}.intersection(names)
 
 
 def test_task_observation_tools_refresh_the_runtime_task_version():

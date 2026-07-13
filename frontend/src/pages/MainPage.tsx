@@ -190,7 +190,7 @@ const TASK_STATE_ACTIVE_REFRESH_MS = 10000;
 const MarkdownContent = lazy(() => import('../components/MarkdownContent'));
 const MANUAL_PROJECTS_STORAGE_KEY = 'chattree.manualProjectWorkspaces';
 const PROJECT_ORDER_STORAGE_KEY = 'chattree.projectOrder';
-const PLAN_MODE_TOOL_NAMES = new Set(['enter_plan_mode', 'update_plan', 'exit_plan_mode', 'ask_user_question']);
+const PLAN_MODE_TOOL_NAMES = new Set(['plan', 'enter_plan_mode', 'update_plan', 'exit_plan_mode', 'ask_user_question']);
 const TASK_TOOL_NAMES = new Set(['create_task', 'set_task_step', 'cancel_task']);
 const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled', 'interrupted', 'stopped']);
 

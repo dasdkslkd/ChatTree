@@ -43,6 +43,8 @@ class SlashCommandDispatcher:
                 stream_target_policy=definition.stream_target_policy,
                 blocks_main_thread=definition.blocks_main_thread,
                 metadata=definition.to_public_dict(),
+                allowed_tools=definition.allowed_tools,
+                disallowed_tools=definition.disallowed_tools,
             )
 
         model_input = (
@@ -66,4 +68,6 @@ class SlashCommandDispatcher:
             blocks_main_thread=definition.blocks_main_thread,
             metadata=definition.to_public_dict(),
             disable_tools=definition.tool_policy.value == "disabled",
+            allowed_tools=definition.allowed_tools,
+            disallowed_tools=definition.disallowed_tools,
         )

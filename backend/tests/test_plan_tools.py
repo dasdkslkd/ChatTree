@@ -153,4 +153,4 @@ def test_registered_plan_tools_are_model_visible_in_real_tool_manager():
 
     names = {tool["function"]["name"] for tool in tool_manager.get_openai_tools()}
 
-    assert {"enter_plan_mode", "update_plan", "exit_plan_mode", "ask_user_question"} <= names
+    assert names == {"plan"}

@@ -90,6 +90,7 @@ Prompt body.
     assert agent.name == "helper"
     assert agent.metadata["base_name"] == "helper"
     assert agent.max_turns == 2
+    assert agent.tools is None
 
 
 def test_load_agent_file_supports_comma_tools_and_yaml_list_skills(tmp_path):
@@ -132,6 +133,28 @@ Prompt body.
 
     assert agent.tools == []
     assert agent.skills == []
+
+
+def test_load_agent_file_supports_explicit_tool_wildcard_and_disallowed_tools(tmp_path):
+    agent_path = write_agent(
+        tmp_path,
+        "helper",
+        """---
+description: Helps with code
+tools: "*"
+disallowedTools:
+  - shell(git commit*)
+  - agent
+---
+
+Prompt body.
+""",
+    )
+
+    agent = load_agent_file(agent_path, source=CapabilitySource.PROJECT)
+
+    assert agent.tools == ["*"]
+    assert agent.disallowed_tools == ["shell(git commit*)", "agent"]
 
 
 def test_load_agent_roots_namespaces_plugin_agents(tmp_path):

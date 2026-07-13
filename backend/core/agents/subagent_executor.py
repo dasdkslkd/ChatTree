@@ -16,6 +16,7 @@ from backend.core.prompts import PromptBuilder, PromptBuildRequest
 from backend.core.prompts.catalog import load_prompt_template
 from backend.core.prompts.types import RuntimePromptContext
 from backend.core.runs import RunKind, RunManager, RunStatus
+from backend.core.tools.exposure import ToolExposureContext
 from backend.core.tools.security.permissions import normalize_permission_mode
 from backend.core.tools.task_tools import filter_task_tools_for_context
 from .types import AgentDeliveryPolicy
@@ -306,7 +307,11 @@ class SubagentExecutor:
                 conversation=conversation,
                 context_mode=context_mode,
             )
-            tools = self._filter_tools(agent.tools, workspace=conversation.metadata.get("workspace"))
+            tools = self._filter_tools(
+                agent.tools,
+                workspace=conversation.metadata.get("workspace"),
+                disallowed_names=agent.disallowed_tools,
+            )
             permission = normalize_permission_mode(permission_mode or agent.permission_mode)
             max_tool_rounds = agent.max_tool_rounds or DEFAULT_MAX_TOOL_ROUNDS
             max_turns = agent.max_turns or DEFAULT_MAX_TURNS
@@ -636,14 +641,38 @@ class SubagentExecutor:
             metadata={"runtime_mode": "subagent_worker", "agent_name": agent.name},
         )
 
-    def _filter_tools(self, allowed_names: list[str], *, workspace: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
+    def _filter_tools(
+        self,
+        allowed_names: Optional[list[str]],
+        *,
+        workspace: Optional[dict[str, Any]] = None,
+        disallowed_names: Optional[list[str]] = None,
+    ) -> list[dict[str, Any]]:
         if not self.chat_manager.tool_manager:
             return []
-        tools = self.chat_manager.tool_manager.get_openai_tools(workspace=workspace)
-        if not allowed_names:
+        exposure_context = ToolExposureContext(
+            run_kind="agent",
+            allowed_tools=tuple(allowed_names) if allowed_names is not None else None,
+            disallowed_tools=tuple(disallowed_names or ()),
+        )
+        try:
+            tools = self.chat_manager.tool_manager.get_openai_tools(
+                workspace=workspace,
+                exposure_context=exposure_context,
+            )
+        except TypeError:
+            tools = self.chat_manager.tool_manager.get_openai_tools(workspace=workspace)
+        if allowed_names == []:
             return []
         tools = filter_task_tools_for_context(tools, "detached")
-        if "*" in allowed_names:
+        disallowed = set(disallowed_names or ())
+        if disallowed:
+            tools = [
+                tool
+                for tool in tools
+                if tool.get("function", {}).get("name") not in disallowed
+            ]
+        if allowed_names is None or "*" in allowed_names:
             return tools
         allowed = set(allowed_names)
         return [

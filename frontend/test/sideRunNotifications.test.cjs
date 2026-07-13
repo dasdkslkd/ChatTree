@@ -41,16 +41,15 @@ function testExtractsSpawnAgentRunIdFromToolResultContent() {
   assert.deepEqual(notifications, [{ runId: 'run-subagent-1', kind: 'subagent' }]);
 }
 
-function testExtractsCompatibilityAliasSubagentRunId() {
+function testExtractsCanonicalAgentRunId() {
   const notifications = extractSideRunNotifications([
     {
       tools: [
         {
-          name: 'start_subagent',
+          name: 'agent',
           content: JSON.stringify({
             run_id: 'run-subagent-2',
             kind: 'subagent',
-            replacement_tool: 'spawn_agent',
           }),
         },
       ],
@@ -108,7 +107,7 @@ function testCollectsToolAndStreamSideRunNotificationsForSharedDeduping() {
 }
 
 testExtractsSpawnAgentRunIdFromToolResultContent();
-testExtractsCompatibilityAliasSubagentRunId();
+testExtractsCanonicalAgentRunId();
 testIgnoresNonSideRunToolResults();
 testDeduplicatesRunNotifications();
 testCollectsToolAndStreamSideRunNotificationsForSharedDeduping();

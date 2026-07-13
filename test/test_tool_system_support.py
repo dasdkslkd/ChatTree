@@ -1,6 +1,7 @@
 ﻿import asyncio
 import json
 import sys
+from types import SimpleNamespace
 
 sys.path.insert(0, ".")
 
@@ -18,6 +19,7 @@ from backend.core.chat.conversation import Conversation
 from backend.core.config.types import Message, Role
 from backend.core.model.providers.openai_compatible import OpenAICompatibleProvider
 from backend.core.tools import mcp_server as mcp_server_module
+from backend.core.tools.exposure import ToolExposureContext
 from backend.core.tools.mcp_server import McpServerManager
 from backend.core.tools.tool_manager import ToolManager
 from backend.core.tools.tool_filter import ToolFilter
@@ -52,9 +54,10 @@ def test_tool_manager_keeps_builtin_inventory_when_mcp_servers_configured():
 
     names = [tool["function"]["name"] for tool in manager.get_openai_tools()]
 
-    assert "web_search" in names
-    assert "fetch_url" in names
-    assert "list_available_tools" in names
+    assert "web" in names
+    assert "web_search" not in names
+    assert "fetch_url" not in names
+    assert "list_available_tools" not in names
 
 
 def test_tool_manager_registers_builtin_code_tools():
@@ -78,10 +81,10 @@ def test_tool_manager_registers_builtin_code_tools():
     assert "edit" in names
     assert "shell" in names
     assert "write" not in names
-    assert "patch" in names
+    assert "patch" not in names
 
 
-def test_tool_manager_full_exposure_registers_raw_write_for_model():
+def test_tool_manager_full_exposure_keeps_raw_write_internal():
     manager = ToolManager({
         "tools": {
             "enabled": True,
@@ -97,10 +100,86 @@ def test_tool_manager_full_exposure_registers_raw_write_for_model():
 
     names = [tool["function"]["name"] for tool in manager.get_openai_tools()]
 
-    assert "write" in names
+    assert "edit" in names
+    assert "write" not in names
 
 
-def test_agent_management_tools_are_model_visible_when_registered():
+def test_tool_manager_exposure_context_supports_explicit_allow_and_deny():
+    manager = ToolManager({
+        "tools": {
+            "enabled": True,
+            "builtin": {
+                "web_search": {"enabled": False},
+                "code": {"enabled": True},
+            },
+        }
+    })
+
+    assert manager.get_openai_tools(exposure_context=ToolExposureContext(allowed_tools=())) == []
+    tools_names = {
+        tool["function"]["name"]
+        for tool in manager.get_openai_tools(
+            exposure_context=ToolExposureContext(allowed_tools=("tools",))
+        )
+    }
+    assert tools_names == {"tools"}
+    denied_names = {
+        tool["function"]["name"]
+        for tool in manager.get_openai_tools(
+            exposure_context=ToolExposureContext(disallowed_tools=("shell",))
+        )
+    }
+    assert "shell" not in denied_names
+    assert {"glob", "grep", "read", "edit"} <= denied_names
+
+
+def test_tool_manager_explicit_context_uses_configured_default_profile():
+    manager = ToolManager({
+        "tools": {
+            "enabled": True,
+            "builtin": {
+                "exposure": "minimal",
+                "web_search": {"enabled": False},
+                "code": {"enabled": True},
+            },
+        }
+    })
+
+    names = {
+        tool["function"]["name"]
+        for tool in manager.get_openai_tools(exposure_context=ToolExposureContext())
+    }
+
+    assert names == {"glob", "grep", "read"}
+
+
+def test_full_builtin_exposure_does_not_make_mcp_visible_by_default():
+    manager = ToolManager({
+        "tools": {
+            "enabled": True,
+            "builtin": {"exposure": "full", "enabled": False},
+            "mcp": {"enabled": True, "servers": {}},
+        }
+    })
+    manager._connection_manager = SimpleNamespace(
+        list_all_tools=lambda: [
+            {
+                "server": "demo",
+                "tool": {"name": "lookup"},
+                "callable_name": "demo__lookup",
+                "openai_schema": {"type": "function", "function": {"name": "demo__lookup", "parameters": {}}},
+            }
+        ]
+    )
+
+    assert "demo__lookup" not in manager.list_tools()
+    assert "demo__lookup" not in [
+        tool["function"]["name"] for tool in manager.get_openai_tools()
+    ]
+    assert "demo__lookup" in manager.list_tools(exposure_context=ToolExposureContext(include_mcp=True))
+
+
+def test_legacy_agent_management_tools_are_internal_when_registered():
     manager = ToolManager({
         "tools": {
             "enabled": True,
@@ -112,11 +191,11 @@ def test_agent_management_tools_are_model_visible_when_registered():
 
     names = [tool["function"]["name"] for tool in manager.get_openai_tools()]
 
-    assert "start_subagent" in names
-    assert "start_workflow" in names
+    assert "start_subagent" not in names
+    assert "start_workflow" not in names
 
 
-def test_agent_runtime_tools_register_complete_model_facing_toolset():
+def test_agent_runtime_tools_expose_single_canonical_agent_tool():
     class FakeAgentRuntime:
         pass
 
@@ -130,9 +209,10 @@ def test_agent_runtime_tools_register_complete_model_facing_toolset():
 
     names = {tool["function"]["name"] for tool in manager.get_openai_tools()}
 
-    assert AGENT_TOOL_NAMES.issubset(names)
-    assert "start_subagent" in names
-    assert "start_workflow" in names
+    assert names == {"agent"}
+    assert "start_subagent" not in names
+    assert "start_workflow" not in names
+    assert not (AGENT_TOOL_NAMES - {"agent"}).intersection(names)
 
 
 def test_spawn_agent_schema_names_delivery_and_forbids_simulation():
@@ -269,7 +349,7 @@ def test_tool_manager_builtin_enabled_false_hides_builtin_runtime_tools():
 
     assert "web_search" not in names
     assert "read" not in names
-    assert "list_available_tools" in names
+    assert "list_available_tools" not in names
 
 
 def test_stdio_command_splits_line_arguments():
@@ -626,3 +706,21 @@ def test_fetch_url_extracts_html_without_crawl4ai():
     assert tool._extract_title(content) == "Demo Page"
     assert tool._html_to_text(content) == "Hello Useful text."
     assert tool._truncate("x" * 100).startswith("x" * 80)
+
+    class FakeResponse:
+        text = "<html><body>" + ("x" * 100) + "</body></html>"
+        headers = {"content-type": "text/html"}
+        status_code = 200
+        url = "https://example.test/page"
+
+        def raise_for_status(self):
+            return None
+
+    class FakeClient:
+        async def get(self, url):
+            return FakeResponse()
+
+    tool._http_client = FakeClient()
+    result = asyncio.run(tool._fetch_with_http("https://example.test/page"))
+    assert result["content"].startswith("x" * 80)
+    assert "[Content truncated" in result["content"]

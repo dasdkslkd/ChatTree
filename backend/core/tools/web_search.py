@@ -9,6 +9,52 @@ from ..utils.logger import setup_logger
 logger = setup_logger('WebSearch')
 
 
+class WebTool(BaseTool):
+    def __init__(self, search_tool: BaseTool, fetch_tool: BaseTool):
+        self._search_tool = search_tool
+        self._fetch_tool = fetch_tool
+
+    @property
+    def name(self) -> str:
+        return "web"
+
+    @property
+    def description(self) -> str:
+        return "Search the web or fetch a URL when current external information is needed."
+
+    def parameters_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["search", "fetch"],
+                    "description": "Use search for web queries and fetch to read one URL.",
+                },
+                "query": {"type": "string", "description": "Search keywords when action is search."},
+                "url": {"type": "string", "description": "URL to fetch when action is fetch."},
+                "num_results": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5},
+                "page": {"type": "integer", "minimum": 1, "default": 1},
+                "language": {"type": "string", "default": "zh-CN"},
+                "time_range": {"type": "string", "enum": ["day", "week", "month", "year"]},
+            },
+            "required": ["action"],
+        }
+
+    async def execute(self, **kwargs) -> str:
+        action = str(kwargs.get("action") or "").strip().lower()
+        if action == "search":
+            return await self._search_tool.execute(**kwargs)
+        if action == "fetch":
+            return await self._fetch_tool.execute(**kwargs)
+        if kwargs.get("url") and not kwargs.get("query"):
+            return await self._fetch_tool.execute(**kwargs)
+        if kwargs.get("query"):
+            return await self._search_tool.execute(**kwargs)
+        return json.dumps({"error": {"type": "invalid_arguments", "message": "action must be search or fetch"}}, ensure_ascii=False)
+
+
 class WebSearchTool(BaseTool):
 
     def __init__(self, config: Dict[str, Any]):
@@ -342,7 +388,7 @@ class FetchUrlTool(BaseTool):
         return {
             "url": str(resp.url),
             "title": title,
-            "content": content,
+            "content": self._truncate(content),
             "success": True,
             "status_code": resp.status_code,
             "content_type": content_type,
@@ -360,7 +406,7 @@ class FetchUrlTool(BaseTool):
         return {
             "url": url,
             "title": getattr(result, "title", "") or "",
-            "content": content,
+            "content": self._truncate(content),
             "success": result.success if hasattr(result, "success") else True,
             "source": "crawl4ai",
         }

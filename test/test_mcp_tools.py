@@ -115,8 +115,9 @@ def test_tool_manager_mcp_config():
     }
     tm_builtin = ToolManager(config_builtin)
     tools = tm_builtin.list_tools()
-    assert "web_search" in tools
-    assert "fetch_url" in tools
+    assert "web" in tools
+    assert "web_search" not in tools
+    assert "fetch_url" not in tools
     print(f"  PASSED: Built-in mode: {tools}")
 
     # Test with MCP enabled
@@ -131,8 +132,9 @@ def test_tool_manager_mcp_config():
     }
     tm_mcp = ToolManager(config_mcp)
     tools = tm_mcp.list_tools()
-    assert "web_search" in tools
-    assert "fetch_url" in tools
+    assert "web" in tools
+    assert "web_search" not in tools
+    assert "fetch_url" not in tools
     print(f"  PASSED: MCP mode: {tools}")
 
     # Verify MCP tools produce correct OpenAI schemas
@@ -179,7 +181,7 @@ def test_tool_manager_fallback():
     # Config without MCP section at all
     config = {"tools": {"web_search": {"enabled": True}}}
     tm = ToolManager(config)
-    assert "web_search" in tm.list_tools()
+    assert "web" in tm.list_tools()
     print("  PASSED: Missing MCP config falls back to built-in tools")
 
 

@@ -87,7 +87,7 @@ def test_command_tool_result_is_model_readable_text(monkeypatch):
     assert "Stderr:" in content
     assert "boom" in content
     assert "tool_result_id: result-1" in content
-    assert 'read_tool_result({"tool_result_id":"result-1"' in content
+    assert 'read({"source":"tool_result","tool_result_id":"result-1"' in content
     assert manager.tool_manager.tool_result_store.saved[0]["content"] == raw_result
 
 
@@ -109,7 +109,7 @@ def test_non_command_tool_result_keeps_preview_with_metadata(monkeypatch):
         "total_chars": 9,
         "truncated": True,
         "preview": "abcde",
-        "read_more": 'read_tool_result({"tool_result_id":"result-1","offset":5})',
+        "read_more": 'read({"source":"tool_result","tool_result_id":"result-1","offset":5})',
     }
 
 
@@ -374,5 +374,5 @@ def test_round_result_budget_shortens_longest_model_visible_result(monkeypatch):
     assert budgeted[0]["content"] == "short result"
     assert len(budgeted[1]["content"]) < 120
     assert "result-long" in budgeted[1]["content"]
-    assert 'read_tool_result({"tool_result_id":"result-long","offset":0})' in budgeted[1]["content"]
+    assert 'read({"source":"tool_result","tool_result_id":"result-long","offset":0})' in budgeted[1]["content"]
     assert budgeted[1]["raw_content"] == "L" * 120

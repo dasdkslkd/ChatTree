@@ -76,13 +76,13 @@ const API_FORMAT_OPTIONS: { value: APIFormat; label: string; description: string
 const BUILTIN_EXPOSURE_OPTIONS: { value: BuiltinToolExposure; label: string; description: string }[] = [
   { value: 'coding', label: 'Coding', description: '代码读写、搜索、命令和网页工具' },
   { value: 'minimal', label: 'Minimal', description: '仅基础工具和网页工具' },
-  { value: 'full', label: 'Full', description: '暴露所有内置工具，包括 write' },
+  { value: 'full', label: 'Full', description: '暴露完整 canonical 工具面' },
 ];
 
 const BUILTIN_CODE_GROUP_OPTIONS: { value: BuiltinCodeToolGroup; label: string; description: string }[] = [
   { value: 'read', label: '读取', description: 'glob, read' },
   { value: 'search', label: '搜索', description: 'grep' },
-  { value: 'edit', label: '编辑', description: 'edit, patch' },
+  { value: 'edit', label: '编辑', description: 'edit' },
   { value: 'shell', label: '命令', description: 'shell' },
   { value: 'write', label: '写入', description: 'write' },
 ];
@@ -1800,7 +1800,7 @@ function BuiltinToolsSection() {
           <div className="flex items-center justify-between px-4 py-2.5" style={{ borderBottom: '0.5px solid var(--border)' }}>
             <div>
               <div className="text-sm font-medium" style={{ color: 'var(--fg-85)' }}>联网工具</div>
-              <div className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>web_search / fetch_url</div>
+              <div className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>web</div>
             </div>
             <div className="flex items-center gap-3">
               <TextTooltip content={webView.title}>

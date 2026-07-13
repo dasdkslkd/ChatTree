@@ -15,10 +15,13 @@ class ToolCapability(str, Enum):
 
 
 DEFAULT_TOOL_CAPABILITIES: Mapping[str, Set[ToolCapability]] = {
+    "web": {ToolCapability.NETWORK_READ},
     "web_search": {ToolCapability.NETWORK_READ},
     "fetch_url": {ToolCapability.NETWORK_READ},
     "read_tool_result": {ToolCapability.READ_ONLY},
     "list_available_tools": {ToolCapability.READ_ONLY},
+    "tools": {ToolCapability.READ_ONLY},
+    "plan": {ToolCapability.READ_ONLY},
     "enter_plan_mode": {ToolCapability.READ_ONLY},
     "update_plan": {ToolCapability.READ_ONLY},
     "exit_plan_mode": {ToolCapability.READ_ONLY},
@@ -30,6 +33,7 @@ DEFAULT_TOOL_CAPABILITIES: Mapping[str, Set[ToolCapability]] = {
     "shell": {ToolCapability.COMMAND_EXEC},
     "write": {ToolCapability.FILESYSTEM_WRITE},
     "patch": {ToolCapability.FILESYSTEM_WRITE},
+    "agent": {ToolCapability.READ_ONLY},
 }
 
 

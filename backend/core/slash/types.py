@@ -54,6 +54,8 @@ class SlashCommandDefinition:
     stream_target_policy: str = "target_node"
     blocks_main_thread: bool = True
     enabled: bool = True
+    allowed_tools: Optional[tuple[str, ...]] = None
+    disallowed_tools: tuple[str, ...] = ()
 
     def to_public_dict(self) -> dict[str, Any]:
         return {
@@ -70,6 +72,8 @@ class SlashCommandDefinition:
             "stream_target_policy": self.stream_target_policy,
             "blocks_main_thread": self.blocks_main_thread,
             "enabled": self.enabled,
+            "allowed_tools": list(self.allowed_tools) if self.allowed_tools is not None else None,
+            "disallowed_tools": list(self.disallowed_tools),
         }
 
 
@@ -90,6 +94,8 @@ class SlashDispatchResult:
     blocks_main_thread: bool = True
     metadata: dict[str, Any] | None = None
     disable_tools: bool = False
+    allowed_tools: Optional[tuple[str, ...]] = None
+    disallowed_tools: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.kind != SlashDispatchKind.ERROR or not self.error:

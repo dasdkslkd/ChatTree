@@ -5,6 +5,8 @@ from fnmatch import fnmatch
 import re
 from typing import Any, Dict, List, Literal, Optional
 
+from backend.core.tools.exposure import command_spec_matches
+
 PermissionBehavior = Literal["allow", "ask", "deny"]
 PermissionMode = Literal[
     "default",
@@ -151,6 +153,9 @@ class PermissionEngine:
 
     def _matches(self, rule: PermissionRule, context: PermissionContext) -> bool:
         if rule.target_type == "tool":
+            if "(" in rule.pattern and ")" in rule.pattern:
+                command = _command_text(context.arguments)
+                return bool(command and command_spec_matches(context.tool_name, command, rule.pattern))
             return fnmatch(context.tool_name, rule.pattern)
         if rule.target_type == "mcp_tool":
             return any(fnmatch(variant, rule.pattern) for variant in self._mcp_tool_name_variants(context.tool_name))
@@ -161,6 +166,8 @@ class PermissionEngine:
             return False
         if rule.target_type == "command":
             command = str(context.arguments.get("command") or "")
+            if "(" in rule.pattern and ")" in rule.pattern:
+                return bool(command and command_spec_matches(context.tool_name, command, rule.pattern))
             return fnmatch(command, rule.pattern)
         return fnmatch(context.tool_name, rule.pattern)
 
@@ -209,10 +216,13 @@ class PermissionEngine:
 
 def default_permission_rules() -> List[PermissionRule]:
     return [
+        PermissionRule("default-allow-web", "allow", "tool", "web", source="default"),
         PermissionRule("default-allow-web-search", "allow", "tool", "web_search", source="default"),
         PermissionRule("default-allow-fetch-url", "allow", "tool", "fetch_url", source="default"),
         PermissionRule("default-allow-read-tool-result", "allow", "tool", "read_tool_result", source="default"),
         PermissionRule("default-allow-list-tools", "allow", "tool", "list_available_tools", source="default"),
+        PermissionRule("default-allow-tools", "allow", "tool", "tools", source="default"),
+        PermissionRule("default-allow-agent", "allow", "tool", "agent", source="default"),
         PermissionRule("default-allow-spawn-agent", "allow", "tool", "spawn_agent", source="default"),
         PermissionRule("default-allow-wait-agent", "allow", "tool", "wait_agent", source="default"),
         PermissionRule("default-allow-list-agents", "allow", "tool", "list_agents", source="default"),
@@ -225,6 +235,7 @@ def default_permission_rules() -> List[PermissionRule]:
         PermissionRule("default-allow-create-task", "allow", "tool", "create_task", source="default"),
         PermissionRule("default-allow-set-task-step", "allow", "tool", "set_task_step", source="default"),
         PermissionRule("default-allow-cancel-task", "allow", "tool", "cancel_task", source="default"),
+        PermissionRule("default-allow-plan", "allow", "tool", "plan", source="default"),
         PermissionRule("default-allow-enter-plan-mode", "allow", "tool", "enter_plan_mode", source="default"),
         PermissionRule("default-allow-update-plan", "allow", "tool", "update_plan", source="default"),
         PermissionRule("default-allow-exit-plan-mode", "allow", "tool", "exit_plan_mode", source="default"),
@@ -277,6 +288,7 @@ _MUTATING_NAME_TOKENS = {
 _DELETE_NAME_TOKENS = {"delete", "remove", "rm", "unlink", "rmdir"}
 _COMMAND_KEYS = {"command", "cmd", "script"}
 _AGENT_MANAGEMENT_TOOLS = {
+    "agent",
     "spawn_agent",
     "wait_agent",
     "list_agents",
@@ -289,10 +301,13 @@ _AGENT_MANAGEMENT_TOOLS = {
 }
 
 _BUILTIN_READ_TOOLS = {
+    "web",
     "web_search",
     "fetch_url",
     "read_tool_result",
     "list_available_tools",
+    "tools",
+    "plan",
     "glob",
     "read",
     "grep",
@@ -302,7 +317,10 @@ _PLAN_ALLOWED_TOOLS = {
     "glob",
     "read",
     "grep",
+    "web",
+    "plan",
     "list_available_tools",
+    "tools",
     "read_tool_result",
     "web_search",
     "fetch_url",

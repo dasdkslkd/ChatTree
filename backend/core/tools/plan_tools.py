@@ -8,7 +8,7 @@ from backend.core.plans import PlanLedger
 from .base import BaseTool
 
 
-PLAN_TOOL_NAMES = {"enter_plan_mode", "update_plan", "exit_plan_mode", "ask_user_question"}
+PLAN_TOOL_NAMES = {"plan", "enter_plan_mode", "update_plan", "exit_plan_mode", "ask_user_question"}
 
 
 def _json(payload: Dict[str, Any]) -> str:
@@ -43,6 +43,54 @@ class PlanLedgerTool(BaseTool):
 
     def _context(self, kwargs: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return _runtime_context(kwargs)
+
+
+class PlanTool(PlanLedgerTool):
+    @property
+    def name(self) -> str:
+        return "plan"
+
+    @property
+    def description(self) -> str:
+        return "Enter, update, ask from, or submit ChatTree plan mode through one planning tool."
+
+    def parameters_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "action": {"type": "string", "enum": ["enter", "update", "ask", "exit"]},
+                "mode": {"type": "string", "enum": ["replace", "apply_patch"]},
+                "content": {"type": "string"},
+                "patch": {"type": "string"},
+                "question": {"type": "string"},
+                "options": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "label": {"type": "string"},
+                            "description": {"type": "string"},
+                        },
+                        "required": ["label"],
+                    },
+                },
+            },
+            "required": ["action"],
+        }
+
+    async def execute(self, **kwargs) -> str:
+        action = str(kwargs.get("action") or "").strip().lower()
+        if action == "enter":
+            return await EnterPlanModeTool(self._plan_ledger).execute(**kwargs)
+        if action == "update":
+            return await UpdatePlanTool(self._plan_ledger).execute(**kwargs)
+        if action == "ask":
+            return await AskUserQuestionTool(self._plan_ledger).execute(**kwargs)
+        if action == "exit":
+            return await ExitPlanModeTool(self._plan_ledger).execute(**kwargs)
+        return _invalid_arguments("action must be enter, update, ask, or exit")
 
 
 class EnterPlanModeTool(PlanLedgerTool):
@@ -280,6 +328,7 @@ def register_plan_tools(tool_manager: Any, plan_ledger: PlanLedger) -> None:
     if not callable(register):
         return
     for tool in (
+        PlanTool(plan_ledger),
         EnterPlanModeTool(plan_ledger),
         UpdatePlanTool(plan_ledger),
         ExitPlanModeTool(plan_ledger),

@@ -104,6 +104,81 @@ def test_glob_supports_path_regex_and_excludes(tmp_path, monkeypatch):
     assert result["files"] == [".hidden.py"]
 
 
+def test_glob_uses_ripgrep_by_default_and_documents_parameters(tmp_path, monkeypatch):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("print('hi')", encoding="utf-8")
+    (tmp_path / "src" / "skip.txt").write_text("skip", encoding="utf-8")
+    fake_rg = tmp_path / "rg.exe"
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, 0, "src/app.py\nsrc/skip.txt\n", "")
+
+    monkeypatch.setattr(code_tools, "_resolve_ripgrep_executable", lambda config: fake_rg)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    tool = ListFilesTool(make_config(tmp_path))
+
+    result = load(run(tool.execute(
+        path=".",
+        pattern="*.py",
+        path_regex=r"src/",
+        respect_gitignore=False,
+        include_hidden=True,
+        exclude=["skip.txt"],
+        limit=10,
+    )))
+
+    assert result["engine"] == "rg"
+    assert result["files"] == ["src/app.py"]
+    args, kwargs = calls[0]
+    assert args[:4] == [str(fake_rg), "--files", "--color", "never"]
+    assert "--no-ignore" in args
+    assert "--hidden" in args
+    assert ["--glob", "*.py"] == args[args.index("--glob"):args.index("--glob") + 2]
+    assert f"!skip.txt" in args
+    assert kwargs["cwd"] == str(tmp_path)
+    assert "do not use a `query` argument" in tool.description
+
+
+def test_tool_manager_preserves_glob_pattern_argument(tmp_path, monkeypatch):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("print('hi')", encoding="utf-8")
+    (tmp_path / "src" / "app.ts").write_text("console.log('hi')", encoding="utf-8")
+    fake_rg = tmp_path / "rg.exe"
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, 0, "src/app.py\nsrc/app.ts\n", "")
+
+    monkeypatch.setattr(code_tools, "_resolve_ripgrep_executable", lambda config: fake_rg)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    manager = ToolManager({
+        "tools": {
+            "enabled": True,
+            "builtin": {
+                "web_search": {"enabled": False},
+                "code": {
+                    "enabled": True,
+                    "workspace_roots": [str(tmp_path)],
+                },
+            },
+        }
+    })
+
+    result = load(run(manager.execute_tool("glob", {
+        "path": ".",
+        "pattern": "*.py",
+        "limit": 10,
+    })))
+
+    assert result["engine"] == "rg"
+    assert result["files"] == ["src/app.py"]
+    args, _kwargs = calls[0]
+    assert ["--glob", "*.py"] == args[args.index("--glob"):args.index("--glob") + 2]
+
+
 def test_read_file_reads_utf8_line_slice(tmp_path):
     (tmp_path / "notes.txt").write_text("one\ntwo\nthree\nfour\n", encoding="utf-8")
     tool = ReadFileTool(make_config(tmp_path, max_read_chars=200))
@@ -569,14 +644,14 @@ def test_tool_manager_coding_exposure_hides_raw_write_file_but_keeps_it_executab
     assert "glob" in names
     assert "read" in names
     assert "edit" in names
-    assert "patch" in names
+    assert "patch" not in names
     assert "shell" in names
     assert "write" not in names
     result = load(run(manager.execute_tool("write", {"path": "notes.txt", "content": "ok"})))
     assert result["path"] == "notes.txt"
 
 
-def test_tool_manager_full_exposure_can_show_write_file(tmp_path):
+def test_tool_manager_full_exposure_keeps_write_internal(tmp_path):
     manager = ToolManager({
         "tools": {
             "enabled": True,
@@ -593,7 +668,8 @@ def test_tool_manager_full_exposure_can_show_write_file(tmp_path):
 
     names = [tool["function"]["name"] for tool in manager.get_openai_tools()]
 
-    assert "write" in names
+    assert "edit" in names
+    assert "write" not in names
 
 
 def test_tool_manager_passes_top_level_ripgrep_config_to_code_tools(tmp_path):

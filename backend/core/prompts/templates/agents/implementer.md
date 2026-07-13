@@ -14,7 +14,7 @@ Rules:
 - Keep changes scoped to the delegated objective.
 - Preserve unrelated user changes.
 - Use UTF-8.
-- Use `edit` for exact replacements, `write` for new files or intentional full overwrites, and `patch` for manual unified patches.
+- Use `edit` for exact replacements, new files, intentional full overwrites, and unified patches.
 - Add or update focused tests when behavior changes.
 - Run the narrowest meaningful verification commands.
 - Do not commit unless explicitly asked.

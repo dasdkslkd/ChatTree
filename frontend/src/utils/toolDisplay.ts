@@ -85,25 +85,32 @@ export function summarizeToolCall(toolName: string, rawArguments: unknown): stri
 
   switch (name) {
     case 'read':
-      return path ? `读取 ${path}` : '读取文件';
+      return stringArg(args, 'source') === 'tool_result'
+        ? '读取完整工具结果'
+        : path ? `读取 ${path}` : '读取文件';
     case 'glob':
       return summarizeListFiles(args);
     case 'grep':
       return pattern ? `搜索 "${compact(pattern, 60)}"` : '搜索内容';
     case 'edit':
       return summarizeEditFile(args, path);
-    case 'write':
-      return summarizeWriteFile(args, path);
     case 'patch':
       return summarizePatch(args);
     case 'shell':
       return command ? `运行 ${compact(command, 80)}` : '运行命令';
+    case 'agent':
+      return summarizeAgent(args);
+    case 'plan':
+      return summarizePlan(args);
+    case 'web':
+      return summarizeWeb(args);
     case 'web_search':
       return query ? `搜索网页 "${compact(query, 60)}"` : '搜索网页';
     case 'fetch_url':
       return stringArg(args, 'url') ? `读取 URL ${compact(stringArg(args, 'url') || '', 80)}` : '读取 URL';
     case 'read_tool_result':
       return '读取完整工具结果';
+    case 'tools':
     case 'list_available_tools':
       return '列出可用工具';
     default:
@@ -139,8 +146,8 @@ function compactRecordForTool(toolName: string, value: string): Record<string, u
   if (toolName === 'shell') return { command: value };
   if (toolName === 'read' || toolName === 'glob') return { path: value };
   if (toolName === 'grep') return { pattern: value };
-  if (toolName === 'web_search') return { query: value };
-  if (toolName === 'patch') return { patch: value };
+  if (toolName === 'web' || toolName === 'web_search') return { query: value };
+  if (toolName === 'edit' && value.trim().startsWith('--- ')) return { operation: 'patch', patch: value };
   return { arguments: value };
 }
 
@@ -182,6 +189,9 @@ function summarizeListFiles(args: Record<string, unknown>): string {
 
 function summarizeEditFile(args: Record<string, unknown>, path: string | null): string {
   const target = path || '文件';
+  const operation = stringArg(args, 'operation');
+  if (operation === 'patch') return summarizePatch(args);
+  if (operation === 'create' || operation === 'overwrite') return summarizeWriteFile(args, path);
   return boolArg(args, 'replace_all') ? `编辑 ${target} · 替换全部` : `编辑 ${target} · 精确替换`;
 }
 
@@ -201,6 +211,31 @@ function summarizePatch(args: Record<string, unknown>): string {
       .filter(Boolean),
   ).size;
   return fileCount > 0 ? `应用补丁 · ${fileCount} 个文件` : '应用补丁';
+}
+
+function summarizeAgent(args: Record<string, unknown>): string {
+  const action = stringArg(args, 'action') || 'spawn';
+  const runId = stringArg(args, 'run_id');
+  if (action === 'spawn') return `启动 agent · ${stringArg(args, 'agent_name') || '默认角色'}`;
+  if (action === 'wait') return '等待 agent 结果';
+  if (action === 'workflow') return '启动 workflow';
+  return runId ? `agent ${action} · ${runId}` : `agent ${action}`;
+}
+
+function summarizePlan(args: Record<string, unknown>): string {
+  const action = stringArg(args, 'action') || 'update';
+  if (action === 'enter') return '进入计划模式';
+  if (action === 'exit') return '提交计划';
+  if (action === 'ask') return '询问计划问题';
+  return '更新计划';
+}
+
+function summarizeWeb(args: Record<string, unknown>): string {
+  const action = stringArg(args, 'action');
+  const query = stringArg(args, 'query');
+  const url = stringArg(args, 'url');
+  if (action === 'fetch' || url) return url ? `读取 URL ${compact(url, 80)}` : '读取 URL';
+  return query ? `搜索网页 "${compact(query, 60)}"` : '搜索网页';
 }
 
 function summarizeFallback(toolName: string, args: Record<string, unknown>): string {

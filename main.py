@@ -220,6 +220,9 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
+    run_manager = getattr(app.state, "run_manager", None)
+    if run_manager:
+        await run_manager.close()
     tool_manager = getattr(app.state, "tool_manager", None)
     if tool_manager:
         await tool_manager.close()

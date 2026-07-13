@@ -12,6 +12,8 @@ _KNOWN_FRONTMATTER_FIELDS = {
     "name",
     "description",
     "tools",
+    "disallowed_tools",
+    "disallowedTools",
     "skills",
     "model",
     "model_id",
@@ -89,7 +91,10 @@ def load_agent_file(
         name=name,
         description=str(frontmatter.get("description") or "").strip(),
         system_prompt=content.strip(),
-        tools=_normalize_string_list(frontmatter.get("tools")),
+        tools=_normalize_optional_string_list(frontmatter, "tools"),
+        disallowed_tools=_normalize_string_list(
+            frontmatter.get("disallowed_tools", frontmatter.get("disallowedTools"))
+        ),
         skills=_normalize_string_list(frontmatter.get("skills")),
         model=_optional_str(frontmatter.get("model")),
         model_id=_optional_str(frontmatter.get("model_id", frontmatter.get("modelId"))),
@@ -140,6 +145,12 @@ def _normalize_string_list(value: Any) -> list[str]:
         return [item.strip() for item in value.split(",") if item.strip()]
     text = str(value).strip()
     return [text] if text else []
+
+
+def _normalize_optional_string_list(frontmatter: dict[str, Any], key: str) -> Optional[list[str]]:
+    if key not in frontmatter:
+        return None
+    return _normalize_string_list(frontmatter.get(key))
 
 
 def _parse_positive_int(value: Any) -> Optional[int]:

@@ -126,9 +126,16 @@ def test_empty_agent_tools_means_no_tools_and_star_allows_all_tools():
     executor, _ = make_executor(agent, FakeProvider([]))
 
     assert executor._filter_tools(agent.tools) == []
+    assert [tool["function"]["name"] for tool in executor._filter_tools(None)] == [
+        "read",
+        "shell",
+    ]
     assert [tool["function"]["name"] for tool in executor._filter_tools(["*"])] == [
         "read",
         "shell",
+    ]
+    assert [tool["function"]["name"] for tool in executor._filter_tools(["*"], disallowed_names=["shell"])] == [
+        "read",
     ]
 
 

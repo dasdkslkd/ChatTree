@@ -8,6 +8,7 @@ from .task_contract import task_step_parameter_schema
 
 
 AGENT_TOOL_NAMES = {
+    "agent",
     "spawn_agent",
     "start_workflow",
     "wait_agent",
@@ -83,6 +84,83 @@ class AgentRuntimeTool(BaseTool):
 
     def _source(self, context: Dict[str, Any]) -> AgentSource:
         return _source_from_context(context)
+
+
+class AgentTool(AgentRuntimeTool):
+    def __init__(
+        self,
+        *,
+        agent_runtime: Any,
+        subagent_executor: Any = None,
+        workflow_manager: Any = None,
+    ) -> None:
+        super().__init__(agent_runtime=agent_runtime)
+        self._subagent_executor = subagent_executor
+        self._workflow_manager = workflow_manager
+
+    @property
+    def name(self) -> str:
+        return "agent"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Manage delegated ChatTree agent and workflow runs. Use this for explicit subagent, agent, forked-agent, "
+            "or workflow requests instead of simulating delegation with shell, file tools, or prose."
+        )
+
+    def parameters_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["spawn", "wait", "list", "message", "input", "followup", "resume", "close", "interrupt", "workflow"],
+                },
+                "agent_name": {"type": "string"},
+                "task": {"type": "string"},
+                "context_mode": {"type": "string", "enum": ["fresh", "fork"]},
+                "delivery": {"type": "string", "enum": ["auto", "notify", "silent"]},
+                "run_id": {"type": "string"},
+                "run_ids": {"type": "array", "items": {"type": "string"}},
+                "timeout_seconds": {"type": "number"},
+                "message": {"type": "string"},
+                "input": {},
+                "include_completed": {"type": "boolean"},
+                "script": {"type": "string"},
+                "args": {"type": "object"},
+                "step": task_step_parameter_schema(),
+            },
+            "required": ["action"],
+        }
+
+    async def execute(self, **kwargs) -> str:
+        action = str(kwargs.get("action") or "").strip().lower()
+        if action == "spawn":
+            return await SpawnAgentTool(agent_runtime=self._agent_runtime).execute(**kwargs)
+        if action == "wait":
+            return await WaitAgentTool(agent_runtime=self._agent_runtime).execute(**kwargs)
+        if action == "list":
+            return await ListAgentsTool(agent_runtime=self._agent_runtime).execute(**kwargs)
+        if action == "message":
+            return await SendMessageTool(agent_runtime=self._agent_runtime).execute(**kwargs)
+        if action == "input":
+            return await SendInputTool(agent_runtime=self._agent_runtime).execute(**kwargs)
+        if action == "followup":
+            return await FollowupTaskTool(agent_runtime=self._agent_runtime).execute(**kwargs)
+        if action == "resume":
+            return await ResumeAgentTool(agent_runtime=self._agent_runtime).execute(**kwargs)
+        if action == "close":
+            return await CloseAgentTool(agent_runtime=self._agent_runtime).execute(**kwargs)
+        if action == "interrupt":
+            return await InterruptAgentTool(agent_runtime=self._agent_runtime).execute(**kwargs)
+        if action == "workflow":
+            return await StartWorkflowTool(
+                workflow_manager=self._workflow_manager,
+                agent_runtime=self._agent_runtime,
+            ).execute(**kwargs)
+        return _invalid_arguments("action must be spawn, wait, list, message, input, followup, resume, close, interrupt, or workflow")
 
 
 class SpawnAgentTool(AgentRuntimeTool):
@@ -400,7 +478,7 @@ class StartSubagentTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Compatibility alias for spawn_agent. Prefer spawn_agent for new model calls. "
+            "Start a ChatTree subagent run for internal runtime paths. "
             "Do not simulate a subagent with shell, file tools, or prose."
         )
 
@@ -445,7 +523,6 @@ class StartSubagentTool(BaseTool):
                 task_generation_id=_context_task_generation(context),
                 task_revision=_context_task_revision(context),
             )
-            result["replacement_tool"] = "spawn_agent"
             return json.dumps(result, ensure_ascii=False)
         if self._subagent_executor is None:
             return json.dumps({"error": {"type": "missing_executor", "message": "subagent executor is not configured"}}, ensure_ascii=False)
@@ -469,7 +546,6 @@ class StartSubagentTool(BaseTool):
             "status": run.get("status"),
             "agent_name": agent_name,
             "task": task,
-            "replacement_tool": "spawn_agent",
             "message": "Subagent started. Its result will be delivered back to this conversation when complete.",
         }, ensure_ascii=False)
 
@@ -569,6 +645,11 @@ def register_agent_management_tools(
     workflow_manager: Any = None,
 ) -> None:
     if agent_runtime is not None:
+        tool_manager.register(AgentTool(
+            agent_runtime=agent_runtime,
+            subagent_executor=subagent_executor,
+            workflow_manager=workflow_manager,
+        ))
         for tool in (
             SpawnAgentTool(agent_runtime=agent_runtime),
             WaitAgentTool(agent_runtime=agent_runtime),

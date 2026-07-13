@@ -63,6 +63,53 @@ def test_run_repository_appends_event_batches(tmp_path):
     assert [event["payload"]["content"] for event in runs.read_events(run_id)[:2]] == ["a", "b"]
 
 
+def test_run_repository_appends_indexed_event_batches_with_one_run_update(tmp_path):
+    _persistence, _chat, runs, conv_id, node_id = _repositories(tmp_path)
+    run_id = runs.create_run(conv_id, kind="chat", target_node_id=node_id)
+
+    returned = runs.append_indexed_events(run_id, [
+        {
+            "run_id": run_id,
+            "event_index": 0,
+            "payload": {"status": "content", "content": "a", "event_index": 0},
+            "created_at": 1000.0,
+        },
+        {
+            "run_id": run_id,
+            "event_index": 1,
+            "payload": {"status": "content", "content": "b", "event_index": 1},
+            "created_at": 1001.0,
+        },
+    ])
+
+    assert [event["event_index"] for event in returned] == [0, 1]
+    assert [event["payload"]["content"] for event in runs.read_events(run_id)] == ["a", "b"]
+    assert runs.get_run(run_id)["event_count"] == 2
+    assert runs.get_run(run_id)["updated_at"] == 1001.0
+
+
+def test_run_repository_rejects_out_of_order_indexed_event_batches(tmp_path):
+    _persistence, _chat, runs, conv_id, node_id = _repositories(tmp_path)
+    run_id = runs.create_run(conv_id, kind="chat", target_node_id=node_id)
+
+    try:
+        runs.append_indexed_events(run_id, [
+            {
+                "run_id": run_id,
+                "event_index": 1,
+                "payload": {"status": "content", "content": "late", "event_index": 1},
+                "created_at": 1000.0,
+            },
+        ])
+    except ValueError as exc:
+        assert "expected event_index 0" in str(exc)
+    else:
+        raise AssertionError("append_indexed_events accepted a gap")
+
+    assert runs.read_events(run_id) == []
+    assert runs.get_run(run_id)["event_count"] == 0
+
+
 def test_run_repository_marks_interrupted_runs_on_startup(tmp_path):
     _persistence, _chat, runs, conv_id, node_id = _repositories(tmp_path)
     run_id = runs.create_run(conv_id, kind="chat", target_node_id=node_id)
@@ -194,6 +241,74 @@ def test_run_manager_uses_optional_repository_backend(tmp_path):
     asyncio.run(scenario())
 
 
+def test_run_manager_publishes_events_before_background_flush(tmp_path):
+    async def scenario():
+        _persistence, _chat, runs, conv_id, node_id = _repositories(tmp_path)
+        manager = RunManager(repository=runs)
+        record = await manager.create_run(
+            conversation_id=conv_id,
+            kind="chat",
+            target_node_id=node_id,
+        )
+
+        await manager.append_events(record.run_id, [
+            {"status": "content", "content": f"chunk-{index}"}
+            for index in range(5)
+        ])
+
+        live_events = manager.read_events(record.run_id)
+        assert [event.get("content") for event in live_events[1:]] == [
+            "chunk-0",
+            "chunk-1",
+            "chunk-2",
+            "chunk-3",
+            "chunk-4",
+        ]
+
+        await manager.flush_run_events(record.run_id)
+        stored_events = runs.read_events(record.run_id)
+        assert [event["event_index"] for event in stored_events] == list(range(6))
+        assert [event["payload"].get("content") for event in stored_events[1:]] == [
+            "chunk-0",
+            "chunk-1",
+            "chunk-2",
+            "chunk-3",
+            "chunk-4",
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_run_manager_flushes_pending_events_before_finish(tmp_path):
+    async def scenario():
+        _persistence, _chat, runs, conv_id, node_id = _repositories(tmp_path)
+        manager = RunManager(repository=runs)
+        record = await manager.create_run(
+            conversation_id=conv_id,
+            kind="chat",
+            target_node_id=node_id,
+        )
+        await manager.append_events(record.run_id, [
+            {"status": "content", "content": "a"},
+            {"status": "content", "content": "b"},
+        ])
+
+        finished = await manager.finish_run(record.run_id, RunStatus.COMPLETED)
+
+        stored_events = runs.read_events(record.run_id)
+        assert finished.status == RunStatus.COMPLETED
+        assert [event["event_index"] for event in stored_events] == [0, 1, 2, 3]
+        assert [event["payload"].get("type") for event in stored_events] == [
+            "run_started",
+            None,
+            None,
+            "run_finished",
+        ]
+        assert stored_events[-1]["payload"]["status"] == "completed"
+
+    asyncio.run(scenario())
+
+
 def test_run_manager_bind_target_node_persists_sqlite_run_record(tmp_path):
     async def scenario():
         _persistence, chat, runs, conv_id, node_id = _repositories(tmp_path)
@@ -210,6 +325,7 @@ def test_run_manager_bind_target_node_persists_sqlite_run_record(tmp_path):
         assert updated.target_node_id == target_node_id
         assert manager.get_run(record.run_id)["target_node_id"] == target_node_id
         assert runs.get_run(record.run_id)["target_node_id"] == target_node_id
+        await manager.flush_run_events(record.run_id)
         events = runs.read_events(record.run_id)
         assert events[-1]["payload"]["type"] == "run_target_bound"
         assert events[-1]["payload"]["target_node_id"] == target_node_id
@@ -228,6 +344,7 @@ def test_run_manager_rehydrates_repository_runs_after_restart(tmp_path):
             summary="restartable",
         )
         await first.append_event(record.run_id, {"status": "content", "content": "persisted"})
+        await first.close()
 
         restarted = RunManager(repository=runs)
 
@@ -247,6 +364,7 @@ def test_run_manager_startup_interrupts_are_visible_after_restart(tmp_path):
             kind="chat",
             target_node_id=node_id,
         )
+        await first.close()
 
         runs.mark_unfinished_as_interrupted()
         restarted = RunManager(repository=runs)

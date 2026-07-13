@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import uuid
+from time import time
 from typing import Any
 
 from .blob_store import BlobStore
@@ -206,6 +207,57 @@ class SQLiteRunRepository:
                 rows.append(self._append_event_in_connection(conn, run_id, payload))
         return [self._event_from_row(row) for row in rows]
 
+    def append_indexed_events(
+        self,
+        run_id: str,
+        events: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not events:
+            return []
+        ordered = sorted(events, key=lambda event: int(event["event_index"]))
+        rows = []
+        with self.persistence.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            run = conn.execute(
+                """
+                SELECT conversation_id, kind, target_node_id, event_count
+                FROM runs
+                WHERE id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            if run is None:
+                raise KeyError(run_id)
+            expected_index = int(run["event_count"])
+            updated_at = float(ordered[-1].get("created_at") or time())
+            for event in ordered:
+                event_index = int(event["event_index"])
+                if event_index != expected_index:
+                    raise ValueError(
+                        f"run {run_id} expected event_index {expected_index}, got {event_index}"
+                    )
+                rows.append(
+                    self._insert_indexed_event_in_connection(
+                        conn,
+                        run_id,
+                        run,
+                        event_index=event_index,
+                        payload=dict(event["payload"]),
+                        created_at=float(event.get("created_at") or time()),
+                    )
+                )
+                expected_index += 1
+            conn.execute(
+                """
+                UPDATE runs
+                SET event_count = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (expected_index, updated_at, run_id),
+            )
+        return [self._event_from_row(row) for row in rows]
+
     def read_events(self, run_id: str, from_event: int = 0) -> list[dict[str, Any]]:
         with self.persistence.connect() as conn:
             rows = conn.execute(
@@ -396,6 +448,35 @@ class SQLiteRunRepository:
         if run is None:
             raise KeyError(run_id)
         event_index = int(run["event_count"])
+        row = self._insert_indexed_event_in_connection(
+            conn,
+            run_id,
+            run,
+            event_index=event_index,
+            payload=payload,
+            created_at=float(time()),
+        )
+        conn.execute(
+            """
+            UPDATE runs
+            SET event_count = event_count + 1,
+                updated_at = strftime('%s', 'now')
+            WHERE id = ?
+            """,
+            (run_id,),
+        )
+        return row
+
+    def _insert_indexed_event_in_connection(
+        self,
+        conn: Any,
+        run_id: str,
+        run: Any,
+        *,
+        event_index: int,
+        payload: dict[str, Any],
+        created_at: float,
+    ) -> Any:
         event_payload = dict(payload)
         event_payload.setdefault("run_id", run_id)
         event_payload.setdefault("conversation_id", run["conversation_id"])
@@ -423,7 +504,7 @@ class SQLiteRunRepository:
               payload_blob_id,
               created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, strftime('%s', 'now'))
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id,
@@ -432,16 +513,8 @@ class SQLiteRunRepository:
                 event_type,
                 stored.inline,
                 stored.blob_id,
+                created_at,
             ),
-        )
-        conn.execute(
-            """
-            UPDATE runs
-            SET event_count = event_count + 1,
-                updated_at = strftime('%s', 'now')
-            WHERE id = ?
-            """,
-            (run_id,),
         )
         return conn.execute(
             """

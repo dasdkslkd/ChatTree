@@ -14,11 +14,18 @@ from .code_tools import (
     WriteFileTool,
 )
 from .connection_manager import ConnectionManager
+from .exposure import (
+    ToolDescriptor,
+    ToolExposureContext,
+    ToolExposureResolver,
+    ToolRegistry,
+    descriptor_for_tool_name,
+)
 from .mcp_client import MCPClient, MCPClientError
 from .mcp_tools import MCPSearchTool, MCPUrlReadTool
 from .tool_arguments import normalize_tool_arguments
 from .tool_filter import ToolFilter
-from .web_search import FetchUrlTool, WebSearchTool
+from .web_search import FetchUrlTool, WebSearchTool, WebTool
 from ..storage.tool_result_storage import ToolResultStorage
 from ..projects import allowed_project_names
 from ..utils.logger import setup_logger
@@ -26,8 +33,6 @@ from ..utils.logger import setup_logger
 logger = setup_logger("ToolManager")
 
 
-BUILTIN_UTILITY_TOOLS = {"read_tool_result", "list_available_tools"}
-BUILTIN_WEB_TOOLS = {"web_search", "fetch_url"}
 BUILTIN_CODE_TOOL_GROUPS = {
     "read": {"read"},
     "search": {"glob", "grep"},
@@ -35,11 +40,6 @@ BUILTIN_CODE_TOOL_GROUPS = {
     "shell": {"shell"},
     "write": {"write"},
 }
-BUILTIN_LOCAL_TOOL_NAMES = (
-    BUILTIN_UTILITY_TOOLS
-    | BUILTIN_WEB_TOOLS
-    | set().union(*BUILTIN_CODE_TOOL_GROUPS.values())
-)
 BUILTIN_CODE_TOOL_CLASSES = {
     "glob": ListFilesTool,
     "read": ReadFileTool,
@@ -48,18 +48,6 @@ BUILTIN_CODE_TOOL_CLASSES = {
     "shell": RunCommandTool,
     "write": WriteFileTool,
     "patch": ApplyPatchTool,
-}
-BUILTIN_EXPOSURE_PROFILES = {
-    "minimal": BUILTIN_UTILITY_TOOLS | BUILTIN_WEB_TOOLS,
-    "coding": (
-        BUILTIN_UTILITY_TOOLS
-        | BUILTIN_WEB_TOOLS
-        | BUILTIN_CODE_TOOL_GROUPS["read"]
-        | BUILTIN_CODE_TOOL_GROUPS["search"]
-        | BUILTIN_CODE_TOOL_GROUPS["edit"]
-        | BUILTIN_CODE_TOOL_GROUPS["shell"]
-    ),
-    "full": BUILTIN_LOCAL_TOOL_NAMES,
 }
 
 
@@ -75,7 +63,8 @@ class ToolManager:
     """Tool manager supporting built-in tools and MCP servers."""
 
     def __init__(self, config: Dict[str, Any], tool_result_store: Optional[ToolResultStorage] = None):
-        self._tools: Dict[str, BaseTool] = {}
+        self._registry = ToolRegistry()
+        self._tools: Dict[str, BaseTool] = self._registry._tools
         self._config = config
         self.tool_result_store = tool_result_store or ToolResultStorage()
         self.command_executor: Any = None
@@ -84,13 +73,14 @@ class ToolManager:
         self._connection_manager = ConnectionManager()
         self._mcp_servers_config: Dict[str, Dict[str, Any]] = {}
         self._mcp_init_errors: Dict[str, str] = {}
+        self._tool_descriptors: Dict[str, ToolDescriptor] = self._registry._descriptors
         tools_config = config.get("tools", {})
         self._enabled = tools_config.get("enabled", True)
         self._filter = ToolFilter(
             enabled=tools_config.get("enabled_tools"),
             disabled=tools_config.get("disabled_tools"),
         )
-        self._model_visible_builtin_tools = self._resolve_model_visible_builtin_tools(tools_config)
+        self._exposure_resolver = ToolExposureResolver(tools_config)
         self._code_tools_config: Dict[str, Any] = {}
         self._command_tools_config: Dict[str, Any] = {}
         if self._enabled:
@@ -150,6 +140,7 @@ class ToolManager:
         search_tool = MCPSearchTool(self._mcp_client, tool_name=search_tool_name)
         url_read_tool = MCPUrlReadTool(self._mcp_client, tool_name=url_read_tool_name)
 
+        self.register(WebTool(search_tool, url_read_tool))
         self.register(search_tool)
         self.register(url_read_tool)
         self._mcp_tools = {
@@ -165,9 +156,12 @@ class ToolManager:
         if search_config.get("enabled", True):
             searxng_cfg = search_config.get("searxng", search_config.get("searxng_config", {}))
             crawl_cfg = search_config.get("crawl4ai", tools_config.get("fetch_url", {}))
-            self.register(WebSearchTool(searxng_cfg))
-            self.register(FetchUrlTool(crawl_cfg))
-            logger.info("Registered built-in web_search and fetch_url tools")
+            search_tool = WebSearchTool(searxng_cfg)
+            fetch_tool = FetchUrlTool(crawl_cfg)
+            self.register(WebTool(search_tool, fetch_tool))
+            self.register(search_tool)
+            self.register(fetch_tool)
+            logger.info("Registered built-in web tool and internal web_search/fetch_url tools")
 
         code_config = dict(tools_config.get("code", {}) or {})
         if "ripgrep" in tools_config and "ripgrep" not in code_config:
@@ -200,7 +194,7 @@ class ToolManager:
         if include_code:
             tools.extend([
                 ListFilesTool(code_tool_config),
-                ReadFileTool(code_tool_config),
+                ReadFileTool(code_tool_config, self.tool_result_store),
                 SearchFilesTool(code_tool_config),
                 EditFileTool(code_tool_config),
                 WriteFileTool(code_tool_config),
@@ -258,41 +252,68 @@ class ToolManager:
 
     def register(self, tool: BaseTool):
         """Register a local tool."""
-        self._tools[tool.name] = tool
+        self._registry.register(tool, descriptor_for_tool_name(tool.name))
         logger.info(f"Tool registered: {tool.name}")
 
     def get_tool(self, name: str) -> Optional[BaseTool]:
-        return self._tools.get(name)
+        return self._registry.get(name)
 
-    def list_tools(self, workspace: Optional[Dict[str, Any]] = None) -> List[str]:
-        names = [
-            name for name in self._tools
-            if self._is_model_visible_local_tool(name)
-        ]
-        names.extend(
-            info["callable_name"]
-            for info in self._connection_manager.list_all_tools()
-            if self._is_mcp_server_allowed_for_workspace(info["server"], workspace)
-            if self._filter.is_allowed(
-                info["callable_name"],
-                aliases=(info["tool"].get("name", ""), f"{info['server']}.{info['tool'].get('name', '')}"),
+    def list_tools(
+        self,
+        workspace: Optional[Dict[str, Any]] = None,
+        exposure_context: Optional[ToolExposureContext] = None,
+    ) -> List[str]:
+        visible = self._visible_local_tool_names(exposure_context)
+        names = sorted(name for name in self._tools if name in visible and self._filter.is_allowed(name))
+        context = exposure_context or self._exposure_resolver.context()
+        if self._exposure_resolver.mcp_visible(context):
+            names.extend(
+                info["callable_name"]
+                for info in self._connection_manager.list_all_tools()
+                if self._is_mcp_server_allowed_for_workspace(info["server"], workspace)
+                if self._exposure_resolver.mcp_tool_visible(
+                    callable_name=info["callable_name"],
+                    original_name=info["tool"].get("name", ""),
+                    server_name=info["server"],
+                    context=context,
+                )
+                if self._filter.is_allowed(
+                    info["callable_name"],
+                    aliases=(info["tool"].get("name", ""), f"{info['server']}.{info['tool'].get('name', '')}"),
+                )
             )
-        )
         return names
 
-    def get_openai_tools(self, workspace: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    def get_openai_tools(
+        self,
+        workspace: Optional[Dict[str, Any]] = None,
+        exposure_context: Optional[ToolExposureContext] = None,
+    ) -> List[Dict[str, Any]]:
         """Get all model-visible tools as OpenAI function calling schemas."""
         tools: List[Dict[str, Any]] = []
-        for name, tool in self._tools.items():
-            if self._is_model_visible_local_tool(name):
+        context = exposure_context or self._exposure_resolver.context()
+        visible = self._visible_local_tool_names(context)
+        for name in sorted(self._tools):
+            tool = self._tools[name]
+            if name in visible and self._filter.is_allowed(name):
                 tools.append(tool.to_openai_tool())
-        for info in self._connection_manager.list_all_tools():
-            original_name = info["tool"].get("name", "")
-            if self._is_mcp_server_allowed_for_workspace(info["server"], workspace) and self._filter.is_allowed(
-                info["callable_name"],
-                aliases=(original_name, f"{info['server']}.{original_name}"),
-            ):
-                tools.append(info["openai_schema"])
+        if self._exposure_resolver.mcp_visible(context):
+            for info in self._connection_manager.list_all_tools():
+                original_name = info["tool"].get("name", "")
+                if (
+                    self._is_mcp_server_allowed_for_workspace(info["server"], workspace)
+                    and self._exposure_resolver.mcp_tool_visible(
+                        callable_name=info["callable_name"],
+                        original_name=original_name,
+                        server_name=info["server"],
+                        context=context,
+                    )
+                    and self._filter.is_allowed(
+                        info["callable_name"],
+                        aliases=(original_name, f"{info['server']}.{original_name}"),
+                    )
+                ):
+                    tools.append(info["openai_schema"])
         return tools
 
     async def execute_tool(
@@ -345,6 +366,8 @@ class ToolManager:
         if workspace and name in BUILTIN_CODE_TOOL_CLASSES:
             source_config = self._command_tools_config if name in BUILTIN_CODE_TOOL_GROUPS["shell"] else self._code_tools_config
             config = CodeToolConfig.for_workspace(source_config, workspace)
+            if name == "read":
+                return ReadFileTool(config, self.tool_result_store)
             return BUILTIN_CODE_TOOL_CLASSES[name](config)
         return self._tools.get(name)
 
@@ -449,46 +472,13 @@ class ToolManager:
             self._mcp_client = None
         await self._connection_manager.close()
 
-    def _resolve_model_visible_builtin_tools(self, tools_config: Dict[str, Any]) -> Optional[set[str]]:
-        builtin_config = tools_config.get("builtin", {})
-        exposure = str(
-            builtin_config.get("exposure")
-            or tools_config.get("builtin_exposure")
-            or tools_config.get("exposure")
-            or "coding"
-        ).lower()
-        visible = set(BUILTIN_EXPOSURE_PROFILES.get(exposure, BUILTIN_EXPOSURE_PROFILES["coding"]))
-
-        code_config = builtin_config.get("code", tools_config.get("code", {}))
-        groups = code_config.get("groups")
-        if groups is not None:
-            visible -= set().union(*BUILTIN_CODE_TOOL_GROUPS.values())
-            for group in groups:
-                visible |= BUILTIN_CODE_TOOL_GROUPS.get(str(group), set())
-
-        explicit_visible = (
-            builtin_config["model_visible_tools"]
-            if "model_visible_tools" in builtin_config
-            else tools_config.get("model_visible_tools")
-        )
-        if explicit_visible is not None:
-            visible = set(str(name) for name in explicit_visible)
-
-        hidden = (
-            builtin_config["hidden_tools"]
-            if "hidden_tools" in builtin_config
-            else tools_config.get("hidden_tools", [])
-        )
-        visible -= set(str(name) for name in hidden)
-
-        return visible
+    def _visible_local_tool_names(self, exposure_context: Optional[ToolExposureContext] = None) -> set[str]:
+        return self._exposure_resolver.visible_local_names(self._registry.descriptors(), exposure_context)
 
     def _is_model_visible_local_tool(self, name: str) -> bool:
         if not self._filter.is_allowed(name):
             return False
-        if name not in BUILTIN_LOCAL_TOOL_NAMES:
-            return True
-        return name in self._model_visible_builtin_tools
+        return name in self._visible_local_tool_names()
 
 
 class ReadToolResultTool(BaseTool):
@@ -549,7 +539,7 @@ class ReadToolResultTool(BaseTool):
         next_offset = result.get("next_offset")
         if next_offset is not None:
             payload["read_more"] = (
-                f'read_tool_result({{"tool_result_id":"{tool_result_id}",'
+                f'read({{"source":"tool_result","tool_result_id":"{tool_result_id}",'
                 f'"offset":{next_offset}}})'
             )
         return json.dumps(payload, ensure_ascii=False)
@@ -563,7 +553,7 @@ class ToolInventoryTool(BaseTool):
 
     @property
     def name(self) -> str:
-        return "list_available_tools"
+        return "tools"
 
     @property
     def description(self) -> str:

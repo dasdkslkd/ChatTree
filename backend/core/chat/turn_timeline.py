@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any, Iterable
 
-BLOCKING_PLAN_TOOLS = {"exit_plan_mode", "ask_user_question"}
+BLOCKING_PLAN_TOOLS = {"plan", "exit_plan_mode", "ask_user_question"}
 
 
 def tool_call_name(tool_call: dict[str, Any]) -> str:

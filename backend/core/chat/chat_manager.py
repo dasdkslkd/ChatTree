@@ -57,6 +57,7 @@ from ..slash import (
     SlashDispatchResult,
     SlashToolPolicy,
 )
+from ..tools.exposure import ToolExposureContext
 from ..tools.security.permissions import PermissionMode, normalize_permission_mode
 from ..tools.agent_tools import AGENT_TOOL_NAMES, LEGACY_AGENT_TOOL_NAMES
 from ..tools.task_tools import (
@@ -110,8 +111,10 @@ PARALLEL_READ_ONLY_TOOL_NAMES = {
     "glob",
     "grep",
     "list_available_tools",
+    "tools",
     "read",
     "read_tool_result",
+    "web",
     "web_search",
 }
 
@@ -1034,15 +1037,42 @@ class ChatManager:
             return f"Slash command '/{command_name}' 是后台 workflow 命令，必须由消息 SSE 入口分派。"
         return f"Slash command '/{command_name}' 暂不可用。"
 
-    def _get_openai_tools_for_workspace(self, workspace_context: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _get_openai_tools_for_workspace(
+        self,
+        workspace_context: Dict[str, Any],
+        exposure_context: Optional[ToolExposureContext] = None,
+    ) -> List[Dict[str, Any]]:
         if not self.tool_manager:
             return []
         try:
-            return self.tool_manager.get_openai_tools(workspace=workspace_context)
+            return self.tool_manager.get_openai_tools(
+                workspace=workspace_context,
+                exposure_context=exposure_context,
+            )
         except TypeError as exc:
-            if "workspace" not in str(exc):
+            if "workspace" not in str(exc) and "exposure_context" not in str(exc):
                 raise
             return self.tool_manager.get_openai_tools()
+
+    def _tool_exposure_context(
+        self,
+        *,
+        slash_result: SlashDispatchResult,
+        multi_agent_mode: str,
+        permission_mode: str,
+    ) -> ToolExposureContext:
+        allowed_tools = slash_result.allowed_tools
+        if slash_result.tool_policy == SlashToolPolicy.READ_ONLY and allowed_tools is None:
+            allowed_tools = ("glob", "grep", "read", "web", "plan")
+        disallowed_tools = tuple(slash_result.disallowed_tools or ())
+        if multi_agent_mode == "none":
+            disallowed_tools = (*disallowed_tools, "agent")
+        return ToolExposureContext(
+            run_kind=slash_result.run_kind or "chat",
+            permission_mode=permission_mode,
+            allowed_tools=allowed_tools,
+            disallowed_tools=disallowed_tools,
+        )
 
     def _build_prompt_messages(
         self,
@@ -1598,7 +1628,12 @@ class ChatManager:
             self._multi_agent_intent_text(prompt_conversation, model_content),
             prompt_conversation.metadata if prompt_conversation is not None else (preview.metadata if preview is not None else {}),
         )
-        available_tools = self._get_openai_tools_for_workspace(workspace_context)
+        exposure_context = self._tool_exposure_context(
+            slash_result=slash_result,
+            multi_agent_mode=multi_agent_mode,
+            permission_mode=new_node.get("tool_permission_mode") or "default",
+        )
+        available_tools = self._get_openai_tools_for_workspace(workspace_context, exposure_context)
         tools = self._filter_tools_for_runtime(
             available_tools,
             multi_agent_mode=multi_agent_mode,
@@ -2081,6 +2116,15 @@ class ChatManager:
                                     tool_permission_mode=next_permission_mode,
                                 )
                                 if slash_result.tool_policy != SlashToolPolicy.DISABLED:
+                                    exposure_context = self._tool_exposure_context(
+                                        slash_result=slash_result,
+                                        multi_agent_mode=multi_agent_mode,
+                                        permission_mode=next_permission_mode,
+                                    )
+                                    available_tools = self._get_openai_tools_for_workspace(
+                                        workspace_context,
+                                        exposure_context,
+                                    )
                                     tools = self._filter_tools_for_runtime(
                                         available_tools,
                                         multi_agent_mode=multi_agent_mode,
@@ -2501,10 +2545,10 @@ class ChatManager:
         multi_agent_lines: list[str] = []
         if multi_agent_mode != "none":
             multi_agent_lines = [
-                "- Multi-agent tools are available in this conversation when tool schemas include `spawn_agent`.",
-                "- If the user explicitly asks to use a subagent, agent, forked agent, or workflow, your first relevant action must be `spawn_agent` or the appropriate agent/workflow tool call.",
+                "- Multi-agent tools are available in this conversation when tool schemas include `agent`.",
+                "- If the user explicitly asks to use a subagent, agent, forked agent, or workflow, your first relevant action must be `agent` with the appropriate action.",
                 "- Do not replace an explicit subagent request with direct shell commands, file tools, or a natural-language claim that a subagent was started.",
-                "- Use `wait_agent` when you need the delegated result before answering. Use notification delivery for background work.",
+                "- Use `agent` with action `wait` when you need the delegated result before answering. Use notification delivery for background work.",
             ]
             if multi_agent_mode == "proactive":
                 multi_agent_lines.append("- You may proactively delegate independent multi-step investigation or verification work to subagents.")
@@ -2540,22 +2584,22 @@ class ChatManager:
                 "- You are in a read-only planning phase. Inspect, search, compare approaches, and reason only with read-only tools.",
                 "- Do not edit files, run implementation commands, start implementation work, change configuration, commit, or claim changes were made.",
                 "- Do not write the full plan in assistant text. The user will review the plan card.",
-                "- Call update_plan whenever the plan artifact needs to be created or changed.",
-                "- When the plan changes, call `update_plan` with either `replace` or `apply_patch`.",
-                "- Call exit_plan_mode with no arguments when the artifact is ready for approval.",
-                "- Your turn must end with exactly one structured plan-mode action: call `ask_user_question` if a genuine user decision is required, or call `exit_plan_mode` with no arguments when ready for approval.",
-                "- Do not ask whether the plan is acceptable in text; `exit_plan_mode` is the only plan-approval path.",
+                "- Call `plan` with action `update` whenever the plan artifact needs to be created or changed.",
+                "- When the plan changes, use action `update` with either `replace` or `apply_patch`.",
+                "- Call `plan` with action `exit` when the artifact is ready for approval.",
+                "- Your turn must end with exactly one structured plan-mode action: action `ask` if a genuine user decision is required, or action `exit` when ready for approval.",
+                "- Do not ask whether the plan is acceptable in text; `plan` action `exit` is the only plan-approval path.",
                 "- If the user changes direction while you are in plan mode, update the plan-mode work instead of implementing until a plan is approved.",
             ]
         return [
             "",
             "Plan mode rules:",
-            "- Use `enter_plan_mode` only when the user explicitly asks for planning/exploration before implementation, or when the implementation approach has genuine ambiguity and user sign-off would prevent significant rework.",
+            "- Use `plan` action `enter` only when the user explicitly asks for planning/exploration before implementation, or when the implementation approach has genuine ambiguity and user sign-off would prevent significant rework.",
             "- Do not enter plan mode merely because the task is large. If the path is clear, even across multiple files, proceed with implementation using the existing codebase patterns.",
             "- When the user asks you to implement now, directly execute, or complete the change, start working instead of planning unless continuing would violate safety or permission rules.",
             "- Prefer direct implementation for small fixes, clear bug fixes after diagnosis, specific instructions, and features that follow an obvious existing pattern.",
-            "- Use `ask_user_question` in plan mode only for genuine user decisions that block planning; do not use it to ask whether the completed plan is acceptable.",
-            "- When plan mode is active, call `update_plan` to write the plan artifact. When the plan is ready, call `exit_plan_mode` with no arguments and wait for user approval before implementing.",
+            "- Use `plan` action `ask` in plan mode only for genuine user decisions that block planning; do not use it to ask whether the completed plan is acceptable.",
+            "- When plan mode is active, call `plan` action `update` to write the plan artifact. When the plan is ready, call `plan` action `exit` and wait for user approval before implementing.",
         ]
 
     def _start_task_turn_context(
@@ -2877,11 +2921,11 @@ class ChatManager:
         for message in tool_messages:
             name = str(message.get("name") or "")
             payload = self._json_tool_payload(message.get("raw_content") or message.get("content"))
-            if name == "enter_plan_mode" and payload.get("permission_mode") == "plan":
+            if name in {"plan", "enter_plan_mode"} and payload.get("permission_mode") == "plan":
                 mode = "plan"
-            elif name == "exit_plan_mode" and payload.get("status") == "awaiting_approval":
+            elif name in {"plan", "exit_plan_mode"} and payload.get("status") == "awaiting_approval":
                 mode = "plan"
-            elif name == "ask_user_question" and payload.get("status") == "awaiting_question":
+            elif name in {"plan", "ask_user_question"} and payload.get("status") == "awaiting_question":
                 mode = "plan"
         return mode
 
@@ -2922,10 +2966,10 @@ class ChatManager:
             "<system-reminder>",
             "Plan mode final response was discarded because plan mode can only end by calling a plan-mode tool.",
             "You are already in plan mode. Continue read-only planning.",
-            "Do not write the full plan in assistant text. Call update_plan to create or revise the plan artifact.",
-            "At the end of this turn, you MUST call exactly one of these tools:",
-            "- ask_user_question: only when a genuine user decision is required to continue planning.",
-            "- exit_plan_mode: with no arguments, when the plan artifact is ready for user approval.",
+            "Do not write the full plan in assistant text. Call `plan` with action `update` to create or revise the plan artifact.",
+            "At the end of this turn, you MUST call `plan` with exactly one of these actions:",
+            "- ask: only when a genuine user decision is required to continue planning.",
+            "- exit: when the plan artifact is ready for user approval.",
             "Do not ask for plan approval in plain text. Do not edit files, run implementation commands, or claim the plan is approved.",
             f"Attempt: {attempt}",
             "</system-reminder>",
@@ -2933,7 +2977,7 @@ class ChatManager:
 
     def _plan_guard_blocked_message(self) -> str:
         return "\n".join([
-            "计划模式仍在等待模型调用 `ask_user_question` 或 `exit_plan_mode`。",
+            "计划模式仍在等待模型调用 `plan` 的 `ask` 或 `exit` 动作。",
             "已丢弃普通最终回复，避免绕过计划审批流程。",
         ])
 
@@ -3007,7 +3051,7 @@ class ChatManager:
             name = str((tool.get("function") or {}).get("name") or "")
             if name in LEGACY_AGENT_TOOL_NAMES:
                 continue
-            if name in AGENT_TOOL_NAMES and mode == "none":
+            if (name in AGENT_TOOL_NAMES or name == "agent") and mode == "none":
                 continue
             filtered.append(tool)
         return filtered
@@ -3022,6 +3066,8 @@ class ChatManager:
         filtered: List[Dict[str, Any]] = []
         for tool in tools:
             name = str((tool.get("function") or {}).get("name") or "")
+            if normalized_mode == "plan" and name in {"agent", "edit", "shell"}:
+                continue
             if name in plan_only and normalized_mode != "plan":
                 continue
             if name == "enter_plan_mode" and normalized_mode == "plan":
@@ -3854,11 +3900,11 @@ class ChatManager:
 
     def _read_tool_result_hint(self, tool_result_id: str, offset: int = 0) -> str:
         args = json.dumps(
-            {"tool_result_id": tool_result_id, "offset": offset},
+            {"source": "tool_result", "tool_result_id": tool_result_id, "offset": offset},
             ensure_ascii=False,
             separators=(",", ":"),
         )
-        return f"read_tool_result({args})"
+        return f"read({args})"
 
     def _parse_command_tool_result(self, raw_result: str) -> Optional[Dict[str, Any]]:
         try:

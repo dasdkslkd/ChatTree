@@ -61,10 +61,12 @@ def test_explicit_deny_wins_over_allow():
 @pytest.mark.parametrize(
     "tool_name",
     [
+        "web",
         "web_search",
         "fetch_url",
         "read_tool_result",
         "list_available_tools",
+        "tools",
     ],
 )
 def test_builtin_read_tools_are_allowed_by_default(tool_name):
@@ -180,6 +182,7 @@ def test_mcp_route_tools_ask_by_default():
 
 
 @pytest.mark.parametrize("tool_name", [
+    "agent",
     "spawn_agent",
     "wait_agent",
     "list_agents",
@@ -348,6 +351,48 @@ def test_bypass_does_not_skip_explicit_deny():
 def test_capabilities_for_builtin_read_tool():
     assert capabilities_for_tool("web_search") == {ToolCapability.NETWORK_READ}
     assert capabilities_for_tool("list_available_tools") == {ToolCapability.READ_ONLY}
+    assert capabilities_for_tool("tools") == {ToolCapability.READ_ONLY}
+
+
+def test_tool_permission_rule_matches_shell_argument_pattern():
+    engine = PermissionEngine.default()
+    context = replace(
+        make_context(tool_name="shell", arguments={"command": "git diff -- backend"}),
+        turn_grants=[
+            PermissionRule(
+                id="allow-safe-diff",
+                behavior="allow",
+                target_type="tool",
+                pattern="shell(git diff*)",
+                source="session",
+            )
+        ],
+    )
+
+    decision = engine.evaluate(context)
+
+    assert decision.behavior == "allow"
+    assert decision.matched_rules[0].id == "allow-safe-diff"
+
+
+def test_tool_permission_rule_does_not_match_wrong_shell_argument():
+    engine = PermissionEngine.default()
+    context = replace(
+        make_context(tool_name="shell", arguments={"command": "git commit -m hi"}),
+        turn_grants=[
+            PermissionRule(
+                id="allow-safe-diff",
+                behavior="allow",
+                target_type="tool",
+                pattern="shell(git diff*)",
+                source="session",
+            )
+        ],
+    )
+
+    decision = engine.evaluate(context)
+
+    assert decision.behavior == "ask"
 
 
 def test_capabilities_for_builtin_code_tools():
