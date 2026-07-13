@@ -95,7 +95,7 @@ class SpawnAgentTool(AgentRuntimeTool):
         return (
             "Spawn a real ChatTree subagent for delegated work. "
             "When the user explicitly asks to use a subagent, agent, or forked agent, call this tool before doing equivalent work yourself. "
-            "Do not simulate a subagent with run_command, file tools, or prose. "
+            "Do not simulate a subagent with shell, file tools, or prose. "
             "Use wait_agent if your current answer depends on the delegated result."
         )
 
@@ -401,7 +401,7 @@ class StartSubagentTool(BaseTool):
     def description(self) -> str:
         return (
             "Compatibility alias for spawn_agent. Prefer spawn_agent for new model calls. "
-            "Do not simulate a subagent with run_command, file tools, or prose."
+            "Do not simulate a subagent with shell, file tools, or prose."
         )
 
     def parameters_schema(self) -> Dict[str, Any]:

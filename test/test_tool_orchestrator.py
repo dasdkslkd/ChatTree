@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import json
 import os
 import sys
@@ -63,7 +63,7 @@ def make_orchestrator(permission_engine, logical_sandbox, approval_manager=None)
     )
 
 
-def make_permission_context(tool_name="filesystem__read_file", arguments=None):
+def make_permission_context(tool_name="filesystem__read", arguments=None):
     return PermissionContext(
         conversation_id="conv-1",
         node_id="node-1",
@@ -142,7 +142,7 @@ async def _sandbox_violation_does_not_execute_manager(tmp_path):
                     id="allow-writes",
                     behavior="allow",
                     target_type="tool",
-                    pattern="write_file",
+                    pattern="write",
                 )
             ]
         ),
@@ -150,7 +150,7 @@ async def _sandbox_violation_does_not_execute_manager(tmp_path):
     )
 
     message = await orchestrator.execute_tool_call(
-        make_tool_call("write_file", {"path": str(protected_target), "content": "x"}),
+        make_tool_call("write", {"path": str(protected_target), "content": "x"}),
         conversation_id="conv-1",
         node_id="node-1",
     )
@@ -158,7 +158,7 @@ async def _sandbox_violation_does_not_execute_manager(tmp_path):
     assert tool_manager.calls == []
     error = json.loads(message["content"])["error"]
     assert error["type"] == "permission_denied"
-    assert error["tool_name"] == "write_file"
+    assert error["tool_name"] == "write"
     assert "protected path" in error["reason"]
 
 
@@ -166,7 +166,7 @@ def test_sandbox_protected_write_violation_returns_permission_denied(tmp_path):
     asyncio.run(_sandbox_violation_does_not_execute_manager(tmp_path))
 
 
-async def _sandbox_violation_for_edit_file_path_like_args(tmp_path):
+async def _sandbox_violation_for_edit_path_like_args(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     protected_target = workspace / ".git" / "config"
@@ -177,7 +177,7 @@ async def _sandbox_violation_for_edit_file_path_like_args(tmp_path):
                     id="allow-edit",
                     behavior="allow",
                     target_type="tool",
-                    pattern="mcp__filesystem__edit_file",
+                    pattern="mcp__filesystem__edit",
                 )
             ]
         ),
@@ -186,7 +186,7 @@ async def _sandbox_violation_for_edit_file_path_like_args(tmp_path):
 
     message = await orchestrator.execute_tool_call(
         make_tool_call(
-            "mcp__filesystem__edit_file",
+            "mcp__filesystem__edit",
             {"file_path": str(protected_target), "edits": []},
         ),
         conversation_id="conv-1",
@@ -196,12 +196,12 @@ async def _sandbox_violation_for_edit_file_path_like_args(tmp_path):
     assert tool_manager.calls == []
     error = json.loads(message["content"])["error"]
     assert error["type"] == "permission_denied"
-    assert error["tool_name"] == "mcp__filesystem__edit_file"
+    assert error["tool_name"] == "mcp__filesystem__edit"
     assert "protected path" in error["reason"]
 
 
-def test_sandbox_protected_write_violation_for_edit_file_path_like_args(tmp_path):
-    asyncio.run(_sandbox_violation_for_edit_file_path_like_args(tmp_path))
+def test_sandbox_protected_write_violation_for_edit_path_like_args(tmp_path):
+    asyncio.run(_sandbox_violation_for_edit_path_like_args(tmp_path))
 
 
 async def _sandbox_violation_for_destination_arg(tmp_path):
@@ -268,7 +268,7 @@ def test_invalid_json_arguments_are_preserved_for_tool_manager(tmp_path):
 
 async def _ask_approval_approve_once_executes_manager(tmp_path):
     decision = PermissionEngine.default().evaluate(
-        make_permission_context("filesystem__read_file", {"path": "notes.txt"})
+        make_permission_context("filesystem__read", {"path": "notes.txt"})
     )
     assert decision.behavior == "ask"
 
@@ -287,7 +287,7 @@ async def _ask_approval_approve_once_executes_manager(tmp_path):
             assert approval["conversation_id"] == "conv-1"
             assert approval["node_id"] == "node-1"
             assert approval["tool_call_id"] == "call-1"
-            assert approval["tool_name"] == "filesystem__read_file"
+            assert approval["tool_name"] == "filesystem__read"
             assert approval["arguments_preview"] == '{"path": "notes.txt"}'
             assert approval["risk_level"] == "medium"
             assert approval["suggested_actions"] == [
@@ -303,7 +303,7 @@ async def _ask_approval_approve_once_executes_manager(tmp_path):
             )
 
     message = await orchestrator.execute_tool_call(
-        make_tool_call("filesystem__read_file", {"path": "notes.txt"}),
+        make_tool_call("filesystem__read", {"path": "notes.txt"}),
         conversation_id="conv-1",
         node_id="node-1",
         emit_event=emit_event,
@@ -318,17 +318,17 @@ async def _ask_approval_approve_once_executes_manager(tmp_path):
         "id": events[0]["approval"]["id"],
         "status": "approved",
         "grant_scope": "once",
-        "tool_name": "filesystem__read_file",
+        "tool_name": "filesystem__read",
         "tool_call_id": "call-1",
         "conversation_id": "conv-1",
         "node_id": "node-1",
     }
     assert result_event["status"] == "approved"
     assert result_event["grant_scope"] == "once"
-    assert tool_manager.calls == [("filesystem__read_file", {"path": "notes.txt"})]
+    assert tool_manager.calls == [("filesystem__read", {"path": "notes.txt"})]
     assert json.loads(message["content"]) == {
         "ok": True,
-        "name": "filesystem__read_file",
+        "name": "filesystem__read",
     }
 
 
@@ -355,7 +355,7 @@ async def _ask_approval_can_be_decided_synchronously_in_emit_event(tmp_path):
             )
 
     message = await orchestrator.execute_tool_call(
-        make_tool_call("filesystem__read_file", {"path": "notes.txt"}),
+        make_tool_call("filesystem__read", {"path": "notes.txt"}),
         conversation_id="conv-1",
         node_id="node-1",
         emit_event=emit_event,
@@ -366,10 +366,10 @@ async def _ask_approval_can_be_decided_synchronously_in_emit_event(tmp_path):
         "tool_approval_result",
     ]
     assert events[1]["approval"]["status"] == "approved"
-    assert tool_manager.calls == [("filesystem__read_file", {"path": "notes.txt"})]
+    assert tool_manager.calls == [("filesystem__read", {"path": "notes.txt"})]
     assert json.loads(message["content"]) == {
         "ok": True,
-        "name": "filesystem__read_file",
+        "name": "filesystem__read",
     }
 
 
@@ -398,7 +398,7 @@ async def _ask_approval_deny_returns_permission_denied(tmp_path):
             )
 
     message = await orchestrator.execute_tool_call(
-        make_tool_call("filesystem__read_file", {"path": "notes.txt"}),
+        make_tool_call("filesystem__read", {"path": "notes.txt"}),
         conversation_id="conv-1",
         node_id="node-1",
         emit_event=emit_event,
@@ -412,7 +412,7 @@ async def _ask_approval_deny_returns_permission_denied(tmp_path):
     assert tool_manager.calls == []
     error = json.loads(message["content"])["error"]
     assert error["type"] == "permission_denied"
-    assert error["tool_name"] == "filesystem__read_file"
+    assert error["tool_name"] == "filesystem__read"
     assert "denied" in error["reason"]
 
 
@@ -433,7 +433,7 @@ async def _ask_approval_timeout_returns_permission_denied(tmp_path):
         events.append(event)
 
     message = await orchestrator.execute_tool_call(
-        make_tool_call("filesystem__read_file", {"path": "notes.txt"}),
+        make_tool_call("filesystem__read", {"path": "notes.txt"}),
         conversation_id="conv-1",
         node_id="node-1",
         emit_event=emit_event,
@@ -448,7 +448,7 @@ async def _ask_approval_timeout_returns_permission_denied(tmp_path):
     assert tool_manager.calls == []
     error = json.loads(message["content"])["error"]
     assert error["type"] == "permission_denied"
-    assert error["tool_name"] == "filesystem__read_file"
+    assert error["tool_name"] == "filesystem__read"
     assert "expired" in error["reason"] or "timeout" in error["reason"].lower()
 
 
@@ -477,13 +477,13 @@ async def _ask_approval_session_scope_bypasses_second_prompt(tmp_path):
             )
 
     first_message = await orchestrator.execute_tool_call(
-        make_tool_call("filesystem__read_file", {"path": "one.txt"}),
+        make_tool_call("filesystem__read", {"path": "one.txt"}),
         conversation_id="conv-1",
         node_id="node-1",
         emit_event=emit_event,
     )
     second_message = await orchestrator.execute_tool_call(
-        make_tool_call("filesystem__read_file", {"path": "two.txt"}),
+        make_tool_call("filesystem__read", {"path": "two.txt"}),
         conversation_id="conv-1",
         node_id="node-2",
         emit_event=emit_event,
@@ -500,13 +500,13 @@ async def _ask_approval_session_scope_bypasses_second_prompt(tmp_path):
         "conversation_id": "conv-1",
         "node_id": "node-2",
         "tool_call_id": "call-1",
-        "tool_name": "filesystem__read_file",
+        "tool_name": "filesystem__read",
         "grant_scope": "session",
         "reason": "Session approval grant reused.",
     }
     assert tool_manager.calls == [
-        ("filesystem__read_file", {"path": "one.txt"}),
-        ("filesystem__read_file", {"path": "two.txt"}),
+        ("filesystem__read", {"path": "one.txt"}),
+        ("filesystem__read", {"path": "two.txt"}),
     ]
     assert json.loads(first_message["content"])["ok"] is True
     assert json.loads(second_message["content"])["ok"] is True
@@ -525,7 +525,7 @@ async def _session_scope_does_not_bypass_explicit_ask_rule(tmp_path):
                     id="ask-read-file-explicitly",
                     behavior="ask",
                     target_type="mcp_tool",
-                    pattern="filesystem__read_file",
+                    pattern="filesystem__read",
                     source="user",
                 )
             ]
@@ -546,13 +546,13 @@ async def _session_scope_does_not_bypass_explicit_ask_rule(tmp_path):
             )
 
     await orchestrator.execute_tool_call(
-        make_tool_call("filesystem__read_file", {"path": "one.txt"}),
+        make_tool_call("filesystem__read", {"path": "one.txt"}),
         conversation_id="conv-1",
         node_id="node-1",
         emit_event=emit_event,
     )
     await orchestrator.execute_tool_call(
-        make_tool_call("filesystem__read_file", {"path": "two.txt"}),
+        make_tool_call("filesystem__read", {"path": "two.txt"}),
         conversation_id="conv-1",
         node_id="node-2",
         emit_event=emit_event,
@@ -565,8 +565,8 @@ async def _session_scope_does_not_bypass_explicit_ask_rule(tmp_path):
         "tool_approval_result",
     ]
     assert tool_manager.calls == [
-        ("filesystem__read_file", {"path": "one.txt"}),
-        ("filesystem__read_file", {"path": "two.txt"}),
+        ("filesystem__read", {"path": "one.txt"}),
+        ("filesystem__read", {"path": "two.txt"}),
     ]
 
 
@@ -614,7 +614,7 @@ def test_command_policy_denies_destructive_command_before_execution(tmp_path, co
     asyncio.run(_command_policy_denies_destructive_command_before_execution(tmp_path, command))
 
 
-async def _command_policy_allows_common_read_command_to_continue(tmp_path):
+async def _command_policy_allows_common_shell_to_continue(tmp_path):
     orchestrator, tool_manager = make_orchestrator(
         PermissionEngine(
             rules=[
@@ -640,67 +640,67 @@ async def _command_policy_allows_common_read_command_to_continue(tmp_path):
     assert json.loads(message["content"]) == {"ok": True, "name": "shell_exec"}
 
 
-def test_command_policy_allows_common_read_command_to_continue(tmp_path):
-    asyncio.run(_command_policy_allows_common_read_command_to_continue(tmp_path))
+def test_command_policy_allows_common_shell_to_continue(tmp_path):
+    asyncio.run(_command_policy_allows_common_shell_to_continue(tmp_path))
 
 
-async def _builtin_write_file_relative_path_reaches_manager(tmp_path):
+async def _builtin_write_relative_path_reaches_manager(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     orchestrator, tool_manager = make_orchestrator(
         PermissionEngine(rules=[
-            PermissionRule("allow-write", "allow", "tool", "write_file")
+            PermissionRule("allow-write", "allow", "tool", "write")
         ]),
         LogicalSandbox(workspace_roots=[workspace], protected_paths=[".git"]),
     )
 
     message = await orchestrator.execute_tool_call(
-        make_tool_call("write_file", {"path": "sample.txt", "content": "x"}),
+        make_tool_call("write", {"path": "sample.txt", "content": "x"}),
         conversation_id="conv-1",
         node_id="node-1",
     )
 
     assert tool_manager.calls == [
-        ("write_file", {"path": "sample.txt", "content": "x"})
+        ("write", {"path": "sample.txt", "content": "x"})
     ]
-    assert json.loads(message["content"]) == {"ok": True, "name": "write_file"}
+    assert json.loads(message["content"]) == {"ok": True, "name": "write"}
 
 
-def test_builtin_write_file_relative_path_reaches_manager(tmp_path):
-    asyncio.run(_builtin_write_file_relative_path_reaches_manager(tmp_path))
+def test_builtin_write_relative_path_reaches_manager(tmp_path):
+    asyncio.run(_builtin_write_relative_path_reaches_manager(tmp_path))
 
 
-async def _builtin_edit_file_relative_path_reaches_manager(tmp_path):
+async def _builtin_edit_relative_path_reaches_manager(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     orchestrator, tool_manager = make_orchestrator(
         PermissionEngine(rules=[
-            PermissionRule("allow-edit", "allow", "tool", "edit_file")
+            PermissionRule("allow-edit", "allow", "tool", "edit")
         ]),
         LogicalSandbox(workspace_roots=[workspace], protected_paths=[".git"]),
     )
 
     message = await orchestrator.execute_tool_call(
-        make_tool_call("edit_file", {"path": "sample.txt", "old_string": "a", "new_string": "b"}),
+        make_tool_call("edit", {"path": "sample.txt", "old_string": "a", "new_string": "b"}),
         conversation_id="conv-1",
         node_id="node-1",
     )
 
     assert tool_manager.calls == [
-        ("edit_file", {"path": "sample.txt", "old_string": "a", "new_string": "b"})
+        ("edit", {"path": "sample.txt", "old_string": "a", "new_string": "b"})
     ]
-    assert json.loads(message["content"]) == {"ok": True, "name": "edit_file"}
+    assert json.loads(message["content"]) == {"ok": True, "name": "edit"}
 
 
-def test_builtin_edit_file_relative_path_reaches_manager(tmp_path):
-    asyncio.run(_builtin_edit_file_relative_path_reaches_manager(tmp_path))
+def test_builtin_edit_relative_path_reaches_manager(tmp_path):
+    asyncio.run(_builtin_edit_relative_path_reaches_manager(tmp_path))
 
 
-async def _compact_run_command_arguments_are_normalized_before_policy_and_execution(tmp_path):
+async def _compact_shell_arguments_are_normalized_before_policy_and_execution(tmp_path):
     approval_manager = ApprovalManager(timeout_seconds=1)
     orchestrator, tool_manager = make_orchestrator(
         PermissionEngine(rules=[
-            PermissionRule("allow-command", "allow", "tool", "run_command")
+            PermissionRule("allow-command", "allow", "tool", "shell")
         ]),
         LogicalSandbox(workspace_roots=[tmp_path], protected_paths=[".git"]),
         approval_manager=approval_manager,
@@ -714,30 +714,30 @@ async def _compact_run_command_arguments_are_normalized_before_policy_and_execut
             approval_manager.decide(event["approval"]["id"], "approve", "once")
 
     await orchestrator.execute_tool_call(
-        make_raw_tool_call("run_command", "python custom_script.py"),
+        make_raw_tool_call("shell", "python custom_script.py"),
         conversation_id="conv-1",
         node_id="node-1",
         emit_event=emit_event,
     )
 
-    assert tool_manager.calls == [("run_command", {"command": "python custom_script.py"})]
+    assert tool_manager.calls == [("shell", {"command": "python custom_script.py"})]
 
 
-def test_compact_run_command_arguments_are_normalized_before_policy_and_execution(tmp_path):
-    asyncio.run(_compact_run_command_arguments_are_normalized_before_policy_and_execution(tmp_path))
+def test_compact_shell_arguments_are_normalized_before_policy_and_execution(tmp_path):
+    asyncio.run(_compact_shell_arguments_are_normalized_before_policy_and_execution(tmp_path))
 
 
-async def _builtin_write_file_outside_workspace_denied(tmp_path):
+async def _builtin_write_outside_workspace_denied(tmp_path):
     outside = tmp_path.parent / "outside.txt"
     orchestrator, tool_manager = make_orchestrator(
         PermissionEngine(rules=[
-            PermissionRule("allow-write", "allow", "tool", "write_file")
+            PermissionRule("allow-write", "allow", "tool", "write")
         ]),
         LogicalSandbox(workspace_roots=[tmp_path], protected_paths=[".git"]),
     )
 
     message = await orchestrator.execute_tool_call(
-        make_tool_call("write_file", {"path": str(outside), "content": "x"}),
+        make_tool_call("write", {"path": str(outside), "content": "x"}),
         conversation_id="conv-1",
         node_id="node-1",
     )
@@ -746,46 +746,46 @@ async def _builtin_write_file_outside_workspace_denied(tmp_path):
     assert json.loads(message["content"])["error"]["type"] == "permission_denied"
 
 
-def test_builtin_write_file_outside_workspace_denied(tmp_path):
-    asyncio.run(_builtin_write_file_outside_workspace_denied(tmp_path))
+def test_builtin_write_outside_workspace_denied(tmp_path):
+    asyncio.run(_builtin_write_outside_workspace_denied(tmp_path))
 
 
-async def _builtin_apply_patch_relative_cwd_reaches_manager(tmp_path):
+async def _builtin_patch_relative_cwd_reaches_manager(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     orchestrator, tool_manager = make_orchestrator(
         PermissionEngine(rules=[
-            PermissionRule("allow-patch", "allow", "tool", "apply_patch")
+            PermissionRule("allow-patch", "allow", "tool", "patch")
         ]),
         LogicalSandbox(workspace_roots=[workspace], protected_paths=[".git"]),
     )
 
     message = await orchestrator.execute_tool_call(
-        make_tool_call("apply_patch", {"cwd": ".", "patch": ""}),
+        make_tool_call("patch", {"cwd": ".", "patch": ""}),
         conversation_id="conv-1",
         node_id="node-1",
     )
 
-    assert tool_manager.calls == [("apply_patch", {"cwd": ".", "patch": ""})]
-    assert json.loads(message["content"]) == {"ok": True, "name": "apply_patch"}
+    assert tool_manager.calls == [("patch", {"cwd": ".", "patch": ""})]
+    assert json.loads(message["content"]) == {"ok": True, "name": "patch"}
 
 
-def test_builtin_apply_patch_relative_cwd_reaches_manager(tmp_path):
-    asyncio.run(_builtin_apply_patch_relative_cwd_reaches_manager(tmp_path))
+def test_builtin_patch_relative_cwd_reaches_manager(tmp_path):
+    asyncio.run(_builtin_patch_relative_cwd_reaches_manager(tmp_path))
 
 
-async def _builtin_apply_patch_cwd_outside_workspace_denied(tmp_path):
+async def _builtin_patch_cwd_outside_workspace_denied(tmp_path):
     outside = tmp_path.parent / "outside"
     outside.mkdir()
     orchestrator, tool_manager = make_orchestrator(
         PermissionEngine(rules=[
-            PermissionRule("allow-patch", "allow", "tool", "apply_patch")
+            PermissionRule("allow-patch", "allow", "tool", "patch")
         ]),
         LogicalSandbox(workspace_roots=[tmp_path], protected_paths=[".git"]),
     )
 
     message = await orchestrator.execute_tool_call(
-        make_tool_call("apply_patch", {"cwd": str(outside), "patch": ""}),
+        make_tool_call("patch", {"cwd": str(outside), "patch": ""}),
         conversation_id="conv-1",
         node_id="node-1",
     )
@@ -794,20 +794,20 @@ async def _builtin_apply_patch_cwd_outside_workspace_denied(tmp_path):
     assert json.loads(message["content"])["error"]["type"] == "permission_denied"
 
 
-def test_builtin_apply_patch_cwd_outside_workspace_denied(tmp_path):
-    asyncio.run(_builtin_apply_patch_cwd_outside_workspace_denied(tmp_path))
+def test_builtin_patch_cwd_outside_workspace_denied(tmp_path):
+    asyncio.run(_builtin_patch_cwd_outside_workspace_denied(tmp_path))
 
 
-async def _run_command_destructive_command_denied(tmp_path):
+async def _shell_destructive_command_denied(tmp_path):
     orchestrator, tool_manager = make_orchestrator(
         PermissionEngine(rules=[
-            PermissionRule("allow-command", "allow", "tool", "run_command")
+            PermissionRule("allow-command", "allow", "tool", "shell")
         ]),
         LogicalSandbox(workspace_roots=[tmp_path], protected_paths=[".git"]),
     )
 
     message = await orchestrator.execute_tool_call(
-        make_tool_call("run_command", {"command": "rm -rf /"}),
+        make_tool_call("shell", {"command": "rm -rf /"}),
         conversation_id="conv-1",
         node_id="node-1",
     )
@@ -818,11 +818,11 @@ async def _run_command_destructive_command_denied(tmp_path):
     assert "destructive" in error["reason"]
 
 
-def test_run_command_destructive_command_denied(tmp_path):
-    asyncio.run(_run_command_destructive_command_denied(tmp_path))
+def test_shell_destructive_command_denied(tmp_path):
+    asyncio.run(_shell_destructive_command_denied(tmp_path))
 
 
-async def _run_command_auto_approve_bypasses_unknown_command_policy_prompt(tmp_path):
+async def _shell_auto_approve_bypasses_unknown_command_policy_prompt(tmp_path):
     approval_manager = ApprovalManager(timeout_seconds=1)
     orchestrator, tool_manager = make_orchestrator(
         PermissionEngine.default(),
@@ -835,7 +835,7 @@ async def _run_command_auto_approve_bypasses_unknown_command_policy_prompt(tmp_p
         events.append(event)
 
     message = await orchestrator.execute_tool_call(
-        make_tool_call("run_command", {"command": "python custom_script.py"}),
+        make_tool_call("shell", {"command": "python custom_script.py"}),
         conversation_id="conv-1",
         node_id="node-1",
         emit_event=emit_event,
@@ -843,22 +843,22 @@ async def _run_command_auto_approve_bypasses_unknown_command_policy_prompt(tmp_p
     )
 
     assert events == []
-    assert tool_manager.calls == [("run_command", {"command": "python custom_script.py"})]
+    assert tool_manager.calls == [("shell", {"command": "python custom_script.py"})]
     assert json.loads(message["content"])["ok"] is True
 
 
-def test_run_command_auto_approve_bypasses_unknown_command_policy_prompt(tmp_path):
-    asyncio.run(_run_command_auto_approve_bypasses_unknown_command_policy_prompt(tmp_path))
+def test_shell_auto_approve_bypasses_unknown_command_policy_prompt(tmp_path):
+    asyncio.run(_shell_auto_approve_bypasses_unknown_command_policy_prompt(tmp_path))
 
 
-async def _explicit_background_terminal_task_allows_sync_run_command_fallback(tmp_path):
+async def _explicit_background_terminal_task_allows_sync_shell_fallback(tmp_path):
     orchestrator, tool_manager = make_orchestrator(
         PermissionEngine.default(),
         LogicalSandbox(workspace_roots=[tmp_path], protected_paths=[".git"]),
     )
 
     message = await orchestrator.execute_tool_call(
-        make_tool_call("run_command", {"command": "python tmp/random_integral.py"}),
+        make_tool_call("shell", {"command": "python tmp/random_integral.py"}),
         conversation_id="conv-1",
         node_id="node-1",
         permission_mode="auto_approve",
@@ -869,12 +869,12 @@ async def _explicit_background_terminal_task_allows_sync_run_command_fallback(tm
         },
     )
 
-    assert tool_manager.calls == [("run_command", {"command": "python tmp/random_integral.py"})]
-    assert json.loads(message["content"]) == {"ok": True, "name": "run_command"}
+    assert tool_manager.calls == [("shell", {"command": "python tmp/random_integral.py"})]
+    assert json.loads(message["content"]) == {"ok": True, "name": "shell"}
 
 
-def test_explicit_background_terminal_task_allows_sync_run_command_fallback(tmp_path):
-    asyncio.run(_explicit_background_terminal_task_allows_sync_run_command_fallback(tmp_path))
+def test_explicit_background_terminal_task_allows_sync_shell_fallback(tmp_path):
+    asyncio.run(_explicit_background_terminal_task_allows_sync_shell_fallback(tmp_path))
 
 
 async def _runtime_context_reaches_manager_tool(tmp_path):
@@ -915,11 +915,11 @@ def test_runtime_context_reaches_manager_tool(tmp_path):
     asyncio.run(_runtime_context_reaches_manager_tool(tmp_path))
 
 
-async def _run_command_unknown_command_requests_approval(tmp_path):
+async def _shell_unknown_command_requests_approval(tmp_path):
     approval_manager = ApprovalManager(timeout_seconds=1)
     orchestrator, tool_manager = make_orchestrator(
         PermissionEngine(rules=[
-            PermissionRule("allow-command", "allow", "tool", "run_command")
+            PermissionRule("allow-command", "allow", "tool", "shell")
         ]),
         LogicalSandbox(workspace_roots=[tmp_path], protected_paths=[".git"]),
         approval_manager=approval_manager,
@@ -932,7 +932,7 @@ async def _run_command_unknown_command_requests_approval(tmp_path):
             approval_manager.decide(event["approval"]["id"], "approve", "once")
 
     await orchestrator.execute_tool_call(
-        make_tool_call("run_command", {"command": "python custom_script.py"}),
+        make_tool_call("shell", {"command": "python custom_script.py"}),
         conversation_id="conv-1",
         node_id="node-1",
         emit_event=emit_event,
@@ -942,18 +942,18 @@ async def _run_command_unknown_command_requests_approval(tmp_path):
         "tool_approval_request",
         "tool_approval_result",
     ]
-    assert tool_manager.calls == [("run_command", {"command": "python custom_script.py"})]
+    assert tool_manager.calls == [("shell", {"command": "python custom_script.py"})]
 
 
-def test_run_command_unknown_command_requests_approval(tmp_path):
-    asyncio.run(_run_command_unknown_command_requests_approval(tmp_path))
+def test_shell_unknown_command_requests_approval(tmp_path):
+    asyncio.run(_shell_unknown_command_requests_approval(tmp_path))
 
 
-async def _run_command_session_scope_bypasses_second_command_policy_prompt(tmp_path):
+async def _shell_session_scope_bypasses_second_command_policy_prompt(tmp_path):
     approval_manager = ApprovalManager(timeout_seconds=1)
     orchestrator, tool_manager = make_orchestrator(
         PermissionEngine(rules=[
-            PermissionRule("allow-command", "allow", "tool", "run_command")
+            PermissionRule("allow-command", "allow", "tool", "shell")
         ]),
         LogicalSandbox(workspace_roots=[tmp_path], protected_paths=[".git"]),
         approval_manager=approval_manager,
@@ -966,13 +966,13 @@ async def _run_command_session_scope_bypasses_second_command_policy_prompt(tmp_p
             approval_manager.decide(event["approval"]["id"], "approve", "session")
 
     first_message = await orchestrator.execute_tool_call(
-        make_tool_call("run_command", {"command": "python custom_script.py"}),
+        make_tool_call("shell", {"command": "python custom_script.py"}),
         conversation_id="conv-1",
         node_id="node-1",
         emit_event=emit_event,
     )
     second_message = await orchestrator.execute_tool_call(
-        make_tool_call("run_command", {"command": "python another_script.py"}),
+        make_tool_call("shell", {"command": "python another_script.py"}),
         conversation_id="conv-1",
         node_id="node-2",
         emit_event=emit_event,
@@ -989,17 +989,17 @@ async def _run_command_session_scope_bypasses_second_command_policy_prompt(tmp_p
         "conversation_id": "conv-1",
         "node_id": "node-2",
         "tool_call_id": "call-1",
-        "tool_name": "run_command",
+        "tool_name": "shell",
         "grant_scope": "session",
         "reason": "Session approval grant reused.",
     }
     assert tool_manager.calls == [
-        ("run_command", {"command": "python custom_script.py"}),
-        ("run_command", {"command": "python another_script.py"}),
+        ("shell", {"command": "python custom_script.py"}),
+        ("shell", {"command": "python another_script.py"}),
     ]
     assert json.loads(first_message["content"])["ok"] is True
     assert json.loads(second_message["content"])["ok"] is True
 
 
-def test_run_command_session_scope_bypasses_second_command_policy_prompt(tmp_path):
-    asyncio.run(_run_command_session_scope_bypasses_second_command_policy_prompt(tmp_path))
+def test_shell_session_scope_bypasses_second_command_policy_prompt(tmp_path):
+    asyncio.run(_shell_session_scope_bypasses_second_command_policy_prompt(tmp_path))

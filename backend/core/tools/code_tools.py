@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import locale
 import os
@@ -94,7 +95,7 @@ def _detect_output_encoding(value: bytes) -> Optional[str]:
     return str(encoding) if encoding else None
 
 
-def _run_command_env() -> Dict[str, str]:
+def _shell_env() -> Dict[str, str]:
     env = os.environ.copy()
     env.setdefault("PYTHONIOENCODING", "utf-8")
     env.setdefault("PYTHONUTF8", "1")
@@ -133,7 +134,7 @@ class CodeToolConfig:
     workspace_roots: List[Path]
     protected_paths: List[Path]
     command_timeout_seconds: int = 120
-    run_command_initial_wait_seconds: float = 120.0
+    shell_initial_wait_seconds: float = 120.0
     max_read_chars: int = 20000
     max_output_chars: int = 60000
     allow_parent_dir_creation: bool = False
@@ -158,7 +159,7 @@ class CodeToolConfig:
             workspace_roots=[Path(root).expanduser().resolve() for root in roots],
             protected_paths=[Path(path) for path in protected],
             command_timeout_seconds=int(cfg.get("command_timeout_seconds", 120)),
-            run_command_initial_wait_seconds=float(cfg.get("run_command_initial_wait_seconds", 120.0)),
+            shell_initial_wait_seconds=float(cfg.get("shell_initial_wait_seconds", 120.0)),
             max_read_chars=int(cfg.get("max_read_chars", 20000)),
             max_output_chars=int(cfg.get("max_output_chars", 60000)),
             allow_parent_dir_creation=bool(cfg.get("allow_parent_dir_creation", False)),
@@ -261,13 +262,13 @@ class _CodeTool(BaseTool):
 class ListFilesTool(_CodeTool):
     @property
     def name(self) -> str:
-        return "list_files"
+        return "glob"
 
     @property
     def description(self) -> str:
         return (
-            "List workspace paths with rg-style controls. Use this instead of run_command for ls/dir/Get-ChildItem/rg --files. "
-            "Paths are relative to the workspace root; max_depth=0 means unlimited recursion."
+            "Find workspace files by glob and path regex. Use this instead of shell for ls/dir/find/Get-ChildItem/rg --files. "
+            "Paths are returned relative to the workspace root with / separators."
         )
 
     def parameters_schema(self) -> Dict[str, Any]:
@@ -276,14 +277,16 @@ class ListFilesTool(_CodeTool):
             "additionalProperties": False,
             "properties": {
                 "path": {"type": "string", "default": "."},
-                "glob": {"type": "string", "default": "*"},
-                "max_depth": {"type": "integer", "minimum": 0, "default": 1},
-                "max_results": {"type": "integer", "minimum": 1, "maximum": 2000, "default": 200},
-                "no_ignore": {"type": "boolean", "default": False},
-                "hidden": {"type": "boolean", "default": False},
-                "files_only": {"type": "boolean", "default": False},
-                "exclude_globs": {"type": "array", "items": {"type": "string"}, "default": []},
-                "format": {"type": "string", "enum": ["list", "tree"], "default": "list"},
+                "patterns": {"type": "array", "items": {"type": "string"}, "default": ["**/*"]},
+                "pattern": {"type": "string"},
+                "path_regex": {"type": "string"},
+                "files_only": {"type": "boolean", "default": True},
+                "include_hidden": {"type": "boolean", "default": False},
+                "respect_gitignore": {"type": "boolean", "default": True},
+                "exclude": {"type": "array", "items": {"type": "string"}, "default": []},
+                "sort": {"type": "string", "enum": ["path", "mtime"], "default": "path"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 2000, "default": 200},
+                "offset": {"type": "integer", "minimum": 0, "default": 0},
             },
         }
 
@@ -296,46 +299,61 @@ class ListFilesTool(_CodeTool):
         except CodeToolError as exc:
             return _error(exc.error_type, str(exc), path=str(kwargs.get("path") or "."))
 
-        glob = str(kwargs.get("glob") or "*")
-        max_depth = max(0, int(kwargs.get("max_depth") if kwargs.get("max_depth") is not None else 1))
-        no_ignore = bool(kwargs.get("no_ignore", False))
-        hidden = bool(kwargs.get("hidden", False))
-        files_only = bool(kwargs.get("files_only", False))
-        exclude_globs = _string_list(kwargs.get("exclude_globs"))
-        output_format = str(kwargs.get("format") or "list")
-        max_results = max(1, min(int(kwargs.get("max_results") or 200), 2000))
+        patterns = _string_list(kwargs.get("patterns"))
+        single_pattern = str(kwargs.get("pattern") or "").strip()
+        if single_pattern:
+            patterns = [single_pattern]
+        if not patterns:
+            patterns = ["**/*"]
+        path_regex = str(kwargs.get("path_regex") or "").strip()
+        try:
+            compiled_path_regex = re.compile(path_regex) if path_regex else None
+        except re.error as exc:
+            return _error("invalid_query", f"invalid path_regex: {exc}")
+        files_only = bool(kwargs.get("files_only", True))
+        include_hidden = bool(kwargs.get("include_hidden", False))
+        respect_gitignore = bool(kwargs.get("respect_gitignore", True))
+        exclude_globs = _string_list(kwargs.get("exclude"))
+        sort = str(kwargs.get("sort") or "path")
+        limit = max(1, min(int(kwargs.get("limit") or 200), 2000))
+        offset = max(0, int(kwargs.get("offset") or 0))
 
-        items, truncated, scanned_entries = _list_files_python(
+        files, truncated, scanned_entries, total = _glob_files_python(
             workspace=self.workspace,
             root=root,
-            glob=glob,
-            max_depth=max_depth,
-            no_ignore=no_ignore,
-            hidden=hidden,
+            patterns=patterns,
+            path_regex=compiled_path_regex,
+            respect_gitignore=respect_gitignore,
+            include_hidden=include_hidden,
             files_only=files_only,
             exclude_globs=exclude_globs,
-            max_results=max_results,
+            sort=sort,
+            limit=limit,
+            offset=offset,
         )
         payload: Dict[str, Any] = {
             "root": self.workspace.relative(root),
-            "items": items,
+            "files": files,
+            "count": len(files),
+            "total": total,
             "truncated": truncated,
+            "next_offset": offset + len(files) if truncated else None,
             "engine": "python",
             "scanned_entries": scanned_entries,
         }
-        return _json(_with_list_format(payload, output_format))
+        return _json(payload)
 
 
 class ReadFileTool(_CodeTool):
     @property
     def name(self) -> str:
-        return "read_file"
+        return "read"
 
     @property
     def description(self) -> str:
         return (
-            "Read one or more UTF-8 text files from the workspace. Use this instead of run_command for cat/type/Get-Content. "
-            "Use start_line and line_count for line-based slices."
+            "Read UTF-8 text files from the workspace. Use this instead of shell for cat/head/tail/type/Get-Content/sed. "
+            "Supports one or more line ranges and returns numbered lines by default."
         )
 
     def parameters_schema(self) -> Dict[str, Any]:
@@ -344,10 +362,24 @@ class ReadFileTool(_CodeTool):
             "additionalProperties": False,
             "properties": {
                 "path": {"type": "string"},
-                "paths": {"type": "array", "items": {"type": "string"}},
+                "targets": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "path": {"type": "string"},
+                            "start_line": {"type": "integer", "minimum": 1, "default": 1},
+                            "line_count": {"type": "integer", "minimum": 1},
+                            "max_chars": {"type": "integer", "minimum": 1},
+                        },
+                        "required": ["path"],
+                    },
+                },
                 "start_line": {"type": "integer", "minimum": 1, "default": 1},
                 "line_count": {"type": "integer", "minimum": 1},
                 "max_chars_per_file": {"type": "integer", "minimum": 1},
+                "format": {"type": "string", "enum": ["numbered", "raw", "json"], "default": "numbered"},
             },
         }
 
@@ -355,28 +387,32 @@ class ReadFileTool(_CodeTool):
         return await asyncio.to_thread(self._execute_sync, dict(kwargs))
 
     def _execute_sync(self, kwargs: Dict[str, Any]) -> str:
-        paths = _read_paths(kwargs)
-        if not paths:
-            return _error("invalid_path", "path or paths is required")
-        start_line = max(1, int(kwargs.get("start_line") or 1))
-        line_count = kwargs.get("line_count")
-        max_chars = max(
-            1,
-            min(int(kwargs.get("max_chars_per_file") or self.config.max_read_chars), self.config.max_read_chars),
-        )
+        targets = _read_targets(kwargs)
+        if not targets:
+            return _error("invalid_path", "path or targets is required")
+        output_format = str(kwargs.get("format") or "numbered")
         files: List[Dict[str, Any]] = []
-        for raw_path in paths:
+        for target_spec in targets:
+            raw_path = target_spec["path"]
             try:
                 target = self.workspace.check_read(raw_path)
             except CodeToolError as exc:
                 files.append({"path": str(raw_path), "error": {"type": exc.error_type, "message": str(exc)}})
                 continue
-            files.append(_read_file_payload(
+            start_line = max(1, int(target_spec.get("start_line") or kwargs.get("start_line") or 1))
+            line_count = target_spec.get("line_count", kwargs.get("line_count"))
+            requested_max_chars = target_spec.get("max_chars", kwargs.get("max_chars_per_file"))
+            max_chars = max(
+                1,
+                min(int(requested_max_chars or self.config.max_read_chars), self.config.max_read_chars),
+            )
+            files.append(_read_payload(
                 workspace=self.workspace,
                 target=target,
                 start_line=start_line,
                 line_count=int(line_count) if line_count is not None else None,
                 max_chars=max_chars,
+                output_format=output_format,
             ))
         if len(files) == 1:
             return _json(files[0])
@@ -386,12 +422,12 @@ class ReadFileTool(_CodeTool):
 class SearchFilesTool(_CodeTool):
     @property
     def name(self) -> str:
-        return "search_files"
+        return "grep"
 
     @property
     def description(self) -> str:
         return (
-            "Search UTF-8 workspace files with rg-style options. Use this instead of run_command for rg/grep/Select-String text search."
+            "Search UTF-8 workspace file contents with ripgrep-style regex. Use this instead of shell for grep/rg/Select-String."
         )
 
     def parameters_schema(self) -> Dict[str, Any]:
@@ -402,16 +438,19 @@ class SearchFilesTool(_CodeTool):
                 "pattern": {"type": "string"},
                 "path": {"type": "string", "default": "."},
                 "glob": {"type": "string", "default": "*"},
-                "max_results": {"type": "integer", "minimum": 1, "maximum": 500, "default": 50},
-                "fixed_strings": {"type": "boolean", "default": False},
+                "type": {"type": "string"},
+                "output": {"type": "string", "enum": ["content", "files", "count"], "default": "files"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 250},
+                "offset": {"type": "integer", "minimum": 0, "default": 0},
+                "regex": {"type": "boolean", "default": True},
                 "ignore_case": {"type": "boolean", "default": False},
-                "no_ignore": {"type": "boolean", "default": False},
-                "hidden": {"type": "boolean", "default": False},
+                "respect_gitignore": {"type": "boolean", "default": True},
+                "include_hidden": {"type": "boolean", "default": False},
+                "multiline": {"type": "boolean", "default": False},
                 "context": {"type": "integer", "minimum": 0, "default": 0},
                 "before_context": {"type": "integer", "minimum": 0, "default": 0},
                 "after_context": {"type": "integer", "minimum": 0, "default": 0},
-                "files_with_matches": {"type": "boolean", "default": False},
-                "exclude_globs": {"type": "array", "items": {"type": "string"}, "default": []},
+                "exclude": {"type": "array", "items": {"type": "string"}, "default": []},
             },
             "required": ["pattern"],
         }
@@ -428,28 +467,52 @@ class SearchFilesTool(_CodeTool):
         except CodeToolError as exc:
             return _error(exc.error_type, str(exc), path=str(kwargs.get("path") or "."))
 
-        glob = str(kwargs.get("glob") or "*")
-        max_results = max(1, min(int(kwargs.get("max_results") or 50), 500))
-        fixed_strings = bool(kwargs.get("fixed_strings", False))
+        glob = _glob_for_type(str(kwargs.get("glob") or "*"), str(kwargs.get("type") or ""))
+        limit = max(1, min(int(kwargs.get("limit") or kwargs.get("head_limit") or 250), 500))
+        offset = max(0, int(kwargs.get("offset") or 0))
+        fixed_strings = not bool(kwargs.get("regex", True))
         ignore_case = bool(kwargs.get("ignore_case", False))
-        no_ignore = bool(kwargs.get("no_ignore", False))
-        hidden = bool(kwargs.get("hidden", False))
+        no_ignore = not bool(kwargs.get("respect_gitignore", True))
+        hidden = bool(kwargs.get("include_hidden", False))
+        multiline = bool(kwargs.get("multiline", False))
+        output = str(kwargs.get("output") or kwargs.get("output_mode") or "files")
+        files_with_matches = output == "files"
+        count_mode = output == "count"
         context = max(0, int(kwargs.get("context") or 0))
         before_context = max(context, int(kwargs.get("before_context") or 0))
         after_context = max(context, int(kwargs.get("after_context") or 0))
-        files_with_matches = bool(kwargs.get("files_with_matches", False))
-        exclude_globs = _string_list(kwargs.get("exclude_globs"))
+        exclude_globs = _string_list(kwargs.get("exclude"))
+
+        if count_mode or multiline:
+            payload = _grep_files_python(
+                workspace=self.workspace,
+                root=root,
+                pattern=pattern,
+                glob=glob,
+                limit=limit,
+                offset=offset,
+                fixed_strings=fixed_strings,
+                ignore_case=ignore_case,
+                multiline=multiline,
+                no_ignore=no_ignore,
+                hidden=hidden,
+                before_context=before_context,
+                after_context=after_context,
+                output=output,
+                exclude_globs=exclude_globs,
+            )
+            return _json(payload)
 
         fallback_reason: Optional[str] = None
         rg_path = _resolve_ripgrep_executable(self.config)
         if rg_path is not None:
-            rg_payload, fallback_reason = _search_files_with_rg(
+            rg_payload, fallback_reason = _grep_with_rg(
                 rg_path=rg_path,
                 workspace=self.workspace,
                 root=root,
                 pattern=pattern,
                 glob=glob,
-                max_results=max_results,
+                max_results=limit + offset,
                 fixed_strings=fixed_strings,
                 ignore_case=ignore_case,
                 no_ignore=no_ignore,
@@ -461,7 +524,7 @@ class SearchFilesTool(_CodeTool):
                 timeout_seconds=self.config.command_timeout_seconds,
             )
             if rg_payload is not None:
-                return _json(rg_payload)
+                return _json(_shape_grep_payload(rg_payload, output=output, limit=limit, offset=offset))
             if fallback_reason and fallback_reason.startswith("ripgrep_invalid_regex:"):
                 return _error("invalid_query", fallback_reason.split(":", 1)[1])
         else:
@@ -473,12 +536,12 @@ class SearchFilesTool(_CodeTool):
             except re.error as exc:
                 return _error("invalid_query", f"invalid regex: {exc}")
 
-        payload = _search_files_python(
+        payload = _grep_python(
             workspace=self.workspace,
             root=root,
             pattern=pattern,
             glob=glob,
-            max_results=max_results,
+            max_results=limit + offset,
             fixed_strings=fixed_strings,
             ignore_case=ignore_case,
             no_ignore=no_ignore,
@@ -490,19 +553,19 @@ class SearchFilesTool(_CodeTool):
         )
         if fallback_reason:
             payload["fallback_reason"] = fallback_reason
-        return _json(payload)
+        return _json(_shape_grep_payload(payload, output=output, limit=limit, offset=offset))
 
 
 class EditFileTool(_CodeTool):
     @property
     def name(self) -> str:
-        return "edit_file"
+        return "edit"
 
     @property
     def description(self) -> str:
         return (
-            "Edit a UTF-8 file by replacing an exact old_string with new_string. "
-            "By default old_string must occur exactly once."
+            "Edit a UTF-8 file by exact replacements. Read the file first and pass expected_version from read. "
+            "Never include read line-number prefixes in old text."
         )
 
     def parameters_schema(self) -> Dict[str, Any]:
@@ -511,11 +574,23 @@ class EditFileTool(_CodeTool):
             "additionalProperties": False,
             "properties": {
                 "path": {"type": "string"},
-                "old_string": {"type": "string"},
-                "new_string": {"type": "string"},
-                "replace_all": {"type": "boolean", "default": False},
+                "expected_version": {"type": "string"},
+                "replacements": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "old": {"type": "string"},
+                            "new": {"type": "string"},
+                            "replace_all": {"type": "boolean", "default": False},
+                            "expected_count": {"type": "integer", "minimum": 1},
+                        },
+                        "required": ["old", "new"],
+                    },
+                },
             },
-            "required": ["path", "old_string", "new_string"],
+            "required": ["path", "expected_version", "replacements"],
         }
 
     async def execute(self, **kwargs) -> str:
@@ -528,44 +603,64 @@ class EditFileTool(_CodeTool):
             return _error(exc.error_type, str(exc), path=str(kwargs.get("path") or ""))
         if not target.exists() or not target.is_file():
             return _error("not_found", "file not found", path=self.workspace.relative(target))
-        old_string = str(kwargs.get("old_string") or "")
-        if not old_string:
-            return _error("invalid_edit", "old_string is required", path=self.workspace.relative(target))
-        new_string = str(kwargs.get("new_string") or "")
+        expected_version = str(kwargs.get("expected_version") or "")
+        current_version = _file_version(target)
+        if not expected_version:
+            return _error("stale_file", "expected_version is required; read the file before editing", path=self.workspace.relative(target))
+        if expected_version != current_version:
+            return _error("stale_file", "file changed since read; read again before editing", path=self.workspace.relative(target), current_version=current_version)
         try:
             text = target.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             return _error("not_utf8", "file is not valid UTF-8 text", path=self.workspace.relative(target))
-
-        occurrences = text.count(old_string)
-        if occurrences == 0:
-            return _error("edit_not_found", "old_string was not found", path=self.workspace.relative(target))
-        replace_all = bool(kwargs.get("replace_all", False))
-        if occurrences > 1 and not replace_all:
-            return _error(
-                "edit_not_unique",
-                "old_string occurs more than once; set replace_all=true or provide a more specific old_string",
-                path=self.workspace.relative(target),
-                occurrences=occurrences,
-            )
-
-        updated = text.replace(old_string, new_string, -1 if replace_all else 1)
+        replacements = kwargs.get("replacements")
+        if not isinstance(replacements, list) or not replacements:
+            return _error("invalid_edit", "replacements must be a non-empty array", path=self.workspace.relative(target))
+        updated = text
+        applied = 0
+        for index, replacement in enumerate(replacements):
+            if not isinstance(replacement, dict):
+                return _error("invalid_edit", f"replacement {index} must be an object", path=self.workspace.relative(target))
+            old_string = str(replacement.get("old") or "")
+            new_string = str(replacement.get("new") or "")
+            if not old_string:
+                return _error("invalid_edit", "old text is required", path=self.workspace.relative(target), index=index)
+            if _looks_like_numbered_read_line(old_string):
+                return _error("invalid_edit", "old text includes read line-number prefixes; remove prefixes before editing", path=self.workspace.relative(target), index=index)
+            occurrences = updated.count(old_string)
+            expected_count = replacement.get("expected_count")
+            if expected_count is not None and occurrences != int(expected_count):
+                return _error("edit_count_mismatch", "old text occurrence count did not match expected_count", path=self.workspace.relative(target), index=index, expected_count=int(expected_count), occurrences=occurrences)
+            if occurrences == 0:
+                return _error("edit_not_found", "old text was not found", path=self.workspace.relative(target), index=index)
+            replace_all = bool(replacement.get("replace_all", False))
+            if occurrences > 1 and not replace_all:
+                return _error(
+                    "edit_not_unique",
+                    "old text occurs more than once; set replace_all=true or provide more context",
+                    path=self.workspace.relative(target),
+                    index=index,
+                    occurrences=occurrences,
+                )
+            updated = updated.replace(old_string, new_string, -1 if replace_all else 1)
+            applied += occurrences if replace_all else 1
         target.write_text(updated, encoding="utf-8")
         return _json({
             "path": self.workspace.relative(target),
-            "replacements": occurrences if replace_all else 1,
+            "replacements": applied,
             "bytes_written": len(updated.encode("utf-8")),
+            "version": _file_version(target),
         })
 
 
 class WriteFileTool(_CodeTool):
     @property
     def name(self) -> str:
-        return "write_file"
+        return "write"
 
     @property
     def description(self) -> str:
-        return "Create or overwrite a UTF-8 text file in the code workspace."
+        return "Create or intentionally overwrite a UTF-8 text file in the workspace. Existing files require expected_version."
 
     def parameters_schema(self) -> Dict[str, Any]:
         return {
@@ -574,7 +669,9 @@ class WriteFileTool(_CodeTool):
             "properties": {
                 "path": {"type": "string"},
                 "content": {"type": "string"},
-                "create_parent_dirs": {"type": "boolean", "default": False},
+                "mode": {"type": "string", "enum": ["create", "overwrite"], "default": "create"},
+                "expected_version": {"type": "string"},
+                "create_parents": {"type": "boolean", "default": False},
             },
             "required": ["path", "content"],
         }
@@ -587,7 +684,7 @@ class WriteFileTool(_CodeTool):
             target = self.workspace.check_write(kwargs.get("path"))
         except CodeToolError as exc:
             return _error(exc.error_type, str(exc), path=str(kwargs.get("path") or ""))
-        create_parents = bool(kwargs.get("create_parent_dirs", False))
+        create_parents = bool(kwargs.get("create_parents", False))
         if create_parents and not self.config.allow_parent_dir_creation:
             return _error("invalid_path", "parent directory creation is disabled", path=self.workspace.relative(target))
         if not target.parent.exists():
@@ -595,15 +692,26 @@ class WriteFileTool(_CodeTool):
                 target.parent.mkdir(parents=True, exist_ok=True)
             else:
                 return _error("not_found", "parent directory does not exist", path=self.workspace.relative(target))
+        mode = str(kwargs.get("mode") or "create")
+        exists = target.exists()
+        if mode == "create" and exists:
+            return _error("file_exists", "file already exists; use edit or overwrite with expected_version", path=self.workspace.relative(target), current_version=_file_version(target) if target.is_file() else None)
+        if mode == "overwrite" and exists:
+            expected_version = str(kwargs.get("expected_version") or "")
+            current_version = _file_version(target)
+            if not expected_version:
+                return _error("stale_file", "expected_version is required to overwrite an existing file", path=self.workspace.relative(target), current_version=current_version)
+            if expected_version != current_version:
+                return _error("stale_file", "file changed since read; read again before overwriting", path=self.workspace.relative(target), current_version=current_version)
         content = str(kwargs.get("content") or "")
         target.write_text(content, encoding="utf-8")
-        return _json({"path": self.workspace.relative(target), "bytes_written": len(content.encode("utf-8"))})
+        return _json({"path": self.workspace.relative(target), "bytes_written": len(content.encode("utf-8")), "version": _file_version(target), "mode": "overwrite" if exists else "create"})
 
 
 class RunCommandTool(_CodeTool):
     @property
     def name(self) -> str:
-        return "run_command"
+        return "shell"
 
     @property
     def description(self) -> str:
@@ -611,7 +719,7 @@ class RunCommandTool(_CodeTool):
         return (
             "Run a synchronous-compatible development command in the code workspace. "
             "Use this for tests, builds, scripts, git, package-manager commands, and environment probes. "
-            "Do not use it for ordinary file listing, file reading, or text search; use list_files, read_file, and search_files instead. "
+            "Do not use it for ordinary file listing, file reading, or text search; use glob, read, and grep instead. "
             "When ChatTree runtime context is available, the command starts foreground, returns stdout/stderr/exit_code if it finishes within the initial wait window, "
             "and auto-backgrounds with a command_run_id if it keeps running.\n\n"
             f"{render_command_tool_guidance(profile)}"
@@ -664,7 +772,7 @@ class RunCommandTool(_CodeTool):
                 args=python_c_args or profile.command_argv(command),
                 shell=False,
                 cwd=str(cwd),
-                env=_run_command_env(),
+                env=_shell_env(),
                 capture_output=True,
                 timeout=timeout,
             )
@@ -705,7 +813,7 @@ class RunCommandTool(_CodeTool):
     ) -> str:
         command_executor = runtime_context.get("command_executor")
         if command_executor is None or not hasattr(command_executor, "start"):
-            return _error("missing_command_executor", "managed run_command requires a command executor")
+            return _error("missing_command_executor", "managed shell requires a command executor")
         run = await command_executor.start(
             conversation_id=str(runtime_context.get("conversation_id") or ""),
             command=command,
@@ -727,7 +835,7 @@ class RunCommandTool(_CodeTool):
                 "tool_name": self.name,
                 "tool_call_id": runtime_context.get("tool_call_id"),
                 "workspace_relative_cwd": self.workspace.relative(cwd),
-                "run_command_managed": True,
+                "shell_managed": True,
                 "agent_name": runtime_context.get("agent_name"),
                 "source_run_id": runtime_context.get("run_id"),
                 "source_run_kind": runtime_context.get("run_kind"),
@@ -737,15 +845,15 @@ class RunCommandTool(_CodeTool):
         )
         run_id = str(run["run_id"])
 
-        initial_wait = max(0.0, float(self.config.run_command_initial_wait_seconds))
+        initial_wait = max(0.0, float(self.config.shell_initial_wait_seconds))
         try:
             await command_executor.wait(run_id, timeout=initial_wait)
         except asyncio.TimeoutError:
             if hasattr(command_executor, "run_manager"):
                 await command_executor.run_manager.update_cancellation_parent(run_id, None)
                 await command_executor.run_manager.update_metadata(run_id, {
-                    "run_command_auto_backgrounded": True,
-                    "run_command_initial_wait_seconds": initial_wait,
+                    "shell_auto_backgrounded": True,
+                    "shell_initial_wait_seconds": initial_wait,
                 })
             snapshot = command_executor.snapshot(run_id) or {}
             return _json(self._managed_background_payload(command, cwd, run_id, snapshot, auto_backgrounded=True))
@@ -818,7 +926,7 @@ class RunCommandTool(_CodeTool):
             "stderr_tail": snapshot.get("stderr_tail") or "",
             "message": (
                 f"Command is {action} as a managed side run. "
-                "Use read_command to inspect it, wait_command only when this answer must join the result, or stop_command to cancel it."
+                "Watch the task notification for progress, and only report final command status after the managed run finishes."
             ),
         }
         self._attach_public_task_outcome(payload, snapshot)
@@ -836,13 +944,13 @@ class RunCommandTool(_CodeTool):
 class ApplyPatchTool(_CodeTool):
     @property
     def name(self) -> str:
-        return "apply_patch"
+        return "patch"
 
     @property
     def description(self) -> str:
         return (
             "Apply a unified diff patch to existing UTF-8 files in the code workspace. "
-            "Prefer edit_file for small exact replacements; use apply_patch for multi-line or multi-file changes."
+            "Prefer edit for small exact replacements; use patch for multi-line or multi-file changes."
         )
 
     def parameters_schema(self) -> Dict[str, Any]:
@@ -915,21 +1023,29 @@ def _read_text_window(target: Path, *, offset: int, limit: int) -> tuple[str, bo
     return content, False
 
 
-def _read_paths(kwargs: Dict[str, Any]) -> List[str]:
-    paths = kwargs.get("paths")
-    if isinstance(paths, list):
-        return [str(path) for path in paths if str(path)]
+def _read_targets(kwargs: Dict[str, Any]) -> List[Dict[str, Any]]:
+    targets = kwargs.get("targets")
+    if isinstance(targets, list):
+        normalized: List[Dict[str, Any]] = []
+        for target in targets:
+            if not isinstance(target, dict):
+                continue
+            path = str(target.get("path") or "")
+            if path:
+                normalized.append(dict(target, path=path))
+        return normalized
     path = kwargs.get("path")
-    return [str(path)] if path else []
+    return [{"path": str(path)}] if path else []
 
 
-def _read_file_payload(
+def _read_payload(
     *,
     workspace: CodeWorkspace,
     target: Path,
     start_line: int,
     line_count: Optional[int],
     max_chars: int,
+    output_format: str,
 ) -> Dict[str, Any]:
     if not target.exists() or not target.is_file():
         return {"path": workspace.relative(target), "error": {"type": "not_found", "message": "file not found"}}
@@ -941,30 +1057,65 @@ def _read_file_payload(
             truncated = False
             for raw_line in handle:
                 current_line += 1
-                if current_line < start_line:
+                in_range = current_line >= start_line and (line_count is None or len(selected) < line_count)
+                if not in_range:
+                    if current_line < start_line:
+                        continue
+                    if line_count is not None and len(selected) >= line_count:
+                        truncated = True
                     continue
-                if line_count is not None and len(selected) >= line_count:
-                    truncated = True
-                    break
                 remaining = max_chars - chars
                 if remaining <= 0:
                     truncated = True
-                    break
+                    continue
                 if len(raw_line) > remaining:
                     selected.append(raw_line[:remaining])
                     chars += remaining
                     truncated = True
-                    break
+                    continue
                 selected.append(raw_line)
                 chars += len(raw_line)
     except UnicodeDecodeError:
         return {"path": workspace.relative(target), "error": {"type": "not_utf8", "message": "file is not valid UTF-8 text"}}
-    return {
+    selected_text = "".join(selected)
+    payload: Dict[str, Any] = {
         "path": workspace.relative(target),
         "start_line": start_line,
-        "content": "".join(selected),
+        "line_count": len(selected),
+        "total_lines": current_line,
+        "version": _file_version(target),
         "truncated": truncated,
     }
+    if output_format == "json":
+        payload["lines"] = [
+            {"line": start_line + index, "text": _strip_line_ending(line)}
+            for index, line in enumerate(selected)
+        ]
+    elif output_format == "raw":
+        payload["content"] = selected_text
+    else:
+        payload["content"] = _number_lines(selected, start_line)
+    return payload
+
+
+def _file_version(target: Path) -> str:
+    digest = hashlib.sha256()
+    with target.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _number_lines(lines: List[str], start_line: int) -> str:
+    return "\n".join(f"{start_line + index}\t{_strip_line_ending(line)}" for index, line in enumerate(lines))
+
+
+def _strip_line_ending(line: str) -> str:
+    return line[:-2] if line.endswith("\r\n") else line[:-1] if line.endswith("\n") else line
+
+
+def _looks_like_numbered_read_line(text: str) -> bool:
+    return any(re.match(r"^\s*\d+(?:\t|\u2192)", line) for line in text.splitlines())
 
 
 def _apply_simple_unified_patch(workspace: CodeWorkspace, base: Path, patch: str) -> List[str]:
@@ -1191,7 +1342,7 @@ def _ripgrep_platform_dir() -> str:
     return f"{system or 'unknown'}-{arch}"
 
 
-def _search_files_with_rg(
+def _grep_with_rg(
     *,
     rg_path: Path,
     workspace: CodeWorkspace,
@@ -1248,7 +1399,7 @@ def _search_files_with_rg(
         proc = subprocess.run(
             argv,
             cwd=str(cwd),
-            env=_run_command_env(),
+            env=_shell_env(),
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -1322,7 +1473,7 @@ def _search_files_with_rg(
     return (payload, None)
 
 
-def _search_files_python(
+def _grep_python(
     *,
     workspace: CodeWorkspace,
     root: Path,
@@ -1345,7 +1496,7 @@ def _search_files_python(
     matcher = _compile_python_matcher(pattern, fixed_strings=fixed_strings, ignore_case=ignore_case)
     ignore_matcher = _GitIgnoreMatcher.for_root(root, workspace)
 
-    for file_path in _iter_search_files(root, glob):
+    for file_path in _iter_grep_files(root, glob):
         resolved = file_path.resolve()
         if (
             not resolved.is_file()
@@ -1394,74 +1545,225 @@ def _search_files_python(
     return _search_payload(pattern, matches, searched_files, skipped_files, False, "python", matched_files if files_with_matches else None)
 
 
-def _list_files_python(
+def _glob_files_python(
     *,
     workspace: CodeWorkspace,
     root: Path,
-    glob: str,
-    max_depth: int,
-    no_ignore: bool,
-    hidden: bool,
+    patterns: List[str],
+    path_regex: Optional[re.Pattern[str]],
+    respect_gitignore: bool,
+    include_hidden: bool,
     files_only: bool,
     exclude_globs: List[str],
-    max_results: int,
-) -> tuple[List[Dict[str, Any]], bool, int]:
+    sort: str,
+    limit: int,
+    offset: int,
+) -> tuple[List[str], bool, int, int]:
     ignore_matcher = _GitIgnoreMatcher.for_root(root, workspace)
-    if root.is_file():
-        if files_only and not root.is_file():
-            return [], False, 1
-        if not _matches_glob(root, glob):
-            return [], False, 1
-        item = _list_item(workspace, root)
-        return ([item] if item else []), False, 1
-
-    items_by_path: Dict[str, Dict[str, Any]] = {}
-    queue: List[tuple[Path, int]] = [(root, 0)]
+    matches: List[Path] = []
+    seen: set[Path] = set()
     scanned_entries = 0
-    scan_limit = max(1000, max_results * 50)
-    truncated = False
+    scan_limit = max(1000, (limit + offset) * 50)
 
-    while queue:
-        directory, depth = queue.pop(0)
-        try:
-            children = sorted(directory.iterdir(), key=lambda path: (not path.is_dir(), path.name.lower()))
-        except OSError:
+    candidates: Iterable[Path]
+    if root.is_file():
+        candidates = [root]
+    else:
+        candidates = root.rglob("*")
+
+    for candidate in candidates:
+        scanned_entries += 1
+        if scanned_entries > scan_limit:
+            break
+        resolved = candidate.resolve()
+        if resolved in seen:
             continue
-        for child in children:
-            scanned_entries += 1
-            if scanned_entries > scan_limit:
-                truncated = True
-                return _sort_list_items(items_by_path.values())[:max_results], truncated, scanned_entries
-            resolved = child.resolve()
-            child_depth = depth + 1
-            if max_depth > 0 and child_depth > max_depth:
-                continue
-            if (
-                not workspace.is_visible(resolved)
-                or _should_skip_python_path(resolved, root, hidden=hidden, no_ignore=no_ignore, ignore_matcher=ignore_matcher)
-                or _matches_excluded_glob(resolved, root, exclude_globs)
-            ):
-                continue
-            if resolved.is_dir():
-                if not files_only and (glob == "*" or _matches_glob(resolved, glob)):
-                    item = _list_item(workspace, resolved)
-                    if item:
-                        items_by_path[item["path"]] = item
-                if max_depth == 0 or child_depth < max_depth:
-                    queue.append((resolved, child_depth))
-            elif _matches_glob(resolved, glob):
-                if not files_only:
-                    _add_parent_dirs(workspace, root, resolved, items_by_path)
-                item = _list_item(workspace, resolved)
-                if item:
-                    items_by_path[item["path"]] = item
-            if len(items_by_path) >= max_results:
-                truncated = True
-                return _sort_list_items(items_by_path.values())[:max_results], truncated, scanned_entries
-    return _sort_list_items(items_by_path.values()), truncated, scanned_entries
+        seen.add(resolved)
+        if not workspace.is_visible(resolved):
+            continue
+        if files_only and not resolved.is_file():
+            continue
+        if not files_only and not (resolved.is_file() or resolved.is_dir()):
+            continue
+        if _should_skip_python_path(
+            resolved,
+            root if root.is_dir() else root.parent,
+            hidden=include_hidden,
+            no_ignore=respect_gitignore is False,
+            ignore_matcher=ignore_matcher,
+        ):
+            continue
+        if _matches_excluded_glob(resolved, root if root.is_dir() else root.parent, exclude_globs):
+            continue
+        if not any(_matches_glob(resolved, pattern) for pattern in patterns):
+            continue
+        relative = workspace.relative(resolved)
+        if path_regex and not path_regex.search(relative):
+            continue
+        matches.append(resolved)
+
+    if sort == "mtime":
+        matches.sort(key=lambda path: (-path.stat().st_mtime, workspace.relative(path)))
+    else:
+        matches.sort(key=lambda path: workspace.relative(path))
+
+    total = len(matches)
+    page = matches[offset:offset + limit]
+    truncated = scanned_entries > scan_limit or offset + limit < total
+    return [workspace.relative(path) for path in page], truncated, scanned_entries, total
 
 
-def _iter_search_files(root: Path, glob: str) -> Iterable[Path]:
+def _shape_grep_payload(payload: Dict[str, Any], *, output: str, limit: int, offset: int) -> Dict[str, Any]:
+    shaped: Dict[str, Any] = {
+        "pattern": payload.get("pattern"),
+        "output": output,
+        "engine": payload.get("engine"),
+        "skipped_non_utf8": payload.get("skipped_non_utf8", []),
+    }
+    if payload.get("fallback_reason"):
+        shaped["fallback_reason"] = payload.get("fallback_reason")
+    if output == "files":
+        files = list(payload.get("files") or [])
+        page = files[offset:offset + limit]
+        shaped.update({
+            "files": page,
+            "count": len(page),
+            "truncated": bool(payload.get("truncated")) or offset + limit < len(files),
+            "next_offset": offset + len(page) if (bool(payload.get("truncated")) or offset + limit < len(files)) else None,
+        })
+        return shaped
+    matches = [
+        {
+            "path": match.get("path"),
+            "line": match.get("line"),
+            "text": match.get("preview", ""),
+            "type": match.get("type", "match"),
+        }
+        for match in list(payload.get("matches") or [])[offset:offset + limit]
+    ]
+    shaped.update({
+        "matches": matches,
+        "count": len(matches),
+        "truncated": bool(payload.get("truncated")) or offset + limit < len(payload.get("matches") or []),
+        "next_offset": offset + len(matches) if (bool(payload.get("truncated")) or offset + limit < len(payload.get("matches") or [])) else None,
+    })
+    return shaped
+
+
+def _grep_files_python(
+    *,
+    workspace: CodeWorkspace,
+    root: Path,
+    pattern: str,
+    glob: str,
+    limit: int,
+    offset: int,
+    fixed_strings: bool,
+    ignore_case: bool,
+    multiline: bool,
+    no_ignore: bool,
+    hidden: bool,
+    before_context: int,
+    after_context: int,
+    output: str,
+    exclude_globs: List[str],
+) -> Dict[str, Any]:
+    if not fixed_strings:
+        try:
+            flags = re.IGNORECASE | (re.DOTALL if multiline else 0)
+            compiled = re.compile(pattern, flags)
+        except re.error as exc:
+            return {"error": {"type": "invalid_query", "message": f"invalid regex: {exc}"}}
+    else:
+        compiled = None
+    ignore_matcher = _GitIgnoreMatcher.for_root(root, workspace)
+    matches: List[Dict[str, Any]] = []
+    files: List[str] = []
+    counts: List[Dict[str, Any]] = []
+    skipped_files: List[str] = []
+    searched_files = 0
+
+    for file_path in _iter_grep_files(root, glob):
+        resolved = file_path.resolve()
+        if (
+            not resolved.is_file()
+            or not workspace.is_visible(resolved)
+            or _should_skip_python_path(resolved, root, hidden=hidden, no_ignore=no_ignore, ignore_matcher=ignore_matcher)
+            or _matches_excluded_glob(resolved, root, exclude_globs)
+        ):
+            continue
+        relative = workspace.relative(resolved)
+        searched_files += 1
+        try:
+            text = resolved.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            skipped_files.append(relative)
+            continue
+        file_match_count = 0
+        if multiline:
+            found = list(compiled.finditer(text)) if compiled else []
+            file_match_count = len(found)
+            if found and output == "files":
+                files.append(relative)
+            elif output == "content":
+                lines = text.splitlines()
+                for match in found:
+                    line_no = text.count("\n", 0, match.start()) + 1
+                    line_text = lines[line_no - 1] if 0 <= line_no - 1 < len(lines) else ""
+                    matches.append({"path": relative, "line": line_no, "text": line_text, "type": "match"})
+        else:
+            lines = text.splitlines()
+            for index, line in enumerate(lines):
+                ok = (compiled.search(line) is not None) if compiled else (
+                    pattern.lower() in line.lower() if ignore_case else pattern in line
+                )
+                if not ok:
+                    continue
+                file_match_count += 1
+                if output == "content":
+                    start = max(0, index - before_context)
+                    stop = min(len(lines), index + after_context + 1)
+                    for context_index in range(start, stop):
+                        matches.append({
+                            "path": relative,
+                            "line": context_index + 1,
+                            "text": lines[context_index],
+                            "type": "match" if context_index == index else "context",
+                        })
+            if file_match_count and output == "files":
+                files.append(relative)
+        if output == "count" and file_match_count:
+            counts.append({"path": relative, "count": file_match_count})
+
+    if output == "files":
+        page = files[offset:offset + limit]
+        return {"pattern": pattern, "output": output, "files": page, "count": len(page), "searched_files": searched_files, "skipped_non_utf8": skipped_files, "truncated": offset + limit < len(files), "next_offset": offset + len(page) if offset + limit < len(files) else None, "engine": "python"}
+    if output == "count":
+        page = counts[offset:offset + limit]
+        return {"pattern": pattern, "output": output, "counts": page, "count": len(page), "searched_files": searched_files, "skipped_non_utf8": skipped_files, "truncated": offset + limit < len(counts), "next_offset": offset + len(page) if offset + limit < len(counts) else None, "engine": "python"}
+    page = matches[offset:offset + limit]
+    return {"pattern": pattern, "output": output, "matches": page, "count": len(page), "searched_files": searched_files, "skipped_non_utf8": skipped_files, "truncated": offset + limit < len(matches), "next_offset": offset + len(page) if offset + limit < len(matches) else None, "engine": "python"}
+
+
+def _glob_for_type(glob: str, type_name: str) -> str:
+    if glob and glob != "*":
+        return glob
+    mapping = {
+        "py": "*.py",
+        "python": "*.py",
+        "js": "*.js",
+        "ts": "*.ts",
+        "tsx": "*.tsx",
+        "jsx": "*.jsx",
+        "rust": "*.rs",
+        "rs": "*.rs",
+        "go": "*.go",
+        "java": "*.java",
+    }
+    return mapping.get(type_name.lower(), glob or "*")
+
+
+def _iter_grep_files(root: Path, glob: str) -> Iterable[Path]:
     if root.is_file():
         if _matches_glob(root, glob):
             yield root
@@ -1520,68 +1822,6 @@ def _matches_excluded_glob(path: Path, root: Path, exclude_globs: List[str]) -> 
     except ValueError:
         relative = path.name
     return any(fnmatch(relative, pattern) or fnmatch(path.name, pattern) for pattern in exclude_globs)
-
-
-def _relative_depth(path: Path, root: Path) -> int:
-    try:
-        return len(path.resolve().relative_to(root.resolve()).parts)
-    except ValueError:
-        return 0
-
-
-def _with_list_format(payload: Dict[str, Any], output_format: str) -> Dict[str, Any]:
-    if output_format != "tree":
-        return payload
-    items = payload.get("items")
-    if not isinstance(items, list):
-        return payload
-    payload = dict(payload)
-    payload["tree"] = _format_tree(items)
-    return payload
-
-
-def _format_tree(items: List[Dict[str, Any]]) -> str:
-    lines: List[str] = []
-    for item in sorted(items, key=lambda entry: str(entry.get("path") or "")):
-        path = str(item.get("path") or "")
-        if not path or path == ".":
-            continue
-        depth = path.count("/")
-        name = path.rsplit("/", 1)[-1]
-        suffix = "/" if item.get("type") == "dir" else ""
-        lines.append(f"{'  ' * depth}{name}{suffix}")
-    return "\n".join(lines)
-
-
-def _sort_list_items(items: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    return sorted(items, key=lambda item: str(item.get("path") or ""))
-
-
-def _list_item(workspace: CodeWorkspace, path: Path) -> Optional[Dict[str, Any]]:
-    if not workspace.is_visible(path):
-        return None
-    return {
-        "path": workspace.relative(path),
-        "type": "dir" if path.is_dir() else "file",
-        "size": path.stat().st_size if path.is_file() else None,
-    }
-
-
-def _add_parent_dirs(
-    workspace: CodeWorkspace,
-    root: Path,
-    file_path: Path,
-    items_by_path: Dict[str, Dict[str, Any]],
-) -> None:
-    parent = file_path.parent
-    parents: List[Path] = []
-    while parent != root and _is_relative_to(parent, root):
-        parents.append(parent)
-        parent = parent.parent
-    for directory in reversed(parents):
-        item = _list_item(workspace, directory)
-        if item:
-            items_by_path.setdefault(item["path"], item)
 
 
 def _rg_json_text(value: Any) -> Optional[str]:

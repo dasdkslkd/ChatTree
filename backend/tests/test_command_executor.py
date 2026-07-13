@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import json
 import sys
 import tempfile
@@ -15,12 +15,6 @@ from backend.core.notifications import TaskNotificationService
 from backend.core.runs import RunKind, RunManager, RunStatus
 from backend.core.tasks import ActiveTaskService, TaskContextDisabledError
 from backend.core.tools.code_tools import CodeToolConfig, RunCommandTool
-from backend.core.tools.command_tools import (
-    ReadCommandTool,
-    StartBackgroundCommandTool,
-    StopCommandTool,
-    WaitCommandTool,
-)
 from backend.core.tools.tool_manager import ToolManager
 
 
@@ -70,15 +64,12 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
                 "command_timeout_seconds": 10,
             })
             run_tool = RunCommandTool(config)
-            start_tool = StartBackgroundCommandTool(config)
 
             self.assertIn("auto-backgrounds", run_tool.description)
             self.assertIn("active shell", run_tool.description)
             self.assertNotIn("start_terminal", run_tool.description)
-            self.assertIn("true background command", start_tool.description)
-            self.assertIn("active shell", start_tool.description)
-            self.assertIn("Do not report completion", start_tool.description)
 
+    @unittest.skip("legacy command control tools removed; shell auto-background is the only model-visible command API")
     async def test_background_start_result_is_explicitly_launch_only(self):
         class StartOnlyExecutor:
             async def start(self, **kwargs):
@@ -110,7 +101,7 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(payload["result_observed"], False)
         self.assertIn("does not contain the command result", payload["message"])
 
-    async def test_run_command_short_managed_command_returns_sync_output_and_suppresses_notification(self):
+    async def test_shell_short_managed_command_returns_sync_output_and_suppresses_notification(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_manager = RunManager()
             notifications = install_notification_service(run_manager)
@@ -124,7 +115,7 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             tool = RunCommandTool(CodeToolConfig.from_dict({
                 "workspace_roots": [tmpdir],
                 "command_timeout_seconds": 10,
-                "run_command_initial_wait_seconds": 5,
+                "shell_initial_wait_seconds": 5,
             }))
 
             raw = await tool.execute(
@@ -150,7 +141,7 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("terminal_run_id", payload)
             self.assertEqual(notifications.items[payload["command_run_id"]]["status"], "observed")
 
-    async def test_workflow_worker_run_command_does_not_create_task_notification(self):
+    async def test_workflow_worker_shell_does_not_create_task_notification(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_manager = RunManager()
             notifications = install_notification_service(run_manager)
@@ -165,7 +156,7 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             tool = RunCommandTool(CodeToolConfig.from_dict({
                 "workspace_roots": [tmpdir],
                 "command_timeout_seconds": 10,
-                "run_command_initial_wait_seconds": 5,
+                "shell_initial_wait_seconds": 5,
             }))
 
             raw = await tool.execute(
@@ -188,14 +179,14 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs((run.get("metadata") or {}).get("suppress_task_notification"), True)
             self.assertEqual(notifications.items, {})
 
-    async def test_run_command_short_managed_command_truncates_output(self):
+    async def test_shell_short_managed_command_truncates_output(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_manager = RunManager()
             command_executor = CommandExecutor(run_manager)
             tool = RunCommandTool(CodeToolConfig.from_dict({
                 "workspace_roots": [tmpdir],
                 "command_timeout_seconds": 10,
-                "run_command_initial_wait_seconds": 5,
+                "shell_initial_wait_seconds": 5,
                 "max_output_chars": 20,
             }))
 
@@ -215,14 +206,14 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(payload["stdout"]), 20)
             self.assertEqual(len(payload["stderr"]), 20)
 
-    async def test_run_command_long_managed_command_auto_backgrounds(self):
+    async def test_shell_long_managed_command_auto_backgrounds(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_manager = RunManager()
             command_executor = CommandExecutor(run_manager)
             tool = RunCommandTool(CodeToolConfig.from_dict({
                 "workspace_roots": [tmpdir],
                 "command_timeout_seconds": 10,
-                "run_command_initial_wait_seconds": 0.1,
+                "shell_initial_wait_seconds": 0.1,
             }))
 
             raw = await tool.execute(
@@ -244,7 +235,7 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("command_run_id", payload)
             self.assertNotIn("terminal_run_id", payload)
             run = run_manager.get_run(payload["command_run_id"])
-            self.assertTrue((run.get("metadata") or {}).get("run_command_auto_backgrounded"))
+            self.assertTrue((run.get("metadata") or {}).get("shell_auto_backgrounded"))
 
             try:
                 await command_executor.stop(payload["command_run_id"])
@@ -266,7 +257,7 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
         })
 
         visible = set(manager.list_tools())
-        self.assertTrue({"run_command", "start_background_command", "read_command", "wait_command", "stop_command"} <= visible)
+        self.assertTrue({"shell", "shell", "shell", "shell", "shell"} <= visible)
         for legacy_name in {"start_command", "start_terminal", "read_terminal", "wait_terminal", "stop_terminal"}:
             self.assertNotIn(legacy_name, visible)
             self.assertIsNone(manager.get_tool(legacy_name))
@@ -290,6 +281,7 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(web_search)
         self.assertEqual(web_search.searxng_url, "http://searxng.example.test")
 
+    @unittest.skip("legacy command control tools removed; command observation now uses managed side-run notifications")
     async def test_command_control_tools_wait_read_and_stop(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_manager = RunManager()
@@ -421,6 +413,7 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(notifications.items, {})
 
+    @unittest.skip("legacy command control tools removed; workflow workers use shell")
     async def test_workflow_worker_command_tool_marks_notification_suppressed(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_manager = RunManager()
@@ -572,7 +565,7 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("task_generation_id", json.dumps(snapshot))
             self.assertNotIn("task_step_position", json.dumps(snapshot))
 
-    async def test_run_command_foreground_result_exposes_public_task_outcome(self):
+    async def test_shell_foreground_result_exposes_public_task_outcome(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_manager = RunManager()
             task_service = ActiveTaskService(run_manager=run_manager)
@@ -592,7 +585,7 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             tool = RunCommandTool(CodeToolConfig.from_dict({
                 "workspace_roots": [tmpdir],
                 "command_timeout_seconds": 10,
-                "run_command_initial_wait_seconds": 5,
+                "shell_initial_wait_seconds": 5,
             }))
 
             payload = json.loads(await tool.execute(
@@ -645,7 +638,8 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(run_manager.list_runs("conv_1"), [])
 
-    async def test_wait_command_marks_final_result_observed_and_suppresses_notification(self):
+    @unittest.skip("legacy command control tools removed; shell marks observed results directly")
+    async def test_shell_marks_final_result_observed_and_suppresses_notification(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_manager = RunManager()
             notifications = install_notification_service(run_manager)
@@ -682,7 +676,8 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(updated["metadata"]["result_observed_via"], "wait_command")
             self.assertEqual(notifications.items[run["run_id"]]["status"], "observed")
 
-    async def test_wait_command_marks_stopped_result_observed(self):
+    @unittest.skip("legacy command control tools removed; shell marks observed results directly")
+    async def test_shell_marks_stopped_result_observed(self):
         class StoppedExecutor:
             def __init__(self):
                 self.observed = None
@@ -709,7 +704,7 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], RunStatus.STOPPED.value)
         self.assertEqual(executor.observed, ("run_stopped", "run_parent", "wait_command"))
 
-    async def test_run_command_foreground_marks_stopped_result_observed(self):
+    async def test_shell_foreground_marks_stopped_result_observed(self):
         class StoppedForegroundExecutor:
             def __init__(self):
                 self.observed = None
@@ -738,7 +733,7 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             tool = RunCommandTool(CodeToolConfig.from_dict({
                 "workspace_roots": [tmpdir],
                 "command_timeout_seconds": 10,
-                "run_command_initial_wait_seconds": 5,
+                "shell_initial_wait_seconds": 5,
             }))
 
             result = json.loads(await tool.execute(
@@ -755,7 +750,7 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], RunStatus.STOPPED.value)
         self.assertEqual(
             executor.observed,
-            ("run_stopped_foreground", "run_parent", "run_command"),
+            ("run_stopped_foreground", "run_parent", "shell"),
         )
 
     async def test_command_start_exception_records_actionable_error_context(self):
@@ -812,6 +807,7 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(child["run_id"], stopped)
             self.assertEqual(run_manager.get_run(child["run_id"])["status"], RunStatus.CANCELLED.value)
 
+    @unittest.skip("legacy command control tools removed; shell auto-background is the only model-visible command API")
     async def test_model_started_background_command_is_not_stopped_with_creator_stream(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_manager = RunManager()

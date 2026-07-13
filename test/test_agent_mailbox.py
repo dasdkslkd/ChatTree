@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 
 from backend.core.agents.mailbox import AgentMailbox
 from backend.core.agents.runtime import AgentRuntime
@@ -239,7 +239,7 @@ async def _wait_agent_timeout_reports_running_progress():
     await run_manager.append_event(run.run_id, {
         "status": "content",
         "event_type": "tool_call",
-        "tool_calls": [{"function": {"name": "list_files"}}],
+        "tool_calls": [{"function": {"name": "glob"}}],
     })
 
     result = await runtime.wait_agent(
@@ -259,7 +259,7 @@ async def _wait_agent_timeout_reports_running_progress():
     assert result["runs"][0]["wait_status"] == "timeout"
     assert result["runs"][0]["timed_out"] is True
     assert result["runs"][0]["last_event"]["event_type"] == "tool_call"
-    assert result["runs"][0]["last_event"]["tool_name"] == "list_files"
+    assert result["runs"][0]["last_event"]["tool_name"] == "glob"
 
 
 def test_wait_agent_timeout_reports_running_progress():
@@ -285,7 +285,7 @@ async def _resume_agent_reports_running_progress():
     await run_manager.append_event(run.run_id, {
         "status": "content",
         "event_type": "tool_result",
-        "tool_call": {"name": "list_files"},
+        "tool_call": {"name": "glob"},
     })
 
     result = await runtime.resume_agent(run_id=run.run_id)
@@ -293,7 +293,7 @@ async def _resume_agent_reports_running_progress():
     assert result["status"] == "running"
     assert result["event_count"] == 2
     assert result["last_event"]["event_type"] == "tool_result"
-    assert result["last_event"]["tool_name"] == "list_files"
+    assert result["last_event"]["tool_name"] == "glob"
 
 
 def test_resume_agent_reports_running_progress():

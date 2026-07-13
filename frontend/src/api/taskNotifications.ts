@@ -16,10 +16,29 @@ export interface TaskNotificationRecord {
   updated_at: number;
 }
 
+type TaskNotificationCacheEntry = {
+  etag: string;
+  data: TaskNotificationRecord[];
+};
+
+const taskNotificationCache = new Map<string, TaskNotificationCacheEntry>();
+
 export const taskNotificationsApi = {
   list: async (conversationId: string): Promise<TaskNotificationRecord[]> => {
-    const response = await apiClient.get(`/conversations/${encodeURIComponent(conversationId)}/task-notifications`);
-    return response.data;
+    const cached = taskNotificationCache.get(conversationId);
+    const response = await apiClient.get(`/conversations/${encodeURIComponent(conversationId)}/task-notifications`, {
+      headers: cached?.etag ? { 'If-None-Match': cached.etag } : undefined,
+      validateStatus: (status) => (status >= 200 && status < 300) || status === 304,
+    });
+    if (response.status === 304) return cached?.data ?? [];
+    const data = Array.isArray(response.data) ? response.data : [];
+    const etag = response.headers?.etag;
+    if (typeof etag === 'string' && etag) {
+      taskNotificationCache.set(conversationId, { etag, data });
+    } else {
+      taskNotificationCache.delete(conversationId);
+    }
+    return data;
   },
 
   bind: async (

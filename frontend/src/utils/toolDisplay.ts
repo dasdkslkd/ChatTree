@@ -80,32 +80,24 @@ export function summarizeToolCall(toolName: string, rawArguments: unknown): stri
   const args = normalizeToolArgs(name, rawArguments);
   const path = stringArg(args, 'path');
   const command = stringArg(args, 'command');
-  const commandRunId = stringArg(args, 'command_run_id');
   const query = stringArg(args, 'query');
+  const pattern = stringArg(args, 'pattern');
 
   switch (name) {
-    case 'read_file':
+    case 'read':
       return path ? `读取 ${path}` : '读取文件';
-    case 'list_files':
+    case 'glob':
       return summarizeListFiles(args);
-    case 'search_files':
-      return query ? `搜索 "${compact(query, 60)}"` : '搜索文件';
-    case 'edit_file':
+    case 'grep':
+      return pattern ? `搜索 "${compact(pattern, 60)}"` : '搜索内容';
+    case 'edit':
       return summarizeEditFile(args, path);
-    case 'write_file':
+    case 'write':
       return summarizeWriteFile(args, path);
-    case 'apply_patch':
+    case 'patch':
       return summarizePatch(args);
-    case 'run_command':
+    case 'shell':
       return command ? `运行 ${compact(command, 80)}` : '运行命令';
-    case 'start_background_command':
-      return command ? `后台运行 ${compact(command, 80)}` : '后台运行命令';
-    case 'read_command':
-      return commandRunId ? `读取命令 ${commandRunId}` : '读取命令';
-    case 'wait_command':
-      return commandRunId ? `等待命令 ${commandRunId}` : '等待命令';
-    case 'stop_command':
-      return commandRunId ? `停止命令 ${commandRunId}` : '停止命令';
     case 'web_search':
       return query ? `搜索网页 "${compact(query, 60)}"` : '搜索网页';
     case 'fetch_url':
@@ -132,9 +124,11 @@ function normalizeToolArgs(toolName: string, rawArguments: unknown): Record<stri
     }
     renameFirst(record, 'path', ['file_path', 'filepath', 'file']);
     renameFirst(record, 'command', ['cmd', 'script']);
-    renameFirst(record, 'query', ['q', 'pattern']);
-    renameFirst(record, 'old_string', ['old', 'oldString', 'old_text']);
-    renameFirst(record, 'new_string', ['new', 'newString', 'new_text']);
+    if (toolName === 'grep') {
+      renameFirst(record, 'pattern', ['q', 'query']);
+    } else {
+      renameFirst(record, 'query', ['q']);
+    }
     return record;
   }
   if (typeof parsed === 'string') return compactRecordForTool(toolName, parsed);
@@ -142,10 +136,11 @@ function normalizeToolArgs(toolName: string, rawArguments: unknown): Record<stri
 }
 
 function compactRecordForTool(toolName: string, value: string): Record<string, unknown> {
-  if (toolName === 'run_command' || toolName === 'start_background_command') return { command: value };
-  if (toolName === 'read_file' || toolName === 'list_files') return { path: value };
-  if (toolName === 'search_files' || toolName === 'web_search') return { query: value };
-  if (toolName === 'apply_patch') return { patch: value };
+  if (toolName === 'shell') return { command: value };
+  if (toolName === 'read' || toolName === 'glob') return { path: value };
+  if (toolName === 'grep') return { pattern: value };
+  if (toolName === 'web_search') return { query: value };
+  if (toolName === 'patch') return { patch: value };
   return { arguments: value };
 }
 

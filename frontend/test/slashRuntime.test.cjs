@@ -146,8 +146,8 @@ function testForegroundManagedRunCommandDoesNotRenderAsDraft() {
     kind: 'command',
     status: 'streaming',
     metadata: {
-      tool_name: 'run_command',
-      run_command_managed: true,
+      tool_name: 'shell',
+      shell_managed: true,
     },
   })), false);
 }
@@ -157,9 +157,9 @@ function testAutoBackgroundedRunCommandRendersAsDraft() {
     kind: 'command',
     status: 'streaming',
     metadata: {
-      tool_name: 'run_command',
-      run_command_managed: true,
-      run_command_auto_backgrounded: true,
+      tool_name: 'shell',
+      shell_managed: true,
+      shell_auto_backgrounded: true,
     },
   })), true);
 }
@@ -169,7 +169,8 @@ function testExplicitBackgroundCommandRendersAsDraft() {
     kind: 'command',
     status: 'streaming',
     metadata: {
-      tool_name: 'start_background_command',
+      tool_name: 'shell',
+      shell_auto_backgrounded: true,
     },
   })), true);
 }

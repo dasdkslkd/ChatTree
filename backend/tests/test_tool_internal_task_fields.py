@@ -1,4 +1,4 @@
-import json
+﻿import json
 import tempfile
 import unittest
 
@@ -7,7 +7,6 @@ from backend.core.runs import RunKind, RunManager
 from backend.core.tasks import ActiveTaskService
 from backend.core.tools.agent_tools import SpawnAgentTool, StartSubagentTool, StartWorkflowTool
 from backend.core.tools.code_tools import CodeToolConfig, RunCommandTool
-from backend.core.tools.command_tools import StartBackgroundCommandTool
 from backend.core.tools.task_contract import TASK_STEP_BINDING_DESCRIPTION
 
 
@@ -20,7 +19,7 @@ class FakeCommandExecutor:
 
     async def start(self, **kwargs):
         self.started = kwargs
-        return {"run_id": "run_command_1", "metadata": dict(kwargs.get("metadata") or {})}
+        return {"run_id": "shell_1", "metadata": dict(kwargs.get("metadata") or {})}
 
     async def wait(self, run_id, timeout):
         return None
@@ -85,7 +84,6 @@ class ToolInternalTaskFieldTests(unittest.IsolatedAsyncioTestCase):
             config = CodeToolConfig.from_dict({"workspace_roots": [tmpdir]})
             tools = [
                 RunCommandTool(config),
-                StartBackgroundCommandTool(config),
                 SpawnAgentTool(agent_runtime=FakeAgentRuntime()),
                 StartSubagentTool(agent_runtime=FakeAgentRuntime()),
                 StartWorkflowTool(agent_runtime=FakeAgentRuntime()),
@@ -103,7 +101,7 @@ class ToolInternalTaskFieldTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_command_tools_forward_only_step_and_runtime_generation(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            config = CodeToolConfig.from_dict({"workspace_roots": [tmpdir], "run_command_initial_wait_seconds": 5})
+            config = CodeToolConfig.from_dict({"workspace_roots": [tmpdir], "shell_initial_wait_seconds": 5})
             context = {
                 "conversation_id": "conv_1",
                 "node_id": "node_1",
@@ -113,22 +111,21 @@ class ToolInternalTaskFieldTests(unittest.IsolatedAsyncioTestCase):
                 "task_revision": 4,
             }
 
-            for tool_class in (RunCommandTool, StartBackgroundCommandTool):
-                executor = FakeCommandExecutor()
-                raw = await tool_class(config).execute(
-                    command="echo ok",
-                    cwd=".",
-                    step=2,
-                    task_id="removed",
-                    task_step_id="removed",
-                    _runtime_context={**context, "command_executor": executor},
-                )
-                self.assertNotIn("error", json.loads(raw))
-                self.assertEqual(executor.started["step"], 2)
-                self.assertEqual(executor.started["task_context_mode"], "attached")
-                self.assertEqual(executor.started["task_generation_id"], "generation-internal")
-                self.assertEqual(executor.started["task_revision"], 4)
-                self.assertFalse(REMOVED_FIELDS & set(executor.started["metadata"]))
+            executor = FakeCommandExecutor()
+            raw = await RunCommandTool(config).execute(
+                command="echo ok",
+                cwd=".",
+                step=2,
+                task_id="removed",
+                task_step_id="removed",
+                _runtime_context={**context, "command_executor": executor},
+            )
+            self.assertNotIn("error", json.loads(raw))
+            self.assertEqual(executor.started["step"], 2)
+            self.assertEqual(executor.started["task_context_mode"], "attached")
+            self.assertEqual(executor.started["task_generation_id"], "generation-internal")
+            self.assertEqual(executor.started["task_revision"], 4)
+            self.assertFalse(REMOVED_FIELDS & set(executor.started["metadata"]))
 
     async def test_agent_tools_forward_numbered_step_without_internal_ids(self):
         context = {

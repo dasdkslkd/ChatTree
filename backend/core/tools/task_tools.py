@@ -22,17 +22,14 @@ from .task_contract import SET_TASK_STEP_DESCRIPTION
 
 TASK_TOOL_NAMES = {"create_task", "set_task_step", "cancel_task"}
 TASK_BOUND_RUN_TOOL_NAMES = {
-    "run_command",
-    "start_background_command",
+    "shell",
     "spawn_agent",
     "start_subagent",
     "start_workflow",
 }
 TASK_OBSERVATION_TOOL_NAMES = {
     "list_agents",
-    "read_command",
     "wait_agent",
-    "wait_command",
 }
 
 

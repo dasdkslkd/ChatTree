@@ -107,11 +107,11 @@ MULTI_AGENT_REQUEST_TOKENS = (
 
 PARALLEL_READ_ONLY_TOOL_NAMES = {
     "fetch_url",
+    "glob",
+    "grep",
     "list_available_tools",
-    "list_files",
-    "read_file",
+    "read",
     "read_tool_result",
-    "search_files",
     "web_search",
 }
 

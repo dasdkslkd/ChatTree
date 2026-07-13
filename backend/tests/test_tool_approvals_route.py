@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+﻿from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from backend.api.routes import tool_approvals
@@ -23,7 +23,7 @@ def _request(
         conversation_id=conversation_id,
         node_id="node-1",
         tool_call_id="call-1",
-        tool_name="run_command",
+        tool_name="shell",
         arguments_preview='{"command":"echo ok"}',
         risk_level="medium",
         reason="test approval",

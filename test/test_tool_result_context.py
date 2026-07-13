@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import json
 import time
 
@@ -71,7 +71,7 @@ def test_command_tool_result_is_model_readable_text(monkeypatch):
 
     content = manager._build_model_visible_tool_result(
         raw_result=raw_result,
-        name="run_command",
+        name="shell",
         conversation_id="conv-1",
         node_id="node-1",
         tool_call_id="call-1",
@@ -146,12 +146,12 @@ def test_execute_tool_calls_runs_read_only_tools_concurrently(monkeypatch):
         {
             "id": "call-read",
             "type": "function",
-            "function": {"name": "read_file", "arguments": "{\"path\":\"a.txt\"}"},
+            "function": {"name": "read", "arguments": "{\"path\":\"a.txt\"}"},
         },
         {
             "id": "call-search",
             "type": "function",
-            "function": {"name": "search_files", "arguments": "{\"query\":\"needle\"}"},
+            "function": {"name": "grep", "arguments": "{\"query\":\"needle\"}"},
         },
     ]
 
@@ -163,8 +163,8 @@ def test_execute_tool_calls_runs_read_only_tools_concurrently(monkeypatch):
 
     assert elapsed < 0.28
     assert [message["tool_call_id"] for message in results] == ["call-read", "call-search"]
-    assert set(tool_manager.started) == {"read_file", "search_files"}
-    assert abs(tool_manager.started["read_file"] - tool_manager.started["search_files"]) < 0.08
+    assert set(tool_manager.started) == {"read", "grep"}
+    assert abs(tool_manager.started["read"] - tool_manager.started["grep"]) < 0.08
 
 
 def test_execute_tool_calls_keeps_mutating_tools_as_order_barriers(monkeypatch):
@@ -175,17 +175,17 @@ def test_execute_tool_calls_keeps_mutating_tools_as_order_barriers(monkeypatch):
         {
             "id": "call-read-before",
             "type": "function",
-            "function": {"name": "read_file", "arguments": "{\"path\":\"before.txt\"}"},
+            "function": {"name": "read", "arguments": "{\"path\":\"before.txt\"}"},
         },
         {
             "id": "call-write",
             "type": "function",
-            "function": {"name": "write_file", "arguments": "{\"path\":\"out.txt\",\"content\":\"x\"}"},
+            "function": {"name": "write", "arguments": "{\"path\":\"out.txt\",\"content\":\"x\"}"},
         },
         {
             "id": "call-read-after",
             "type": "function",
-            "function": {"name": "search_files", "arguments": "{\"query\":\"after\"}"},
+            "function": {"name": "grep", "arguments": "{\"query\":\"after\"}"},
         },
     ]
 
@@ -198,32 +198,32 @@ def test_execute_tool_calls_keeps_mutating_tools_as_order_barriers(monkeypatch):
         "call-write",
         "call-read-after",
     ]
-    assert tool_manager.finished["read_file"] <= tool_manager.started["write_file"]
-    assert tool_manager.finished["write_file"] <= tool_manager.started["search_files"]
+    assert tool_manager.finished["read"] <= tool_manager.started["write"]
+    assert tool_manager.finished["write"] <= tool_manager.started["grep"]
 
 
-def test_list_files_tool_sync_work_runs_off_event_loop(monkeypatch, tmp_path):
+def test_glob_tool_sync_work_runs_off_event_loop(monkeypatch, tmp_path):
     (tmp_path / "a.txt").write_text("hello", encoding="utf-8")
 
-    def slow_list_files_python(**kwargs):
+    def slow_glob_python(**kwargs):
         time.sleep(0.2)
-        return ([{"path": "a.txt", "type": "file", "size": 5}], False, 1)
+        return (["a.txt"], False, 1, 1)
 
-    monkeypatch.setattr(code_tools, "_list_files_python", slow_list_files_python)
+    monkeypatch.setattr(code_tools, "_glob_files_python", slow_glob_python)
     tool = ListFilesTool(CodeToolConfig.from_dict({
         "workspace_roots": [str(tmp_path)],
         "command_timeout_seconds": 1,
     }))
 
     async def run_case():
-        task = asyncio.create_task(tool.execute(path=".", max_depth=1))
+        task = asyncio.create_task(tool.execute(path="."))
         await asyncio.sleep(0.03)
         assert not task.done()
         return await task
 
     payload = json.loads(asyncio.run(run_case()))
 
-    assert payload["items"][0]["path"] == "a.txt"
+    assert payload["files"][0] == "a.txt"
 
 
 def test_prepare_messages_uses_model_visible_content_and_drops_orphan_tool_messages():
@@ -245,7 +245,7 @@ def test_prepare_messages_uses_model_visible_content_and_drops_orphan_tool_messa
             {
                 "id": "call-1",
                 "type": "function",
-                "function": {"name": "run_command", "arguments": "{}"},
+                "function": {"name": "shell", "arguments": "{}"},
             }
         ],
     }
@@ -256,7 +256,7 @@ def test_prepare_messages_uses_model_visible_content_and_drops_orphan_tool_messa
             "content": "raw output that UI keeps",
             "model_visible_content": "Command: pytest -q\nExit code: 0",
             "raw_content": "raw output that UI keeps",
-            "name": "run_command",
+            "name": "shell",
             "tool_call_id": "call-1",
             "timestamp": 2,
         }
@@ -266,7 +266,7 @@ def test_prepare_messages_uses_model_visible_content_and_drops_orphan_tool_messa
             "id": "tool-orphan",
             "role": Role.TOOL,
             "content": "must not reach provider",
-            "name": "run_command",
+            "name": "shell",
             "tool_call_id": "missing-call",
             "timestamp": 3,
         }
@@ -313,7 +313,7 @@ def test_prepare_messages_synthesizes_missing_tool_result():
             {
                 "id": "call-missing",
                 "type": "function",
-                "function": {"name": "run_command", "arguments": "{}"},
+                "function": {"name": "shell", "arguments": "{}"},
             }
         ],
     }

@@ -48,10 +48,10 @@ def test_run_command_default_initial_wait_is_120_seconds(tmp_path):
         "protected_paths": [".git"],
     })
 
-    assert config.run_command_initial_wait_seconds == 120.0
+    assert config.shell_initial_wait_seconds == 120.0
 
 
-def test_list_files_lists_workspace_files_and_hides_protected_paths(tmp_path, monkeypatch):
+def test_glob_lists_workspace_files_and_hides_protected_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(code_tools, "_resolve_ripgrep_executable", lambda config: None)
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("print('hi')", encoding="utf-8")
@@ -60,13 +60,13 @@ def test_list_files_lists_workspace_files_and_hides_protected_paths(tmp_path, mo
     (tmp_path / ".git" / "config").write_text("secret", encoding="utf-8")
     tool = ListFilesTool(make_config(tmp_path))
 
-    result = load(run(tool.execute(path=".", max_depth=0, max_results=10)))
+    result = load(run(tool.execute(path=".", limit=10)))
 
-    assert {item["path"] for item in result["items"]} == {"empty", "src", "src/app.py"}
+    assert set(result["files"]) == {"src/app.py"}
     assert result["truncated"] is False
 
 
-def test_list_files_recursive_listing_is_bounded_by_max_results(tmp_path, monkeypatch):
+def test_glob_recursive_listing_is_bounded_by_limit(tmp_path, monkeypatch):
     monkeypatch.setattr(code_tools, "_resolve_ripgrep_executable", lambda config: None)
     (tmp_path / "src").mkdir()
     (tmp_path / "empty").mkdir()
@@ -74,16 +74,15 @@ def test_list_files_recursive_listing_is_bounded_by_max_results(tmp_path, monkey
         (tmp_path / "src" / f"file_{index:03}.txt").write_text("x", encoding="utf-8")
     tool = ListFilesTool(make_config(tmp_path))
 
-    result = load(run(tool.execute(path=".", max_depth=0, max_results=10, format="tree")))
+    result = load(run(tool.execute(path=".", limit=10)))
 
     assert result["engine"] == "python"
-    assert len(result["items"]) == 10
+    assert len(result["files"]) == 10
     assert result["truncated"] is True
-    assert result["scanned_entries"] <= 10
-    assert "tree" in result
+    assert result["next_offset"] == 10
 
 
-def test_list_files_supports_rg_style_options(tmp_path, monkeypatch):
+def test_glob_supports_path_regex_and_excludes(tmp_path, monkeypatch):
     monkeypatch.setattr(code_tools, "_resolve_ripgrep_executable", lambda config: None)
     (tmp_path / ".hidden.py").write_text("print('hi')", encoding="utf-8")
     (tmp_path / "skip.py").write_text("print('skip')", encoding="utf-8")
@@ -93,16 +92,16 @@ def test_list_files_supports_rg_style_options(tmp_path, monkeypatch):
 
     result = load(run(tool.execute(
         path=".",
-        glob="*.py",
-        max_depth=1,
+        pattern="*.py",
+        path_regex=r"(^|/)\.hidden\.py$",
         files_only=True,
-        no_ignore=True,
-        hidden=True,
-        exclude_globs=["skip.py"],
-        max_results=10,
+        respect_gitignore=False,
+        include_hidden=True,
+        exclude=["skip.py"],
+        limit=10,
     )))
 
-    assert [item["path"] for item in result["items"]] == [".hidden.py"]
+    assert result["files"] == [".hidden.py"]
 
 
 def test_read_file_reads_utf8_line_slice(tmp_path):
@@ -111,12 +110,13 @@ def test_read_file_reads_utf8_line_slice(tmp_path):
 
     result = load(run(tool.execute(path="notes.txt", start_line=2, line_count=2)))
 
-    assert result == {
-        "path": "notes.txt",
-        "start_line": 2,
-        "content": "two\nthree\n",
-        "truncated": True,
-    }
+    assert result["path"] == "notes.txt"
+    assert result["start_line"] == 2
+    assert result["content"] == "2\ttwo\n3\tthree"
+    assert result["line_count"] == 2
+    assert result["total_lines"] == 4
+    assert result["version"].startswith("sha256:")
+    assert result["truncated"] is True
 
 
 def test_read_file_reads_multiple_files(tmp_path):
@@ -124,14 +124,11 @@ def test_read_file_reads_multiple_files(tmp_path):
     (tmp_path / "b.txt").write_text("beta\n", encoding="utf-8")
     tool = ReadFileTool(make_config(tmp_path, max_read_chars=200))
 
-    result = load(run(tool.execute(paths=["a.txt", "b.txt"])))
+    result = load(run(tool.execute(targets=[{"path": "a.txt"}, {"path": "b.txt"}])))
 
-    assert result == {
-        "files": [
-            {"path": "a.txt", "start_line": 1, "content": "alpha\n", "truncated": False},
-            {"path": "b.txt", "start_line": 1, "content": "beta\n", "truncated": False},
-        ]
-    }
+    assert [file["path"] for file in result["files"]] == ["a.txt", "b.txt"]
+    assert [file["content"] for file in result["files"]] == ["1\talpha", "1\tbeta"]
+    assert all(file["version"].startswith("sha256:") for file in result["files"])
 
 
 def test_read_file_streams_window_without_read_text(tmp_path, monkeypatch):
@@ -146,12 +143,10 @@ def test_read_file_streams_window_without_read_text(tmp_path, monkeypatch):
 
     result = load(run(tool.execute(path="large.txt", max_chars_per_file=4)))
 
-    assert result == {
-        "path": "large.txt",
-        "start_line": 1,
-        "content": "0123",
-        "truncated": True,
-    }
+    assert result["path"] == "large.txt"
+    assert result["start_line"] == 1
+    assert result["content"] == "1\t0123"
+    assert result["truncated"] is True
 
 
 def test_read_file_rejects_outside_workspace(tmp_path):
@@ -173,7 +168,7 @@ def test_read_file_rejects_non_utf8(tmp_path):
     assert result["error"]["type"] == "not_utf8"
 
 
-def test_search_files_returns_matching_lines_and_skips_non_utf8(tmp_path, monkeypatch):
+def test_grep_returns_matching_lines_and_skips_non_utf8(tmp_path, monkeypatch):
     monkeypatch.setattr(code_tools, "_resolve_ripgrep_executable", lambda config: None)
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("alpha\nneedle here\n", encoding="utf-8")
@@ -181,19 +176,19 @@ def test_search_files_returns_matching_lines_and_skips_non_utf8(tmp_path, monkey
     (tmp_path / "src" / "bad.py").write_bytes(b"\xff\xfe")
     tool = SearchFilesTool(make_config(tmp_path))
 
-    result = load(run(tool.execute(pattern="needle", path="src", glob="*.py", fixed_strings=True, max_results=10)))
+    result = load(run(tool.execute(pattern="needle", path="src", glob="*.py", regex=False, output="content", limit=10)))
 
     assert result["matches"] == [{
         "path": "src/app.py",
         "line": 2,
-        "preview": "needle here",
+        "text": "needle here",
         "type": "match",
     }]
     assert result["skipped_non_utf8"] == ["src/bad.py"]
     assert result["truncated"] is False
 
 
-def test_search_files_uses_project_bundled_rg_and_translates_options(tmp_path, monkeypatch):
+def test_grep_uses_project_bundled_rg_and_translates_options(tmp_path, monkeypatch):
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("alpha\nNeedle HERE\n", encoding="utf-8")
     fake_rg = tmp_path / "data" / "tools" / "ripgrep" / code_tools.DEFAULT_RIPGREP_VERSION / "win32-x64" / "rg.exe"
@@ -219,11 +214,12 @@ def test_search_files_uses_project_bundled_rg_and_translates_options(tmp_path, m
         pattern="needle",
         path="src",
         glob="*.py",
-        fixed_strings=True,
+        regex=False,
         ignore_case=True,
-        no_ignore=True,
-        hidden=True,
-        max_results=10,
+        respect_gitignore=False,
+        include_hidden=True,
+        output="content",
+        limit=10,
     )))
 
     args = calls[0][0]
@@ -239,38 +235,45 @@ def test_search_files_uses_project_bundled_rg_and_translates_options(tmp_path, m
     assert result["matches"] == [{
         "path": "src/app.py",
         "line": 2,
-        "preview": "Needle HERE",
+        "text": "Needle HERE",
         "type": "match",
     }]
 
 
-def test_search_files_python_fallback_supports_regex_and_ignore_case(tmp_path, monkeypatch):
+def test_grep_python_fallback_supports_regex_and_ignore_case(tmp_path, monkeypatch):
     monkeypatch.setattr(code_tools, "_resolve_ripgrep_executable", lambda config: None)
     (tmp_path / "notes.txt").write_text("Alpha\nneedle-42\n", encoding="utf-8")
     tool = SearchFilesTool(make_config(tmp_path))
 
-    result = load(run(tool.execute(pattern=r"NEEDLE-\d+", ignore_case=True)))
+    result = load(run(tool.execute(pattern=r"NEEDLE-\d+", ignore_case=True, output="content")))
 
     assert result["engine"] == "python"
     assert result["fallback_reason"] == "ripgrep_not_installed"
-    assert result["matches"][0]["preview"] == "needle-42"
+    assert result["matches"][0]["text"] == "needle-42"
 
 
 def test_edit_file_replaces_unique_match_and_rejects_ambiguous_edit(tmp_path):
     (tmp_path / "app.py").write_text("old\nkeep\nold\n", encoding="utf-8")
+    read_tool = ReadFileTool(make_config(tmp_path, max_read_chars=200))
     tool = EditFileTool(make_config(tmp_path))
+    version = load(run(read_tool.execute(path="app.py")))["version"]
 
-    ambiguous = load(run(tool.execute(path="app.py", old_string="old", new_string="new")))
+    ambiguous = load(run(tool.execute(
+        path="app.py",
+        expected_version=version,
+        replacements=[{"old": "old", "new": "new"}],
+    )))
     assert ambiguous["error"]["type"] == "edit_not_unique"
 
     ok = load(run(tool.execute(
         path="app.py",
-        old_string="old\nkeep\n",
-        new_string="new\nkeep\n",
+        expected_version=version,
+        replacements=[{"old": "old\nkeep\n", "new": "new\nkeep\n"}],
     )))
 
     assert ok["path"] == "app.py"
     assert ok["replacements"] == 1
+    assert ok["version"].startswith("sha256:")
     assert (tmp_path / "app.py").read_text(encoding="utf-8") == "new\nkeep\nold\n"
 
 
@@ -514,7 +517,7 @@ def test_tool_manager_returns_structured_error_when_tool_raises_not_implemented(
     class BrokenTool(BaseTool):
         @property
         def name(self) -> str:
-            return "run_command"
+            return "shell"
 
         @property
         def description(self) -> str:
@@ -537,12 +540,12 @@ def test_tool_manager_returns_structured_error_when_tool_raises_not_implemented(
     })
     manager.register(BrokenTool())
 
-    result = load(run(manager.execute_tool("run_command", {"command": "echo hi"})))
+    result = load(run(manager.execute_tool("shell", {"command": "echo hi"})))
 
     assert result["error"] == {
         "type": "NotImplementedError",
         "message": "",
-        "tool_name": "run_command",
+        "tool_name": "shell",
     }
 
 
@@ -562,11 +565,14 @@ def test_tool_manager_coding_exposure_hides_raw_write_file_but_keeps_it_executab
 
     names = [tool["function"]["name"] for tool in manager.get_openai_tools()]
 
-    assert "search_files" in names
-    assert "edit_file" in names
-    assert "apply_patch" in names
-    assert "write_file" not in names
-    result = load(run(manager.execute_tool("write_file", {"path": "notes.txt", "content": "ok"})))
+    assert "grep" in names
+    assert "glob" in names
+    assert "read" in names
+    assert "edit" in names
+    assert "patch" in names
+    assert "shell" in names
+    assert "write" not in names
+    result = load(run(manager.execute_tool("write", {"path": "notes.txt", "content": "ok"})))
     assert result["path"] == "notes.txt"
 
 
@@ -587,7 +593,7 @@ def test_tool_manager_full_exposure_can_show_write_file(tmp_path):
 
     names = [tool["function"]["name"] for tool in manager.get_openai_tools()]
 
-    assert "write_file" in names
+    assert "write" in names
 
 
 def test_tool_manager_passes_top_level_ripgrep_config_to_code_tools(tmp_path):
@@ -622,7 +628,7 @@ def test_tool_manager_normalizes_compact_run_command_arguments(tmp_path):
         }
     })
 
-    result = load(run(manager.execute_tool("run_command", {"arguments": "python -c \"print('compact')\""})))
+    result = load(run(manager.execute_tool("shell", {"arguments": "python -c \"print('compact')\""})))
 
     assert result["exit_code"] == 0
     assert result["stdout"].strip() == "compact"
@@ -678,7 +684,7 @@ def test_run_command_returns_structured_error_when_execution_fails(tmp_path, mon
     assert result["error"] == {
         "type": "OSError",
         "message": "boom",
-        "tool_name": "run_command",
+            "tool_name": "shell",
         "command": "python -V",
         "cwd": ".",
     }

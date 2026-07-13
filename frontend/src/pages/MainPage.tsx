@@ -183,13 +183,15 @@ import {
   normalizeTranscriptItems,
   type LiveRunTranscriptOverlay,
 } from '../utils/transcriptItems';
-import { createTaskPanelItem, shouldPollTaskState } from '../utils/activeTask';
+import { createTaskPanelItem } from '../utils/activeTask';
 
-const TASK_STATE_POLL_MS = 2500;
+const TASK_STATE_PROBE_DELAYS_MS = [1000, 2000, 4000, 8000] as const;
+const TASK_STATE_ACTIVE_REFRESH_MS = 10000;
 const MarkdownContent = lazy(() => import('../components/MarkdownContent'));
 const MANUAL_PROJECTS_STORAGE_KEY = 'chattree.manualProjectWorkspaces';
 const PROJECT_ORDER_STORAGE_KEY = 'chattree.projectOrder';
 const PLAN_MODE_TOOL_NAMES = new Set(['enter_plan_mode', 'update_plan', 'exit_plan_mode', 'ask_user_question']);
+const TASK_TOOL_NAMES = new Set(['create_task', 'set_task_step', 'cancel_task']);
 const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled', 'interrupted', 'stopped']);
 
 type SidebarResizeSession = {
@@ -224,6 +226,63 @@ function isAbortError(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false;
   const candidate = error as { name?: string; code?: string };
   return candidate.name === 'AbortError' || candidate.code === 'ERR_CANCELED';
+}
+
+function getToolCallName(toolCall: unknown): string | null {
+  if (!toolCall || typeof toolCall !== 'object') return null;
+  const candidate = toolCall as {
+    function?: { name?: unknown } | null;
+    name?: unknown;
+  };
+  const name = candidate.function?.name ?? candidate.name;
+  return typeof name === 'string' && name ? name : null;
+}
+
+function collectTaskToolEntries(toolInteractions: unknown[]): string[] {
+  const entries: string[] = [];
+  for (const interaction of toolInteractions) {
+    if (!interaction || typeof interaction !== 'object') continue;
+    const candidate = interaction as {
+      assistant?: { tool_calls?: unknown[] } | null;
+      tools?: unknown[];
+    };
+    for (const toolCall of candidate.assistant?.tool_calls || []) {
+      const name = getToolCallName(toolCall);
+      if (name && TASK_TOOL_NAMES.has(name)) entries.push(`call:${name}`);
+    }
+    for (const toolResult of candidate.tools || []) {
+      const name = getToolCallName(toolResult);
+      if (name && TASK_TOOL_NAMES.has(name)) entries.push(`result:${name}`);
+    }
+  }
+  return entries;
+}
+
+function getTaskToolSignal(runs: StreamState[]): string {
+  return runs
+    .map((run) => {
+      const entries = collectTaskToolEntries(run.toolInteractions || []);
+      return entries.length > 0 ? `${run.conversationId}:${run.runId}:${entries.join(',')}` : '';
+    })
+    .filter(Boolean)
+    .join('|');
+}
+
+function getActiveRunSignal(runs: StreamState[]): string {
+  return runs
+    .filter((run) => run.status === 'streaming' || run.status === 'waiting_approval' || run.status === 'stopping')
+    .map((run) => `${run.conversationId}:${run.runId}`)
+    .sort()
+    .join('|');
+}
+
+function shouldContinueTaskStateRefresh(
+  task: ActiveTaskRecord | null,
+  notifications: TaskNotificationRecord[],
+): boolean {
+  return task?.execution_state === 'running'
+    || task?.execution_state === 'stopping'
+    || notifications.some((notification) => notification.status === 'delivering');
 }
 
 function getTranscriptItemNodeId(item: TranscriptItem): string | null {
@@ -1128,6 +1187,8 @@ export default function ChatPage() {
   const queuedMessagesRef = useRef<QueuedMessage[]>([]);
   const toolPermissionDraftRef = useRef<ToolPermissionDraft>(toolPermissionDraft);
   const transcriptRequestsRef = useRef<Map<string, TranscriptSnapshotRequest>>(new Map());
+  const taskProbeTimerRef = useRef<number | null>(null);
+  const taskProbeGenerationRef = useRef(0);
 
   const beginSidebarResize = useCallback((
     event: ReactPointerEvent<HTMLDivElement>,
@@ -1338,10 +1399,6 @@ export default function ChatPage() {
   };
 
   const activeRunStates = useRunManager(currentConversation?.id ?? null);
-  const activeRunCount = useMemo(
-    () => activeRunStates.filter((run) => !['completed', 'error', 'stopped'].includes(run.status)).length,
-    [activeRunStates],
-  );
   const [serverPendingToolApprovals, setServerPendingToolApprovals] = useState<ToolApprovalPayload[]>([]);
   const [activePlan, setActivePlan] = useState<PlanSession | null>(null);
   const [planActionPending, setPlanActionPending] = useState<'approve' | 'reject' | 'answer' | null>(null);
@@ -1466,7 +1523,9 @@ export default function ChatPage() {
     }
     try {
       const notifications = await taskNotificationsApi.list(conversationId);
-      setTaskNotifications(notifications);
+      if (conversationId === currentConversationIdRef.current) {
+        setTaskNotifications(notifications);
+      }
       return notifications;
     } catch (error) {
       console.error('刷新 task notification 失败:', error);
@@ -1480,7 +1539,9 @@ export default function ChatPage() {
     }
     try {
       const task = await activeTaskService.fetch(conversationId);
-      setActiveTask(task);
+      if (conversationId === currentConversationIdRef.current) {
+        setActiveTask(task);
+      }
       return task;
     } catch (error) {
       console.error('刷新活动任务失败:', error);
@@ -1505,6 +1566,51 @@ export default function ChatPage() {
       );
     }
   }, []);
+  const refreshTaskState = useCallback(async (conversationId: string | null | undefined) => {
+    if (!conversationId) {
+      setTaskNotifications([]);
+      setActiveTask(null);
+      return { notifications: [], task: null };
+    }
+    const [notifications, task] = await Promise.all([
+      refreshTaskNotifications(conversationId),
+      refreshActiveTask(conversationId),
+    ]);
+    attachDeliveringTaskNotifications(conversationId, notifications);
+    return { notifications, task };
+  }, [attachDeliveringTaskNotifications, refreshActiveTask, refreshTaskNotifications]);
+  const cancelTaskProbe = useCallback(() => {
+    taskProbeGenerationRef.current += 1;
+    if (taskProbeTimerRef.current !== null) {
+      window.clearTimeout(taskProbeTimerRef.current);
+      taskProbeTimerRef.current = null;
+    }
+  }, []);
+  const scheduleTaskProbe = useCallback((conversationId: string | null | undefined) => {
+    if (!conversationId) return;
+    cancelTaskProbe();
+    const generation = taskProbeGenerationRef.current;
+    let attempt = 0;
+    const scheduleNext = () => {
+      if (generation !== taskProbeGenerationRef.current) return;
+      if (conversationId !== currentConversationIdRef.current) return;
+      const delay = attempt < TASK_STATE_PROBE_DELAYS_MS.length
+        ? TASK_STATE_PROBE_DELAYS_MS[attempt]
+        : TASK_STATE_ACTIVE_REFRESH_MS;
+      attempt += 1;
+      taskProbeTimerRef.current = window.setTimeout(() => {
+        taskProbeTimerRef.current = null;
+        void refreshTaskState(conversationId).then(({ notifications, task }) => {
+          if (generation !== taskProbeGenerationRef.current) return;
+          if (conversationId !== currentConversationIdRef.current) return;
+          if (attempt < TASK_STATE_PROBE_DELAYS_MS.length || shouldContinueTaskStateRefresh(task, notifications)) {
+            scheduleNext();
+          }
+        });
+      }, delay);
+    };
+    scheduleNext();
+  }, [cancelTaskProbe, refreshTaskState]);
   const probeTaskNotificationDelivery = useCallback(async (conversationId: string) => {
     for (let attempt = 0; attempt < TASK_NOTIFICATION_DELIVERY_LOOKUPS; attempt += 1) {
       if (attempt > 0) {
@@ -1521,26 +1627,9 @@ export default function ChatPage() {
       }
     }
   }, [attachDeliveringTaskNotifications, refreshTaskNotifications]);
-  const shouldPollTaskNotifications = shouldPollTaskState({
-    conversationId: currentConversation?.id,
-    activeRunCount,
-    visibleNotificationCount: visibleTaskNotifications.length,
-  });
   useEffect(() => {
-    void refreshTaskNotifications(currentConversation?.id);
-  }, [currentConversation?.id, refreshTaskNotifications]);
-  useEffect(() => {
-    if (!currentConversation?.id || activeRunCount === 0) return;
-    void refreshTaskNotifications(currentConversation.id);
-  }, [activeRunCount, currentConversation?.id, refreshTaskNotifications]);
-  useEffect(() => {
-    if (!currentConversation?.id || !shouldPollTaskNotifications) return;
-    const conversationId = currentConversation.id;
-    const timer = window.setInterval(() => {
-      void refreshTaskNotifications(conversationId);
-    }, TASK_STATE_POLL_MS);
-    return () => window.clearInterval(timer);
-  }, [currentConversation?.id, refreshTaskNotifications, shouldPollTaskNotifications]);
+    void refreshTaskState(currentConversation?.id);
+  }, [currentConversation?.id, refreshTaskState]);
   useEffect(() => {
     const conversationId = currentConversation?.id;
     if (!conversationId) return;
@@ -1653,6 +1742,8 @@ export default function ChatPage() {
     })
     .filter(Boolean)
     .join('|'), [activeRunStates]);
+  const activeTaskToolSignal = useMemo(() => getTaskToolSignal(activeRunStates), [activeRunStates]);
+  const activeRunSignal = useMemo(() => getActiveRunSignal(activeRunStates), [activeRunStates]);
 
   useEffect(() => {
     const next = syncToolPermissionDraftFromBranch(
@@ -1683,31 +1774,21 @@ export default function ChatPage() {
   }, [currentConversation, defaultToolPermissionMode, updateToolPermissionDraft]);
 
   useEffect(() => {
-    if (!currentConversation?.id) {
-      void refreshActiveTask(null);
+    const conversationId = currentConversation?.id;
+    if (!conversationId || !activeRunSignal) {
+      cancelTaskProbe();
       return;
     }
-    void refreshActiveTask(currentConversation.id);
-  }, [currentConversation?.id, refreshActiveTask]);
+    void refreshTaskState(conversationId);
+    scheduleTaskProbe(conversationId);
+    return cancelTaskProbe;
+  }, [activeRunSignal, cancelTaskProbe, currentConversation?.id, refreshTaskState, scheduleTaskProbe]);
 
-  const shouldPollActiveTask = shouldPollTaskState({
-    conversationId: currentConversation?.id,
-    activeRunCount,
-    activeTask,
-  });
   useEffect(() => {
     const conversationId = currentConversation?.id;
-    if (!conversationId || activeRunCount === 0) return;
-    void refreshActiveTask(conversationId);
-  }, [activeRunCount, currentConversation?.id, refreshActiveTask]);
-  useEffect(() => {
-    const conversationId = currentConversation?.id;
-    if (!conversationId || !shouldPollActiveTask) return;
-    const timer = window.setInterval(() => {
-      void refreshActiveTask(conversationId);
-    }, TASK_STATE_POLL_MS);
-    return () => window.clearInterval(timer);
-  }, [currentConversation?.id, refreshActiveTask, shouldPollActiveTask]);
+    if (!conversationId || !activeTaskToolSignal) return;
+    void refreshTaskState(conversationId);
+  }, [activeTaskToolSignal, currentConversation?.id, refreshTaskState]);
 
   useEffect(() => {
     const activeKeys = new Set<string>();
@@ -2478,8 +2559,7 @@ export default function ChatPage() {
     const deliveryNodeId = liveSelectedBranchTipId || currentConversation?.current_node_id || null;
     if (!conversationId || !deliveryNodeId) return;
     const notification = await taskNotificationsApi.bind(notificationId, deliveryNodeId, { trigger: true });
-    const refreshedNotifications = await refreshTaskNotifications(conversationId);
-    attachDeliveringTaskNotifications(conversationId, refreshedNotifications);
+    await refreshTaskState(conversationId);
     if (notification.delivered_run_id) {
       void streamManager.resumeStream(
         conversationId,
@@ -2505,7 +2585,7 @@ export default function ChatPage() {
     loadConversations,
     probeTaskNotificationDelivery,
     refreshMessages,
-    refreshTaskNotifications,
+    refreshTaskState,
     refreshVisibleTranscriptSnapshot,
     liveSelectedBranchTipId,
   ]);
@@ -2514,8 +2594,8 @@ export default function ChatPage() {
     const conversationId = currentConversation?.id;
     if (selectedTaskNotificationId === notificationId) setSelectedTaskNotificationId(null);
     await taskNotificationsApi.delete(notificationId);
-    await refreshTaskNotifications(conversationId);
-  }, [currentConversation?.id, refreshTaskNotifications, selectedTaskNotificationId]);
+    await refreshTaskState(conversationId);
+  }, [currentConversation?.id, refreshTaskState, selectedTaskNotificationId]);
 
   const handleInspectTaskNotification = useCallback(async (notification: TaskNotificationRecord) => {
     const conversationId = currentConversation?.id;
@@ -2761,9 +2841,10 @@ export default function ChatPage() {
         });
         await refreshMessages(conversationId, { retries: 1 });
         await refreshVisibleTranscriptSnapshot(conversationId);
+        await refreshTaskState(conversationId);
       }
     })();
-  }, [currentBranchStoppableRunIds, currentConversation?.id, refreshMessages, refreshVisibleTranscriptSnapshot, updateQueuedMessages]);
+  }, [currentBranchStoppableRunIds, currentConversation?.id, refreshMessages, refreshTaskState, refreshVisibleTranscriptSnapshot, updateQueuedMessages]);
 
   // 全局注册一次：任意对话的流结束（completed/error/stopped）时，
   // 从后端刷新真实消息，再清理 StreamManager 中该对话的临时状态。
@@ -2786,6 +2867,7 @@ export default function ChatPage() {
       if (shouldProbeTaskNotificationDelivery({ finishStatus: status })) {
         void probeTaskNotificationDelivery(finishedId);
       }
+      void refreshTaskState(finishedId);
 
       if (!shouldPatchMainConversation || (!targetNodeId && !nodeId)) {
         if (!finishedRun || !shouldRenderRunDraft(finishedRun)) {
@@ -2867,6 +2949,7 @@ export default function ChatPage() {
     loadConversations,
     loadTree,
     refreshVisibleTranscriptSnapshot,
+    refreshTaskState,
     syncSelectedConversationSideRuns,
     sendNextQueuedMessage,
     syncBackendScheduledFollowup,

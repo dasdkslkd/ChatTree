@@ -1,4 +1,4 @@
-from pathlib import Path
+﻿from pathlib import Path
 import sys
 
 sys.path.insert(0, ".")
@@ -22,7 +22,7 @@ def test_load_agent_roots_discovers_project_agent_with_frontmatter(tmp_path):
         """---
 description: Reviews code changes
 tools:
-  - read_file
+  - read
   - search
 skills: review, testing
 model: gpt-5
@@ -41,7 +41,7 @@ You are a careful code reviewer.
     assert agent.name == "reviewer"
     assert agent.description == "Reviews code changes"
     assert agent.system_prompt == "You are a careful code reviewer."
-    assert agent.tools == ["read_file", "search"]
+    assert agent.tools == ["read", "search"]
     assert agent.skills == ["review", "testing"]
     assert agent.model == "gpt-5"
     assert agent.max_turns == 4
@@ -98,7 +98,7 @@ def test_load_agent_file_supports_comma_tools_and_yaml_list_skills(tmp_path):
         "helper",
         """---
 description: Helps with code
-tools: read_file, search
+tools: read, search
 skills:
   - review
   - testing
@@ -110,7 +110,7 @@ Prompt body.
 
     agent = load_agent_file(agent_path, source=CapabilitySource.PROJECT)
 
-    assert agent.tools == ["read_file", "search"]
+    assert agent.tools == ["read", "search"]
     assert agent.skills == ["review", "testing"]
 
 

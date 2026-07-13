@@ -56,9 +56,9 @@ PATH_ARGUMENT_KEYS = {
 }
 
 BUILTIN_CODE_WRITE_TOOLS = {
-    "edit_file",
-    "write_file",
-    "apply_patch",
+    "edit",
+    "write",
+    "patch",
 }
 
 COMMAND_TOOL_NAME_TOKENS = {

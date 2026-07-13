@@ -30,7 +30,10 @@ def test_task_routes_manage_single_active_task_until_completion():
     version = created.headers["etag"]
     assert created.json()["status"] == "pending"
     assert "task_id" not in created.json()
-    assert client.get("/conversations/conv-1/task").json()["title"] == "检查实现"
+    current_task = client.get("/conversations/conv-1/task")
+    assert current_task.json()["title"] == "检查实现"
+    unchanged = client.get("/conversations/conv-1/task", headers={"If-None-Match": current_task.headers["etag"]})
+    assert unchanged.status_code == 304
 
     duplicate = client.post(
         "/conversations/conv-1/task",
@@ -59,7 +62,11 @@ def test_task_routes_manage_single_active_task_until_completion():
         "completed",
         "completed",
     ]
-    assert client.get("/conversations/conv-1/task").json() is None
+    empty = client.get("/conversations/conv-1/task")
+    assert empty.json() is None
+    assert empty.headers["etag"] == '"none"'
+    empty_unchanged = client.get("/conversations/conv-1/task", headers={"If-None-Match": empty.headers["etag"]})
+    assert empty_unchanged.status_code == 304
 
 
 def test_task_routes_validate_order_evidence_and_cancel():

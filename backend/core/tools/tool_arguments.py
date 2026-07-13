@@ -4,7 +4,7 @@ import json
 from typing import Any, Dict
 
 
-COMMAND_ARGUMENT_TOOLS = {"run_command", "start_background_command"}
+COMMAND_ARGUMENT_TOOLS = {"shell"}
 
 
 def normalize_tool_arguments(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -27,12 +27,10 @@ def normalize_tool_arguments(tool_name: str, arguments: Dict[str, Any]) -> Dict[
         _rename_first(normalized, "command", ("cmd", "script"))
     else:
         _rename_first(normalized, "command", ("cmd",))
-    if tool_name.lower() == "search_files":
+    if tool_name.lower() == "grep":
         _rename_first(normalized, "pattern", ("q", "query"))
     else:
         _rename_first(normalized, "query", ("q", "pattern"))
-    _rename_first(normalized, "old_string", ("old", "oldString", "old_text"))
-    _rename_first(normalized, "new_string", ("new", "newString", "new_text"))
     return normalized
 
 
@@ -53,13 +51,13 @@ def _parse_json_object(raw: str) -> Dict[str, Any] | None:
 
 def _compact_argument_for_tool(tool_name: str, raw: str) -> Dict[str, Any] | None:
     name = tool_name.lower()
-    if name in {"read_file", "list_files"}:
+    if name in {"read", "glob"}:
         return {"path": raw}
-    if name == "search_files":
+    if name == "grep":
         return {"pattern": raw}
-    if name in {"run_command", "start_background_command"}:
+    if name == "shell":
         return {"command": raw}
-    if name == "apply_patch":
+    if name == "patch":
         return {"patch": raw}
     return None
 

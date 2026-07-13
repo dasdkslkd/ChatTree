@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import json
@@ -253,9 +253,7 @@ def test_registered_task_tools_are_model_visible_in_real_tool_manager():
 def test_task_observation_tools_refresh_the_runtime_task_version():
     assert TASK_OBSERVATION_TOOL_NAMES == {
         "list_agents",
-        "read_command",
         "wait_agent",
-        "wait_command",
     }
 
 

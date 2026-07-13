@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -25,10 +25,10 @@ class FakeRegistry:
 
 
 class FakeToolManager:
-    def get_openai_tools(self):
+    def get_openai_tools(self, **_kwargs):
         return [
-            {"function": {"name": "read_file"}},
-            {"function": {"name": "run_command"}},
+            {"function": {"name": "read"}},
+            {"function": {"name": "shell"}},
         ]
 
 
@@ -127,8 +127,8 @@ def test_empty_agent_tools_means_no_tools_and_star_allows_all_tools():
 
     assert executor._filter_tools(agent.tools) == []
     assert [tool["function"]["name"] for tool in executor._filter_tools(["*"])] == [
-        "read_file",
-        "run_command",
+        "read",
+        "shell",
     ]
 
 
@@ -212,13 +212,13 @@ def test_subagent_timeout_seconds_fails_run():
 
 
 def test_subagent_max_turns_limits_model_rounds():
-    agent = AgentDefinition(name="limited", max_turns=1, tools=["read_file"])
+    agent = AgentDefinition(name="limited", max_turns=1, tools=["read"])
     provider = FakeProvider([
         [
             {
                 "status": StreamStatus.COMPLETE,
                 "tool_calls": [
-                    {"id": "call-1", "function": {"name": "read_file"}},
+                    {"id": "call-1", "function": {"name": "read"}},
                 ],
             }
         ],

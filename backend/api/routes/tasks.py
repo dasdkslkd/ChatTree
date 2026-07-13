@@ -17,6 +17,7 @@ from backend.core.tasks import (
 
 
 router = APIRouter()
+NO_ACTIVE_TASK_ETAG = '"none"'
 
 
 def _task_etag(task) -> str:
@@ -75,12 +76,20 @@ class CancelTaskRequest(BaseModel):
 async def get_active_task(
     conversation_id: str,
     response: Response,
+    if_none_match: Optional[str] = Header(default=None, alias="If-None-Match"),
     task_service: ActiveTaskService = Depends(get_task_service),
 ):
     task = await task_service.get_active_task(conversation_id)
     if task is not None:
-        response.headers["ETag"] = _task_etag(task)
-    return task.public_dict() if task is not None else None
+        etag = _task_etag(task)
+        if if_none_match == etag:
+            return Response(status_code=304, headers={"ETag": etag})
+        response.headers["ETag"] = etag
+        return task.public_dict()
+    if if_none_match == NO_ACTIVE_TASK_ETAG:
+        return Response(status_code=304, headers={"ETag": NO_ACTIVE_TASK_ETAG})
+    response.headers["ETag"] = NO_ACTIVE_TASK_ETAG
+    return None
 
 
 @router.post("/conversations/{conversation_id}/task", response_model=dict[str, Any])

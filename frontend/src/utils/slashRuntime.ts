@@ -206,9 +206,9 @@ export interface RunDraftLike {
 function isForegroundManagedRunCommand(run: RunDraftLike): boolean {
   const metadata = run.metadata || {};
   return run.kind === 'command'
-    && metadata.tool_name === 'run_command'
-    && metadata.run_command_managed === true
-    && metadata.run_command_auto_backgrounded !== true;
+    && metadata.tool_name === 'shell'
+    && metadata.shell_managed === true
+    && metadata.shell_auto_backgrounded !== true;
 }
 
 export function shouldRenderRunDraft(run: RunDraftLike): boolean {

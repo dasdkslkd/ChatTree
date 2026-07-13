@@ -1,4 +1,4 @@
-from dataclasses import replace
+﻿from dataclasses import replace
 import os
 from pathlib import Path
 import sys
@@ -20,7 +20,7 @@ from backend.core.tools.security.command_policy import CommandPolicy
 from backend.core.tools.security.logical_sandbox import LogicalSandbox, SandboxViolation
 
 
-def make_context(tool_name="mcp__filesystem__write_file", arguments=None, mode="default"):
+def make_context(tool_name="mcp__filesystem__write", arguments=None, mode="default"):
     return PermissionContext(
         conversation_id="conv-1",
         node_id="node-1",
@@ -47,7 +47,7 @@ def test_explicit_deny_wins_over_allow():
             id="deny-write",
             behavior="deny",
             target_type="mcp_tool",
-            pattern="mcp__filesystem__write_file",
+            pattern="mcp__filesystem__write",
             source="user",
         ),
     ])
@@ -74,21 +74,21 @@ def test_builtin_read_tools_are_allowed_by_default(tool_name):
     assert "built-in read" in decision.reason
 
 
-@pytest.mark.parametrize("tool_name", ["list_files", "read_file", "search_files"])
+@pytest.mark.parametrize("tool_name", ["glob", "read", "grep"])
 def test_builtin_code_read_tools_are_allowed_by_default(tool_name):
     decision = PermissionEngine.default().evaluate(make_context(tool_name=tool_name))
 
     assert decision.behavior == "allow"
 
 
-@pytest.mark.parametrize("tool_name", ["edit_file", "write_file", "apply_patch", "run_command"])
+@pytest.mark.parametrize("tool_name", ["edit", "write", "patch", "shell"])
 def test_builtin_code_mutating_tools_ask_by_default(tool_name):
     decision = PermissionEngine.default().evaluate(make_context(tool_name=tool_name))
 
     assert decision.behavior == "ask"
 
 
-@pytest.mark.parametrize("tool_name", ["web_search", "read_file", "edit_file", "write_file", "run_command"])
+@pytest.mark.parametrize("tool_name", ["web_search", "read", "edit", "write", "shell"])
 def test_auto_approve_mode_allows_non_delete_tools(tool_name):
     decision = PermissionEngine.default().evaluate(make_context(tool_name=tool_name, mode="auto_approve"))
 
@@ -100,7 +100,7 @@ def test_auto_approve_mode_allows_non_delete_tools(tool_name):
     [
         ("delete_file", {"path": "notes.txt"}),
         ("mcp__filesystem__remove_file", {"path": "notes.txt"}),
-        ("run_command", {"command": "rm notes.txt"}),
+        ("shell", {"command": "rm notes.txt"}),
     ],
 )
 def test_auto_approve_mode_still_asks_for_explicit_delete(tool_name, arguments):
@@ -112,14 +112,14 @@ def test_auto_approve_mode_still_asks_for_explicit_delete(tool_name, arguments):
     assert "delete" in decision.reason.lower() or "remove" in decision.reason.lower()
 
 
-@pytest.mark.parametrize("tool_name", ["web_search", "read_file", "search_files"])
+@pytest.mark.parametrize("tool_name", ["web_search", "read", "grep"])
 def test_modify_only_mode_asks_for_read_tools(tool_name):
     decision = PermissionEngine.default().evaluate(make_context(tool_name=tool_name, mode="modify_only"))
 
     assert decision.behavior == "ask"
 
 
-@pytest.mark.parametrize("tool_name", ["edit_file", "write_file", "apply_patch", "run_command"])
+@pytest.mark.parametrize("tool_name", ["edit", "write", "patch", "shell"])
 def test_modify_only_mode_allows_mutating_tools(tool_name):
     decision = PermissionEngine.default().evaluate(make_context(tool_name=tool_name, mode="modify_only"))
 
@@ -130,7 +130,7 @@ def test_modify_only_mode_allows_mutating_tools(tool_name):
     ("tool_name", "arguments"),
     [
         ("delete_file", {"path": "notes.txt"}),
-        ("run_command", {"command": "rm notes.txt"}),
+        ("shell", {"command": "rm notes.txt"}),
     ],
 )
 def test_modify_only_mode_still_asks_for_explicit_delete(tool_name, arguments):
@@ -141,7 +141,7 @@ def test_modify_only_mode_still_asks_for_explicit_delete(tool_name, arguments):
     assert decision.behavior == "ask"
 
 
-@pytest.mark.parametrize("tool_name", ["web_search", "read_file", "edit_file"])
+@pytest.mark.parametrize("tool_name", ["web_search", "read", "edit"])
 def test_ask_always_mode_asks_for_every_tool(tool_name):
     decision = PermissionEngine.default().evaluate(make_context(tool_name=tool_name, mode="ask_always"))
 
@@ -173,7 +173,7 @@ def test_mcp_tools_ask_by_default():
 
 
 def test_mcp_route_tools_ask_by_default():
-    decision = PermissionEngine.default().evaluate(make_context(tool_name="filesystem__read_file"))
+    decision = PermissionEngine.default().evaluate(make_context(tool_name="filesystem__read"))
 
     assert decision.behavior == "ask"
     assert "MCP" in decision.reason
@@ -213,8 +213,8 @@ def test_mcp_server_rule_matches_route_and_alias_names():
         )
     ])
 
-    route_decision = engine.evaluate(make_context(tool_name="filesystem__read_file"))
-    alias_decision = engine.evaluate(make_context(tool_name="mcp__filesystem__read_file"))
+    route_decision = engine.evaluate(make_context(tool_name="filesystem__read"))
+    alias_decision = engine.evaluate(make_context(tool_name="mcp__filesystem__read"))
 
     assert route_decision.behavior == "deny"
     assert route_decision.matched_rules[0].id == "deny-server"
@@ -224,7 +224,7 @@ def test_mcp_server_rule_matches_route_and_alias_names():
 
 def test_session_allow_overrides_default_mcp_ask():
     context = make_context(
-        tool_name="filesystem__read_file",
+        tool_name="filesystem__read",
         arguments={},
     )
     context = replace(
@@ -234,7 +234,7 @@ def test_session_allow_overrides_default_mcp_ask():
                 id="allow-read-file",
                 behavior="allow",
                 target_type="mcp_tool",
-                pattern="filesystem__read_file",
+                pattern="filesystem__read",
                 source="session",
             )
         ],
@@ -248,7 +248,7 @@ def test_session_allow_overrides_default_mcp_ask():
 
 def test_turn_allow_overrides_default_mcp_ask():
     context = make_context(
-        tool_name="filesystem__read_file",
+        tool_name="filesystem__read",
         arguments={},
     )
     context = replace(
@@ -258,7 +258,7 @@ def test_turn_allow_overrides_default_mcp_ask():
                 id="turn-allow",
                 behavior="allow",
                 target_type="mcp_tool",
-                pattern="filesystem__read_file",
+                pattern="filesystem__read",
                 source="session",
             )
         ],
@@ -276,12 +276,12 @@ def test_explicit_ask_overrides_session_allow():
             id="ask-write-file",
             behavior="ask",
             target_type="mcp_tool",
-            pattern="filesystem__write_file",
+            pattern="filesystem__write",
             source="user",
         )
     ])
     context = make_context(
-        tool_name="filesystem__write_file",
+        tool_name="filesystem__write",
         arguments={},
     )
     context = replace(
@@ -291,7 +291,7 @@ def test_explicit_ask_overrides_session_allow():
                 id="allow-write-file",
                 behavior="allow",
                 target_type="mcp_tool",
-                pattern="filesystem__write_file",
+                pattern="filesystem__write",
                 source="session",
             )
         ],
@@ -310,12 +310,12 @@ def test_unimplemented_sandbox_rule_types_do_not_match_tool_name(target_type):
             id=f"deny-{target_type}",
             behavior="deny",
             target_type=target_type,
-            pattern="filesystem__read_file",
+            pattern="filesystem__read",
             source="user",
         )
     ])
 
-    decision = engine.evaluate(make_context(tool_name="filesystem__read_file"))
+    decision = engine.evaluate(make_context(tool_name="filesystem__read"))
 
     assert decision.behavior == "ask"
     assert not decision.matched_rules
@@ -351,24 +351,24 @@ def test_capabilities_for_builtin_read_tool():
 
 
 def test_capabilities_for_builtin_code_tools():
-    assert capabilities_for_tool("list_files") == {ToolCapability.FILESYSTEM_READ}
-    assert capabilities_for_tool("read_file") == {ToolCapability.FILESYSTEM_READ}
-    assert capabilities_for_tool("search_files") == {ToolCapability.FILESYSTEM_READ}
-    assert capabilities_for_tool("edit_file") == {ToolCapability.FILESYSTEM_WRITE}
-    assert capabilities_for_tool("write_file") == {ToolCapability.FILESYSTEM_WRITE}
-    assert capabilities_for_tool("apply_patch") == {ToolCapability.FILESYSTEM_WRITE}
-    assert capabilities_for_tool("run_command") == {ToolCapability.COMMAND_EXEC}
+    assert capabilities_for_tool("glob") == {ToolCapability.FILESYSTEM_READ}
+    assert capabilities_for_tool("read") == {ToolCapability.FILESYSTEM_READ}
+    assert capabilities_for_tool("grep") == {ToolCapability.FILESYSTEM_READ}
+    assert capabilities_for_tool("edit") == {ToolCapability.FILESYSTEM_WRITE}
+    assert capabilities_for_tool("write") == {ToolCapability.FILESYSTEM_WRITE}
+    assert capabilities_for_tool("patch") == {ToolCapability.FILESYSTEM_WRITE}
+    assert capabilities_for_tool("shell") == {ToolCapability.COMMAND_EXEC}
 
 
 def test_mcp_tool_defaults_to_dynamic_capability():
-    assert capabilities_for_tool("filesystem__read_file") == {ToolCapability.MCP_DYNAMIC}
+    assert capabilities_for_tool("filesystem__read") == {ToolCapability.MCP_DYNAMIC}
     assert capabilities_for_tool("mcp__unknown__tool") == {ToolCapability.MCP_DYNAMIC}
 
 
 def test_capability_overrides_replace_defaults():
     assert capabilities_for_tool(
-        "filesystem__write_file",
-        {"filesystem__write_file": ["FILESYSTEM_WRITE"]},
+        "filesystem__write",
+        {"filesystem__write": ["FILESYSTEM_WRITE"]},
     ) == {ToolCapability.FILESYSTEM_WRITE}
 
 

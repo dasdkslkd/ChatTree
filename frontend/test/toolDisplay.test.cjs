@@ -134,7 +134,7 @@ function testFormatsRawContentWhileExtractingModelEnvelope() {
 
 function testFormatsSlimmedToolResultEnvelopeWithoutRawFields() {
   const toolMessage = {
-    name: 'run_command',
+    name: 'shell',
     tool_call_id: 'call-1',
     tool_result_id: 'result-slim',
     content: JSON.stringify({
@@ -171,43 +171,35 @@ function testShowsStructuredErrorMessage() {
       error: {
         type: 'NotImplementedError',
         message: '',
-        tool_name: 'run_command',
+        tool_name: 'shell',
         command: 'pwsh -c test',
       },
     }),
   });
 
-  assert.equal(output, 'NotImplementedError: run_command failed while running `pwsh -c test`');
+  assert.equal(output, 'NotImplementedError: shell failed while running `pwsh -c test`');
   assert.equal(isToolResultError({
     content: JSON.stringify({
-      error: { type: 'NotImplementedError', tool_name: 'run_command' },
+      error: { type: 'NotImplementedError', tool_name: 'shell' },
     }),
   }), true);
 }
 
 function testSummarizesCommonToolCalls() {
   assert.equal(
-    summarizeToolCall('read_file', '{"path":"src/main.py"}'),
+    summarizeToolCall('read', '{"path":"src/main.py"}'),
     '读取 src/main.py',
   );
   assert.equal(
-    summarizeToolCall('run_command', '{"command":"pytest -q","timeout_seconds":30}'),
+    summarizeToolCall('shell', '{"command":"pytest -q","timeout_seconds":30}'),
     '运行 pytest -q',
   );
   assert.equal(
-    summarizeToolCall('start_background_command', '{"command":"npm run dev"}'),
-    '后台运行 npm run dev',
-  );
-  assert.equal(
-    summarizeToolCall('wait_command', '{"command_run_id":"run-command-1"}'),
-    '等待命令 run-command-1',
-  );
-  assert.equal(
-    summarizeToolCall('edit_file', '{"path":"a.py","old_string":"x","new_string":"y"}'),
+    summarizeToolCall('edit', '{"path":"a.py","replacements":[{"old":"x","new":"y"}]}'),
     '编辑 a.py · 精确替换',
   );
   assert.equal(
-    summarizeToolCall('search_files', '{"query":"ToolManager","path":"backend"}'),
+    summarizeToolCall('grep', '{"pattern":"ToolManager","path":"backend"}'),
     '搜索 "ToolManager"',
   );
 }
@@ -227,16 +219,12 @@ function testSummarizesPatchAndCompactArguments() {
   ].join('\n');
 
   assert.equal(
-    summarizeToolCall('apply_patch', JSON.stringify({ patch })),
+    summarizeToolCall('patch', JSON.stringify({ patch })),
     '应用补丁 · 2 个文件',
   );
   assert.equal(
-    summarizeToolCall('run_command', 'pytest test/test_code_tools.py -q'),
+    summarizeToolCall('shell', 'pytest test/test_code_tools.py -q'),
     '运行 pytest test/test_code_tools.py -q',
-  );
-  assert.equal(
-    summarizeToolCall('start_background_command', 'npm run dev'),
-    '后台运行 npm run dev',
   );
 }
 

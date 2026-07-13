@@ -1,4 +1,4 @@
-from pathlib import Path
+﻿from pathlib import Path
 import json
 import sys
 
@@ -22,7 +22,7 @@ name: review
 description: Review code changes
 when_to_use: Use before merging code
 allowed_tools:
-  - read_file
+  - read
   - search
 policy:
   allow_implicit_invocation: false
@@ -50,7 +50,7 @@ def test_load_skill_roots_discovers_project_skill(tmp_path):
     assert skill.source == CapabilitySource.PROJECT
     assert skill.description == "Review code changes"
     assert skill.when_to_use == "Use before merging code"
-    assert skill.allowed_tools == ["read_file", "search"]
+    assert skill.allowed_tools == ["read", "search"]
     assert skill.path == skill_path
     assert skill.metadata["base_name"] == "review"
     assert skill.metadata["content_length"] > 0
@@ -86,7 +86,7 @@ def test_load_skill_roots_supports_comma_separated_allowed_tools_and_when_to_use
 name: review
 description: Review code changes
 when-to-use: Use before merging code
-allowed_tools: read_file, search
+allowed_tools: read, search
 ---
 
 # Review
@@ -98,7 +98,7 @@ allowed_tools: read_file, search
 
     assert len(skills) == 1
     assert skills[0].when_to_use == "Use before merging code"
-    assert skills[0].allowed_tools == ["read_file", "search"]
+    assert skills[0].allowed_tools == ["read", "search"]
 
 
 def test_load_skill_roots_supports_skill_aliases(tmp_path):

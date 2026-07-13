@@ -1,4 +1,4 @@
-import json
+﻿import json
 
 import pytest
 
@@ -203,7 +203,7 @@ def test_tool_result_storage_sqlite_copy_tolerates_run_id_as_node_id(tmp_path):
 
     record = store.save_result(
         content="subagent output",
-        tool_name="run_command",
+        tool_name="shell",
         conversation_id=conv_id,
         node_id="run-subagent-1",
         tool_call_id="call-subagent-1",
@@ -228,7 +228,7 @@ def test_tool_result_storage_sqlite_copy_tolerates_run_id_as_node_id(tmp_path):
         ).fetchone()
 
     assert call["node_id"] is None
-    assert call["name"] == "run_command"
+    assert call["name"] == "shell"
     assert result["node_id"] is None
     assert result["tool_call_id"] == "call-subagent-1"
     assert result["output_preview"] == "subagent output"

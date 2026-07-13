@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import json
 import sqlite3
 from pathlib import Path
@@ -650,12 +650,12 @@ def test_completed_assistant_process_persists_duration(tmp_path: Path):
                 "tool_calls": [{
                     "id": "call-duration",
                     "type": "function",
-                    "function": {"name": "read_file", "arguments": "{}"},
+                    "function": {"name": "read", "arguments": "{}"},
                 }],
             },
             "tools": [{
                 "tool_call_id": "call-duration",
-                "name": "read_file",
+                "name": "read",
                 "content": "ok",
             }],
         }],

@@ -1,4 +1,4 @@
-from pathlib import Path
+﻿from pathlib import Path
 import asyncio
 import json
 import sys
@@ -301,7 +301,7 @@ class FakeWorkflowToolManager(FakeToolManager):
             {
                 "type": "function",
                 "function": {
-                    "name": "run_command",
+                    "name": "shell",
                     "description": "Run a command",
                     "parameters": {"type": "object", "properties": {}},
                 },
@@ -398,7 +398,7 @@ class EnterPlanThenWriteProvider(CapturingProvider):
                         "id": "call_write",
                         "type": "function",
                         "function": {
-                            "name": "write_file",
+                            "name": "write",
                             "arguments": json.dumps({"path": "x.txt", "content": "nope"}),
                         },
                     },
@@ -516,7 +516,7 @@ class PlanModeToolManager:
         tools.append({
             "type": "function",
             "function": {
-                "name": "write_file",
+                "name": "write",
                 "description": "Write a file",
                 "parameters": {
                     "type": "object",
@@ -591,7 +591,7 @@ def test_send_message_stream_enter_plan_mode_blocks_same_round_write(tmp_path: P
     )
 
     tool_results = [chunk["tool_call"] for chunk in chunks if chunk.get("event_type") == "tool_result"]
-    write_result = next(item for item in tool_results if item["name"] == "write_file")
+    write_result = next(item for item in tool_results if item["name"] == "write")
     assert "permission_denied" in write_result["content"]
     assert "plan mode" in write_result["content"]
     reloaded = manager.get_conversation(conversation.metadata["id"])
@@ -872,7 +872,7 @@ def test_send_message_stream_allows_final_after_real_start_workflow(tmp_path: Pa
 def test_send_message_stream_btw_runs_isolated_side_question_without_tools(tmp_path: Path):
     skill_path = tmp_path / "tools" / "SKILL.md"
     skill_path.parent.mkdir()
-    skill_path.write_text("# Tools\n\nThis injected skill mentions run_command.", encoding="utf-8")
+    skill_path.write_text("# Tools\n\nThis injected skill mentions shell.", encoding="utf-8")
     registry = CapabilityRegistry()
     registry.add_capabilities(
         [
@@ -915,7 +915,7 @@ def test_send_message_stream_btw_runs_isolated_side_question_without_tools(tmp_p
     ]
     full_prompt = "\n\n".join(str(message.get("content") or "") for message in model_manager.provider.messages)
     assert "## Available Capabilities" not in full_prompt
-    assert "This injected skill mentions run_command" not in full_prompt
+    assert "This injected skill mentions shell" not in full_prompt
     assert "Claude Code-style side question" in sent_user_messages[-1]["content"]
     assert "Do not call tools" in sent_user_messages[-1]["content"]
     assert "what changed here?" in sent_user_messages[-1]["content"]

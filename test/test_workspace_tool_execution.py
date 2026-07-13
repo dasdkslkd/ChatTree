@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import json
 from pathlib import Path
 
@@ -58,7 +58,7 @@ def make_orchestrator(manager: ToolManager, global_root: Path) -> ToolOrchestrat
     )
 
 
-def test_run_command_uses_workspace_cwd_instead_of_global_tool_root(tmp_path):
+def test_shell_uses_workspace_cwd_instead_of_global_tool_root(tmp_path):
     global_root = tmp_path / "global"
     project = tmp_path / "project"
     global_root.mkdir()
@@ -68,7 +68,7 @@ def test_run_command_uses_workspace_cwd_instead_of_global_tool_root(tmp_path):
     workspace = normalize_workspace({"cwd": str(project), "protected_paths": [".git"]})
 
     result = run(manager.execute_tool(
-        "run_command",
+        "shell",
         {"command": "python -c \"import pathlib; print(pathlib.Path('marker.txt').read_text())\""},
         workspace=workspace,
     ))
@@ -91,18 +91,18 @@ def test_workspace_contexts_do_not_share_code_tool_cwd_state(tmp_path):
     manager = make_manager(global_root)
 
     first_payload = json.loads(run(manager.execute_tool(
-        "read_file",
+        "read",
         {"path": "name.txt"},
         workspace=normalize_workspace({"cwd": str(first)}),
     )))
     second_payload = json.loads(run(manager.execute_tool(
-        "read_file",
+        "read",
         {"path": "name.txt"},
         workspace=normalize_workspace({"cwd": str(second)}),
     )))
 
-    assert first_payload["content"] == "first"
-    assert second_payload["content"] == "second"
+    assert first_payload["content"] == "1\tfirst"
+    assert second_payload["content"] == "1\tsecond"
 
 
 def test_orchestrator_enforces_workspace_protected_path_per_call(tmp_path):
@@ -114,7 +114,7 @@ def test_orchestrator_enforces_workspace_protected_path_per_call(tmp_path):
     orchestrator = make_orchestrator(manager, global_root)
 
     message = run(orchestrator.execute_tool_call(
-        tool_call("write_file", {"path": ".git/config", "content": "unsafe"}),
+        tool_call("write", {"path": ".git/config", "content": "unsafe"}),
         conversation_id="conv-1",
         node_id="node-1",
         workspace=normalize_workspace({"cwd": str(project), "protected_paths": [".git"]}),

@@ -1,4 +1,4 @@
-import unittest
+﻿import unittest
 import asyncio
 import json
 import tempfile
@@ -98,19 +98,13 @@ class PromptCatalogTests(unittest.TestCase):
 
     def test_core_prompt_defines_command_tool_boundaries(self):
         text = load_prompt_template("core")
-        self.assertIn("run_command", text)
-        self.assertIn("start_background_command", text)
-        self.assertIn("wait_command", text)
-        self.assertIn("Use `run_command` for command execution that should start foreground", text)
-        self.assertIn("Use `start_background_command` only for true background command work", text)
-        self.assertIn("Use `wait_command` only when the current answer must join", text)
-        self.assertIn("Do not claim completion, exit code, or output", text)
+        self.assertIn("shell", text)
+        self.assertIn("Use `shell` for command execution that should start foreground", text)
         self.assertIn("auto-background", text)
         self.assertIn("active shell declared by the command tool description", text)
-        self.assertNotIn("start_terminal", text)
-        self.assertNotIn("wait_terminal", text)
-        self.assertIn("If the user explicitly asked for a background command and it fails", text)
-        self.assertIn("do not describe the final result as completed by the background run", text)
+        self.assertNotIn("start_background_command", text)
+        self.assertNotIn("wait_command", text)
+        self.assertNotIn("run_command", text)
 
     def test_core_prompt_distinguishes_fresh_subagents_from_forks(self):
         text = load_prompt_template("core")
@@ -421,7 +415,7 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
             {"type": "function", "function": {"name": "update_plan"}},
             {"type": "function", "function": {"name": "exit_plan_mode"}},
             {"type": "function", "function": {"name": "ask_user_question"}},
-            {"type": "function", "function": {"name": "read_file"}},
+            {"type": "function", "function": {"name": "read"}},
         ]
 
         normal_names = {
@@ -433,8 +427,8 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
             for tool in manager._filter_plan_tools_for_mode(tools, "plan")
         }
 
-        self.assertEqual(normal_names, {"enter_plan_mode", "read_file"})
-        self.assertEqual(plan_names, {"update_plan", "exit_plan_mode", "ask_user_question", "read_file"})
+        self.assertEqual(normal_names, {"enter_plan_mode", "read"})
+        self.assertEqual(plan_names, {"update_plan", "exit_plan_mode", "ask_user_question", "read"})
 
     async def test_attached_runtime_context_lists_active_task_without_internal_ids(self):
         task_service = ActiveTaskService()
@@ -525,7 +519,7 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
             conversation_id=conversation.metadata["id"],
             tool_call={
                 "function": {
-                    "name": "run_command",
+                    "name": "shell",
                     "arguments": json.dumps({"command": "echo 3", "step": 3}),
                 }
             },
@@ -584,7 +578,7 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
                             "id": "call-step-3",
                             "type": "function",
                             "function": {
-                                "name": "run_command",
+                                "name": "shell",
                                 "arguments": json.dumps({"command": "echo 3", "step": 3}),
                             },
                         }],
@@ -610,7 +604,7 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
                 return [{
                     "type": "function",
                     "function": {
-                        "name": "run_command",
+                        "name": "shell",
                         "parameters": {"type": "object", "properties": {"step": {"type": "integer"}}},
                     },
                 }]
@@ -902,7 +896,7 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
         outcome = manager._task_outcome_from_tool_execution(
             {
                 "function": {
-                    "name": "start_background_command",
+                    "name": "shell",
                     "arguments": json.dumps({"command": "echo 1", "step": 1}),
                 }
             },
@@ -931,7 +925,7 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
         outcome = manager._task_outcome_from_tool_execution(
             {
                 "function": {
-                    "name": "run_command",
+                    "name": "shell",
                     "arguments": json.dumps({"command": "echo 1", "step": 1}),
                 }
             },
@@ -1141,7 +1135,7 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
         tools = [
             {"type": "function", "function": {"name": "create_task", "parameters": {"type": "object"}}},
             {"type": "function", "function": {"name": "set_task_step", "parameters": {"type": "object"}}},
-            {"type": "function", "function": {"name": "run_command", "parameters": {"type": "object", "properties": {"step": {"type": "integer"}, "command": {"type": "string"}}}}},
+            {"type": "function", "function": {"name": "shell", "parameters": {"type": "object", "properties": {"step": {"type": "integer"}, "command": {"type": "string"}}}}},
         ]
         filtered = manager._filter_tools_for_runtime(
             tools,
@@ -1153,7 +1147,7 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Active Conversation Task", messages[1]["content"])
         self.assertNotIn("Task rules:", messages[1]["content"])
         self.assertNotIn("pass `step`", messages[1]["content"])
-        self.assertEqual([tool["function"]["name"] for tool in filtered], ["run_command"])
+        self.assertEqual([tool["function"]["name"] for tool in filtered], ["shell"])
         self.assertNotIn("step", filtered[0]["function"]["parameters"]["properties"])
 
     def test_explicit_subagent_request_builds_multi_agent_runtime_context(self):
@@ -1213,14 +1207,14 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
             [
                 {"type": "function", "function": {"name": "spawn_agent"}},
                 {"type": "function", "function": {"name": "start_workflow"}},
-                {"type": "function", "function": {"name": "run_command"}},
+                {"type": "function", "function": {"name": "shell"}},
             ],
             mode,
         )
 
         self.assertIn("spawn_agent", messages[1]["content"])
         self.assertEqual(mode, "explicit_request_only")
-        self.assertEqual([tool["function"]["name"] for tool in tools], ["spawn_agent", "start_workflow", "run_command"])
+        self.assertEqual([tool["function"]["name"] for tool in tools], ["spawn_agent", "start_workflow", "shell"])
 
     def test_explicit_workflow_request_exposes_real_workflow_tool(self):
         manager = ChatManager(
@@ -1236,13 +1230,13 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
                 {"type": "function", "function": {"name": "spawn_agent"}},
                 {"type": "function", "function": {"name": "start_workflow"}},
                 {"type": "function", "function": {"name": "start_subagent"}},
-                {"type": "function", "function": {"name": "run_command"}},
+                {"type": "function", "function": {"name": "shell"}},
             ],
             mode,
         )
 
         self.assertEqual(mode, "explicit_request_only")
-        self.assertEqual([tool["function"]["name"] for tool in tools], ["spawn_agent", "start_workflow", "run_command"])
+        self.assertEqual([tool["function"]["name"] for tool in tools], ["spawn_agent", "start_workflow", "shell"])
 
     def test_no_multi_agent_request_hides_workflow_tool(self):
         manager = ChatManager(
@@ -1257,13 +1251,13 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
             [
                 {"type": "function", "function": {"name": "spawn_agent"}},
                 {"type": "function", "function": {"name": "start_workflow"}},
-                {"type": "function", "function": {"name": "run_command"}},
+                {"type": "function", "function": {"name": "shell"}},
             ],
             mode,
         )
 
         self.assertEqual(mode, "none")
-        self.assertEqual([tool["function"]["name"] for tool in tools], ["run_command"])
+        self.assertEqual([tool["function"]["name"] for tool in tools], ["shell"])
 
     def test_short_confirmation_turn_inherits_explicit_subagent_request(self):
         manager = ChatManager(
@@ -1289,13 +1283,13 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
         tools = manager._filter_agent_tools_for_mode(
             [
                 {"type": "function", "function": {"name": "spawn_agent"}},
-                {"type": "function", "function": {"name": "run_command"}},
+                {"type": "function", "function": {"name": "shell"}},
             ],
             mode,
         )
 
         self.assertEqual(mode, "explicit_request_only")
-        self.assertEqual([tool["function"]["name"] for tool in tools], ["spawn_agent", "run_command"])
+        self.assertEqual([tool["function"]["name"] for tool in tools], ["spawn_agent", "shell"])
 
     async def test_conversation_multi_agent_mode_can_be_set_to_proactive(self):
         manager = ChatManager(
@@ -1319,11 +1313,11 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
         tools = manager._filter_agent_tools_for_mode(
             [
                 {"type": "function", "function": {"name": "spawn_agent"}},
-                {"type": "function", "function": {"name": "run_command"}},
+                {"type": "function", "function": {"name": "shell"}},
             ],
             manager._resolve_multi_agent_mode("普通问题", loaded.metadata),
         )
-        self.assertEqual([tool["function"]["name"] for tool in tools], ["spawn_agent", "run_command"])
+        self.assertEqual([tool["function"]["name"] for tool in tools], ["spawn_agent", "shell"])
 
     async def test_btw_builds_side_question_runtime_context(self):
         manager = ChatManager(
@@ -1793,7 +1787,7 @@ class TaskNotificationTests(unittest.IsolatedAsyncioTestCase):
                             {
                                 "id": "call-1",
                                 "type": "function",
-                                "function": {"name": "run_command", "arguments": "{}"},
+                                "function": {"name": "read", "arguments": "{}"},
                             }
                         ],
                     }
@@ -1815,7 +1809,7 @@ class TaskNotificationTests(unittest.IsolatedAsyncioTestCase):
                 self.seen_context_node_ids.append(kwargs["run_context"]["node_id"])
                 return [{
                     "role": "tool",
-                    "name": "run_command",
+                    "name": "read",
                     "tool_call_id": "call-1",
                     "content": "{}",
                 }]
@@ -1831,7 +1825,7 @@ class TaskNotificationTests(unittest.IsolatedAsyncioTestCase):
                 system_prompt="Implementer body",
                 provider_id="fake",
                 model_id="model",
-                tools=["run_command"],
+                tools=["read"],
             )
         ])
         chat_manager = RecordingChatManager(ToolCallingProvider())
@@ -2055,7 +2049,7 @@ class TaskNotificationTests(unittest.IsolatedAsyncioTestCase):
                         {
                             "id": "call-1",
                             "type": "function",
-                            "function": {"name": "run_command", "arguments": "{}"},
+                            "function": {"name": "read", "arguments": "{}"},
                         }
                     ],
                 }
@@ -2067,8 +2061,8 @@ class TaskNotificationTests(unittest.IsolatedAsyncioTestCase):
                     "FakeToolManager",
                     (),
                     {
-                        "get_openai_tools": lambda _self: [
-                            {"type": "function", "function": {"name": "run_command"}}
+                        "get_openai_tools": lambda _self, **_kwargs: [
+                            {"type": "function", "function": {"name": "read"}}
                         ]
                     },
                 )()
@@ -2108,7 +2102,7 @@ class TaskNotificationTests(unittest.IsolatedAsyncioTestCase):
                 system_prompt="Implementer body",
                 provider_id="fake",
                 model_id="model",
-                tools=["run_command"],
+                tools=["read"],
             )
         ])
         executor = SubagentExecutor(
@@ -2165,7 +2159,7 @@ class TaskNotificationTests(unittest.IsolatedAsyncioTestCase):
                         {
                             "id": "call-1",
                             "type": "function",
-                            "function": {"name": "run_command", "arguments": "{}"},
+                            "function": {"name": "read", "arguments": "{}"},
                         }
                     ],
                 }
@@ -2179,8 +2173,8 @@ class TaskNotificationTests(unittest.IsolatedAsyncioTestCase):
                     "FakeToolManager",
                     (),
                     {
-                        "get_openai_tools": lambda _self: [
-                            {"type": "function", "function": {"name": "run_command"}}
+                        "get_openai_tools": lambda _self, **_kwargs: [
+                            {"type": "function", "function": {"name": "read"}}
                         ]
                     },
                 )()
@@ -2203,7 +2197,7 @@ class TaskNotificationTests(unittest.IsolatedAsyncioTestCase):
                 statuses.append(self.run_manager.get_run(self.run_id_getter())["status"])
                 return [{
                     "role": "tool",
-                    "name": "run_command",
+                    "name": "read",
                     "tool_call_id": "call-1",
                     "content": "{}",
                 }]
@@ -2229,7 +2223,7 @@ class TaskNotificationTests(unittest.IsolatedAsyncioTestCase):
                 system_prompt="Implementer body",
                 provider_id="fake",
                 model_id="model",
-                tools=["run_command"],
+                tools=["read"],
                 max_tool_rounds=1,
             )
         ])

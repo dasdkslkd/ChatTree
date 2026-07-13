@@ -16,12 +16,6 @@ from .code_tools import (
 from .connection_manager import ConnectionManager
 from .mcp_client import MCPClient, MCPClientError
 from .mcp_tools import MCPSearchTool, MCPUrlReadTool
-from .command_tools import (
-    ReadCommandTool,
-    StartBackgroundCommandTool,
-    StopCommandTool,
-    WaitCommandTool,
-)
 from .tool_arguments import normalize_tool_arguments
 from .tool_filter import ToolFilter
 from .web_search import FetchUrlTool, WebSearchTool
@@ -35,11 +29,11 @@ logger = setup_logger("ToolManager")
 BUILTIN_UTILITY_TOOLS = {"read_tool_result", "list_available_tools"}
 BUILTIN_WEB_TOOLS = {"web_search", "fetch_url"}
 BUILTIN_CODE_TOOL_GROUPS = {
-    "read": {"list_files", "read_file"},
-    "search": {"search_files"},
-    "edit": {"edit_file", "apply_patch"},
-    "shell": {"run_command", "start_background_command", "wait_command", "read_command", "stop_command"},
-    "write": {"write_file"},
+    "read": {"read"},
+    "search": {"glob", "grep"},
+    "edit": {"edit", "patch"},
+    "shell": {"shell"},
+    "write": {"write"},
 }
 BUILTIN_LOCAL_TOOL_NAMES = (
     BUILTIN_UTILITY_TOOLS
@@ -47,14 +41,13 @@ BUILTIN_LOCAL_TOOL_NAMES = (
     | set().union(*BUILTIN_CODE_TOOL_GROUPS.values())
 )
 BUILTIN_CODE_TOOL_CLASSES = {
-    "list_files": ListFilesTool,
-    "read_file": ReadFileTool,
-    "search_files": SearchFilesTool,
-    "edit_file": EditFileTool,
-    "run_command": RunCommandTool,
-    "start_background_command": StartBackgroundCommandTool,
-    "write_file": WriteFileTool,
-    "apply_patch": ApplyPatchTool,
+    "glob": ListFilesTool,
+    "read": ReadFileTool,
+    "grep": SearchFilesTool,
+    "edit": EditFileTool,
+    "shell": RunCommandTool,
+    "write": WriteFileTool,
+    "patch": ApplyPatchTool,
 }
 BUILTIN_EXPOSURE_PROFILES = {
     "minimal": BUILTIN_UTILITY_TOOLS | BUILTIN_WEB_TOOLS,
@@ -216,10 +209,6 @@ class ToolManager:
         if include_command:
             tools.extend([
                 RunCommandTool(command_tool_config),
-                StartBackgroundCommandTool(command_tool_config),
-                WaitCommandTool(),
-                ReadCommandTool(),
-                StopCommandTool(),
             ])
         for tool in tools:
             self.register(tool)

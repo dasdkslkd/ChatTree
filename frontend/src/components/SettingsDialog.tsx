@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+﻿import { useEffect, useState, useCallback } from 'react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -76,15 +76,15 @@ const API_FORMAT_OPTIONS: { value: APIFormat; label: string; description: string
 const BUILTIN_EXPOSURE_OPTIONS: { value: BuiltinToolExposure; label: string; description: string }[] = [
   { value: 'coding', label: 'Coding', description: '代码读写、搜索、命令和网页工具' },
   { value: 'minimal', label: 'Minimal', description: '仅基础工具和网页工具' },
-  { value: 'full', label: 'Full', description: '暴露所有内置工具，包括 write_file' },
+  { value: 'full', label: 'Full', description: '暴露所有内置工具，包括 write' },
 ];
 
 const BUILTIN_CODE_GROUP_OPTIONS: { value: BuiltinCodeToolGroup; label: string; description: string }[] = [
-  { value: 'read', label: '读取', description: 'list_files, read_file' },
-  { value: 'search', label: '搜索', description: 'search_files' },
-  { value: 'edit', label: '编辑', description: 'edit_file, apply_patch' },
-  { value: 'shell', label: '命令', description: 'run_command' },
-  { value: 'write', label: '写入', description: 'write_file' },
+  { value: 'read', label: '读取', description: 'glob, read' },
+  { value: 'search', label: '搜索', description: 'grep' },
+  { value: 'edit', label: '编辑', description: 'edit, patch' },
+  { value: 'shell', label: '命令', description: 'shell' },
+  { value: 'write', label: '写入', description: 'write' },
 ];
 
 const TOOL_PERMISSION_MODE_OPTIONS: { value: ToolPermissionMode; label: string; description: string }[] = [

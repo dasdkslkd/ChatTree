@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import json
 import sys
 
@@ -72,16 +72,16 @@ def test_tool_manager_registers_builtin_code_tools():
 
     names = [tool["function"]["name"] for tool in manager.get_openai_tools()]
 
-    assert "list_files" in names
-    assert "read_file" in names
-    assert "search_files" in names
-    assert "edit_file" in names
-    assert "run_command" in names
-    assert "write_file" not in names
-    assert "apply_patch" in names
+    assert "glob" in names
+    assert "read" in names
+    assert "grep" in names
+    assert "edit" in names
+    assert "shell" in names
+    assert "write" not in names
+    assert "patch" in names
 
 
-def test_tool_manager_full_exposure_registers_raw_write_file_for_model():
+def test_tool_manager_full_exposure_registers_raw_write_for_model():
     manager = ToolManager({
         "tools": {
             "enabled": True,
@@ -97,7 +97,7 @@ def test_tool_manager_full_exposure_registers_raw_write_file_for_model():
 
     names = [tool["function"]["name"] for tool in manager.get_openai_tools()]
 
-    assert "write_file" in names
+    assert "write" in names
 
 
 def test_agent_management_tools_are_model_visible_when_registered():
@@ -268,7 +268,7 @@ def test_tool_manager_builtin_enabled_false_hides_builtin_runtime_tools():
     names = [tool["function"]["name"] for tool in manager.get_openai_tools()]
 
     assert "web_search" not in names
-    assert "read_file" not in names
+    assert "read" not in names
     assert "list_available_tools" in names
 
 

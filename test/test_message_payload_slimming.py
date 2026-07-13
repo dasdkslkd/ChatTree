@@ -1,4 +1,4 @@
-import os
+﻿import os
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -12,7 +12,7 @@ def test_slim_tool_result_for_ui_removes_heavy_fields_but_keeps_envelope():
     tool_message = {
         "id": "tool-1",
         "role": "tool",
-        "name": "run_command",
+        "name": "shell",
         "tool_call_id": "call-1",
         "content": '{"tool_result_id":"result-1","total_chars":42000,"truncated":true,"preview":"short"}',
         "raw_content": "x" * 42000,
@@ -25,7 +25,7 @@ def test_slim_tool_result_for_ui_removes_heavy_fields_but_keeps_envelope():
     assert slimmed == {
         "id": "tool-1",
         "role": "tool",
-        "name": "run_command",
+        "name": "shell",
         "tool_call_id": "call-1",
         "content": '{"tool_result_id":"result-1","total_chars":42000,"truncated":true,"preview":"short"}',
         "tool_result_id": "result-1",
@@ -52,7 +52,7 @@ def test_slim_message_for_ui_slims_nested_tool_payloads():
                 "assistant": {
                     "role": "assistant",
                     "content": "",
-                    "tool_calls": [{"id": "call-1", "function": {"name": "run_command", "arguments": "{}"}}],
+                    "tool_calls": [{"id": "call-1", "function": {"name": "shell", "arguments": "{}"}}],
                 },
                 "tools": [
                     {

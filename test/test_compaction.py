@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import os
 import shutil
 import sys
@@ -360,7 +360,7 @@ def test_messages_to_keep_preserves_latest_original_turn_after_summary():
 def test_microcompact_shortens_large_tool_results_without_touching_user_text():
     messages = [
         {"role": "user", "content": "u" * 12000},
-        {"role": "tool", "content": "x" * 12000, "tool_call_id": "call-1", "name": "run_command"},
+        {"role": "tool", "content": "x" * 12000, "tool_call_id": "call-1", "name": "shell"},
     ]
 
     compacted = microcompact_messages(messages, max_tool_content_chars=2000)
