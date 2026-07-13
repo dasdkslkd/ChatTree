@@ -1,19 +1,22 @@
 import { apiClient } from '../api/client';
-import type { TranscriptItem } from '../types/transcript';
+import type { TranscriptSnapshot } from '../types/transcript';
 
 type TranscriptApiClient = {
-  get: (url: string, config?: any) => Promise<{ data: { items?: TranscriptItem[] } }>;
+  get: (url: string, config?: any) => Promise<{ data: TranscriptSnapshot }>;
 };
 
 export function createTranscriptService(client: TranscriptApiClient) {
   return {
-    async fetchTranscript(conversationId: string, nodeId?: string | null): Promise<TranscriptItem[]> {
-      const params = nodeId ? { node_id: nodeId } : undefined;
+    async fetchBranchSnapshot(
+      conversationId: string,
+      tipNodeId: string,
+      signal?: AbortSignal,
+    ): Promise<TranscriptSnapshot> {
       const response = await client.get(
-        `/conversations/${encodeURIComponent(conversationId)}/transcript`,
-        params ? { params } : undefined,
+        `/conversations/${encodeURIComponent(conversationId)}/branches/${encodeURIComponent(tipNodeId)}/transcript`,
+        signal ? { signal } : undefined,
       );
-      return response.data.items || [];
+      return response.data;
     },
   };
 }

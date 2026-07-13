@@ -358,16 +358,22 @@ async def delete_conversation(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/conversations/{conversation_id}/transcript")
-async def get_conversation_transcript(
+@router.get("/conversations/{conversation_id}/branches/{tip_node_id}/transcript")
+async def get_conversation_branch_transcript(
     conversation_id: str,
-    node_id: Optional[str] = None,
+    tip_node_id: str,
     projection: TranscriptProjection = Depends(get_transcript_projection),
 ):
-    """获取当前分支的后端 transcript 投影。"""
+    """获取显式分支的后端 transcript 快照。"""
     try:
-        items = projection.list_for_branch(conversation_id, node_id)
-        return {"items": [to_transcript_item_dto(item) for item in items]}
+        items = projection.list_for_branch(conversation_id, tip_node_id)
+        revision = max((int(item.get("updated_at") or 0) for item in items), default=0)
+        return {
+            "conversation_id": conversation_id,
+            "tip_node_id": tip_node_id,
+            "revision": revision,
+            "items": [to_transcript_item_dto(item) for item in items],
+        }
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Transcript branch not found") from exc
     except HTTPException:

@@ -33,6 +33,13 @@ export interface TranscriptItem {
   updated_at?: number | string | null;
 }
 
+export interface TranscriptSnapshot {
+  conversation_id: string;
+  tip_node_id: string;
+  revision: number;
+  items: TranscriptItem[];
+}
+
 export type TranscriptPlanActionHandler = (item: TranscriptItem) => void | Promise<void>;
 export type TranscriptPlanQuestionAnswerHandler = (item: TranscriptItem, answer: string) => void | Promise<void>;
 export type TranscriptCopyHandler = (item: TranscriptItem, text: string) => void | Promise<void>;

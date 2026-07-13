@@ -43,12 +43,14 @@ def test_conversation_transcript_route_returns_branch_items_in_backend_order(tmp
     client = client_for(projection)
 
     response = client.get(
-        f"/conversations/{conversation_id}/transcript",
-        params={"node_id": node_id},
+        f"/conversations/{conversation_id}/branches/{node_id}/transcript",
     )
 
     assert response.status_code == 200
     payload = response.json()
+    assert payload["conversation_id"] == conversation_id
+    assert payload["tip_node_id"] == node_id
+    assert isinstance(payload["revision"], int)
     assert payload["items"][0]["type"] == "user_message"
     assert payload["items"][0]["item_type"] == "user_message"
     assert payload["items"][0]["message_id"] == message_id
@@ -64,23 +66,29 @@ def test_conversation_transcript_route_returns_404_for_unknown_conversation(tmp_
     persistence.initialize()
     client = client_for(TranscriptProjection(persistence))
 
-    response = client.get("/conversations/missing/transcript")
+    response = client.get("/conversations/missing/branches/missing-tip/transcript")
 
     assert response.status_code == 404
 
 
-def test_conversation_transcript_route_returns_empty_items_for_empty_conversation(tmp_path):
+def test_conversation_transcript_route_returns_empty_items_for_empty_branch(tmp_path):
     persistence = SQLitePersistence(tmp_path)
     persistence.initialize()
     repository = ChatRepository(persistence)
     projection = TranscriptProjection(persistence)
     conversation_id = repository.create_conversation(title="Empty")
+    node_id = repository.create_node(conversation_id, parent_id=None, child_order=0)
     client = client_for(projection)
 
-    response = client.get(f"/conversations/{conversation_id}/transcript")
+    response = client.get(f"/conversations/{conversation_id}/branches/{node_id}/transcript")
 
     assert response.status_code == 200
-    assert response.json() == {"items": []}
+    assert response.json() == {
+        "conversation_id": conversation_id,
+        "tip_node_id": node_id,
+        "revision": 0,
+        "items": [],
+    }
 
 
 def test_tool_result_route_falls_back_to_sqlite_blob_result(tmp_path):

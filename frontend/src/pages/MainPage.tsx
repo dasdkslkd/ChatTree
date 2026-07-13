@@ -208,9 +208,32 @@ function getTranscriptRequestKey(conversationId: string, nodeId?: string | null)
   return `${conversationId}:${nodeId || ''}`;
 }
 
+function getCurrentVisibleTranscriptTip(): { conversationId: string; tipNodeId: string } | null {
+  const state = useConversationStore.getState();
+  const conversationId = state.currentConversation?.id;
+  const tipNodeId = state.currentNodeId || state.currentConversation?.current_node_id || null;
+  return conversationId && tipNodeId ? { conversationId, tipNodeId } : null;
+}
+
+function getCurrentVisibleTranscriptKey(): string | null {
+  const visible = getCurrentVisibleTranscriptTip();
+  return visible ? getTranscriptRequestKey(visible.conversationId, visible.tipNodeId) : null;
+}
+
+function isAbortError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { name?: string; code?: string };
+  return candidate.name === 'AbortError' || candidate.code === 'ERR_CANCELED';
+}
+
 function getTranscriptItemNodeId(item: TranscriptItem): string | null {
   return item.node_id || item.anchor_node_id || null;
 }
+
+type TranscriptSnapshotRequest = {
+  controller: AbortController;
+  promise: Promise<void>;
+};
 
 type TranscriptScrollTarget = {
   messageId?: string | null;
@@ -1104,7 +1127,7 @@ export default function ChatPage() {
   const programmaticScrollRef = useRef(false);
   const queuedMessagesRef = useRef<QueuedMessage[]>([]);
   const toolPermissionDraftRef = useRef<ToolPermissionDraft>(toolPermissionDraft);
-  const transcriptRequestTokensRef = useRef<Map<string, symbol>>(new Map());
+  const transcriptRequestsRef = useRef<Map<string, TranscriptSnapshotRequest>>(new Map());
 
   const beginSidebarResize = useCallback((
     event: ReactPointerEvent<HTMLDivElement>,
@@ -1325,48 +1348,75 @@ export default function ChatPage() {
   const [planRejectFeedback, setPlanRejectFeedback] = useState('');
   const [planError, setPlanError] = useState<string | null>(null);
   const currentConversationIdRef = useRef<string | null>(null);
-  const currentVisibleTranscriptKeyRef = useRef<string | null>(null);
   currentConversationIdRef.current = currentConversation?.id ?? null;
-  const refreshTranscript = useCallback(async (
+  const loadTranscriptSnapshot = useCallback(async (
     conversationId: string | null | undefined,
-    nodeId?: string | null,
+    tipNodeId?: string | null,
   ) => {
-    if (!conversationId) {
+    if (!conversationId || !tipNodeId) {
       setTranscriptItems([]);
       setTranscriptError(null);
       setTranscriptLoading(false);
       return;
     }
 
-    const requestKey = getTranscriptRequestKey(conversationId, nodeId);
-    const requestToken = Symbol(requestKey);
-    transcriptRequestTokensRef.current.set(requestKey, requestToken);
-    const isCurrentVisibleRequest = () => requestKey === currentVisibleTranscriptKeyRef.current;
+    const requestKey = getTranscriptRequestKey(conversationId, tipNodeId);
+    const existing = transcriptRequestsRef.current.get(requestKey);
+    if (existing) {
+      if (requestKey === getCurrentVisibleTranscriptKey()) {
+        setTranscriptLoading(true);
+      }
+      return existing.promise;
+    }
+
+    for (const [key, request] of transcriptRequestsRef.current) {
+      if (key !== requestKey) {
+        request.controller.abort();
+        transcriptRequestsRef.current.delete(key);
+      }
+    }
+
+    const controller = new AbortController();
+    const isCurrentVisibleRequest = () => requestKey === getCurrentVisibleTranscriptKey();
     if (isCurrentVisibleRequest()) {
       setTranscriptLoading(true);
       setTranscriptError(null);
     }
 
-    try {
-      const items = await transcriptService.fetchTranscript(conversationId, nodeId);
-      if (transcriptRequestTokensRef.current.get(requestKey) !== requestToken) return;
-      if (!isCurrentVisibleRequest()) return;
-      setTranscriptItems(normalizeTranscriptItems(items));
-      setTranscriptError(null);
-    } catch (_) {
-      if (transcriptRequestTokensRef.current.get(requestKey) !== requestToken) return;
-      if (isCurrentVisibleRequest()) {
-        setTranscriptError('对话 transcript 刷新失败，已保留当前内容');
-      }
-    } finally {
-      if (transcriptRequestTokensRef.current.get(requestKey) === requestToken) {
-        transcriptRequestTokensRef.current.delete(requestKey);
+    const promise = transcriptService.fetchBranchSnapshot(conversationId, tipNodeId, controller.signal)
+      .then((snapshot) => {
+        if (controller.signal.aborted) return;
+        if (transcriptRequestsRef.current.get(requestKey)?.controller !== controller) return;
+        if (!isCurrentVisibleRequest()) return;
+        if (snapshot.conversation_id !== conversationId || snapshot.tip_node_id !== tipNodeId) return;
+        setTranscriptItems(normalizeTranscriptItems(snapshot.items || []));
+        setTranscriptError(null);
+      })
+      .catch((error) => {
+        if (controller.signal.aborted || isAbortError(error)) return;
+        if (transcriptRequestsRef.current.get(requestKey)?.controller !== controller) return;
         if (isCurrentVisibleRequest()) {
-          setTranscriptLoading(false);
+          setTranscriptError('对话 transcript 刷新失败，已保留当前内容');
         }
-      }
-    }
+      })
+      .finally(() => {
+        if (transcriptRequestsRef.current.get(requestKey)?.controller === controller) {
+          transcriptRequestsRef.current.delete(requestKey);
+          if (isCurrentVisibleRequest()) {
+            setTranscriptLoading(false);
+          }
+        }
+      });
+
+    transcriptRequestsRef.current.set(requestKey, { controller, promise });
+    return promise;
   }, []);
+  const refreshVisibleTranscriptSnapshot = useCallback(async (conversationId?: string | null) => {
+    const visible = getCurrentVisibleTranscriptTip();
+    if (!visible) return;
+    if (conversationId && visible.conversationId !== conversationId) return;
+    await loadTranscriptSnapshot(visible.conversationId, visible.tipNodeId);
+  }, [loadTranscriptSnapshot]);
   const hiddenSideRunIds = useMemo(() => {
     const conversationId = currentConversation?.id;
     return new Set(conversationId ? hiddenSideRunIdsByConversation[conversationId] ?? [] : []);
@@ -1564,9 +1614,6 @@ export default function ChatPage() {
       .sort((a, b) => b.createdAt - a.createdAt)[0];
     return liveMainRun?.targetNodeId || liveMainRun?.nodeId || selectedBranchTipId;
   }, [activeRunStates, currentBranchNodeIds, selectedBranchTipId]);
-  currentVisibleTranscriptKeyRef.current = currentConversation?.id
-    ? getTranscriptRequestKey(currentConversation.id, selectedBranchTipId)
-    : null;
   const currentBranchToolPermissionMode = useMemo(
     () => getBranchToolPermissionMode(messages, selectedBranchTipId),
     [messages, selectedBranchTipId],
@@ -1911,12 +1958,21 @@ export default function ChatPage() {
 
   useEffect(() => {
     const conversationId = currentConversation?.id;
-    if (!conversationId) {
+    if (!conversationId || !selectedBranchTipId) {
       setTranscriptItems([]);
+      setTranscriptError(null);
+      setTranscriptLoading(false);
       return;
     }
-    void refreshTranscript(conversationId, selectedBranchTipId);
-  }, [currentConversation?.id, currentBranchStreamActivity, refreshTranscript, selectedBranchTipId]);
+    void loadTranscriptSnapshot(conversationId, selectedBranchTipId);
+  }, [currentConversation?.id, loadTranscriptSnapshot, selectedBranchTipId]);
+
+  useEffect(() => () => {
+    for (const request of transcriptRequestsRef.current.values()) {
+      request.controller.abort();
+    }
+    transcriptRequestsRef.current.clear();
+  }, []);
 
   useEffect(() => {
     if (selectedSideRunId && !selectedSideRunItem) {
@@ -2414,8 +2470,8 @@ export default function ChatPage() {
       run?.kind ?? 'chat',
     );
     await refreshMessages(conversationId, { retries: 0 });
-    await refreshTranscript(conversationId, run?.targetNodeId ?? run?.nodeId ?? selectedBranchTipId);
-  }, [activeRunStates, currentConversation?.id, refreshMessages, refreshPendingToolApprovals, refreshTranscript, selectedBranchTipId]);
+    await refreshVisibleTranscriptSnapshot(conversationId);
+  }, [activeRunStates, currentConversation?.id, refreshMessages, refreshPendingToolApprovals, refreshVisibleTranscriptSnapshot]);
 
   const handleBindTaskNotification = useCallback(async (notificationId: string) => {
     const conversationId = currentConversation?.id;
@@ -2439,7 +2495,7 @@ export default function ChatPage() {
     }
     if (notification.status === 'delivered' && notification.delivered_node_id) {
       await refreshMessages(conversationId, { awaitNodeId: notification.delivered_node_id, retries: 6 });
-      await refreshTranscript(conversationId, notification.delivered_node_id);
+      await refreshVisibleTranscriptSnapshot(conversationId);
       await loadConversations();
     }
   }, [
@@ -2450,7 +2506,7 @@ export default function ChatPage() {
     probeTaskNotificationDelivery,
     refreshMessages,
     refreshTaskNotifications,
-    refreshTranscript,
+    refreshVisibleTranscriptSnapshot,
     liveSelectedBranchTipId,
   ]);
 
@@ -2553,8 +2609,8 @@ export default function ChatPage() {
     if (!nodeId || !currentConversation?.id) return;
     if (!window.confirm('确定删除这条消息及其后续分支？')) return;
     await deleteNode(nodeId);
-    await refreshTranscript(currentConversation.id);
-  }, [currentConversation?.id, deleteNode, refreshTranscript, selectedBranchTipId]);
+    await refreshVisibleTranscriptSnapshot(currentConversation.id);
+  }, [currentConversation?.id, deleteNode, refreshVisibleTranscriptSnapshot, selectedBranchTipId]);
 
   // Legacy static coverage still keys off the historical marker:
   // const handleApprovePlan = useCallback(async () => {
@@ -2585,14 +2641,14 @@ export default function ChatPage() {
         actionNodeId,
       );
       await refreshActivePlan(conversationId);
-      await refreshTranscript(conversationId, actionNodeId);
+      await refreshVisibleTranscriptSnapshot(conversationId);
     } catch (error) {
       console.error('Failed to approve plan:', error);
       setPlanError('批准失败，请稍后重试');
     } finally {
       setPlanActionPending(null);
     }
-  }, [currentConversation?.id, refreshActivePlan, refreshTranscript, selectedBranchTipId]);
+  }, [currentConversation?.id, refreshActivePlan, refreshVisibleTranscriptSnapshot, selectedBranchTipId]);
 
   const handleRejectPlan = useCallback(async (item: TranscriptItem) => {
     if (!isTranscriptItemVisibleNow(item, currentConversation?.id ?? null, selectedBranchTipId)) return;
@@ -2624,14 +2680,14 @@ export default function ChatPage() {
         actionNodeId,
       );
       await refreshActivePlan(conversationId);
-      await refreshTranscript(conversationId, actionNodeId);
+      await refreshVisibleTranscriptSnapshot(conversationId);
     } catch (error) {
       console.error('Failed to reject plan:', error);
       setPlanError('提交修改意见失败，请稍后重试');
     } finally {
       setPlanActionPending(null);
     }
-  }, [currentConversation?.id, planRejectFeedback, refreshActivePlan, refreshTranscript, selectedBranchTipId]);
+  }, [currentConversation?.id, planRejectFeedback, refreshActivePlan, refreshVisibleTranscriptSnapshot, selectedBranchTipId]);
 
   const handleAnswerPlanQuestion = useCallback(async (item: TranscriptItem, answerOverride?: string) => {
     if (!isTranscriptItemVisibleNow(item, currentConversation?.id ?? null, selectedBranchTipId)) return;
@@ -2665,7 +2721,7 @@ export default function ChatPage() {
         actionNodeId,
       ).then(async () => {
         await refreshActivePlan(conversationId);
-        await refreshTranscript(conversationId, actionNodeId);
+        await refreshVisibleTranscriptSnapshot(conversationId);
       }).catch((error) => {
         console.error('Failed to answer plan question:', error);
         setPlanError('提交回答失败，请稍后重试');
@@ -2676,7 +2732,7 @@ export default function ChatPage() {
     } finally {
       setPlanActionPending(null);
     }
-  }, [currentConversation?.id, refreshActivePlan, refreshTranscript, selectedBranchTipId]);
+  }, [currentConversation?.id, refreshActivePlan, refreshVisibleTranscriptSnapshot, selectedBranchTipId]);
 
   const handleStopStreaming = useCallback(() => {
     if (currentConversation?.id) {
@@ -2704,10 +2760,10 @@ export default function ChatPage() {
           return next;
         });
         await refreshMessages(conversationId, { retries: 1 });
-        await refreshTranscript(conversationId, selectedBranchTipId);
+        await refreshVisibleTranscriptSnapshot(conversationId);
       }
     })();
-  }, [currentBranchStoppableRunIds, currentConversation?.id, refreshMessages, refreshTranscript, selectedBranchTipId, updateQueuedMessages]);
+  }, [currentBranchStoppableRunIds, currentConversation?.id, refreshMessages, refreshVisibleTranscriptSnapshot, updateQueuedMessages]);
 
   // 全局注册一次：任意对话的流结束（completed/error/stopped）时，
   // 从后端刷新真实消息，再清理 StreamManager 中该对话的临时状态。
@@ -2739,7 +2795,7 @@ export default function ChatPage() {
         if (finishedId === currentConversationIdRef.current) {
           await loadTree(finishedId);
         }
-        await refreshTranscript(finishedId, awaitNodeId ?? null);
+        await refreshVisibleTranscriptSnapshot(finishedId);
         void syncSelectedConversationSideRuns(finishedId);
         const sentQueued = await sendNextQueuedMessage(finishedId);
         if (shouldProbeBackendScheduledFollowup({ finishStatus: status, hasQueuedFollowup: sentQueued })) {
@@ -2758,7 +2814,7 @@ export default function ChatPage() {
                 ? (awaitNodeId ? { awaitNodeId, retries: 0 } : undefined)
                 : { awaitNodeId, retries: 6 },
             );
-            await refreshTranscript(finishedId, awaitNodeId ?? null);
+            await refreshVisibleTranscriptSnapshot(finishedId);
             await loadConversations();
             void syncSelectedConversationSideRuns(finishedId);
             if (shouldProbeBackendScheduledFollowup({ finishStatus: status, hasQueuedFollowup: false })) {
@@ -2781,7 +2837,7 @@ export default function ChatPage() {
           ? (awaitNodeId ? { awaitNodeId, retries: 0 } : undefined)
           : { awaitNodeId, retries: 6 },
       );
-      await refreshTranscript(finishedId, awaitNodeId ?? null);
+      await refreshVisibleTranscriptSnapshot(finishedId);
       // 仅当确认真实消息已落地，才清理临时流状态（移除乐观气泡）。
       // 身份校验：若 await 期间用户对同一对话发起了新流，controller 已被替换则跳过。
       if (drained || confirmed) {
@@ -2791,7 +2847,7 @@ export default function ChatPage() {
         // 成功后再清理，彻底避免用户消息闪失。
         setTimeout(async () => {
           await refreshMessages(finishedId, { awaitNodeId, retries: 6 });
-          await refreshTranscript(finishedId, awaitNodeId ?? null);
+          await refreshVisibleTranscriptSnapshot(finishedId);
           // 无论是否确认，这是最后兜底：清理临时状态，避免气泡永久残留。
           streamManager.cleanupIfController(finishedId, controller, runId);
         }, 800);
@@ -2810,7 +2866,7 @@ export default function ChatPage() {
     patchAssistantMessageFromStream,
     loadConversations,
     loadTree,
-    refreshTranscript,
+    refreshVisibleTranscriptSnapshot,
     syncSelectedConversationSideRuns,
     sendNextQueuedMessage,
     syncBackendScheduledFollowup,
