@@ -4,14 +4,14 @@ import sys
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 # ---------- 导入路由 ----------
-from backend.api.routes import agents, capabilities, config, conversations, messages, models, notifications, plans, prompts, runs, slash, tasks, tool_approvals, tool_results, workflows
+from backend.api.routes import agents, capabilities, config, conversations, messages, models, notifications, perf, plans, prompts, runs, slash, tasks, tool_approvals, tool_results, workflows
 
 # ---------- 导入核心 ----------
 from backend.core.chat.chat_manager import ChatManager
@@ -48,6 +48,7 @@ from backend.core.tools.security.permissions import PermissionEngine
 from backend.core.tools.tool_manager import ToolManager
 from backend.core.storage.tool_result_storage import ToolResultStorage
 from backend.core.command_runtime import CommandExecutor
+from backend.core.perf import configure_profiler, get_profiler, load_perf_config
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
@@ -77,10 +78,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def performance_middleware(request: Request, call_next):
+    profiler = get_profiler()
+    route = getattr(request.scope.get("route"), "path", None) or request.url.path
+    with profiler.span(
+        "http.request",
+        method=request.method,
+        path=route,
+    ):
+        response = await call_next(request)
+    profiler.mark(
+        "http.response",
+        method=request.method,
+        path=route,
+        status_code=response.status_code,
+    )
+    return response
+
 # ---------- 挂载管理器 ----------
 @app.on_event("startup")
 async def startup_event():
     config_manager = Config()
+    perf_profiler = configure_profiler(load_perf_config(config_manager.data))
     persistence = SQLitePersistence()
     persistence.initialize()
     chat_repository = ChatRepository(persistence)
@@ -179,6 +200,7 @@ async def startup_event():
     app.state.task_repository = task_repository
     app.state.task_notification_repository = task_notification_repository
     app.state.config_manager = config_manager
+    app.state.perf_profiler = perf_profiler
     app.state.project_root = PROJECT_ROOT
     app.state.capability_registry = capability_registry
     app.state.model_manager = model_manager
@@ -215,6 +237,7 @@ app.include_router(runs.router, prefix="", tags=["运行"])
 app.include_router(plans.router, prefix="", tags=["计划"])
 app.include_router(tasks.router, prefix="", tags=["任务"])
 app.include_router(notifications.router, prefix="", tags=["Task Notification"])
+app.include_router(perf.router, prefix="", tags=["Performance"])
 app.include_router(slash.router, prefix="", tags=["Slash"])
 app.include_router(agents.router, prefix="", tags=["Agent"])
 app.include_router(workflows.router, prefix="", tags=["Workflow"])

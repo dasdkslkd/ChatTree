@@ -48,6 +48,21 @@ def test_run_repository_persists_run_events_and_replays_from_index(tmp_path):
     assert events[0]["payload"]["event_index"] == 1
 
 
+def test_run_repository_appends_event_batches(tmp_path):
+    _persistence, _chat, runs, conv_id, node_id = _repositories(tmp_path)
+    run_id = runs.create_run(conv_id, kind="chat", target_node_id=node_id)
+
+    returned = runs.append_events(run_id, [
+        {"status": "content", "content": "a"},
+        {"status": "content", "content": "b"},
+        {"status": "complete", "content": None},
+    ])
+
+    assert [event["event_index"] for event in returned] == [0, 1, 2]
+    assert runs.get_run(run_id)["event_count"] == 3
+    assert [event["payload"]["content"] for event in runs.read_events(run_id)[:2]] == ["a", "b"]
+
+
 def test_run_repository_marks_interrupted_runs_on_startup(tmp_path):
     _persistence, _chat, runs, conv_id, node_id = _repositories(tmp_path)
     run_id = runs.create_run(conv_id, kind="chat", target_node_id=node_id)

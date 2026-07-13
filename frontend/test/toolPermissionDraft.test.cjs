@@ -23,12 +23,13 @@ const {
   markToolPermissionModeSent,
   syncToolPermissionDraftFromBranch,
   selectToolPermissionMode,
+  getConfiguredDefaultToolPermissionMode,
 } = require(path.join(__dirname, '../src/utils/toolPermissionDraft.ts'));
 
 function testInitialDraftDoesNotOverrideParent() {
   const draft = createToolPermissionDraft();
 
-  assert.equal(draft.mode, 'ask_always');
+  assert.equal(draft.mode, 'auto_approve');
   assert.equal(getPendingToolPermissionMode(draft), undefined);
 }
 
@@ -67,12 +68,25 @@ function testCompletingPreviousSendDoesNotClearNewPendingSelection() {
   assert.equal(getPendingToolPermissionMode(draft), 'modify_only');
 }
 
+function testConfiguredDefaultMode() {
+  assert.equal(getConfiguredDefaultToolPermissionMode(null), 'auto_approve');
+  assert.equal(
+    getConfiguredDefaultToolPermissionMode({ tools: { default_permission_mode: 'ask_always' } }),
+    'ask_always',
+  );
+  assert.equal(
+    getConfiguredDefaultToolPermissionMode({ tools: { default_permission_mode: 'bogus' } }),
+    'auto_approve',
+  );
+}
+
 function main() {
   testInitialDraftDoesNotOverrideParent();
   testSelectedModeIsSentOnceThenInherited();
   testBranchModeUpdatesDisplayWhenNoPendingSelection();
   testBranchModeDoesNotOverwritePendingSelection();
   testCompletingPreviousSendDoesNotClearNewPendingSelection();
+  testConfiguredDefaultMode();
   console.log('toolPermissionDraft tests passed');
 }
 

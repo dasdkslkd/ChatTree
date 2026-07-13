@@ -48,6 +48,7 @@ import type {
   ProjectCapabilityConfig,
   ProjectSettingsItem,
 } from '../types/model';
+import type { ToolPermissionMode } from '../types/message';
 import type { Prompt, PromptResponse } from '../types/prompt';
 
 /* ─── Constants ─── */
@@ -84,6 +85,13 @@ const BUILTIN_CODE_GROUP_OPTIONS: { value: BuiltinCodeToolGroup; label: string; 
   { value: 'edit', label: '编辑', description: 'edit_file, apply_patch' },
   { value: 'shell', label: '命令', description: 'run_command' },
   { value: 'write', label: '写入', description: 'write_file' },
+];
+
+const TOOL_PERMISSION_MODE_OPTIONS: { value: ToolPermissionMode; label: string; description: string }[] = [
+  { value: 'auto_approve', label: '自动批准', description: '除显式删除外自动执行工具' },
+  { value: 'modify_only', label: '修改前询问', description: '读取自动执行，修改需确认' },
+  { value: 'ask_always', label: '总是询问', description: '每次工具调用都需确认' },
+  { value: 'plan', label: '计划模式', description: '仅允许只读规划工具' },
 ];
 
 const DEFAULT_PROVIDER_CONFIG: ModelProviderConfig = {
@@ -127,6 +135,7 @@ const DEFAULT_TOOLS_CONFIG: ToolsConfig = {
   enabled: true,
   max_rounds: 5,
   max_result_length: 8000,
+  default_permission_mode: 'auto_approve',
   builtin: {
     enabled: true,
     exposure: 'coding',
@@ -1523,6 +1532,10 @@ function BuiltinToolsSection() {
     setToolsForm(current => normalizeToolsConfig(updater(normalizeToolsConfig(current))));
   };
 
+  const setDefaultPermissionMode = (mode: ToolPermissionMode) => {
+    updateTools(current => ({ ...current, default_permission_mode: mode }));
+  };
+
   const loadRuntimeStatus = useCallback(async (options: { checkWeb?: boolean } = {}) => {
     try {
       const inventory = await configApi.getMcpStatus();
@@ -1676,10 +1689,29 @@ function BuiltinToolsSection() {
 
       <div className="flex-1 overflow-y-auto custom-scrollbar min-h-0 px-6 pb-6 space-y-4">
         <div className="rounded-xl overflow-hidden" style={{ border: '0.5px solid var(--border)' }}>
-          <div className="grid grid-cols-3 gap-4 px-4 py-3">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 px-4 py-3">
             <div className="flex items-center justify-between gap-3">
               <Label>工具系统</Label>
               <Switch checked={toolsForm.enabled !== false} onCheckedChange={(checked) => updateTools(current => ({ ...current, enabled: checked }))} />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs">默认审批</Label>
+              <Select
+                value={toolsForm.default_permission_mode || 'auto_approve'}
+                onValueChange={(value) => setDefaultPermissionMode(value as ToolPermissionMode)}
+              >
+                <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {TOOL_PERMISSION_MODE_OPTIONS.map(option => (
+                    <SelectItem key={option.value} value={option.value} textValue={option.label}>
+                      <div className="flex flex-col">
+                        <span>{option.label}</span>
+                        <span className="text-xs opacity-70">{option.description}</span>
+                      </div>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             <div className="space-y-1">
               <Label className="text-xs">最大轮次</Label>

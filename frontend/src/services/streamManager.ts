@@ -8,6 +8,8 @@ import { messageApi } from '../api/message';
 import { runsApi } from '../api/runs';
 import { slashRegistry } from './slashRegistry';
 import { isSideRunKind } from '../utils/sideRunSync';
+import { flushPerfEvents } from '../perf/client';
+import { perfNow, recordMark, recordSpan } from '../perf/marks';
 
 export const STREAM_DURATION_UPDATE_MS = 1000;
 
@@ -442,7 +444,12 @@ export class StreamManager {
   }
 
   private emitNotify(conversationId: string) {
+    const started = perfNow();
     this.listeners.forEach((listener) => listener(conversationId));
+    recordSpan('stream_manager.emit_notify', started, {
+      conversation_id: conversationId,
+      listener_count: this.listeners.size,
+    });
   }
 
   private clearPendingNotify(conversationId: string) {
@@ -457,6 +464,11 @@ export class StreamManager {
   }
 
   private notify(conversationId: string, immediate = false) {
+    recordMark('stream_manager.notify', {
+      conversation_id: conversationId,
+      immediate,
+      pending: this.pendingNotifyHandles.has(conversationId),
+    });
     if (immediate) {
       this.clearPendingNotify(conversationId);
       this.emitNotify(conversationId);
@@ -949,7 +961,14 @@ export class StreamManager {
 
     try {
       for await (const chunk of openStream()) {
+        const applyStarted = perfNow();
         runId = this.applyChunk(runId, chunk);
+        recordSpan('stream_manager.apply_chunk', applyStarted, {
+          run_id: runId,
+          status: chunk?.status,
+          event_type: chunk?.event_type,
+          event_index: chunk?.event_index,
+        });
         const state = this.streams.get(runId);
         const mappedStatus = mapRunStatus(chunk.status);
         if (mappedStatus === 'error') finishStatus = 'error';
@@ -997,6 +1016,7 @@ export class StreamManager {
           targetNodeId: finalState.targetNodeId,
           controller: finalState.abortController!,
         });
+        void flushPerfEvents();
       }
     }
   }

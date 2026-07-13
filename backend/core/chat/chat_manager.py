@@ -6,7 +6,7 @@ import json
 import base64
 from copy import deepcopy
 from contextlib import suppress
-from time import time
+from time import perf_counter, time
 from .conversation import Conversation
 from .node import NodeManager
 from .compact import (
@@ -40,6 +40,7 @@ from ..storage.chat_storage import ChatStorage
 from ..storage.prompt_storage import PromptStorage
 from ..model.model_manager import ModelManager
 from ..model.usage import add_usage, estimated_usage, usage_total
+from ..perf import get_profiler
 from ..utils.logger import setup_logger
 from ..config.config import cfg
 from ..workspace import build_default_workspace, normalize_workspace
@@ -113,6 +114,38 @@ PARALLEL_READ_ONLY_TOOL_NAMES = {
     "search_files",
     "web_search",
 }
+
+
+def _configured_default_tool_permission_mode() -> PermissionMode:
+    tools_config = cfg.data.get("tools", {}) if isinstance(cfg.data, dict) else {}
+    configured = None
+    if isinstance(tools_config, dict):
+        configured = tools_config.get("default_permission_mode")
+    return normalize_permission_mode(configured if configured not in (None, "") else "auto_approve")
+
+
+def _estimate_stream_tokens(text: str) -> int:
+    """Cheap output-token estimate for live throughput telemetry."""
+    if not text:
+        return 0
+    cjk = sum(1 for char in text if "\u3400" <= char <= "\u9fff")
+    non_space = sum(1 for char in text if not char.isspace())
+    latin_like = max(0, non_space - cjk)
+    estimate = cjk + int((latin_like + 3) / 4)
+    return max(1, estimate)
+
+
+def _usage_output_tokens(usage_info: Any) -> int:
+    if not isinstance(usage_info, dict):
+        return 0
+    for key in ("output_tokens", "completion_tokens"):
+        value = usage_info.get(key)
+        try:
+            if value is not None:
+                return max(0, int(value))
+        except (TypeError, ValueError):
+            continue
+    return 0
 
 
 def _tool_call_function_name(tool_call: Dict[str, Any]) -> str:
@@ -211,7 +244,7 @@ class ChatManager:
             eff_tool_permission_mode = normalize_permission_mode(
                 tool_permission_mode
                 if tool_permission_mode not in (None, "")
-                else parent_tool_permission_mode or "ask_always"
+                else parent_tool_permission_mode or _configured_default_tool_permission_mode()
             )
             parent_task_context_mode = "attached"
             if current_node_id and current_node_id in conversation.nodes:
@@ -1148,9 +1181,11 @@ class ChatManager:
         异步流式发送消息
         前端可以：for chunk in stream: 实时更新UI
         """
+        profiler = get_profiler()
         # 预加载（只读）用于解析模型/提供商，不做任何修改或保存。
         # 真正的树修改在锁内重新加载最新快照，避免并发覆盖 root.children_ids。
-        conversation_data = self.storage.load(conversation_id)
+        with profiler.span("chat.preload_conversation", conversation_id=conversation_id, run_id=run_id):
+            conversation_data = self.storage.load(conversation_id)
         if not conversation_data:
             logger.error(f"对话 {conversation_id} 不存在")
             yield StreamChunk(
@@ -1290,13 +1325,20 @@ class ChatManager:
         else:
             meta = {}
 
-        auto_result = await self._auto_compact_if_needed(
-            conversation_id,
-            parent_node_id=requested_parent_node_id,
-            target_model=target_model,
-            target_provider=target_provider,
-            model_context_window=meta.get("context_length"),
-        )
+        with profiler.span(
+            "chat.auto_compact_check",
+            conversation_id=conversation_id,
+            run_id=run_id,
+            provider_id=target_provider,
+            model_id=target_model,
+        ):
+            auto_result = await self._auto_compact_if_needed(
+                conversation_id,
+                parent_node_id=requested_parent_node_id,
+                target_model=target_model,
+                target_provider=target_provider,
+                model_context_window=meta.get("context_length"),
+            )
         if auto_result.get("was_compacted"):
             compact_node_id = str((auto_result.get("result") or {}).get("node_id") or "")
             if compact_node_id:
@@ -1398,112 +1440,116 @@ class ChatManager:
         # ── 临界区 1（锁内）：重新加载最新快照 + 建节点 + 立即保存 user 消息 ──
         # 锁内重载确保看到其他并发流刚提交的兄弟节点，add_node 不会丢失 root 引用。
         # 立即落盘是为了让前端的 userMsgLanded 判定能尽快看到真实 user 消息。
-        async with self._lock_for(conversation_id):
-            conversation = self.get_conversation(conversation_id)
-            if conversation is None:
-                yield StreamChunk(
-                    status=StreamStatus.ERROR, content="", node_id=None,
-                    conversation_id=conversation_id, run_id=run_id, error="对话不存在", tokens_used=0)
-                return
-            if requested_parent_node_id not in conversation.nodes:
-                yield StreamChunk(
-                    status=StreamStatus.ERROR, content="", node_id=None,
-                    conversation_id=conversation_id, run_id=run_id, error="父节点不存在", tokens_used=0)
-                return
-            current_node_id = requested_parent_node_id
-            parent_tool_permission_mode = None
-            parent_task_context_mode = TaskContextMode.ATTACHED.value
-            if current_node_id and current_node_id in conversation.nodes:
-                parent_tool_permission_mode = conversation.nodes[current_node_id].get("tool_permission_mode")
-                parent_task_context_mode = str(
-                    conversation.nodes[current_node_id].get("task_context_mode")
-                    or TaskContextMode.ATTACHED.value
-                )
-            if (
-                parent_tool_permission_mode == "plan"
-                and plan_context_permission_mode != "plan"
-                and active_plan_permission_mode != "plan"
-            ):
+        with profiler.span("chat.create_turn_node", conversation_id=conversation_id, run_id=run_id):
+            async with self._lock_for(conversation_id):
+                conversation = self.get_conversation(conversation_id)
+                if conversation is None:
+                    yield StreamChunk(
+                        status=StreamStatus.ERROR, content="", node_id=None,
+                        conversation_id=conversation_id, run_id=run_id, error="对话不存在", tokens_used=0)
+                    return
+                if requested_parent_node_id not in conversation.nodes:
+                    yield StreamChunk(
+                        status=StreamStatus.ERROR, content="", node_id=None,
+                        conversation_id=conversation_id, run_id=run_id, error="父节点不存在", tokens_used=0)
+                    return
+                current_node_id = requested_parent_node_id
                 parent_tool_permission_mode = None
-            eff_tool_permission_mode = normalize_permission_mode(
-                requested_tool_permission_mode
-                if requested_tool_permission_mode
-                else plan_context_permission_mode or active_plan_permission_mode or parent_tool_permission_mode or "ask_always"
-            )
-            try:
-                eff_task_context_mode = normalize_context_mode(
-                    task_context_mode if task_context_mode not in (None, "") else parent_task_context_mode
-                ).value
-            except ValueError:
-                yield StreamChunk(
-                    status=StreamStatus.ERROR,
-                    content="",
-                    node_id=None,
-                    conversation_id=conversation_id,
-                    run_id=run_id,
-                    error="task_context_mode must be attached or detached",
-                    tokens_used=0,
+                parent_task_context_mode = TaskContextMode.ATTACHED.value
+                if current_node_id and current_node_id in conversation.nodes:
+                    parent_tool_permission_mode = conversation.nodes[current_node_id].get("tool_permission_mode")
+                    parent_task_context_mode = str(
+                        conversation.nodes[current_node_id].get("task_context_mode")
+                        or TaskContextMode.ATTACHED.value
+                    )
+                if (
+                    parent_tool_permission_mode == "plan"
+                    and plan_context_permission_mode != "plan"
+                    and active_plan_permission_mode != "plan"
+                ):
+                    parent_tool_permission_mode = None
+                eff_tool_permission_mode = normalize_permission_mode(
+                    requested_tool_permission_mode
+                    if requested_tool_permission_mode
+                    else plan_context_permission_mode
+                    or active_plan_permission_mode
+                    or parent_tool_permission_mode
+                    or _configured_default_tool_permission_mode()
                 )
-                return
-            if (
-                self.capability_registry is not None
-                and not hidden_user_message
-                and not is_control_event_turn
-                and not suppress_user_message
-            ):
-                skill_names = collect_skill_injection_names(
-                    model_content,
-                    self._scoped_capability_registry(conversation),
-                    active_skill_names=self._recent_active_skill_names(conversation),
+                try:
+                    eff_task_context_mode = normalize_context_mode(
+                        task_context_mode if task_context_mode not in (None, "") else parent_task_context_mode
+                    ).value
+                except ValueError:
+                    yield StreamChunk(
+                        status=StreamStatus.ERROR,
+                        content="",
+                        node_id=None,
+                        conversation_id=conversation_id,
+                        run_id=run_id,
+                        error="task_context_mode must be attached or detached",
+                        tokens_used=0,
+                    )
+                    return
+                if (
+                    self.capability_registry is not None
+                    and not hidden_user_message
+                    and not is_control_event_turn
+                    and not suppress_user_message
+                ):
+                    skill_names = collect_skill_injection_names(
+                        model_content,
+                        self._scoped_capability_registry(conversation),
+                        active_skill_names=self._recent_active_skill_names(conversation),
+                    )
+                new_node = NodeManager.create_node(
+                    user_message=user_msg,
+                    parent_id=current_node_id,
+                    model_id=target_model,
+                    tool_permission_mode=eff_tool_permission_mode,
+                    task_context_mode=eff_task_context_mode,
                 )
-            new_node = NodeManager.create_node(
-                user_message=user_msg,
-                parent_id=current_node_id,
-                model_id=target_model,
-                tool_permission_mode=eff_tool_permission_mode,
-                task_context_mode=eff_task_context_mode,
-            )
-            if skill_names:
-                new_node["active_skill_names"] = skill_names
-            if refer_bundle is not None:
-                new_node["refer_context"] = {
-                    "selectors": refer_bundle.get("selectors") or [],
-                    "source_node_ids": refer_bundle.get("source_node_ids") or [],
-                    "truncated_sources": refer_bundle.get("truncated_sources") or [],
-                    "truncated": bool(refer_bundle.get("truncated")),
-                }
-            conversation.add_node(new_node, parent_id=current_node_id, focus=focus_new_node)
-            self._set_conversation_model_metadata(
-                conversation,
-                provider_id=target_provider,
-                model_id=target_model,
-            )
-            if plan_snapshot_after_context is not None:
-                conversation.metadata["plan_ledger"] = plan_snapshot_after_context
-            self._update_branch_usage_for_node(
-                conversation,
-                new_node["id"],
-                model_context_window=meta.get("context_length"),
-            )
-            self._save(conversation)
-            if is_control_event_turn:
-                self._persist_sqlite_control_event_turn(
-                    conversation=conversation,
-                    node=new_node,
-                    control_event=control_event_payload,
+                if skill_names:
+                    new_node["active_skill_names"] = skill_names
+                if refer_bundle is not None:
+                    new_node["refer_context"] = {
+                        "selectors": refer_bundle.get("selectors") or [],
+                        "source_node_ids": refer_bundle.get("source_node_ids") or [],
+                        "truncated_sources": refer_bundle.get("truncated_sources") or [],
+                        "truncated": bool(refer_bundle.get("truncated")),
+                    }
+                conversation.add_node(new_node, parent_id=current_node_id, focus=focus_new_node)
+                self._set_conversation_model_metadata(
+                    conversation,
                     provider_id=target_provider,
                     model_id=target_model,
-                    run_id=run_id,
                 )
-            elif user_msg is not None:
-                self._persist_sqlite_user_turn(
-                    conversation=conversation,
-                    node=new_node,
-                    user_msg=user_msg,
-                    provider_id=target_provider,
-                    model_id=target_model,
-                    run_id=run_id,
+                if plan_snapshot_after_context is not None:
+                    conversation.metadata["plan_ledger"] = plan_snapshot_after_context
+                self._update_branch_usage_for_node(
+                    conversation,
+                    new_node["id"],
+                    model_context_window=meta.get("context_length"),
                 )
+                self._save(conversation)
+                if is_control_event_turn:
+                    self._persist_sqlite_control_event_turn(
+                        conversation=conversation,
+                        node=new_node,
+                        control_event=control_event_payload,
+                        provider_id=target_provider,
+                        model_id=target_model,
+                        run_id=run_id,
+                    )
+                elif user_msg is not None:
+                    self._persist_sqlite_user_turn(
+                        conversation=conversation,
+                        node=new_node,
+                        user_msg=user_msg,
+                        provider_id=target_provider,
+                        model_id=target_model,
+                        run_id=run_id,
+                    )
 
         # 创建流控制器（在锁外，避免把网络流式包进锁里阻塞同对话其他分支）
         controller = StreamController(
@@ -1532,11 +1578,12 @@ class ChatManager:
             prompt_conversation = Conversation.from_dict(conversation.to_dict())
             prompt_conversation.switch_to_node(new_node["id"])
         task_turn_context = self._start_task_turn_context(prompt_conversation)
-        messages = self._build_prompt_messages(
-            prompt_conversation,
-            skill_names,
-            task_turn_context=task_turn_context,
-        )
+        with profiler.span("chat.build_prompt", conversation_id=conversation_id, run_id=run_id, node_id=new_node["id"]):
+            messages = self._build_prompt_messages(
+                prompt_conversation,
+                skill_names,
+                task_turn_context=task_turn_context,
+            )
         self._insert_context_before_history(messages, refer_context_messages)
         messages.extend(self._plan_context_messages(pending_plan_context))
         if continuation_messages:
@@ -1636,50 +1683,180 @@ class ChatManager:
                 # provider 引用已在循环前捕获（见上方 get_model）。即便此刻 config 变更
                 # 重建了 model_manager，在途流仍用这个局部 provider，不受影响。
                 # 不要在循环内重新读取 self.model_manager。
-                async for chunk in provider.generate_response_stream(
-                    model=target_model,
-                    messages=messages,
-                    stream_controller=controller,
-                    tools=tools,
-                    tool_choice="auto" if tools else None,
-                    reasoning_effort=eff_effort,
-                    thinking_enabled=eff_thinking,
-                ): # type: ignore
-                    if r := chunk.get("reasoning"):
-                        total_reasoning += r
-                        round_reasoning += r
-                    if data := chunk.get("content"):
-                        total_content += data
-                        round_content += data
-                    if chunk.get("tool_calls"):
-                        round_tool_calls = self._merge_tool_call_lists(round_tool_calls, chunk.get("tool_calls") or [])
-                    elif chunk.get("tool_call"):
-                        embedded = chunk.get("tool_call") or {}
-                        if embedded.get("tool_calls"):
-                            round_tool_calls = self._merge_tool_call_lists(round_tool_calls, embedded.get("tool_calls") or [])
+                provider_chunk_count = 0
+                provider_content_chars = 0
+                provider_reasoning_chars = 0
+                provider_tool_call_chunks = 0
+                first_provider_chunk = True
+                provider_started = perf_counter()
+                first_chunk_latency_ms: float | None = None
+                first_token_latency_ms: float | None = None
+                first_reasoning_latency_ms: float | None = None
+                first_content_latency_ms: float | None = None
+                with profiler.span(
+                    "chat.provider_round",
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    node_id=new_node["id"],
+                    provider_id=target_provider,
+                    model_id=target_model,
+                    tool_round=tool_round,
+                    tool_count=len(tools or []),
+                ):
+                    async for chunk in provider.generate_response_stream(
+                        model=target_model,
+                        messages=messages,
+                        stream_controller=controller,
+                        tools=tools,
+                        tool_choice="auto" if tools else None,
+                        reasoning_effort=eff_effort,
+                        thinking_enabled=eff_thinking,
+                    ): # type: ignore
+                        provider_chunk_count += 1
+                        if first_provider_chunk:
+                            first_chunk_latency_ms = (perf_counter() - provider_started) * 1000.0
+                            profiler.mark(
+                                "chat.provider_first_chunk",
+                                conversation_id=conversation_id,
+                                run_id=run_id,
+                                node_id=new_node["id"],
+                                provider_id=target_provider,
+                                model_id=target_model,
+                                latency_ms=round(first_chunk_latency_ms, 3),
+                            )
+                            first_provider_chunk = False
+                        if r := chunk.get("reasoning"):
+                            if first_token_latency_ms is None:
+                                first_token_latency_ms = (perf_counter() - provider_started) * 1000.0
+                                profiler.record({
+                                    "type": "span",
+                                    "name": "chat.provider_first_token_latency",
+                                    "duration_ms": first_token_latency_ms,
+                                    "attrs": {
+                                        "conversation_id": conversation_id,
+                                        "run_id": run_id,
+                                        "node_id": new_node["id"],
+                                        "provider_id": target_provider,
+                                        "model_id": target_model,
+                                        "token_kind": "reasoning",
+                                    },
+                                })
+                            if first_reasoning_latency_ms is None:
+                                first_reasoning_latency_ms = (perf_counter() - provider_started) * 1000.0
+                                profiler.record({
+                                    "type": "span",
+                                    "name": "chat.provider_first_reasoning_latency",
+                                    "duration_ms": first_reasoning_latency_ms,
+                                    "attrs": {
+                                        "conversation_id": conversation_id,
+                                        "run_id": run_id,
+                                        "node_id": new_node["id"],
+                                        "provider_id": target_provider,
+                                        "model_id": target_model,
+                                    },
+                                })
+                            provider_reasoning_chars += len(str(r))
+                            total_reasoning += r
+                            round_reasoning += r
+                        if data := chunk.get("content"):
+                            if first_token_latency_ms is None:
+                                first_token_latency_ms = (perf_counter() - provider_started) * 1000.0
+                                profiler.record({
+                                    "type": "span",
+                                    "name": "chat.provider_first_token_latency",
+                                    "duration_ms": first_token_latency_ms,
+                                    "attrs": {
+                                        "conversation_id": conversation_id,
+                                        "run_id": run_id,
+                                        "node_id": new_node["id"],
+                                        "provider_id": target_provider,
+                                        "model_id": target_model,
+                                        "token_kind": "content",
+                                    },
+                                })
+                            if first_content_latency_ms is None:
+                                first_content_latency_ms = (perf_counter() - provider_started) * 1000.0
+                                profiler.record({
+                                    "type": "span",
+                                    "name": "chat.provider_first_content_latency",
+                                    "duration_ms": first_content_latency_ms,
+                                    "attrs": {
+                                        "conversation_id": conversation_id,
+                                        "run_id": run_id,
+                                        "node_id": new_node["id"],
+                                        "provider_id": target_provider,
+                                        "model_id": target_model,
+                                    },
+                                })
+                            provider_content_chars += len(str(data))
+                            total_content += data
+                            round_content += data
+                        if chunk.get("tool_calls"):
+                            provider_tool_call_chunks += 1
+                            round_tool_calls = self._merge_tool_call_lists(round_tool_calls, chunk.get("tool_calls") or [])
+                        elif chunk.get("tool_call"):
+                            provider_tool_call_chunks += 1
+                            embedded = chunk.get("tool_call") or {}
+                            if embedded.get("tool_calls"):
+                                round_tool_calls = self._merge_tool_call_lists(round_tool_calls, embedded.get("tool_calls") or [])
 
-                    chunk_status = chunk.get("status")
-                    if chunk_status == StreamStatus.ERROR:
-                        generation_status = "error"
-                        error_message = chunk.get("error")
-                        round_status = "error"
-                    elif chunk_status == StreamStatus.STOPPED:
-                        generation_status = "stopped"
-                        round_status = "stopped"
-                    if chunk_status == StreamStatus.COMPLETE:
-                        tokens_used = chunk.get("tokens_used", tokens_used) or tokens_used
-                        usage_info = chunk.get("usage_info") or usage_info
-                        tokens_used = usage_total(usage_info, tokens_used)
-                        complete_chunk = chunk
-                        continue
+                        chunk_status = chunk.get("status")
+                        if chunk_status == StreamStatus.ERROR:
+                            generation_status = "error"
+                            error_message = chunk.get("error")
+                            round_status = "error"
+                        elif chunk_status == StreamStatus.STOPPED:
+                            generation_status = "stopped"
+                            round_status = "stopped"
+                        if chunk_status == StreamStatus.COMPLETE:
+                            tokens_used = chunk.get("tokens_used", tokens_used) or tokens_used
+                            usage_info = chunk.get("usage_info") or usage_info
+                            tokens_used = usage_total(usage_info, tokens_used)
+                            complete_chunk = chunk
+                            continue
 
-                    chunk["conversation_id"] = conversation_id
-                    if run_id:
-                        chunk["run_id"] = run_id
-                    if defer_round_content and chunk.get("content"):
-                        deferred_content_chunks.append(dict(chunk))
-                    else:
-                        yield chunk
+                        chunk["conversation_id"] = conversation_id
+                        if run_id:
+                            chunk["run_id"] = run_id
+                        if defer_round_content and chunk.get("content"):
+                            deferred_content_chunks.append(dict(chunk))
+                        else:
+                            yield chunk
+                provider_duration_ms = (perf_counter() - provider_started) * 1000.0
+                provider_content_tokens = _estimate_stream_tokens(round_content)
+                provider_reasoning_tokens = _estimate_stream_tokens(round_reasoning)
+                provider_estimated_output_tokens = provider_content_tokens + provider_reasoning_tokens
+                provider_usage_output_tokens = _usage_output_tokens(usage_info)
+                provider_output_tokens = provider_usage_output_tokens or provider_estimated_output_tokens
+                provider_tpm = (
+                    (provider_output_tokens * 60000.0) / provider_duration_ms
+                    if provider_duration_ms > 0 and provider_output_tokens > 0
+                    else 0.0
+                )
+                profiler.mark(
+                    "chat.provider_round.done",
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    node_id=new_node["id"],
+                    provider_id=target_provider,
+                    model_id=target_model,
+                    chunks=provider_chunk_count,
+                    duration_ms=round(provider_duration_ms, 3),
+                    first_chunk_latency_ms=round(first_chunk_latency_ms, 3) if first_chunk_latency_ms is not None else None,
+                    first_token_latency_ms=round(first_token_latency_ms, 3) if first_token_latency_ms is not None else None,
+                    first_reasoning_latency_ms=round(first_reasoning_latency_ms, 3) if first_reasoning_latency_ms is not None else None,
+                    first_content_latency_ms=round(first_content_latency_ms, 3) if first_content_latency_ms is not None else None,
+                    content_chars=provider_content_chars,
+                    reasoning_chars=provider_reasoning_chars,
+                    content_tokens_est=provider_content_tokens,
+                    reasoning_tokens_est=provider_reasoning_tokens,
+                    output_tokens_est=provider_estimated_output_tokens,
+                    output_tokens_usage=provider_usage_output_tokens or None,
+                    output_tokens_for_tpm=provider_output_tokens,
+                    tokens_per_minute_source="usage" if provider_usage_output_tokens else "estimate",
+                    tokens_per_minute_est=round(provider_tpm, 3),
+                    tool_call_chunks=provider_tool_call_chunks,
+                )
 
                 if round_status != "completed":
                     final_content = round_content
@@ -1802,8 +1979,16 @@ class ChatManager:
                         if approval_manager is not None:
                             approval_manager.cancel_for_node(new_node["id"])
 
-                execute_task = asyncio.create_task(
-                    self._execute_tool_calls(
+                async def execute_tool_calls_with_perf():
+                    with profiler.span(
+                        "chat.tool_round",
+                        conversation_id=conversation_id,
+                        run_id=run_id,
+                        node_id=new_node["id"],
+                        tool_round=tool_round,
+                        tool_call_count=len(round_tool_calls),
+                    ):
+                        return await self._execute_tool_calls(
                         round_tool_calls,
                         node_id=new_node["id"],
                         conversation_id=conversation_id,
@@ -1813,6 +1998,9 @@ class ChatManager:
                         run_context=tool_run_context,
                         task_turn_context=task_turn_context,
                     )
+
+                execute_task = asyncio.create_task(
+                    execute_tool_calls_with_perf()
                 )
                 event_get_task = asyncio.create_task(approval_events.get())
                 async def wait_controller_stop():
@@ -4018,20 +4206,17 @@ class ChatManager:
         tool_orchestrator = getattr(self, "tool_orchestrator", None)
         call_run_context = dict(run_context or {})
         call_run_context["tool_call_id"] = tool_call.get("id")
-        if tool_orchestrator:
-            try:
-                message = await tool_orchestrator.execute_tool_call(
-                    tool_call,
-                    conversation_id or "",
-                    node_id,
-                    emit_event=emit_event,
-                    workspace=workspace,
-                    permission_mode=permission_mode,
-                    run_context=call_run_context,
-                )
-            except TypeError as exc:
-                error_text = str(exc)
-                if "unexpected keyword argument 'run_context'" in error_text:
+        profiler = get_profiler()
+        with profiler.span(
+            "chat.tool_call",
+            conversation_id=conversation_id,
+            node_id=node_id,
+            run_id=call_run_context.get("run_id"),
+            tool_name=name,
+            permission_mode=permission_mode,
+        ):
+            if tool_orchestrator:
+                try:
                     message = await tool_orchestrator.execute_tool_call(
                         tool_call,
                         conversation_id or "",
@@ -4039,46 +4224,58 @@ class ChatManager:
                         emit_event=emit_event,
                         workspace=workspace,
                         permission_mode=permission_mode,
+                        run_context=call_run_context,
                     )
-                elif "unexpected keyword argument 'permission_mode'" in error_text:
-                    message = await tool_orchestrator.execute_tool_call(
-                        tool_call,
-                        conversation_id or "",
-                        node_id,
-                        emit_event=emit_event,
-                        workspace=workspace,
-                    )
-                elif "unexpected keyword argument 'workspace'" in error_text:
-                    message = await tool_orchestrator.execute_tool_call(
-                        tool_call,
-                        conversation_id or "",
-                        node_id,
-                        emit_event=emit_event,
-                    )
-                else:
-                    raise
-            return self._model_visible_tool_message(
-                message,
-                name=name,
-                conversation_id=conversation_id,
-                node_id=node_id,
-                tool_call_id=tool_call.get("id"),
-            )
-
-        if not self.tool_manager:
-            raw_result = json.dumps({"error": "Tool manager is not configured"}, ensure_ascii=False)
-        else:
-            try:
-                raw_result = await self.tool_manager.execute_tool(
-                    name,
-                    arguments,
-                    workspace=workspace,
-                    runtime_context=call_run_context,
+                except TypeError as exc:
+                    error_text = str(exc)
+                    if "unexpected keyword argument 'run_context'" in error_text:
+                        message = await tool_orchestrator.execute_tool_call(
+                            tool_call,
+                            conversation_id or "",
+                            node_id,
+                            emit_event=emit_event,
+                            workspace=workspace,
+                            permission_mode=permission_mode,
+                        )
+                    elif "unexpected keyword argument 'permission_mode'" in error_text:
+                        message = await tool_orchestrator.execute_tool_call(
+                            tool_call,
+                            conversation_id or "",
+                            node_id,
+                            emit_event=emit_event,
+                            workspace=workspace,
+                        )
+                    elif "unexpected keyword argument 'workspace'" in error_text:
+                        message = await tool_orchestrator.execute_tool_call(
+                            tool_call,
+                            conversation_id or "",
+                            node_id,
+                            emit_event=emit_event,
+                        )
+                    else:
+                        raise
+                return self._model_visible_tool_message(
+                    message,
+                    name=name,
+                    conversation_id=conversation_id,
+                    node_id=node_id,
+                    tool_call_id=tool_call.get("id"),
                 )
-            except TypeError as exc:
-                if "unexpected keyword argument 'workspace'" not in str(exc):
-                    raise
-                raw_result = await self.tool_manager.execute_tool(name, arguments)
+
+            if not self.tool_manager:
+                raw_result = json.dumps({"error": "Tool manager is not configured"}, ensure_ascii=False)
+            else:
+                try:
+                    raw_result = await self.tool_manager.execute_tool(
+                        name,
+                        arguments,
+                        workspace=workspace,
+                        runtime_context=call_run_context,
+                    )
+                except TypeError as exc:
+                    if "unexpected keyword argument 'workspace'" not in str(exc):
+                        raise
+                    raw_result = await self.tool_manager.execute_tool(name, arguments)
         return self._model_visible_tool_message(
             Message({
                 "id": str(uuid.uuid4()),

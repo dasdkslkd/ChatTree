@@ -124,8 +124,8 @@ import {
   shouldExportMessage,
 } from '../utils/taskNotificationVisibility';
 import {
-  DEFAULT_TOOL_PERMISSION_MODE,
   createToolPermissionDraft,
+  getConfiguredDefaultToolPermissionMode,
   syncToolPermissionDraftFromBranch,
   type ToolPermissionDraft,
 } from '../utils/toolPermissionDraft';
@@ -1081,6 +1081,8 @@ export default function ChatPage() {
   const [collapsedProjectIds, setCollapsedProjectIds] = useState<Set<string>>(() => new Set());
   const [expandedHistoryProjectIds, setExpandedHistoryProjectIds] = useState<Set<string>>(() => new Set());
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const modelConfig = useModelStore((state) => state.config);
+  const defaultToolPermissionMode = getConfiguredDefaultToolPermissionMode(modelConfig);
   const [manualProjectWorkspaces, setManualProjectWorkspaces] = useState<WorkspaceContext[]>(() => loadManualProjectWorkspaces());
   const [projectOrder, setProjectOrder] = useState<string[]>(() => loadProjectOrder());
   const [projectConfigs, setProjectConfigs] = useState<Record<string, ProjectCapabilityConfig>>({});
@@ -1628,10 +1630,10 @@ export default function ChatPage() {
   useEffect(() => {
     if (currentConversation || toolPermissionDraftRef.current.explicit) return;
     const current = toolPermissionDraftRef.current;
-    if (current.mode !== DEFAULT_TOOL_PERMISSION_MODE) {
-      updateToolPermissionDraft(createToolPermissionDraft());
+    if (current.mode !== defaultToolPermissionMode) {
+      updateToolPermissionDraft(createToolPermissionDraft(defaultToolPermissionMode));
     }
-  }, [currentConversation, updateToolPermissionDraft]);
+  }, [currentConversation, defaultToolPermissionMode, updateToolPermissionDraft]);
 
   useEffect(() => {
     if (!currentConversation?.id) {
@@ -1863,9 +1865,40 @@ export default function ChatPage() {
       }
     }
   }, []);
+  const shouldRefreshPendingToolApprovals = useMemo(() => {
+    if (!currentConversation?.id) return false;
+    if (serverPendingToolApprovals.length > 0) return true;
+    if (approvalPromptRunStates.some((run) => run.status === 'waiting_approval')) return true;
+    if (approvalPromptRunStates.some((run) =>
+      Object.values(run.pendingApprovals || {}).some((approval) => approval?.status === 'pending')
+    )) return true;
+    const effectiveMode = liveBranchToolPermissionMode ?? currentBranchToolPermissionMode ?? defaultToolPermissionMode;
+    return effectiveMode !== 'auto_approve';
+  }, [
+    approvalPromptRunStates,
+    currentBranchToolPermissionMode,
+    currentConversation?.id,
+    defaultToolPermissionMode,
+    liveBranchToolPermissionMode,
+    serverPendingToolApprovals.length,
+  ]);
   useEffect(() => {
-    void refreshPendingToolApprovals(currentConversation?.id);
-  }, [approvalPromptRunSignal, currentConversation?.id, refreshPendingToolApprovals]);
+    if (!currentConversation?.id) {
+      setServerPendingToolApprovals([]);
+      return;
+    }
+    if (!shouldRefreshPendingToolApprovals) {
+      if (serverPendingToolApprovals.length > 0) setServerPendingToolApprovals([]);
+      return;
+    }
+    void refreshPendingToolApprovals(currentConversation.id);
+  }, [
+    approvalPromptRunSignal,
+    currentConversation?.id,
+    refreshPendingToolApprovals,
+    serverPendingToolApprovals.length,
+    shouldRefreshPendingToolApprovals,
+  ]);
   const activePendingApprovalIds = useMemo(
     () => new Set(serverPendingToolApprovals.map((approval) => approval.id).filter(Boolean)),
     [serverPendingToolApprovals],

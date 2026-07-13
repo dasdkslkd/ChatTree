@@ -6,6 +6,7 @@ sys.path.insert(0, ".")
 
 from backend.core.chat.chat_manager import ChatManager
 from backend.core.chat.conversation import Conversation
+from backend.core.config.config import cfg
 from backend.core.config.types import StreamChunk, StreamController, StreamStatus
 from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
@@ -233,7 +234,7 @@ def test_stream_persists_tool_permission_mode_per_new_leaf_node(tmp_path):
     assert user_modes == ["auto_approve", "modify_only"]
 
 
-def test_stream_defaults_tool_permission_mode_to_ask_always(tmp_path):
+def test_stream_defaults_tool_permission_mode_to_auto_approve(tmp_path):
     manager = make_chat_manager(tmp_path)
     conversation = manager.create_conversation("tool permission default")
     conversation_id = conversation.metadata["id"]
@@ -249,7 +250,32 @@ def test_stream_defaults_tool_permission_mode_to_ask_always(tmp_path):
 
     reloaded = manager.get_conversation(conversation_id)
     assert reloaded is not None
-    assert reloaded.nodes[first_node_id]["tool_permission_mode"] == "ask_always"
+    assert reloaded.nodes[first_node_id]["tool_permission_mode"] == "auto_approve"
+
+
+def test_stream_uses_configured_default_tool_permission_mode(tmp_path):
+    previous = dict(cfg.data)
+    try:
+        cfg.data = {**cfg.data, "tools": {**(cfg.data.get("tools") or {}), "default_permission_mode": "ask_always"}}
+        manager = make_chat_manager(tmp_path)
+        conversation = manager.create_conversation("tool permission configured default")
+        conversation_id = conversation.metadata["id"]
+
+        asyncio.run(
+            drain(stream_from_current(
+                manager,
+                conversation_id,
+                "first",
+                model_id="deepseek-v4-pro",
+            ))
+        )
+        first_node_id = manager.get_conversation(conversation_id).current_node_id
+
+        reloaded = manager.get_conversation(conversation_id)
+        assert reloaded is not None
+        assert reloaded.nodes[first_node_id]["tool_permission_mode"] == "ask_always"
+    finally:
+        cfg.data = previous
 
 
 def test_stream_inherits_tool_permission_mode_from_parent_node(tmp_path):

@@ -102,6 +102,7 @@ export interface ToolsConfig {
   enabled?: boolean;
   max_rounds?: number;
   max_result_length?: number;
+  default_permission_mode?: 'auto_approve' | 'modify_only' | 'ask_always' | 'plan';
   enabled_tools?: string[] | null;
   disabled_tools?: string[];
   builtin?: BuiltinToolsConfig;

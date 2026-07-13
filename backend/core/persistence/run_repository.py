@@ -196,6 +196,16 @@ class SQLiteRunRepository:
             event_row = self._append_event_in_connection(conn, run_id, payload)
         return self._event_from_row(event_row)
 
+    def append_events(self, run_id: str, payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not payloads:
+            return []
+        rows = []
+        with self.persistence.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            for payload in payloads:
+                rows.append(self._append_event_in_connection(conn, run_id, payload))
+        return [self._event_from_row(row) for row in rows]
+
     def read_events(self, run_id: str, from_event: int = 0) -> list[dict[str, Any]]:
         with self.persistence.connect() as conn:
             rows = conn.execute(

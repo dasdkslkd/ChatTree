@@ -10,6 +10,7 @@ from inspect import isawaitable
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
+from backend.core.perf import get_profiler
 from backend.core.config.types import Message, Role
 from backend.core.shell_profile import ShellProfileResolver
 from backend.core.tools.security.approval import ApprovalManager, ApprovalRequest
@@ -105,6 +106,7 @@ class ToolOrchestrator:
             _parse_arguments(tool_call.get("function", {}).get("arguments")),
         )
         tool_call_id = str(tool_call.get("id") or "")
+        profiler = get_profiler()
 
         context = PermissionContext(
             conversation_id=conversation_id,
@@ -217,7 +219,14 @@ class ToolOrchestrator:
                         }
                     )
                 )
-                approval = await approval_wait_task
+                with profiler.span(
+                    "tool.approval_wait",
+                    conversation_id=conversation_id,
+                    node_id=node_id,
+                    run_id=_run_context_value(run_context, "run_id"),
+                    tool_name=name,
+                ):
+                    approval = await approval_wait_task
             except BaseException:
                 if not approval_wait_task.done():
                     approval_wait_task.cancel()
@@ -253,24 +262,31 @@ class ToolOrchestrator:
                     ),
                 )
 
-        sandbox = self._sandbox_for_workspace(workspace)
-        try:
-            for target in _filesystem_write_targets(
-                name,
-                arguments,
-                include_builtin_relative=workspace is not None,
-            ):
-                sandbox.check_filesystem_write(_resolve_workspace_target(target, workspace))
-        except SandboxViolation as exc:
-            return _tool_message(
-                name=name,
-                tool_call_id=tool_call_id,
-                content=_permission_denied_content(
-                    tool_name=name,
-                    reason=str(exc),
-                    message="Tool execution violates logical sandbox.",
-                ),
-            )
+        with profiler.span(
+            "tool.sandbox_check",
+            conversation_id=conversation_id,
+            node_id=node_id,
+            run_id=_run_context_value(run_context, "run_id"),
+            tool_name=name,
+        ):
+            sandbox = self._sandbox_for_workspace(workspace)
+            try:
+                for target in _filesystem_write_targets(
+                    name,
+                    arguments,
+                    include_builtin_relative=workspace is not None,
+                ):
+                    sandbox.check_filesystem_write(_resolve_workspace_target(target, workspace))
+            except SandboxViolation as exc:
+                return _tool_message(
+                    name=name,
+                    tool_call_id=tool_call_id,
+                    content=_permission_denied_content(
+                        tool_name=name,
+                        reason=str(exc),
+                        message="Tool execution violates logical sandbox.",
+                    ),
+                )
 
         runtime_context = {
             "conversation_id": conversation_id,
@@ -280,13 +296,20 @@ class ToolOrchestrator:
             "workspace": workspace,
             **(run_context if isinstance(run_context, dict) else {}),
         }
-        content = await _execute_manager_tool(
-            self.tool_manager,
-            name,
-            arguments,
-            workspace=workspace,
-            runtime_context=runtime_context,
-        )
+        with profiler.span(
+            "tool.execute",
+            conversation_id=conversation_id,
+            node_id=node_id,
+            run_id=_run_context_value(run_context, "run_id"),
+            tool_name=name,
+        ):
+            content = await _execute_manager_tool(
+                self.tool_manager,
+                name,
+                arguments,
+                workspace=workspace,
+                runtime_context=runtime_context,
+            )
         return _tool_message(name=name, tool_call_id=tool_call_id, content=content)
 
     def _sandbox_for_workspace(self, workspace: Optional[Dict[str, Any]]) -> LogicalSandbox:

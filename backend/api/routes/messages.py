@@ -11,6 +11,7 @@ from ...core.agents import SubagentExecutor
 from ...core.chat.chat_manager import ChatManager
 from ..dependencies import get_chat_manager, get_run_manager, get_subagent_executor, get_command_executor, get_workflow_manager
 from ...core.config.types import Message, StreamChunk
+from ...core.perf import get_profiler
 from ...core.runs import RunKind, RunManager, RunNotFoundError, RunStatus
 from ...core.slash import SlashCommandDispatcher, SlashDispatchKind, SlashCommandRegistry
 from ...core.slash.direct_response import build_direct_response_text
@@ -36,6 +37,65 @@ _ANCHOR_STOP_RUN_KINDS = (
     RunKind.WORKFLOW,
     RunKind.WORKFLOW_STEP,
 )
+_RUN_EVENT_BATCH_MAX_DELAY_SECONDS = 0.05
+_RUN_EVENT_BATCH_MAX_SIZE = 24
+
+
+def _should_flush_run_event_immediately(payload: Dict[str, Any]) -> bool:
+    status = str(payload.get("status") or "")
+    event_type = str(payload.get("event_type") or payload.get("type") or "")
+    if status in {"start", "complete", "error", "stopped"}:
+        return True
+    if event_type.startswith("tool_") or event_type.startswith("child_"):
+        return True
+    return event_type not in {"", "text", "reasoning", "process_content"}
+
+
+class RunEventBatcher:
+    def __init__(self, run_manager: RunManager, run_id: str):
+        self.run_manager = run_manager
+        self.run_id = run_id
+        self.pending: list[Dict[str, Any]] = []
+        self.last_flush = asyncio.get_running_loop().time()
+        self._flush_task: asyncio.Task[None] | None = None
+        self._lock = asyncio.Lock()
+
+    async def append(self, payload: Dict[str, Any]) -> None:
+        if _should_flush_run_event_immediately(payload):
+            await self.flush()
+            await self.run_manager.append_event(self.run_id, payload)
+            self.last_flush = asyncio.get_running_loop().time()
+            return
+        async with self._lock:
+            self.pending.append(payload)
+            if self._flush_task is None or self._flush_task.done():
+                self._flush_task = asyncio.create_task(self._flush_after_delay())
+        now = asyncio.get_running_loop().time()
+        if (
+            len(self.pending) >= _RUN_EVENT_BATCH_MAX_SIZE
+            or now - self.last_flush >= _RUN_EVENT_BATCH_MAX_DELAY_SECONDS
+        ):
+            await self.flush(now)
+
+    async def flush(self, now: float | None = None) -> None:
+        current_task = asyncio.current_task()
+        if self._flush_task is not None and self._flush_task is not current_task and not self._flush_task.done():
+            self._flush_task.cancel()
+        async with self._lock:
+            if not self.pending:
+                self.last_flush = now if now is not None else asyncio.get_running_loop().time()
+                return
+            batch = self.pending
+            self.pending = []
+        await self.run_manager.append_events(self.run_id, batch)
+        self.last_flush = now if now is not None else asyncio.get_running_loop().time()
+
+    async def _flush_after_delay(self) -> None:
+        try:
+            await asyncio.sleep(_RUN_EVENT_BATCH_MAX_DELAY_SECONDS)
+            await self.flush()
+        except asyncio.CancelledError:
+            return
 
 class SendMessageRequest(BaseModel):
     content: str
@@ -370,13 +430,23 @@ def slim_messages_for_ui(messages: List[Message]) -> List[Message]:
 
 
 async def _subscribe_sse(run_manager: RunManager, run_id: str, from_event: int = 0) -> AsyncIterator[str]:
+    profiler = get_profiler()
+    emitted = 0
+    first_event = True
     try:
-        async for payload in run_manager.subscribe(run_id, from_event):
-            if payload.get("type") == "run_finished":
-                continue
-            yield _format_sse_data(payload)
+        with profiler.span("sse.subscribe", run_id=run_id, from_event=from_event, route="messages"):
+            async for payload in run_manager.subscribe(run_id, from_event):
+                if payload.get("type") == "run_finished":
+                    continue
+                if first_event:
+                    profiler.mark("sse.first_event", run_id=run_id, route="messages")
+                    first_event = False
+                emitted += 1
+                yield _format_sse_data(payload)
     except RunNotFoundError:
         yield _format_sse_data({"status": "error", "error": "运行不存在或已结束", "run_id": run_id})
+    finally:
+        profiler.mark("sse.done", run_id=run_id, route="messages", emitted_events=emitted)
     yield _format_sse_data("[DONE]")
 
 
@@ -389,75 +459,100 @@ async def start_detached_chat_run(
 ) -> Dict[str, Any]:
     slash_result = slash_result or SlashCommandDispatcher().dispatch(request.content)
     run_kind = RunKind(str(slash_result.run_kind or RunKind.CHAT.value))
-    run = await run_manager.create_run(
+    profiler = get_profiler()
+    with profiler.span(
+        "message.detached_run.create",
         conversation_id=conversation_id,
-        kind=run_kind,
         anchor_node_id=request.parent_node_id,
-        summary=request.content[:80],
-        metadata={
-            "slash_command": {
-                "command": slash_result.canonical_name,
-                "input_command": slash_result.command_name,
-                "kind": slash_result.kind.value,
-                "args": slash_result.args,
-                "original_input": slash_result.original_input,
-                "tool_policy": slash_result.tool_policy.value,
-                "persistence_policy": slash_result.persistence_policy.value,
-                "run_kind": slash_result.run_kind,
-            } if not slash_result.is_passthrough else None,
-            "model_id": request.model_id,
-            "provider_id": request.provider_id,
-            "reasoning_effort": request.reasoning_effort,
-            "thinking_enabled": request.thinking_enabled,
-            "tool_permission_mode": request.tool_permission_mode,
-            "task_context_mode": request.task_context_mode,
-        },
-    )
+        kind=run_kind.value,
+    ):
+        run = await run_manager.create_run(
+            conversation_id=conversation_id,
+            kind=run_kind,
+            anchor_node_id=request.parent_node_id,
+            summary=request.content[:80],
+            metadata={
+                "slash_command": {
+                    "command": slash_result.canonical_name,
+                    "input_command": slash_result.command_name,
+                    "kind": slash_result.kind.value,
+                    "args": slash_result.args,
+                    "original_input": slash_result.original_input,
+                    "tool_policy": slash_result.tool_policy.value,
+                    "persistence_policy": slash_result.persistence_policy.value,
+                    "run_kind": slash_result.run_kind,
+                } if not slash_result.is_passthrough else None,
+                "model_id": request.model_id,
+                "provider_id": request.provider_id,
+                "reasoning_effort": request.reasoning_effort,
+                "thinking_enabled": request.thinking_enabled,
+                "tool_permission_mode": request.tool_permission_mode,
+                "task_context_mode": request.task_context_mode,
+            },
+        )
 
     async def produce() -> None:
         final_status = RunStatus.COMPLETED
         final_error: str | None = None
         bound_node_id: str | None = None
+        event_batcher = RunEventBatcher(run_manager, run.run_id)
         try:
-            async for chunk in chat_manager.send_message_stream(
+            with profiler.span(
+                "message.detached_run.produce",
                 conversation_id=conversation_id,
-                content=request.content,
-                model_id=request.model_id,
-                provider_id=request.provider_id,
-                parent_node_id=request.parent_node_id,
-                focus_new_node=request.focus_new_node,
-                reasoning_effort=request.reasoning_effort,
-                thinking_enabled=request.thinking_enabled,
-                import_files=request.import_files,
-                image_refs=request.image_refs,
-                tool_permission_mode=request.tool_permission_mode,
-                task_context_mode=request.task_context_mode,
                 run_id=run.run_id,
+                kind=run_kind.value,
+                provider_id=request.provider_id,
+                model_id=request.model_id,
             ):
-                chunk_data = build_stream_chunk_data(chunk, conversation_id)
-                node_id = chunk_data.get("node_id")
-                if node_id and node_id != bound_node_id:
-                    bound_node_id = node_id
-                    await run_manager.bind_target_node(run.run_id, node_id)
-                    legacy_session = LegacyRunStreamSession(run_manager, run.run_id, conversation_id)
-                    legacy_session.node_id = node_id
-                    _STREAM_SESSIONS[node_id] = legacy_session
-                    chunk_data["target_node_id"] = node_id
-                    if await run_manager.is_stop_requested(run.run_id):
-                        await chat_manager.stop_stream(node_id)
-                await run_manager.append_event(run.run_id, chunk_data)
-                if chunk_data.get("status") == "error":
-                    final_status = RunStatus.FAILED
-                    final_error = chunk_data.get("error")
-                elif chunk_data.get("status") == "stopped":
-                    final_status = RunStatus.CANCELLED
+                async for chunk in chat_manager.send_message_stream(
+                    conversation_id=conversation_id,
+                    content=request.content,
+                    model_id=request.model_id,
+                    provider_id=request.provider_id,
+                    parent_node_id=request.parent_node_id,
+                    focus_new_node=request.focus_new_node,
+                    reasoning_effort=request.reasoning_effort,
+                    thinking_enabled=request.thinking_enabled,
+                    import_files=request.import_files,
+                    image_refs=request.image_refs,
+                    tool_permission_mode=request.tool_permission_mode,
+                    task_context_mode=request.task_context_mode,
+                    run_id=run.run_id,
+                ):
+                    chunk_data = build_stream_chunk_data(chunk, conversation_id)
+                    node_id = chunk_data.get("node_id")
+                    if node_id and node_id != bound_node_id:
+                        bound_node_id = node_id
+                        await run_manager.bind_target_node(run.run_id, node_id)
+                        legacy_session = LegacyRunStreamSession(run_manager, run.run_id, conversation_id)
+                        legacy_session.node_id = node_id
+                        _STREAM_SESSIONS[node_id] = legacy_session
+                        chunk_data["target_node_id"] = node_id
+                        if await run_manager.is_stop_requested(run.run_id):
+                            await chat_manager.stop_stream(node_id)
+                    with profiler.span(
+                        "message.detached_run.append_event",
+                        conversation_id=conversation_id,
+                        run_id=run.run_id,
+                        status=chunk_data.get("status"),
+                        event_type=chunk_data.get("event_type"),
+                    ):
+                        await event_batcher.append(chunk_data)
+                    if chunk_data.get("status") == "error":
+                        final_status = RunStatus.FAILED
+                        final_error = chunk_data.get("error")
+                    elif chunk_data.get("status") == "stopped":
+                        final_status = RunStatus.CANCELLED
 
         except Exception as e:
             logger.exception("Detached stream failed for conversation %s", conversation_id)
             final_status = RunStatus.FAILED
             final_error = str(e)
+            await event_batcher.flush()
             await run_manager.append_event(run.run_id, _stream_error_chunk(conversation_id, str(e)))
         finally:
+            await event_batcher.flush()
             await run_manager.finish_run(run.run_id, final_status, final_error)
             if bound_node_id:
                 _STREAM_SESSIONS.pop(bound_node_id, None)

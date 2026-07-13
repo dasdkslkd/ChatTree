@@ -8,6 +8,7 @@ from fastapi.responses import StreamingResponse
 from backend.api.dependencies import get_chat_manager, get_run_manager, get_subagent_executor, get_command_executor, get_workflow_manager
 from backend.core.agents import SubagentExecutor
 from backend.core.chat.chat_manager import ChatManager
+from backend.core.perf import get_profiler
 from backend.core.runs import RunManager, RunNotFoundError
 from backend.core.runs.public import public_run_dict
 from backend.core.workflows import WorkflowManager
@@ -24,8 +25,17 @@ def _format_sse_data(payload: Dict[str, Any] | str) -> str:
 
 
 async def _subscribe_sse(run_manager: RunManager, run_id: str, from_event: int = 0):
-    async for payload in run_manager.subscribe(run_id, from_event):
-        yield _format_sse_data(payload)
+    profiler = get_profiler()
+    emitted = 0
+    first_event = True
+    with profiler.span("sse.subscribe", run_id=run_id, from_event=from_event, route="runs"):
+        async for payload in run_manager.subscribe(run_id, from_event):
+            if first_event:
+                profiler.mark("sse.first_event", run_id=run_id, route="runs")
+                first_event = False
+            emitted += 1
+            yield _format_sse_data(payload)
+    profiler.mark("sse.done", run_id=run_id, route="runs", emitted_events=emitted)
     yield _format_sse_data("[DONE]")
 
 
