@@ -322,6 +322,7 @@ class ToolManager:
         arguments: Dict[str, Any],
         workspace: Optional[Dict[str, Any]] = None,
         runtime_context: Optional[Dict[str, Any]] = None,
+        event_sink: Optional[Any] = None,
     ) -> str:
         """Execute a tool by exposed name."""
         if not self._filter.is_allowed(name):
@@ -349,10 +350,12 @@ class ToolManager:
 
             logger.info(f"Executing tool: {name} with args: {json.dumps(arguments, ensure_ascii=False)[:200]}")
             execute_arguments = dict(arguments)
-            if runtime_context is not None:
-                enriched_context = dict(runtime_context)
+            if runtime_context is not None or event_sink is not None:
+                enriched_context = dict(runtime_context or {})
                 if self.command_executor is not None:
                     enriched_context.setdefault("command_executor", self.command_executor)
+                if event_sink is not None:
+                    enriched_context.setdefault("tool_event_sink", event_sink)
                 execute_arguments["_runtime_context"] = enriched_context
             result = await tool.execute(**execute_arguments)
             logger.info(f"Tool {name} returned {len(result)} chars")

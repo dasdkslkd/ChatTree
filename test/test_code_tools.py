@@ -1,4 +1,5 @@
 import asyncio
+import io
 import json
 import os
 import subprocess
@@ -27,6 +28,88 @@ def run(coro):
 
 def load(payload: str):
     return json.loads(payload)
+
+
+class FakePopen:
+    def __init__(self, args, *, stdout_text: str = "", stderr_text: str = "", returncode: int = 0, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+        self.stdout = io.StringIO(stdout_text)
+        self.stderr = io.StringIO(stderr_text)
+        self.returncode = returncode
+        self.terminated = False
+        self.killed = False
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def communicate(self, timeout=None):
+        return "", self.stderr.read()
+
+    def terminate(self):
+        self.terminated = True
+        self.returncode = -15
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+
+
+class HangingPopen:
+    class BlockingStdout:
+        def __init__(self):
+            self.closed = False
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            while not self.closed:
+                import time
+                time.sleep(0.01)
+            raise StopIteration
+
+        def close(self):
+            self.closed = True
+
+    def __init__(self, args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+        self.stdout = self.BlockingStdout()
+        self.stderr = io.StringIO("")
+        self.returncode = None
+        self.terminated = False
+        self.killed = False
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        self.returncode = -15
+        return self.returncode
+
+    def communicate(self, timeout=None):
+        return "", ""
+
+    def terminate(self):
+        self.terminated = True
+        self.returncode = -15
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+
+
+class LongRunningPopen(FakePopen):
+    def __init__(self, args, *, stdout_text: str = "", stderr_text: str = "", **kwargs):
+        super().__init__(args, stdout_text=stdout_text, stderr_text=stderr_text, returncode=0, **kwargs)
+        self.returncode = None
+
+    def poll(self):
+        return self.returncode
 
 
 def make_config(tmp_path: Path, **overrides) -> CodeToolConfig:
@@ -111,12 +194,12 @@ def test_glob_uses_ripgrep_by_default_and_documents_parameters(tmp_path, monkeyp
     fake_rg = tmp_path / "rg.exe"
     calls = []
 
-    def fake_run(args, **kwargs):
+    def fake_popen(args, **kwargs):
         calls.append((args, kwargs))
-        return subprocess.CompletedProcess(args, 0, "src/app.py\nsrc/skip.txt\n", "")
+        return FakePopen(args, stdout_text="src/app.py\nsrc/skip.txt\n", **kwargs)
 
     monkeypatch.setattr(code_tools, "_resolve_ripgrep_executable", lambda config: fake_rg)
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
     tool = ListFilesTool(make_config(tmp_path))
 
     result = load(run(tool.execute(
@@ -141,6 +224,99 @@ def test_glob_uses_ripgrep_by_default_and_documents_parameters(tmp_path, monkeyp
     assert "do not use a `query` argument" in tool.description
 
 
+def test_glob_uses_ripgrep_for_directory_listing(tmp_path, monkeypatch):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("print('hi')", encoding="utf-8")
+    (tmp_path / "empty").mkdir()
+    (tmp_path / "README.md").write_text("notes", encoding="utf-8")
+    fake_rg = tmp_path / "rg.exe"
+    calls = []
+
+    def fake_popen(args, **kwargs):
+        calls.append((args, kwargs))
+        return FakePopen(args, stdout_text="src/app.py\nREADME.md\n", **kwargs)
+
+    monkeypatch.setattr(code_tools, "_resolve_ripgrep_executable", lambda config: fake_rg)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    tool = ListFilesTool(make_config(tmp_path))
+
+    result = load(run(tool.execute(path=".", pattern="*", files_only=False, limit=10)))
+
+    assert result["engine"] == "rg"
+    assert "src" in result["files"]
+    assert "empty" in result["files"]
+    assert "README.md" in result["files"]
+    assert calls
+    assert ["--glob", "*"] not in [calls[0][0][index:index + 2] for index in range(len(calls[0][0]) - 1)]
+
+
+def test_glob_streaming_ripgrep_stops_process_after_scan_limit(tmp_path, monkeypatch):
+    for index in range(1005):
+        (tmp_path / f"file_{index:04}.txt").write_text("x", encoding="utf-8")
+    fake_rg = tmp_path / "rg.exe"
+    proc_holder = {}
+
+    def fake_popen(args, **kwargs):
+        stdout_text = "".join(f"file_{index:04}.txt\n" for index in range(1005))
+        proc = LongRunningPopen(args, stdout_text=stdout_text, **kwargs)
+        proc_holder["proc"] = proc
+        return proc
+
+    monkeypatch.setattr(code_tools, "_resolve_ripgrep_executable", lambda config: fake_rg)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    tool = ListFilesTool(make_config(tmp_path, command_timeout_seconds=30))
+
+    result = load(run(tool.execute(path=".", pattern="*", limit=10)))
+
+    assert result["engine"] == "rg"
+    assert result["truncated"] is True
+    assert result["scanned_entries"] == 1001
+    assert proc_holder["proc"].terminated is True
+
+
+def test_glob_python_fallback_when_ripgrep_times_out(tmp_path, monkeypatch):
+    fake_rg = tmp_path / "rg.exe"
+    fallback_calls = []
+
+    def hanging_popen(args, **kwargs):
+        return HangingPopen(args, **kwargs)
+
+    def fake_python(**kwargs):
+        fallback_calls.append(kwargs)
+        return ["fallback.txt"], False, 1, 1
+
+    monkeypatch.setattr(code_tools, "_resolve_ripgrep_executable", lambda config: fake_rg)
+    monkeypatch.setattr(subprocess, "Popen", hanging_popen)
+    monkeypatch.setattr(code_tools, "_glob_files_python", fake_python)
+    tool = ListFilesTool(make_config(tmp_path, command_timeout_seconds=1))
+
+    result = load(run(tool.execute(path=".", files_only=True, limit=10)))
+
+    assert result["engine"] == "python"
+    assert result["fallback_reason"] == "ripgrep_timeout"
+    assert result["files"] == ["fallback.txt"]
+    assert fallback_calls
+
+
+def test_glob_observation_events_do_not_change_result(tmp_path, monkeypatch):
+    monkeypatch.setattr(code_tools, "_resolve_ripgrep_executable", lambda config: None)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("print('hi')", encoding="utf-8")
+    tool = ListFilesTool(make_config(tmp_path))
+    events = []
+
+    plain = load(run(tool.execute(path=".", pattern="*.py", limit=10)))
+    observed = load(run(tool.execute(
+        path=".",
+        pattern="*.py",
+        limit=10,
+        _runtime_context={"tool_event_sink": events.append},
+    )))
+
+    assert observed == plain
+    assert any(event["event_type"] == "tool_progress" for event in events)
+
+
 def test_tool_manager_preserves_glob_pattern_argument(tmp_path, monkeypatch):
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("print('hi')", encoding="utf-8")
@@ -148,12 +324,12 @@ def test_tool_manager_preserves_glob_pattern_argument(tmp_path, monkeypatch):
     fake_rg = tmp_path / "rg.exe"
     calls = []
 
-    def fake_run(args, **kwargs):
+    def fake_popen(args, **kwargs):
         calls.append((args, kwargs))
-        return subprocess.CompletedProcess(args, 0, "src/app.py\nsrc/app.ts\n", "")
+        return FakePopen(args, stdout_text="src/app.py\nsrc/app.ts\n", **kwargs)
 
     monkeypatch.setattr(code_tools, "_resolve_ripgrep_executable", lambda config: fake_rg)
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
     manager = ToolManager({
         "tools": {
             "enabled": True,
@@ -277,12 +453,12 @@ def test_grep_uses_project_bundled_rg_and_translates_options(tmp_path, monkeypat
     }
     calls = []
 
-    def fake_run(args, **kwargs):
+    def fake_popen(args, **kwargs):
         calls.append((args, kwargs))
-        return subprocess.CompletedProcess(args, 0, json.dumps(event, ensure_ascii=False) + "\n", "")
+        return FakePopen(args, stdout_text=json.dumps(event, ensure_ascii=False) + "\n", **kwargs)
 
     monkeypatch.setattr(code_tools, "_resolve_ripgrep_executable", lambda config: fake_rg)
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
     tool = SearchFilesTool(make_config(tmp_path))
 
     result = load(run(tool.execute(
@@ -313,6 +489,80 @@ def test_grep_uses_project_bundled_rg_and_translates_options(tmp_path, monkeypat
         "text": "Needle HERE",
         "type": "match",
     }]
+
+
+def test_grep_count_uses_ripgrep_when_available(tmp_path, monkeypatch):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("needle\nneedle\n", encoding="utf-8")
+    fake_rg = tmp_path / "rg.exe"
+    events = [
+        {
+            "type": "match",
+            "data": {
+                "path": {"text": "app.py"},
+                "lines": {"text": "needle\n"},
+                "line_number": 1,
+            },
+        },
+        {
+            "type": "match",
+            "data": {
+                "path": {"text": "app.py"},
+                "lines": {"text": "needle\n"},
+                "line_number": 2,
+            },
+        },
+    ]
+    calls = []
+
+    def fake_popen(args, **kwargs):
+        calls.append((args, kwargs))
+        return FakePopen(
+            args,
+            stdout_text="\n".join(json.dumps(event, ensure_ascii=False) for event in events) + "\n",
+            **kwargs,
+        )
+
+    monkeypatch.setattr(code_tools, "_resolve_ripgrep_executable", lambda config: fake_rg)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    tool = SearchFilesTool(make_config(tmp_path))
+
+    result = load(run(tool.execute(pattern="needle", path="src", output="count", limit=10)))
+
+    assert result["engine"] == "rg"
+    assert result["counts"] == [{"path": "src/app.py", "count": 2}]
+    assert "--json" in calls[0][0]
+
+
+def test_grep_python_fallback_when_ripgrep_times_out(tmp_path, monkeypatch):
+    fake_rg = tmp_path / "rg.exe"
+    fallback_calls = []
+
+    def hanging_popen(args, **kwargs):
+        return HangingPopen(args, **kwargs)
+
+    def fake_python(**kwargs):
+        fallback_calls.append(kwargs)
+        return {
+            "pattern": kwargs["pattern"],
+            "matches": [{"path": "fallback.txt", "line": 1, "preview": "needle", "type": "match"}],
+            "searched_files": 1,
+            "skipped_non_utf8": [],
+            "truncated": False,
+            "engine": "python",
+        }
+
+    monkeypatch.setattr(code_tools, "_resolve_ripgrep_executable", lambda config: fake_rg)
+    monkeypatch.setattr(subprocess, "Popen", hanging_popen)
+    monkeypatch.setattr(code_tools, "_grep_python", fake_python)
+    tool = SearchFilesTool(make_config(tmp_path, command_timeout_seconds=1))
+
+    result = load(run(tool.execute(pattern="needle", path=".", output="content")))
+
+    assert result["engine"] == "python"
+    assert result["fallback_reason"] == "ripgrep_timeout"
+    assert result["matches"] == [{"path": "fallback.txt", "line": 1, "text": "needle", "type": "match"}]
+    assert fallback_calls
 
 
 def test_grep_python_fallback_supports_regex_and_ignore_case(tmp_path, monkeypatch):

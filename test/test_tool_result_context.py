@@ -26,8 +26,15 @@ class FakeToolManager:
         self.tool_result_store = FakeToolResultStore()
         self.calls = []
 
-    async def execute_tool(self, name, arguments):
+    async def execute_tool(self, name, arguments, workspace=None, runtime_context=None):
         self.calls.append((name, arguments))
+        sink = runtime_context.get("tool_event_sink") if isinstance(runtime_context, dict) else None
+        if callable(sink):
+            sink({
+                "event_type": "tool_progress",
+                "status": "running",
+                "progress": {"phase": "fake-tool-manager"},
+            })
         return self.result
 
 
@@ -167,6 +174,86 @@ def test_execute_tool_calls_runs_read_only_tools_concurrently(monkeypatch):
     assert abs(tool_manager.started["read"] - tool_manager.started["grep"]) < 0.08
 
 
+def test_execute_tool_calls_streams_observation_events_before_batch_finishes(monkeypatch):
+    monkeypatch.setitem(cfg.data, "tools", {"max_result_length": 2000})
+    tool_manager = DelayedToolManager(delay=0.15)
+    manager = make_manager(tool_manager)
+    events = []
+    tool_calls = [
+        {
+            "id": "call-read",
+            "type": "function",
+            "function": {"name": "read", "arguments": "{\"path\":\"a.txt\"}"},
+        },
+        {
+            "id": "call-search",
+            "type": "function",
+            "function": {"name": "grep", "arguments": "{\"pattern\":\"needle\"}"},
+        },
+    ]
+
+    async def emit_event(event):
+        events.append((time.perf_counter(), event))
+
+    async def run_case():
+        task = asyncio.create_task(
+            manager._execute_tool_calls(
+                tool_calls,
+                node_id="node-1",
+                conversation_id="conv-1",
+                emit_event=emit_event,
+            )
+        )
+        await asyncio.sleep(0.04)
+        event_types = [event["event_type"] for _, event in events]
+        assert "tool_call_start" in event_types
+        assert "tool_progress" in event_types
+        assert "tool_result" not in event_types
+        results = await task
+        return results
+
+    results = asyncio.run(run_case())
+
+    assert [message["tool_call_id"] for message in results] == ["call-read", "call-search"]
+    final_events = [event for _, event in events if event["event_type"] == "tool_result"]
+    assert {event["tool_call"]["tool_call_id"] for event in final_events} == {"call-read", "call-search"}
+
+
+def test_execute_tool_calls_flushes_tool_sink_events_before_final_result(monkeypatch):
+    monkeypatch.setitem(cfg.data, "tools", {"max_result_length": 2000})
+    manager = make_manager(FakeToolManager())
+    events = []
+    tool_calls = [
+        {
+            "id": "call-read",
+            "type": "function",
+            "function": {"name": "read", "arguments": "{\"path\":\"a.txt\"}"},
+        },
+    ]
+
+    async def emit_event(event):
+        events.append(event)
+
+    asyncio.run(
+        manager._execute_tool_calls(
+            tool_calls,
+            node_id="node-1",
+            conversation_id="conv-1",
+            emit_event=emit_event,
+        )
+    )
+
+    event_types = [event["event_type"] for event in events]
+    sink_progress_index = next(
+        index
+        for index, event in enumerate(events)
+        if event["event_type"] == "tool_progress"
+        and (event["tool_call"].get("progress") or {}).get("phase") == "fake-tool-manager"
+    )
+    final_index = event_types.index("tool_result")
+    assert sink_progress_index < final_index
+
+
 def test_execute_tool_calls_keeps_mutating_tools_as_order_barriers(monkeypatch):
     monkeypatch.setitem(cfg.data, "tools", {"max_result_length": 2000})
     tool_manager = DelayedToolManager(delay=0.08)
@@ -209,6 +296,7 @@ def test_glob_tool_sync_work_runs_off_event_loop(monkeypatch, tmp_path):
         time.sleep(0.2)
         return (["a.txt"], False, 1, 1)
 
+    monkeypatch.setattr(code_tools, "_resolve_ripgrep_executable", lambda config: None)
     monkeypatch.setattr(code_tools, "_glob_files_python", slow_glob_python)
     tool = ListFilesTool(CodeToolConfig.from_dict({
         "workspace_roots": [str(tmp_path)],

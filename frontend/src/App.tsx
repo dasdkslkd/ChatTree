@@ -7,7 +7,7 @@ import { SettingsPageView } from './components/SettingsDialog'
 import { useNavigationStore } from './store/navigationStore'
 import { useModelStore } from './store/modelStore'
 import { useConversationStore } from './store/conversationStore'
-import { flushPerfEvents, flushPerfEventsSync, loadPerfConfig } from './perf/client'
+import { flushPerfEventsSync, loadPerfConfig } from './perf/client'
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 
 const ChatPage = lazy(() => import('./pages/MainPage'));
@@ -63,9 +63,6 @@ function App() {
       await loadConfig();
       await loadProviders();
     })();
-    const flushInterval = window.setInterval(() => {
-      void flushPerfEvents();
-    }, 5000);
     const flushOnVisibility = () => {
       if (document.visibilityState === 'hidden') flushPerfEventsSync();
     };
@@ -76,7 +73,6 @@ function App() {
     window.addEventListener('pagehide', flushOnPageHide);
     window.addEventListener('beforeunload', flushOnPageHide);
     return () => {
-      window.clearInterval(flushInterval);
       document.removeEventListener('visibilitychange', flushOnVisibility);
       window.removeEventListener('pagehide', flushOnPageHide);
       window.removeEventListener('beforeunload', flushOnPageHide);

@@ -40,6 +40,7 @@ interface ConversationActions {
   loadTree: (conversationId: string) => Promise<void>;
   clearPendingScroll: () => void;
   refreshMessages: (conversationId: string, opts?: { awaitNodeId?: string; awaitRole?: 'assistant' | 'user'; retries?: number }) => Promise<boolean>;
+  refreshBranches: (conversationId: string) => Promise<boolean>;
   patchAssistantMessageFromStream: (conversationId: string, message: Message, pendingUserContent?: string | null) => boolean;
 }
 
@@ -350,10 +351,7 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
             !awaitNodeId || history.some((m) => m.node_id === awaitNodeId && m.role === awaitRole);
           for (let attempt = 0; attempt <= retries; attempt++) {
             try {
-              const [history, branches] = await Promise.all([
-                messageApi.getHistory(conversationId),
-                conversationApi.getBranches(conversationId),
-              ]);
+              const history = await messageApi.getHistory(conversationId);
               // 再次校验：await 期间用户可能已切走
               if (get().currentConversation?.id !== conversationId) return false;
               const ok = landed(history);
@@ -367,7 +365,6 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
                 const currentNodeId = latestNodeIdFromHistory(history) || conv?.current_node_id || get().currentNodeId;
                 set((state) => ({
                   messages: history,
-                  branches: branches || {},
                   currentNodeId,
                   currentConversation: state.currentConversation?.id === conversationId
                     ? { ...state.currentConversation, current_node_id: currentNodeId || state.currentConversation.current_node_id }
@@ -388,6 +385,19 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
             }
           }
           return false;
+        },
+
+        refreshBranches: async (conversationId: string): Promise<boolean> => {
+          if (get().currentConversation?.id !== conversationId) return false;
+          try {
+            const branches = await conversationApi.getBranches(conversationId);
+            if (get().currentConversation?.id !== conversationId) return false;
+            set({ branches: branches || {} });
+            return true;
+          } catch (err: any) {
+            set({ error: err.message });
+            return false;
+          }
         },
 
         clearCurrentConversation: () => {

@@ -77,6 +77,12 @@ import { taskNotificationsApi, type TaskNotificationRecord } from '../api/taskNo
 import { plansService } from '../services/plans';
 import { activeTaskService } from '../services/tasks';
 import { transcriptService } from '../services/transcript';
+import {
+  ConversationSyncCoordinator,
+  type ConversationSyncInclude,
+  type ConversationSyncRequest,
+  type ConversationSyncResult,
+} from '../services/conversationSyncCoordinator';
 import type {
   Message,
   SendMessageRequest,
@@ -1348,7 +1354,7 @@ export default function ChatPage() {
     conversations, currentConversation, messages,
     currentNodeId, pendingScrollNodeId, clearPendingScroll,
     createConversation, selectConversation, deleteConversation, deleteNode, switchNode, loadConversations, loadTree,
-    clearCurrentConversation, updateConversationTitle, refreshMessages, patchAssistantMessageFromStream,
+    clearCurrentConversation, updateConversationTitle, refreshMessages, refreshBranches, patchAssistantMessageFromStream,
   } = useConversationStore();
 
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
@@ -1406,6 +1412,11 @@ export default function ChatPage() {
   const [planError, setPlanError] = useState<string | null>(null);
   const currentConversationIdRef = useRef<string | null>(null);
   currentConversationIdRef.current = currentConversation?.id ?? null;
+  const conversationSyncCoordinatorRef = useRef<ConversationSyncCoordinator | null>(null);
+  const scheduleConversationSyncRef = useRef<(
+    conversationId: string,
+    request: ConversationSyncRequest,
+  ) => Promise<ConversationSyncResult>>(async () => ({ messagesConfirmed: false }));
   const loadTranscriptSnapshot = useCallback(async (
     conversationId: string | null | undefined,
     tipNodeId?: string | null,
@@ -2442,10 +2453,12 @@ export default function ChatPage() {
         if (attachable.length > 0) {
           await Promise.all(attachable
             .filter((active) => active.node_id)
-            .map((active) => refreshMessages(conversationId, {
+            .map((active) => scheduleConversationSyncRef.current(conversationId, {
+              reason: 'backend-followup-attachable',
+              include: ['messages', 'branches'],
               awaitNodeId: active.node_id ?? undefined,
               awaitRole: 'user',
-              retries: 0,
+              messageRetries: 0,
             })));
           for (const active of attachable) {
             void streamManager.resumeStream(
@@ -2459,14 +2472,25 @@ export default function ChatPage() {
           }
           return;
         }
-        await refreshMessages(conversationId, { retries: 0 });
-      } catch (_) {
-        await refreshMessages(conversationId, { retries: 0 });
+        await scheduleConversationSyncRef.current(conversationId, {
+          reason: 'backend-followup-poll',
+          include: ['messages', 'branches'],
+          messageRetries: 0,
+        });
+      } catch {
+        await scheduleConversationSyncRef.current(conversationId, {
+          reason: 'backend-followup-poll-error',
+          include: ['messages', 'branches'],
+          messageRetries: 0,
+        });
       }
       await new Promise((resolve) => window.setTimeout(resolve, 500));
     }
-    await loadConversations();
-  }, [hiddenSideRunIds, loadConversations, refreshMessages]);
+    await scheduleConversationSyncRef.current(conversationId, {
+      reason: 'backend-followup-timeout',
+      include: ['conversations'],
+    });
+  }, [hiddenSideRunIds]);
 
   const syncSelectedConversationSideRuns = useCallback(async (conversationId: string) => {
     const existing = sideRunSyncPromisesRef.current.get(conversationId);
@@ -2509,6 +2533,28 @@ export default function ChatPage() {
     }
   }, [hiddenSideRunIds]);
 
+  if (!conversationSyncCoordinatorRef.current) {
+    conversationSyncCoordinatorRef.current = new ConversationSyncCoordinator();
+  }
+  conversationSyncCoordinatorRef.current.setOperations({
+    refreshMessages,
+    refreshBranches,
+    refreshTranscript: refreshVisibleTranscriptSnapshot,
+    loadConversations,
+    loadTree,
+    refreshTaskState,
+    refreshActivePlan,
+    syncSideRuns: syncSelectedConversationSideRuns,
+  });
+  const scheduleConversationSync = useCallback((
+    conversationId: string,
+    request: ConversationSyncRequest,
+  ) => (
+    conversationSyncCoordinatorRef.current?.schedule(conversationId, request)
+    ?? Promise.resolve({ messagesConfirmed: false })
+  ), []);
+  scheduleConversationSyncRef.current = scheduleConversationSync;
+
   useEffect(() => {
     for (const run of activeRunStates) {
       const notifications = collectSideRunNotifications(run.toolInteractions, run.sideRunNotifications);
@@ -2550,9 +2596,12 @@ export default function ChatPage() {
       run?.anchorNodeId ?? null,
       run?.kind ?? 'chat',
     );
-    await refreshMessages(conversationId, { retries: 0 });
-    await refreshVisibleTranscriptSnapshot(conversationId);
-  }, [activeRunStates, currentConversation?.id, refreshMessages, refreshPendingToolApprovals, refreshVisibleTranscriptSnapshot]);
+    await scheduleConversationSync(conversationId, {
+      reason: 'tool-approval-decision',
+      include: ['messages', 'branches', 'transcript'],
+      messageRetries: 0,
+    });
+  }, [activeRunStates, currentConversation?.id, refreshPendingToolApprovals, scheduleConversationSync]);
 
   const handleBindTaskNotification = useCallback(async (notificationId: string) => {
     const conversationId = currentConversation?.id;
@@ -2574,19 +2623,19 @@ export default function ChatPage() {
       void probeTaskNotificationDelivery(conversationId);
     }
     if (notification.status === 'delivered' && notification.delivered_node_id) {
-      await refreshMessages(conversationId, { awaitNodeId: notification.delivered_node_id, retries: 6 });
-      await refreshVisibleTranscriptSnapshot(conversationId);
-      await loadConversations();
+      await scheduleConversationSync(conversationId, {
+        reason: 'task-notification-delivered',
+        include: ['messages', 'branches', 'transcript', 'conversations'],
+        awaitNodeId: notification.delivered_node_id,
+        messageRetries: 6,
+      });
     }
   }, [
     currentConversation?.current_node_id,
     currentConversation?.id,
-    attachDeliveringTaskNotifications,
-    loadConversations,
     probeTaskNotificationDelivery,
-    refreshMessages,
     refreshTaskState,
-    refreshVisibleTranscriptSnapshot,
+    scheduleConversationSync,
     liveSelectedBranchTipId,
   ]);
 
@@ -2720,15 +2769,17 @@ export default function ChatPage() {
         },
         actionNodeId,
       );
-      await refreshActivePlan(conversationId);
-      await refreshVisibleTranscriptSnapshot(conversationId);
+      await scheduleConversationSync(conversationId, {
+        reason: 'plan-approved',
+        include: ['plan', 'transcript'],
+      });
     } catch (error) {
       console.error('Failed to approve plan:', error);
       setPlanError('批准失败，请稍后重试');
     } finally {
       setPlanActionPending(null);
     }
-  }, [currentConversation?.id, refreshActivePlan, refreshVisibleTranscriptSnapshot, selectedBranchTipId]);
+  }, [currentConversation?.id, scheduleConversationSync, selectedBranchTipId]);
 
   const handleRejectPlan = useCallback(async (item: TranscriptItem) => {
     if (!isTranscriptItemVisibleNow(item, currentConversation?.id ?? null, selectedBranchTipId)) return;
@@ -2759,15 +2810,17 @@ export default function ChatPage() {
         },
         actionNodeId,
       );
-      await refreshActivePlan(conversationId);
-      await refreshVisibleTranscriptSnapshot(conversationId);
+      await scheduleConversationSync(conversationId, {
+        reason: 'plan-rejected',
+        include: ['plan', 'transcript'],
+      });
     } catch (error) {
       console.error('Failed to reject plan:', error);
       setPlanError('提交修改意见失败，请稍后重试');
     } finally {
       setPlanActionPending(null);
     }
-  }, [currentConversation?.id, planRejectFeedback, refreshActivePlan, refreshVisibleTranscriptSnapshot, selectedBranchTipId]);
+  }, [currentConversation?.id, planRejectFeedback, scheduleConversationSync, selectedBranchTipId]);
 
   const handleAnswerPlanQuestion = useCallback(async (item: TranscriptItem, answerOverride?: string) => {
     if (!isTranscriptItemVisibleNow(item, currentConversation?.id ?? null, selectedBranchTipId)) return;
@@ -2800,8 +2853,10 @@ export default function ChatPage() {
         },
         actionNodeId,
       ).then(async () => {
-        await refreshActivePlan(conversationId);
-        await refreshVisibleTranscriptSnapshot(conversationId);
+        await scheduleConversationSync(conversationId, {
+          reason: 'plan-question-answered',
+          include: ['plan', 'transcript'],
+        });
       }).catch((error) => {
         console.error('Failed to answer plan question:', error);
         setPlanError('提交回答失败，请稍后重试');
@@ -2812,7 +2867,7 @@ export default function ChatPage() {
     } finally {
       setPlanActionPending(null);
     }
-  }, [currentConversation?.id, refreshActivePlan, refreshVisibleTranscriptSnapshot, selectedBranchTipId]);
+  }, [currentConversation?.id, scheduleConversationSync, selectedBranchTipId]);
 
   const handleStopStreaming = useCallback(() => {
     if (currentConversation?.id) {
@@ -2839,12 +2894,14 @@ export default function ChatPage() {
           else next.delete(conversationId);
           return next;
         });
-        await refreshMessages(conversationId, { retries: 1 });
-        await refreshVisibleTranscriptSnapshot(conversationId);
-        await refreshTaskState(conversationId);
+        await scheduleConversationSync(conversationId, {
+          reason: 'stop-streaming',
+          include: ['messages', 'branches', 'transcript', 'taskState'],
+          messageRetries: 1,
+        });
       }
     })();
-  }, [currentBranchStoppableRunIds, currentConversation?.id, refreshMessages, refreshTaskState, refreshVisibleTranscriptSnapshot, updateQueuedMessages]);
+  }, [currentBranchStoppableRunIds, currentConversation?.id, scheduleConversationSync, selectedBranchTipId, updateQueuedMessages]);
 
   // 全局注册一次：任意对话的流结束（completed/error/stopped）时，
   // 从后端刷新真实消息，再清理 StreamManager 中该对话的临时状态。
@@ -2867,18 +2924,21 @@ export default function ChatPage() {
       if (shouldProbeTaskNotificationDelivery({ finishStatus: status })) {
         void probeTaskNotificationDelivery(finishedId);
       }
-      void refreshTaskState(finishedId);
+      void scheduleConversationSync(finishedId, {
+        reason: 'stream-finished-task-state',
+        include: ['taskState'],
+      });
 
       if (!shouldPatchMainConversation || (!targetNodeId && !nodeId)) {
         if (!finishedRun || !shouldRenderRunDraft(finishedRun)) {
           streamManager.cleanupIfController(finishedId, controller, runId);
         }
-        await loadConversations();
-        if (finishedId === currentConversationIdRef.current) {
-          await loadTree(finishedId);
-        }
-        await refreshVisibleTranscriptSnapshot(finishedId);
-        void syncSelectedConversationSideRuns(finishedId);
+        const include: ConversationSyncInclude[] = ['conversations', 'transcript', 'plan', 'sideRuns'];
+        if (finishedId === currentConversationIdRef.current) include.push('tree');
+        await scheduleConversationSync(finishedId, {
+          reason: 'stream-finished-non-main',
+          include,
+        });
         const sentQueued = await sendNextQueuedMessage(finishedId);
         if (shouldProbeBackendScheduledFollowup({ finishStatus: status, hasQueuedFollowup: sentQueued })) {
           void syncBackendScheduledFollowup(finishedId);
@@ -2890,15 +2950,12 @@ export default function ChatPage() {
         streamManager.cleanupIfController(finishedId, controller, runId);
         scheduleIdleTask(() => {
           void (async () => {
-            await refreshMessages(
-              finishedId,
-              drained
-                ? (awaitNodeId ? { awaitNodeId, retries: 0 } : undefined)
-                : { awaitNodeId, retries: 6 },
-            );
-            await refreshVisibleTranscriptSnapshot(finishedId);
-            await loadConversations();
-            void syncSelectedConversationSideRuns(finishedId);
+            await scheduleConversationSync(finishedId, {
+              reason: 'stream-finished-patched-idle',
+              include: ['messages', 'branches', 'transcript', 'conversations', 'plan', 'sideRuns'],
+              awaitNodeId,
+              messageRetries: drained ? 0 : 6,
+            });
             if (shouldProbeBackendScheduledFollowup({ finishStatus: status, hasQueuedFollowup: false })) {
               void syncBackendScheduledFollowup(finishedId);
             }
@@ -2913,13 +2970,12 @@ export default function ChatPage() {
       // drained=true：后端在 [DONE] 前已保存，一次即可拿到最终结果。
       // drained=false（硬 abort）：保存由连接断开触发，与刷新竞态，需轮询重试，
       //   期间保留乐观气泡，避免“用户消息瞬间消失”。
-      const confirmed = await refreshMessages(
-        finishedId,
-        drained
-          ? (awaitNodeId ? { awaitNodeId, retries: 0 } : undefined)
-          : { awaitNodeId, retries: 6 },
-      );
-      await refreshVisibleTranscriptSnapshot(finishedId);
+      const { messagesConfirmed: confirmed } = await scheduleConversationSync(finishedId, {
+        reason: 'stream-finished-main',
+        include: ['messages', 'branches', 'transcript', 'conversations', 'plan', 'sideRuns'],
+        awaitNodeId,
+        messageRetries: drained ? 0 : 6,
+      });
       // 仅当确认真实消息已落地，才清理临时流状态（移除乐观气泡）。
       // 身份校验：若 await 期间用户对同一对话发起了新流，controller 已被替换则跳过。
       if (drained || confirmed) {
@@ -2928,15 +2984,16 @@ export default function ChatPage() {
         // 硬 abort 且后端保存超过重试预算：保留乐观气泡，延后再确认一次，
         // 成功后再清理，彻底避免用户消息闪失。
         setTimeout(async () => {
-          await refreshMessages(finishedId, { awaitNodeId, retries: 6 });
-          await refreshVisibleTranscriptSnapshot(finishedId);
+          await scheduleConversationSync(finishedId, {
+            reason: 'stream-finished-main-fallback',
+            include: ['messages', 'branches', 'transcript'],
+            awaitNodeId,
+            messageRetries: 6,
+          });
           // 无论是否确认，这是最后兜底：清理临时状态，避免气泡永久残留。
           streamManager.cleanupIfController(finishedId, controller, runId);
         }, 800);
       }
-      // 同步对话列表（更新时间、标题等）
-      await loadConversations();
-      void syncSelectedConversationSideRuns(finishedId);
       const sentQueued = await sendNextQueuedMessage(finishedId);
       if (shouldProbeBackendScheduledFollowup({ finishStatus: status, hasQueuedFollowup: sentQueued })) {
         void syncBackendScheduledFollowup(finishedId);
@@ -2944,13 +3001,8 @@ export default function ChatPage() {
     });
     return unsubscribe;
   }, [
-    refreshMessages,
     patchAssistantMessageFromStream,
-    loadConversations,
-    loadTree,
-    refreshVisibleTranscriptSnapshot,
-    refreshTaskState,
-    syncSelectedConversationSideRuns,
+    scheduleConversationSync,
     sendNextQueuedMessage,
     syncBackendScheduledFollowup,
     probeTaskNotificationDelivery,
@@ -3032,7 +3084,7 @@ export default function ChatPage() {
         }
         setBackendActiveStreamConversationCounts(counts);
         scheduleNextSync(activeStreams.filter((item) => !item.done).length);
-      } catch (_) {
+      } catch {
         if (!cancelled) setBackendActiveStreamConversationCounts(new Map());
         scheduleNextSync(0);
       }
@@ -3094,10 +3146,12 @@ export default function ChatPage() {
         }
         await Promise.all(attachable
           .filter((active) => active.node_id)
-          .map((active) => refreshMessages(conversationId, {
+          .map((active) => scheduleConversationSync(conversationId, {
+            reason: 'active-stream-recovery',
+            include: ['messages', 'branches'],
             awaitNodeId: active.node_id ?? undefined,
             awaitRole: 'user',
-            retries: 0,
+            messageRetries: 0,
           })));
         if (cancelled) return;
         for (const active of attachable) {
@@ -3111,14 +3165,18 @@ export default function ChatPage() {
           );
         }
       } catch (_) {
-        await refreshMessages(conversationId, { retries: 0 });
+        await scheduleConversationSync(conversationId, {
+          reason: 'active-stream-recovery-error',
+          include: ['messages', 'branches'],
+          messageRetries: 0,
+        });
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [currentBackendActiveStreamHintCount, currentConversation?.id, hiddenSideRunIds, refreshMessages]);
+  }, [currentBackendActiveStreamHintCount, currentConversation?.id, hiddenSideRunIds, scheduleConversationSync]);
 
   useEffect(() => {
     const conversationId = currentConversation?.id;
@@ -3128,7 +3186,6 @@ export default function ChatPage() {
     });
   }, [currentConversation?.id, syncSelectedConversationSideRuns]);
 
-  const latestMessageId = messages.length > 0 ? messages[messages.length - 1]?.id : null;
   useEffect(() => {
     const conversationId = currentConversation?.id;
     if (!conversationId) {
@@ -3136,7 +3193,7 @@ export default function ChatPage() {
       return;
     }
     void refreshActivePlan(conversationId);
-  }, [currentConversation?.id, latestMessageId, refreshActivePlan]);
+  }, [currentConversation?.id, refreshActivePlan]);
 
   const handleSelectConversation = async (id: string) => {
     if (currentConversation && historyRef.current) {

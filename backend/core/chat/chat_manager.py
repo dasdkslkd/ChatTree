@@ -6,6 +6,7 @@ import json
 import base64
 from copy import deepcopy
 from contextlib import suppress
+from inspect import isawaitable
 from time import perf_counter, time
 from .conversation import Conversation
 from .node import NodeManager
@@ -2159,26 +2160,6 @@ class ChatManager:
                     "tools": tool_messages,
                     "reasoning": round_reasoning or None,
                 })
-                for tool_msg in tool_messages:
-                    yield StreamChunk(
-                        status=StreamStatus.CONTENT,
-                        content=None,
-                        node_id=new_node["id"],
-                        target_node_id=new_node["id"],
-                        conversation_id=conversation_id,
-                        run_id=run_id,
-                        error=None,
-                        tokens_used=0,
-                        event_type="tool_result",
-                        tool_call={
-                            "tool_call_id": tool_msg.get("tool_call_id"),
-                            "name": tool_msg.get("name"),
-                            "content": tool_msg.get("content"),
-                            "raw_content": tool_msg.get("raw_content"),
-                            "model_visible_content": tool_msg.get("model_visible_content"),
-                            "tool_result_id": tool_msg.get("tool_result_id"),
-                        },
-                    )
                 if has_blocking_plan_tool_result(tool_messages):
                     final_content = ""
                     persisted_final_content = ""
@@ -4088,11 +4069,44 @@ class ChatManager:
             content=None,
             node_id=node_id,
             conversation_id=conversation_id,
+            run_id=event.get("run_id"),
             error=None,
             tokens_used=0,
             event_type=event.get("event_type"),
             approval=event.get("approval"),
+            tool_call=event.get("tool_call"),
         )
+
+    def _tool_observation_event(
+        self,
+        event: Dict[str, Any],
+        *,
+        tool_call: Dict[str, Any],
+        name: str,
+    ) -> Dict[str, Any]:
+        fn = tool_call.get("function") or {}
+        tool_call_id = str(tool_call.get("id") or event.get("tool_call_id") or "")
+        incoming = event.get("tool_call") if isinstance(event.get("tool_call"), dict) else {}
+        payload = dict(incoming)
+        payload.setdefault("id", tool_call_id)
+        payload.setdefault("tool_call_id", tool_call_id)
+        payload.setdefault("name", name)
+        payload.setdefault("type", tool_call.get("type") or "function")
+        payload.setdefault(
+            "function",
+            {
+                "name": name,
+                "arguments": fn.get("arguments") or "",
+            },
+        )
+        for key in ("status", "progress", "content_delta", "error"):
+            if key in event:
+                payload[key] = event[key]
+        return {
+            "event_type": event.get("event_type") or "tool_progress",
+            "run_id": event.get("run_id"),
+            "tool_call": payload,
+        }
 
     def _model_visible_tool_message(
         self,
@@ -4252,29 +4266,90 @@ class ChatManager:
         tool_orchestrator = getattr(self, "tool_orchestrator", None)
         call_run_context = dict(run_context or {})
         call_run_context["tool_call_id"] = tool_call.get("id")
+        loop = asyncio.get_running_loop()
+        pending_observation_futures: list[Any] = []
+
+        async def emit_tool_observation(event: Dict[str, Any]) -> None:
+            if emit_event is None:
+                return
+            event = dict(event)
+            event.setdefault("run_id", call_run_context.get("run_id"))
+            payload = self._tool_observation_event(
+                event,
+                tool_call=tool_call,
+                name=name,
+            )
+            result = emit_event(payload)
+            if isawaitable(result):
+                await result
+
+        def schedule_tool_observation(event: Dict[str, Any]) -> None:
+            if emit_event is None or loop.is_closed():
+                return
+            future = asyncio.run_coroutine_threadsafe(
+                emit_tool_observation(event),
+                loop,
+            )
+            pending_observation_futures.append(future)
+
+        async def flush_tool_observations() -> None:
+            while pending_observation_futures:
+                futures = list(pending_observation_futures)
+                pending_observation_futures.clear()
+                await asyncio.gather(
+                    *(asyncio.wrap_future(future) for future in futures),
+                    return_exceptions=True,
+                )
+
+        call_run_context["tool_event_sink"] = schedule_tool_observation
+
+        await emit_tool_observation({
+            "event_type": "tool_call_start",
+            "status": "running",
+        })
+        await emit_tool_observation({
+            "event_type": "tool_progress",
+            "status": "running",
+            "progress": {
+                "phase": "started",
+                "elapsed_ms": 0,
+            },
+        })
+
+        heartbeat_stop = asyncio.Event()
+
+        async def progress_heartbeat() -> None:
+            started_at = perf_counter()
+            try:
+                while not heartbeat_stop.is_set():
+                    try:
+                        await asyncio.wait_for(heartbeat_stop.wait(), timeout=1.0)
+                        break
+                    except asyncio.TimeoutError:
+                        await emit_tool_observation({
+                            "event_type": "tool_progress",
+                            "status": "running",
+                            "progress": {
+                                "phase": "running",
+                                "elapsed_ms": int((perf_counter() - started_at) * 1000),
+                            },
+                        })
+            except asyncio.CancelledError:
+                raise
+
+        heartbeat_task = asyncio.create_task(progress_heartbeat())
         profiler = get_profiler()
-        with profiler.span(
-            "chat.tool_call",
-            conversation_id=conversation_id,
-            node_id=node_id,
-            run_id=call_run_context.get("run_id"),
-            tool_name=name,
-            permission_mode=permission_mode,
-        ):
-            if tool_orchestrator:
-                try:
-                    message = await tool_orchestrator.execute_tool_call(
-                        tool_call,
-                        conversation_id or "",
-                        node_id,
-                        emit_event=emit_event,
-                        workspace=workspace,
-                        permission_mode=permission_mode,
-                        run_context=call_run_context,
-                    )
-                except TypeError as exc:
-                    error_text = str(exc)
-                    if "unexpected keyword argument 'run_context'" in error_text:
+        try:
+            with profiler.span(
+                "chat.tool_call",
+                conversation_id=conversation_id,
+                node_id=node_id,
+                run_id=call_run_context.get("run_id"),
+                tool_name=name,
+                permission_mode=permission_mode,
+            ):
+                if tool_orchestrator:
+                    try:
                         message = await tool_orchestrator.execute_tool_call(
                             tool_call,
                             conversation_id or "",
@@ -4282,62 +4357,112 @@ class ChatManager:
                             emit_event=emit_event,
                             workspace=workspace,
                             permission_mode=permission_mode,
+                            run_context=call_run_context,
                         )
-                    elif "unexpected keyword argument 'permission_mode'" in error_text:
-                        message = await tool_orchestrator.execute_tool_call(
-                            tool_call,
-                            conversation_id or "",
-                            node_id,
-                            emit_event=emit_event,
-                            workspace=workspace,
-                        )
-                    elif "unexpected keyword argument 'workspace'" in error_text:
-                        message = await tool_orchestrator.execute_tool_call(
-                            tool_call,
-                            conversation_id or "",
-                            node_id,
-                            emit_event=emit_event,
-                        )
-                    else:
-                        raise
-                return self._model_visible_tool_message(
-                    message,
-                    name=name,
-                    conversation_id=conversation_id,
-                    node_id=node_id,
-                    tool_call_id=tool_call.get("id"),
-                )
-
-            if not self.tool_manager:
-                raw_result = json.dumps({"error": "Tool manager is not configured"}, ensure_ascii=False)
-            else:
-                try:
-                    raw_result = await self.tool_manager.execute_tool(
-                        name,
-                        arguments,
-                        workspace=workspace,
-                        runtime_context=call_run_context,
+                    except TypeError as exc:
+                        error_text = str(exc)
+                        if "unexpected keyword argument 'run_context'" in error_text:
+                            message = await tool_orchestrator.execute_tool_call(
+                                tool_call,
+                                conversation_id or "",
+                                node_id,
+                                emit_event=emit_event,
+                                workspace=workspace,
+                                permission_mode=permission_mode,
+                            )
+                        elif "unexpected keyword argument 'permission_mode'" in error_text:
+                            message = await tool_orchestrator.execute_tool_call(
+                                tool_call,
+                                conversation_id or "",
+                                node_id,
+                                emit_event=emit_event,
+                                workspace=workspace,
+                            )
+                        elif "unexpected keyword argument 'workspace'" in error_text:
+                            message = await tool_orchestrator.execute_tool_call(
+                                tool_call,
+                                conversation_id or "",
+                                node_id,
+                                emit_event=emit_event,
+                            )
+                        else:
+                            raise
+                    model_message = self._model_visible_tool_message(
+                        message,
+                        name=name,
+                        conversation_id=conversation_id,
+                        node_id=node_id,
+                        tool_call_id=tool_call.get("id"),
                     )
-                except TypeError as exc:
-                    if "unexpected keyword argument 'workspace'" not in str(exc):
-                        raise
-                    raw_result = await self.tool_manager.execute_tool(name, arguments)
-        return self._model_visible_tool_message(
-            Message({
-                "id": str(uuid.uuid4()),
-                "role": Role.TOOL,
-                "content": raw_result,
-                "name": name,
-                "tool_calls": None,
-                "tool_call_id": tool_call.get("id"),
-                "node_id": node_id,
-                "timestamp": int(time()),
-            }),
-            name=name,
-            conversation_id=conversation_id,
-            node_id=node_id,
-            tool_call_id=tool_call.get("id"),
-        )
+                else:
+                    if not self.tool_manager:
+                        raw_result = json.dumps({"error": "Tool manager is not configured"}, ensure_ascii=False)
+                    else:
+                        try:
+                            raw_result = await self.tool_manager.execute_tool(
+                                name,
+                                arguments,
+                                workspace=workspace,
+                                runtime_context=call_run_context,
+                            )
+                        except TypeError as exc:
+                            error_text = str(exc)
+                            if "unexpected keyword argument 'runtime_context'" in error_text:
+                                raw_result = await self.tool_manager.execute_tool(
+                                    name,
+                                    arguments,
+                                    workspace=workspace,
+                                )
+                            elif "unexpected keyword argument 'workspace'" in error_text:
+                                raw_result = await self.tool_manager.execute_tool(name, arguments)
+                            else:
+                                raise
+                    model_message = self._model_visible_tool_message(
+                        Message({
+                            "id": str(uuid.uuid4()),
+                            "role": Role.TOOL,
+                            "content": raw_result,
+                            "name": name,
+                            "tool_calls": None,
+                            "tool_call_id": tool_call.get("id"),
+                            "node_id": node_id,
+                            "timestamp": int(time()),
+                        }),
+                        name=name,
+                        conversation_id=conversation_id,
+                        node_id=node_id,
+                        tool_call_id=tool_call.get("id"),
+                    )
+        except Exception as exc:
+            await flush_tool_observations()
+            await emit_tool_observation({
+                "event_type": "tool_call_error",
+                "status": "error",
+                "error": str(exc),
+            })
+            raise
+        finally:
+            heartbeat_stop.set()
+            heartbeat_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat_task
+
+        await flush_tool_observations()
+        parsed_result = self._parse_structured_tool_result(model_message.get("raw_content"))
+        result_status = "error" if isinstance(parsed_result, dict) and parsed_result.get("error") else "done"
+        await emit_tool_observation({
+            "event_type": "tool_result",
+            "status": result_status,
+            "tool_call": {
+                "tool_call_id": model_message.get("tool_call_id"),
+                "name": model_message.get("name"),
+                "content": model_message.get("content"),
+                "raw_content": model_message.get("raw_content"),
+                "model_visible_content": model_message.get("model_visible_content"),
+                "tool_result_id": model_message.get("tool_result_id"),
+            },
+        })
+        return model_message
 
     def _parse_tool_arguments(self, raw_arguments: Any) -> Dict[str, Any]:
         if isinstance(raw_arguments, dict):

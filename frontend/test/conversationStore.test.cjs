@@ -34,6 +34,7 @@ let historyResponse = [
   { id: 'msg-2', role: 'assistant', content: '保留的回答', node_id: 'node-1' },
 ];
 let branchesResponse = { 'node-1': [] };
+let getBranchesCalls = 0;
 let switchNodeCalls = [];
 let updateMultiAgentModeCalls = [];
 let deleteNodeCalls = [];
@@ -91,7 +92,10 @@ require.cache[require.resolve(conversationApiModule)] = {
         deleteNodeCalls.push(args);
         return deleteNodeHandler(...args);
       },
-      getBranches: async () => branchesResponse,
+      getBranches: async () => {
+        getBranchesCalls += 1;
+        return branchesResponse;
+      },
       getTree: async () => {
         getTreeCalls += 1;
         return refreshedTree;
@@ -240,6 +244,7 @@ async function testDeleteNodeRetriesForceWhenActiveRunBlocksDeletion() {
 }
 
 async function testRefreshMessagesUsesHistoryTipInsteadOfStaleConversationList() {
+  getBranchesCalls = 0;
   const currentConversation = {
     id: 'conv-1',
     title: '刷新测试',
@@ -277,9 +282,11 @@ async function testRefreshMessagesUsesHistoryTipInsteadOfStaleConversationList()
   assert.equal(ok, true);
   assert.equal(state.currentNodeId, 'node-hello');
   assert.equal(state.currentConversation.current_node_id, 'node-hello');
+  assert.equal(getBranchesCalls, 0);
 }
 
 async function testRefreshMessagesKeepsOptimisticMessagesUntilAwaitedUserLands() {
+  getBranchesCalls = 0;
   const currentConversation = {
     id: 'conv-1',
     title: '乐观消息刷新测试',
@@ -321,6 +328,40 @@ async function testRefreshMessagesKeepsOptimisticMessagesUntilAwaitedUserLands()
   assert.equal(state.currentNodeId, 'node-new');
   assert.equal(state.messages.some((message) => message.id === 'stream-user-node-new'), true);
   assert.equal(state.messages.some((message) => message.content === '新问题'), true);
+  assert.equal(getBranchesCalls, 0);
+}
+
+async function testRefreshBranchesUpdatesBranchesOnce() {
+  getBranchesCalls = 0;
+  branchesResponse = { 'node-hello': ['node-alt'] };
+  const currentConversation = {
+    id: 'conv-1',
+    title: '分支刷新测试',
+    created_at: 1,
+    updated_at: 1,
+    model: '',
+    model_id: '',
+    provider_id: '',
+    current_node_id: 'node-hello',
+    total_tokens: {},
+  };
+
+  useConversationStore.setState({
+    conversations: [currentConversation],
+    currentConversation,
+    messages: [],
+    branches: {},
+    currentNodeId: 'node-hello',
+    loading: false,
+    error: null,
+  });
+
+  const ok = await useConversationStore.getState().refreshBranches('conv-1');
+
+  const state = useConversationStore.getState();
+  assert.equal(ok, true);
+  assert.equal(getBranchesCalls, 1);
+  assert.deepEqual(state.branches, branchesResponse);
 }
 
 async function testSwitchNodeUpdatesCurrentConversationSnapshot() {
@@ -490,6 +531,7 @@ async function main() {
   await testDeleteNodeRetriesForceWhenActiveRunBlocksDeletion();
   await testRefreshMessagesUsesHistoryTipInsteadOfStaleConversationList();
   await testRefreshMessagesKeepsOptimisticMessagesUntilAwaitedUserLands();
+  await testRefreshBranchesUpdatesBranchesOnce();
   await testSwitchNodeUpdatesCurrentConversationSnapshot();
   await testUpdateMultiAgentModeSyncsConversationSnapshots();
   testSetCurrentNodeIdLocalKeepsSnapshotsInSync();

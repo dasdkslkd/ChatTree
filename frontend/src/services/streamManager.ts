@@ -120,7 +120,11 @@ function mergeToolCalls(existing: any[], incoming: any[]): any[] {
 function getChunkToolCalls(chunk: any): any[] {
   if (Array.isArray(chunk.tool_calls)) return chunk.tool_calls;
   if (Array.isArray(chunk.tool_call?.tool_calls)) return chunk.tool_call.tool_calls;
-  if (chunk.tool_call && typeof chunk.tool_call === 'object' && chunk.event_type === 'tool_call') return [chunk.tool_call];
+  if (
+    chunk.tool_call
+    && typeof chunk.tool_call === 'object'
+    && (chunk.event_type === 'tool_call' || chunk.event_type === 'tool_call_start')
+  ) return [chunk.tool_call];
   return [];
 }
 
@@ -185,6 +189,64 @@ function appendToolResult(toolInteractions: any[], toolResult: any): any[] {
   if (existingIndex >= 0) tools[existingIndex] = { ...tools[existingIndex], ...toolResult };
   else tools.push({ role: 'tool', ...toolResult });
   return next;
+}
+
+function formatToolProgress(progress: any): string {
+  if (!progress || typeof progress !== 'object') return '';
+  const parts: string[] = [];
+  if (typeof progress.phase === 'string') parts.push(progress.phase);
+  if (typeof progress.scanned_entries === 'number') parts.push(`scanned ${progress.scanned_entries}`);
+  if (typeof progress.matched_entries === 'number') parts.push(`matched ${progress.matched_entries}`);
+  if (typeof progress.matches === 'number') parts.push(`matches ${progress.matches}`);
+  if (typeof progress.searched_files === 'number') parts.push(`files ${progress.searched_files}`);
+  if (typeof progress.elapsed_ms === 'number' && progress.elapsed_ms > 0) parts.push(`${Math.round(progress.elapsed_ms)}ms`);
+  return parts.join(' · ');
+}
+
+function appendToolProgress(toolInteractions: any[], toolCall: any): any[] {
+  if (!toolCall) return toolInteractions;
+  const progressText = formatToolProgress(toolCall.progress);
+  return appendToolResult(toolInteractions, {
+    role: 'tool',
+    tool_call_id: toolCall.tool_call_id || toolCall.id,
+    name: toolCall.name || toolCall.function?.name,
+    status: toolCall.status || 'running',
+    progress: toolCall.progress,
+    content: progressText || 'running',
+  });
+}
+
+function appendToolResultDelta(toolInteractions: any[], toolCall: any): any[] {
+  if (!toolCall) return toolInteractions;
+  const targetId = toolCall.tool_call_id || toolCall.id;
+  const delta = typeof toolCall.content_delta === 'string' ? toolCall.content_delta : '';
+  if (!targetId || !delta) return appendToolProgress(toolInteractions, toolCall);
+  const current = toolInteractions.length > 0
+    ? toolInteractions.flatMap((interaction) => Array.isArray(interaction.tools) ? interaction.tools : [])
+        .find((tool) => tool?.tool_call_id === targetId)
+    : null;
+  return appendToolResult(toolInteractions, {
+    role: 'tool',
+    tool_call_id: targetId,
+    name: toolCall.name || toolCall.function?.name,
+    status: toolCall.status || 'running',
+    content: `${current?.content || ''}${delta}`,
+  });
+}
+
+function appendToolError(toolInteractions: any[], toolCall: any): any[] {
+  if (!toolCall) return toolInteractions;
+  const errorText = typeof toolCall.error === 'string'
+    ? toolCall.error
+    : JSON.stringify(toolCall.error ?? { error: 'tool failed' });
+  return appendToolResult(toolInteractions, {
+    role: 'tool',
+    tool_call_id: toolCall.tool_call_id || toolCall.id,
+    name: toolCall.name || toolCall.function?.name,
+    status: 'error',
+    error: toolCall.error || errorText,
+    content: errorText,
+  });
 }
 
 function appendProcessContent(toolInteractions: any[], content: string): any[] {
@@ -631,7 +693,10 @@ export class StreamManager {
       next.reasoningActive = true;
     }
     if (chunk.event_type === 'tool_call_start') {
-      next.toolInteractions = appendToolCallStart(next.toolInteractions, next.content, next.reasoning);
+      const toolCalls = getChunkToolCalls(chunk);
+      next.toolInteractions = toolCalls.length > 0
+        ? appendToolCalls(next.toolInteractions, toolCalls, next.content, next.reasoning)
+        : appendToolCallStart(next.toolInteractions, next.content, next.reasoning);
       next.content = '';
       next.reasoning = '';
       next.reasoningActive = false;
@@ -645,6 +710,15 @@ export class StreamManager {
       }
     } else if (chunk.event_type === 'tool_result') {
       next.toolInteractions = appendToolResult(next.toolInteractions, chunk.tool_call);
+      next.reasoningActive = false;
+    } else if (chunk.event_type === 'tool_progress') {
+      next.toolInteractions = appendToolProgress(next.toolInteractions, chunk.tool_call);
+      next.reasoningActive = false;
+    } else if (chunk.event_type === 'tool_result_delta') {
+      next.toolInteractions = appendToolResultDelta(next.toolInteractions, chunk.tool_call);
+      next.reasoningActive = false;
+    } else if (chunk.event_type === 'tool_call_error') {
+      next.toolInteractions = appendToolError(next.toolInteractions, chunk.tool_call);
       next.reasoningActive = false;
     } else if (chunk.event_type === 'tool_approval_request') {
       next.pendingApprovals = mergeApproval(next.pendingApprovals, chunk.approval, 'pending');

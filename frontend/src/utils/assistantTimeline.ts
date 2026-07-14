@@ -37,6 +37,8 @@ export type ToolMessageLike = {
   envelope?: unknown;
   tool_result_id?: unknown;
   tool_call_id?: string;
+  status?: unknown;
+  progress?: unknown;
 };
 
 export type ToolRenderItem = {
@@ -116,13 +118,19 @@ export function makeToolItem(
   const name = getToolName(toolCall, toolMessage);
   const rawArgs = getToolRawArgs(toolCall);
   const outputText = limitToolDisplayText(getToolOutput(toolMessage));
+  const messageStatus = typeof toolMessage?.status === 'string' ? toolMessage.status : '';
+  const status = messageStatus === 'running'
+    ? 'running'
+    : toolMessage
+      ? (isToolResultError(toolMessage) ? 'error' : 'done')
+      : 'running';
   return {
     key: toolCall?.id || toolMessage?.tool_call_id || fallbackKey,
     name,
-    summary: toolCall ? makeToolSummary(name, rawArgs) : outputText || '工具结果',
+    summary: toolCall ? makeToolSummary(name, rawArgs) : outputText || (status === 'running' ? '工具运行中' : '工具结果'),
     argsText: toolCall ? formatToolArguments(rawArgs) : '',
     outputText,
-    status: toolMessage ? (isToolResultError(toolMessage) ? 'error' : 'done') : 'running',
+    status,
     resultEnvelope: extractToolResultEnvelope(toolMessage),
   };
 }

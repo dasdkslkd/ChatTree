@@ -7,15 +7,19 @@ import json
 import locale
 import os
 import platform
+import queue
 import re
 import shlex
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
+from collections import defaultdict
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from .base import BaseTool
 from .security.logical_sandbox import DEFAULT_PROTECTED_PATHS
@@ -51,6 +55,36 @@ def _json(payload: Dict[str, Any]) -> str:
 
 def _error(error_type: str, message: str, **extra: Any) -> str:
     return _json({"error": {"type": error_type, "message": message, **extra}})
+
+
+def _ripgrep_error(reason: str) -> str:
+    if reason == "ripgrep_timeout":
+        return _error("ripgrep_timeout", "ripgrep timed out; narrow path/glob or raise the tool timeout")
+    if reason.startswith("ripgrep_failed:"):
+        return _error("ripgrep_failed", reason.split(":", 1)[1])
+    return _error("ripgrep_failed", reason)
+
+
+def _tool_event_sink(kwargs: Dict[str, Any]) -> Optional[Callable[[Dict[str, Any]], None]]:
+    runtime_context = kwargs.get("_runtime_context")
+    if not isinstance(runtime_context, dict):
+        return None
+    sink = runtime_context.get("tool_event_sink")
+    return sink if callable(sink) else None
+
+
+def _emit_tool_observation(
+    sink: Optional[Callable[[Dict[str, Any]], None]],
+    event_type: str,
+    **payload: Any,
+) -> None:
+    if sink is None:
+        return
+    try:
+        sink({"event_type": event_type, **payload})
+    except Exception:
+        # Tool observation must never change tool semantics.
+        pass
 
 
 def _decode_output(value: bytes | str | None, max_chars: int) -> str:
@@ -296,6 +330,7 @@ class ListFilesTool(_CodeTool):
         return await asyncio.to_thread(self._execute_sync, dict(kwargs))
 
     def _execute_sync(self, kwargs: Dict[str, Any]) -> str:
+        event_sink = _tool_event_sink(kwargs)
         try:
             root = self.workspace.check_read(kwargs.get("path") or ".")
         except CodeToolError as exc:
@@ -320,15 +355,28 @@ class ListFilesTool(_CodeTool):
         limit = max(1, min(int(kwargs.get("limit") or 200), 2000))
         offset = max(0, int(kwargs.get("offset") or 0))
 
+        _emit_tool_observation(
+            event_sink,
+            "tool_progress",
+            status="running",
+            progress={
+                "phase": "prepare",
+                "path": self.workspace.relative(root),
+                "patterns": patterns,
+                "files_only": files_only,
+                "respect_gitignore": respect_gitignore,
+            },
+        )
         rg_path = _resolve_ripgrep_executable(self.config)
-        fallback_reason = None
-        if rg_path is not None and files_only:
+        fallback_reason = "ripgrep_not_installed" if rg_path is None else None
+        if rg_path is not None:
             rg_result, fallback_reason = _glob_files_with_rg(
                 rg_path=rg_path,
                 workspace=self.workspace,
                 root=root,
                 patterns=patterns,
                 path_regex=compiled_path_regex,
+                files_only=files_only,
                 respect_gitignore=respect_gitignore,
                 include_hidden=include_hidden,
                 exclude_globs=exclude_globs,
@@ -336,10 +384,24 @@ class ListFilesTool(_CodeTool):
                 limit=limit,
                 offset=offset,
                 timeout_seconds=self.config.command_timeout_seconds,
+                event_sink=event_sink,
             )
             if rg_result is not None:
                 return _json(rg_result)
+            if fallback_reason != "ripgrep_not_installed":
+                _emit_tool_observation(
+                    event_sink,
+                    "tool_progress",
+                    status="running",
+                    progress={"phase": "rg_failed", "engine": "rg", "reason": fallback_reason},
+                )
 
+        _emit_tool_observation(
+            event_sink,
+            "tool_progress",
+            status="running",
+            progress={"phase": "python_fallback", "reason": fallback_reason},
+        )
         files, truncated, scanned_entries, total = _glob_files_python(
             workspace=self.workspace,
             root=root,
@@ -365,6 +427,18 @@ class ListFilesTool(_CodeTool):
         }
         if fallback_reason:
             payload["fallback_reason"] = fallback_reason
+        _emit_tool_observation(
+            event_sink,
+            "tool_progress",
+            status="running",
+            progress={
+                "phase": "complete",
+                "engine": "python",
+                "scanned_entries": scanned_entries,
+                "matched_entries": total,
+                "truncated": truncated,
+            },
+        )
         return _json(payload)
 
 
@@ -420,15 +494,28 @@ class ReadFileTool(_CodeTool):
         return await asyncio.to_thread(self._execute_sync, dict(kwargs))
 
     def _execute_sync(self, kwargs: Dict[str, Any]) -> str:
+        event_sink = _tool_event_sink(kwargs)
         if str(kwargs.get("source") or "").lower() == "tool_result" or kwargs.get("tool_result_id") or (
             kwargs.get("id") and not kwargs.get("path") and not kwargs.get("targets")
         ):
+            _emit_tool_observation(
+                event_sink,
+                "tool_progress",
+                status="running",
+                progress={"phase": "read_tool_result", "tool_result_id": kwargs.get("tool_result_id") or kwargs.get("id")},
+            )
             return self._read_tool_result(kwargs)
         targets = _read_targets(kwargs)
         if not targets:
             return _error("invalid_path", "path or targets is required")
         output_format = str(kwargs.get("format") or "numbered")
         files: List[Dict[str, Any]] = []
+        _emit_tool_observation(
+            event_sink,
+            "tool_progress",
+            status="running",
+            progress={"phase": "prepare", "target_count": len(targets)},
+        )
         for target_spec in targets:
             raw_path = target_spec["path"]
             try:
@@ -451,6 +538,23 @@ class ReadFileTool(_CodeTool):
                 max_chars=max_chars,
                 output_format=output_format,
             ))
+            _emit_tool_observation(
+                event_sink,
+                "tool_progress",
+                status="running",
+                progress={
+                    "phase": "read_file",
+                    "path": self.workspace.relative(target),
+                    "completed_files": len(files),
+                    "target_count": len(targets),
+                },
+            )
+        _emit_tool_observation(
+            event_sink,
+            "tool_progress",
+            status="running",
+            progress={"phase": "complete", "completed_files": len(files), "target_count": len(targets)},
+        )
         if len(files) == 1:
             return _json(files[0])
         return _json({"files": files})
@@ -525,6 +629,7 @@ class SearchFilesTool(_CodeTool):
         return await asyncio.to_thread(self._execute_sync, dict(kwargs))
 
     def _execute_sync(self, kwargs: Dict[str, Any]) -> str:
+        event_sink = _tool_event_sink(kwargs)
         pattern = str(kwargs.get("pattern") or "")
         if not pattern:
             return _error("invalid_query", "pattern is required")
@@ -549,27 +654,19 @@ class SearchFilesTool(_CodeTool):
         after_context = max(context, int(kwargs.get("after_context") or 0))
         exclude_globs = _string_list(kwargs.get("exclude"))
 
-        if count_mode or multiline:
-            payload = _grep_files_python(
-                workspace=self.workspace,
-                root=root,
-                pattern=pattern,
-                glob=glob,
-                limit=limit,
-                offset=offset,
-                fixed_strings=fixed_strings,
-                ignore_case=ignore_case,
-                multiline=multiline,
-                no_ignore=no_ignore,
-                hidden=hidden,
-                before_context=before_context,
-                after_context=after_context,
-                output=output,
-                exclude_globs=exclude_globs,
-            )
-            return _json(payload)
-
-        fallback_reason: Optional[str] = None
+        _emit_tool_observation(
+            event_sink,
+            "tool_progress",
+            status="running",
+            progress={
+                "phase": "prepare",
+                "path": self.workspace.relative(root),
+                "pattern": pattern[:200],
+                "glob": glob,
+                "output": output,
+            },
+        )
+        fallback_reason: Optional[str] = "ripgrep_not_installed"
         rg_path = _resolve_ripgrep_executable(self.config)
         if rg_path is not None:
             rg_payload, fallback_reason = _grep_with_rg(
@@ -586,15 +683,35 @@ class SearchFilesTool(_CodeTool):
                 before_context=before_context,
                 after_context=after_context,
                 files_with_matches=files_with_matches,
+                count_mode=count_mode,
+                multiline=multiline,
                 exclude_globs=exclude_globs,
                 timeout_seconds=self.config.command_timeout_seconds,
+                event_sink=event_sink,
             )
             if rg_payload is not None:
+                _emit_tool_observation(
+                    event_sink,
+                    "tool_progress",
+                    status="running",
+                    progress={
+                        "phase": "complete",
+                        "engine": "rg",
+                        "searched_files": rg_payload.get("searched_files"),
+                        "matched_files": len(rg_payload.get("files") or []),
+                        "matches": len(rg_payload.get("matches") or []),
+                    },
+                )
                 return _json(_shape_grep_payload(rg_payload, output=output, limit=limit, offset=offset))
             if fallback_reason and fallback_reason.startswith("ripgrep_invalid_regex:"):
                 return _error("invalid_query", fallback_reason.split(":", 1)[1])
-        else:
-            fallback_reason = "ripgrep_not_installed"
+            if fallback_reason != "ripgrep_not_installed":
+                _emit_tool_observation(
+                    event_sink,
+                    "tool_progress",
+                    status="running",
+                    progress={"phase": "rg_failed", "engine": "rg", "reason": fallback_reason},
+                )
 
         if not fixed_strings:
             try:
@@ -602,6 +719,52 @@ class SearchFilesTool(_CodeTool):
             except re.error as exc:
                 return _error("invalid_query", f"invalid regex: {exc}")
 
+        if count_mode or multiline:
+            _emit_tool_observation(
+                event_sink,
+                "tool_progress",
+                status="running",
+                progress={"phase": "python_fallback", "reason": fallback_reason},
+            )
+            payload = _grep_files_python(
+                workspace=self.workspace,
+                root=root,
+                pattern=pattern,
+                glob=glob,
+                limit=limit,
+                offset=offset,
+                fixed_strings=fixed_strings,
+                ignore_case=ignore_case,
+                multiline=multiline,
+                no_ignore=no_ignore,
+                hidden=hidden,
+                before_context=before_context,
+                after_context=after_context,
+                output=output,
+                exclude_globs=exclude_globs,
+                event_sink=event_sink,
+            )
+            if fallback_reason and "error" not in payload:
+                payload["fallback_reason"] = fallback_reason
+            _emit_tool_observation(
+                event_sink,
+                "tool_progress",
+                status="running",
+                progress={
+                    "phase": "complete",
+                    "engine": "python",
+                    "searched_files": payload.get("searched_files"),
+                    "matches": len(payload.get("matches") or []),
+                },
+            )
+            return _json(payload)
+
+        _emit_tool_observation(
+            event_sink,
+            "tool_progress",
+            status="running",
+            progress={"phase": "python_fallback", "reason": fallback_reason},
+        )
         payload = _grep_python(
             workspace=self.workspace,
             root=root,
@@ -616,9 +779,21 @@ class SearchFilesTool(_CodeTool):
             after_context=after_context,
             files_with_matches=files_with_matches,
             exclude_globs=exclude_globs,
+            event_sink=event_sink,
         )
         if fallback_reason:
             payload["fallback_reason"] = fallback_reason
+        _emit_tool_observation(
+            event_sink,
+            "tool_progress",
+            status="running",
+            progress={
+                "phase": "complete",
+                "engine": "python",
+                "searched_files": payload.get("searched_files"),
+                "matches": len(payload.get("matches") or []),
+            },
+        )
         return _json(_shape_grep_payload(payload, output=output, limit=limit, offset=offset))
 
 
@@ -1446,8 +1621,11 @@ def _grep_with_rg(
     before_context: int,
     after_context: int,
     files_with_matches: bool,
+    count_mode: bool,
+    multiline: bool,
     exclude_globs: List[str],
     timeout_seconds: int,
+    event_sink: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
     if root.is_file() and not _matches_glob(root, glob):
         return ({
@@ -1464,6 +1642,8 @@ def _grep_with_rg(
     argv = [str(rg_path), "--color", "never", "--no-config", "--line-number"]
     if not files_with_matches:
         argv.append("--json")
+    if multiline:
+        argv.append("--multiline")
     if fixed_strings:
         argv.append("--fixed-strings")
     if ignore_case:
@@ -1484,69 +1664,217 @@ def _grep_with_rg(
         argv.extend(["--glob", f"!{exclude_glob}"])
     argv.extend(["--", pattern, target])
 
-    try:
-        proc = subprocess.run(
-            argv,
-            cwd=str(cwd),
-            env=_shell_env(),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout_seconds,
-        )
-    except FileNotFoundError:
-        return None, "ripgrep_not_installed"
-    except subprocess.TimeoutExpired:
-        return None, "ripgrep_timeout"
-    except OSError as exc:
-        return None, f"ripgrep_failed:{type(exc).__name__}"
-
-    if proc.returncode not in {0, 1}:
-        return None, _ripgrep_failure_reason(proc.stderr)
-
     matches: List[Dict[str, Any]] = []
+    counts: dict[str, int] = defaultdict(int)
     matched_files: set[str] = set()
     skipped_files: set[str] = set()
     searched_paths: set[str] = set()
+    scanned_lines = 0
     truncated = False
-    for raw_line in proc.stdout.splitlines():
-        if files_with_matches:
-            resolved = (cwd / raw_line.strip()).resolve()
-            if resolved.is_file() and workspace.is_visible(resolved):
-                matched_files.add(workspace.relative(resolved))
-                if len(matched_files) >= max_results:
-                    truncated = True
-                    break
-            continue
+    last_progress_at = 0.0
+
+    def emit_progress(*, phase: str = "scan", force: bool = False) -> None:
+        nonlocal last_progress_at
+        now = time.monotonic()
+        if not force and now - last_progress_at < 0.5:
+            return
+        last_progress_at = now
+        _emit_tool_observation(
+            event_sink,
+            "tool_progress",
+            status="running",
+            progress={
+                "phase": phase,
+                "engine": "rg",
+                "root": workspace.relative(root),
+                "searched_files": len(searched_paths),
+                "matched_files": len(matched_files),
+                "matches": sum(counts.values()) if count_mode else len(matches),
+                "scanned_entries": scanned_lines,
+                "truncated": truncated,
+            },
+        )
+
+    try:
+        proc = subprocess.Popen(
+            argv,
+            cwd=str(cwd),
+            env=_shell_env(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except FileNotFoundError:
+        return None, "ripgrep_not_installed"
+    except OSError as exc:
+        return None, f"ripgrep_failed:{type(exc).__name__}"
+
+    line_queue: queue.Queue[object] = queue.Queue(maxsize=256)
+    stdout_done = object()
+    stop_reader = threading.Event()
+    stderr_lines: list[str] = []
+
+    def pump_stdout() -> None:
         try:
-            event = json.loads(raw_line)
-        except json.JSONDecodeError:
-            return None, "ripgrep_invalid_json"
-        if event.get("type") not in {"match", "context"}:
-            continue
-        data = event.get("data") if isinstance(event.get("data"), dict) else {}
-        path_text = _rg_json_text(data.get("path"))
-        if not path_text:
-            continue
-        resolved = (cwd / path_text).resolve()
-        if not resolved.is_file() or not workspace.is_visible(resolved):
-            continue
-        relative_path = workspace.relative(resolved)
-        searched_paths.add(relative_path)
-        line_text = _rg_json_text(data.get("lines"))
-        if line_text is None:
-            skipped_files.add(relative_path)
-            continue
-        matches.append({
-            "path": relative_path,
-            "line": int(data.get("line_number") or 0),
-            "preview": line_text.strip(),
-            "type": event.get("type"),
-        })
-        if len(matches) >= max_results:
-            truncated = True
-            break
+            if proc.stdout is not None:
+                try:
+                    for line in proc.stdout:
+                        if stop_reader.is_set():
+                            break
+                        while not stop_reader.is_set():
+                            try:
+                                line_queue.put(line, timeout=0.05)
+                                break
+                            except queue.Full:
+                                continue
+                except (OSError, ValueError):
+                    pass
+        finally:
+            while not stop_reader.is_set():
+                try:
+                    line_queue.put(stdout_done, timeout=0.05)
+                    break
+                except queue.Full:
+                    continue
+
+    def pump_stderr() -> None:
+        try:
+            if proc.stderr is not None:
+                for line in proc.stderr:
+                    stderr_lines.append(line)
+        except (OSError, ValueError):
+            pass
+
+    stdout_thread = threading.Thread(target=pump_stdout, name="grep-rg-stdout", daemon=True)
+    stderr_thread = threading.Thread(target=pump_stderr, name="grep-rg-stderr", daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+    deadline = time.monotonic() + max(0.001, float(timeout_seconds))
+    timed_out = False
+    invalid_json = False
+    return_code: int | None = None
+    emit_progress(phase="scan_start", force=True)
+
+    def stop_process() -> None:
+        if proc.stdout is not None:
+            try:
+                proc.stdout.close()
+            except OSError:
+                pass
+        if proc.poll() is None:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                try:
+                    proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    pass
+        stdout_thread.join(timeout=0.2)
+        stderr_thread.join(timeout=0.2)
+
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            try:
+                queued = line_queue.get(timeout=min(0.05, remaining))
+            except queue.Empty:
+                continue
+            if queued is stdout_done:
+                break
+            raw_line = str(queued).rstrip("\r\n")
+            if not raw_line:
+                continue
+            scanned_lines += 1
+            emit_progress()
+            if files_with_matches:
+                resolved = (cwd / raw_line.strip()).resolve()
+                if resolved.is_file() and workspace.is_visible(resolved):
+                    relative_path = workspace.relative(resolved)
+                    searched_paths.add(relative_path)
+                    matched_files.add(relative_path)
+                    if len(matched_files) >= max_results:
+                        truncated = True
+                        break
+                continue
+            try:
+                event = json.loads(raw_line)
+            except json.JSONDecodeError:
+                invalid_json = True
+                break
+            if event.get("type") not in {"match", "context"}:
+                continue
+            data = event.get("data") if isinstance(event.get("data"), dict) else {}
+            path_text = _rg_json_text(data.get("path"))
+            if not path_text:
+                continue
+            resolved = (cwd / path_text).resolve()
+            if not resolved.is_file() or not workspace.is_visible(resolved):
+                continue
+            relative_path = workspace.relative(resolved)
+            searched_paths.add(relative_path)
+            if event.get("type") == "match":
+                counts[relative_path] += 1
+                matched_files.add(relative_path)
+            line_text = _rg_json_text(data.get("lines"))
+            if line_text is None:
+                skipped_files.add(relative_path)
+                continue
+            if count_mode:
+                continue
+            matches.append({
+                "path": relative_path,
+                "line": int(data.get("line_number") or 0),
+                "preview": line_text.strip(),
+                "type": event.get("type"),
+            })
+            if len(matches) >= max_results:
+                truncated = True
+                break
+    finally:
+        if timed_out or truncated or invalid_json:
+            stop_reader.set()
+            stop_process()
+
+    if timed_out:
+        _emit_tool_observation(
+            event_sink,
+            "tool_progress",
+            status="running",
+            progress={
+                "phase": "timeout",
+                "engine": "rg",
+                "searched_files": len(searched_paths),
+                "matches": sum(counts.values()) if count_mode else len(matches),
+            },
+        )
+        return None, "ripgrep_timeout"
+    if invalid_json:
+        return None, "ripgrep_invalid_json"
+    if not truncated:
+        remaining = max(0.001, deadline - time.monotonic())
+        try:
+            return_code = proc.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            stop_reader.set()
+            stop_process()
+            return None, "ripgrep_timeout"
+        stdout_thread.join(timeout=0.2)
+        stderr_thread.join(timeout=0.2)
+        if return_code not in {0, 1}:
+            return None, _ripgrep_failure_reason("".join(stderr_lines))
 
     payload: Dict[str, Any] = {
         "pattern": pattern,
@@ -1559,6 +1887,13 @@ def _grep_with_rg(
     if files_with_matches:
         payload["files"] = sorted(matched_files)
         payload["matches"] = []
+    if count_mode:
+        payload["counts"] = [
+            {"path": path, "count": count}
+            for path, count in sorted(counts.items())
+        ]
+        payload["matches"] = []
+    emit_progress(phase="complete", force=True)
     return (payload, None)
 
 
@@ -1569,6 +1904,7 @@ def _glob_files_with_rg(
     root: Path,
     patterns: List[str],
     path_regex: Optional[re.Pattern[str]],
+    files_only: bool,
     respect_gitignore: bool,
     include_hidden: bool,
     exclude_globs: List[str],
@@ -1576,6 +1912,7 @@ def _glob_files_with_rg(
     limit: int,
     offset: int,
     timeout_seconds: int,
+    event_sink: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
     if root.is_file():
         if not any(_matches_glob(root, pattern) for pattern in patterns):
@@ -1611,55 +1948,237 @@ def _glob_files_with_rg(
     if include_hidden:
         argv.append("--hidden")
     for pattern in patterns:
-        if pattern and pattern != "**/*":
+        if pattern and pattern not in {"*", "**/*"}:
             argv.extend(["--glob", pattern])
     for exclude_glob in exclude_globs:
         argv.extend(["--glob", f"!{exclude_glob}"])
     argv.extend(["--", "."])
 
-    try:
-        proc = subprocess.run(
-            argv,
-            cwd=str(root),
-            env=_shell_env(),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout_seconds,
-        )
-    except FileNotFoundError:
-        return None, "ripgrep_not_installed"
-    except subprocess.TimeoutExpired:
-        return None, "ripgrep_timeout"
-    except OSError as exc:
-        return None, f"ripgrep_failed:{type(exc).__name__}"
-
-    if proc.returncode not in {0, 1}:
-        return None, _ripgrep_failure_reason(proc.stderr)
-
     matches: List[Path] = []
     seen: set[Path] = set()
     scanned_entries = 0
-    for raw_line in proc.stdout.splitlines():
-        relative_text = raw_line.strip()
-        if not relative_text:
-            continue
-        scanned_entries += 1
-        resolved = (root / relative_text).resolve()
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        if not resolved.is_file() or not workspace.is_visible(resolved):
-            continue
-        if not any(_matches_glob(resolved, pattern) for pattern in patterns):
-            continue
-        if _matches_excluded_glob(resolved, root, exclude_globs):
-            continue
-        relative = workspace.relative(resolved)
+    scan_limit = max(1000, (limit + offset) * 50)
+    stopped_early = False
+    timed_out = False
+    last_progress_at = 0.0
+
+    def emit_progress(*, phase: str = "scan", force: bool = False) -> None:
+        nonlocal last_progress_at
+        now = time.monotonic()
+        if not force and now - last_progress_at < 0.5:
+            return
+        last_progress_at = now
+        _emit_tool_observation(
+            event_sink,
+            "tool_progress",
+            status="running",
+            progress={
+                "phase": phase,
+                "engine": "rg",
+                "root": workspace.relative(root),
+                "scanned_entries": scanned_entries,
+                "matched_entries": len(matches),
+                "scan_limit": scan_limit,
+                "truncated": stopped_early,
+            },
+        )
+
+    def add_candidate(candidate: Path) -> None:
+        resolved_candidate = candidate.resolve()
+        if resolved_candidate in seen:
+            return
+        seen.add(resolved_candidate)
+        if files_only and not resolved_candidate.is_file():
+            return
+        if not files_only and not (resolved_candidate.is_file() or resolved_candidate.is_dir()):
+            return
+        if not workspace.is_visible(resolved_candidate):
+            return
+        if not include_hidden and _is_hidden_under(resolved_candidate, root):
+            return
+        if not any(_matches_glob(resolved_candidate, pattern) for pattern in patterns):
+            return
+        if _matches_excluded_glob(resolved_candidate, root, exclude_globs):
+            return
+        relative = workspace.relative(resolved_candidate)
         if path_regex and not path_regex.search(relative):
-            continue
-        matches.append(resolved)
+            return
+        matches.append(resolved_candidate)
+
+    try:
+        proc = subprocess.Popen(
+            argv,
+            cwd=str(root),
+            env=_shell_env(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except FileNotFoundError:
+        return None, "ripgrep_not_installed"
+    except OSError as exc:
+        return None, f"ripgrep_failed:{type(exc).__name__}"
+
+    line_queue: queue.Queue[object] = queue.Queue(maxsize=256)
+    stdout_done = object()
+    stop_reader = threading.Event()
+    stderr_lines: list[str] = []
+
+    def pump_stdout() -> None:
+        try:
+            if proc.stdout is not None:
+                try:
+                    for line in proc.stdout:
+                        if stop_reader.is_set():
+                            break
+                        while not stop_reader.is_set():
+                            try:
+                                line_queue.put(line, timeout=0.05)
+                                break
+                            except queue.Full:
+                                continue
+                except (OSError, ValueError):
+                    pass
+        finally:
+            while not stop_reader.is_set():
+                try:
+                    line_queue.put(stdout_done, timeout=0.05)
+                    break
+                except queue.Full:
+                    continue
+
+    def pump_stderr() -> None:
+        try:
+            if proc.stderr is not None:
+                for line in proc.stderr:
+                    stderr_lines.append(line)
+        except (OSError, ValueError):
+            pass
+
+    stdout_thread = threading.Thread(target=pump_stdout, name="glob-rg-stdout", daemon=True)
+    stderr_thread = threading.Thread(target=pump_stderr, name="glob-rg-stderr", daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+    deadline = time.monotonic() + max(0.001, float(timeout_seconds))
+    return_code: int | None = None
+    emit_progress(phase="scan_start", force=True)
+
+    def stop_process() -> None:
+        if proc.stdout is not None:
+            try:
+                proc.stdout.close()
+            except OSError:
+                pass
+        if proc.poll() is None:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                try:
+                    proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    pass
+        stdout_thread.join(timeout=0.2)
+        stderr_thread.join(timeout=0.2)
+
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            try:
+                queued = line_queue.get(timeout=min(0.05, remaining))
+            except queue.Empty:
+                continue
+            if queued is stdout_done:
+                break
+            raw_line = str(queued)
+            relative_text = raw_line.strip()
+            if not relative_text:
+                continue
+            scanned_entries += 1
+            emit_progress()
+            if scanned_entries > scan_limit:
+                stopped_early = True
+                break
+            resolved = (root / relative_text).resolve()
+            if not resolved.is_file() or not workspace.is_visible(resolved):
+                continue
+            if not include_hidden and _is_hidden_under(resolved, root):
+                continue
+            if files_only:
+                add_candidate(resolved)
+                continue
+            ancestors: List[Path] = []
+            parent = resolved.parent
+            while parent != root and root in parent.parents:
+                ancestors.append(parent)
+                parent = parent.parent
+            for candidate in reversed(ancestors):
+                add_candidate(candidate)
+            add_candidate(resolved)
+    finally:
+        if timed_out or stopped_early:
+            stop_reader.set()
+            stop_process()
+
+    if timed_out:
+        _emit_tool_observation(
+            event_sink,
+            "tool_progress",
+            status="running",
+            progress={
+                "phase": "timeout",
+                "engine": "rg",
+                "scanned_entries": scanned_entries,
+                "matched_entries": len(matches),
+            },
+        )
+        return None, "ripgrep_timeout"
+
+    if not stopped_early:
+        remaining = max(0.001, deadline - time.monotonic())
+        try:
+            return_code = proc.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            stop_reader.set()
+            stop_process()
+            return None, "ripgrep_timeout"
+        stdout_thread.join(timeout=0.2)
+        stderr_thread.join(timeout=0.2)
+        if return_code not in {0, 1}:
+            return None, _ripgrep_failure_reason("".join(stderr_lines))
+
+    if not files_only and root.is_dir() and not stopped_early:
+        ignore_matcher = _GitIgnoreMatcher.for_root(root, workspace)
+        for candidate in root.rglob("*"):
+            scanned_entries += 1
+            if scanned_entries > scan_limit:
+                stopped_early = True
+                break
+            resolved = candidate.resolve()
+            if not resolved.is_dir():
+                continue
+            if _should_skip_python_path(
+                resolved,
+                root,
+                hidden=include_hidden,
+                no_ignore=respect_gitignore is False,
+                ignore_matcher=ignore_matcher,
+            ):
+                continue
+            add_candidate(resolved)
+            emit_progress()
 
     if sort == "mtime":
         matches.sort(key=lambda path: (-path.stat().st_mtime, workspace.relative(path)))
@@ -1668,7 +2187,8 @@ def _glob_files_with_rg(
 
     total = len(matches)
     page = matches[offset:offset + limit]
-    truncated = offset + limit < total
+    truncated = stopped_early or offset + limit < total
+    emit_progress(phase="complete", force=True)
     return ({
         "root": workspace.relative(root),
         "files": [workspace.relative(path) for path in page],
@@ -1696,6 +2216,7 @@ def _grep_python(
     after_context: int,
     files_with_matches: bool,
     exclude_globs: List[str],
+    event_sink: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     matches: List[Dict[str, Any]] = []
     matched_files: set[str] = set()
@@ -1703,7 +2224,29 @@ def _grep_python(
     skipped_files: List[str] = []
     matcher = _compile_python_matcher(pattern, fixed_strings=fixed_strings, ignore_case=ignore_case)
     ignore_matcher = _GitIgnoreMatcher.for_root(root, workspace)
+    last_progress_at = 0.0
 
+    def emit_progress(*, force: bool = False) -> None:
+        nonlocal last_progress_at
+        now = time.monotonic()
+        if not force and now - last_progress_at < 0.5:
+            return
+        last_progress_at = now
+        _emit_tool_observation(
+            event_sink,
+            "tool_progress",
+            status="running",
+            progress={
+                "phase": "scan",
+                "engine": "python",
+                "root": workspace.relative(root),
+                "searched_files": searched_files,
+                "matched_files": len(matched_files),
+                "matches": len(matches),
+            },
+        )
+
+    emit_progress(force=True)
     for file_path in _iter_grep_files(root, glob):
         resolved = file_path.resolve()
         if (
@@ -1714,6 +2257,7 @@ def _grep_python(
         ):
             continue
         searched_files += 1
+        emit_progress()
         try:
             text = resolved.read_text(encoding="utf-8")
         except UnicodeDecodeError:
@@ -1727,6 +2271,7 @@ def _grep_python(
             matched_files.add(relative_path)
             if files_with_matches:
                 if len(matched_files) >= max_results:
+                    emit_progress(force=True)
                     return _search_payload(pattern, [], searched_files, skipped_files, True, "python", matched_files)
                 break
             start = max(0, index - before_context)
@@ -1739,8 +2284,10 @@ def _grep_python(
                     "type": "match" if context_index == index else "context",
                 })
                 if len(matches) >= max_results:
+                    emit_progress(force=True)
                     return _search_payload(pattern, matches, searched_files, skipped_files, True, "python", matched_files)
             if len(matches) >= max_results:
+                emit_progress(force=True)
                 return {
                     "pattern": pattern,
                     "matches": matches,
@@ -1750,6 +2297,7 @@ def _grep_python(
                     "engine": "python",
                 }
 
+    emit_progress(force=True)
     return _search_payload(pattern, matches, searched_files, skipped_files, False, "python", matched_files if files_with_matches else None)
 
 
@@ -1840,6 +2388,16 @@ def _shape_grep_payload(payload: Dict[str, Any], *, output: str, limit: int, off
             "next_offset": offset + len(page) if (bool(payload.get("truncated")) or offset + limit < len(files)) else None,
         })
         return shaped
+    if output == "count":
+        counts = list(payload.get("counts") or [])
+        page = counts[offset:offset + limit]
+        shaped.update({
+            "counts": page,
+            "count": len(page),
+            "truncated": bool(payload.get("truncated")) or offset + limit < len(counts),
+            "next_offset": offset + len(page) if (bool(payload.get("truncated")) or offset + limit < len(counts)) else None,
+        })
+        return shaped
     matches = [
         {
             "path": match.get("path"),
@@ -1875,6 +2433,7 @@ def _grep_files_python(
     after_context: int,
     output: str,
     exclude_globs: List[str],
+    event_sink: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     if not fixed_strings:
         try:
@@ -1890,7 +2449,29 @@ def _grep_files_python(
     counts: List[Dict[str, Any]] = []
     skipped_files: List[str] = []
     searched_files = 0
+    last_progress_at = 0.0
 
+    def emit_progress(*, force: bool = False) -> None:
+        nonlocal last_progress_at
+        now = time.monotonic()
+        if not force and now - last_progress_at < 0.5:
+            return
+        last_progress_at = now
+        _emit_tool_observation(
+            event_sink,
+            "tool_progress",
+            status="running",
+            progress={
+                "phase": "scan",
+                "engine": "python",
+                "root": workspace.relative(root),
+                "searched_files": searched_files,
+                "matched_files": len(files) or len(counts),
+                "matches": len(matches),
+            },
+        )
+
+    emit_progress(force=True)
     for file_path in _iter_grep_files(root, glob):
         resolved = file_path.resolve()
         if (
@@ -1902,6 +2483,7 @@ def _grep_files_python(
             continue
         relative = workspace.relative(resolved)
         searched_files += 1
+        emit_progress()
         try:
             text = resolved.read_text(encoding="utf-8")
         except UnicodeDecodeError:
@@ -1943,6 +2525,7 @@ def _grep_files_python(
         if output == "count" and file_match_count:
             counts.append({"path": relative, "count": file_match_count})
 
+    emit_progress(force=True)
     if output == "files":
         page = files[offset:offset + limit]
         return {"pattern": pattern, "output": output, "files": page, "count": len(page), "searched_files": searched_files, "skipped_non_utf8": skipped_files, "truncated": offset + limit < len(files), "next_offset": offset + len(page) if offset + limit < len(files) else None, "engine": "python"}

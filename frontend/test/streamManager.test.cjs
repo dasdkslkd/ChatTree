@@ -258,6 +258,114 @@ async function testMergesToolResultIntoExistingInteraction() {
   });
 }
 
+async function testToolProgressUpdatesRunningToolInPlace() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    messageApi.stream = controlled.stream;
+    const toolCall = {
+      id: 'call-1',
+      type: 'function',
+      function: { name: 'glob', arguments: '{"path":"frontend"}' },
+    };
+    const running = manager.startStream('conv-1', { content: 'hello' });
+
+    await controlled.push(chunk({ event_type: 'tool_call', tool_calls: [toolCall] }));
+    await controlled.push(chunk({
+      event_type: 'tool_progress',
+      tool_call: {
+        id: 'call-1',
+        tool_call_id: 'call-1',
+        name: 'glob',
+        status: 'running',
+        progress: { phase: 'scan', scanned_entries: 100, matched_entries: 12 },
+      },
+    }));
+
+    try {
+      const state = manager.getState('conv-1');
+      assert.equal(state.toolInteractions.length, 1);
+      assert.equal(state.toolInteractions[0].tools.length, 1);
+      assert.equal(state.toolInteractions[0].tools[0].tool_call_id, 'call-1');
+      assert.equal(state.toolInteractions[0].tools[0].status, 'running');
+      assert.match(state.toolInteractions[0].tools[0].content, /scanned 100/);
+    } finally {
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
+async function testToolResultDeltaAppendsOutputInPlace() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    messageApi.stream = controlled.stream;
+    const toolCall = {
+      id: 'call-1',
+      type: 'function',
+      function: { name: 'run_command', arguments: '{"command":"echo hi"}' },
+    };
+    const running = manager.startStream('conv-1', { content: 'hello' });
+
+    await controlled.push(chunk({ event_type: 'tool_call', tool_calls: [toolCall] }));
+    await controlled.push(chunk({
+      event_type: 'tool_result_delta',
+      tool_call: { id: 'call-1', tool_call_id: 'call-1', name: 'run_command', content_delta: 'hel' },
+    }));
+    await controlled.push(chunk({
+      event_type: 'tool_result_delta',
+      tool_call: { id: 'call-1', tool_call_id: 'call-1', name: 'run_command', content_delta: 'lo' },
+    }));
+
+    try {
+      const state = manager.getState('conv-1');
+      assert.equal(state.toolInteractions.length, 1);
+      assert.equal(state.toolInteractions[0].tools.length, 1);
+      assert.equal(state.toolInteractions[0].tools[0].content, 'hello');
+      assert.equal(state.toolInteractions[0].tools[0].status, 'running');
+    } finally {
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
+async function testToolCallErrorUpdatesToolInPlace() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    messageApi.stream = controlled.stream;
+    const toolCall = {
+      id: 'call-1',
+      type: 'function',
+      function: { name: 'glob', arguments: '{"path":"missing"}' },
+    };
+    const running = manager.startStream('conv-1', { content: 'hello' });
+
+    await controlled.push(chunk({ event_type: 'tool_call', tool_calls: [toolCall] }));
+    await controlled.push(chunk({
+      event_type: 'tool_call_error',
+      tool_call: {
+        id: 'call-1',
+        tool_call_id: 'call-1',
+        name: 'glob',
+        status: 'error',
+        error: 'path is outside workspace roots',
+      },
+    }));
+
+    try {
+      const state = manager.getState('conv-1');
+      assert.equal(state.toolInteractions.length, 1);
+      assert.equal(state.toolInteractions[0].tools.length, 1);
+      assert.equal(state.toolInteractions[0].tools[0].tool_call_id, 'call-1');
+      assert.equal(state.toolInteractions[0].tools[0].status, 'error');
+      assert.match(state.toolInteractions[0].tools[0].content, /outside workspace/);
+    } finally {
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
 async function testProcessContentStaysWithCurrentToolInteraction() {
   await withManager(async (manager) => {
     const controlled = createControlledStream();
@@ -1343,6 +1451,9 @@ async function main() {
   await testFlushesReasoningBeforeContentStarts();
   await testFlushesBufferedTextIntoSingleToolCall();
   await testMergesToolResultIntoExistingInteraction();
+  await testToolProgressUpdatesRunningToolInPlace();
+  await testToolResultDeltaAppendsOutputInPlace();
+  await testToolCallErrorUpdatesToolInPlace();
   await testProcessContentStaysWithCurrentToolInteraction();
   await testToolCallStartFlushesBufferedTextBeforeToolCallCompletes();
   await testToolCallStartCreatesRunningPlaceholder();

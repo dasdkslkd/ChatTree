@@ -139,7 +139,7 @@ export interface StreamChunk {
   error?: string | null;
   tokens_used: number;
   // 可扩展字段（未来推理/工具事件；缺省按文本处理）
-  event_type?: 'text' | 'reasoning' | 'process_content' | 'tool_call_start' | 'tool_call' | 'tool_result' | 'tool_approval_request' | 'tool_approval_result';
+  event_type?: 'text' | 'reasoning' | 'process_content' | 'tool_call_start' | 'tool_call' | 'tool_progress' | 'tool_result_delta' | 'tool_call_error' | 'tool_result' | 'tool_approval_request' | 'tool_approval_result';
   reasoning?: string | null;
   tool_call?: any;
   tool_calls?: any[];
