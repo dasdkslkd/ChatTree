@@ -223,6 +223,94 @@ class PlainAssistantProvider:
         )
 
 
+def make_indexed_tool_call(index, name="filesystem__read_file", arguments=None):
+    return {
+        "id": f"call-{index}",
+        "type": "function",
+        "function": {
+            "name": name,
+            "arguments": json.dumps(arguments or {"path": f"notes-{index}.txt"}, ensure_ascii=False),
+        },
+    }
+
+
+class ParallelToolSnapshotProvider:
+    def __init__(self):
+        self.calls = 0
+
+    async def generate_response_stream(
+        self,
+        model,
+        messages,
+        stream_controller: StreamController = None,
+        **kwargs,
+    ):
+        self.calls += 1
+        yield StreamChunk(
+            status=StreamStatus.START,
+            content=None,
+            node_id=stream_controller.node_id,
+            conversation_id=stream_controller.conversation_id,
+            error=None,
+            tokens_used=0,
+        )
+        if self.calls == 1:
+            yield StreamChunk(
+                status=StreamStatus.CONTENT,
+                content=None,
+                node_id=stream_controller.node_id,
+                conversation_id=stream_controller.conversation_id,
+                error=None,
+                tokens_used=0,
+                event_type="tool_call_start",
+            )
+            yield StreamChunk(
+                status=StreamStatus.CONTENT,
+                content=None,
+                node_id=stream_controller.node_id,
+                conversation_id=stream_controller.conversation_id,
+                error=None,
+                tokens_used=0,
+                event_type="tool_call",
+                tool_calls=[make_indexed_tool_call(index) for index in range(1, 8)],
+                tool_call={"tool_calls": [make_indexed_tool_call(index) for index in range(1, 8)]},
+            )
+            yield StreamChunk(
+                status=StreamStatus.CONTENT,
+                content=None,
+                node_id=stream_controller.node_id,
+                conversation_id=stream_controller.conversation_id,
+                error=None,
+                tokens_used=0,
+                event_type="tool_call",
+                tool_calls=[make_indexed_tool_call(index) for index in range(1, 9)],
+                tool_call={"tool_calls": [make_indexed_tool_call(index) for index in range(1, 9)]},
+            )
+        else:
+            yield StreamChunk(
+                status=StreamStatus.CONTENT,
+                content="done",
+                node_id=stream_controller.node_id,
+                conversation_id=stream_controller.conversation_id,
+                error=None,
+                tokens_used=0,
+            )
+        yield StreamChunk(
+            status=StreamStatus.COMPLETE,
+            content=None,
+            node_id=stream_controller.node_id,
+            conversation_id=stream_controller.conversation_id,
+            error=None,
+            tokens_used=1,
+            usage_info={
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "total_tokens": 2,
+                "source": "test",
+            },
+        )
+
+
 class FakeModelManager:
     def __init__(self, provider=None):
         self.model_list = {"fake-provider": ["fake-model"]}
@@ -409,12 +497,16 @@ def test_build_stream_chunk_data_preserves_tool_approval_request():
             error=None,
             tokens_used=0,
             event_type="tool_approval_request",
+            tool_round=3,
+            tool_round_id="run-1:tool-round-3",
             approval={"id": "approval-1", "status": "pending"},
         ),
         conversation_id="fallback-conv",
     )
 
     assert data["event_type"] == "tool_approval_request"
+    assert data["tool_round"] == 3
+    assert data["tool_round_id"] == "run-1:tool-round-3"
     assert data["approval"]["id"] == "approval-1"
 
 
@@ -540,9 +632,12 @@ async def _stream_persists_tool_approval_events_on_assistant_node(tmp_path):
     node_id = streamed_approval_events[0]["node_id"]
     assistant_message = saved.nodes[node_id]["assistant_message"]
     assert assistant_message is not None
+    round_id = streamed_approval_events[0]["tool_round_id"]
     assert assistant_message["approval_events"] == [
         {
             "event_type": "tool_approval_request",
+            "tool_round": 1,
+            "tool_round_id": round_id,
             "approval": {
                 "id": "approval-42",
                 "status": "pending",
@@ -555,6 +650,8 @@ async def _stream_persists_tool_approval_events_on_assistant_node(tmp_path):
         },
         {
             "event_type": "tool_approval_result",
+            "tool_round": 1,
+            "tool_round_id": round_id,
             "approval": {
                 "id": "approval-42",
                 "status": "approved",
@@ -567,6 +664,8 @@ async def _stream_persists_tool_approval_events_on_assistant_node(tmp_path):
         },
         {
             "event_type": "tool_approval_reused",
+            "tool_round": 1,
+            "tool_round_id": round_id,
             "approval": {
                 "conversation_id": conversation.metadata["id"],
                 "node_id": node_id,
@@ -656,6 +755,55 @@ async def _stream_updates_metadata_updated_at_after_plain_assistant_completion(t
 
 def test_stream_updates_metadata_updated_at_after_plain_assistant_completion(tmp_path, monkeypatch):
     asyncio.run(_stream_updates_metadata_updated_at_after_plain_assistant_completion(tmp_path, monkeypatch))
+
+
+async def _stream_commits_parallel_tool_round_once(tmp_path):
+    provider = ParallelToolSnapshotProvider()
+    chat_manager = ChatManager(
+        FakeModelManager(provider=provider),
+        ChatStorage(storage_dir=str(tmp_path / "conversations")),
+        PromptStorage(storage_dir=str(tmp_path / "prompts")),
+        tool_manager=FakeStreamingToolManager(),
+    )
+    conversation = chat_manager.create_conversation("parallel tool round")
+
+    chunks = [
+        chunk
+        async for chunk in chat_manager.send_message_stream(
+            conversation.metadata["id"],
+            "read many files",
+            model_id="fake-model",
+            parent_node_id=conversation.current_node_id,
+        )
+    ]
+
+    assert [chunk.get("event_type") for chunk in chunks].count("tool_calls_committed") == 1
+    assert not any(chunk.get("event_type") == "tool_call" for chunk in chunks)
+    committed = next(chunk for chunk in chunks if chunk.get("event_type") == "tool_calls_committed")
+    assert committed["tool_round"] == 1
+    assert committed["tool_round_id"].endswith(":tool-round-1")
+    assert len(committed["tool_calls"]) == 8
+
+    tool_events = [
+        chunk for chunk in chunks
+        if chunk.get("event_type") in {"tool_call_start", "tool_progress", "tool_result"}
+    ]
+    assert tool_events
+    assert {event.get("tool_round_id") for event in tool_events} == {committed["tool_round_id"]}
+
+    saved = chat_manager.get_conversation(conversation.metadata["id"])
+    assert saved is not None
+    assistant_message = saved.nodes[committed["node_id"]]["assistant_message"]
+    assert assistant_message is not None
+    interactions = assistant_message["tool_interactions"]
+    assert len(interactions) == 1
+    assert interactions[0]["tool_round_id"] == committed["tool_round_id"]
+    assert len(interactions[0]["assistant"]["tool_calls"]) == 8
+    assert len(interactions[0]["tools"]) == 8
+
+
+def test_stream_commits_parallel_tool_round_once(tmp_path):
+    asyncio.run(_stream_commits_parallel_tool_round_once(tmp_path))
 
 
 async def _stop_stream_cancels_pending_approval_and_stream_finishes(tmp_path):

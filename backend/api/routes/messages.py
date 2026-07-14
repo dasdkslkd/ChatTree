@@ -151,6 +151,8 @@ def build_stream_chunk_data(chunk: StreamChunk, conversation_id: str) -> Dict[st
         "reasoning",
         "tool_call",
         "tool_calls",
+        "tool_round",
+        "tool_round_id",
         "approval",
         "child_run_id",
         "child_kind",

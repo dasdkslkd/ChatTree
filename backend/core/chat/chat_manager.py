@@ -1728,6 +1728,10 @@ class ChatManager:
                         thinking_enabled=eff_thinking,
                     ): # type: ignore
                         provider_chunk_count += 1
+                        provider_tool_event = str(chunk.get("event_type") or "") in {
+                            "tool_call_start",
+                            "tool_call",
+                        }
                         if first_provider_chunk:
                             first_chunk_latency_ms = (perf_counter() - provider_started) * 1000.0
                             profiler.mark(
@@ -1808,9 +1812,11 @@ class ChatManager:
                             round_content += data
                         if chunk.get("tool_calls"):
                             provider_tool_call_chunks += 1
+                            provider_tool_event = True
                             round_tool_calls = self._merge_tool_call_lists(round_tool_calls, chunk.get("tool_calls") or [])
                         elif chunk.get("tool_call"):
                             provider_tool_call_chunks += 1
+                            provider_tool_event = True
                             embedded = chunk.get("tool_call") or {}
                             if embedded.get("tool_calls"):
                                 round_tool_calls = self._merge_tool_call_lists(round_tool_calls, embedded.get("tool_calls") or [])
@@ -1833,6 +1839,8 @@ class ChatManager:
                         chunk["conversation_id"] = conversation_id
                         if run_id:
                             chunk["run_id"] = run_id
+                        if provider_tool_event:
+                            continue
                         if defer_round_content and chunk.get("content"):
                             deferred_content_chunks.append(dict(chunk))
                         else:
@@ -1968,19 +1976,44 @@ class ChatManager:
                     for deferred_chunk in deferred_content_chunks:
                         yield deferred_chunk
                 tool_round += 1
+                tool_round_id = f"{run_id or new_node['id']}:tool-round-{tool_round}"
                 assistant_tool_message = {
                     "role": "assistant",
                     "content": round_content,
                     "tool_calls": round_tool_calls,
+                    "tool_round": tool_round,
+                    "tool_round_id": tool_round_id,
                 }
                 messages.append(assistant_tool_message)
                 if round_text_is_intermediate:
                     for deferred_chunk in deferred_content_chunks:
                         deferred_chunk.setdefault("event_type", "process_content")
                         yield deferred_chunk
+                yield StreamChunk(
+                    status=StreamStatus.CONTENT,
+                    content=None,
+                    node_id=new_node["id"],
+                    target_node_id=new_node["id"],
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    error=None,
+                    tokens_used=0,
+                    event_type="tool_calls_committed",
+                    tool_calls=round_tool_calls,
+                    tool_round=tool_round,
+                    tool_round_id=tool_round_id,
+                )
                 approval_events: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
+                round_run_context = {
+                    **tool_run_context,
+                    "tool_round": tool_round,
+                    "tool_round_id": tool_round_id,
+                }
 
                 async def emit_tool_event(event: Dict[str, Any]):
+                    event = dict(event)
+                    event.setdefault("tool_round", tool_round)
+                    event.setdefault("tool_round_id", tool_round_id)
                     await approval_events.put(event)
                     if (
                         event.get("event_type") == "tool_approval_request"
@@ -2010,7 +2043,7 @@ class ChatManager:
                         emit_event=emit_tool_event,
                         workspace=workspace_context,
                         permission_mode=new_node.get("tool_permission_mode") or "default",
-                        run_context=tool_run_context,
+                        run_context=round_run_context,
                         task_turn_context=task_turn_context,
                     )
 
@@ -2135,6 +2168,8 @@ class ChatManager:
                 all_tool_calls.extend(round_tool_calls)
                 all_tool_messages.extend(tool_messages)
                 tool_interactions.append({
+                    "tool_round": tool_round,
+                    "tool_round_id": tool_round_id,
                     "assistant": assistant_tool_message,
                     "tools": tool_messages,
                     "reasoning": round_reasoning or None,
@@ -3843,11 +3878,7 @@ class ChatManager:
         current: List[Dict[str, Any]],
         incoming: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        by_id = {call.get("id") or str(index): call for index, call in enumerate(current)}
-        for index, call in enumerate(incoming):
-            key = call.get("id") or str(index)
-            by_id[key] = call
-        return list(by_id.values())
+        return [dict(call) for call in incoming]
 
     def _tool_result_preview_chars(self) -> int:
         tools_config = cfg.data.get("tools", {}) if isinstance(cfg.data, dict) else {}
@@ -4054,6 +4085,9 @@ class ChatManager:
             event_type=event.get("event_type"),
             approval=event.get("approval"),
             tool_call=event.get("tool_call"),
+            tool_calls=event.get("tool_calls"),
+            tool_round=event.get("tool_round"),
+            tool_round_id=event.get("tool_round_id"),
         )
 
     def _tool_observation_event(
@@ -4084,6 +4118,8 @@ class ChatManager:
         return {
             "event_type": event.get("event_type") or "tool_progress",
             "run_id": event.get("run_id"),
+            "tool_round": event.get("tool_round"),
+            "tool_round_id": event.get("tool_round_id"),
             "tool_call": payload,
         }
 
@@ -4234,6 +4270,8 @@ class ChatManager:
                 return
             event = dict(event)
             event.setdefault("run_id", call_run_context.get("run_id"))
+            event.setdefault("tool_round", call_run_context.get("tool_round"))
+            event.setdefault("tool_round_id", call_run_context.get("tool_round_id"))
             payload = self._tool_observation_event(
                 event,
                 tool_call=tool_call,

@@ -185,10 +185,12 @@ class StreamChunk(TypedDict, total=False):
     conversation_id: Optional[str]
     error: Optional[str]
     tokens_used: int  # 当前chunk的token数
-    event_type: Optional[str]            # "text" | "reasoning" | "tool_call_start" | "tool_call" | "tool_result" | "tool_approval_request" | "tool_approval_result"，缺省按 text
+    event_type: Optional[str]            # "text" | "reasoning" | "tool_calls_committed" | "tool_call_start" | "tool_call" | "tool_result" | "tool_approval_request" | "tool_approval_result"，缺省按 text
     reasoning: Optional[str]             # 推理增量
     tool_call: Optional[Dict[str, Any]]  # 工具调用增量/完整载荷
     tool_calls: Optional[List[Dict[str, Any]]]  # 完整工具调用列表（provider 聚合后填充）
+    tool_round: Optional[int]            # 已提交工具轮次，1-based
+    tool_round_id: Optional[str]         # 同一工具轮从 committed 到 result 的稳定 ID
     approval: Optional[Dict[str, Any]]   # 工具审批请求/结果载荷
     tool_permission_mode: Optional[str]  # 当前节点工具权限模式发生变化时随流同步
     task_context_mode: Optional[str]

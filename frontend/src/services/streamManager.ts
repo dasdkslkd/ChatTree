@@ -117,6 +117,37 @@ function mergeToolCalls(existing: any[], incoming: any[]): any[] {
   return merged;
 }
 
+function normalizeToolRoundId(value: unknown): string | null {
+  if (typeof value === 'string' && value.trim()) return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  return null;
+}
+
+function getChunkToolRoundId(chunk: any): string | null {
+  return normalizeToolRoundId(chunk?.tool_round_id)
+    || normalizeToolRoundId(chunk?.tool_call?.tool_round_id)
+    || (typeof chunk?.tool_round === 'number' ? `tool-round-${chunk.tool_round}` : null);
+}
+
+function getChunkToolRound(chunk: any): number | null {
+  if (typeof chunk?.tool_round === 'number') return chunk.tool_round;
+  if (typeof chunk?.tool_call?.tool_round === 'number') return chunk.tool_call.tool_round;
+  return null;
+}
+
+function toolCallKey(toolCall: any, index: number): string {
+  return String(toolCall?.id ?? toolCall?.tool_call_id ?? toolCall?.index ?? index);
+}
+
+function withToolRound(toolCall: any, roundId: string | null, round: number | null): any {
+  if (!toolCall || typeof toolCall !== 'object') return toolCall;
+  return {
+    ...toolCall,
+    ...(roundId ? { tool_round_id: roundId } : {}),
+    ...(round != null ? { tool_round: round } : {}),
+  };
+}
+
 function getChunkToolCalls(chunk: any): any[] {
   if (Array.isArray(chunk.tool_calls)) return chunk.tool_calls;
   if (Array.isArray(chunk.tool_call?.tool_calls)) return chunk.tool_call.tool_calls;
@@ -128,66 +159,106 @@ function getChunkToolCalls(chunk: any): any[] {
   return [];
 }
 
-function appendToolCallStart(toolInteractions: any[], content: string, reasoning: string): any[] {
-  const next = [...toolInteractions];
-  next.push({
+function findToolRoundIndex(toolInteractions: any[], roundId: string | null): number {
+  if (!roundId) return -1;
+  return toolInteractions.findIndex((interaction) => (
+    interaction?.tool_round_id === roundId
+    || interaction?.assistant?.tool_round_id === roundId
+  ));
+}
+
+function createToolRoundInteraction(
+  toolCalls: any[],
+  content: string,
+  reasoning: string,
+  roundId: string | null,
+  round: number | null,
+): any {
+  return {
+    ...(roundId ? { tool_round_id: roundId } : {}),
+    ...(round != null ? { tool_round: round } : {}),
     assistant: {
       role: 'assistant',
       content,
-      tool_calls: [{
-        id: '__pending_tool_call__',
-        type: 'function',
-        pending: true,
-        function: { name: '准备工具调用', arguments: '' },
-      }],
+      tool_calls: toolCalls,
+      ...(roundId ? { tool_round_id: roundId } : {}),
+      ...(round != null ? { tool_round: round } : {}),
     },
     tools: [],
     reasoning: reasoning || null,
-  });
-  return next;
+  };
 }
 
-function appendToolCalls(toolInteractions: any[], toolCalls: any[], content: string, reasoning: string): any[] {
+function appendToolCalls(
+  toolInteractions: any[],
+  toolCalls: any[],
+  content: string,
+  reasoning: string,
+  roundId: string | null,
+  round: number | null,
+  replaceSnapshot: boolean,
+): any[] {
   if (toolCalls.length === 0) return toolInteractions;
+  const normalizedCalls = toolCalls.map((toolCall) => withToolRound(toolCall, roundId, round));
   const next = [...toolInteractions];
-  const last = next[next.length - 1];
-  if (last && Array.isArray(last?.assistant?.tool_calls) && (!Array.isArray(last.tools) || last.tools.length === 0)) {
-    next[next.length - 1] = {
+  const roundIndex = findToolRoundIndex(next, roundId);
+  const index = roundIndex >= 0 ? roundIndex : -1;
+  if (index >= 0) {
+    const last = next[index];
+    const existingCalls = Array.isArray(last?.assistant?.tool_calls) ? last.assistant.tool_calls : [];
+    next[index] = {
       ...last,
+      ...(roundId ? { tool_round_id: roundId } : {}),
+      ...(round != null ? { tool_round: round } : {}),
       assistant: {
         ...last.assistant,
         content: content || last.assistant?.content || '',
-        tool_calls: mergeToolCalls(last.assistant.tool_calls, toolCalls),
+        tool_calls: replaceSnapshot ? normalizedCalls : mergeToolCalls(existingCalls, normalizedCalls),
+        ...(roundId ? { tool_round_id: roundId } : {}),
+        ...(round != null ? { tool_round: round } : {}),
       },
       reasoning: reasoning || last.reasoning || null,
     };
     return next;
   }
-  next.push({
-    assistant: { role: 'assistant', content, tool_calls: toolCalls },
-    tools: [],
-    reasoning: reasoning || null,
-  });
+  next.push(createToolRoundInteraction(normalizedCalls, content, reasoning, roundId, round));
   return next;
 }
 
-function appendToolResult(toolInteractions: any[], toolResult: any): any[] {
+function appendToolResult(
+  toolInteractions: any[],
+  toolResult: any,
+  roundId: string | null,
+  round: number | null,
+): any[] {
   if (!toolResult) return toolInteractions;
   const next = toolInteractions.length > 0
     ? toolInteractions.map((interaction) => ({
         ...interaction,
         tools: Array.isArray(interaction.tools) ? [...interaction.tools] : [],
       }))
-    : [{ assistant: { role: 'assistant', content: '', tool_calls: [] }, tools: [], reasoning: null }];
+    : [createToolRoundInteraction([], '', '', roundId, round)];
   const targetId = toolResult.tool_call_id;
+  const roundIndex = findToolRoundIndex(next, roundId);
   const targetIndex = targetId
     ? next.findIndex((interaction) => (interaction.assistant?.tool_calls || []).some((call: any) => call?.id === targetId))
     : -1;
-  const index = targetIndex >= 0 ? targetIndex : next.length - 1;
+  const index = roundIndex >= 0 ? roundIndex : targetIndex >= 0 ? targetIndex : next.length - 1;
+  next[index] = {
+    ...next[index],
+    ...(roundId ? { tool_round_id: roundId } : {}),
+    ...(round != null ? { tool_round: round } : {}),
+  };
   const tools = next[index].tools;
   const existingIndex = targetId ? tools.findIndex((tool: any) => tool?.tool_call_id === targetId) : -1;
-  if (existingIndex >= 0) tools[existingIndex] = { ...tools[existingIndex], ...toolResult };
-  else tools.push({ role: 'tool', ...toolResult });
+  const normalizedResult = {
+    role: 'tool',
+    ...toolResult,
+    ...(roundId ? { tool_round_id: roundId } : {}),
+    ...(round != null ? { tool_round: round } : {}),
+  };
+  if (existingIndex >= 0) tools[existingIndex] = { ...tools[existingIndex], ...normalizedResult };
+  else tools.push(normalizedResult);
   return next;
 }
 
@@ -203,7 +274,7 @@ function formatToolProgress(progress: any): string {
   return parts.join(' · ');
 }
 
-function appendToolProgress(toolInteractions: any[], toolCall: any): any[] {
+function appendToolProgress(toolInteractions: any[], toolCall: any, roundId: string | null, round: number | null): any[] {
   if (!toolCall) return toolInteractions;
   const progressText = formatToolProgress(toolCall.progress);
   return appendToolResult(toolInteractions, {
@@ -213,14 +284,14 @@ function appendToolProgress(toolInteractions: any[], toolCall: any): any[] {
     status: toolCall.status || 'running',
     progress: toolCall.progress,
     content: progressText || 'running',
-  });
+  }, roundId, round);
 }
 
-function appendToolResultDelta(toolInteractions: any[], toolCall: any): any[] {
+function appendToolResultDelta(toolInteractions: any[], toolCall: any, roundId: string | null, round: number | null): any[] {
   if (!toolCall) return toolInteractions;
   const targetId = toolCall.tool_call_id || toolCall.id;
   const delta = typeof toolCall.content_delta === 'string' ? toolCall.content_delta : '';
-  if (!targetId || !delta) return appendToolProgress(toolInteractions, toolCall);
+  if (!targetId || !delta) return appendToolProgress(toolInteractions, toolCall, roundId, round);
   const current = toolInteractions.length > 0
     ? toolInteractions.flatMap((interaction) => Array.isArray(interaction.tools) ? interaction.tools : [])
         .find((tool) => tool?.tool_call_id === targetId)
@@ -231,10 +302,10 @@ function appendToolResultDelta(toolInteractions: any[], toolCall: any): any[] {
     name: toolCall.name || toolCall.function?.name,
     status: toolCall.status || 'running',
     content: `${current?.content || ''}${delta}`,
-  });
+  }, roundId, round);
 }
 
-function appendToolError(toolInteractions: any[], toolCall: any): any[] {
+function appendToolError(toolInteractions: any[], toolCall: any, roundId: string | null, round: number | null): any[] {
   if (!toolCall) return toolInteractions;
   const errorText = typeof toolCall.error === 'string'
     ? toolCall.error
@@ -246,7 +317,27 @@ function appendToolError(toolInteractions: any[], toolCall: any): any[] {
     status: 'error',
     error: toolCall.error || errorText,
     content: errorText,
-  });
+  }, roundId, round);
+}
+
+function summarizeToolInteractions(toolInteractions: any[]): string {
+  return JSON.stringify(toolInteractions.map((interaction) => ({
+    round_id: interaction?.tool_round_id ?? interaction?.assistant?.tool_round_id ?? '',
+    round: interaction?.tool_round ?? interaction?.assistant?.tool_round ?? '',
+    calls: (interaction?.assistant?.tool_calls || []).map((call: any, index: number) => ({
+      key: toolCallKey(call, index),
+      status: call?.status ?? '',
+      name: call?.function?.name ?? call?.name ?? '',
+      args_len: String(call?.function?.arguments ?? call?.arguments ?? '').length,
+    })),
+    tools: (interaction?.tools || []).map((tool: any) => ({
+      id: tool?.tool_call_id ?? '',
+      status: tool?.status ?? '',
+      result_id: tool?.tool_result_id ?? '',
+      content_len: String(tool?.content ?? '').length,
+      delta_len: String(tool?.content_delta ?? '').length,
+    })),
+  })));
 }
 
 function appendProcessContent(toolInteractions: any[], content: string): any[] {
@@ -461,7 +552,7 @@ export class StreamManager {
       state.content,
       state.reasoning,
       Object.keys(state.pendingApprovals).length,
-      state.toolInteractions.length,
+      summarizeToolInteractions(state.toolInteractions),
       state.errorMessage ?? '',
       state.pendingUserMessage ?? '',
       state.toolPermissionMode ?? '',
@@ -692,33 +783,53 @@ export class StreamManager {
       next.reasoning += chunk.reasoning;
       next.reasoningActive = true;
     }
-    if (chunk.event_type === 'tool_call_start') {
+    const toolRoundId = getChunkToolRoundId(chunk);
+    const toolRound = getChunkToolRound(chunk);
+    if (chunk.event_type === 'tool_calls_committed') {
       const toolCalls = getChunkToolCalls(chunk);
-      next.toolInteractions = toolCalls.length > 0
-        ? appendToolCalls(next.toolInteractions, toolCalls, next.content, next.reasoning)
-        : appendToolCallStart(next.toolInteractions, next.content, next.reasoning);
-      next.content = '';
-      next.reasoning = '';
-      next.reasoningActive = false;
-    } else if (chunk.event_type === 'tool_call') {
-      const toolCalls = getChunkToolCalls(chunk);
-      next.toolInteractions = appendToolCalls(next.toolInteractions, toolCalls, next.content, next.reasoning);
+      next.toolInteractions = appendToolCalls(
+        next.toolInteractions,
+        toolCalls,
+        next.content,
+        next.reasoning,
+        toolRoundId,
+        toolRound,
+        true,
+      );
       if (toolCalls.length > 0) {
         next.content = '';
         next.reasoning = '';
         next.reasoningActive = false;
       }
+    } else if (chunk.event_type === 'tool_call_start') {
+      const toolCalls = getChunkToolCalls(chunk);
+      if (toolCalls.length > 0) {
+        next.toolInteractions = appendToolCalls(
+          next.toolInteractions,
+          toolCalls,
+          next.content,
+          next.reasoning,
+          toolRoundId,
+          toolRound,
+          false,
+        );
+        next.content = '';
+        next.reasoning = '';
+      }
+      next.reasoningActive = false;
+    } else if (chunk.event_type === 'tool_call') {
+      next.reasoningActive = false;
     } else if (chunk.event_type === 'tool_result') {
-      next.toolInteractions = appendToolResult(next.toolInteractions, chunk.tool_call);
+      next.toolInteractions = appendToolResult(next.toolInteractions, chunk.tool_call, toolRoundId, toolRound);
       next.reasoningActive = false;
     } else if (chunk.event_type === 'tool_progress') {
-      next.toolInteractions = appendToolProgress(next.toolInteractions, chunk.tool_call);
+      next.toolInteractions = appendToolProgress(next.toolInteractions, chunk.tool_call, toolRoundId, toolRound);
       next.reasoningActive = false;
     } else if (chunk.event_type === 'tool_result_delta') {
-      next.toolInteractions = appendToolResultDelta(next.toolInteractions, chunk.tool_call);
+      next.toolInteractions = appendToolResultDelta(next.toolInteractions, chunk.tool_call, toolRoundId, toolRound);
       next.reasoningActive = false;
     } else if (chunk.event_type === 'tool_call_error') {
-      next.toolInteractions = appendToolError(next.toolInteractions, chunk.tool_call);
+      next.toolInteractions = appendToolError(next.toolInteractions, chunk.tool_call, toolRoundId, toolRound);
       next.reasoningActive = false;
     } else if (chunk.event_type === 'tool_approval_request') {
       next.pendingApprovals = mergeApproval(next.pendingApprovals, chunk.approval, 'pending');
