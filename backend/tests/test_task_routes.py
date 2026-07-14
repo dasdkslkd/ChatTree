@@ -3,15 +3,21 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from backend.api.dependencies import get_task_service
+from backend.api.dependencies import get_task_notification_service, get_task_service
 from backend.api.routes import tasks as tasks_route
 from backend.core.tasks import ActiveTaskService
+
+
+class EmptyNotificationService:
+    def list_for_conversation(self, conversation_id: str):
+        return []
 
 
 def client_for(service: ActiveTaskService) -> TestClient:
     app = FastAPI()
     app.include_router(tasks_route.router)
     app.dependency_overrides[get_task_service] = lambda: service
+    app.dependency_overrides[get_task_notification_service] = lambda: EmptyNotificationService()
     return TestClient(app)
 
 
@@ -30,9 +36,11 @@ def test_task_routes_manage_single_active_task_until_completion():
     version = created.headers["etag"]
     assert created.json()["status"] == "pending"
     assert "task_id" not in created.json()
-    current_task = client.get("/conversations/conv-1/task")
-    assert current_task.json()["title"] == "检查实现"
-    unchanged = client.get("/conversations/conv-1/task", headers={"If-None-Match": current_task.headers["etag"]})
+    current_task = client.get("/conversations/conv-1/task-state")
+    assert current_task.json()["task"]["title"] == "检查实现"
+    assert current_task.json()["notifications"] == []
+    assert current_task.json()["flags"]["running"] is False
+    unchanged = client.get("/conversations/conv-1/task-state", headers={"If-None-Match": current_task.headers["etag"]})
     assert unchanged.status_code == 304
 
     duplicate = client.post(
@@ -62,10 +70,11 @@ def test_task_routes_manage_single_active_task_until_completion():
         "completed",
         "completed",
     ]
-    empty = client.get("/conversations/conv-1/task")
-    assert empty.json() is None
-    assert empty.headers["etag"] == '"none"'
-    empty_unchanged = client.get("/conversations/conv-1/task", headers={"If-None-Match": empty.headers["etag"]})
+    empty = client.get("/conversations/conv-1/task-state")
+    assert empty.json()["task"] is None
+    assert empty.json()["flags"]["running"] is False
+    assert empty.headers["etag"]
+    empty_unchanged = client.get("/conversations/conv-1/task-state", headers={"If-None-Match": empty.headers["etag"]})
     assert empty_unchanged.status_code == 304
 
 
@@ -115,7 +124,7 @@ def test_task_routes_validate_order_evidence_and_cancel():
     )
     assert cancelled.status_code == 200
     assert cancelled.json() == {"cancelled": True}
-    assert client.get("/conversations/conv-1/task").json() is None
+    assert client.get("/conversations/conv-1/task-state").json()["task"] is None
 
 
 def test_task_routes_reject_stale_version_after_task_replacement():
@@ -144,7 +153,8 @@ def test_task_routes_reject_stale_version_after_task_replacement():
     )
 
     assert stale.status_code == 412
-    current = client.get("/conversations/conv-1/task")
-    assert current.json()["title"] == "任务 B"
-    assert current.json()["steps"][0]["status"] == "pending"
-    assert current.headers["etag"] == replacement.headers["etag"]
+    current = client.get("/conversations/conv-1/task-state")
+    assert current.json()["task"]["title"] == "任务 B"
+    assert current.json()["task"]["steps"][0]["status"] == "pending"
+    assert current.headers["etag"]
+    assert current.headers["etag"] != replacement.headers["etag"]

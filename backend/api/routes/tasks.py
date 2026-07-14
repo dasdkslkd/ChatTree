@@ -7,7 +7,9 @@ from typing import Any, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from pydantic import BaseModel, Field
 
-from backend.api.dependencies import get_task_service
+from backend.api.dependencies import get_task_notification_service, get_task_service
+from backend.api.task_state import apply_task_state_etag, build_task_state
+from backend.core.notifications import TaskNotificationService
 from backend.core.tasks import (
     ActiveTaskConflictError,
     ActiveTaskNotFoundError,
@@ -17,7 +19,6 @@ from backend.core.tasks import (
 
 
 router = APIRouter()
-NO_ACTIVE_TASK_ETAG = '"none"'
 
 
 def _task_etag(task) -> str:
@@ -72,24 +73,24 @@ class CancelTaskRequest(BaseModel):
     reason: str
 
 
-@router.get("/conversations/{conversation_id}/task", response_model=Optional[dict[str, Any]])
-async def get_active_task(
+@router.get("/conversations/{conversation_id}/task-state", response_model=dict[str, Any])
+async def get_task_state(
     conversation_id: str,
     response: Response,
     if_none_match: Optional[str] = Header(default=None, alias="If-None-Match"),
     task_service: ActiveTaskService = Depends(get_task_service),
+    notification_service: TaskNotificationService = Depends(get_task_notification_service),
 ):
-    task = await task_service.get_active_task(conversation_id)
-    if task is not None:
-        etag = _task_etag(task)
-        if if_none_match == etag:
-            return Response(status_code=304, headers={"ETag": etag})
-        response.headers["ETag"] = etag
-        return task.public_dict()
-    if if_none_match == NO_ACTIVE_TASK_ETAG:
-        return Response(status_code=304, headers={"ETag": NO_ACTIVE_TASK_ETAG})
-    response.headers["ETag"] = NO_ACTIVE_TASK_ETAG
-    return None
+    state = await build_task_state(
+        conversation_id,
+        task_service=task_service,
+        notification_service=notification_service,
+    )
+    etag = f'"{state["version"]}"'
+    if if_none_match == etag:
+        return Response(status_code=304, headers={"ETag": etag})
+    apply_task_state_etag(response, state)
+    return state
 
 
 @router.post("/conversations/{conversation_id}/task", response_model=dict[str, Any])

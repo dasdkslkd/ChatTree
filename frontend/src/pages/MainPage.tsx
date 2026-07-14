@@ -71,18 +71,24 @@ import {
 } from 'lucide-react';
 import { conversationApi } from '../api/conversation';
 import { configApi } from '../api/config';
-import { messageApi, type ActiveStreamInfo, type ToolResultSlice } from '../api/message';
+import { messageApi, type ToolResultSlice } from '../api/message';
 import { runsApi } from '../api/runs';
-import { taskNotificationsApi, type TaskNotificationRecord } from '../api/taskNotifications';
+import { taskStateApi, type TaskNotificationRecord, type TaskStateSnapshot } from '../api/taskState';
 import { plansService } from '../services/plans';
-import { activeTaskService } from '../services/tasks';
 import { transcriptService } from '../services/transcript';
+import { taskStateCoordinator } from '../services/taskStateCoordinator';
 import {
   ConversationSyncCoordinator,
   type ConversationSyncInclude,
   type ConversationSyncRequest,
   type ConversationSyncResult,
 } from '../services/conversationSyncCoordinator';
+import {
+  ACTIVE_STREAM_RECOVERY_FOLLOWUP_ATTEMPTS,
+  ACTIVE_STREAM_RECOVERY_INTERVAL_MS,
+  ActiveStreamRecoveryCoordinator,
+  getActiveStreamRecoveryAttemptLimit,
+} from '../services/activeStreamRecoveryCoordinator';
 import type {
   Message,
   SendMessageRequest,
@@ -156,11 +162,7 @@ import {
 import { createLiveAssistantTranscriptItems } from '../utils/assistantTimeline';
 import {
   getActiveStreamPollingDelay,
-  getConversationActiveStreamLookupLimit,
   shouldProbeBackendScheduledFollowup,
-  shouldProbeTaskNotificationDelivery,
-  TASK_NOTIFICATION_DELIVERY_LOOKUPS,
-  TASK_NOTIFICATION_DELIVERY_POLL_MS,
 } from '../utils/activeStreamPolling';
 import { ChatInput } from '../components/ChatInput';
 import { TranscriptList } from '../components/transcript/TranscriptList';
@@ -191,8 +193,6 @@ import {
 } from '../utils/transcriptItems';
 import { createTaskPanelItem } from '../utils/activeTask';
 
-const TASK_STATE_PROBE_DELAYS_MS = [1000, 2000, 4000, 8000] as const;
-const TASK_STATE_ACTIVE_REFRESH_MS = 10000;
 const MarkdownContent = lazy(() => import('../components/MarkdownContent'));
 const MANUAL_PROJECTS_STORAGE_KEY = 'chattree.manualProjectWorkspaces';
 const PROJECT_ORDER_STORAGE_KEY = 'chattree.projectOrder';
@@ -272,23 +272,6 @@ function getTaskToolSignal(runs: StreamState[]): string {
     })
     .filter(Boolean)
     .join('|');
-}
-
-function getActiveRunSignal(runs: StreamState[]): string {
-  return runs
-    .filter((run) => run.status === 'streaming' || run.status === 'waiting_approval' || run.status === 'stopping')
-    .map((run) => `${run.conversationId}:${run.runId}`)
-    .sort()
-    .join('|');
-}
-
-function shouldContinueTaskStateRefresh(
-  task: ActiveTaskRecord | null,
-  notifications: TaskNotificationRecord[],
-): boolean {
-  return task?.execution_state === 'running'
-    || task?.execution_state === 'stopping'
-    || notifications.some((notification) => notification.status === 'delivering');
 }
 
 function getTranscriptItemNodeId(item: TranscriptItem): string | null {
@@ -1193,8 +1176,6 @@ export default function ChatPage() {
   const queuedMessagesRef = useRef<QueuedMessage[]>([]);
   const toolPermissionDraftRef = useRef<ToolPermissionDraft>(toolPermissionDraft);
   const transcriptRequestsRef = useRef<Map<string, TranscriptSnapshotRequest>>(new Map());
-  const taskProbeTimerRef = useRef<number | null>(null);
-  const taskProbeGenerationRef = useRef(0);
 
   const beginSidebarResize = useCallback((
     event: ReactPointerEvent<HTMLDivElement>,
@@ -1417,6 +1398,7 @@ export default function ChatPage() {
     conversationId: string,
     request: ConversationSyncRequest,
   ) => Promise<ConversationSyncResult>>(async () => ({ messagesConfirmed: false }));
+  const activeStreamRecoveryCoordinatorRef = useRef<ActiveStreamRecoveryCoordinator | null>(null);
   const loadTranscriptSnapshot = useCallback(async (
     conversationId: string | null | undefined,
     tipNodeId?: string | null,
@@ -1527,38 +1509,6 @@ export default function ChatPage() {
       };
     });
   }, []);
-  const refreshTaskNotifications = useCallback(async (conversationId: string | null | undefined) => {
-    if (!conversationId) {
-      setTaskNotifications([]);
-      return [];
-    }
-    try {
-      const notifications = await taskNotificationsApi.list(conversationId);
-      if (conversationId === currentConversationIdRef.current) {
-        setTaskNotifications(notifications);
-      }
-      return notifications;
-    } catch (error) {
-      console.error('刷新 task notification 失败:', error);
-      return [];
-    }
-  }, []);
-  const refreshActiveTask = useCallback(async (conversationId: string | null | undefined) => {
-    if (!conversationId) {
-      setActiveTask(null);
-      return null;
-    }
-    try {
-      const task = await activeTaskService.fetch(conversationId);
-      if (conversationId === currentConversationIdRef.current) {
-        setActiveTask(task);
-      }
-      return task;
-    } catch (error) {
-      console.error('刷新活动任务失败:', error);
-      return null;
-    }
-  }, []);
   const attachDeliveringTaskNotifications = useCallback((
     conversationId: string,
     notifications: TaskNotificationRecord[],
@@ -1577,70 +1527,62 @@ export default function ChatPage() {
       );
     }
   }, []);
+
+  const applyTaskStateSnapshot = useCallback((
+    conversationId: string,
+    state: TaskStateSnapshot,
+  ) => {
+    if (conversationId !== currentConversationIdRef.current) return;
+    setTaskNotifications(state.notifications);
+    setActiveTask(state.task);
+    attachDeliveringTaskNotifications(conversationId, state.notifications);
+  }, [attachDeliveringTaskNotifications]);
+
   const refreshTaskState = useCallback(async (conversationId: string | null | undefined) => {
     if (!conversationId) {
       setTaskNotifications([]);
       setActiveTask(null);
-      return { notifications: [], task: null };
+      return null;
     }
-    const [notifications, task] = await Promise.all([
-      refreshTaskNotifications(conversationId),
-      refreshActiveTask(conversationId),
-    ]);
-    attachDeliveringTaskNotifications(conversationId, notifications);
-    return { notifications, task };
-  }, [attachDeliveringTaskNotifications, refreshActiveTask, refreshTaskNotifications]);
-  const cancelTaskProbe = useCallback(() => {
-    taskProbeGenerationRef.current += 1;
-    if (taskProbeTimerRef.current !== null) {
-      window.clearTimeout(taskProbeTimerRef.current);
-      taskProbeTimerRef.current = null;
+    try {
+      const state = await taskStateCoordinator.refresh(conversationId);
+      applyTaskStateSnapshot(conversationId, state);
+      return state;
+    } catch (error) {
+      console.error('刷新 TaskState 失败:', error);
+      return null;
     }
-  }, []);
-  const scheduleTaskProbe = useCallback((conversationId: string | null | undefined) => {
-    if (!conversationId) return;
-    cancelTaskProbe();
-    const generation = taskProbeGenerationRef.current;
-    let attempt = 0;
-    const scheduleNext = () => {
-      if (generation !== taskProbeGenerationRef.current) return;
-      if (conversationId !== currentConversationIdRef.current) return;
-      const delay = attempt < TASK_STATE_PROBE_DELAYS_MS.length
-        ? TASK_STATE_PROBE_DELAYS_MS[attempt]
-        : TASK_STATE_ACTIVE_REFRESH_MS;
-      attempt += 1;
-      taskProbeTimerRef.current = window.setTimeout(() => {
-        taskProbeTimerRef.current = null;
-        void refreshTaskState(conversationId).then(({ notifications, task }) => {
-          if (generation !== taskProbeGenerationRef.current) return;
-          if (conversationId !== currentConversationIdRef.current) return;
-          if (attempt < TASK_STATE_PROBE_DELAYS_MS.length || shouldContinueTaskStateRefresh(task, notifications)) {
-            scheduleNext();
-          }
-        });
-      }, delay);
-    };
-    scheduleNext();
-  }, [cancelTaskProbe, refreshTaskState]);
-  const probeTaskNotificationDelivery = useCallback(async (conversationId: string) => {
-    for (let attempt = 0; attempt < TASK_NOTIFICATION_DELIVERY_LOOKUPS; attempt += 1) {
-      if (attempt > 0) {
-        await new Promise((resolve) => window.setTimeout(resolve, TASK_NOTIFICATION_DELIVERY_POLL_MS));
-      }
-      const notifications = await refreshTaskNotifications(conversationId);
-      attachDeliveringTaskNotifications(conversationId, notifications);
-      if (notifications.some((notification) =>
-        notification.status === 'delivering'
-        && notification.delivered_run_id
-        && streamManager.hasRun(notification.delivered_run_id)
-      )) {
-        return;
-      }
+  }, [applyTaskStateSnapshot]);
+
+  const invalidateTaskState = useCallback(async (conversationId: string | null | undefined) => {
+    if (!conversationId) return null;
+    try {
+      const state = await taskStateCoordinator.invalidate(conversationId);
+      applyTaskStateSnapshot(conversationId, state);
+      return state;
+    } catch (error) {
+      console.error('刷新 TaskState 失败:', error);
+      return null;
     }
-  }, [attachDeliveringTaskNotifications, refreshTaskNotifications]);
+  }, [applyTaskStateSnapshot]);
+
   useEffect(() => {
-    void refreshTaskState(currentConversation?.id);
-  }, [currentConversation?.id, refreshTaskState]);
+    const conversationId = currentConversation?.id;
+    if (!conversationId) {
+      setTaskNotifications([]);
+      setActiveTask(null);
+      return;
+    }
+    setTaskNotifications([]);
+    setActiveTask(null);
+    const unsubscribe = taskStateCoordinator.subscribe(conversationId, (state) => {
+      applyTaskStateSnapshot(conversationId, state);
+    });
+    void taskStateCoordinator.refresh(conversationId).catch((error) => {
+      console.error('刷新 TaskState 失败:', error);
+    });
+    return unsubscribe;
+  }, [applyTaskStateSnapshot, currentConversation?.id]);
   useEffect(() => {
     const conversationId = currentConversation?.id;
     if (!conversationId) return;
@@ -1754,7 +1696,6 @@ export default function ChatPage() {
     .filter(Boolean)
     .join('|'), [activeRunStates]);
   const activeTaskToolSignal = useMemo(() => getTaskToolSignal(activeRunStates), [activeRunStates]);
-  const activeRunSignal = useMemo(() => getActiveRunSignal(activeRunStates), [activeRunStates]);
 
   useEffect(() => {
     const next = syncToolPermissionDraftFromBranch(
@@ -1786,20 +1727,9 @@ export default function ChatPage() {
 
   useEffect(() => {
     const conversationId = currentConversation?.id;
-    if (!conversationId || !activeRunSignal) {
-      cancelTaskProbe();
-      return;
-    }
-    void refreshTaskState(conversationId);
-    scheduleTaskProbe(conversationId);
-    return cancelTaskProbe;
-  }, [activeRunSignal, cancelTaskProbe, currentConversation?.id, refreshTaskState, scheduleTaskProbe]);
-
-  useEffect(() => {
-    const conversationId = currentConversation?.id;
     if (!conversationId || !activeTaskToolSignal) return;
-    void refreshTaskState(conversationId);
-  }, [activeTaskToolSignal, currentConversation?.id, refreshTaskState]);
+    void invalidateTaskState(conversationId);
+  }, [activeTaskToolSignal, currentConversation?.id, invalidateTaskState]);
 
   useEffect(() => {
     const activeKeys = new Set<string>();
@@ -2441,56 +2371,46 @@ export default function ChatPage() {
     updateQueuedMessages((messages) => messages.filter((message) => message.id !== id));
   }, [updateQueuedMessages]);
 
+  if (!activeStreamRecoveryCoordinatorRef.current) {
+    activeStreamRecoveryCoordinatorRef.current = new ActiveStreamRecoveryCoordinator();
+  }
+  activeStreamRecoveryCoordinatorRef.current.setHandlers({
+    getActiveStreams: messageApi.getActiveStreams,
+    isAttachable: (item) =>
+      Boolean(!item.done
+      && (item.node_id || item.run_id)
+      && !(item.run_id && item.kind && SIDE_RUN_KINDS.has(item.kind) && hiddenSideRunIds.has(item.run_id))),
+    prepareAttach: async (conversationId, active, reason) => {
+      if (!active.node_id) return;
+      await scheduleConversationSyncRef.current(conversationId, {
+        reason: reason.includes('backend-followup')
+          ? 'backend-followup-attachable'
+          : 'active-stream-recovery',
+        include: ['messages', 'branches'],
+        awaitNodeId: active.node_id,
+        awaitRole: 'user',
+        messageRetries: 0,
+      });
+    },
+    resumeStream: (conversationId, active) => {
+      void streamManager.resumeStream(
+        conversationId,
+        active.node_id ?? null,
+        active.run_id ?? undefined,
+        0,
+        active.anchor_node_id ?? null,
+        active.kind ?? 'chat',
+      );
+    },
+  });
+
   const syncBackendScheduledFollowup = useCallback(async (conversationId: string) => {
-    for (let attempt = 0; attempt < 12; attempt += 1) {
-      try {
-        const activeStreams = await messageApi.getActiveStreams(conversationId);
-        const attachable = activeStreams.filter((item) =>
-          !item.done
-          && (item.node_id || item.run_id)
-          && !(item.run_id && item.kind && SIDE_RUN_KINDS.has(item.kind) && hiddenSideRunIds.has(item.run_id))
-        );
-        if (attachable.length > 0) {
-          await Promise.all(attachable
-            .filter((active) => active.node_id)
-            .map((active) => scheduleConversationSyncRef.current(conversationId, {
-              reason: 'backend-followup-attachable',
-              include: ['messages', 'branches'],
-              awaitNodeId: active.node_id ?? undefined,
-              awaitRole: 'user',
-              messageRetries: 0,
-            })));
-          for (const active of attachable) {
-            void streamManager.resumeStream(
-              conversationId,
-              active.node_id ?? null,
-              active.run_id ?? undefined,
-              0,
-              active.anchor_node_id ?? null,
-              active.kind ?? 'chat',
-            );
-          }
-          return;
-        }
-        await scheduleConversationSyncRef.current(conversationId, {
-          reason: 'backend-followup-poll',
-          include: ['messages', 'branches'],
-          messageRetries: 0,
-        });
-      } catch {
-        await scheduleConversationSyncRef.current(conversationId, {
-          reason: 'backend-followup-poll-error',
-          include: ['messages', 'branches'],
-          messageRetries: 0,
-        });
-      }
-      await new Promise((resolve) => window.setTimeout(resolve, 500));
-    }
-    await scheduleConversationSyncRef.current(conversationId, {
-      reason: 'backend-followup-timeout',
-      include: ['conversations'],
+    await activeStreamRecoveryCoordinatorRef.current?.probeConversation(conversationId, {
+      reason: 'backend-followup',
+      attempts: ACTIVE_STREAM_RECOVERY_FOLLOWUP_ATTEMPTS,
+      intervalMs: ACTIVE_STREAM_RECOVERY_INTERVAL_MS,
     });
-  }, [hiddenSideRunIds]);
+  }, []);
 
   const syncSelectedConversationSideRuns = useCallback(async (conversationId: string) => {
     const existing = sideRunSyncPromisesRef.current.get(conversationId);
@@ -2607,9 +2527,11 @@ export default function ChatPage() {
     const conversationId = currentConversation?.id;
     const deliveryNodeId = liveSelectedBranchTipId || currentConversation?.current_node_id || null;
     if (!conversationId || !deliveryNodeId) return;
-    const notification = await taskNotificationsApi.bind(notificationId, deliveryNodeId, { trigger: true });
-    await refreshTaskState(conversationId);
-    if (notification.delivered_run_id) {
+    const state = await taskStateApi.bind(conversationId, notificationId, deliveryNodeId, { trigger: true });
+    taskStateCoordinator.apply(conversationId, state);
+    applyTaskStateSnapshot(conversationId, state);
+    const notification = state.notifications.find((item) => item.id === notificationId) ?? null;
+    if (notification?.delivered_run_id) {
       void streamManager.resumeStream(
         conversationId,
         notification.delivered_node_id ?? null,
@@ -2619,10 +2541,10 @@ export default function ChatPage() {
         'chat',
         { anchorUntilTargetLands: true },
       );
-    } else {
-      void probeTaskNotificationDelivery(conversationId);
+    } else if (state.flags.delivering) {
+      void invalidateTaskState(conversationId);
     }
-    if (notification.status === 'delivered' && notification.delivered_node_id) {
+    if (notification?.status === 'delivered' && notification.delivered_node_id) {
       await scheduleConversationSync(conversationId, {
         reason: 'task-notification-delivered',
         include: ['messages', 'branches', 'transcript', 'conversations'],
@@ -2631,10 +2553,10 @@ export default function ChatPage() {
       });
     }
   }, [
+    applyTaskStateSnapshot,
     currentConversation?.current_node_id,
     currentConversation?.id,
-    probeTaskNotificationDelivery,
-    refreshTaskState,
+    invalidateTaskState,
     scheduleConversationSync,
     liveSelectedBranchTipId,
   ]);
@@ -2642,9 +2564,11 @@ export default function ChatPage() {
   const handleDeleteTaskNotification = useCallback(async (notificationId: string) => {
     const conversationId = currentConversation?.id;
     if (selectedTaskNotificationId === notificationId) setSelectedTaskNotificationId(null);
-    await taskNotificationsApi.delete(notificationId);
-    await refreshTaskState(conversationId);
-  }, [currentConversation?.id, refreshTaskState, selectedTaskNotificationId]);
+    if (!conversationId) return;
+    const state = await taskStateApi.delete(conversationId, notificationId);
+    taskStateCoordinator.apply(conversationId, state);
+    applyTaskStateSnapshot(conversationId, state);
+  }, [applyTaskStateSnapshot, currentConversation?.id, selectedTaskNotificationId]);
 
   const handleInspectTaskNotification = useCallback(async (notification: TaskNotificationRecord) => {
     const conversationId = currentConversation?.id;
@@ -2921,9 +2845,6 @@ export default function ChatPage() {
         message.conversationId === finishedId
         && message.content.trim()
       );
-      if (shouldProbeTaskNotificationDelivery({ finishStatus: status })) {
-        void probeTaskNotificationDelivery(finishedId);
-      }
       void scheduleConversationSync(finishedId, {
         reason: 'stream-finished-task-state',
         include: ['taskState'],
@@ -3005,7 +2926,6 @@ export default function ChatPage() {
     scheduleConversationSync,
     sendNextQueuedMessage,
     syncBackendScheduledFollowup,
-    probeTaskNotificationDelivery,
   ]);
 
   const shouldAutoScrollRef = useRef(shouldAutoScroll);
@@ -3117,66 +3037,14 @@ export default function ChatPage() {
       return;
     }
 
-    let cancelled = false;
-    (async () => {
-      try {
-        let activeStreams: ActiveStreamInfo[] = [];
-        const maxAttempts = getConversationActiveStreamLookupLimit({
-          activeStreamHintCount: currentBackendActiveStreamHintCount,
-        });
-        for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-          activeStreams = await messageApi.getActiveStreams(conversationId);
-          if (cancelled) return;
-          if (activeStreams.some((item) =>
-            !item.done
-            && (item.node_id || item.run_id)
-            && !(item.run_id && item.kind && SIDE_RUN_KINDS.has(item.kind) && hiddenSideRunIds.has(item.run_id))
-          )) break;
-          if (attempt + 1 >= maxAttempts) break;
-          await new Promise((resolve) => window.setTimeout(resolve, 500));
-        }
-        if (cancelled) return;
-        const attachable = activeStreams.filter((item) =>
-          !item.done
-          && (item.node_id || item.run_id)
-          && !(item.run_id && item.kind && SIDE_RUN_KINDS.has(item.kind) && hiddenSideRunIds.has(item.run_id))
-        );
-        if (attachable.length === 0) {
-          return;
-        }
-        await Promise.all(attachable
-          .filter((active) => active.node_id)
-          .map((active) => scheduleConversationSync(conversationId, {
-            reason: 'active-stream-recovery',
-            include: ['messages', 'branches'],
-            awaitNodeId: active.node_id ?? undefined,
-            awaitRole: 'user',
-            messageRetries: 0,
-          })));
-        if (cancelled) return;
-        for (const active of attachable) {
-          void streamManager.resumeStream(
-            conversationId,
-            active.node_id ?? null,
-            active.run_id ?? undefined,
-            0,
-            active.anchor_node_id ?? null,
-            active.kind ?? 'chat',
-          );
-        }
-      } catch (_) {
-        await scheduleConversationSync(conversationId, {
-          reason: 'active-stream-recovery-error',
-          include: ['messages', 'branches'],
-          messageRetries: 0,
-        });
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [currentBackendActiveStreamHintCount, currentConversation?.id, hiddenSideRunIds, scheduleConversationSync]);
+    void activeStreamRecoveryCoordinatorRef.current?.probeConversation(conversationId, {
+      reason: 'active-stream-recovery',
+      attempts: getActiveStreamRecoveryAttemptLimit({
+        activeStreamHintCount: currentBackendActiveStreamHintCount,
+      }),
+      intervalMs: ACTIVE_STREAM_RECOVERY_INTERVAL_MS,
+    });
+  }, [currentBackendActiveStreamHintCount, currentConversation?.id, hiddenSideRunIds]);
 
   useEffect(() => {
     const conversationId = currentConversation?.id;

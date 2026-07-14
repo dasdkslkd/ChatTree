@@ -39,18 +39,6 @@ export type TaskPanelItem = {
   steps: TaskPanelStepItem[];
 };
 
-export function shouldPollTaskState(options: {
-  conversationId?: string | null;
-  activeRunCount?: number;
-  activeTask?: ActiveTaskRecord | null;
-  visibleNotificationCount?: number;
-}): boolean {
-  if (!options.conversationId) return false;
-  return Boolean(options.activeTask)
-    || Number(options.activeRunCount || 0) > 0
-    || Number(options.visibleNotificationCount || 0) > 0;
-}
-
 export function createTaskPanelItem(task: ActiveTaskRecord | null): TaskPanelItem | null {
   if (!task) return null;
   const completed = task.steps.filter((step) => step.status === 'completed').length;

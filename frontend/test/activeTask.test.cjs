@@ -20,7 +20,6 @@ require.extensions['.ts'] = function loadTs(module, filename) {
 const {
   compactTaskTitle,
   createTaskPanelItem,
-  shouldPollTaskState,
   taskStatusLabel,
 } = require(path.join(__dirname, '../src/utils/activeTask.ts'));
 
@@ -71,11 +70,5 @@ const blocked = createTaskPanelItem(task({
 }));
 assert.equal(blocked.statusLabel, '已阻塞');
 assert.equal(blocked.steps[0].statusLabel, '已阻塞');
-
-assert.equal(shouldPollTaskState({ conversationId: null, activeRunCount: 1 }), false);
-assert.equal(shouldPollTaskState({ conversationId: 'conv-1' }), false);
-assert.equal(shouldPollTaskState({ conversationId: 'conv-1', activeRunCount: 1 }), true);
-assert.equal(shouldPollTaskState({ conversationId: 'conv-1', activeTask: task() }), true);
-assert.equal(shouldPollTaskState({ conversationId: 'conv-1', visibleNotificationCount: 1 }), true);
 
 console.log('activeTask tests passed');

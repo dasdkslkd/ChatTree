@@ -20,14 +20,8 @@ require.extensions['.ts'] = function loadTs(module, filename) {
 const {
   ACTIVE_STREAM_IDLE_POLL_MS,
   ACTIVE_STREAM_VISIBLE_POLL_MS,
-  CONVERSATION_ACTIVE_STREAM_HINTED_LOOKUPS,
-  CONVERSATION_ACTIVE_STREAM_IDLE_LOOKUPS,
-  TASK_NOTIFICATION_DELIVERY_LOOKUPS,
-  TASK_NOTIFICATION_DELIVERY_POLL_MS,
-  getConversationActiveStreamLookupLimit,
   getActiveStreamPollingDelay,
   shouldProbeBackendScheduledFollowup,
-  shouldProbeTaskNotificationDelivery,
 } = require(path.join(__dirname, '../src/utils/activeStreamPolling.ts'));
 
 function testUsesFastPollingWhenStreamsAreActive() {
@@ -40,21 +34,6 @@ function testUsesSlowPollingWhenIdle() {
 
 function testPausesPollingWhenDocumentIsHidden() {
   assert.equal(getActiveStreamPollingDelay({ activeStreamCount: 2, documentHidden: true }), null);
-}
-
-function testUsesThreeShortLookupsWithoutActiveHint() {
-  assert.equal(CONVERSATION_ACTIVE_STREAM_IDLE_LOOKUPS, 3);
-  assert.equal(
-    getConversationActiveStreamLookupLimit({ activeStreamHintCount: 0 }),
-    CONVERSATION_ACTIVE_STREAM_IDLE_LOOKUPS,
-  );
-}
-
-function testAllowsRetryWhenSelectedConversationHasActiveHint() {
-  assert.equal(
-    getConversationActiveStreamLookupLimit({ activeStreamHintCount: 1 }),
-    CONVERSATION_ACTIVE_STREAM_HINTED_LOOKUPS,
-  );
 }
 
 function testOnlyCompletedStreamsProbeForScheduledFollowup() {
@@ -76,22 +55,11 @@ function testOnlyCompletedStreamsProbeForScheduledFollowup() {
   );
 }
 
-function testTaskNotificationDeliveryUsesFastPostFinishProbe() {
-  assert.equal(TASK_NOTIFICATION_DELIVERY_POLL_MS <= 250, true);
-  assert.equal(TASK_NOTIFICATION_DELIVERY_LOOKUPS >= 8, true);
-  assert.equal(shouldProbeTaskNotificationDelivery({ finishStatus: 'completed' }), true);
-  assert.equal(shouldProbeTaskNotificationDelivery({ finishStatus: 'error' }), true);
-  assert.equal(shouldProbeTaskNotificationDelivery({ finishStatus: 'stopped' }), true);
-}
-
 function main() {
   testUsesFastPollingWhenStreamsAreActive();
   testUsesSlowPollingWhenIdle();
   testPausesPollingWhenDocumentIsHidden();
-  testUsesThreeShortLookupsWithoutActiveHint();
-  testAllowsRetryWhenSelectedConversationHasActiveHint();
   testOnlyCompletedStreamsProbeForScheduledFollowup();
-  testTaskNotificationDeliveryUsesFastPostFinishProbe();
   console.log('activeStreamPolling tests passed');
 }
 
