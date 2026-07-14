@@ -23,6 +23,7 @@ from backend.core.tools.security.permissions import (
     PermissionMode,
     normalize_permission_mode,
 )
+from backend.core.tools.perf_attrs import summarize_tool_arguments, summarize_tool_result
 from backend.core.tools.tool_arguments import normalize_tool_arguments
 
 
@@ -296,13 +297,17 @@ class ToolOrchestrator:
             "workspace": workspace,
             **(run_context if isinstance(run_context, dict) else {}),
         }
-        with profiler.span(
-            "tool.execute",
-            conversation_id=conversation_id,
-            node_id=node_id,
-            run_id=_run_context_value(run_context, "run_id"),
-            tool_name=name,
-        ):
+        execute_attrs = {
+            "conversation_id": conversation_id,
+            "node_id": node_id,
+            "run_id": _run_context_value(run_context, "run_id"),
+            "tool_name": name,
+            "tool_call_id": tool_call_id,
+            **summarize_tool_arguments(name, arguments),
+        }
+        started = time.perf_counter()
+        profiler.mark("tool.execute.start", **execute_attrs)
+        try:
             content = await _execute_manager_tool(
                 self.tool_manager,
                 name,
@@ -310,6 +315,20 @@ class ToolOrchestrator:
                 workspace=workspace,
                 runtime_context=runtime_context,
             )
+        except Exception as exc:
+            profiler.record({
+                "type": "span",
+                "name": "tool.execute",
+                "duration_ms": (time.perf_counter() - started) * 1000.0,
+                "attrs": {**execute_attrs, "error_type": type(exc).__name__},
+            })
+            raise
+        profiler.record({
+            "type": "span",
+            "name": "tool.execute",
+            "duration_ms": (time.perf_counter() - started) * 1000.0,
+            "attrs": {**execute_attrs, **summarize_tool_result(content)},
+        })
         return _tool_message(name=name, tool_call_id=tool_call_id, content=content)
 
     def _sandbox_for_workspace(self, workspace: Optional[Dict[str, Any]]) -> LogicalSandbox:
@@ -527,19 +546,9 @@ async def _execute_manager_tool(
     workspace: Optional[Dict[str, Any]],
     runtime_context: Dict[str, Any],
 ) -> str:
-    try:
-        if workspace is None:
-            return await tool_manager.execute_tool(name, arguments, runtime_context=runtime_context)
-        return await tool_manager.execute_tool(
-            name,
-            arguments,
-            workspace=workspace,
-            runtime_context=runtime_context,
-        )
-    except TypeError as exc:
-        message = str(exc)
-        if "unexpected keyword argument 'runtime_context'" not in message:
-            raise
-        if workspace is None:
-            return await tool_manager.execute_tool(name, arguments)
-        return await tool_manager.execute_tool(name, arguments, workspace=workspace)
+    return await tool_manager.execute_tool(
+        name,
+        arguments,
+        workspace=workspace,
+        runtime_context=runtime_context,
+    )

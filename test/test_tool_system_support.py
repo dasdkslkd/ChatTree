@@ -23,6 +23,7 @@ from backend.core.tools.exposure import ToolExposureContext
 from backend.core.tools.mcp_server import McpServerManager
 from backend.core.tools.tool_manager import ToolManager
 from backend.core.tools.tool_filter import ToolFilter
+from backend.core.tools.security.capabilities import capabilities_for_tool
 from backend.core.tools.web_search import WebSearchTool
 from backend.core.tools.web_search import FetchUrlTool
 
@@ -472,7 +473,10 @@ def test_execute_tool_calls_returns_tool_messages():
         def __init__(self):
             self.calls = []
 
-        async def execute_tool(self, name, arguments):
+        def capabilities_for(self, name, workspace=None):
+            return capabilities_for_tool(name)
+
+        async def execute_tool(self, name, arguments, workspace=None, runtime_context=None):
             self.calls.append((name, arguments))
             return json.dumps({"name": name, "arguments": arguments}, ensure_ascii=False)
 

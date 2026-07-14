@@ -4,6 +4,7 @@ from typing import Any, Dict
 
 from .base import BaseTool
 from .mcp_client import MCPClient, MCPClientError
+from .security.capabilities import ToolCapability
 from ..utils.logger import setup_logger
 
 logger = setup_logger("MCPTools")
@@ -21,6 +22,10 @@ class MCPSearchTool(BaseTool):
     @property
     def name(self) -> str:
         return "web_search"
+
+    @property
+    def capabilities(self) -> set[ToolCapability]:
+        return {ToolCapability.NETWORK_READ, ToolCapability.READ_ONLY, ToolCapability.PARALLEL_SAFE}
 
     @property
     def description(self) -> str:
@@ -120,6 +125,10 @@ class MCPUrlReadTool(BaseTool):
     @property
     def name(self) -> str:
         return "fetch_url"
+
+    @property
+    def capabilities(self) -> set[ToolCapability]:
+        return {ToolCapability.NETWORK_READ, ToolCapability.READ_ONLY, ToolCapability.PARALLEL_SAFE}
 
     @property
     def description(self) -> str:

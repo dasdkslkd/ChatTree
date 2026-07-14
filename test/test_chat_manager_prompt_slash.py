@@ -21,6 +21,7 @@ from backend.core.storage.prompt_storage import PromptStorage
 from backend.core.slash import SlashCommandDispatcher, SlashDispatchKind
 from backend.core.tools.orchestrator import ToolOrchestrator
 from backend.core.tools.plan_tools import register_plan_tools
+from backend.core.tools.security.capabilities import ToolCapability, capabilities_for_tool
 from backend.core.tools.security.approval import ApprovalManager
 from backend.core.tools.security.logical_sandbox import LogicalSandbox
 from backend.core.tools.security.permissions import PermissionEngine
@@ -271,6 +272,11 @@ class CapturingModelManager:
 
 
 class FakeToolManager:
+    def capabilities_for(self, name, workspace=None):
+        if name == "test_tool":
+            return {ToolCapability.READ_ONLY, ToolCapability.PARALLEL_SAFE}
+        return capabilities_for_tool(name)
+
     def get_openai_tools(self, include_disabled=False):
         return [
             {
@@ -510,6 +516,9 @@ class PlanModeToolManager:
 
     def register(self, tool):
         self.tools[tool.name] = tool
+
+    def capabilities_for(self, name, workspace=None):
+        return capabilities_for_tool(name)
 
     def get_openai_tools(self, include_disabled=False):
         tools = [tool.to_openai_tool() for tool in self.tools.values()]

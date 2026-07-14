@@ -23,6 +23,7 @@ from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
 from backend.core.storage.tool_result_storage import ToolResultStorage
 from backend.core.tools.orchestrator import ToolOrchestrator
+from backend.core.tools.security.capabilities import ToolCapability
 from backend.core.tools.security.approval import ApprovalManager
 from backend.core.tools.security.logical_sandbox import LogicalSandbox
 from backend.core.tools.security.permissions import PermissionEngine
@@ -862,6 +863,9 @@ class LargeToolManager:
             }
         ]
 
+    def capabilities_for(self, name, workspace=None):
+        return {ToolCapability.READ_ONLY, ToolCapability.PARALLEL_SAFE}
+
     async def execute_tool(self, name, arguments, workspace=None, runtime_context=None):
         return "x" * 5000
 
@@ -948,6 +952,9 @@ class TwoToolManager:
             }
             for name in ("first_tool", "second_tool")
         ]
+
+    def capabilities_for(self, name, workspace=None):
+        return {ToolCapability.READ_ONLY, ToolCapability.PARALLEL_SAFE}
 
     async def execute_tool(self, name, arguments, workspace=None, runtime_context=None):
         self.runtime_contexts.append(dict(runtime_context or {}))

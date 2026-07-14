@@ -59,7 +59,9 @@ from ..slash import (
     SlashToolPolicy,
 )
 from ..tools.exposure import ToolExposureContext
+from ..tools.perf_attrs import summarize_tool_arguments, summarize_tool_result
 from ..tools.security.permissions import PermissionMode, normalize_permission_mode
+from ..tools.tool_call_scheduler import plan_tool_call_waves, tool_call_function_name
 from ..tools.agent_tools import AGENT_TOOL_NAMES, LEGACY_AGENT_TOOL_NAMES
 from ..tools.task_tools import (
     TASK_BOUND_RUN_TOOL_NAMES,
@@ -107,19 +109,6 @@ MULTI_AGENT_REQUEST_TOKENS = (
     "工作流",
 )
 
-PARALLEL_READ_ONLY_TOOL_NAMES = {
-    "fetch_url",
-    "glob",
-    "grep",
-    "list_available_tools",
-    "tools",
-    "read",
-    "read_tool_result",
-    "web",
-    "web_search",
-}
-
-
 def _configured_default_tool_permission_mode() -> PermissionMode:
     tools_config = cfg.data.get("tools", {}) if isinstance(cfg.data, dict) else {}
     configured = None
@@ -153,17 +142,7 @@ def _usage_output_tokens(usage_info: Any) -> int:
 
 
 def _tool_call_function_name(tool_call: Dict[str, Any]) -> str:
-    fn = tool_call.get("function") or {}
-    return str(fn.get("name") or "")
-
-
-def _is_parallel_read_only_tool(name: str) -> bool:
-    if name in PARALLEL_READ_ONLY_TOOL_NAMES:
-        return True
-    if name.startswith("mcp__"):
-        lowered = name.lower()
-        return lowered.endswith("__read_file") or lowered.endswith("__list_files") or lowered.endswith("__search_files")
-    return False
+    return tool_call_function_name(tool_call)
 
 
 class ChatManager:
@@ -4156,31 +4135,43 @@ class ChatManager:
         run_context: Optional[Dict[str, Any]] = None,
         task_turn_context: Optional[TaskTurnContext] = None,
     ) -> List[Message]:
-        results: List[Message] = []
+        results: list[Optional[Message]] = [None] * len(tool_calls)
         current_permission_mode = permission_mode
-        batch: List[Dict[str, Any]] = []
 
-        async def flush_read_only_batch() -> None:
-            nonlocal batch, current_permission_mode
-            if not batch:
-                return
-            tool_call_batch = list(batch)
-            messages = await asyncio.gather(*[
-                self._execute_single_tool_call(
-                    tool_call,
-                    node_id=node_id,
-                    conversation_id=conversation_id,
-                    emit_event=emit_event,
-                    workspace=workspace,
-                    permission_mode=current_permission_mode,
-                    run_context=run_context,
-                )
-                for tool_call in tool_call_batch
-            ])
-            for tool_call, message in zip(tool_call_batch, messages):
-                results.append(message)
+        if not self.tool_manager:
+            raise RuntimeError("Tool manager is not configured")
+
+        waves = plan_tool_call_waves(
+            tool_calls,
+            lambda name: self.tool_manager.capabilities_for(name, workspace=workspace),
+        )
+
+        async def execute_one(tool_call: Dict[str, Any], mode: PermissionMode) -> Message:
+            return await self._execute_single_tool_call(
+                tool_call,
+                node_id=node_id,
+                conversation_id=conversation_id,
+                emit_event=emit_event,
+                workspace=workspace,
+                permission_mode=mode,
+                run_context=run_context,
+            )
+
+        for wave in waves:
+            if wave.parallel:
+                wave_permission_mode = current_permission_mode
+                wave_messages = await asyncio.gather(*[
+                    execute_one(item.call, wave_permission_mode)
+                    for item in wave.calls
+                ])
+            else:
+                item = wave.calls[0]
+                wave_messages = [await execute_one(item.call, current_permission_mode)]
+
+            for item, message in zip(wave.calls, wave_messages):
+                results[item.index] = message
                 self._refresh_task_context_after_relevant_tool(
-                    tool_call=tool_call,
+                    tool_call=item.call,
                     tool_message=message,
                     run_context=run_context,
                     task_turn_context=task_turn_context,
@@ -4190,39 +4181,8 @@ class ChatManager:
                     [message],
                     current_permission_mode,
                 )
-            batch = []
 
-        for tool_call in tool_calls:
-            name = _tool_call_function_name(tool_call)
-            if _is_parallel_read_only_tool(name):
-                batch.append(tool_call)
-                continue
-
-            await flush_read_only_batch()
-            model_message = await self._execute_single_tool_call(
-                tool_call,
-                node_id=node_id,
-                conversation_id=conversation_id,
-                emit_event=emit_event,
-                workspace=workspace,
-                permission_mode=current_permission_mode,
-                run_context=run_context,
-            )
-            results.append(model_message)
-            self._refresh_task_context_after_relevant_tool(
-                tool_call=tool_call,
-                tool_message=model_message,
-                run_context=run_context,
-                task_turn_context=task_turn_context,
-                conversation_id=conversation_id,
-            )
-            current_permission_mode = self._permission_mode_after_plan_tools(
-                [model_message],
-                current_permission_mode,
-            )
-
-        await flush_read_only_batch()
-        return results
+        return [message for message in results if message is not None]
 
     def _refresh_task_context_after_relevant_tool(
         self,
@@ -4321,119 +4281,92 @@ class ChatManager:
         async def progress_heartbeat() -> None:
             started_at = perf_counter()
             try:
+                try:
+                    await asyncio.wait_for(heartbeat_stop.wait(), timeout=1.5)
+                    return
+                except asyncio.TimeoutError:
+                    pass
                 while not heartbeat_stop.is_set():
+                    await emit_tool_observation({
+                        "event_type": "tool_progress",
+                        "status": "running",
+                        "progress": {
+                            "phase": "running",
+                            "elapsed_ms": int((perf_counter() - started_at) * 1000),
+                        },
+                    })
                     try:
                         await asyncio.wait_for(heartbeat_stop.wait(), timeout=1.0)
                         break
                     except asyncio.TimeoutError:
-                        await emit_tool_observation({
-                            "event_type": "tool_progress",
-                            "status": "running",
-                            "progress": {
-                                "phase": "running",
-                                "elapsed_ms": int((perf_counter() - started_at) * 1000),
-                            },
-                        })
+                        continue
             except asyncio.CancelledError:
                 raise
 
         heartbeat_task = asyncio.create_task(progress_heartbeat())
         profiler = get_profiler()
+        tool_call_attrs = {
+            "conversation_id": conversation_id,
+            "node_id": node_id,
+            "run_id": call_run_context.get("run_id"),
+            "tool_name": name,
+            "tool_call_id": tool_call.get("id"),
+            "permission_mode": permission_mode,
+            **summarize_tool_arguments(name, arguments),
+        }
+        tool_call_started = perf_counter()
+        profiler.mark("chat.tool_call.start", **tool_call_attrs)
         try:
-            with profiler.span(
-                "chat.tool_call",
-                conversation_id=conversation_id,
-                node_id=node_id,
-                run_id=call_run_context.get("run_id"),
-                tool_name=name,
-                permission_mode=permission_mode,
-            ):
-                if tool_orchestrator:
-                    try:
-                        message = await tool_orchestrator.execute_tool_call(
-                            tool_call,
-                            conversation_id or "",
-                            node_id,
-                            emit_event=emit_event,
-                            workspace=workspace,
-                            permission_mode=permission_mode,
-                            run_context=call_run_context,
-                        )
-                    except TypeError as exc:
-                        error_text = str(exc)
-                        if "unexpected keyword argument 'run_context'" in error_text:
-                            message = await tool_orchestrator.execute_tool_call(
-                                tool_call,
-                                conversation_id or "",
-                                node_id,
-                                emit_event=emit_event,
-                                workspace=workspace,
-                                permission_mode=permission_mode,
-                            )
-                        elif "unexpected keyword argument 'permission_mode'" in error_text:
-                            message = await tool_orchestrator.execute_tool_call(
-                                tool_call,
-                                conversation_id or "",
-                                node_id,
-                                emit_event=emit_event,
-                                workspace=workspace,
-                            )
-                        elif "unexpected keyword argument 'workspace'" in error_text:
-                            message = await tool_orchestrator.execute_tool_call(
-                                tool_call,
-                                conversation_id or "",
-                                node_id,
-                                emit_event=emit_event,
-                            )
-                        else:
-                            raise
-                    model_message = self._model_visible_tool_message(
-                        message,
-                        name=name,
-                        conversation_id=conversation_id,
-                        node_id=node_id,
-                        tool_call_id=tool_call.get("id"),
-                    )
+            if tool_orchestrator:
+                message = await tool_orchestrator.execute_tool_call(
+                    tool_call,
+                    conversation_id or "",
+                    node_id,
+                    emit_event=emit_event,
+                    workspace=workspace,
+                    permission_mode=permission_mode,
+                    run_context=call_run_context,
+                )
+                model_message = self._model_visible_tool_message(
+                    message,
+                    name=name,
+                    conversation_id=conversation_id,
+                    node_id=node_id,
+                    tool_call_id=tool_call.get("id"),
+                )
+            else:
+                if not self.tool_manager:
+                    raw_result = json.dumps({"error": "Tool manager is not configured"}, ensure_ascii=False)
                 else:
-                    if not self.tool_manager:
-                        raw_result = json.dumps({"error": "Tool manager is not configured"}, ensure_ascii=False)
-                    else:
-                        try:
-                            raw_result = await self.tool_manager.execute_tool(
-                                name,
-                                arguments,
-                                workspace=workspace,
-                                runtime_context=call_run_context,
-                            )
-                        except TypeError as exc:
-                            error_text = str(exc)
-                            if "unexpected keyword argument 'runtime_context'" in error_text:
-                                raw_result = await self.tool_manager.execute_tool(
-                                    name,
-                                    arguments,
-                                    workspace=workspace,
-                                )
-                            elif "unexpected keyword argument 'workspace'" in error_text:
-                                raw_result = await self.tool_manager.execute_tool(name, arguments)
-                            else:
-                                raise
-                    model_message = self._model_visible_tool_message(
-                        Message({
-                            "id": str(uuid.uuid4()),
-                            "role": Role.TOOL,
-                            "content": raw_result,
-                            "name": name,
-                            "tool_calls": None,
-                            "tool_call_id": tool_call.get("id"),
-                            "node_id": node_id,
-                            "timestamp": int(time()),
-                        }),
-                        name=name,
-                        conversation_id=conversation_id,
-                        node_id=node_id,
-                        tool_call_id=tool_call.get("id"),
+                    raw_result = await self.tool_manager.execute_tool(
+                        name,
+                        arguments,
+                        workspace=workspace,
+                        runtime_context=call_run_context,
                     )
+                model_message = self._model_visible_tool_message(
+                    Message({
+                        "id": str(uuid.uuid4()),
+                        "role": Role.TOOL,
+                        "content": raw_result,
+                        "name": name,
+                        "tool_calls": None,
+                        "tool_call_id": tool_call.get("id"),
+                        "node_id": node_id,
+                        "timestamp": int(time()),
+                    }),
+                    name=name,
+                    conversation_id=conversation_id,
+                    node_id=node_id,
+                    tool_call_id=tool_call.get("id"),
+                )
         except Exception as exc:
+            profiler.record({
+                "type": "span",
+                "name": "chat.tool_call",
+                "duration_ms": (perf_counter() - tool_call_started) * 1000.0,
+                "attrs": {**tool_call_attrs, "error_type": type(exc).__name__},
+            })
             await flush_tool_observations()
             await emit_tool_observation({
                 "event_type": "tool_call_error",
@@ -4447,6 +4380,12 @@ class ChatManager:
             with suppress(asyncio.CancelledError):
                 await heartbeat_task
 
+        profiler.record({
+            "type": "span",
+            "name": "chat.tool_call",
+            "duration_ms": (perf_counter() - tool_call_started) * 1000.0,
+            "attrs": {**tool_call_attrs, **summarize_tool_result(model_message.get("raw_content"))},
+        })
         await flush_tool_observations()
         parsed_result = self._parse_structured_tool_result(model_message.get("raw_content"))
         result_status = "error" if isinstance(parsed_result, dict) and parsed_result.get("error") else "done"

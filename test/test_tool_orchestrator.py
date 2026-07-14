@@ -23,7 +23,7 @@ class FakeToolManager:
     def __init__(self):
         self.calls = []
 
-    async def execute_tool(self, name, arguments):
+    async def execute_tool(self, name, arguments, workspace=None, runtime_context=None):
         self.calls.append((name, arguments))
         return json.dumps({"ok": True, "name": name}, ensure_ascii=False)
 

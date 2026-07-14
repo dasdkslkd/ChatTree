@@ -302,8 +302,10 @@ class ListFilesTool(_CodeTool):
     @property
     def description(self) -> str:
         return (
-            "Find workspace files with ripgrep-style file listing. Use `pattern` for one glob, `patterns` for multiple globs, "
-            "and `path_regex` to match returned paths; do not use a `query` argument. "
+            "Find workspace files with ripgrep-style file listing. Default sort=discovery is optimized for fast paged discovery "
+            "and may not know the exact total; continue with next_offset when needed and trust total only when total_known is true. "
+            "Use sort=path only when deterministic path order matters, and sort=mtime only for recently modified files because it requires a full scan. "
+            "Use `pattern` for one glob, `patterns` for multiple globs, and `path_regex` to match returned paths; do not use a `query` argument. "
             "Use this instead of shell for ls/dir/find/Get-ChildItem/rg --files. Paths are returned relative to the workspace root with / separators."
         )
 
@@ -320,7 +322,12 @@ class ListFilesTool(_CodeTool):
                 "include_hidden": {"type": "boolean", "default": False},
                 "respect_gitignore": {"type": "boolean", "default": True},
                 "exclude": {"type": "array", "items": {"type": "string"}, "default": []},
-                "sort": {"type": "string", "enum": ["path", "mtime"], "default": "path"},
+                "sort": {
+                    "type": "string",
+                    "enum": ["discovery", "path", "mtime"],
+                    "default": "discovery",
+                    "description": "discovery is fastest and supports early pagination; path is deterministic; mtime requires a full scan.",
+                },
                 "limit": {"type": "integer", "minimum": 1, "maximum": 2000, "default": 200},
                 "offset": {"type": "integer", "minimum": 0, "default": 0},
             },
@@ -336,10 +343,10 @@ class ListFilesTool(_CodeTool):
         except CodeToolError as exc:
             return _error(exc.error_type, str(exc), path=str(kwargs.get("path") or "."))
 
-        patterns = _string_list(kwargs.get("patterns"))
+        patterns = _normalize_glob_patterns(_string_list(kwargs.get("patterns")))
         single_pattern = str(kwargs.get("pattern") or "").strip()
         if single_pattern:
-            patterns = [single_pattern]
+            patterns = [_normalize_glob_pattern(single_pattern)]
         if not patterns:
             patterns = ["**/*"]
         path_regex = str(kwargs.get("path_regex") or "").strip()
@@ -350,8 +357,10 @@ class ListFilesTool(_CodeTool):
         files_only = bool(kwargs.get("files_only", True))
         include_hidden = bool(kwargs.get("include_hidden", False))
         respect_gitignore = bool(kwargs.get("respect_gitignore", True))
-        exclude_globs = _string_list(kwargs.get("exclude"))
-        sort = str(kwargs.get("sort") or "path")
+        exclude_globs = _normalize_glob_patterns(_string_list(kwargs.get("exclude")))
+        sort = str(kwargs.get("sort") or "discovery")
+        if sort not in {"discovery", "path", "mtime"}:
+            return _error("invalid_query", "sort must be one of discovery, path, or mtime")
         limit = max(1, min(int(kwargs.get("limit") or 200), 2000))
         offset = max(0, int(kwargs.get("offset") or 0))
 
@@ -365,6 +374,7 @@ class ListFilesTool(_CodeTool):
                 "patterns": patterns,
                 "files_only": files_only,
                 "respect_gitignore": respect_gitignore,
+                "sort": sort,
             },
         )
         rg_path = _resolve_ripgrep_executable(self.config)
@@ -402,7 +412,7 @@ class ListFilesTool(_CodeTool):
             status="running",
             progress={"phase": "python_fallback", "reason": fallback_reason},
         )
-        files, truncated, scanned_entries, total = _glob_files_python(
+        payload = _glob_files_python(
             workspace=self.workspace,
             root=root,
             patterns=patterns,
@@ -415,16 +425,6 @@ class ListFilesTool(_CodeTool):
             limit=limit,
             offset=offset,
         )
-        payload: Dict[str, Any] = {
-            "root": self.workspace.relative(root),
-            "files": files,
-            "count": len(files),
-            "total": total,
-            "truncated": truncated,
-            "next_offset": offset + len(files) if truncated else None,
-            "engine": "python",
-            "scanned_entries": scanned_entries,
-        }
         if fallback_reason:
             payload["fallback_reason"] = fallback_reason
         _emit_tool_observation(
@@ -434,9 +434,9 @@ class ListFilesTool(_CodeTool):
             progress={
                 "phase": "complete",
                 "engine": "python",
-                "scanned_entries": scanned_entries,
-                "matched_entries": total,
-                "truncated": truncated,
+                "scanned_entries": payload.get("scanned_entries"),
+                "matched_entries": payload.get("observed_count"),
+                "truncated": payload.get("truncated"),
             },
         )
         return _json(payload)
@@ -597,7 +597,10 @@ class SearchFilesTool(_CodeTool):
     @property
     def description(self) -> str:
         return (
-            "Search UTF-8 workspace file contents with ripgrep-style regex. Use this instead of shell for grep/rg/Select-String."
+            "Search UTF-8 workspace file contents with ripgrep-style regex. Use this to locate files and line numbers, "
+            "not to read large known-file excerpts. When the file and target area are known, use a precise grep first "
+            "and then read that file window. Prefer output=files for broad discovery; use output=content only for a "
+            "specific pattern with a small limit/context. Use this instead of shell for grep/rg/Select-String."
         )
 
     def parameters_schema(self) -> Dict[str, Any]:
@@ -605,11 +608,27 @@ class SearchFilesTool(_CodeTool):
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "pattern": {"type": "string"},
-                "path": {"type": "string", "default": "."},
-                "glob": {"type": "string", "default": "*"},
-                "type": {"type": "string"},
-                "output": {"type": "string", "enum": ["content", "files", "count"], "default": "files"},
+                "pattern": {
+                    "type": "string",
+                    "description": "Regex or fixed string to search for. Keep it specific; avoid broad alternations when read can fetch a known file window.",
+                },
+                "path": {
+                    "type": "string",
+                    "default": ".",
+                    "description": "Workspace-relative file or directory to search. Use a single file path when it is known.",
+                },
+                "glob": {
+                    "type": "string",
+                    "default": "*",
+                    "description": "File glob within path. Narrow this for directory searches, for example *.py.",
+                },
+                "type": {"type": "string", "description": "Language shortcut such as py, ts, or rust when glob is not set."},
+                "output": {
+                    "type": "string",
+                    "enum": ["content", "files", "count"],
+                    "default": "files",
+                    "description": "Use files for broad discovery, content for a small precise match set, and count for statistics.",
+                },
                 "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 250},
                 "offset": {"type": "integer", "minimum": 0, "default": 0},
                 "regex": {"type": "boolean", "default": True},
@@ -617,7 +636,12 @@ class SearchFilesTool(_CodeTool):
                 "respect_gitignore": {"type": "boolean", "default": True},
                 "include_hidden": {"type": "boolean", "default": False},
                 "multiline": {"type": "boolean", "default": False},
-                "context": {"type": "integer", "minimum": 0, "default": 0},
+                "context": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 0,
+                    "description": "Context lines around each match. Keep this small; for larger excerpts use read after finding the line.",
+                },
                 "before_context": {"type": "integer", "minimum": 0, "default": 0},
                 "after_context": {"type": "integer", "minimum": 0, "default": 0},
                 "exclude": {"type": "array", "items": {"type": "string"}, "default": []},
@@ -638,7 +662,7 @@ class SearchFilesTool(_CodeTool):
         except CodeToolError as exc:
             return _error(exc.error_type, str(exc), path=str(kwargs.get("path") or "."))
 
-        glob = _glob_for_type(str(kwargs.get("glob") or "*"), str(kwargs.get("type") or ""))
+        glob = _normalize_glob_pattern(_glob_for_type(str(kwargs.get("glob") or "*"), str(kwargs.get("type") or "")))
         limit = max(1, min(int(kwargs.get("limit") or kwargs.get("head_limit") or 250), 500))
         offset = max(0, int(kwargs.get("offset") or 0))
         fixed_strings = not bool(kwargs.get("regex", True))
@@ -652,7 +676,7 @@ class SearchFilesTool(_CodeTool):
         context = max(0, int(kwargs.get("context") or 0))
         before_context = max(context, int(kwargs.get("before_context") or 0))
         after_context = max(context, int(kwargs.get("after_context") or 0))
-        exclude_globs = _string_list(kwargs.get("exclude"))
+        exclude_globs = _normalize_glob_patterns(_string_list(kwargs.get("exclude")))
 
         _emit_tool_observation(
             event_sink,
@@ -1627,7 +1651,7 @@ def _grep_with_rg(
     timeout_seconds: int,
     event_sink: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
-    if root.is_file() and not _matches_glob(root, glob):
+    if root.is_file() and not _matches_glob(root, glob, workspace=workspace):
         return ({
             "pattern": pattern,
             "matches": [],
@@ -1637,6 +1661,8 @@ def _grep_with_rg(
             "engine": "rg",
         }, None)
 
+    single_file = root if root.is_file() else None
+    single_file_relative = workspace.relative(root) if single_file is not None else None
     cwd = root if root.is_dir() else root.parent
     target = "." if root.is_dir() else root.name
     argv = [str(rg_path), "--color", "never", "--no-config", "--line-number"]
@@ -1658,13 +1684,15 @@ def _grep_with_rg(
         argv.extend(["--after-context", str(after_context)])
     if files_with_matches:
         argv.append("--files-with-matches")
-    if glob and glob != "*":
-        argv.extend(["--glob", glob])
+    rg_glob = _glob_for_search_root(workspace, root, glob)
+    if rg_glob and not _is_match_all_glob(rg_glob):
+        argv.extend(["--glob", rg_glob])
     for exclude_glob in exclude_globs:
-        argv.extend(["--glob", f"!{exclude_glob}"])
+        argv.extend(["--glob", f"!{_glob_for_search_root(workspace, root, exclude_glob)}"])
     argv.extend(["--", pattern, target])
 
     matches: List[Dict[str, Any]] = []
+    match_index_by_line: dict[tuple[str, int], int] = {}
     counts: dict[str, int] = defaultdict(int)
     matched_files: set[str] = set()
     skipped_files: set[str] = set()
@@ -1800,14 +1828,18 @@ def _grep_with_rg(
             scanned_lines += 1
             emit_progress()
             if files_with_matches:
-                resolved = (cwd / raw_line.strip()).resolve()
-                if resolved.is_file() and workspace.is_visible(resolved):
+                if single_file_relative is not None:
+                    relative_path = single_file_relative
+                else:
+                    resolved = (cwd / raw_line.strip()).resolve()
+                    if not resolved.is_file() or not workspace.is_visible(resolved):
+                        continue
                     relative_path = workspace.relative(resolved)
-                    searched_paths.add(relative_path)
-                    matched_files.add(relative_path)
-                    if len(matched_files) >= max_results:
-                        truncated = True
-                        break
+                searched_paths.add(relative_path)
+                matched_files.add(relative_path)
+                if len(matched_files) >= max_results:
+                    truncated = True
+                    break
                 continue
             try:
                 event = json.loads(raw_line)
@@ -1820,10 +1852,13 @@ def _grep_with_rg(
             path_text = _rg_json_text(data.get("path"))
             if not path_text:
                 continue
-            resolved = (cwd / path_text).resolve()
-            if not resolved.is_file() or not workspace.is_visible(resolved):
-                continue
-            relative_path = workspace.relative(resolved)
+            if single_file_relative is not None:
+                relative_path = single_file_relative
+            else:
+                resolved = (cwd / path_text).resolve()
+                if not resolved.is_file() or not workspace.is_visible(resolved):
+                    continue
+                relative_path = workspace.relative(resolved)
             searched_paths.add(relative_path)
             if event.get("type") == "match":
                 counts[relative_path] += 1
@@ -1834,12 +1869,21 @@ def _grep_with_rg(
                 continue
             if count_mode:
                 continue
-            matches.append({
+            line_number = int(data.get("line_number") or 0)
+            key = (relative_path, line_number)
+            existing_index = match_index_by_line.get(key)
+            entry = {
                 "path": relative_path,
-                "line": int(data.get("line_number") or 0),
+                "line": line_number,
                 "preview": line_text.strip(),
                 "type": event.get("type"),
-            })
+            }
+            if existing_index is not None:
+                if entry["type"] == "match" and matches[existing_index].get("type") != "match":
+                    matches[existing_index] = entry
+                continue
+            match_index_by_line[key] = len(matches)
+            matches.append(entry)
             if len(matches) >= max_results:
                 truncated = True
                 break
@@ -1915,51 +1959,61 @@ def _glob_files_with_rg(
     event_sink: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
     if root.is_file():
-        if not any(_matches_glob(root, pattern) for pattern in patterns):
-            return ({
-                "root": workspace.relative(root),
-                "files": [],
-                "count": 0,
-                "total": 0,
-                "truncated": False,
-                "next_offset": None,
-                "engine": "rg",
-                "scanned_entries": 1,
-            }, None)
+        if not any(_matches_glob(root, pattern, workspace=workspace) for pattern in patterns):
+            return (_glob_payload(
+                workspace=workspace,
+                root=root,
+                page=[],
+                engine="rg",
+                sort=sort,
+                scanned_entries=1,
+                observed_count=0,
+                total_known=True,
+                truncated=False,
+                offset=offset,
+            ), None)
         relative = workspace.relative(root)
         if path_regex and not path_regex.search(relative):
             files: List[str] = []
         else:
             files = [relative]
-        return ({
-            "root": workspace.relative(root),
-            "files": files[offset:offset + limit],
-            "count": len(files[offset:offset + limit]),
-            "total": len(files),
-            "truncated": offset + limit < len(files),
-            "next_offset": offset + len(files[offset:offset + limit]) if offset + limit < len(files) else None,
-            "engine": "rg",
-            "scanned_entries": 1,
-        }, None)
+        page = files[offset:offset + limit]
+        return (_glob_payload(
+            workspace=workspace,
+            root=root,
+            page=page,
+            engine="rg",
+            sort=sort,
+            scanned_entries=1,
+            observed_count=len(files),
+            total_known=True,
+            truncated=offset + limit < len(files),
+            offset=offset,
+        ), None)
 
     argv = [str(rg_path), "--files", "--color", "never", "--no-config"]
+    if sort == "path" and files_only:
+        argv.extend(["--sort", "path"])
     if not respect_gitignore:
         argv.append("--no-ignore")
     if include_hidden:
         argv.append("--hidden")
-    for pattern in patterns:
-        if pattern and pattern not in {"*", "**/*"}:
+    rg_patterns = [_glob_for_search_root(workspace, root, pattern) for pattern in patterns]
+    for pattern in rg_patterns:
+        if pattern and not _is_match_all_glob(pattern):
             argv.extend(["--glob", pattern])
     for exclude_glob in exclude_globs:
-        argv.extend(["--glob", f"!{exclude_glob}"])
+        argv.extend(["--glob", f"!{_glob_for_search_root(workspace, root, exclude_glob)}"])
     argv.extend(["--", "."])
 
     matches: List[Path] = []
     seen: set[Path] = set()
     scanned_entries = 0
-    scan_limit = max(1000, (limit + offset) * 50)
     stopped_early = False
+    stopped_for_page = False
     timed_out = False
+    observed_count = 0
+    early_page = files_only and sort in {"discovery", "path"}
     last_progress_at = 0.0
 
     def emit_progress(*, phase: str = "scan", force: bool = False) -> None:
@@ -1977,33 +2031,42 @@ def _glob_files_with_rg(
                 "engine": "rg",
                 "root": workspace.relative(root),
                 "scanned_entries": scanned_entries,
-                "matched_entries": len(matches),
-                "scan_limit": scan_limit,
+                "matched_entries": observed_count if early_page else len(matches),
                 "truncated": stopped_early,
             },
         )
 
-    def add_candidate(candidate: Path) -> None:
+    def add_candidate(candidate: Path) -> bool:
+        nonlocal observed_count, stopped_early, stopped_for_page
         resolved_candidate = candidate.resolve()
         if resolved_candidate in seen:
-            return
+            return False
         seen.add(resolved_candidate)
-        if files_only and not resolved_candidate.is_file():
-            return
-        if not files_only and not (resolved_candidate.is_file() or resolved_candidate.is_dir()):
-            return
-        if not workspace.is_visible(resolved_candidate):
-            return
-        if not include_hidden and _is_hidden_under(resolved_candidate, root):
-            return
-        if not any(_matches_glob(resolved_candidate, pattern) for pattern in patterns):
-            return
-        if _matches_excluded_glob(resolved_candidate, root, exclude_globs):
-            return
-        relative = workspace.relative(resolved_candidate)
-        if path_regex and not path_regex.search(relative):
-            return
-        matches.append(resolved_candidate)
+        accepted = _accept_glob_candidate(
+            resolved_candidate,
+            workspace=workspace,
+            root=root,
+            patterns=patterns,
+            path_regex=path_regex,
+            files_only=files_only,
+            include_hidden=include_hidden,
+            exclude_globs=exclude_globs,
+        )
+        if accepted is None:
+            return False
+        if early_page:
+            observed_count += 1
+            if observed_count <= offset:
+                return False
+            if len(matches) < limit:
+                matches.append(accepted)
+                return False
+            stopped_early = True
+            stopped_for_page = True
+            return True
+        matches.append(accepted)
+        observed_count = len(matches)
+        return False
 
     try:
         proc = subprocess.Popen(
@@ -2108,25 +2171,29 @@ def _glob_files_with_rg(
                 continue
             scanned_entries += 1
             emit_progress()
-            if scanned_entries > scan_limit:
-                stopped_early = True
-                break
             resolved = (root / relative_text).resolve()
             if not resolved.is_file() or not workspace.is_visible(resolved):
                 continue
             if not include_hidden and _is_hidden_under(resolved, root):
                 continue
             if files_only:
-                add_candidate(resolved)
+                if add_candidate(resolved):
+                    break
                 continue
             ancestors: List[Path] = []
             parent = resolved.parent
             while parent != root and root in parent.parents:
                 ancestors.append(parent)
                 parent = parent.parent
+            page_full = False
             for candidate in reversed(ancestors):
-                add_candidate(candidate)
-            add_candidate(resolved)
+                if add_candidate(candidate):
+                    page_full = True
+                    break
+            if page_full:
+                break
+            else:
+                add_candidate(resolved)
     finally:
         if timed_out or stopped_early:
             stop_reader.set()
@@ -2141,7 +2208,7 @@ def _glob_files_with_rg(
                 "phase": "timeout",
                 "engine": "rg",
                 "scanned_entries": scanned_entries,
-                "matched_entries": len(matches),
+                "matched_entries": observed_count if early_page else len(matches),
             },
         )
         return None, "ripgrep_timeout"
@@ -2163,9 +2230,6 @@ def _glob_files_with_rg(
         ignore_matcher = _GitIgnoreMatcher.for_root(root, workspace)
         for candidate in root.rglob("*"):
             scanned_entries += 1
-            if scanned_entries > scan_limit:
-                stopped_early = True
-                break
             resolved = candidate.resolve()
             if not resolved.is_dir():
                 continue
@@ -2182,23 +2246,30 @@ def _glob_files_with_rg(
 
     if sort == "mtime":
         matches.sort(key=lambda path: (-path.stat().st_mtime, workspace.relative(path)))
-    else:
+    elif sort == "path" and not (files_only and early_page):
         matches.sort(key=lambda path: workspace.relative(path))
 
-    total = len(matches)
-    page = matches[offset:offset + limit]
-    truncated = stopped_early or offset + limit < total
+    total_known = not stopped_for_page and not stopped_early
+    if total_known:
+        observed_count = len(matches) if not early_page else observed_count
+    if early_page:
+        page_paths = matches
+    else:
+        page_paths = matches[offset:offset + limit]
+    truncated = stopped_for_page or (total_known and offset + limit < observed_count)
     emit_progress(phase="complete", force=True)
-    return ({
-        "root": workspace.relative(root),
-        "files": [workspace.relative(path) for path in page],
-        "count": len(page),
-        "total": total,
-        "truncated": truncated,
-        "next_offset": offset + len(page) if truncated else None,
-        "engine": "rg",
-        "scanned_entries": scanned_entries,
-    }, None)
+    return (_glob_payload(
+        workspace=workspace,
+        root=root,
+        page=[workspace.relative(path) for path in page_paths],
+        engine="rg",
+        sort=sort,
+        scanned_entries=scanned_entries,
+        observed_count=observed_count,
+        total_known=total_known,
+        truncated=truncated,
+        offset=offset,
+    ), None)
 
 
 def _grep_python(
@@ -2247,13 +2318,13 @@ def _grep_python(
         )
 
     emit_progress(force=True)
-    for file_path in _iter_grep_files(root, glob):
+    for file_path in _iter_grep_files(root, glob, workspace=workspace):
         resolved = file_path.resolve()
         if (
             not resolved.is_file()
             or not workspace.is_visible(resolved)
             or _should_skip_python_path(resolved, root, hidden=hidden, no_ignore=no_ignore, ignore_matcher=ignore_matcher)
-            or _matches_excluded_glob(resolved, root, exclude_globs)
+            or _matches_excluded_glob(resolved, root, exclude_globs, workspace=workspace)
         ):
             continue
         searched_files += 1
@@ -2314,59 +2385,143 @@ def _glob_files_python(
     sort: str,
     limit: int,
     offset: int,
-) -> tuple[List[str], bool, int, int]:
+) -> Dict[str, Any]:
     ignore_matcher = _GitIgnoreMatcher.for_root(root, workspace)
     matches: List[Path] = []
     seen: set[Path] = set()
     scanned_entries = 0
-    scan_limit = max(1000, (limit + offset) * 50)
+    observed_count = 0
+    stopped_for_page = False
+    early_page = files_only and sort == "discovery"
 
     candidates: Iterable[Path]
     if root.is_file():
         candidates = [root]
     else:
-        candidates = root.rglob("*")
+        candidates = _iter_glob_candidates(root, patterns, workspace)
 
     for candidate in candidates:
         scanned_entries += 1
-        if scanned_entries > scan_limit:
-            break
         resolved = candidate.resolve()
         if resolved in seen:
             continue
         seen.add(resolved)
-        if not workspace.is_visible(resolved):
-            continue
-        if files_only and not resolved.is_file():
-            continue
-        if not files_only and not (resolved.is_file() or resolved.is_dir()):
-            continue
-        if _should_skip_python_path(
+        accepted = _accept_glob_candidate(
             resolved,
-            root if root.is_dir() else root.parent,
-            hidden=include_hidden,
-            no_ignore=respect_gitignore is False,
+            workspace=workspace,
+            root=root,
+            patterns=patterns,
+            path_regex=path_regex,
+            files_only=files_only,
+            include_hidden=include_hidden,
+            exclude_globs=exclude_globs,
             ignore_matcher=ignore_matcher,
-        ):
+            respect_gitignore=respect_gitignore,
+        )
+        if accepted is None:
             continue
-        if _matches_excluded_glob(resolved, root if root.is_dir() else root.parent, exclude_globs):
-            continue
-        if not any(_matches_glob(resolved, pattern) for pattern in patterns):
-            continue
-        relative = workspace.relative(resolved)
-        if path_regex and not path_regex.search(relative):
-            continue
-        matches.append(resolved)
+        if early_page:
+            observed_count += 1
+            if observed_count <= offset:
+                continue
+            if len(matches) < limit:
+                matches.append(accepted)
+                continue
+            stopped_for_page = True
+            break
+        matches.append(accepted)
+        observed_count = len(matches)
 
     if sort == "mtime":
         matches.sort(key=lambda path: (-path.stat().st_mtime, workspace.relative(path)))
-    else:
+    elif sort == "path":
         matches.sort(key=lambda path: workspace.relative(path))
 
-    total = len(matches)
-    page = matches[offset:offset + limit]
-    truncated = scanned_entries > scan_limit or offset + limit < total
-    return [workspace.relative(path) for path in page], truncated, scanned_entries, total
+    total_known = not stopped_for_page
+    if total_known:
+        observed_count = observed_count if early_page else len(matches)
+    page = matches if early_page else matches[offset:offset + limit]
+    truncated = stopped_for_page or (total_known and offset + limit < observed_count)
+    return _glob_payload(
+        workspace=workspace,
+        root=root,
+        page=[workspace.relative(path) for path in page],
+        engine="python",
+        sort=sort,
+        scanned_entries=scanned_entries,
+        observed_count=observed_count,
+        total_known=total_known,
+        truncated=truncated,
+        offset=offset,
+    )
+
+
+def _accept_glob_candidate(
+    candidate: Path,
+    *,
+    workspace: CodeWorkspace,
+    root: Path,
+    patterns: List[str],
+    path_regex: Optional[re.Pattern[str]],
+    files_only: bool,
+    include_hidden: bool,
+    exclude_globs: List[str],
+    ignore_matcher: Optional["_GitIgnoreMatcher"] = None,
+    respect_gitignore: bool = True,
+) -> Optional[Path]:
+    resolved = candidate.resolve()
+    if files_only and not resolved.is_file():
+        return None
+    if not files_only and not (resolved.is_file() or resolved.is_dir()):
+        return None
+    if not workspace.is_visible(resolved):
+        return None
+    search_root = root if root.is_dir() else root.parent
+    if _should_skip_python_path(
+        resolved,
+        search_root,
+        hidden=include_hidden,
+        no_ignore=respect_gitignore is False,
+        ignore_matcher=ignore_matcher,
+    ):
+        return None
+    if _matches_excluded_glob(resolved, search_root, exclude_globs, workspace=workspace):
+        return None
+    if not any(_matches_glob(resolved, pattern, workspace=workspace, root=root) for pattern in patterns):
+        return None
+    relative = workspace.relative(resolved)
+    if path_regex and not path_regex.search(relative):
+        return None
+    return resolved
+
+
+def _glob_payload(
+    *,
+    workspace: CodeWorkspace,
+    root: Path,
+    page: List[str],
+    engine: str,
+    sort: str,
+    scanned_entries: int,
+    observed_count: int,
+    total_known: bool,
+    truncated: bool,
+    offset: int,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "root": workspace.relative(root),
+        "files": page,
+        "count": len(page),
+        "total": observed_count if total_known else None,
+        "total_known": total_known,
+        "observed_count": observed_count,
+        "truncated": truncated,
+        "next_offset": offset + len(page) if truncated else None,
+        "engine": engine,
+        "sort": sort,
+        "scanned_entries": scanned_entries,
+    }
+    return payload
 
 
 def _shape_grep_payload(payload: Dict[str, Any], *, output: str, limit: int, offset: int) -> Dict[str, Any]:
@@ -2472,13 +2627,13 @@ def _grep_files_python(
         )
 
     emit_progress(force=True)
-    for file_path in _iter_grep_files(root, glob):
+    for file_path in _iter_grep_files(root, glob, workspace=workspace):
         resolved = file_path.resolve()
         if (
             not resolved.is_file()
             or not workspace.is_visible(resolved)
             or _should_skip_python_path(resolved, root, hidden=hidden, no_ignore=no_ignore, ignore_matcher=ignore_matcher)
-            or _matches_excluded_glob(resolved, root, exclude_globs)
+            or _matches_excluded_glob(resolved, root, exclude_globs, workspace=workspace)
         ):
             continue
         relative = workspace.relative(resolved)
@@ -2554,12 +2709,19 @@ def _glob_for_type(glob: str, type_name: str) -> str:
     return mapping.get(type_name.lower(), glob or "*")
 
 
-def _iter_grep_files(root: Path, glob: str) -> Iterable[Path]:
+def _iter_grep_files(root: Path, glob: str, *, workspace: Optional[CodeWorkspace] = None) -> Iterable[Path]:
+    glob = _normalize_glob_pattern(glob)
     if root.is_file():
-        if _matches_glob(root, glob):
+        if _matches_glob(root, glob, workspace=workspace):
             yield root
         return
-    yield from root.rglob(glob)
+    search_glob = _glob_for_search_root(workspace, root, glob) if workspace is not None else glob
+    if _is_match_all_glob(search_glob):
+        yield from root.rglob("*")
+    elif _glob_has_path_separator(search_glob):
+        yield from root.glob(search_glob)
+    else:
+        yield from root.rglob(search_glob)
 
 
 def _compile_python_matcher(pattern: str, *, fixed_strings: bool, ignore_case: bool):
@@ -2595,8 +2757,94 @@ def _search_payload(
     return payload
 
 
-def _matches_glob(path: Path, pattern: str) -> bool:
-    return fnmatch(path.name, pattern) or fnmatch(path.as_posix(), pattern)
+def _iter_glob_candidates(root: Path, patterns: List[str], workspace: CodeWorkspace) -> Iterable[Path]:
+    seen: set[Path] = set()
+    for pattern in patterns:
+        search_pattern = _glob_for_search_root(workspace, root, pattern)
+        if _is_match_all_glob(search_pattern):
+            candidates = root.rglob("*")
+        elif _glob_has_path_separator(search_pattern):
+            candidates = root.glob(search_pattern)
+        else:
+            candidates = root.rglob(search_pattern)
+        for candidate in candidates:
+            resolved = candidate.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            yield candidate
+
+
+def _normalize_glob_patterns(patterns: List[str]) -> List[str]:
+    return [_normalize_glob_pattern(pattern) for pattern in patterns if str(pattern).strip()]
+
+
+def _normalize_glob_pattern(pattern: str) -> str:
+    normalized = str(pattern or "").strip().replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized or "*"
+
+
+def _is_match_all_glob(pattern: str) -> bool:
+    return _normalize_glob_pattern(pattern) in {"*", "**/*"}
+
+
+def _glob_has_path_separator(pattern: str) -> bool:
+    return "/" in _normalize_glob_pattern(pattern)
+
+
+def _glob_for_search_root(workspace: Optional[CodeWorkspace], root: Path, pattern: str) -> str:
+    normalized = _normalize_glob_pattern(pattern)
+    if workspace is None or root.is_file() or _is_match_all_glob(normalized):
+        return normalized
+    root_relative = workspace.relative(root.resolve()).replace("\\", "/")
+    if root_relative and root_relative != ".":
+        prefix = root_relative.rstrip("/") + "/"
+        if normalized == root_relative:
+            return "*"
+        if normalized.startswith(prefix):
+            return normalized[len(prefix):] or "*"
+    return normalized
+
+
+def _glob_match_texts(path: Path, *, workspace: Optional[CodeWorkspace] = None, root: Optional[Path] = None) -> List[str]:
+    texts = [path.name, path.as_posix()]
+    if workspace is not None:
+        texts.append(workspace.relative(path.resolve()))
+    if root is not None:
+        try:
+            texts.append(path.resolve().relative_to(root.resolve()).as_posix())
+        except ValueError:
+            pass
+    normalized: List[str] = []
+    for text in texts:
+        value = str(text).replace("\\", "/")
+        normalized.append(value)
+        while value.startswith("./"):
+            value = value[2:]
+            normalized.append(value)
+    return list(dict.fromkeys(normalized))
+
+
+def _matches_glob(
+    path: Path,
+    pattern: str,
+    *,
+    workspace: Optional[CodeWorkspace] = None,
+    root: Optional[Path] = None,
+) -> bool:
+    normalized = _normalize_glob_pattern(pattern)
+    if _is_match_all_glob(normalized):
+        return True
+    patterns = [normalized]
+    if normalized.startswith("**/"):
+        patterns.append(normalized[3:])
+    return any(
+        fnmatch(text, candidate_pattern)
+        for candidate_pattern in patterns
+        for text in _glob_match_texts(path, workspace=workspace, root=root)
+    )
 
 
 def _string_list(value: Any) -> List[str]:
@@ -2605,14 +2853,16 @@ def _string_list(value: Any) -> List[str]:
     return [str(item) for item in value if str(item)]
 
 
-def _matches_excluded_glob(path: Path, root: Path, exclude_globs: List[str]) -> bool:
+def _matches_excluded_glob(
+    path: Path,
+    root: Path,
+    exclude_globs: List[str],
+    *,
+    workspace: Optional[CodeWorkspace] = None,
+) -> bool:
     if not exclude_globs:
         return False
-    try:
-        relative = path.resolve().relative_to(root.resolve()).as_posix()
-    except ValueError:
-        relative = path.name
-    return any(fnmatch(relative, pattern) or fnmatch(path.name, pattern) for pattern in exclude_globs)
+    return any(_matches_glob(path, pattern, workspace=workspace, root=root) for pattern in exclude_globs)
 
 
 def _rg_json_text(value: Any) -> Optional[str]:
@@ -2648,11 +2898,11 @@ def _should_skip_python_path(
     *,
     hidden: bool,
     no_ignore: bool,
-    ignore_matcher: "_GitIgnoreMatcher",
+    ignore_matcher: Optional["_GitIgnoreMatcher"],
 ) -> bool:
     if not hidden and _is_hidden_under(path, root):
         return True
-    if not no_ignore and ignore_matcher.matches(path):
+    if not no_ignore and ignore_matcher is not None and ignore_matcher.matches(path):
         return True
     return False
 

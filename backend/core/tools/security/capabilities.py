@@ -1,40 +1,78 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Iterable, Mapping, Optional, Set
+from typing import Any, Iterable, Mapping, Optional, Set
 
 
 class ToolCapability(str, Enum):
     READ_ONLY = "READ_ONLY"
+    PARALLEL_SAFE = "PARALLEL_SAFE"
     NETWORK_READ = "NETWORK_READ"
     FILESYSTEM_READ = "FILESYSTEM_READ"
     FILESYSTEM_WRITE = "FILESYSTEM_WRITE"
     COMMAND_EXEC = "COMMAND_EXEC"
     CONFIG_WRITE = "CONFIG_WRITE"
+    MUTATES_WORKSPACE = "MUTATES_WORKSPACE"
+    MUTATES_RUNTIME_STATE = "MUTATES_RUNTIME_STATE"
+    REQUIRES_APPROVAL = "REQUIRES_APPROVAL"
     MCP_DYNAMIC = "MCP_DYNAMIC"
 
 
 DEFAULT_TOOL_CAPABILITIES: Mapping[str, Set[ToolCapability]] = {
-    "web": {ToolCapability.NETWORK_READ},
-    "web_search": {ToolCapability.NETWORK_READ},
-    "fetch_url": {ToolCapability.NETWORK_READ},
-    "read_tool_result": {ToolCapability.READ_ONLY},
-    "list_available_tools": {ToolCapability.READ_ONLY},
-    "tools": {ToolCapability.READ_ONLY},
-    "plan": {ToolCapability.READ_ONLY},
-    "enter_plan_mode": {ToolCapability.READ_ONLY},
-    "update_plan": {ToolCapability.READ_ONLY},
-    "exit_plan_mode": {ToolCapability.READ_ONLY},
-    "ask_user_question": {ToolCapability.READ_ONLY},
-    "glob": {ToolCapability.FILESYSTEM_READ},
-    "read": {ToolCapability.FILESYSTEM_READ},
-    "grep": {ToolCapability.FILESYSTEM_READ},
-    "edit": {ToolCapability.FILESYSTEM_WRITE},
-    "shell": {ToolCapability.COMMAND_EXEC},
-    "write": {ToolCapability.FILESYSTEM_WRITE},
-    "patch": {ToolCapability.FILESYSTEM_WRITE},
-    "agent": {ToolCapability.READ_ONLY},
+    "web": {ToolCapability.NETWORK_READ, ToolCapability.READ_ONLY, ToolCapability.PARALLEL_SAFE},
+    "web_search": {ToolCapability.NETWORK_READ, ToolCapability.READ_ONLY, ToolCapability.PARALLEL_SAFE},
+    "fetch_url": {ToolCapability.NETWORK_READ, ToolCapability.READ_ONLY, ToolCapability.PARALLEL_SAFE},
+    "read_tool_result": {ToolCapability.READ_ONLY, ToolCapability.PARALLEL_SAFE},
+    "list_available_tools": {ToolCapability.READ_ONLY, ToolCapability.PARALLEL_SAFE},
+    "tools": {ToolCapability.READ_ONLY, ToolCapability.PARALLEL_SAFE},
+    "plan": {ToolCapability.MUTATES_RUNTIME_STATE},
+    "enter_plan_mode": {ToolCapability.MUTATES_RUNTIME_STATE},
+    "update_plan": {ToolCapability.MUTATES_RUNTIME_STATE},
+    "exit_plan_mode": {ToolCapability.MUTATES_RUNTIME_STATE},
+    "ask_user_question": {ToolCapability.MUTATES_RUNTIME_STATE},
+    "glob": {ToolCapability.FILESYSTEM_READ, ToolCapability.READ_ONLY, ToolCapability.PARALLEL_SAFE},
+    "read": {ToolCapability.FILESYSTEM_READ, ToolCapability.READ_ONLY, ToolCapability.PARALLEL_SAFE},
+    "grep": {ToolCapability.FILESYSTEM_READ, ToolCapability.READ_ONLY, ToolCapability.PARALLEL_SAFE},
+    "edit": {
+        ToolCapability.FILESYSTEM_WRITE,
+        ToolCapability.MUTATES_WORKSPACE,
+        ToolCapability.REQUIRES_APPROVAL,
+    },
+    "shell": {
+        ToolCapability.COMMAND_EXEC,
+        ToolCapability.MUTATES_RUNTIME_STATE,
+        ToolCapability.REQUIRES_APPROVAL,
+    },
+    "write": {
+        ToolCapability.FILESYSTEM_WRITE,
+        ToolCapability.MUTATES_WORKSPACE,
+        ToolCapability.REQUIRES_APPROVAL,
+    },
+    "patch": {
+        ToolCapability.FILESYSTEM_WRITE,
+        ToolCapability.MUTATES_WORKSPACE,
+        ToolCapability.REQUIRES_APPROVAL,
+    },
+    "agent": {ToolCapability.MUTATES_RUNTIME_STATE},
+    "spawn_agent": {ToolCapability.MUTATES_RUNTIME_STATE, ToolCapability.PARALLEL_SAFE},
+    "wait_agent": {ToolCapability.READ_ONLY, ToolCapability.PARALLEL_SAFE},
+    "list_agents": {ToolCapability.READ_ONLY, ToolCapability.PARALLEL_SAFE},
+    "send_message": {ToolCapability.MUTATES_RUNTIME_STATE},
+    "send_input": {ToolCapability.MUTATES_RUNTIME_STATE},
+    "followup_task": {ToolCapability.MUTATES_RUNTIME_STATE},
+    "resume_agent": {ToolCapability.MUTATES_RUNTIME_STATE},
+    "close_agent": {ToolCapability.MUTATES_RUNTIME_STATE},
+    "interrupt_agent": {ToolCapability.MUTATES_RUNTIME_STATE},
+    "start_subagent": {ToolCapability.MUTATES_RUNTIME_STATE, ToolCapability.PARALLEL_SAFE},
+    "start_workflow": {ToolCapability.MUTATES_RUNTIME_STATE, ToolCapability.PARALLEL_SAFE},
+    "create_task": {ToolCapability.MUTATES_RUNTIME_STATE},
+    "set_task_step": {ToolCapability.MUTATES_RUNTIME_STATE},
+    "cancel_task": {ToolCapability.MUTATES_RUNTIME_STATE},
 }
+
+
+class UnknownToolCapabilitiesError(LookupError):
+    """Raised when a tool has no explicit capability declaration."""
 
 
 def capabilities_for_tool(
@@ -47,19 +85,30 @@ def capabilities_for_tool(
     if tool_name in DEFAULT_TOOL_CAPABILITIES:
         return set(DEFAULT_TOOL_CAPABILITIES[tool_name])
 
-    if _looks_like_mcp_tool(tool_name):
-        return {ToolCapability.MCP_DYNAMIC}
+    raise UnknownToolCapabilitiesError(f"Tool '{tool_name}' has no declared capabilities")
 
-    return {ToolCapability.READ_ONLY}
+
+def capabilities_for_registered_tool(tool: Any) -> Set[ToolCapability]:
+    explicit = getattr(tool, "capabilities", None)
+    if explicit is not None:
+        return {_to_capability(capability) for capability in explicit}
+    return capabilities_for_tool(str(getattr(tool, "name", "")))
+
+
+def capabilities_for_mcp_tool(tool_schema: Mapping[str, Any]) -> Set[ToolCapability]:
+    annotations = tool_schema.get("annotations")
+    if not isinstance(annotations, Mapping):
+        return {ToolCapability.MCP_DYNAMIC}
+    if annotations.get("readOnlyHint") is True:
+        return {ToolCapability.MCP_DYNAMIC, ToolCapability.READ_ONLY, ToolCapability.PARALLEL_SAFE}
+    return {ToolCapability.MCP_DYNAMIC}
+
+
+def is_parallel_safe(capabilities: Iterable[ToolCapability]) -> bool:
+    return ToolCapability.PARALLEL_SAFE in set(capabilities)
 
 
 def _to_capability(value: str | ToolCapability) -> ToolCapability:
     if isinstance(value, ToolCapability):
         return value
     return ToolCapability(value)
-
-
-def _looks_like_mcp_tool(tool_name: str) -> bool:
-    route_name = tool_name[5:] if tool_name.startswith("mcp__") else tool_name
-    parts = route_name.split("__", 1)
-    return len(parts) == 2 and bool(parts[0]) and bool(parts[1])

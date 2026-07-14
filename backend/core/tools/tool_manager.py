@@ -23,6 +23,13 @@ from .exposure import (
 )
 from .mcp_client import MCPClient, MCPClientError
 from .mcp_tools import MCPSearchTool, MCPUrlReadTool
+from .security.capabilities import (
+    ToolCapability,
+    UnknownToolCapabilitiesError,
+    capabilities_for_mcp_tool,
+    capabilities_for_registered_tool,
+    capabilities_for_tool,
+)
 from .tool_arguments import normalize_tool_arguments
 from .tool_filter import ToolFilter
 from .web_search import FetchUrlTool, WebSearchTool, WebTool
@@ -252,11 +259,32 @@ class ToolManager:
 
     def register(self, tool: BaseTool):
         """Register a local tool."""
+        capabilities_for_registered_tool(tool)
         self._registry.register(tool, descriptor_for_tool_name(tool.name))
         logger.info(f"Tool registered: {tool.name}")
 
     def get_tool(self, name: str) -> Optional[BaseTool]:
         return self._registry.get(name)
+
+    def capabilities_for(
+        self,
+        name: str,
+        workspace: Optional[Dict[str, Any]] = None,
+    ) -> set[ToolCapability]:
+        if self._connection_manager.has_tool(name):
+            server_name = self._connection_manager.server_for_tool(name)
+            if not self._is_mcp_server_allowed_for_workspace(server_name, workspace):
+                raise UnknownToolCapabilitiesError(f"MCP tool '{name}' is not enabled for this project")
+            for info in self._connection_manager.list_all_tools():
+                if info.get("callable_name") == name:
+                    return capabilities_for_mcp_tool(info.get("tool") or {})
+            raise UnknownToolCapabilitiesError(f"MCP tool '{name}' has no schema")
+
+        tool = self._tool_for_execution(name, workspace)
+        if tool is not None:
+            return capabilities_for_registered_tool(tool)
+
+        return capabilities_for_tool(name)
 
     def list_tools(
         self,

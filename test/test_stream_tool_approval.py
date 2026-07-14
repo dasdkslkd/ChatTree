@@ -14,6 +14,7 @@ from backend.core.config.types import Role, StreamChunk, StreamController, Strea
 from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
 from backend.core.tools.orchestrator import ToolOrchestrator
+from backend.core.tools.security.capabilities import ToolCapability
 from backend.core.tools.security.approval import ApprovalManager
 from backend.core.tools.security.logical_sandbox import LogicalSandbox
 from backend.core.tools.security.permissions import PermissionEngine
@@ -44,7 +45,10 @@ class FakeToolManager:
         self.tool_result_store = FakeToolResultStore()
         self.calls = []
 
-    async def execute_tool(self, name, arguments):
+    def capabilities_for(self, name, workspace=None):
+        return {ToolCapability.READ_ONLY, ToolCapability.PARALLEL_SAFE}
+
+    async def execute_tool(self, name, arguments, workspace=None, runtime_context=None):
         self.calls.append((name, arguments))
         return "direct-result"
 
@@ -53,7 +57,16 @@ class FakeOrchestrator:
     def __init__(self):
         self.calls = []
 
-    async def execute_tool_call(self, tool_call, conversation_id, node_id, emit_event=None):
+    async def execute_tool_call(
+        self,
+        tool_call,
+        conversation_id,
+        node_id,
+        emit_event=None,
+        workspace=None,
+        permission_mode="default",
+        run_context=None,
+    ):
         self.calls.append((tool_call, conversation_id, node_id))
         if emit_event:
             result = emit_event(
@@ -232,7 +245,10 @@ class FakeStreamingToolManager:
             }
         ]
 
-    async def execute_tool(self, name, arguments):
+    def capabilities_for(self, name, workspace=None):
+        return {ToolCapability.READ_ONLY, ToolCapability.PARALLEL_SAFE}
+
+    async def execute_tool(self, name, arguments, workspace=None, runtime_context=None):
         return "streaming-tool-result"
 
 
@@ -297,7 +313,16 @@ class BlockingOrchestrator:
         self.cancelled = asyncio.Event()
         self.task = None
 
-    async def execute_tool_call(self, tool_call, conversation_id, node_id, emit_event=None):
+    async def execute_tool_call(
+        self,
+        tool_call,
+        conversation_id,
+        node_id,
+        emit_event=None,
+        workspace=None,
+        permission_mode="default",
+        run_context=None,
+    ):
         self.task = asyncio.current_task()
         try:
             await emit_event(
@@ -313,7 +338,16 @@ class BlockingOrchestrator:
 
 
 class ApprovalPersistenceOrchestrator:
-    async def execute_tool_call(self, tool_call, conversation_id, node_id, emit_event=None):
+    async def execute_tool_call(
+        self,
+        tool_call,
+        conversation_id,
+        node_id,
+        emit_event=None,
+        workspace=None,
+        permission_mode="default",
+        run_context=None,
+    ):
         events = [
             {
                 "event_type": "tool_approval_request",
@@ -405,7 +439,11 @@ async def _execute_tool_calls_uses_orchestrator_and_keeps_events_separate():
 
     assert tool_manager.calls == []
     assert len(orchestrator.calls) == 1
-    assert events == [
+    approval_events = [
+        event for event in events
+        if event.get("event_type") == "tool_approval_request"
+    ]
+    assert approval_events == [
         {
             "event_type": "tool_approval_request",
             "approval": {"id": "approval-1", "status": "pending"},
@@ -446,6 +484,7 @@ async def _closing_stream_cancels_pending_tool_execution(tmp_path):
         "read notes",
         model_id="fake-model",
         parent_node_id=conversation.current_node_id,
+        tool_permission_mode="ask_always",
     )
 
     try:
@@ -640,6 +679,7 @@ async def _stop_stream_cancels_pending_approval_and_stream_finishes(tmp_path):
         "read notes",
         model_id="fake-model",
         parent_node_id=conversation.current_node_id,
+        tool_permission_mode="ask_always",
     )
 
     approval_id = None

@@ -9,6 +9,7 @@ from backend.core.config.config import cfg
 from backend.core.config.types import Message, Role
 from backend.core.tools import code_tools
 from backend.core.tools.code_tools import CodeToolConfig, ListFilesTool
+from backend.core.tools.security.capabilities import ToolCapability
 
 
 class FakeToolResultStore:
@@ -37,6 +38,9 @@ class FakeToolManager:
             })
         return self.result
 
+    def capabilities_for(self, name, workspace=None):
+        return {ToolCapability.READ_ONLY, ToolCapability.PARALLEL_SAFE}
+
 
 class DelayedToolManager:
     def __init__(self, delay=0.12):
@@ -52,6 +56,11 @@ class DelayedToolManager:
         await asyncio.sleep(self.delay)
         self.finished[name] = time.perf_counter()
         return json.dumps({"name": name, "arguments": arguments}, ensure_ascii=False)
+
+    def capabilities_for(self, name, workspace=None):
+        if name in {"write", "edit", "patch", "shell"}:
+            return {ToolCapability.MUTATES_WORKSPACE}
+        return {ToolCapability.READ_ONLY, ToolCapability.PARALLEL_SAFE}
 
 
 def make_manager(tool_manager):
@@ -294,7 +303,19 @@ def test_glob_tool_sync_work_runs_off_event_loop(monkeypatch, tmp_path):
 
     def slow_glob_python(**kwargs):
         time.sleep(0.2)
-        return (["a.txt"], False, 1, 1)
+        return {
+            "root": ".",
+            "files": ["a.txt"],
+            "count": 1,
+            "total": 1,
+            "total_known": True,
+            "observed_count": 1,
+            "truncated": False,
+            "next_offset": None,
+            "engine": "python",
+            "sort": kwargs["sort"],
+            "scanned_entries": 1,
+        }
 
     monkeypatch.setattr(code_tools, "_resolve_ripgrep_executable", lambda config: None)
     monkeypatch.setattr(code_tools, "_glob_files_python", slow_glob_python)

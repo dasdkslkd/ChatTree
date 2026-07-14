@@ -15,7 +15,11 @@ from backend.core.tools.security.permissions import (
     PermissionRule,
     normalize_permission_mode,
 )
-from backend.core.tools.security.capabilities import ToolCapability, capabilities_for_tool
+from backend.core.tools.security.capabilities import (
+    ToolCapability,
+    UnknownToolCapabilitiesError,
+    capabilities_for_tool,
+)
 from backend.core.tools.security.command_policy import CommandPolicy
 from backend.core.tools.security.logical_sandbox import LogicalSandbox, SandboxViolation
 
@@ -349,9 +353,19 @@ def test_bypass_does_not_skip_explicit_deny():
 
 
 def test_capabilities_for_builtin_read_tool():
-    assert capabilities_for_tool("web_search") == {ToolCapability.NETWORK_READ}
-    assert capabilities_for_tool("list_available_tools") == {ToolCapability.READ_ONLY}
-    assert capabilities_for_tool("tools") == {ToolCapability.READ_ONLY}
+    assert capabilities_for_tool("web_search") == {
+        ToolCapability.NETWORK_READ,
+        ToolCapability.READ_ONLY,
+        ToolCapability.PARALLEL_SAFE,
+    }
+    assert capabilities_for_tool("list_available_tools") == {
+        ToolCapability.READ_ONLY,
+        ToolCapability.PARALLEL_SAFE,
+    }
+    assert capabilities_for_tool("tools") == {
+        ToolCapability.READ_ONLY,
+        ToolCapability.PARALLEL_SAFE,
+    }
 
 
 def test_tool_permission_rule_matches_shell_argument_pattern():
@@ -396,18 +410,30 @@ def test_tool_permission_rule_does_not_match_wrong_shell_argument():
 
 
 def test_capabilities_for_builtin_code_tools():
-    assert capabilities_for_tool("glob") == {ToolCapability.FILESYSTEM_READ}
-    assert capabilities_for_tool("read") == {ToolCapability.FILESYSTEM_READ}
-    assert capabilities_for_tool("grep") == {ToolCapability.FILESYSTEM_READ}
-    assert capabilities_for_tool("edit") == {ToolCapability.FILESYSTEM_WRITE}
-    assert capabilities_for_tool("write") == {ToolCapability.FILESYSTEM_WRITE}
-    assert capabilities_for_tool("patch") == {ToolCapability.FILESYSTEM_WRITE}
-    assert capabilities_for_tool("shell") == {ToolCapability.COMMAND_EXEC}
+    read_caps = {ToolCapability.FILESYSTEM_READ, ToolCapability.READ_ONLY, ToolCapability.PARALLEL_SAFE}
+    write_caps = {
+        ToolCapability.FILESYSTEM_WRITE,
+        ToolCapability.MUTATES_WORKSPACE,
+        ToolCapability.REQUIRES_APPROVAL,
+    }
+    assert capabilities_for_tool("glob") == read_caps
+    assert capabilities_for_tool("read") == read_caps
+    assert capabilities_for_tool("grep") == read_caps
+    assert capabilities_for_tool("edit") == write_caps
+    assert capabilities_for_tool("write") == write_caps
+    assert capabilities_for_tool("patch") == write_caps
+    assert capabilities_for_tool("shell") == {
+        ToolCapability.COMMAND_EXEC,
+        ToolCapability.MUTATES_RUNTIME_STATE,
+        ToolCapability.REQUIRES_APPROVAL,
+    }
 
 
-def test_mcp_tool_defaults_to_dynamic_capability():
-    assert capabilities_for_tool("filesystem__read") == {ToolCapability.MCP_DYNAMIC}
-    assert capabilities_for_tool("mcp__unknown__tool") == {ToolCapability.MCP_DYNAMIC}
+def test_unknown_tool_capability_must_be_declared():
+    with pytest.raises(UnknownToolCapabilitiesError):
+        capabilities_for_tool("filesystem__read")
+    with pytest.raises(UnknownToolCapabilitiesError):
+        capabilities_for_tool("mcp__unknown__tool")
 
 
 def test_capability_overrides_replace_defaults():

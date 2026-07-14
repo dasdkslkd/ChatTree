@@ -41,8 +41,10 @@ def _parse_json_object(raw: str) -> Dict[str, Any] | None:
 
 def _compact_argument_for_tool(tool_name: str, raw: str) -> Dict[str, Any] | None:
     name = tool_name.lower()
-    if name in {"read", "glob"}:
+    if name == "read":
         return {"path": raw}
+    if name == "glob":
+        return {"pattern": raw} if _looks_like_glob_pattern(raw) else {"path": raw}
     if name == "grep":
         return {"pattern": raw}
     if name == "shell":
@@ -52,3 +54,8 @@ def _compact_argument_for_tool(tool_name: str, raw: str) -> Dict[str, Any] | Non
     if name in {"web", "tools"}:
         return {"query": raw}
     return None
+
+
+def _looks_like_glob_pattern(raw: str) -> bool:
+    normalized = raw.replace("\\", "/")
+    return any(marker in normalized for marker in ("*", "?", "["))
