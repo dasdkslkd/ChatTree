@@ -30,6 +30,26 @@ def load(payload: str):
     return json.loads(payload)
 
 
+def test_default_code_workspace_uses_chattree_home(monkeypatch, tmp_path):
+    home = tmp_path / "chattree-home"
+    monkeypatch.setenv("CHATTREE_HOME", str(home))
+
+    config = CodeToolConfig.from_dict({})
+
+    assert code_tools.DEFAULT_CODE_WORKSPACE == Path("workspaces") / "default"
+    assert config.workspace_roots == [(home / "workspaces" / "default").resolve()]
+
+
+def test_explicit_code_workspace_roots_override_default(monkeypatch, tmp_path):
+    home = tmp_path / "chattree-home"
+    project = tmp_path / "project"
+    monkeypatch.setenv("CHATTREE_HOME", str(home))
+
+    config = CodeToolConfig.from_dict({"workspace_roots": [str(project)]})
+
+    assert config.workspace_roots == [project.resolve()]
+
+
 class FakePopen:
     def __init__(self, args, *, stdout_text: str = "", stderr_text: str = "", returncode: int = 0, **kwargs):
         self.args = args
@@ -299,7 +319,7 @@ def test_glob_ripgrep_matches_workspace_relative_path_patterns(tmp_path, monkeyp
         assert ["--glob", "backend/core/tools/*.py"] == args[args.index("--glob"):args.index("--glob") + 2]
         return FakePopen(
             args,
-            stdout_text=".\\backend\\core\\tools\\code_tools.py\n.\\backend\\core\\tools\\notes.txt\n",
+            stdout_text="backend/core/tools/code_tools.py\nbackend/core/tools/notes.txt\n",
             **kwargs,
         )
 
@@ -1000,7 +1020,7 @@ def test_apply_patch_rejects_delete_file_patch(tmp_path):
 def test_run_command_runs_in_workspace_and_returns_output(tmp_path):
     tool = RunCommandTool(make_config(tmp_path))
 
-    result = load(run(tool.execute(command="python -c \"print('hello')\"")))
+    result = load(run(tool.execute(command=f'"{sys.executable}" -c "print(\'hello\')"')))
 
     assert result["exit_code"] == 0
     assert result["stdout"].strip() == "hello"
@@ -1071,7 +1091,7 @@ def test_run_command_windows_python_c_uses_argument_list(tmp_path, monkeypatch):
         calls.append(kwargs.copy())
         return real_run(*args, **kwargs)
 
-    monkeypatch.setattr(code_tools.os, "name", "nt")
+    monkeypatch.setattr(code_tools, "_windows_python_c_args", lambda value: [sys.executable, "-c", code] if value == command else None)
     monkeypatch.setattr(subprocess, "run", record_run)
     tool = RunCommandTool(make_config(tmp_path))
 
@@ -1093,14 +1113,14 @@ def test_run_command_non_python_command_keeps_shell_path(tmp_path, monkeypatch):
         calls.append(kwargs.copy())
         return subprocess.CompletedProcess(kwargs["args"], 0, b"plain shell", b"")
 
-    monkeypatch.setattr(code_tools.os, "name", "nt")
+    monkeypatch.setattr(code_tools, "_windows_python_c_args", lambda value: None)
     monkeypatch.setattr(subprocess, "run", fake_run)
     tool = RunCommandTool(make_config(tmp_path))
 
     result = load(run(tool.execute(command="echo plain shell")))
 
     assert result["stdout"] == "plain shell"
-    assert calls[0]["args"][-2:] == ["-Command", "echo plain shell"]
+    assert calls[0]["args"][-1] == "echo plain shell"
     assert calls[0]["shell"] is False
 
 
@@ -1228,7 +1248,7 @@ def test_tool_manager_normalizes_compact_run_command_arguments(tmp_path):
         }
     })
 
-    result = load(run(manager.execute_tool("shell", {"arguments": "python -c \"print('compact')\""})))
+    result = load(run(manager.execute_tool("shell", {"arguments": f'"{sys.executable}" -c "print(\'compact\')"'})))
 
     assert result["exit_code"] == 0
     assert result["stdout"].strip() == "compact"
@@ -1241,7 +1261,7 @@ def test_run_command_does_not_use_event_loop_subprocess(tmp_path, monkeypatch):
     monkeypatch.setattr(asyncio, "create_subprocess_shell", fail_if_called)
     tool = RunCommandTool(make_config(tmp_path))
 
-    result = load(run(tool.execute(command="python -c \"print('selector-safe')\"")))
+    result = load(run(tool.execute(command=f'"{sys.executable}" -c "print(\'selector-safe\')"')))
 
     assert result["exit_code"] == 0
     assert result["stdout"].strip() == "selector-safe"
@@ -1260,10 +1280,12 @@ def test_run_command_returns_structured_timeout(tmp_path, monkeypatch):
     monkeypatch.setattr(subprocess, "run", raise_timeout)
     tool = RunCommandTool(make_config(tmp_path))
 
-    result = load(run(tool.execute(command="python -c \"print('slow')\"", timeout_seconds=1)))
+    command = f'"{sys.executable}" -c "print(\'slow\')"'
+
+    result = load(run(tool.execute(command=command, timeout_seconds=1)))
 
     assert result == {
-        "command": "python -c \"print('slow')\"",
+        "command": command,
         "cwd": ".",
         "exit_code": None,
         "stdout": "partial stdout",

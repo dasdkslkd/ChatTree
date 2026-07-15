@@ -29,7 +29,7 @@ from ..runs.types import FINISHED_RUN_STATUSES
 from ..shell_profile import ShellProfileResolver, render_command_tool_guidance
 
 
-DEFAULT_CODE_WORKSPACE = r"D:\Workspace\ChatTree\tmp"
+DEFAULT_CODE_WORKSPACE = Path("workspaces") / "default"
 DEFAULT_RIPGREP_VERSION = "15.1.0"
 TEXT_READ_CHUNK_CHARS = 8192
 FINISHED_STATUS_VALUES = {status.value for status in FINISHED_RUN_STATUSES}
@@ -41,6 +41,10 @@ def _project_root() -> Path:
 
 def _default_ripgrep_install_dir() -> Path:
     return resolve_chattree_home() / "tools" / "ripgrep"
+
+
+def _default_code_workspace() -> Path:
+    return resolve_chattree_home() / DEFAULT_CODE_WORKSPACE
 
 
 class CodeToolError(ValueError):
@@ -179,7 +183,7 @@ class CodeToolConfig:
     @classmethod
     def from_dict(cls, raw: Optional[Dict[str, Any]] = None) -> "CodeToolConfig":
         cfg = raw or {}
-        roots = cfg.get("workspace_roots") or [DEFAULT_CODE_WORKSPACE]
+        roots = cfg.get("workspace_roots") or [_default_code_workspace()]
         protected = cfg.get("protected_paths") or DEFAULT_PROTECTED_PATHS
         ripgrep_cfg = cfg.get("ripgrep") if isinstance(cfg.get("ripgrep"), dict) else {}
         ripgrep_install_dir = (
