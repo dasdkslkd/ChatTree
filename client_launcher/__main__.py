@@ -14,6 +14,8 @@ def main() -> None:
         port=settings.port,
         workers=1,
         lifespan="on",
+        date_header=False,
+        server_header=False,
     )
 
 
