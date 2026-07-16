@@ -131,8 +131,14 @@ async def _stale_transport_error_does_not_break_reconnected_session_case(tmp_pat
     manager = SessionManager(store, connector)
 
     first = await manager.connect("local")
+    first_lease = manager.resolve_endpoint("local")
+    assert first_lease.invalidated is not None
+    assert not first_lease.invalidated.is_set()
     await manager.disconnect("local")
+    assert first_lease.invalidated.is_set()
     second = await manager.connect("local")
+    second_lease = manager.resolve_endpoint("local")
+    assert second_lease.invalidated is not None
     transport_error = LauncherError(
         "proxy_upstream_unavailable",
         "Unable to reach the Server",
@@ -149,6 +155,7 @@ async def _stale_transport_error_does_not_break_reconnected_session_case(tmp_pat
     current = manager.status("local")
     assert current.status == "ready"
     assert current.connection_epoch == second.connection_epoch == 2
+    assert not second_lease.invalidated.is_set()
 
     manager.mark_error(
         "local",
@@ -156,6 +163,7 @@ async def _stale_transport_error_does_not_break_reconnected_session_case(tmp_pat
         connection_epoch=second.connection_epoch,
     )
     assert manager.status("local").status == "error"
+    assert second_lease.invalidated.is_set()
 
 
 def test_stale_transport_error_does_not_break_reconnected_session(tmp_path):

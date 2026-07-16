@@ -332,6 +332,47 @@ def test_proxy_returns_first_sse_chunk_without_buffering_the_stream() -> None:
     _run(scenario())
 
 
+def test_proxy_stops_stream_when_endpoint_lease_is_invalidated() -> None:
+    async def scenario() -> None:
+        stream = _GatedStream()
+        invalidated = asyncio.Event()
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                stream=stream,
+            )
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        handler = ProxyHandler(
+            lambda _profile_id: EndpointLease(
+                endpoint="http://upstream.test",
+                connection_epoch=1,
+                invalidated=invalidated,
+            ),
+            http_client=client,
+        )
+        request = _request("GET", "/p/local/api/v1/runs/run-1/events")
+        response = await handler(request, "local", "runs/run-1/events")
+        iterator = response.body_iterator.__aiter__()
+
+        assert await asyncio.wait_for(anext(iterator), timeout=0.25) == (
+            b"data: first\n\n"
+        )
+        second_task = asyncio.create_task(anext(iterator))
+        await asyncio.wait_for(stream.waiting_for_release.wait(), timeout=0.25)
+        invalidated.set()
+
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(second_task, timeout=0.25)
+        assert stream.closed.is_set()
+        assert stream.close_calls == 1
+        await client.aclose()
+
+    _run(scenario())
+
+
 class _BlockingStream(httpx.AsyncByteStream):
     def __init__(self) -> None:
         self.started = asyncio.Event()
@@ -435,5 +476,53 @@ def test_transport_error_carries_resolved_connection_epoch() -> None:
 
         await client.aclose()
         assert captured.value.connection_epoch == 7
+
+    _run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("location", "expected"),
+    [
+        (
+            "http://upstream.test/api/v1/conversations",
+            "/p/local/api/v1/conversations",
+        ),
+        ("/api/v1/conversations?limit=5", "/p/local/api/v1/conversations?limit=5"),
+        ("../../models", "/p/local/api/v1/models"),
+        ("https://example.com/elsewhere", "https://example.com/elsewhere"),
+    ],
+)
+def test_proxy_rewrites_same_upstream_redirects(
+    location: str,
+    expected: str,
+) -> None:
+    async def scenario() -> None:
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(307, headers={"Location": location})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        handler = ProxyHandler(
+            lambda _profile_id: "http://upstream.test",
+            http_client=client,
+        )
+        request = _request(
+            "GET",
+            "/p/local/api/v1/conversations/current/",
+        )
+        response = await handler(
+            request,
+            "local",
+            "conversations/current/",
+        )
+
+        response_location = next(
+            value.decode("latin-1")
+            for name, value in response.raw_headers
+            if name.lower() == b"location"
+        )
+        assert response_location == expected
+        if response.background is not None:
+            await response.background()
+        await client.aclose()
 
     _run(scenario())

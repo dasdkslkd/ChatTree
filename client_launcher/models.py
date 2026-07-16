@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -179,6 +180,7 @@ class ConnectionErrorInfo:
 class EndpointLease:
     endpoint: str
     connection_epoch: int
+    invalidated: asyncio.Event | None = None
 
     def __post_init__(self) -> None:
         _required_string(self.endpoint, "endpoint")
@@ -188,6 +190,11 @@ class EndpointLease:
             or self.connection_epoch <= 0
         ):
             raise ValueError("connection_epoch must be a positive integer")
+        if self.invalidated is not None and not isinstance(
+            self.invalidated,
+            asyncio.Event,
+        ):
+            raise ValueError("invalidated must be an asyncio.Event or None")
 
 
 @dataclass

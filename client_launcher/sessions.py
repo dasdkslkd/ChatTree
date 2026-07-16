@@ -23,6 +23,7 @@ class SessionManager:
         self.connector = connector
         self._sessions: dict[str, ServerSession] = {}
         self._endpoints: dict[str, str] = {}
+        self._lease_invalidations: dict[str, asyncio.Event] = {}
         self._attempt_generation: dict[str, int] = {}
         self._connect_tasks: dict[str, asyncio.Task[ServerSession]] = {}
         self._connect_intents: dict[str, tuple[bool, str | None]] = {}
@@ -54,6 +55,7 @@ class SessionManager:
         return EndpointLease(
             endpoint=endpoint,
             connection_epoch=session.connection_epoch,
+            invalidated=self._lease_invalidations.get(profile_id),
         )
 
     def mark_error(
@@ -85,6 +87,7 @@ class SessionManager:
             retryable=error.retryable,
             details=error.details or None,
         )
+        self._invalidate_lease(profile_id)
         self._endpoints.pop(profile_id, None)
         return True
 
@@ -274,6 +277,7 @@ class SessionManager:
         session.phase = None
         session.server_instance_id = None
         session.error = None
+        self._invalidate_lease(profile_id)
         self._endpoints.pop(profile_id, None)
         return replace(session), task
 
@@ -371,6 +375,8 @@ class SessionManager:
                 session.connection_epoch += 1
                 session.server_instance_id = bound_profile.bound_server_instance_id
                 session.error = None
+                self._invalidate_lease(profile_id)
+                self._lease_invalidations[profile_id] = asyncio.Event()
                 self._endpoints[profile_id] = connected.endpoint
                 return replace(session)
         except asyncio.CancelledError:
@@ -395,6 +401,7 @@ class SessionManager:
                             details=error.details or None,
                         )
                         session.server_instance_id = None
+                    self._invalidate_lease(profile_id)
                     self._endpoints.pop(profile_id, None)
             raise error from exc
         finally:
@@ -417,6 +424,11 @@ class SessionManager:
             status_code=int(getattr(exc, "status_code", 502)),
             details=details,
         )
+
+    def _invalidate_lease(self, profile_id: str) -> None:
+        invalidated = self._lease_invalidations.pop(profile_id, None)
+        if invalidated is not None:
+            invalidated.set()
 
     def _background_done(self, task: asyncio.Task[object]) -> None:
         self._background_tasks.discard(task)

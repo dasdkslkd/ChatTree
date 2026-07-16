@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from typing import TypeAlias
+from urllib.parse import quote, urljoin, urlsplit
 
 import httpx
 from fastapi import APIRouter
@@ -171,7 +173,9 @@ class ProxyHandler:
         profile_id: str,
         path: str,
     ) -> StreamingResponse:
-        endpoint, connection_epoch = await self._ready_endpoint(profile_id)
+        endpoint, connection_epoch, invalidated = await self._ready_endpoint(
+            profile_id
+        )
         target_url = _target_url(endpoint, request, profile_id, path)
         body = await _read_bounded_body(request, self._max_body_bytes)
         request_headers = _request_headers(request, target_url, body)
@@ -197,24 +201,32 @@ class ProxyHandler:
 
         closer = _UpstreamCloser(upstream_response)
         return _ClosingStreamingResponse(
-            _response_body(upstream_response, closer),
+            _response_body(upstream_response, closer, invalidated),
             status_code=upstream_response.status_code,
-            raw_headers=_filtered_headers(upstream_response.headers.raw),
+            raw_headers=_response_headers(
+                upstream_response.headers.raw,
+                target_url=target_url,
+                profile_id=profile_id,
+            ),
             closer=closer,
         )
 
     async def _ready_endpoint(
         self,
         profile_id: str,
-    ) -> tuple[Endpoint, int | None]:
+    ) -> tuple[Endpoint, int | None, asyncio.Event | None]:
         resolved = self._resolve_endpoint(profile_id)
         if inspect.isawaitable(resolved):
             resolved = await resolved
         if isinstance(resolved, EndpointLease):
-            return resolved.endpoint, resolved.connection_epoch
+            return (
+                resolved.endpoint,
+                resolved.connection_epoch,
+                resolved.invalidated,
+            )
         if resolved is None or (isinstance(resolved, str) and not resolved.strip()):
             raise ProxyEndpointUnavailable(profile_id)
-        return resolved, None
+        return resolved, None, None
 
 
 def create_proxy_router(
@@ -355,16 +367,107 @@ def _filtered_headers(
     ]
 
 
+def _response_headers(
+    raw_headers: Iterable[RawHeader],
+    *,
+    target_url: httpx.URL,
+    profile_id: str,
+) -> list[RawHeader]:
+    headers = _filtered_headers(raw_headers)
+    return [
+        (
+            name,
+            _rewrite_location(value, target_url, profile_id)
+            if name.lower() == b"location"
+            else value,
+        )
+        for name, value in headers
+    ]
+
+
+def _rewrite_location(
+    value: bytes,
+    target_url: httpx.URL,
+    profile_id: str,
+) -> bytes:
+    try:
+        location = value.decode("latin-1")
+        target = urlsplit(str(target_url))
+        resolved = urlsplit(urljoin(str(target_url), location))
+        target_port = target.port or (443 if target.scheme == "https" else 80)
+        resolved_port = resolved.port or (
+            443 if resolved.scheme == "https" else 80
+        )
+    except (UnicodeError, ValueError):
+        return value
+
+    same_origin = (
+        resolved.scheme.lower() == target.scheme.lower()
+        and (resolved.hostname or "").lower() == (target.hostname or "").lower()
+        and resolved_port == target_port
+    )
+    if not same_origin or not (
+        resolved.path == "/api/v1" or resolved.path.startswith("/api/v1/")
+    ):
+        return value
+
+    rewritten = f"/p/{quote(profile_id, safe='')}{resolved.path}"
+    if resolved.query:
+        rewritten += f"?{resolved.query}"
+    if resolved.fragment:
+        rewritten += f"#{resolved.fragment}"
+    try:
+        return rewritten.encode("latin-1")
+    except UnicodeEncodeError:
+        return value
+
+
 async def _response_body(
     response: httpx.Response,
     closer: _UpstreamCloser,
+    invalidated: asyncio.Event | None = None,
 ) -> AsyncIterator[bytes]:
     try:
+        if invalidated is not None and invalidated.is_set():
+            return
         if response.is_stream_consumed:
             if response.content:
                 yield response.content
             return
-        async for chunk in response.aiter_raw():
-            yield chunk
+        if invalidated is None:
+            async for chunk in response.aiter_raw():
+                yield chunk
+            return
+
+        iterator = response.aiter_raw().__aiter__()
+        invalidated_task = asyncio.create_task(invalidated.wait())
+        next_chunk_task: asyncio.Task[bytes] | None = None
+        try:
+            while True:
+                next_chunk_task = asyncio.create_task(anext(iterator))
+                done, _ = await asyncio.wait(
+                    (next_chunk_task, invalidated_task),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if invalidated_task in done:
+                    next_chunk_task.cancel()
+                    await asyncio.gather(next_chunk_task, return_exceptions=True)
+                    return
+                try:
+                    chunk = next_chunk_task.result()
+                except StopAsyncIteration:
+                    return
+                next_chunk_task = None
+                yield chunk
+        finally:
+            pending = [
+                task
+                for task in (next_chunk_task, invalidated_task)
+                if task is not None and not task.done()
+            ]
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
     finally:
         await closer()
