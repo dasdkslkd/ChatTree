@@ -230,8 +230,7 @@ def create_app(
     ) -> dict[str, Any]:
         current = profile_store.get(profile_id)
         local = None
-        endpoint_changed = body.server_home is not None or body.server_port is not None
-        if endpoint_changed:
+        if body.server_home is not None or body.server_port is not None:
             try:
                 local = LocalTarget(
                     server_home=body.server_home or current.local.server_home,
@@ -248,8 +247,7 @@ def create_app(
                     retryable=False,
                     status_code=422,
                 ) from exc
-            await sessions.disconnect(profile_id)
-        updated = profile_store.update(
+        updated = await sessions.update_profile(
             profile_id,
             label=body.label.strip() if body.label is not None else None,
             auto_connect=body.auto_connect,

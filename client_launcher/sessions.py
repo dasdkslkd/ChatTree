@@ -8,6 +8,8 @@ from client_launcher.models import (
     ConnectionErrorInfo,
     EndpointLease,
     LauncherError,
+    LocalTarget,
+    ServerProfile,
     ServerSession,
 )
 from client_launcher.profiles import ProfileStore
@@ -204,23 +206,54 @@ class SessionManager:
         task: asyncio.Task[ServerSession] | None
         async with self._guard:
             self.profiles.get(profile_id)
-            session = self._session(profile_id)
-            self._attempt_generation[profile_id] = (
-                self._attempt_generation.get(profile_id, 0) + 1
-            )
-            task = self._connect_tasks.pop(profile_id, None)
-            self._connect_intents.pop(profile_id, None)
-            if task is not None and not task.done():
-                task.cancel()
-            session.status = "disconnected"
-            session.phase = None
-            session.server_instance_id = None
-            session.error = None
-            self._endpoints.pop(profile_id, None)
+            snapshot, task = self._disconnect_locked(profile_id)
 
         if task is not None:
             await asyncio.gather(task, return_exceptions=True)
-        return replace(session)
+        return snapshot
+
+    async def update_profile(
+        self,
+        profile_id: str,
+        *,
+        label: str | None = None,
+        auto_connect: bool | None = None,
+        local: LocalTarget | None = None,
+    ) -> ServerProfile:
+        task: asyncio.Task[ServerSession] | None = None
+        async with self._guard:
+            current = self.profiles.get(profile_id)
+            updated = self.profiles.update(
+                profile_id,
+                label=label,
+                auto_connect=auto_connect,
+                local=local,
+            )
+            if updated.local != current.local:
+                _, task = self._disconnect_locked(profile_id)
+
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
+        return updated
+
+    def _disconnect_locked(
+        self,
+        profile_id: str,
+    ) -> tuple[ServerSession, asyncio.Task[ServerSession] | None]:
+        session = self._session(profile_id)
+        self._attempt_generation[profile_id] = (
+            self._attempt_generation.get(profile_id, 0) + 1
+        )
+        task = self._connect_tasks.pop(profile_id, None)
+        self._connect_intents.pop(profile_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+        session.status = "disconnected"
+        session.phase = None
+        session.server_instance_id = None
+        session.error = None
+        self._endpoints.pop(profile_id, None)
+        return replace(session), task
 
     async def close(self) -> None:
         if self._closed:

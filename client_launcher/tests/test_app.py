@@ -138,6 +138,52 @@ def test_create_profile_requires_explicit_unique_server_port(tmp_path: Path):
     assert duplicate_port.json()["error"]["code"] == "profile_port_duplicate"
 
 
+def test_rejected_endpoint_update_preserves_ready_session(tmp_path: Path):
+    app, _, _ = _app(tmp_path)
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/client/v1/profiles",
+            json={
+                "label": "Work",
+                "server_home": str(tmp_path / "work-server"),
+                "server_port": 18101,
+            },
+        )
+        profile_id = created.json()["id"]
+        connected = client.post(f"/client/v1/profiles/{profile_id}/connect")
+
+        rejected = client.patch(
+            f"/client/v1/profiles/{profile_id}",
+            json={"server_port": 8001},
+        )
+        status = client.get(f"/client/v1/profiles/{profile_id}/status")
+
+    assert connected.status_code == 200
+    assert connected.json()["status"] == "ready"
+    assert rejected.status_code == 409
+    assert rejected.json()["error"]["code"] == "profile_port_duplicate"
+    assert status.json()["status"] == "ready"
+    assert status.json()["connection_epoch"] == 1
+
+
+def test_noop_endpoint_update_preserves_ready_session(tmp_path: Path):
+    app, _, _ = _app(tmp_path)
+
+    with TestClient(app) as client:
+        connected = client.post("/client/v1/profiles/local/connect")
+        unchanged = client.patch(
+            "/client/v1/profiles/local",
+            json={"server_port": 8001},
+        )
+        status = client.get("/client/v1/profiles/local/status")
+
+    assert connected.status_code == 200
+    assert unchanged.status_code == 200
+    assert status.json()["status"] == "ready"
+    assert status.json()["connection_epoch"] == 1
+
+
 def test_connect_disconnect_and_endpoint_change_reset_session(tmp_path: Path):
     app, store, connector = _app(tmp_path)
 
