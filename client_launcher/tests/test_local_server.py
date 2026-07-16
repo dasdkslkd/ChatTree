@@ -1,0 +1,400 @@
+from __future__ import annotations
+
+import asyncio
+import subprocess
+from pathlib import Path
+from types import SimpleNamespace
+
+import httpx
+import pytest
+
+from client_launcher.local_server import (
+    LocalServerConnector,
+    LocalServerIdentityError,
+    LocalServerProtocolError,
+    LocalServerResponseError,
+    LocalServerStartExitedError,
+    LocalServerStartTimeoutError,
+)
+
+
+SERVER_ID = "5fb0d7cc-785e-40c2-875d-218447b15583"
+OTHER_SERVER_ID = "74197461-d4b2-436f-9d7a-16131dccd034"
+
+
+def _settings(tmp_path: Path, **overrides):
+    values = {
+        "client_home": tmp_path / "client",
+        "project_root": tmp_path / "project",
+        "server_python": tmp_path / "python",
+        "connect_timeout_seconds": 0.1,
+        "start_timeout_seconds": 1.0,
+        "poll_interval_seconds": 0.1,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _profile(
+    tmp_path: Path,
+    *,
+    server_id: str | None = SERVER_ID,
+    port: int = 18001,
+):
+    return SimpleNamespace(
+        id="local-profile",
+        label="Local",
+        kind="local",
+        auto_connect=True,
+        bound_server_instance_id=server_id,
+        local=SimpleNamespace(
+            server_home=str(tmp_path / "server-home"),
+            server_port=port,
+        ),
+    )
+
+
+def _health(server_id: str = SERVER_ID) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "status": "ok",
+            "server_instance_id": server_id,
+            "time": 1784112000,
+        },
+    )
+
+
+def _handshake(
+    server_id: str = SERVER_ID,
+    *,
+    protocol_version: int = 1,
+) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "server_instance_id": server_id,
+            "protocol_version": protocol_version,
+            "server_version": "0.1.0",
+            "platform": "windows",
+            "features": ["conversations", "runs"],
+            "provider_configured": False,
+        },
+    )
+
+
+class FakeProcess:
+    def __init__(self, return_codes: list[int | None] | None = None) -> None:
+        self._return_codes = list(return_codes or [None])
+        self.terminate_calls = 0
+        self.kill_calls = 0
+
+    def poll(self):
+        if len(self._return_codes) > 1:
+            return self._return_codes.pop(0)
+        return self._return_codes[0]
+
+    def terminate(self):
+        self.terminate_calls += 1
+
+    def kill(self):
+        self.kill_calls += 1
+
+
+class FakePopen:
+    def __init__(self, process: FakeProcess | None = None) -> None:
+        self.process = process or FakeProcess()
+        self.calls: list[tuple[list[str], dict]] = []
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append((list(argv), dict(kwargs)))
+        return self.process
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    async def sleep(self, delay: float) -> None:
+        self.now += delay
+
+
+def test_existing_server_is_reused_without_spawn(tmp_path: Path):
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        return _health() if request.url.path.endswith("/health") else _handshake()
+
+    popen = FakePopen()
+    connector = LocalServerConnector(
+        _settings(tmp_path),
+        transport=httpx.MockTransport(handler),
+        popen_factory=popen,
+    )
+
+    connected = asyncio.run(connector.connect(_profile(tmp_path), None))
+    asyncio.run(connector.close())
+
+    assert connected.endpoint == "http://127.0.0.1:18001"
+    assert connected.server_instance_id == SERVER_ID
+    assert connected.handshake["provider_configured"] is False
+    assert paths == ["/api/v1/health", "/api/v1/handshake"]
+    assert popen.calls == []
+
+
+def test_connection_refusal_spawns_detached_production_server(tmp_path: Path):
+    requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        if requests == 1:
+            raise httpx.ConnectError("refused", request=request)
+        return _health() if request.url.path.endswith("/health") else _handshake()
+
+    phases: list[str] = []
+    process = FakeProcess()
+    popen = FakePopen(process)
+    project_root = tmp_path / "project"
+    server_python = tmp_path / "python"
+    connector = LocalServerConnector(
+        _settings(
+            tmp_path,
+            project_root=project_root,
+            server_python=server_python,
+        ),
+        transport=httpx.MockTransport(handler),
+        popen_factory=popen,
+        platform_name="posix",
+    )
+
+    connected = asyncio.run(connector.connect(_profile(tmp_path), phases.append))
+    asyncio.run(connector.close())
+
+    assert connected.server_instance_id == SERVER_ID
+    assert len(popen.calls) == 1
+    argv, kwargs = popen.calls[0]
+    assert argv == [
+        str(server_python.resolve()),
+        "-m",
+        "uvicorn",
+        "main:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "18001",
+        "--workers",
+        "1",
+        "--lifespan",
+        "on",
+        "--app-dir",
+        str(project_root.resolve()),
+    ]
+    assert kwargs["shell"] is False
+    assert kwargs["close_fds"] is True
+    assert kwargs["start_new_session"] is True
+    assert kwargs["stdin"] is subprocess.DEVNULL
+    assert kwargs["stderr"] is subprocess.STDOUT
+    assert kwargs["cwd"] == str(project_root.resolve())
+    assert kwargs["env"]["CHATTREE_HOME"] == str(
+        (tmp_path / "server-home").resolve()
+    )
+    assert kwargs["env"]["CHATTREE_SERVER_PORT"] == "18001"
+    assert kwargs["env"]["PYTHONUNBUFFERED"] == "1"
+    assert kwargs["env"]["PYTHONIOENCODING"] == "utf-8"
+    assert kwargs["stdout"].closed
+    assert phases == ["health", "local_start", "health", "handshake"]
+    assert process.terminate_calls == 0
+    assert process.kill_calls == 0
+
+
+def test_handshake_connection_error_never_spawns(tmp_path: Path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/health"):
+            return _health()
+        raise httpx.ConnectError("dropped", request=request)
+
+    popen = FakePopen()
+    connector = LocalServerConnector(
+        _settings(tmp_path),
+        transport=httpx.MockTransport(handler),
+        popen_factory=popen,
+    )
+
+    with pytest.raises(LocalServerResponseError):
+        asyncio.run(connector.connect(_profile(tmp_path), None))
+    asyncio.run(connector.close())
+
+    assert popen.calls == []
+
+
+def test_windows_spawn_uses_detached_process_flags(tmp_path: Path):
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise httpx.ConnectError("refused", request=request)
+        return _health() if request.url.path.endswith("/health") else _handshake()
+
+    popen = FakePopen()
+    connector = LocalServerConnector(
+        _settings(tmp_path),
+        transport=httpx.MockTransport(handler),
+        popen_factory=popen,
+        platform_name="nt",
+    )
+
+    asyncio.run(connector.connect(_profile(tmp_path), None))
+    asyncio.run(connector.close())
+
+    _, kwargs = popen.calls[0]
+    expected = getattr(subprocess, "DETACHED_PROCESS", 0x00000008) | getattr(
+        subprocess,
+        "CREATE_NEW_PROCESS_GROUP",
+        0x00000200,
+    )
+    assert kwargs["creationflags"] == expected
+    assert "start_new_session" not in kwargs
+
+
+@pytest.mark.parametrize("status_code", [301, 404, 500])
+def test_http_response_on_health_never_spawns(tmp_path: Path, status_code: int):
+    popen = FakePopen()
+    connector = LocalServerConnector(
+        _settings(tmp_path),
+        transport=httpx.MockTransport(lambda request: httpx.Response(status_code)),
+        popen_factory=popen,
+    )
+
+    with pytest.raises(LocalServerResponseError):
+        asyncio.run(connector.connect(_profile(tmp_path), None))
+    asyncio.run(connector.close())
+
+    assert popen.calls == []
+
+
+def test_malformed_health_never_spawns(tmp_path: Path):
+    popen = FakePopen()
+    connector = LocalServerConnector(
+        _settings(tmp_path),
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                content=b"not-json",
+            )
+        ),
+        popen_factory=popen,
+    )
+
+    with pytest.raises(LocalServerResponseError):
+        asyncio.run(connector.connect(_profile(tmp_path), None))
+    asyncio.run(connector.close())
+
+    assert popen.calls == []
+
+
+def test_protocol_mismatch_fails_without_spawn(tmp_path: Path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _health() if request.url.path.endswith("/health") else _handshake(
+            protocol_version=2
+        )
+
+    popen = FakePopen()
+    connector = LocalServerConnector(
+        _settings(tmp_path),
+        transport=httpx.MockTransport(handler),
+        popen_factory=popen,
+    )
+
+    with pytest.raises(LocalServerProtocolError):
+        asyncio.run(connector.connect(_profile(tmp_path), None))
+    asyncio.run(connector.close())
+
+    assert popen.calls == []
+
+
+def test_health_and_handshake_identity_must_match(tmp_path: Path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _health() if request.url.path.endswith("/health") else _handshake(
+            OTHER_SERVER_ID
+        )
+
+    connector = LocalServerConnector(
+        _settings(tmp_path),
+        transport=httpx.MockTransport(handler),
+        popen_factory=FakePopen(),
+    )
+
+    with pytest.raises(LocalServerIdentityError):
+        asyncio.run(connector.connect(_profile(tmp_path), None))
+    asyncio.run(connector.close())
+
+
+def test_profile_binding_is_left_to_session_manager(tmp_path: Path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _health() if request.url.path.endswith("/health") else _handshake()
+
+    connector = LocalServerConnector(
+        _settings(tmp_path),
+        transport=httpx.MockTransport(handler),
+        popen_factory=FakePopen(),
+    )
+
+    connected = asyncio.run(
+        connector.connect(
+            _profile(tmp_path, server_id=OTHER_SERVER_ID),
+            None,
+        )
+    )
+    asyncio.run(connector.close())
+
+    assert connected.server_instance_id == SERVER_ID
+
+
+def test_child_early_exit_is_reported(tmp_path: Path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    popen = FakePopen(FakeProcess([17]))
+    connector = LocalServerConnector(
+        _settings(tmp_path),
+        transport=httpx.MockTransport(handler),
+        popen_factory=popen,
+    )
+
+    with pytest.raises(LocalServerStartExitedError) as exc_info:
+        asyncio.run(connector.connect(_profile(tmp_path), None))
+    asyncio.run(connector.close())
+
+    assert exc_info.value.exit_code == 17
+    assert exc_info.value.log_path.name == "local-server-local-profile.log"
+
+
+def test_start_timeout_does_not_kill_server(tmp_path: Path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    process = FakeProcess([None])
+    popen = FakePopen(process)
+    clock = FakeClock()
+    connector = LocalServerConnector(
+        _settings(tmp_path, start_timeout_seconds=0.2, poll_interval_seconds=0.1),
+        transport=httpx.MockTransport(handler),
+        popen_factory=popen,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    )
+
+    with pytest.raises(LocalServerStartTimeoutError):
+        asyncio.run(connector.connect(_profile(tmp_path), None))
+    asyncio.run(connector.close())
+
+    assert process.terminate_calls == 0
+    assert process.kill_calls == 0
