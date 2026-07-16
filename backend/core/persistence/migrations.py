@@ -27,7 +27,10 @@ class MigrationCursor:
         self.__cursor = cursor
 
     def __iter__(self):
-        return iter(self.__cursor)
+        return self
+
+    def __next__(self):
+        return next(self.__cursor)
 
     def fetchone(self):
         return self.__cursor.fetchone()
@@ -49,12 +52,20 @@ class MigrationConnection:
         self.__conn = conn
 
     def execute(self, sql: str, parameters=()) -> MigrationCursor:
+        self._require_outer_transaction()
         _reject_transaction_control(sql)
         return MigrationCursor(self.__conn.execute(sql, parameters))
 
     def executemany(self, sql: str, parameters) -> MigrationCursor:
+        self._require_outer_transaction()
         _reject_transaction_control(sql)
         return MigrationCursor(self.__conn.executemany(sql, parameters))
+
+    def _require_outer_transaction(self) -> None:
+        if not self.__conn.in_transaction:
+            raise MigrationTransactionError(
+                "migration callback no longer owns the outer transaction"
+            )
 
     def commit(self) -> None:
         raise MigrationTransactionError("migration callback cannot commit")
@@ -95,6 +106,10 @@ class SchemaMigrationRunner:
         self.migrations = tuple(migrations)
 
     def run(self, conn: sqlite3.Connection) -> Path | None:
+        if conn.isolation_level is None:
+            raise MigrationTransactionError(
+                "schema migration does not support autocommit connections"
+            )
         if conn.in_transaction:
             raise RuntimeError("schema migration requires an idle connection")
 
@@ -122,8 +137,32 @@ class SchemaMigrationRunner:
 
             migration_conn = MigrationConnection(conn)
             for migration in path:
-                migration.apply(migration_conn)
+                authorizer = _MigrationAuthorizer()
+                conn.set_authorizer(authorizer)
+                try:
+                    try:
+                        migration.apply(migration_conn)
+                    except sqlite3.DatabaseError as exc:
+                        if authorizer.denial is not None:
+                            raise MigrationTransactionError(
+                                f"migration authorizer rejected {authorizer.denial}"
+                            ) from exc
+                        raise
+                    if authorizer.denial is not None:
+                        raise MigrationTransactionError(
+                            f"migration authorizer rejected {authorizer.denial}"
+                        )
+                finally:
+                    conn.set_authorizer(_allow_all_authorizer)
+                if not conn.in_transaction:
+                    raise MigrationTransactionError(
+                        "migration callback ended the outer transaction"
+                    )
                 conn.execute(f"PRAGMA user_version = {migration.to_version}")
+                if not conn.in_transaction:
+                    raise MigrationTransactionError(
+                        "schema version update ended the outer transaction"
+                    )
 
             violation = conn.execute("PRAGMA foreign_key_check").fetchone()
             if violation is not None:
@@ -221,7 +260,7 @@ def execute_sql_script(conn: MigrationConnection, script: str) -> None:
                 parts.clear()
 
     remainder = "".join(parts)
-    if remainder.strip():
+    if _strip_leading_comments(remainder).strip():
         raise ValueError("incomplete SQL statement in schema script")
 
 
@@ -235,12 +274,63 @@ _TRANSACTION_KEYWORDS = {
     "VACUUM",
 }
 _RUNNER_OWNED_PRAGMAS = {
+    "application_id",
     "foreign_keys",
+    "ignore_check_constraints",
     "journal_mode",
+    "legacy_alter_table",
     "locking_mode",
+    "schema_version",
+    "temp_store",
     "user_version",
     "writable_schema",
 }
+
+
+class _MigrationAuthorizer:
+    def __init__(self) -> None:
+        self.denial: str | None = None
+
+    def __call__(
+        self,
+        action_code: int,
+        parameter_1: str | None,
+        parameter_2: str | None,
+        database_name: str | None,
+        trigger_name: str | None,
+    ) -> int:
+        del database_name, trigger_name
+        if action_code == sqlite3.SQLITE_TRANSACTION:
+            if self.denial is None:
+                self.denial = f"transaction control {parameter_1 or ''}".strip()
+            return sqlite3.SQLITE_DENY
+        if action_code == sqlite3.SQLITE_SAVEPOINT:
+            if self.denial is None:
+                self.denial = (
+                    f"savepoint control {parameter_1 or ''} "
+                    f"{parameter_2 or ''}".strip()
+                )
+            return sqlite3.SQLITE_DENY
+        if (
+            action_code == sqlite3.SQLITE_PRAGMA
+            and parameter_1 is not None
+            and parameter_1.lower() in _RUNNER_OWNED_PRAGMAS
+        ):
+            if self.denial is None:
+                self.denial = f"runner-owned PRAGMA {parameter_1}"
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+
+def _allow_all_authorizer(
+    action_code: int,
+    parameter_1: str | None,
+    parameter_2: str | None,
+    database_name: str | None,
+    trigger_name: str | None,
+) -> int:
+    del action_code, parameter_1, parameter_2, database_name, trigger_name
+    return sqlite3.SQLITE_OK
 
 
 def _reject_transaction_control(sql: str) -> None:
@@ -270,7 +360,9 @@ def _strip_leading_comments(sql: str) -> str:
     position = 0
     while True:
         while position < len(sql) and (
-            sql[position].isspace() or sql[position] == ";"
+            sql[position].isspace()
+            or sql[position] == ";"
+            or sql[position] == "\ufeff"
         ):
             position += 1
         if sql.startswith("--", position):

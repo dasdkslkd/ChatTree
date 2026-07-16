@@ -1,0 +1,252 @@
+"""Frozen SQLite schemas from releases that predate explicit schema versions."""
+
+
+# backend/core/persistence/schema.py at c1a96e0.
+C1_INITIAL_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS blobs (
+  id TEXT PRIMARY KEY,
+  path TEXT NOT NULL,
+  mime_type TEXT NOT NULL DEFAULT 'text/plain; charset=utf-8',
+  compression TEXT NOT NULL DEFAULT 'zstd',
+  byte_size INTEGER NOT NULL,
+  stored_size INTEGER NOT NULL,
+  char_count INTEGER,
+  ref_count INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  last_accessed_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS conversations (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  root_node_id TEXT,
+  current_node_id TEXT,
+  project_id TEXT,
+  provider_id TEXT,
+  model_id TEXT,
+  reasoning_effort TEXT,
+  thinking_enabled INTEGER,
+  multi_agent_mode TEXT NOT NULL DEFAULT 'explicit_request_only',
+  workspace_json TEXT,
+  settings_json TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS nodes (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  parent_id TEXT REFERENCES nodes(id) ON DELETE CASCADE,
+  child_order INTEGER NOT NULL DEFAULT 0,
+  depth INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'complete',
+  model_id TEXT,
+  provider_id TEXT,
+  tool_permission_mode TEXT,
+  turn_usage_json TEXT,
+  branch_usage_json TEXT,
+  active_context_usage_json TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_nodes_conversation_parent
+  ON nodes(conversation_id, parent_id, child_order);
+CREATE INDEX IF NOT EXISTS idx_nodes_conversation_depth
+  ON nodes(conversation_id, depth);
+CREATE INDEX IF NOT EXISTS idx_nodes_conversation_updated
+  ON nodes(conversation_id, updated_at);
+
+CREATE TABLE IF NOT EXISTS messages (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  node_id TEXT REFERENCES nodes(id) ON DELETE CASCADE,
+  role TEXT NOT NULL,
+  subtype TEXT,
+  name TEXT,
+  content_inline TEXT,
+  content_blob_id TEXT REFERENCES blobs(id),
+  preview TEXT NOT NULL DEFAULT '',
+  hidden INTEGER NOT NULL DEFAULT 0,
+  transcript_only INTEGER NOT NULL DEFAULT 0,
+  metadata_json TEXT,
+  usage_json TEXT,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_messages_node_role
+  ON messages(node_id, role, created_at);
+CREATE INDEX IF NOT EXISTS idx_messages_conversation_created
+  ON messages(conversation_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_messages_blob
+  ON messages(content_blob_id);
+
+CREATE TABLE IF NOT EXISTS tool_calls (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  node_id TEXT REFERENCES nodes(id) ON DELETE CASCADE,
+  run_id TEXT,
+  assistant_message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
+  call_index INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  args_inline TEXT,
+  args_blob_id TEXT REFERENCES blobs(id),
+  args_preview TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'running',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS tool_results (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  node_id TEXT REFERENCES nodes(id) ON DELETE CASCADE,
+  run_id TEXT,
+  tool_call_id TEXT REFERENCES tool_calls(id) ON DELETE CASCADE,
+  status TEXT NOT NULL,
+  output_preview TEXT NOT NULL DEFAULT '',
+  output_blob_id TEXT REFERENCES blobs(id),
+  output_size INTEGER NOT NULL DEFAULT 0,
+  truncated INTEGER NOT NULL DEFAULT 0,
+  metadata_json TEXT,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_tool_calls_node
+  ON tool_calls(node_id, call_index);
+CREATE INDEX IF NOT EXISTS idx_tool_results_call
+  ON tool_results(tool_call_id);
+CREATE INDEX IF NOT EXISTS idx_tool_results_blob
+  ON tool_results(output_blob_id);
+
+CREATE TABLE IF NOT EXISTS runs (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  status TEXT NOT NULL,
+  parent_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  anchor_node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL,
+  target_node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL,
+  summary TEXT NOT NULL DEFAULT '',
+  metadata_json TEXT,
+  event_count INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  finished_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS run_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  event_index INTEGER NOT NULL,
+  event_type TEXT NOT NULL,
+  payload_inline TEXT,
+  payload_blob_id TEXT REFERENCES blobs(id),
+  created_at INTEGER NOT NULL,
+  UNIQUE(run_id, event_index)
+);
+
+CREATE INDEX IF NOT EXISTS idx_runs_conversation_status
+  ON runs(conversation_id, status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_runs_target_node
+  ON runs(target_node_id);
+CREATE INDEX IF NOT EXISTS idx_runs_anchor_node
+  ON runs(anchor_node_id);
+CREATE INDEX IF NOT EXISTS idx_run_events_run_index
+  ON run_events(run_id, event_index);
+
+CREATE TABLE IF NOT EXISTS plans (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  status TEXT NOT NULL,
+  entered_node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL,
+  submitted_node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL,
+  entered_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  submitted_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  approved_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  previous_permission_mode TEXT NOT NULL DEFAULT 'modify_only',
+  plan_inline TEXT,
+  plan_blob_id TEXT REFERENCES blobs(id),
+  plan_preview TEXT NOT NULL DEFAULT '',
+  question_json TEXT,
+  feedback_json TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  approved_at INTEGER,
+  rejected_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS plan_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  event_type TEXT NOT NULL,
+  payload_json TEXT,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_plans_conversation_status
+  ON plans(conversation_id, status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_plan_events_plan
+  ON plan_events(plan_id, created_at);
+
+CREATE TABLE IF NOT EXISTS tasks (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  status TEXT NOT NULL,
+  owner_type TEXT NOT NULL,
+  owner_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  title TEXT NOT NULL,
+  detail_inline TEXT,
+  detail_blob_id TEXT REFERENCES blobs(id),
+  evidence_summary TEXT,
+  evidence_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  metadata_json TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS task_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  event_type TEXT NOT NULL,
+  payload_json TEXT,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_conversation_status
+  ON tasks(conversation_id, status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_tasks_owner_run
+  ON tasks(owner_run_id);
+CREATE INDEX IF NOT EXISTS idx_task_events_task
+  ON task_events(task_id, created_at);
+
+CREATE TABLE IF NOT EXISTS transcript_items (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  node_id TEXT REFERENCES nodes(id) ON DELETE CASCADE,
+  anchor_node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL,
+  run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  plan_id TEXT REFERENCES plans(id) ON DELETE SET NULL,
+  task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+  message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
+  item_type TEXT NOT NULL,
+  local_order INTEGER NOT NULL,
+  visibility TEXT NOT NULL DEFAULT 'main',
+  status TEXT,
+  summary TEXT NOT NULL DEFAULT '',
+  preview TEXT NOT NULL DEFAULT '',
+  props_json TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_transcript_conversation_node_order
+  ON transcript_items(conversation_id, node_id, local_order);
+CREATE INDEX IF NOT EXISTS idx_transcript_conversation_anchor_order
+  ON transcript_items(conversation_id, anchor_node_id, local_order);
+CREATE INDEX IF NOT EXISTS idx_transcript_conversation_visibility
+  ON transcript_items(conversation_id, visibility, local_order);
+"""

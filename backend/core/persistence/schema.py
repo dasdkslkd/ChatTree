@@ -4,7 +4,7 @@ from __future__ import annotations
 CURRENT_SCHEMA_VERSION = 1
 
 
-SCHEMA_SQL = """
+SCHEMA_V1_SQL = """
 CREATE TABLE IF NOT EXISTS server_metadata (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,
@@ -386,3 +386,6 @@ CREATE INDEX IF NOT EXISTS idx_transcript_conversation_anchor_order
 CREATE INDEX IF NOT EXISTS idx_transcript_conversation_visibility
   ON transcript_items(conversation_id, visibility, local_order);
 """
+
+# Keep the public current-schema name separate from the immutable v1 migration DDL.
+SCHEMA_SQL = SCHEMA_V1_SQL

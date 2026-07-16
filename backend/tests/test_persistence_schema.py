@@ -574,6 +574,7 @@ def _create_legacy_tool_call_schema(db_path: Path):
 
 
 def _create_legacy_run_lifecycle_schema(db_path: Path):
+    # Frozen table definitions from 1f37f9b^, before parent_run_id was split.
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(db_path) as conn:
         conn.execute("PRAGMA foreign_keys = ON")
@@ -582,6 +583,16 @@ def _create_legacy_run_lifecycle_schema(db_path: Path):
             CREATE TABLE conversations (
               id TEXT PRIMARY KEY,
               title TEXT NOT NULL,
+              root_node_id TEXT,
+              current_node_id TEXT,
+              project_id TEXT,
+              provider_id TEXT,
+              model_id TEXT,
+              reasoning_effort TEXT,
+              thinking_enabled INTEGER,
+              multi_agent_mode TEXT NOT NULL DEFAULT 'explicit_request_only',
+              workspace_json TEXT,
+              settings_json TEXT,
               created_at INTEGER NOT NULL,
               updated_at INTEGER NOT NULL
             );
@@ -593,6 +604,12 @@ def _create_legacy_run_lifecycle_schema(db_path: Path):
               child_order INTEGER NOT NULL DEFAULT 0,
               depth INTEGER NOT NULL DEFAULT 0,
               status TEXT NOT NULL DEFAULT 'complete',
+              model_id TEXT,
+              provider_id TEXT,
+              tool_permission_mode TEXT,
+              turn_usage_json TEXT,
+              branch_usage_json TEXT,
+              active_context_usage_json TEXT,
               created_at INTEGER NOT NULL,
               updated_at INTEGER NOT NULL,
               UNIQUE(conversation_id, id),
@@ -628,21 +645,35 @@ def _create_legacy_run_lifecycle_schema(db_path: Path):
               conversation_id,
               kind,
               status,
+              parent_run_id,
               anchor_node_id,
               summary,
               created_at,
               updated_at
             )
-            VALUES (
-              'legacy-run',
-              'legacy-conversation',
-              'chat',
-              'completed',
-              'legacy-node',
-              'legacy run',
-              1,
-              1
-            );
+            VALUES
+              (
+                'parent-run',
+                'legacy-conversation',
+                'chat',
+                'completed',
+                NULL,
+                'legacy-node',
+                'parent run',
+                1,
+                1
+              ),
+              (
+                'legacy-run',
+                'legacy-conversation',
+                'agent',
+                'completed',
+                'parent-run',
+                'legacy-node',
+                'legacy run',
+                2,
+                2
+              );
             """
         )
 
@@ -675,7 +706,7 @@ def test_initialize_migrates_legacy_run_lifecycle_before_indexes(tmp_path: Path)
             WHERE id = 'legacy-run'
             """
         ).fetchone()
-        assert legacy["created_by_run_id"] is None
+        assert legacy["created_by_run_id"] == "parent-run"
         assert legacy["cancellation_parent_run_id"] is None
 
 
