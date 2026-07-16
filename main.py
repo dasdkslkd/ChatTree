@@ -51,7 +51,7 @@ from backend.core.tools.tool_manager import ToolManager
 from backend.core.storage.tool_result_storage import ToolResultStorage
 from backend.core.command_runtime import CommandExecutor
 from backend.core.perf import configure_profiler, get_profiler, load_perf_config
-from backend.core.server import SERVER_VERSION, ServerIdentityStore
+from backend.core.server import SERVER_VERSION, ServerHomeLock, ServerIdentityStore
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_SERVER_PORT = 8001
@@ -90,6 +90,7 @@ def run_server(environ: Mapping[str, str] | None = None) -> None:
     uvicorn.run(
         "main:app",
         reload=True,
+        workers=1,
         **uvicorn_reload_options(),
         **uvicorn_server_options(environ),
     )
@@ -129,8 +130,7 @@ async def performance_middleware(request: Request, call_next):
     return response
 
 # ---------- 挂载管理器 ----------
-@app.on_event("startup")
-async def startup_event():
+async def _initialize_server() -> None:
     config_manager = Config()
     perf_profiler = configure_profiler(load_perf_config(config_manager.data))
     persistence = SQLitePersistence()
@@ -253,14 +253,36 @@ async def startup_event():
     app.state.workflow_manager = workflow_manager
     app.state.task_notification_service = task_notification_service
 
+
+@app.on_event("startup")
+async def startup_event() -> None:
+    home_lock = ServerHomeLock()
+    home_lock.acquire()
+    app.state.server_home_lock = home_lock
+    try:
+        await _initialize_server()
+    except BaseException:
+        home_lock.release()
+        if getattr(app.state, "server_home_lock", None) is home_lock:
+            app.state.server_home_lock = None
+        raise
+
+
 @app.on_event("shutdown")
-async def shutdown_event():
-    run_manager = getattr(app.state, "run_manager", None)
-    if run_manager:
-        await run_manager.close()
-    tool_manager = getattr(app.state, "tool_manager", None)
-    if tool_manager:
-        await tool_manager.close()
+async def shutdown_event() -> None:
+    try:
+        run_manager = getattr(app.state, "run_manager", None)
+        if run_manager:
+            await run_manager.close()
+        tool_manager = getattr(app.state, "tool_manager", None)
+        if tool_manager:
+            await tool_manager.close()
+    finally:
+        home_lock = getattr(app.state, "server_home_lock", None)
+        if home_lock:
+            home_lock.release()
+            if getattr(app.state, "server_home_lock", None) is home_lock:
+                app.state.server_home_lock = None
 
 # ---------- 注册路由 ----------
 app.include_router(api_v1_router)

@@ -71,4 +71,5 @@ def test_run_server_wires_loopback_port_and_reload_options(monkeypatch):
     assert captured["host"] == "127.0.0.1"
     assert captured["port"] == 18003
     assert captured["reload"] is True
+    assert captured["workers"] == 1
     assert captured["reload_dirs"] == [str(main.PROJECT_ROOT / "backend")]
