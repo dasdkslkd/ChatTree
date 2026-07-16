@@ -11,7 +11,7 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 # ---------- 导入路由 ----------
-from backend.api.routes import agents, capabilities, config, conversations, messages, models, notifications, perf, plans, prompts, runs, slash, tasks, tool_approvals, tool_results, workflows
+from backend.api.router import api_v1_router, legacy_router
 
 # ---------- 导入核心 ----------
 from backend.core.chat.chat_manager import ChatManager
@@ -49,6 +49,7 @@ from backend.core.tools.tool_manager import ToolManager
 from backend.core.storage.tool_result_storage import ToolResultStorage
 from backend.core.command_runtime import CommandExecutor
 from backend.core.perf import configure_profiler, get_profiler, load_perf_config
+from backend.core.server import SERVER_VERSION, ServerIdentityStore
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
@@ -66,7 +67,7 @@ def uvicorn_reload_options() -> dict:
 
 app = FastAPI(
     title="AI 对话树后端",
-    version="0.1.0",
+    version=SERVER_VERSION,
 )
 
 app.add_middleware(
@@ -104,6 +105,8 @@ async def startup_event():
     perf_profiler = configure_profiler(load_perf_config(config_manager.data))
     persistence = SQLitePersistence()
     persistence.initialize()
+    server_identity_store = ServerIdentityStore(persistence)
+    server_identity = server_identity_store.get_or_create()
     chat_repository = ChatRepository(persistence)
     transcript_projection = TranscriptProjection(persistence)
     plan_repository = SQLitePlanRepository(persistence)
@@ -192,6 +195,8 @@ async def startup_event():
     register_task_tools(tool_manager, task_service)
     await task_notification_service.reconcile_terminal_publications()
     app.state.persistence = persistence
+    app.state.server_identity_store = server_identity_store
+    app.state.server_identity = server_identity
     app.state.chat_repository = chat_repository
     app.state.transcript_projection = transcript_projection
     app.state.run_repository = run_repository
@@ -228,22 +233,8 @@ async def shutdown_event():
         await tool_manager.close()
 
 # ---------- 注册路由 ----------
-app.include_router(config.router,        prefix="",        tags=["配置"])
-app.include_router(conversations.router, prefix="", tags=["对话"])
-app.include_router(messages.router,      prefix="", tags=["消息"])
-app.include_router(models.router,        prefix="",               tags=["模型"])
-app.include_router(prompts.router,        prefix="",               tags=["提示词"])
-app.include_router(tool_approvals.router, prefix="", tags=["工具审批"])
-app.include_router(tool_results.router, prefix="", tags=["工具结果"])
-app.include_router(capabilities.router, prefix="", tags=["能力"])
-app.include_router(runs.router, prefix="", tags=["运行"])
-app.include_router(plans.router, prefix="", tags=["计划"])
-app.include_router(tasks.router, prefix="", tags=["任务"])
-app.include_router(notifications.router, prefix="", tags=["Task Notification"])
-app.include_router(perf.router, prefix="", tags=["Performance"])
-app.include_router(slash.router, prefix="", tags=["Slash"])
-app.include_router(agents.router, prefix="", tags=["Agent"])
-app.include_router(workflows.router, prefix="", tags=["Workflow"])
+app.include_router(legacy_router)
+app.include_router(api_v1_router)
 
 if __name__ == "__main__":
     uvicorn.run(

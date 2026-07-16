@@ -10,6 +10,7 @@ from backend.api.dependencies import get_tool_manager
 from backend.core.persistence.blob_store import BlobStore
 
 router = APIRouter()
+legacy_router = APIRouter()
 
 
 def _sqlite_tool_result_slice(
@@ -138,7 +139,7 @@ async def _get_optional_tool_manager(request: Request) -> Any | None:
         raise
 
 
-@router.get("/api/tool-results/{tool_result_id}", include_in_schema=False)
+@legacy_router.get("/api/tool-results/{tool_result_id}", include_in_schema=False)
 @router.get("/tool-results/{tool_result_id}")
 async def get_tool_result(
     request: Request,

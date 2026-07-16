@@ -23,6 +23,7 @@ from ...core.command_runtime import CommandExecutor
 from ..dependencies import get_config_manager, get_tool_manager
 
 router = APIRouter()
+legacy_router = APIRouter()
 
 
 class ConfigUpdateRequest(BaseModel):
@@ -177,9 +178,9 @@ def _runtime_config_for_app(app, config_data: Dict[str, Any]) -> Dict[str, Any]:
     return build_runtime_config_with_plugin_mcp(config_data, capability_registry)
 
 
-@router.get("/health")
+@legacy_router.get("/health")
 async def health_check():
-    """轻量健康检查端点，仅用于前端心跳检测"""
+    """轻量健康检查端点，仅用于旧前端迁移。"""
     return {"status": "ok"}
 
 
