@@ -47,6 +47,7 @@ def test_list_pending_tool_approvals_filters_by_conversation():
 
     assert response.status_code == 200
     assert [item["id"] for item in response.json()["approvals"]] == ["approval-1"]
+    assert response.json()["approvals"][0]["expires_at"] is None
 
 
 def test_decide_stale_tool_approval_returns_gone():

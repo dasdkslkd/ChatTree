@@ -115,7 +115,7 @@ def test_approval_manager_resolves_denied_request():
 
 
 async def _cancel_for_node_case():
-    manager = ApprovalManager(timeout_seconds=5)
+    manager = ApprovalManager()
     matching_request = make_request("approval-1", node_id="node-1")
     other_request = make_request("approval-2", node_id="node-2")
     matching_task = asyncio.create_task(manager.request_and_wait(matching_request))
@@ -136,6 +136,44 @@ async def _cancel_for_node_case():
 
 def test_cancel_for_node_cancels_pending_request():
     asyncio.run(_cancel_for_node_case())
+
+
+async def _immediate_waiter_cancellation_case():
+    manager = ApprovalManager()
+    request = make_request()
+
+    wait_task = manager.begin_request(request)
+    wait_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await wait_task
+    await asyncio.sleep(0)
+
+    assert request.status == "cancelled"
+    assert manager.get(request.id) is None
+    assert manager.list_pending() == []
+
+
+def test_immediate_waiter_cancellation_cleans_unlimited_request():
+    asyncio.run(_immediate_waiter_cancellation_case())
+
+
+async def _terminal_decision_is_first_wins_case():
+    manager = ApprovalManager()
+    request = make_request()
+    wait_task = manager.begin_request(request)
+
+    manager.cancel_for_node(request.node_id)
+    with pytest.raises(KeyError):
+        manager.decide(request.id, decision="approve", scope="session")
+    result = await wait_task
+
+    assert result.status == "cancelled"
+    assert request.status == "cancelled"
+    assert not manager.is_session_allowed(request.conversation_id, request.tool_name)
+
+
+def test_terminal_decision_is_first_wins():
+    asyncio.run(_terminal_decision_is_first_wins_case())
 
 
 async def _session_allow_scoped_by_conversation_case():

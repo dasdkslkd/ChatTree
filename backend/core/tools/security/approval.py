@@ -94,25 +94,37 @@ class ApprovalManager:
         )
         self._pending[request.id] = request
         self._futures[request.id] = asyncio.get_running_loop().create_future()
-        return asyncio.create_task(self._wait_for_decision(request.id))
+        task = asyncio.create_task(self._wait_for_decision(request.id))
+        task.add_done_callback(
+            lambda completed, approval_id=request.id: self._cleanup_cancelled_before_start(
+                approval_id,
+                completed,
+            )
+        )
+        return task
 
     async def request_and_wait(self, request: ApprovalRequest) -> ApprovalDecision:
         return await self.begin_request(request)
 
     async def _wait_for_decision(self, approval_id: str) -> ApprovalDecision:
+        future = self._futures[approval_id]
         try:
             return await asyncio.wait_for(
-                asyncio.shield(self._futures[approval_id]),
+                asyncio.shield(future),
                 timeout=self.timeout_seconds,
             )
         except asyncio.TimeoutError:
-            return self._resolve(approval_id, ApprovalDecision("expired"))
+            decision = ApprovalDecision("expired")
+            if self._try_resolve(approval_id, decision):
+                return decision
+            if future.done() and not future.cancelled():
+                return future.result()
+            return decision
         except asyncio.CancelledError:
-            self._resolve(approval_id, ApprovalDecision("cancelled"))
+            self._try_resolve(approval_id, ApprovalDecision("cancelled"))
             raise
         finally:
-            self._pending.pop(approval_id, None)
-            self._futures.pop(approval_id, None)
+            self._cleanup(approval_id)
 
     def decide(
         self,
@@ -125,17 +137,20 @@ class ApprovalManager:
             raise KeyError(approval_id)
         if decision == "approve":
             status: Literal["approved", "denied"] = "approved"
-            if scope == "session":
-                self._session_allowed_tools.setdefault(
-                    request.conversation_id,
-                    set(),
-                ).add(request.tool_name)
         elif decision == "deny":
             status = "denied"
         else:
             raise ValueError(f"Unknown approval decision: {decision}")
 
-        return self._resolve(approval_id, ApprovalDecision(status, scope))
+        result = ApprovalDecision(status, scope)
+        if not self._try_resolve(approval_id, result):
+            raise KeyError(approval_id)
+        if decision == "approve" and scope == "session":
+            self._session_allowed_tools.setdefault(
+                request.conversation_id,
+                set(),
+            ).add(request.tool_name)
+        return result
 
     def cancel_for_node(self, node_id: str) -> None:
         approval_ids = [
@@ -144,21 +159,39 @@ class ApprovalManager:
             if request.node_id == node_id
         ]
         for approval_id in approval_ids:
-            self._resolve(approval_id, ApprovalDecision("cancelled"))
+            self._try_resolve(approval_id, ApprovalDecision("cancelled"))
 
     def get(self, approval_id: str) -> Optional[ApprovalRequest]:
         return self._pending.get(approval_id)
 
-    def _resolve(
+    def _try_resolve(
         self,
         approval_id: str,
         decision: ApprovalDecision,
-    ) -> ApprovalDecision:
+    ) -> bool:
         request = self._pending.get(approval_id)
-        if request is not None:
-            request.status = decision.status
-
         future = self._futures.get(approval_id)
-        if future is not None and not future.done():
-            future.set_result(decision)
-        return decision
+        if (
+            request is None
+            or future is None
+            or request.status != "pending"
+            or future.done()
+        ):
+            return False
+        request.status = decision.status
+        future.set_result(decision)
+        return True
+
+    def _cleanup_cancelled_before_start(
+        self,
+        approval_id: str,
+        task: asyncio.Task[ApprovalDecision],
+    ) -> None:
+        if not task.cancelled() or approval_id not in self._pending:
+            return
+        self._try_resolve(approval_id, ApprovalDecision("cancelled"))
+        self._cleanup(approval_id)
+
+    def _cleanup(self, approval_id: str) -> None:
+        self._pending.pop(approval_id, None)
+        self._futures.pop(approval_id, None)
