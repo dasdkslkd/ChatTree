@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
 
 PROTOCOL_VERSION = 1
+STARTUP_LOG_TAIL_BYTES = 8 * 1024
 _HEALTH_PATH = "/api/v1/health"
 _HANDSHAKE_PATH = "/api/v1/handshake"
 _WINDOWS_DETACHED_PROCESS = 0x00000008
@@ -84,28 +85,57 @@ class LocalServerSpawnError(LocalServerError):
 
 
 class LocalServerStartExitedError(LocalServerError):
-    def __init__(self, exit_code: int, log_path: Path) -> None:
+    def __init__(self, exit_code: int, log_path: Path, log_tail: str) -> None:
         super().__init__(
             "local_server_start_exited",
-            f"Local server exited with code {exit_code}; see {log_path}",
+            _startup_error_message(
+                f"Local server exited with code {exit_code}",
+                log_path,
+                log_tail,
+            ),
             phase="local_start",
             retryable=True,
         )
         self.exit_code = exit_code
         self.log_path = log_path
+        self.log_tail = log_tail
 
 
 class LocalServerStartTimeoutError(LocalServerError):
-    def __init__(self, endpoint: str, log_path: Path) -> None:
+    def __init__(self, endpoint: str, log_path: Path, log_tail: str) -> None:
         super().__init__(
             "local_server_start_timeout",
-            f"Local server did not become ready at {endpoint}; see {log_path}",
+            _startup_error_message(
+                f"Local server did not become ready at {endpoint}",
+                log_path,
+                log_tail,
+            ),
             phase="local_start",
             retryable=True,
             status_code=504,
         )
         self.endpoint = endpoint
         self.log_path = log_path
+        self.log_tail = log_tail
+
+
+def _startup_error_message(base: str, log_path: Path, log_tail: str) -> str:
+    message = f"{base}; see {log_path}"
+    if log_tail:
+        return f"{message}\nLog tail:\n{log_tail}"
+    return message
+
+
+def _read_log_tail(log_path: Path) -> str:
+    try:
+        with log_path.open("rb") as log_file:
+            log_file.seek(0, os.SEEK_END)
+            size = log_file.tell()
+            log_file.seek(max(0, size - STARTUP_LOG_TAIL_BYTES))
+            tail = log_file.read(STARTUP_LOG_TAIL_BYTES)
+    except OSError:
+        return ""
+    return tail.decode("utf-8", errors="replace").strip()
 
 
 class _EndpointUnavailable(Exception):
@@ -539,9 +569,17 @@ class LocalServerConnector:
 
             exit_code = process.poll()
             if exit_code is not None:
-                raise LocalServerStartExitedError(exit_code, log_path)
+                raise LocalServerStartExitedError(
+                    exit_code,
+                    log_path,
+                    _read_log_tail(log_path),
+                )
             if self._monotonic() >= deadline:
-                raise LocalServerStartTimeoutError(endpoint, log_path)
+                raise LocalServerStartTimeoutError(
+                    endpoint,
+                    log_path,
+                    _read_log_tail(log_path),
+                )
             await self._sleep(float(self._settings.poll_interval_seconds))
 
     @staticmethod

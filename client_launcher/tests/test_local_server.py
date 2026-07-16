@@ -15,6 +15,7 @@ from client_launcher.local_server import (
     LocalServerResponseError,
     LocalServerStartExitedError,
     LocalServerStartTimeoutError,
+    STARTUP_LOG_TAIL_BYTES,
 )
 
 
@@ -104,12 +105,21 @@ class FakeProcess:
 
 
 class FakePopen:
-    def __init__(self, process: FakeProcess | None = None) -> None:
+    def __init__(
+        self,
+        process: FakeProcess | None = None,
+        *,
+        log_bytes: bytes = b"",
+    ) -> None:
         self.process = process or FakeProcess()
+        self.log_bytes = log_bytes
         self.calls: list[tuple[list[str], dict]] = []
 
     def __call__(self, argv, **kwargs):
         self.calls.append((list(argv), dict(kwargs)))
+        if self.log_bytes:
+            kwargs["stdout"].write(self.log_bytes)
+            kwargs["stdout"].flush()
         return self.process
 
 
@@ -408,7 +418,14 @@ def test_child_early_exit_is_reported(tmp_path: Path):
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("refused", request=request)
 
-    popen = FakePopen(FakeProcess([17]))
+    omitted_prefix = b"must-not-leak-from-full-log\n"
+    visible_suffix = b"fatal: child startup failed"
+    log_bytes = (
+        omitted_prefix
+        + (b"x" * STARTUP_LOG_TAIL_BYTES)
+        + visible_suffix
+    )
+    popen = FakePopen(FakeProcess([17]), log_bytes=log_bytes)
     connector = LocalServerConnector(
         _settings(tmp_path),
         transport=httpx.MockTransport(handler),
@@ -421,6 +438,10 @@ def test_child_early_exit_is_reported(tmp_path: Path):
 
     assert exc_info.value.exit_code == 17
     assert exc_info.value.log_path.name == "local-server-local-profile.log"
+    assert exc_info.value.log_tail.endswith(visible_suffix.decode("utf-8"))
+    assert omitted_prefix.decode("utf-8").strip() not in exc_info.value.log_tail
+    assert len(exc_info.value.log_tail.encode("utf-8")) <= STARTUP_LOG_TAIL_BYTES
+    assert exc_info.value.log_tail in str(exc_info.value)
 
 
 def test_start_timeout_does_not_kill_server(tmp_path: Path):
@@ -428,7 +449,7 @@ def test_start_timeout_does_not_kill_server(tmp_path: Path):
         raise httpx.ConnectError("refused", request=request)
 
     process = FakeProcess([None])
-    popen = FakePopen(process)
+    popen = FakePopen(process, log_bytes=b"startup is still waiting")
     clock = FakeClock()
     connector = LocalServerConnector(
         _settings(tmp_path, start_timeout_seconds=0.2, poll_interval_seconds=0.1),
@@ -438,12 +459,14 @@ def test_start_timeout_does_not_kill_server(tmp_path: Path):
         sleep=clock.sleep,
     )
 
-    with pytest.raises(LocalServerStartTimeoutError):
+    with pytest.raises(LocalServerStartTimeoutError) as exc_info:
         asyncio.run(connector.connect(_profile(tmp_path), None))
     asyncio.run(connector.close())
 
     assert process.terminate_calls == 0
     assert process.kill_calls == 0
+    assert exc_info.value.log_tail == "startup is still waiting"
+    assert exc_info.value.log_tail in str(exc_info.value)
 
 
 def test_spawned_server_exit_is_reaped_without_termination(tmp_path: Path):
