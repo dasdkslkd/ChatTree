@@ -28,13 +28,18 @@ _DEFAULT_PROVIDER_TEMPLATE: ModelProviderConfig = {
 class Config:
     """配置管理器"""
 
-    def __init__(self, config_path: str | None = None):
+    def __init__(
+        self,
+        config_path: str | None = None,
+        *,
+        load_from_disk: bool = True,
+    ):
         self.config_path = str(
             Path(config_path)
             if config_path is not None
             else resolve_chattree_home() / "config.json"
         )
-        self.data = self._load_config()
+        self.data = self._load_config() if load_from_disk else self._fresh_config()
 
     def _load_config(self) -> Dict[str, Any]:
         """加载配置，如果检测到旧格式则重置"""
@@ -101,4 +106,6 @@ class Config:
         self.data['default_provider'] = provider_id
         self.save()
 
-cfg = Config()
+# Runtime code imports this shared object, but the Server binds its on-disk data
+# only after acquiring the CHATTREE_HOME lock during startup.
+cfg = Config(load_from_disk=False)

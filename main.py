@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import asyncio
+import logging
 import os
 import sys
 from collections.abc import Mapping
@@ -22,7 +23,7 @@ from backend.core.capabilities.bootstrap import (
     build_runtime_config_with_plugin_mcp,
 )
 from backend.core.model.model_manager import ModelManager
-from backend.core.config.config import Config
+from backend.core.config.config import Config, cfg
 from backend.core.agents import AgentMailbox, AgentRuntime, SubagentExecutor
 from backend.core.runs import RunManager
 from backend.core.plans import PlanLedger
@@ -55,6 +56,7 @@ from backend.core.server import SERVER_VERSION, ServerHomeLock, ServerIdentitySt
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_SERVER_PORT = 8001
+logger = logging.getLogger(__name__)
 
 
 def uvicorn_reload_options() -> dict:
@@ -130,8 +132,34 @@ async def performance_middleware(request: Request, call_next):
     return response
 
 # ---------- 挂载管理器 ----------
+async def _close_server_resources() -> list[BaseException]:
+    errors: list[BaseException] = []
+    for state_name in ("run_manager", "tool_manager"):
+        resource = getattr(app.state, state_name, None)
+        if resource is None:
+            continue
+        try:
+            await resource.close()
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            if getattr(app.state, state_name, None) is resource:
+                setattr(app.state, state_name, None)
+    return errors
+
+
+def _log_cleanup_errors(errors: list[BaseException]) -> None:
+    for error in errors:
+        logger.error(
+            "ChatTree Server resource cleanup failed",
+            exc_info=(type(error), error, error.__traceback__),
+        )
+
+
 async def _initialize_server() -> None:
     config_manager = Config()
+    cfg.config_path = config_manager.config_path
+    cfg.data = config_manager.data
     perf_profiler = configure_profiler(load_perf_config(config_manager.data))
     persistence = SQLitePersistence()
     persistence.initialize()
@@ -157,9 +185,11 @@ async def _initialize_server() -> None:
         sqlite_repository=chat_repository,
     )
     tool_manager = ToolManager(runtime_config, tool_result_store=tool_result_store)
+    app.state.tool_manager = tool_manager
     await tool_manager.init()
     approval_manager = ApprovalManager()
     run_manager = RunManager(repository=run_repository)
+    app.state.run_manager = run_manager
     plan_ledger = PlanLedger(repository=plan_repository)
     task_service = ActiveTaskService(repository=task_repository)
     run_manager.task_service = task_service
@@ -259,30 +289,34 @@ async def startup_event() -> None:
     home_lock = ServerHomeLock()
     home_lock.acquire()
     app.state.server_home_lock = home_lock
+    app.state.run_manager = None
+    app.state.tool_manager = None
     try:
         await _initialize_server()
     except BaseException:
-        home_lock.release()
-        if getattr(app.state, "server_home_lock", None) is home_lock:
-            app.state.server_home_lock = None
+        try:
+            _log_cleanup_errors(await _close_server_resources())
+        finally:
+            home_lock.release()
+            if getattr(app.state, "server_home_lock", None) is home_lock:
+                app.state.server_home_lock = None
         raise
 
 
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
+    cleanup_errors: list[BaseException] = []
     try:
-        run_manager = getattr(app.state, "run_manager", None)
-        if run_manager:
-            await run_manager.close()
-        tool_manager = getattr(app.state, "tool_manager", None)
-        if tool_manager:
-            await tool_manager.close()
+        cleanup_errors = await _close_server_resources()
     finally:
         home_lock = getattr(app.state, "server_home_lock", None)
         if home_lock:
             home_lock.release()
             if getattr(app.state, "server_home_lock", None) is home_lock:
                 app.state.server_home_lock = None
+    if cleanup_errors:
+        _log_cleanup_errors(cleanup_errors[1:])
+        raise cleanup_errors[0]
 
 # ---------- 注册路由 ----------
 app.include_router(api_v1_router)
