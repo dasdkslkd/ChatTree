@@ -6,6 +6,7 @@ from typing import Any
 
 from client_launcher.models import (
     ConnectionErrorInfo,
+    EndpointLease,
     LauncherError,
     ServerSession,
 )
@@ -35,7 +36,7 @@ class SessionManager:
             ServerSession(profile_id=profile_id),
         )
 
-    def resolve_endpoint(self, profile_id: str) -> str:
+    def resolve_endpoint(self, profile_id: str) -> EndpointLease:
         self.profiles.get(profile_id)
         session = self._session(profile_id)
         endpoint = self._endpoints.get(profile_id)
@@ -46,11 +47,31 @@ class SessionManager:
                 retryable=True,
                 status_code=503,
             )
-        return endpoint
+        return EndpointLease(
+            endpoint=endpoint,
+            connection_epoch=session.connection_epoch,
+        )
 
-    def mark_error(self, profile_id: str, error: LauncherError) -> None:
-        self.profiles.get(profile_id)
-        session = self._session(profile_id)
+    def mark_error(
+        self,
+        profile_id: str,
+        error: LauncherError,
+        *,
+        connection_epoch: int,
+    ) -> bool:
+        try:
+            self.profiles.get(profile_id)
+        except LauncherError as exc:
+            if exc.code == "profile_not_found":
+                return False
+            raise
+        session = self._sessions.get(profile_id)
+        if (
+            session is None
+            or session.status != "ready"
+            or session.connection_epoch != connection_epoch
+        ):
+            return False
         session.status = "error"
         session.phase = None
         session.server_instance_id = None
@@ -60,6 +81,7 @@ class SessionManager:
             retryable=error.retryable,
         )
         self._endpoints.pop(profile_id, None)
+        return True
 
     async def start(self) -> None:
         for profile in self.profiles.list():

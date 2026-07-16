@@ -9,6 +9,7 @@ import pytest
 from fastapi import FastAPI
 from starlette.requests import Request
 
+from client_launcher.models import EndpointLease
 from client_launcher.proxy import (
     ProxyEndpointUnavailable,
     ProxyHandler,
@@ -376,6 +377,31 @@ def test_transport_error_before_response_headers_is_typed() -> None:
         assert captured.value.code == "proxy_upstream_unavailable"
         assert captured.value.status_code == 502
         assert captured.value.retryable is True
+        assert captured.value.connection_epoch is None
         assert isinstance(captured.value.__cause__, httpx.ConnectError)
+
+    _run(scenario())
+
+
+def test_transport_error_carries_resolved_connection_epoch() -> None:
+    async def scenario() -> None:
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused", request=request)
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        handler = ProxyHandler(
+            lambda _profile_id: EndpointLease(
+                endpoint="http://upstream.test",
+                connection_epoch=7,
+            ),
+            http_client=client,
+        )
+        request = _request("GET", "/p/local/api/v1/health")
+
+        with pytest.raises(ProxyUpstreamTransportError) as captured:
+            await handler(request, "local", "health")
+
+        await client.aclose()
+        assert captured.value.connection_epoch == 7
 
     _run(scenario())

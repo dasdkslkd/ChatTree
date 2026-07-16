@@ -11,6 +11,8 @@ from starlette.requests import Request
 from starlette.responses import StreamingResponse
 from starlette.types import Receive, Scope, Send
 
+from client_launcher.models import EndpointLease
+
 
 DEFAULT_MAX_BODY_BYTES = 64 * 1024 * 1024
 DEFAULT_CONNECT_TIMEOUT = 5.0
@@ -42,7 +44,7 @@ _HOP_BY_HOP_HEADERS = frozenset(
 )
 
 Endpoint: TypeAlias = str | httpx.URL
-ResolvedEndpoint: TypeAlias = Endpoint | None
+ResolvedEndpoint: TypeAlias = Endpoint | EndpointLease | None
 EndpointResolverResult: TypeAlias = ResolvedEndpoint | Awaitable[ResolvedEndpoint]
 EndpointResolver: TypeAlias = Callable[[str], EndpointResolverResult]
 RawHeader: TypeAlias = tuple[bytes, bytes]
@@ -83,8 +85,13 @@ class ProxyUpstreamTransportError(ProxyError):
     status_code = 502
     retryable = True
 
-    def __init__(self, profile_id: str) -> None:
+    def __init__(
+        self,
+        profile_id: str,
+        connection_epoch: int | None = None,
+    ) -> None:
         self.profile_id = profile_id
+        self.connection_epoch = connection_epoch
         super().__init__(f"Unable to reach the Server for profile '{profile_id}'")
 
 
@@ -164,7 +171,7 @@ class ProxyHandler:
         profile_id: str,
         path: str,
     ) -> StreamingResponse:
-        endpoint = await self._ready_endpoint(profile_id)
+        endpoint, connection_epoch = await self._ready_endpoint(profile_id)
         target_url = _target_url(endpoint, request, profile_id, path)
         body = await _read_bounded_body(request, self._max_body_bytes)
         request_headers = _request_headers(request, target_url, body)
@@ -183,7 +190,10 @@ class ProxyHandler:
                 follow_redirects=False,
             )
         except httpx.TransportError as exc:
-            raise ProxyUpstreamTransportError(profile_id) from exc
+            raise ProxyUpstreamTransportError(
+                profile_id,
+                connection_epoch,
+            ) from exc
 
         closer = _UpstreamCloser(upstream_response)
         return _ClosingStreamingResponse(
@@ -193,13 +203,18 @@ class ProxyHandler:
             closer=closer,
         )
 
-    async def _ready_endpoint(self, profile_id: str) -> Endpoint:
+    async def _ready_endpoint(
+        self,
+        profile_id: str,
+    ) -> tuple[Endpoint, int | None]:
         resolved = self._resolve_endpoint(profile_id)
         if inspect.isawaitable(resolved):
             resolved = await resolved
+        if isinstance(resolved, EndpointLease):
+            return resolved.endpoint, resolved.connection_epoch
         if resolved is None or (isinstance(resolved, str) and not resolved.strip()):
             raise ProxyEndpointUnavailable(profile_id)
-        return resolved
+        return resolved, None
 
 
 def create_proxy_router(

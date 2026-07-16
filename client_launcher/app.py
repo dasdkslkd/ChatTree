@@ -148,7 +148,12 @@ def create_app(
         exc: ProxyError,
     ) -> JSONResponse:
         profile_id = getattr(exc, "profile_id", None)
-        if profile_id and exc.code == "proxy_upstream_unavailable":
+        connection_epoch = getattr(exc, "connection_epoch", None)
+        if (
+            profile_id
+            and connection_epoch is not None
+            and exc.code == "proxy_upstream_unavailable"
+        ):
             sessions.mark_error(
                 profile_id,
                 LauncherError(
@@ -157,6 +162,7 @@ def create_app(
                     exc.retryable,
                     exc.status_code,
                 ),
+                connection_epoch=connection_epoch,
             )
         return _error_response(
             request,

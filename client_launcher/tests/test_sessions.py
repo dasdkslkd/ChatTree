@@ -124,6 +124,46 @@ def test_ready_connect_is_idempotent(tmp_path):
     asyncio.run(_ready_connect_is_idempotent_case(tmp_path))
 
 
+async def _stale_transport_error_does_not_break_reconnected_session_case(tmp_path):
+    store = _store(tmp_path)
+    connector = FakeConnector()
+    connector.release.set()
+    manager = SessionManager(store, connector)
+
+    first = await manager.connect("local")
+    await manager.disconnect("local")
+    second = await manager.connect("local")
+    transport_error = LauncherError(
+        "proxy_upstream_unavailable",
+        "Unable to reach the Server",
+        retryable=True,
+        status_code=502,
+    )
+
+    manager.mark_error(
+        "local",
+        transport_error,
+        connection_epoch=first.connection_epoch,
+    )
+
+    current = manager.status("local")
+    assert current.status == "ready"
+    assert current.connection_epoch == second.connection_epoch == 2
+
+    manager.mark_error(
+        "local",
+        transport_error,
+        connection_epoch=second.connection_epoch,
+    )
+    assert manager.status("local").status == "error"
+
+
+def test_stale_transport_error_does_not_break_reconnected_session(tmp_path):
+    asyncio.run(
+        _stale_transport_error_does_not_break_reconnected_session_case(tmp_path)
+    )
+
+
 async def _ready_rebind_rejects_expected_identity_mismatch_case(tmp_path):
     store = _store(tmp_path)
     connector = FakeConnector(SERVER_A)

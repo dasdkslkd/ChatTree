@@ -164,6 +164,21 @@ class ConnectionErrorInfo:
         }
 
 
+@dataclass(frozen=True)
+class EndpointLease:
+    endpoint: str
+    connection_epoch: int
+
+    def __post_init__(self) -> None:
+        _required_string(self.endpoint, "endpoint")
+        if (
+            isinstance(self.connection_epoch, bool)
+            or not isinstance(self.connection_epoch, int)
+            or self.connection_epoch <= 0
+        ):
+            raise ValueError("connection_epoch must be a positive integer")
+
+
 @dataclass
 class ServerSession:
     profile_id: str

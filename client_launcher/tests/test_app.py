@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
+import httpx
 from fastapi.testclient import TestClient
 
 from client_launcher.app import create_app
@@ -211,3 +213,83 @@ def test_default_profile_cannot_be_deleted(tmp_path: Path):
 
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "default_profile_required"
+
+
+def test_stale_proxy_failure_does_not_break_reconnected_session(tmp_path: Path):
+    settings = _settings(tmp_path)
+    store = ProfileStore(
+        settings.client_home / "profiles.json",
+        default_server_home=tmp_path / "default-server",
+    )
+    store.update("local", auto_connect=False)
+    connector = ImmediateConnector()
+    app = None
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        assert app is not None
+        sessions = app.state.session_manager
+        await sessions.disconnect("local")
+        await sessions.connect("local")
+        raise httpx.ConnectError("connection refused", request=request)
+
+    proxy_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    app = create_app(
+        settings=settings,
+        profiles=store,
+        connector=connector,
+        proxy_client=proxy_client,
+    )
+
+    with TestClient(app) as client:
+        assert client.post("/client/v1/profiles/local/connect").status_code == 200
+        response = client.get("/p/local/api/v1/health")
+        status = client.get("/client/v1/profiles/local/status")
+
+    asyncio.run(proxy_client.aclose())
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "proxy_upstream_unavailable"
+    assert status.json()["status"] == "ready"
+    assert status.json()["connection_epoch"] == 2
+
+
+def test_deleted_profile_proxy_failure_preserves_transport_error(tmp_path: Path):
+    settings = _settings(tmp_path)
+    store = ProfileStore(
+        settings.client_home / "profiles.json",
+        default_server_home=tmp_path / "default-server",
+    )
+    store.update("local", auto_connect=False)
+    connector = ImmediateConnector()
+    profile_id = ""
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        store.delete(profile_id)
+        raise httpx.ConnectError("connection refused", request=request)
+
+    proxy_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    app = create_app(
+        settings=settings,
+        profiles=store,
+        connector=connector,
+        proxy_client=proxy_client,
+    )
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        created = client.post(
+            "/client/v1/profiles",
+            json={
+                "label": "Disposable",
+                "auto_connect": False,
+                "server_home": str(tmp_path / "disposable-server"),
+                "server_port": 18101,
+            },
+        )
+        profile_id = created.json()["id"]
+        connected = client.post(f"/client/v1/profiles/{profile_id}/connect")
+        assert connected.status_code == 200
+
+        response = client.get(f"/p/{profile_id}/api/v1/health")
+
+    asyncio.run(proxy_client.aclose())
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "proxy_upstream_unavailable"
