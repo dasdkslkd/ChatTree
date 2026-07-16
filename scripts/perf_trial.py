@@ -20,6 +20,32 @@ from backend.core.perf.aggregate import summarize_events, write_reports
 from backend.core.persistence.home import resolve_chattree_home
 
 
+DEFAULT_API_BASE_URL = "http://127.0.0.1:8001/api/v1"
+
+
+def _api_url(base_url: str, path: str) -> str:
+    return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run ChatTree real-call performance trial.")
+    parser.add_argument(
+        "--base-url",
+        default=DEFAULT_API_BASE_URL,
+        help="ChatTree API base URL, including the version prefix.",
+    )
+    parser.add_argument("--duration-seconds", type=float, default=60)
+    parser.add_argument("--concurrency", type=int, default=1)
+    parser.add_argument("--prompt-file")
+    parser.add_argument("--conversation-id")
+    parser.add_argument("--parent-node-id")
+    parser.add_argument("--provider-id")
+    parser.add_argument("--model-id")
+    parser.add_argument("--output-dir")
+    parser.add_argument("--enable-server-perf", action="store_true")
+    return parser
+
+
 def _json_request(
     base_url: str,
     path: str,
@@ -30,7 +56,7 @@ def _json_request(
 ) -> Any:
     data = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(
-        base_url.rstrip("/") + path,
+        _api_url(base_url, path),
         data=data,
         headers={"Content-Type": "application/json"},
         method=method,
@@ -97,7 +123,7 @@ def _stream_once(
 
     try:
         request = urllib.request.Request(
-            base_url.rstrip("/") + f"/conversations/{conversation_id}/messages/stream",
+            _api_url(base_url, f"/conversations/{conversation_id}/messages/stream"),
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -199,18 +225,7 @@ def _worker(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run ChatTree real-call performance trial.")
-    parser.add_argument("--base-url", default="http://127.0.0.1:8001")
-    parser.add_argument("--duration-seconds", type=float, default=60)
-    parser.add_argument("--concurrency", type=int, default=1)
-    parser.add_argument("--prompt-file")
-    parser.add_argument("--conversation-id")
-    parser.add_argument("--parent-node-id")
-    parser.add_argument("--provider-id")
-    parser.add_argument("--model-id")
-    parser.add_argument("--output-dir")
-    parser.add_argument("--enable-server-perf", action="store_true")
-    args = parser.parse_args()
+    args = _build_parser().parse_args()
 
     perf_run_id = f"trial_{uuid.uuid4().hex[:12]}"
     output_dir = Path(args.output_dir).expanduser() if args.output_dir else resolve_chattree_home() / "perf" / "runs" / perf_run_id
