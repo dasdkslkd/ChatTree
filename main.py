@@ -11,7 +11,7 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 # ---------- 导入路由 ----------
-from backend.api.router import api_v1_router, legacy_router
+from backend.api.router import api_v1_router
 
 # ---------- 导入核心 ----------
 from backend.core.chat.chat_manager import ChatManager
@@ -233,7 +233,6 @@ async def shutdown_event():
         await tool_manager.close()
 
 # ---------- 注册路由 ----------
-app.include_router(legacy_router)
 app.include_router(api_v1_router)
 
 if __name__ == "__main__":

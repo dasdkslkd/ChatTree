@@ -117,7 +117,7 @@ def test_tool_result_route_reads_paginated_content_and_returns_404(tmp_path):
     try:
         client = TestClient(app)
 
-        response = client.get(f"/tool-results/{record['id']}")
+        response = client.get(f"/api/v1/tool-results/{record['id']}")
         assert response.status_code == 200
         assert response.json() == {
             "tool_result_id": record["id"],
@@ -130,12 +130,14 @@ def test_tool_result_route_reads_paginated_content_and_returns_404(tmp_path):
             "content": "0123456789" * 1600,
         }
 
-        api_response = client.get(f"/api/tool-results/{record['id']}?offset=16000&limit=5")
+        api_response = client.get(
+            f"/api/v1/tool-results/{record['id']}?offset=16000&limit=5"
+        )
         assert api_response.status_code == 200
         assert api_response.json()["content"] == "01234"
         assert api_response.json()["next_offset"] == 16005
 
-        missing_response = client.get("/tool-results/missing")
+        missing_response = client.get("/api/v1/tool-results/missing")
         assert missing_response.status_code == 404
     finally:
         if had_tool_manager:
@@ -167,7 +169,7 @@ def test_tool_result_route_respects_tool_manager_dependency_override(tmp_path):
     try:
         client = TestClient(app)
 
-        response = client.get(f"/tool-results/{record['id']}")
+        response = client.get(f"/api/v1/tool-results/{record['id']}")
 
         assert response.status_code == 200
         assert response.json()["content"] == "override content"

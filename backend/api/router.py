@@ -42,23 +42,11 @@ _BUSINESS_ROUTERS = (
     (workflows.router, ["Workflow"]),
 )
 
-_LEGACY_COMPAT_ROUTERS = (
-    (config.legacy_router, ["配置"]),
-    (tool_results.legacy_router, ["工具结果"]),
-)
-
-
 def _build_business_router() -> APIRouter:
     router = APIRouter()
     for child_router, tags in _BUSINESS_ROUTERS:
         router.include_router(child_router, tags=tags)
     return router
-
-
-legacy_router = APIRouter()
-for child_router, tags in _LEGACY_COMPAT_ROUTERS:
-    legacy_router.include_router(child_router, tags=tags)
-legacy_router.include_router(_build_business_router())
 
 api_v1_router = APIRouter(prefix="/api/v1")
 api_v1_router.include_router(server_routes.router, tags=["Server"])

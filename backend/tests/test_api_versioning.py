@@ -1,68 +1,49 @@
-from fastapi import APIRouter, FastAPI
 from fastapi.routing import APIRoute
 
-from backend.api.router import api_v1_router, legacy_router
+from backend.api.router import api_v1_router
+from main import app
 
 
-SERVER_ONLY_SIGNATURES = {
-    ("/api/v1/health", "GET"),
-    ("/api/v1/handshake", "GET"),
-}
-LEGACY_ONLY_SIGNATURES = {
-    ("/health", "GET"),
-    ("/api/tool-results/{tool_result_id}", "GET"),
-}
-
-
-def _signatures(router: APIRouter) -> set[tuple[str, str]]:
-    return {
-        (route.path, method)
+def _api_routes(router):
+    return [
+        route
         for route in router.routes
         if isinstance(route, APIRoute)
+    ]
+
+
+def test_every_production_business_route_is_under_api_v1():
+    paths = {route.path for route in _api_routes(app.router)}
+
+    assert paths
+    assert all(path.startswith("/api/v1/") for path in paths)
+    assert not any(path.startswith("/api/v1/api/") for path in paths)
+    assert "/api/v1/health" in paths
+    assert "/api/v1/handshake" in paths
+    assert "/api/v1/conversations" in paths
+
+
+def test_api_v1_health_has_one_handler():
+    matches = [
+        route
+        for route in _api_routes(api_v1_router)
+        if route.path == "/api/v1/health" and "GET" in route.methods
+    ]
+    assert len(matches) == 1
+
+
+def test_api_v1_path_method_signatures_are_unique():
+    signatures = [
+        (route.path, method)
+        for route in _api_routes(app.router)
         for method in route.methods
         if method not in {"HEAD", "OPTIONS"}
-    }
+    ]
+
+    assert len(signatures) == len(set(signatures))
 
 
-def test_legacy_compatibility_is_not_mirrored_into_v1():
-    legacy = _signatures(legacy_router)
-    v1 = _signatures(api_v1_router)
-
-    assert LEGACY_ONLY_SIGNATURES <= legacy
-    assert ("/api/v1/api/tool-results/{tool_result_id}", "GET") not in v1
-    assert sum(
-        1
-        for route in api_v1_router.routes
-        if isinstance(route, APIRoute)
-        and route.path == "/api/v1/health"
-        and "GET" in route.methods
-    ) == 1
-
-
-def test_every_canonical_legacy_business_route_has_v1_mirror():
-    legacy_business = _signatures(legacy_router) - LEGACY_ONLY_SIGNATURES
-    v1_business = _signatures(api_v1_router) - SERVER_ONLY_SIGNATURES
-
-    assert legacy_business
-    assert v1_business == {
-        (f"/api/v1{path}", method)
-        for path, method in legacy_business
-    }
-
-
-def test_handshake_is_v1_only():
-    legacy_paths = {path for path, _ in _signatures(legacy_router)}
-    v1_paths = {path for path, _ in _signatures(api_v1_router)}
-
-    assert "/handshake" not in legacy_paths
-    assert {path for path, _ in SERVER_ONLY_SIGNATURES} <= v1_paths
-
-
-def test_dual_routes_have_unique_openapi_operation_ids():
-    app = FastAPI()
-    app.include_router(legacy_router)
-    app.include_router(api_v1_router)
-
+def test_api_v1_openapi_operation_ids_are_unique():
     operation_ids = [
         operation["operationId"]
         for path_item in app.openapi()["paths"].values()
