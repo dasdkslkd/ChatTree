@@ -86,10 +86,12 @@ def _handshake(
 class FakeProcess:
     def __init__(self, return_codes: list[int | None] | None = None) -> None:
         self._return_codes = list(return_codes or [None])
+        self.poll_calls = 0
         self.terminate_calls = 0
         self.kill_calls = 0
 
     def poll(self):
+        self.poll_calls += 1
         if len(self._return_codes) > 1:
             return self._return_codes.pop(0)
         return self._return_codes[0]
@@ -210,6 +212,30 @@ def test_connection_refusal_spawns_detached_production_server(tmp_path: Path):
     assert phases == ["health", "local_start", "health", "handshake"]
     assert process.terminate_calls == 0
     assert process.kill_calls == 0
+
+
+def test_loopback_connect_timeout_still_starts_server(tmp_path: Path):
+    requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        if requests == 1:
+            raise httpx.ConnectTimeout("timed out", request=request)
+        return _health() if request.url.path.endswith("/health") else _handshake()
+
+    popen = FakePopen()
+    connector = LocalServerConnector(
+        _settings(tmp_path),
+        transport=httpx.MockTransport(handler),
+        popen_factory=popen,
+    )
+
+    connected = asyncio.run(connector.connect(_profile(tmp_path), None))
+    asyncio.run(connector.close())
+
+    assert connected.server_instance_id == SERVER_ID
+    assert len(popen.calls) == 1
 
 
 def test_handshake_connection_error_never_spawns(tmp_path: Path):
@@ -398,3 +424,34 @@ def test_start_timeout_does_not_kill_server(tmp_path: Path):
 
     assert process.terminate_calls == 0
     assert process.kill_calls == 0
+
+
+def test_spawned_server_exit_is_reaped_without_termination(tmp_path: Path):
+    async def scenario() -> None:
+        requests = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal requests
+            requests += 1
+            if requests == 1:
+                raise httpx.ConnectError("refused", request=request)
+            return _health() if request.url.path.endswith("/health") else _handshake()
+
+        process = FakeProcess([None])
+        connector = LocalServerConnector(
+            _settings(tmp_path),
+            transport=httpx.MockTransport(handler),
+            popen_factory=FakePopen(process),
+            reaper_interval_seconds=0.001,
+        )
+
+        await connector.connect(_profile(tmp_path), None)
+        process._return_codes = [0]
+        await asyncio.sleep(0.02)
+        await connector.close()
+
+        assert process.poll_calls > 0
+        assert process.terminate_calls == 0
+        assert process.kill_calls == 0
+
+    asyncio.run(scenario())

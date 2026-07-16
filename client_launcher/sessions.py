@@ -96,6 +96,9 @@ class SessionManager:
             if current.status == "ready":
                 return replace(current)
             task = self._connect_tasks.get(profile_id)
+            if task is not None and task.done():
+                self._connect_tasks.pop(profile_id, None)
+                task = None
             if task is None:
                 generation = self._attempt_generation.get(profile_id, 0) + 1
                 self._attempt_generation[profile_id] = generation
@@ -133,7 +136,7 @@ class SessionManager:
             self._attempt_generation[profile_id] = (
                 self._attempt_generation.get(profile_id, 0) + 1
             )
-            task = self._connect_tasks.get(profile_id)
+            task = self._connect_tasks.pop(profile_id, None)
             if task is not None and not task.done():
                 task.cancel()
             session.status = "disconnected"

@@ -97,7 +97,7 @@ class LocalServerStartTimeoutError(LocalServerError):
 
 
 class _EndpointUnavailable(Exception):
-    def __init__(self, phase: str, cause: httpx.ConnectError) -> None:
+    def __init__(self, phase: str, cause: httpx.RequestError) -> None:
         super().__init__(str(cause))
         self.phase = phase
         self.cause = cause
@@ -113,12 +113,16 @@ class LocalServerConnector:
         platform_name: str = os.name,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Sleep = asyncio.sleep,
+        reaper_interval_seconds: float = 1.0,
     ) -> None:
+        if reaper_interval_seconds <= 0:
+            raise ValueError("reaper_interval_seconds must be positive")
         self._settings = settings
         self._popen_factory = popen_factory
         self._platform_name = platform_name
         self._monotonic = monotonic
         self._sleep = sleep
+        self._reaper_interval_seconds = reaper_interval_seconds
         self._client = httpx.AsyncClient(
             transport=transport,
             timeout=httpx.Timeout(float(settings.connect_timeout_seconds)),
@@ -126,6 +130,8 @@ class LocalServerConnector:
             follow_redirects=False,
         )
         self._locks: dict[str, asyncio.Lock] = {}
+        self._spawned_processes: set[subprocess.Popen[Any]] = set()
+        self._reaper_task: asyncio.Task[None] | None = None
 
     async def connect(
         self,
@@ -145,6 +151,7 @@ class LocalServerConnector:
 
             await self._emit_phase(phase_callback, "local_start")
             process, log_path = self._spawn(profile, server_home, port)
+            self._track_process(process)
             return await self._wait_for_ready(
                 endpoint,
                 profile,
@@ -154,7 +161,33 @@ class LocalServerConnector:
             )
 
     async def close(self) -> None:
+        reaper = self._reaper_task
+        self._reaper_task = None
+        if reaper is not None and not reaper.done():
+            reaper.cancel()
+            await asyncio.gather(reaper, return_exceptions=True)
+        self._poll_spawned_processes()
+        self._spawned_processes.clear()
         await self._client.aclose()
+
+    def _track_process(self, process: subprocess.Popen[Any]) -> None:
+        self._spawned_processes.add(process)
+        if self._reaper_task is None or self._reaper_task.done():
+            self._reaper_task = asyncio.create_task(self._reap_spawned_processes())
+
+    async def _reap_spawned_processes(self) -> None:
+        try:
+            while self._spawned_processes:
+                self._poll_spawned_processes()
+                if self._spawned_processes:
+                    await asyncio.sleep(self._reaper_interval_seconds)
+        except asyncio.CancelledError:
+            return
+
+    def _poll_spawned_processes(self) -> None:
+        for process in tuple(self._spawned_processes):
+            if process.poll() is not None:
+                self._spawned_processes.discard(process)
 
     def _connection_target(
         self,
@@ -239,7 +272,7 @@ class LocalServerConnector:
     ) -> Mapping[str, Any]:
         try:
             response = await self._client.get(f"{endpoint}{path}")
-        except httpx.ConnectError as exc:
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
             raise _EndpointUnavailable(phase, exc) from exc
         except httpx.HTTPError as exc:
             raise LocalServerResponseError(

@@ -116,6 +116,29 @@ def test_disconnect_blocks_late_ready_and_binding(tmp_path):
     asyncio.run(_disconnect_blocks_late_ready_case(tmp_path))
 
 
+async def _disconnect_before_inner_task_starts_allows_reconnect_case(tmp_path):
+    store = _store(tmp_path)
+    connector = FakeConnector()
+    manager = SessionManager(store, connector)
+
+    connect_task = asyncio.create_task(manager.connect("local"))
+    await asyncio.sleep(0)
+    await manager.disconnect("local")
+    with pytest.raises(LauncherError) as exc_info:
+        await connect_task
+    assert exc_info.value.code == "connection_cancelled"
+
+    connector.release.set()
+    reconnected = await manager.connect("local")
+
+    assert reconnected.status == "ready"
+    assert reconnected.connection_epoch == 1
+
+
+def test_disconnect_before_inner_task_starts_allows_reconnect(tmp_path):
+    asyncio.run(_disconnect_before_inner_task_starts_allows_reconnect_case(tmp_path))
+
+
 async def _identity_change_requires_explicit_rebind_case(tmp_path):
     store = _store(tmp_path)
     connector = FakeConnector(SERVER_A)
