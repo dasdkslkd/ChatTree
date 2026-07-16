@@ -7,6 +7,7 @@ from backend.core.persistence.database import SQLitePersistence
 
 
 REQUIRED_TABLES = {
+    "server_metadata",
     "blobs",
     "conversations",
     "nodes",

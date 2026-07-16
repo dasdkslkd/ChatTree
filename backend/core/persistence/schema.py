@@ -2,6 +2,12 @@ from __future__ import annotations
 
 
 SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS server_metadata (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS blobs (
   id TEXT PRIMARY KEY,
   path TEXT NOT NULL,
