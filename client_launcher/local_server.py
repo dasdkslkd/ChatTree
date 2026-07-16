@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import os
 import re
+import socket
 import subprocess
 import time
 import uuid
@@ -28,6 +29,17 @@ _WINDOWS_CREATE_NEW_PROCESS_GROUP = 0x00000200
 
 PhaseCallback = Callable[[str], object]
 Sleep = Callable[[float], Awaitable[None]]
+
+
+def _loopback_port_is_available(port: int) -> bool:
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind(("127.0.0.1", port))
+    except OSError:
+        return False
+    finally:
+        probe.close()
+    return True
 
 
 @dataclass(frozen=True)
@@ -114,6 +126,7 @@ class LocalServerConnector:
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Sleep = asyncio.sleep,
         reaper_interval_seconds: float = 1.0,
+        port_available: Callable[[int], bool] = _loopback_port_is_available,
     ) -> None:
         if reaper_interval_seconds <= 0:
             raise ValueError("reaper_interval_seconds must be positive")
@@ -123,6 +136,7 @@ class LocalServerConnector:
         self._monotonic = monotonic
         self._sleep = sleep
         self._reaper_interval_seconds = reaper_interval_seconds
+        self._port_available = port_available
         self._client = httpx.AsyncClient(
             transport=transport,
             timeout=httpx.Timeout(float(settings.connect_timeout_seconds)),
@@ -147,6 +161,10 @@ class LocalServerConnector:
                 return await self._probe(endpoint, profile, phase_callback)
             except _EndpointUnavailable as exc:
                 if exc.phase != "health":
+                    raise self._transport_error(endpoint, exc) from exc.cause
+                if isinstance(exc.cause, httpx.ConnectTimeout) and not self._port_available(
+                    port
+                ):
                     raise self._transport_error(endpoint, exc) from exc.cause
 
             await self._emit_phase(phase_callback, "local_start")

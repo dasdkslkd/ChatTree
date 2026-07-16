@@ -229,6 +229,7 @@ def test_loopback_connect_timeout_still_starts_server(tmp_path: Path):
         _settings(tmp_path),
         transport=httpx.MockTransport(handler),
         popen_factory=popen,
+        port_available=lambda _port: True,
     )
 
     connected = asyncio.run(connector.connect(_profile(tmp_path), None))
@@ -236,6 +237,25 @@ def test_loopback_connect_timeout_still_starts_server(tmp_path: Path):
 
     assert connected.server_instance_id == SERVER_ID
     assert len(popen.calls) == 1
+
+
+def test_connect_timeout_on_occupied_port_never_spawns(tmp_path: Path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("timed out", request=request)
+
+    popen = FakePopen()
+    connector = LocalServerConnector(
+        _settings(tmp_path),
+        transport=httpx.MockTransport(handler),
+        popen_factory=popen,
+        port_available=lambda _port: False,
+    )
+
+    with pytest.raises(LocalServerResponseError):
+        asyncio.run(connector.connect(_profile(tmp_path), None))
+    asyncio.run(connector.close())
+
+    assert popen.calls == []
 
 
 def test_handshake_connection_error_never_spawns(tmp_path: Path):
