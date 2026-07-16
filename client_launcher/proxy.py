@@ -297,6 +297,10 @@ def _request_headers(
     headers.append((b"host", target_url.netloc))
     if body or request.method.upper() in _CONTENT_LENGTH_METHODS:
         headers.append((b"content-length", str(len(body)).encode("ascii")))
+    if not any(name.lower() == b"x-request-id" for name, _value in headers):
+        request_id = getattr(request.state, "request_id", None)
+        if isinstance(request_id, str) and request_id.isascii():
+            headers.append((b"x-request-id", request_id.encode("ascii")))
     return headers
 
 
