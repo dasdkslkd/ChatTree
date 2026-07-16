@@ -192,9 +192,7 @@ class LocalServerConnector:
             except _EndpointUnavailable as exc:
                 if exc.phase != "health":
                     raise self._transport_error(endpoint, exc) from exc.cause
-                if isinstance(exc.cause, httpx.ConnectTimeout) and not self._port_available(
-                    port
-                ):
+                if not self._port_available(port):
                     raise self._transport_error(endpoint, exc) from exc.cause
 
             await self._emit_phase(phase_callback, "local_start")

@@ -249,9 +249,13 @@ def test_loopback_connect_timeout_still_starts_server(tmp_path: Path):
     assert len(popen.calls) == 1
 
 
-def test_connect_timeout_on_occupied_port_never_spawns(tmp_path: Path):
+@pytest.mark.parametrize("error_type", [httpx.ConnectError, httpx.ConnectTimeout])
+def test_unavailable_health_on_occupied_port_never_spawns(
+    tmp_path: Path,
+    error_type,
+):
     def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectTimeout("timed out", request=request)
+        raise error_type("unavailable", request=request)
 
     popen = FakePopen()
     connector = LocalServerConnector(
