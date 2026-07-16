@@ -20,7 +20,6 @@ from client_launcher.proxy import ProxyError, create_proxy_router
 from client_launcher.sessions import SessionManager
 from client_launcher.settings import (
     DEFAULT_LOCAL_PROFILE_ID,
-    DEFAULT_LOCAL_SERVER_PORT,
     PROFILES_FILENAME,
     LauncherSettings,
 )
@@ -31,7 +30,6 @@ class CreateProfileRequest(BaseModel):
     auto_connect: bool = False
     server_home: str = Field(min_length=1)
     server_port: int = Field(
-        default=DEFAULT_LOCAL_SERVER_PORT,
         ge=1,
         le=65535,
     )

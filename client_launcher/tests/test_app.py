@@ -112,6 +112,32 @@ def test_profile_crud_and_stable_error_envelope(tmp_path: Path):
         assert store.list() == (store.get("local"),)
 
 
+def test_create_profile_requires_explicit_unique_server_port(tmp_path: Path):
+    app, _, _ = _app(tmp_path)
+
+    with TestClient(app) as client:
+        missing_port = client.post(
+            "/client/v1/profiles",
+            json={
+                "label": "Work",
+                "server_home": str(tmp_path / "work-server"),
+            },
+        )
+        duplicate_port = client.post(
+            "/client/v1/profiles",
+            json={
+                "label": "Work",
+                "server_home": str(tmp_path / "work-server"),
+                "server_port": 8001,
+            },
+        )
+
+    assert missing_port.status_code == 422
+    assert missing_port.json()["error"]["code"] == "invalid_request"
+    assert duplicate_port.status_code == 409
+    assert duplicate_port.json()["error"]["code"] == "profile_port_duplicate"
+
+
 def test_connect_disconnect_and_endpoint_change_reset_session(tmp_path: Path):
     app, store, connector = _app(tmp_path)
 
