@@ -205,6 +205,38 @@ def test_proxy_forwards_launcher_generated_request_id() -> None:
     _run(scenario())
 
 
+def test_proxy_replaces_incoming_request_id_with_launcher_canonical_id() -> None:
+    async def scenario() -> None:
+        seen_request_ids: list[str] = []
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            seen_request_ids.extend(request.headers.get_list("x-request-id"))
+            return httpx.Response(204)
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        handler = ProxyHandler(
+            lambda _profile_id: "http://upstream.test",
+            http_client=client,
+        )
+        request = _request(
+            "GET",
+            "/p/local/api/v1/health",
+            headers=((b"x-request-id", b"invalid-or-overlong"),),
+        )
+        request.state.request_id = "req-canonical"
+        response = await handler(request, "local", "health")
+        iterator = response.body_iterator.__aiter__()
+        with pytest.raises(StopAsyncIteration):
+            await anext(iterator)
+        if response.background is not None:
+            await response.background()
+
+        await client.aclose()
+        assert seen_request_ids == ["req-canonical"]
+
+    _run(scenario())
+
+
 def test_proxy_enforces_body_limit_while_reading_chunked_body() -> None:
     async def scenario() -> None:
         calls = 0

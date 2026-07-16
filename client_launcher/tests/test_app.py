@@ -231,6 +231,14 @@ def test_rebind_requires_confirmed_instance_id(tmp_path: Path):
         changed = client.post("/client/v1/profiles/local/connect")
         assert changed.status_code == 409
         assert changed.json()["error"]["code"] == "server_identity_changed"
+        observed_instance_id = changed.json()["error"]["details"][
+            "observed_server_instance_id"
+        ]
+        assert observed_instance_id == connector.instance_id
+        status = client.get("/client/v1/profiles/local/status").json()
+        assert status["error"]["details"]["observed_server_instance_id"] == (
+            observed_instance_id
+        )
 
         missing_confirmation = client.post(
             "/client/v1/profiles/local/connect",
@@ -243,11 +251,74 @@ def test_rebind_requires_confirmed_instance_id(tmp_path: Path):
             "/client/v1/profiles/local/connect",
             json={
                 "rebind": True,
-                "expected_server_instance_id": connector.instance_id,
+                "expected_server_instance_id": observed_instance_id,
             },
         )
         assert rebound.status_code == 200
-        assert rebound.json()["server_instance_id"] == connector.instance_id
+        assert rebound.json()["server_instance_id"] == observed_instance_id
+
+
+def test_duplicate_instance_connect_rolls_back_unbound_profile(tmp_path: Path):
+    app, _, _ = _app(tmp_path)
+
+    with TestClient(app) as client:
+        assert client.post("/client/v1/profiles/local/connect").status_code == 200
+        created = client.post(
+            "/client/v1/profiles",
+            json={
+                "label": "Duplicate Instance",
+                "server_home": str(tmp_path / "other-server"),
+                "server_port": 18101,
+            },
+        )
+        profile_id = created.json()["id"]
+
+        duplicate = client.post(f"/client/v1/profiles/{profile_id}/connect")
+        profiles = client.get("/client/v1/profiles").json()
+
+    assert duplicate.status_code == 409
+    assert duplicate.json()["error"]["code"] == "server_instance_already_bound"
+    assert duplicate.json()["error"]["details"] == {
+        "existing_profile_id": "local",
+        "observed_server_instance_id": SERVER_A,
+        "unbound_profile_removed": True,
+    }
+    assert [profile["id"] for profile in profiles] == ["local"]
+
+
+def test_profile_write_failure_uses_launcher_error_envelope(
+    tmp_path: Path,
+    monkeypatch,
+):
+    app, store, _ = _app(tmp_path)
+    before = store.list()
+
+    def fail_write(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("client_launcher.profiles.atomic_write_json", fail_write)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(
+            "/client/v1/profiles",
+            headers={"X-Request-ID": "req-write-failed"},
+            json={
+                "label": "Work",
+                "server_home": str(tmp_path / "write-failed-server"),
+                "server_port": 18101,
+            },
+        )
+
+    assert response.status_code == 500
+    assert response.headers["X-Request-ID"] == "req-write-failed"
+    assert response.json() == {
+        "error": {
+            "code": "profiles_write_failed",
+            "message": response.json()["error"]["message"],
+            "retryable": True,
+            "request_id": "req-write-failed",
+        }
+    }
+    assert store.list() == before
 
 
 def test_origin_and_validation_are_rejected_with_launcher_errors(tmp_path: Path):
@@ -275,6 +346,32 @@ def test_origin_and_validation_are_rejected_with_launcher_errors(tmp_path: Path)
         assert invalid.status_code == 422
         assert invalid.json()["error"]["code"] == "invalid_request"
         assert invalid.json()["error"]["request_id"].startswith("req_")
+
+
+def test_profile_requests_reject_coercion_and_unknown_fields(tmp_path: Path):
+    app, _, _ = _app(tmp_path)
+
+    with TestClient(app) as client:
+        boolean_port = client.post(
+            "/client/v1/profiles",
+            json={
+                "label": "Boolean Port",
+                "server_home": str(tmp_path / "boolean-port"),
+                "server_port": True,
+            },
+        )
+        binding_injection = client.patch(
+            "/client/v1/profiles/local",
+            json={"bound_server_instance_id": SERVER_A},
+        )
+        coerced_rebind = client.post(
+            "/client/v1/profiles/local/connect",
+            json={"rebind": 1, "expected_server_instance_id": SERVER_A},
+        )
+
+    for response in (boolean_port, binding_injection, coerced_rebind):
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "invalid_request"
 
 
 def test_default_profile_cannot_be_deleted(tmp_path: Path):

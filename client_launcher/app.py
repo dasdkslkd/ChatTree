@@ -9,7 +9,7 @@ import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import JSONResponse
 
@@ -19,13 +19,16 @@ from client_launcher.profiles import ProfileStore
 from client_launcher.proxy import ProxyError, create_proxy_router
 from client_launcher.sessions import SessionManager
 from client_launcher.settings import (
-    DEFAULT_LOCAL_PROFILE_ID,
     PROFILES_FILENAME,
     LauncherSettings,
 )
 
 
-class CreateProfileRequest(BaseModel):
+class StrictRequestModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+
+class CreateProfileRequest(StrictRequestModel):
     label: str = Field(min_length=1, max_length=120)
     auto_connect: bool = False
     server_home: str = Field(min_length=1)
@@ -35,14 +38,14 @@ class CreateProfileRequest(BaseModel):
     )
 
 
-class UpdateProfileRequest(BaseModel):
+class UpdateProfileRequest(StrictRequestModel):
     label: str | None = Field(default=None, min_length=1, max_length=120)
     auto_connect: bool | None = None
     server_home: str | None = Field(default=None, min_length=1)
     server_port: int | None = Field(default=None, ge=1, le=65535)
 
 
-class ConnectProfileRequest(BaseModel):
+class ConnectProfileRequest(StrictRequestModel):
     rebind: bool = False
     expected_server_instance_id: str | None = None
 
@@ -138,6 +141,7 @@ def create_app(
             message=exc.message,
             retryable=exc.retryable,
             status_code=exc.status_code,
+            details=exc.details,
         )
 
     @app.exception_handler(ProxyError)
@@ -257,11 +261,7 @@ def create_app(
 
     @app.delete("/client/v1/profiles/{profile_id}", status_code=204)
     async def delete_profile(profile_id: str) -> Response:
-        if profile_id == DEFAULT_LOCAL_PROFILE_ID:
-            profile_store.delete(profile_id)
-        profile_store.get(profile_id)
-        await sessions.disconnect(profile_id)
-        profile_store.delete(profile_id)
+        await sessions.delete_profile(profile_id)
         return Response(status_code=204)
 
     @app.post("/client/v1/profiles/{profile_id}/connect")
@@ -305,16 +305,18 @@ def _error_response(
     message: str,
     retryable: bool,
     status_code: int,
+    details: dict[str, Any] | None = None,
 ) -> JSONResponse:
     request_id = getattr(request.state, "request_id", f"req_{uuid4().hex}")
+    error: dict[str, Any] = {
+        "code": code,
+        "message": message,
+        "retryable": retryable,
+        "request_id": request_id,
+    }
+    if details:
+        error["details"] = details
     return JSONResponse(
         status_code=status_code,
-        content={
-            "error": {
-                "code": code,
-                "message": message,
-                "retryable": retryable,
-                "request_id": request_id,
-            }
-        },
+        content={"error": error},
     )

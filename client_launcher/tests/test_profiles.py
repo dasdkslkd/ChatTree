@@ -442,9 +442,12 @@ def test_failed_atomic_write_preserves_disk_and_memory(
         raise OSError("disk full")
 
     monkeypatch.setattr("client_launcher.profiles.atomic_write_json", fail_write)
-    with pytest.raises(OSError, match="disk full"):
+    with pytest.raises(LauncherError) as exc_info:
         store.create(_profile("work", tmp_path / "work"))
 
+    assert exc_info.value.code == "profiles_write_failed"
+    assert exc_info.value.retryable is True
+    assert isinstance(exc_info.value.__cause__, OSError)
     assert store.list() == before_profiles
     assert path.read_bytes() == before_bytes
 

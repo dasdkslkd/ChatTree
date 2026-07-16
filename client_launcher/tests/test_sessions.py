@@ -3,7 +3,7 @@ import asyncio
 import pytest
 
 from client_launcher.local_server import ConnectedServer
-from client_launcher.models import LauncherError
+from client_launcher.models import LauncherError, LocalTarget, ServerProfile
 from client_launcher.profiles import ProfileStore
 from client_launcher.sessions import SessionManager
 
@@ -252,6 +252,45 @@ async def _auto_connect_start_then_immediate_disconnect_case(tmp_path):
 
 def test_auto_connect_start_then_immediate_disconnect_stays_disconnected(tmp_path):
     asyncio.run(_auto_connect_start_then_immediate_disconnect_case(tmp_path))
+
+
+async def _delete_profile_serializes_against_connect_case(tmp_path):
+    store = _store(tmp_path)
+    store.create(
+        ServerProfile(
+            id="work",
+            label="Work",
+            kind="local",
+            auto_connect=False,
+            bound_server_instance_id=None,
+            local=LocalTarget(str(tmp_path / "work-server"), 8100),
+        )
+    )
+    connector = FakeConnector()
+    manager = SessionManager(store, connector)
+
+    first_connect = asyncio.create_task(manager.connect("work"))
+    await connector.started.wait()
+    delete_task = asyncio.create_task(manager.delete_profile("work"))
+    await asyncio.sleep(0)
+    late_connect = asyncio.create_task(manager.connect("work"))
+    connector.release.set()
+
+    deleted = await delete_task
+    with pytest.raises(LauncherError) as first_error:
+        await first_connect
+    with pytest.raises(LauncherError) as late_error:
+        await late_connect
+
+    assert deleted.id == "work"
+    assert first_error.value.code == "connection_cancelled"
+    assert late_error.value.code == "profile_not_found"
+    assert connector.calls == 1
+    assert [profile.id for profile in store.list()] == ["local"]
+
+
+def test_delete_profile_serializes_against_connect(tmp_path):
+    asyncio.run(_delete_profile_serializes_against_connect_case(tmp_path))
 
 
 async def _identity_change_requires_explicit_rebind_case(tmp_path):

@@ -305,17 +305,27 @@ def _request_headers(
     target_url: httpx.URL,
     body: bytes,
 ) -> list[RawHeader]:
+    request_id = getattr(request.state, "request_id", None)
+    canonical_request_id = (
+        request_id
+        if isinstance(request_id, str)
+        and request_id
+        and len(request_id) <= 128
+        and request_id.isascii()
+        else None
+    )
+    excluded = {b"content-length", b"host"}
+    if canonical_request_id is not None:
+        excluded.add(b"x-request-id")
     headers = _filtered_headers(
         request.scope.get("headers", ()),
-        extra_excluded={b"content-length", b"host"},
+        extra_excluded=excluded,
     )
     headers.append((b"host", target_url.netloc))
     if body or request.method.upper() in _CONTENT_LENGTH_METHODS:
         headers.append((b"content-length", str(len(body)).encode("ascii")))
-    if not any(name.lower() == b"x-request-id" for name, _value in headers):
-        request_id = getattr(request.state, "request_id", None)
-        if isinstance(request_id, str) and request_id.isascii():
-            headers.append((b"x-request-id", request_id.encode("ascii")))
+    if canonical_request_id is not None:
+        headers.append((b"x-request-id", canonical_request_id.encode("ascii")))
     return headers
 
 

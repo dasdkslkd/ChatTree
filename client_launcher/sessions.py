@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
 
@@ -13,6 +14,7 @@ from client_launcher.models import (
     ServerSession,
 )
 from client_launcher.profiles import ProfileStore
+from client_launcher.settings import DEFAULT_LOCAL_PROFILE_ID
 
 
 class SessionManager:
@@ -81,6 +83,7 @@ class SessionManager:
             code=error.code,
             message=error.message,
             retryable=error.retryable,
+            details=error.details or None,
         )
         self._endpoints.pop(profile_id, None)
         return True
@@ -168,6 +171,14 @@ class SessionManager:
                         "Connected Server does not match the confirmed instance ID",
                         retryable=False,
                         status_code=409,
+                        details={
+                            "expected_server_instance_id": (
+                                expected_server_instance_id
+                            ),
+                            "observed_server_instance_id": (
+                                current.server_instance_id
+                            ),
+                        },
                     )
                 return replace(current)
             task = self._connect_tasks.get(profile_id)
@@ -235,6 +246,17 @@ class SessionManager:
         if task is not None:
             await asyncio.gather(task, return_exceptions=True)
         return updated
+
+    async def delete_profile(self, profile_id: str) -> ServerProfile:
+        task: asyncio.Task[ServerSession] | None
+        async with self._guard:
+            deleted = self.profiles.delete(profile_id)
+            _, task = self._disconnect_locked(profile_id)
+            self._sessions.pop(profile_id, None)
+
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
+        return deleted
 
     def _disconnect_locked(
         self,
@@ -304,16 +326,44 @@ class SessionManager:
                             "Connected Server does not match the confirmed instance ID",
                             retryable=False,
                             status_code=409,
+                            details={
+                                "expected_server_instance_id": (
+                                    expected_server_instance_id
+                                ),
+                                "observed_server_instance_id": (
+                                    connected.server_instance_id
+                                ),
+                            },
                         )
                     bound_profile = self.profiles.rebind(
                         profile_id,
                         connected.server_instance_id,
                     )
                 else:
-                    bound_profile = self.profiles.bind(
-                        profile_id,
-                        connected.server_instance_id,
-                    )
+                    try:
+                        bound_profile = self.profiles.bind(
+                            profile_id,
+                            connected.server_instance_id,
+                        )
+                    except LauncherError as exc:
+                        if exc.code != "server_instance_already_bound":
+                            raise
+                        current_profile = self.profiles.get(profile_id)
+                        if (
+                            current_profile.id == DEFAULT_LOCAL_PROFILE_ID
+                            or current_profile.bound_server_instance_id is not None
+                        ):
+                            raise
+                        self.profiles.delete(profile_id)
+                        details = dict(exc.details)
+                        details["unbound_profile_removed"] = True
+                        raise LauncherError(
+                            exc.code,
+                            exc.message,
+                            exc.retryable,
+                            exc.status_code,
+                            details=details,
+                        ) from exc
 
                 session = self._session(profile_id)
                 session.status = "ready"
@@ -329,14 +379,22 @@ class SessionManager:
             error = self._launcher_error(exc)
             async with self._guard:
                 if self._attempt_generation.get(profile_id) == generation:
-                    session = self._session(profile_id)
-                    session.status = "error"
-                    session.error = ConnectionErrorInfo(
-                        code=error.code,
-                        message=error.message,
-                        retryable=error.retryable,
-                    )
-                    session.server_instance_id = None
+                    try:
+                        self.profiles.get(profile_id)
+                    except LauncherError as profile_error:
+                        if profile_error.code != "profile_not_found":
+                            raise
+                        self._sessions.pop(profile_id, None)
+                    else:
+                        session = self._session(profile_id)
+                        session.status = "error"
+                        session.error = ConnectionErrorInfo(
+                            code=error.code,
+                            message=error.message,
+                            retryable=error.retryable,
+                            details=error.details or None,
+                        )
+                        session.server_instance_id = None
                     self._endpoints.pop(profile_id, None)
             raise error from exc
         finally:
@@ -350,11 +408,14 @@ class SessionManager:
     def _launcher_error(exc: BaseException) -> LauncherError:
         if isinstance(exc, LauncherError):
             return exc
+        raw_details = getattr(exc, "details", None)
+        details = raw_details if isinstance(raw_details, Mapping) else None
         return LauncherError(
             str(getattr(exc, "code", "server_connection_failed")),
             str(getattr(exc, "message", str(exc) or "Server connection failed")),
             retryable=bool(getattr(exc, "retryable", True)),
             status_code=int(getattr(exc, "status_code", 502)),
+            details=details,
         )
 
     def _background_done(self, task: asyncio.Task[object]) -> None:

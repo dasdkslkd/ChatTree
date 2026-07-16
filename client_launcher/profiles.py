@@ -145,6 +145,12 @@ class ProfileStore:
                     "The profile is already bound to a different Server instance",
                     False,
                     409,
+                    details={
+                        "bound_server_instance_id": (
+                            current.bound_server_instance_id
+                        ),
+                        "observed_server_instance_id": instance_id,
+                    },
                 )
             return self._set_binding(current, instance_id)
 
@@ -171,6 +177,10 @@ class ProfileStore:
                     "The Server instance is already bound to another profile",
                     False,
                     409,
+                    details={
+                        "existing_profile_id": profile.id,
+                        "observed_server_instance_id": server_instance_id,
+                    },
                 )
         updated = ServerProfile(
             id=current.id,
@@ -229,7 +239,15 @@ class ProfileStore:
             "schema_version": PROFILES_SCHEMA_VERSION,
             "profiles": [profile.to_dict() for profile in profiles],
         }
-        atomic_write_json(str(self.path), document, fsync=True)
+        try:
+            atomic_write_json(str(self.path), document, fsync=True)
+        except OSError as exc:
+            raise LauncherError(
+                "profiles_write_failed",
+                f"Could not write profiles file: {self.path}",
+                True,
+                500,
+            ) from exc
 
     def _load(self) -> tuple[ServerProfile, ...]:
         try:

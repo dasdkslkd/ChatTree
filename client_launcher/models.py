@@ -17,12 +17,15 @@ class LauncherError(RuntimeError):
         message: str,
         retryable: bool,
         status_code: int = 400,
+        *,
+        details: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.retryable = retryable
         self.status_code = status_code
+        self.details = dict(details or {})
 
 
 def _require_exact_keys(
@@ -149,19 +152,27 @@ class ConnectionErrorInfo:
     code: str
     message: str
     retryable: bool
+    details: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         _required_string(self.code, "error code")
         _required_string(self.message, "error message")
         if not isinstance(self.retryable, bool):
             raise ValueError("retryable must be a boolean")
+        if self.details is not None:
+            if not isinstance(self.details, Mapping):
+                raise ValueError("error details must be an object")
+            object.__setattr__(self, "details", dict(self.details))
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "code": self.code,
             "message": self.message,
             "retryable": self.retryable,
         }
+        if self.details:
+            payload["details"] = dict(self.details)
+        return payload
 
 
 @dataclass(frozen=True)
