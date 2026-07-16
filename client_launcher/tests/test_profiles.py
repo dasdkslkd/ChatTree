@@ -102,6 +102,52 @@ def test_launcher_settings_from_env_has_local_defaults_and_typed_overrides(
     )
 
 
+@pytest.mark.parametrize(
+    ("name", "invalid_value"),
+    [
+        ("CHATTREE_CLIENT_CONNECT_TIMEOUT_SECONDS", "nan"),
+        ("CHATTREE_CLIENT_CONNECT_TIMEOUT_SECONDS", "inf"),
+        ("CHATTREE_CLIENT_CONNECT_TIMEOUT_SECONDS", "60.1"),
+        ("CHATTREE_CLIENT_START_TIMEOUT_SECONDS", "nan"),
+        ("CHATTREE_CLIENT_START_TIMEOUT_SECONDS", "inf"),
+        ("CHATTREE_CLIENT_START_TIMEOUT_SECONDS", "600.1"),
+        ("CHATTREE_CLIENT_POLL_INTERVAL_SECONDS", "nan"),
+        ("CHATTREE_CLIENT_POLL_INTERVAL_SECONDS", "inf"),
+        ("CHATTREE_CLIENT_POLL_INTERVAL_SECONDS", "10.1"),
+        ("CHATTREE_CLIENT_PROXY_IDLE_TIMEOUT_SECONDS", "nan"),
+        ("CHATTREE_CLIENT_PROXY_IDLE_TIMEOUT_SECONDS", "inf"),
+        ("CHATTREE_CLIENT_PROXY_IDLE_TIMEOUT_SECONDS", "3600.1"),
+    ],
+)
+def test_launcher_settings_reject_non_finite_or_excessive_float_timeouts(
+    tmp_path: Path,
+    name: str,
+    invalid_value: str,
+):
+    with pytest.raises(ValueError, match=name):
+        LauncherSettings.from_env(
+            project_root=tmp_path,
+            environ={name: invalid_value},
+        )
+
+
+def test_launcher_settings_accept_normal_float_timeouts(tmp_path: Path):
+    settings = LauncherSettings.from_env(
+        project_root=tmp_path,
+        environ={
+            "CHATTREE_CLIENT_CONNECT_TIMEOUT_SECONDS": "5.5",
+            "CHATTREE_CLIENT_START_TIMEOUT_SECONDS": "120",
+            "CHATTREE_CLIENT_POLL_INTERVAL_SECONDS": "1.5",
+            "CHATTREE_CLIENT_PROXY_IDLE_TIMEOUT_SECONDS": "900",
+        },
+    )
+
+    assert settings.connect_timeout_seconds == 5.5
+    assert settings.start_timeout_seconds == 120.0
+    assert settings.poll_interval_seconds == 1.5
+    assert settings.proxy_idle_timeout_seconds == 900.0
+
+
 def test_missing_store_seeds_and_persists_default_local_profile(tmp_path: Path):
     path = tmp_path / "profiles.json"
     server_home = tmp_path / "server-home"
@@ -200,6 +246,61 @@ def test_crud_normalizes_home_and_update_never_changes_binding(tmp_path: Path):
     assert exc_info.value.code == "profile_not_found"
 
 
+def test_create_rejects_local_port_owned_by_another_home(tmp_path: Path):
+    path = tmp_path / "profiles.json"
+    store = ProfileStore(path, default_server_home=tmp_path / "default")
+    store.create(_profile("first", tmp_path / "first", port=8100))
+    before_profiles = store.list()
+    before_bytes = path.read_bytes()
+
+    with pytest.raises(LauncherError) as exc_info:
+        store.create(_profile("second", tmp_path / "second", port=8100))
+
+    assert exc_info.value.code == "profile_port_duplicate"
+    assert store.list() == before_profiles
+    assert path.read_bytes() == before_bytes
+
+
+def test_update_rejects_local_port_owned_by_another_home(tmp_path: Path):
+    path = tmp_path / "profiles.json"
+    store = ProfileStore(path, default_server_home=tmp_path / "default")
+    store.create(_profile("first", tmp_path / "first", port=8100))
+    original = store.create(_profile("second", tmp_path / "second", port=8101))
+    before_bytes = path.read_bytes()
+
+    with pytest.raises(LauncherError) as exc_info:
+        store.update(
+            "second",
+            local=LocalTarget(str(tmp_path / "second"), 8100),
+        )
+
+    assert exc_info.value.code == "profile_port_duplicate"
+    assert store.get("second") == original
+    assert path.read_bytes() == before_bytes
+
+
+def test_persisted_profiles_with_different_homes_on_same_port_fail_closed(
+    tmp_path: Path,
+):
+    path = tmp_path / "profiles.json"
+    _write_document(
+        path,
+        [
+            _profile(
+                DEFAULT_LOCAL_PROFILE_ID,
+                tmp_path / "default",
+                port=8100,
+            ).to_dict(),
+            _profile("other", tmp_path / "other", port=8100).to_dict(),
+        ],
+    )
+
+    with pytest.raises(LauncherError) as exc_info:
+        ProfileStore(path, default_server_home=tmp_path / "default")
+
+    assert exc_info.value.code == "profile_port_duplicate"
+
+
 def test_default_local_profile_cannot_be_deleted(tmp_path: Path):
     store = ProfileStore(
         tmp_path / "profiles.json",
@@ -274,7 +375,7 @@ def test_binding_and_rebinding_reject_instance_owned_by_another_profile(
                     "id": "duplicate-instance",
                     "local": {
                         "server_home": "other-home",
-                        "server_port": 8100,
+                        "server_port": 8101,
                     },
                 }
             ),
@@ -355,7 +456,13 @@ def test_concurrent_creates_are_serialized_without_lost_updates(tmp_path: Path):
     )
 
     def create(index: int) -> None:
-        store.create(_profile(f"profile-{index}", tmp_path / f"home-{index}"))
+        store.create(
+            _profile(
+                f"profile-{index}",
+                tmp_path / f"home-{index}",
+                port=8100 + index,
+            )
+        )
 
     with ThreadPoolExecutor(max_workers=8) as executor:
         list(executor.map(create, range(20)))

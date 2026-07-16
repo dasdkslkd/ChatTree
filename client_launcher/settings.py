@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import sys
 from dataclasses import dataclass
@@ -12,6 +13,10 @@ DEFAULT_CLIENT_HOME_NAME = ".chattree-client"
 DEFAULT_LOCAL_PROFILE_ID = "local"
 DEFAULT_LOCAL_SERVER_PORT = 8001
 DEFAULT_LAUNCHER_PORT = 8000
+MAX_CONNECT_TIMEOUT_SECONDS = 60.0
+MAX_START_TIMEOUT_SECONDS = 600.0
+MAX_POLL_INTERVAL_SECONDS = 10.0
+MAX_PROXY_IDLE_TIMEOUT_SECONDS = 3600.0
 PROFILES_FILENAME = "profiles.json"
 PROFILES_SCHEMA_VERSION = 1
 
@@ -56,14 +61,19 @@ def _float_setting(
     environ: Mapping[str, str],
     name: str,
     default: float,
+    *,
+    maximum: float,
 ) -> float:
     raw = environ.get(name, str(default))
+    requirement = (
+        f"{name} must be a number greater than 0 and at most {maximum:g}"
+    )
     try:
         value = float(raw)
     except (TypeError, ValueError) as exc:
-        raise ValueError(f"{name} must be a positive number") from exc
-    if value <= 0:
-        raise ValueError(f"{name} must be a positive number")
+        raise ValueError(requirement) from exc
+    if not math.isfinite(value) or not 0 < value <= maximum:
+        raise ValueError(requirement)
     return value
 
 
@@ -130,16 +140,19 @@ class LauncherSettings:
                 values,
                 "CHATTREE_CLIENT_CONNECT_TIMEOUT_SECONDS",
                 2.0,
+                maximum=MAX_CONNECT_TIMEOUT_SECONDS,
             ),
             start_timeout_seconds=_float_setting(
                 values,
                 "CHATTREE_CLIENT_START_TIMEOUT_SECONDS",
                 30.0,
+                maximum=MAX_START_TIMEOUT_SECONDS,
             ),
             poll_interval_seconds=_float_setting(
                 values,
                 "CHATTREE_CLIENT_POLL_INTERVAL_SECONDS",
                 0.2,
+                maximum=MAX_POLL_INTERVAL_SECONDS,
             ),
             max_request_body_bytes=_integer_setting(
                 values,
@@ -151,6 +164,7 @@ class LauncherSettings:
                 values,
                 "CHATTREE_CLIENT_PROXY_IDLE_TIMEOUT_SECONDS",
                 300.0,
+                maximum=MAX_PROXY_IDLE_TIMEOUT_SECONDS,
             ),
             allowed_origins=allowed_origins,
         )

@@ -288,6 +288,7 @@ class ProfileStore:
     def _validate_profiles(profiles: Iterable[ServerProfile]) -> None:
         profile_ids: set[str] = set()
         home_keys: set[str] = set()
+        local_ports: set[int] = set()
         instance_ids: set[str] = set()
         has_default = False
         for profile in profiles:
@@ -310,6 +311,16 @@ class ProfileStore:
                     409,
                 )
             home_keys.add(home_key)
+
+            local_port = profile.local.server_port
+            if local_port in local_ports:
+                raise LauncherError(
+                    "profile_port_duplicate",
+                    f"Multiple profiles use local Server port: {local_port}",
+                    False,
+                    409,
+                )
+            local_ports.add(local_port)
 
             instance_id = profile.bound_server_instance_id
             if instance_id is not None:
