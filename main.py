@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import asyncio
+import os
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 import uvicorn
@@ -52,6 +54,7 @@ from backend.core.perf import configure_profiler, get_profiler, load_perf_config
 from backend.core.server import SERVER_VERSION, ServerIdentityStore
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+DEFAULT_SERVER_PORT = 8001
 
 
 def uvicorn_reload_options() -> dict:
@@ -63,6 +66,33 @@ def uvicorn_reload_options() -> dict:
             "**/__pycache__/**",
         ],
     }
+
+
+def uvicorn_server_options(
+    environ: Mapping[str, str] | None = None,
+) -> dict:
+    values = os.environ if environ is None else environ
+    raw_port = values.get("CHATTREE_SERVER_PORT", str(DEFAULT_SERVER_PORT))
+    try:
+        port = int(raw_port)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "CHATTREE_SERVER_PORT must be an integer from 1 to 65535"
+        ) from exc
+    if not 1 <= port <= 65535:
+        raise ValueError(
+            "CHATTREE_SERVER_PORT must be an integer from 1 to 65535"
+        )
+    return {"host": "127.0.0.1", "port": port}
+
+
+def run_server(environ: Mapping[str, str] | None = None) -> None:
+    uvicorn.run(
+        "main:app",
+        reload=True,
+        **uvicorn_reload_options(),
+        **uvicorn_server_options(environ),
+    )
 
 
 app = FastAPI(
@@ -236,10 +266,4 @@ async def shutdown_event():
 app.include_router(api_v1_router)
 
 if __name__ == "__main__":
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=8001,
-        reload=True,
-        **uvicorn_reload_options(),
-    )
+    run_server()
