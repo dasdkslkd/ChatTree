@@ -449,7 +449,11 @@ def test_child_early_exit_is_reported(tmp_path: Path):
 
 
 def test_start_timeout_does_not_kill_server(tmp_path: Path):
+    requests = 0
+
     def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
         raise httpx.ConnectError("refused", request=request)
 
     process = FakeProcess([None])
@@ -471,6 +475,41 @@ def test_start_timeout_does_not_kill_server(tmp_path: Path):
     assert process.kill_calls == 0
     assert exc_info.value.log_tail == "startup is still waiting"
     assert exc_info.value.log_tail in str(exc_info.value)
+    assert requests == 3
+
+
+def test_start_timeout_bounds_a_slow_readiness_probe(tmp_path: Path):
+    async def scenario() -> None:
+        requests = 0
+        never_ready = asyncio.Event()
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal requests
+            requests += 1
+            if requests == 1:
+                raise httpx.ConnectError("refused", request=request)
+            await never_ready.wait()
+            raise AssertionError("unreachable")
+
+        process = FakeProcess([None])
+        connector = LocalServerConnector(
+            _settings(tmp_path, start_timeout_seconds=0.05),
+            transport=httpx.MockTransport(handler),
+            popen_factory=FakePopen(process),
+        )
+
+        with pytest.raises(LocalServerStartTimeoutError):
+            await asyncio.wait_for(
+                connector.connect(_profile(tmp_path), None),
+                timeout=0.25,
+            )
+        await connector.close()
+
+        assert requests == 2
+        assert process.terminate_calls == 0
+        assert process.kill_calls == 0
+
+    asyncio.run(scenario())
 
 
 def test_spawned_server_exit_is_reaped_without_termination(tmp_path: Path):

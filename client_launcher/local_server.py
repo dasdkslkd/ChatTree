@@ -560,8 +560,24 @@ class LocalServerConnector:
             self._settings.start_timeout_seconds
         )
         while True:
+            remaining = deadline - self._monotonic()
+            if remaining <= 0:
+                raise LocalServerStartTimeoutError(
+                    endpoint,
+                    log_path,
+                    _read_log_tail(log_path),
+                )
             try:
-                return await self._probe(endpoint, profile, phase_callback)
+                return await asyncio.wait_for(
+                    self._probe(endpoint, profile, phase_callback),
+                    timeout=remaining,
+                )
+            except asyncio.TimeoutError:
+                raise LocalServerStartTimeoutError(
+                    endpoint,
+                    log_path,
+                    _read_log_tail(log_path),
+                ) from None
             except _EndpointUnavailable:
                 pass
 
@@ -572,13 +588,19 @@ class LocalServerConnector:
                     log_path,
                     _read_log_tail(log_path),
                 )
-            if self._monotonic() >= deadline:
+            remaining = deadline - self._monotonic()
+            if remaining <= 0:
                 raise LocalServerStartTimeoutError(
                     endpoint,
                     log_path,
                     _read_log_tail(log_path),
                 )
-            await self._sleep(float(self._settings.poll_interval_seconds))
+            await self._sleep(
+                min(
+                    float(self._settings.poll_interval_seconds),
+                    remaining,
+                )
+            )
 
     @staticmethod
     async def _emit_phase(
