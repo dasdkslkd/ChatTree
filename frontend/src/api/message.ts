@@ -1,4 +1,4 @@
-import { apiClient } from './client';
+import { apiClient, serverApiUrl } from './client';
 import type {
   Message,
   SendMessageRequest,
@@ -173,7 +173,7 @@ export const messageApi = {
     signal?: AbortSignal
   ): AsyncGenerator<StreamChunk, void> {
     const started = perfNow();
-    const response = await fetch(`/api/conversations/${conversationId}/messages/stream`, {
+    const response = await fetch(serverApiUrl(`/conversations/${conversationId}/messages/stream`), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -210,7 +210,7 @@ export const messageApi = {
   ): AsyncGenerator<StreamChunk, void> {
     const started = perfNow();
     const response = await fetch(
-      `/api/conversations/${conversationId}/messages/${nodeId}/stream/attach?from_event=${fromEvent}`,
+      serverApiUrl(`/conversations/${conversationId}/messages/${nodeId}/stream/attach?from_event=${fromEvent}`),
       { signal },
     );
     recordSpan('stream.fetch', started, {
@@ -235,7 +235,7 @@ export const messageApi = {
   ): AsyncGenerator<StreamChunk, void> {
     const started = perfNow();
     const response = await fetch(
-      `/api/conversations/${encodeURIComponent(conversationId)}/plans/${encodeURIComponent(planId)}/approve/stream`,
+      serverApiUrl(`/conversations/${encodeURIComponent(conversationId)}/plans/${encodeURIComponent(planId)}/approve/stream`),
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -255,7 +255,7 @@ export const messageApi = {
   ): AsyncGenerator<StreamChunk, void> {
     const started = perfNow();
     const response = await fetch(
-      `/api/conversations/${encodeURIComponent(conversationId)}/plans/${encodeURIComponent(planId)}/answer/stream`,
+      serverApiUrl(`/conversations/${encodeURIComponent(conversationId)}/plans/${encodeURIComponent(planId)}/answer/stream`),
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -275,7 +275,7 @@ export const messageApi = {
   ): AsyncGenerator<StreamChunk, void> {
     const started = perfNow();
     const response = await fetch(
-      `/api/conversations/${encodeURIComponent(conversationId)}/plans/${encodeURIComponent(planId)}/reject/stream`,
+      serverApiUrl(`/conversations/${encodeURIComponent(conversationId)}/plans/${encodeURIComponent(planId)}/reject/stream`),
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

@@ -8,9 +8,11 @@ import { useNavigationStore } from './store/navigationStore'
 import { useModelStore } from './store/modelStore'
 import { useConversationStore } from './store/conversationStore'
 import { flushPerfEventsSync, loadPerfConfig } from './perf/client'
+import { serverApi } from './api/server'
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 
 const ChatPage = lazy(() => import('./pages/MainPage'));
+const SERVER_PROBE_INTERVAL_MS = 30000;
 
 type UsageInfo = {
   input_tokens?: number;
@@ -54,15 +56,78 @@ function App() {
   const { activePage, settingsSection, openSettings } = useNavigationStore();
   const { currentProvider, currentModel, loadConfig, loadProviders, loadMetadata, getMetadata } = useModelStore();
   const { messages } = useConversationStore();
-  const [connected, setConnected] = useState(true);
+  const [connected, setConnected] = useState(false);
+  const [protocolReady, setProtocolReady] = useState(false);
   const [contextHovered, setContextHovered] = useState(false);
 
   useEffect(() => {
-    (async () => {
-      void loadPerfConfig();
-      await loadConfig();
-      await loadProviders();
-    })();
+    let cancelled = false;
+    let probeTimer: number | null = null;
+    let probeController: AbortController | null = null;
+    let requiresHandshake = true;
+    let initializationInFlight = false;
+    let initializationComplete = false;
+
+    const initializeAfterHandshake = async () => {
+      if (initializationInFlight || initializationComplete) return;
+      initializationInFlight = true;
+      try {
+        void loadPerfConfig();
+        await loadConfig();
+        if (cancelled) return;
+        if (!useModelStore.getState().config) {
+          throw new Error('Frontend config initialization failed');
+        }
+        await loadProviders();
+        if (cancelled) return;
+        const initializationError = useModelStore.getState().error;
+        if (initializationError) throw new Error(initializationError);
+        initializationComplete = true;
+      } catch (error) {
+        if (!cancelled) console.error('Failed to initialize frontend data', error);
+      } finally {
+        initializationInFlight = false;
+      }
+    };
+
+    const scheduleProbe = () => {
+      if (cancelled) return;
+      probeTimer = window.setTimeout(() => {
+        probeTimer = null;
+        void probeServer();
+      }, SERVER_PROBE_INTERVAL_MS);
+    };
+
+    const probeServer = async () => {
+      const controller = new AbortController();
+      probeController = controller;
+      try {
+        if (requiresHandshake) {
+          await serverApi.assertCompatible(controller.signal);
+          if (cancelled) return;
+          requiresHandshake = false;
+          setConnected(true);
+          setProtocolReady(true);
+          void initializeAfterHandshake();
+        } else {
+          await serverApi.health(controller.signal);
+          if (cancelled) return;
+          setConnected(true);
+          void initializeAfterHandshake();
+        }
+      } catch {
+        if (!cancelled) {
+          requiresHandshake = true;
+          setConnected(false);
+          setProtocolReady(false);
+        }
+      } finally {
+        if (probeController === controller) probeController = null;
+        scheduleProbe();
+      }
+    };
+
+    void probeServer();
     const flushOnVisibility = () => {
       if (document.visibilityState === 'hidden') flushPerfEventsSync();
     };
@@ -73,6 +138,9 @@ function App() {
     window.addEventListener('pagehide', flushOnPageHide);
     window.addEventListener('beforeunload', flushOnPageHide);
     return () => {
+      cancelled = true;
+      probeController?.abort();
+      if (probeTimer !== null) window.clearTimeout(probeTimer);
       document.removeEventListener('visibilitychange', flushOnVisibility);
       window.removeEventListener('pagehide', flushOnPageHide);
       window.removeEventListener('beforeunload', flushOnPageHide);
@@ -81,25 +149,10 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (currentProvider) {
+    if (protocolReady && currentProvider) {
       void loadMetadata(currentProvider);
     }
-  }, [currentProvider, loadMetadata]);
-
-  // Connectivity check — lightweight health endpoint, not the full config
-  useEffect(() => {
-    const check = async () => {
-      try {
-        const resp = await fetch('/api/health', { method: 'GET', signal: AbortSignal.timeout(5000) });
-        setConnected(resp.ok);
-      } catch {
-        setConnected(false);
-      }
-    };
-    check();
-    const interval = setInterval(check, 30000);
-    return () => clearInterval(interval);
-  }, []);
+  }, [currentProvider, loadMetadata, protocolReady]);
 
   const getModelDisplay = (): string => {
     if (currentProvider && currentModel) return `${currentProvider} / ${currentModel}`;
@@ -184,14 +237,18 @@ function App() {
         >
           {/* Page content */}
           <div className="flex-1 overflow-hidden">
-            <Suspense fallback={null}>
-              <div className="h-full" style={{ display: activePage === 'settings' ? 'none' : 'block' }}>
-                <ChatPage />
-              </div>
-            </Suspense>
-            <div className="h-full" style={{ display: activePage === 'settings' ? 'block' : 'none' }}>
-              <SettingsPageView defaultSection={settingsSection} />
-            </div>
+            {protocolReady && (
+              <>
+                <Suspense fallback={null}>
+                  <div className="h-full" style={{ display: activePage === 'settings' ? 'none' : 'block' }}>
+                    <ChatPage />
+                  </div>
+                </Suspense>
+                <div className="h-full" style={{ display: activePage === 'settings' ? 'block' : 'none' }}>
+                  <SettingsPageView defaultSection={settingsSection} />
+                </div>
+              </>
+            )}
           </div>
 
           {/* Status bar — inside main surface, below content */}

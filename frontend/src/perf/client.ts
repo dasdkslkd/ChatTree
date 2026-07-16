@@ -1,4 +1,5 @@
 import type { FrontendPerfEvent, PerfConfig } from './types';
+import { serverApiUrl } from '../api/client';
 
 const DEFAULT_CONFIG: PerfConfig = {
   enabled: false,
@@ -101,7 +102,7 @@ export async function loadPerfConfig(): Promise<PerfConfig> {
     const controller = typeof AbortController === 'function' ? new AbortController() : null;
     const timeout = controller ? globalThis.setTimeout(() => controller.abort(), 2000) : null;
     try {
-      const response = await fetch('/api/perf/config', {
+      const response = await fetch(serverApiUrl('/perf/config'), {
         method: 'GET',
         signal: controller?.signal,
       });
@@ -164,7 +165,7 @@ export async function flushPerfEvents(): Promise<void> {
   flushing = true;
   const batch = queue.splice(0, batchLimit());
   try {
-    await fetch('/api/perf/events', {
+    await fetch(serverApiUrl('/perf/events'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ events: batch }),
@@ -192,7 +193,7 @@ export function flushPerfEventsSync(): boolean {
     const body = JSON.stringify({ events: batch });
     if (nav && typeof nav.sendBeacon === 'function') {
       try {
-        const ok = nav.sendBeacon('/api/perf/events', new Blob([body], { type: 'application/json' }));
+        const ok = nav.sendBeacon(serverApiUrl('/perf/events'), new Blob([body], { type: 'application/json' }));
         if (ok) continue;
       } catch {
         // Fall through to fetch keepalive.
@@ -200,7 +201,7 @@ export function flushPerfEventsSync(): boolean {
     }
     if (hasFetch()) {
       try {
-        void fetch('/api/perf/events', {
+        void fetch(serverApiUrl('/perf/events'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body,

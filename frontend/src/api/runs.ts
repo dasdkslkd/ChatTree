@@ -1,4 +1,4 @@
-import { apiClient } from './client';
+import { apiClient, serverApiUrl } from './client';
 import type { StreamChunk } from '../types/message';
 import type { RunEventPayload, RunRecord } from '../types/run';
 import { perfNow, recordMark, recordSpan } from '../perf/marks';
@@ -67,7 +67,7 @@ export const runsApi = {
 
   attach: async function* (runId: string, fromEvent = 0, signal?: AbortSignal): AsyncGenerator<StreamChunk, void> {
     const started = perfNow();
-    const response = await fetch(`/api/runs/${runId}/attach?from_event=${fromEvent}`, { signal });
+    const response = await fetch(serverApiUrl(`/runs/${runId}/attach?from_event=${fromEvent}`), { signal });
     recordSpan('stream.fetch', started, { run_id: runId, from_event: fromEvent, route: 'runs.attach' });
     yield* parseSseResponse(response, { run_id: runId, from_event: fromEvent, route: 'runs.attach' });
   },

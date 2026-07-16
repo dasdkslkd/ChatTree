@@ -70,6 +70,7 @@ import {
   PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, ArrowLeft, Bell,
 } from 'lucide-react';
 import { conversationApi } from '../api/conversation';
+import { serverApiUrl } from '../api/client';
 import { configApi } from '../api/config';
 import { messageApi, type ToolResultSlice } from '../api/message';
 import { runsApi } from '../api/runs';
@@ -3193,7 +3194,7 @@ export default function ChatPage() {
 
   const getImportAssetUrl = (filename: string, conversationId = currentConversation?.id) => {
     if (!conversationId) return '';
-    return `/api/conversations/${conversationId}/imports/${encodeURIComponent(filename)}`;
+    return serverApiUrl(`/conversations/${conversationId}/imports/${encodeURIComponent(filename)}`);
   };
 
   const handlePreviewImage = (filename: string) => {

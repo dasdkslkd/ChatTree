@@ -58,7 +58,7 @@ async function testEnabledBatchesEvents() {
   recordFrontendEvent({ type: 'mark', name: 'front.mark', attrs: { long: 'abcdef' } });
   await flushPerfEvents();
   assert.equal(requests.length, 1);
-  assert.equal(requests[0].url, '/api/perf/events');
+  assert.equal(requests[0].url, '/api/v1/perf/events');
   const body = JSON.parse(requests[0].init.body);
   assert.equal(body.events[0].name, 'front.mark');
   assert.equal(body.events[0].attrs.long, 'abcd...[len=6]');
@@ -133,7 +133,7 @@ async function testPreInitEventsFlushAfterConfigLoads() {
   const requests = [];
   global.fetch = async (url, init) => {
     requests.push({ url, init });
-    if (url === '/api/perf/config') {
+    if (url === '/api/v1/perf/config') {
       return {
         ok: true,
         json: async () => ({
@@ -153,8 +153,8 @@ async function testPreInitEventsFlushAfterConfigLoads() {
   await loadPerfConfig();
   await flushPerfEvents();
 
-  const configRequests = requests.filter((request) => request.url === '/api/perf/config');
-  const eventRequests = requests.filter((request) => request.url === '/api/perf/events');
+  const configRequests = requests.filter((request) => request.url === '/api/v1/perf/config');
+  const eventRequests = requests.filter((request) => request.url === '/api/v1/perf/events');
   assert.equal(configRequests.length, 1);
   assert.equal(eventRequests.length, 1);
   const body = JSON.parse(eventRequests[0].init.body);
@@ -166,7 +166,7 @@ async function testImmediatePreInitEventFlushesAfterConfigLoads() {
   const requests = [];
   global.fetch = async (url, init) => {
     requests.push({ url, init });
-    if (url === '/api/perf/config') {
+    if (url === '/api/v1/perf/config') {
       return {
         ok: true,
         json: async () => ({
@@ -186,7 +186,7 @@ async function testImmediatePreInitEventFlushesAfterConfigLoads() {
   await loadPerfConfig();
   await nextTick();
 
-  const eventRequests = requests.filter((request) => request.url === '/api/perf/events');
+  const eventRequests = requests.filter((request) => request.url === '/api/v1/perf/events');
   assert.equal(eventRequests.length, 1);
   const body = JSON.parse(eventRequests[0].init.body);
   assert.equal(body.events[0].name, 'stream.done');
@@ -197,7 +197,7 @@ async function testConfigLoadFailureRetriesAndKeepsPreInitEvents() {
   let configAttempts = 0;
   global.fetch = async (url, init) => {
     requests.push({ url, init });
-    if (url === '/api/perf/config') {
+    if (url === '/api/v1/perf/config') {
       configAttempts += 1;
       if (configAttempts === 1) throw new Error('temporary config failure');
       return {
@@ -222,8 +222,8 @@ async function testConfigLoadFailureRetriesAndKeepsPreInitEvents() {
   await loadPerfConfig();
   await flushPerfEvents();
 
-  const configRequests = requests.filter((request) => request.url === '/api/perf/config');
-  const eventRequests = requests.filter((request) => request.url === '/api/perf/events');
+  const configRequests = requests.filter((request) => request.url === '/api/v1/perf/config');
+  const eventRequests = requests.filter((request) => request.url === '/api/v1/perf/events');
   assert.equal(configRequests.length, 2);
   assert.equal(eventRequests.length, 1);
   const body = JSON.parse(eventRequests[0].init.body);
@@ -252,7 +252,7 @@ function testSyncFlushUsesBeacon() {
   recordFrontendEvent({ type: 'mark', name: 'front.hide' });
   assert.equal(flushPerfEventsSync(), true);
   assert.equal(beacons.length, 1);
-  assert.equal(beacons[0].url, '/api/perf/events');
+  assert.equal(beacons[0].url, '/api/v1/perf/events');
   Object.defineProperty(globalThis, 'navigator', {
     configurable: true,
     value: previousNavigator,
