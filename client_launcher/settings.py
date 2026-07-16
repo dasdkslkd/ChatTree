@@ -74,6 +74,7 @@ class LauncherSettings:
     server_python: str
     host: str = "127.0.0.1"
     port: int = DEFAULT_LAUNCHER_PORT
+    default_local_server_port: int = DEFAULT_LOCAL_SERVER_PORT
     connect_timeout_seconds: float = 2.0
     start_timeout_seconds: float = 30.0
     poll_interval_seconds: float = 0.2
@@ -115,6 +116,13 @@ class LauncherSettings:
                 values,
                 "CHATTREE_CLIENT_PORT",
                 DEFAULT_LAUNCHER_PORT,
+                minimum=1,
+                maximum=65535,
+            ),
+            default_local_server_port=_integer_setting(
+                values,
+                "CHATTREE_LOCAL_SERVER_PORT",
+                DEFAULT_LOCAL_SERVER_PORT,
                 minimum=1,
                 maximum=65535,
             ),

@@ -58,7 +58,8 @@ def create_app(
 ) -> FastAPI:
     resolved_settings = settings or LauncherSettings.from_env()
     profile_store = profiles or ProfileStore(
-        resolved_settings.client_home / PROFILES_FILENAME
+        resolved_settings.client_home / PROFILES_FILENAME,
+        default_server_port=resolved_settings.default_local_server_port,
     )
     local_connector = connector or LocalServerConnector(resolved_settings)
     sessions = SessionManager(profile_store, local_connector)

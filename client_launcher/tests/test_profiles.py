@@ -72,6 +72,7 @@ def test_launcher_settings_from_env_has_local_defaults_and_typed_overrides(
 ):
     monkeypatch.setenv("CHATTREE_CLIENT_HOME", str(tmp_path / "client"))
     monkeypatch.setenv("CHATTREE_CLIENT_PORT", "18000")
+    monkeypatch.setenv("CHATTREE_LOCAL_SERVER_PORT", "18001")
     monkeypatch.setenv("CHATTREE_SERVER_PYTHON", str(tmp_path / "python"))
     monkeypatch.setenv("CHATTREE_CLIENT_CONNECT_TIMEOUT_SECONDS", "1.5")
     monkeypatch.setenv("CHATTREE_CLIENT_ALLOWED_ORIGINS", "http://one.test, http://two.test")
@@ -83,6 +84,7 @@ def test_launcher_settings_from_env_has_local_defaults_and_typed_overrides(
     assert settings.server_python == str(tmp_path / "python")
     assert settings.host == "127.0.0.1"
     assert settings.port == 18000
+    assert settings.default_local_server_port == 18001
     assert settings.connect_timeout_seconds == 1.5
     assert settings.start_timeout_seconds > 0
     assert settings.poll_interval_seconds > 0
