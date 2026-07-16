@@ -76,6 +76,37 @@ def test_concurrent_connect_is_singleflight(tmp_path):
     asyncio.run(_concurrent_connect_is_singleflight_case(tmp_path))
 
 
+async def _concurrent_connect_rejects_conflicting_intent_case(tmp_path):
+    store = _store(tmp_path)
+    connector = FakeConnector(SERVER_A)
+    manager = SessionManager(store, connector)
+
+    first = asyncio.create_task(manager.connect("local"))
+    await connector.started.wait()
+    conflicting = asyncio.create_task(
+        manager.connect(
+            "local",
+            rebind=True,
+            expected_server_instance_id=SERVER_B,
+        )
+    )
+    await asyncio.sleep(0)
+    connector.release.set()
+
+    first_status = await first
+    with pytest.raises(LauncherError) as exc_info:
+        await conflicting
+
+    assert exc_info.value.code == "connection_intent_conflict"
+    assert exc_info.value.status_code == 409
+    assert connector.calls == 1
+    assert first_status.server_instance_id == SERVER_A
+
+
+def test_concurrent_connect_rejects_conflicting_intent(tmp_path):
+    asyncio.run(_concurrent_connect_rejects_conflicting_intent_case(tmp_path))
+
+
 async def _ready_connect_is_idempotent_case(tmp_path):
     store = _store(tmp_path)
     connector = FakeConnector()
@@ -91,6 +122,30 @@ async def _ready_connect_is_idempotent_case(tmp_path):
 
 def test_ready_connect_is_idempotent(tmp_path):
     asyncio.run(_ready_connect_is_idempotent_case(tmp_path))
+
+
+async def _ready_rebind_rejects_expected_identity_mismatch_case(tmp_path):
+    store = _store(tmp_path)
+    connector = FakeConnector(SERVER_A)
+    connector.release.set()
+    manager = SessionManager(store, connector)
+
+    await manager.connect("local")
+
+    with pytest.raises(LauncherError) as exc_info:
+        await manager.connect(
+            "local",
+            rebind=True,
+            expected_server_instance_id=SERVER_B,
+        )
+
+    assert exc_info.value.code == "rebind_identity_mismatch"
+    assert manager.status("local").server_instance_id == SERVER_A
+    assert connector.calls == 1
+
+
+def test_ready_rebind_rejects_expected_identity_mismatch(tmp_path):
+    asyncio.run(_ready_rebind_rejects_expected_identity_mismatch_case(tmp_path))
 
 
 async def _disconnect_blocks_late_ready_case(tmp_path):
@@ -137,6 +192,26 @@ async def _disconnect_before_inner_task_starts_allows_reconnect_case(tmp_path):
 
 def test_disconnect_before_inner_task_starts_allows_reconnect(tmp_path):
     asyncio.run(_disconnect_before_inner_task_starts_allows_reconnect_case(tmp_path))
+
+
+async def _auto_connect_start_then_immediate_disconnect_case(tmp_path):
+    store = _store(tmp_path)
+    connector = FakeConnector()
+    manager = SessionManager(store, connector)
+
+    await manager.start()
+    background_tasks = list(manager._background_tasks)
+    disconnected = await manager.disconnect("local")
+    connector.release.set()
+    await asyncio.gather(*background_tasks, return_exceptions=True)
+
+    assert disconnected.status == "disconnected"
+    assert manager.status("local").status == "disconnected"
+    assert store.get("local").bound_server_instance_id is None
+
+
+def test_auto_connect_start_then_immediate_disconnect_stays_disconnected(tmp_path):
+    asyncio.run(_auto_connect_start_then_immediate_disconnect_case(tmp_path))
 
 
 async def _identity_change_requires_explicit_rebind_case(tmp_path):

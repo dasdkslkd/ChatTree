@@ -20,6 +20,7 @@ class SessionManager:
         self._endpoints: dict[str, str] = {}
         self._attempt_generation: dict[str, int] = {}
         self._connect_tasks: dict[str, asyncio.Task[ServerSession]] = {}
+        self._connect_intents: dict[str, tuple[bool, str | None]] = {}
         self._background_tasks: set[asyncio.Task[object]] = set()
         self._guard = asyncio.Lock()
         self._closed = False
@@ -64,9 +65,16 @@ class SessionManager:
         for profile in self.profiles.list():
             if not profile.auto_connect:
                 continue
-            task = asyncio.create_task(self.connect(profile.id))
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_done)
+            prepared = await self._prepare_connect(
+                profile.id,
+                rebind=False,
+                expected_server_instance_id=None,
+            )
+            if isinstance(prepared, ServerSession):
+                continue
+            if prepared not in self._background_tasks:
+                self._background_tasks.add(prepared)
+                prepared.add_done_callback(self._background_done)
 
     async def connect(
         self,
@@ -75,6 +83,34 @@ class SessionManager:
         rebind: bool = False,
         expected_server_instance_id: str | None = None,
     ) -> ServerSession:
+        prepared = await self._prepare_connect(
+            profile_id,
+            rebind=rebind,
+            expected_server_instance_id=expected_server_instance_id,
+        )
+        if isinstance(prepared, ServerSession):
+            return prepared
+        task = prepared
+
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.cancelled():
+                raise LauncherError(
+                    "connection_cancelled",
+                    f"Connection for Profile {profile_id} was cancelled",
+                    retryable=True,
+                    status_code=409,
+                ) from None
+            raise
+
+    async def _prepare_connect(
+        self,
+        profile_id: str,
+        *,
+        rebind: bool,
+        expected_server_instance_id: str | None,
+    ) -> ServerSession | asyncio.Task[ServerSession]:
         if self._closed:
             raise LauncherError(
                 "launcher_stopping",
@@ -89,15 +125,31 @@ class SessionManager:
                 retryable=False,
                 status_code=422,
             )
+        intent = (
+            rebind,
+            expected_server_instance_id if rebind else None,
+        )
 
         async with self._guard:
             self.profiles.get(profile_id)
             current = self._session(profile_id)
             if current.status == "ready":
+                if (
+                    rebind
+                    and expected_server_instance_id
+                    != current.server_instance_id
+                ):
+                    raise LauncherError(
+                        "rebind_identity_mismatch",
+                        "Connected Server does not match the confirmed instance ID",
+                        retryable=False,
+                        status_code=409,
+                    )
                 return replace(current)
             task = self._connect_tasks.get(profile_id)
             if task is not None and task.done():
                 self._connect_tasks.pop(profile_id, None)
+                self._connect_intents.pop(profile_id, None)
                 task = None
             if task is None:
                 generation = self._attempt_generation.get(profile_id, 0) + 1
@@ -115,18 +167,16 @@ class SessionManager:
                     )
                 )
                 self._connect_tasks[profile_id] = task
-
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError:
-            if task.cancelled():
+                self._connect_intents[profile_id] = intent
+            elif self._connect_intents.get(profile_id) != intent:
                 raise LauncherError(
-                    "connection_cancelled",
-                    f"Connection for Profile {profile_id} was cancelled",
+                    "connection_intent_conflict",
+                    f"Profile {profile_id} already has a connection attempt "
+                    "with a different binding intent",
                     retryable=True,
                     status_code=409,
-                ) from None
-            raise
+                )
+            return task
 
     async def disconnect(self, profile_id: str) -> ServerSession:
         task: asyncio.Task[ServerSession] | None
@@ -137,6 +187,7 @@ class SessionManager:
                 self._attempt_generation.get(profile_id, 0) + 1
             )
             task = self._connect_tasks.pop(profile_id, None)
+            self._connect_intents.pop(profile_id, None)
             if task is not None and not task.done():
                 task.cancel()
             session.status = "disconnected"
@@ -238,6 +289,7 @@ class SessionManager:
                 current = asyncio.current_task()
                 if self._connect_tasks.get(profile_id) is current:
                     self._connect_tasks.pop(profile_id, None)
+                    self._connect_intents.pop(profile_id, None)
 
     @staticmethod
     def _launcher_error(exc: BaseException) -> LauncherError:
