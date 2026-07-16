@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from backend.core.persistence.database import SQLitePersistence
+from backend.core.persistence.schema import CURRENT_SCHEMA_VERSION
 
 
 REQUIRED_TABLES = {
@@ -38,6 +39,7 @@ def test_initialize_creates_database_tables(tmp_path: Path):
             ).fetchall()
         }
         binding_fks = conn.execute("PRAGMA foreign_key_list(task_run_bindings)").fetchall()
+        schema_version = conn.execute("PRAGMA user_version").fetchone()[0]
 
     assert REQUIRED_TABLES <= names
     assert {"tasks", "task_steps", "task_events"}.isdisjoint(names)
@@ -49,14 +51,16 @@ def test_initialize_creates_database_tables(tmp_path: Path):
         ("active_tasks", "task_generation_id", "generation_id", "CASCADE"),
     }
     assert (tmp_path / "chattree.sqlite").exists()
+    assert schema_version == CURRENT_SCHEMA_VERSION
 
 
 def test_initialize_applies_wal_and_foreign_keys(tmp_path: Path):
     persistence = SQLitePersistence(tmp_path)
     persistence.initialize()
 
-    with persistence.connect() as conn:
+    with sqlite3.connect(persistence.db_path) as conn:
         journal = conn.execute("PRAGMA journal_mode").fetchone()[0]
+    with persistence.connect() as conn:
         foreign_keys = conn.execute("PRAGMA foreign_keys").fetchone()[0]
 
     assert journal.lower() == "wal"
@@ -83,6 +87,7 @@ def test_initialize_replaces_obsolete_task_schema_without_losing_transcript(tmp_
         conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
         conn.execute("CREATE TABLE task_steps (id TEXT PRIMARY KEY)")
         conn.execute("CREATE TABLE task_events (id INTEGER PRIMARY KEY)")
+        conn.execute("PRAGMA user_version = 0")
 
     persistence.initialize()
 

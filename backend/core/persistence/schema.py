@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 
+CURRENT_SCHEMA_VERSION = 1
+
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS server_metadata (
   key TEXT PRIMARY KEY,

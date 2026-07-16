@@ -6,7 +6,13 @@ from pathlib import Path
 from typing import Iterator
 
 from .home import resolve_chattree_home
-from .schema import SCHEMA_SQL
+from .migrations import (
+    Migration,
+    MigrationConnection,
+    SchemaMigrationRunner,
+    execute_sql_script,
+)
+from .schema import CURRENT_SCHEMA_VERSION, SCHEMA_SQL
 
 
 class SQLitePersistence:
@@ -15,22 +21,44 @@ class SQLitePersistence:
         self.db_path = self.home / "chattree.sqlite"
         self.blobs_dir = self.home / "blobs"
         self.tmp_dir = self.home / "tmp"
+        self.backup_dir = self.home / "backups"
 
     def initialize(self) -> None:
         self.home.mkdir(parents=True, exist_ok=True)
         self.blobs_dir.mkdir(parents=True, exist_ok=True)
         self.tmp_dir.mkdir(parents=True, exist_ok=True)
-        with self.connect() as conn:
-            self._repair_run_lifecycle_schema(conn)
-            self._ensure_node_context_schema(conn)
-            self._replace_obsolete_task_schema(conn)
-            conn.executescript(SCHEMA_SQL)
-            self._repair_scoped_tool_call_schema(conn)
-            self._repair_run_lifecycle_schema(conn)
-            self._ensure_node_context_schema(conn)
-            conn.executescript(SCHEMA_SQL)
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA busy_timeout = 5000")
+        try:
+            runner = SchemaMigrationRunner(
+                db_path=self.db_path,
+                backup_dir=self.backup_dir,
+                current_version=CURRENT_SCHEMA_VERSION,
+                migrations=(
+                    Migration(
+                        0,
+                        1,
+                        self._migrate_0_to_1,
+                        destructive=True,
+                    ),
+                ),
+            )
+            runner.run(conn)
+            self._apply_storage_pragmas(conn)
+        finally:
+            conn.close()
 
-    def _replace_obsolete_task_schema(self, conn: sqlite3.Connection) -> None:
+    def _migrate_0_to_1(self, conn: MigrationConnection) -> None:
+        self._repair_run_lifecycle_schema(conn)
+        self._ensure_node_context_schema(conn)
+        self._replace_obsolete_task_schema(conn)
+        execute_sql_script(conn, SCHEMA_SQL)
+        self._repair_scoped_tool_call_schema(conn)
+        execute_sql_script(conn, SCHEMA_SQL)
+
+    def _replace_obsolete_task_schema(self, conn: MigrationConnection) -> None:
         notification_columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(task_notifications)")
         }
@@ -58,64 +86,54 @@ class SQLitePersistence:
         ):
             return
 
-        conn.commit()
-        conn.execute("PRAGMA foreign_keys = OFF")
-        try:
-            conn.execute("BEGIN")
-            if legacy_tables or reset_active_schema:
-                conn.execute("DROP TABLE IF EXISTS task_run_bindings")
-            if reset_active_schema:
-                conn.execute("DROP TABLE IF EXISTS active_task_steps")
-                conn.execute("DROP TABLE IF EXISTS active_tasks")
-            if "task_id" in notification_columns:
-                conn.execute("ALTER TABLE task_notifications RENAME TO task_notifications_obsolete")
-                conn.execute(_TASK_NOTIFICATIONS_TABLE_SQL)
-                conn.execute(
-                    """
-                    INSERT INTO task_notifications (
-                      id, conversation_id, source_run_id, source_run_kind, status,
-                      delivery_node_id, bound_at, bound_by, summary, content, payload_json,
-                      delivered_run_id, delivered_node_id, created_at, updated_at
-                    )
-                    SELECT
-                      id, conversation_id, source_run_id, source_run_kind, status,
-                      delivery_node_id, bound_at, bound_by, summary, content, payload_json,
-                      delivered_run_id, delivered_node_id, created_at, updated_at
-                    FROM task_notifications_obsolete
-                    """
+        if legacy_tables or reset_active_schema:
+            conn.execute("DROP TABLE IF EXISTS task_run_bindings")
+        if reset_active_schema:
+            conn.execute("DROP TABLE IF EXISTS active_task_steps")
+            conn.execute("DROP TABLE IF EXISTS active_tasks")
+        if "task_id" in notification_columns:
+            conn.execute("ALTER TABLE task_notifications RENAME TO task_notifications_obsolete")
+            conn.execute(_TASK_NOTIFICATIONS_TABLE_SQL)
+            conn.execute(
+                """
+                INSERT INTO task_notifications (
+                  id, conversation_id, source_run_id, source_run_kind, status,
+                  delivery_node_id, bound_at, bound_by, summary, content, payload_json,
+                  delivered_run_id, delivered_node_id, created_at, updated_at
                 )
-                conn.execute("DROP TABLE task_notifications_obsolete")
-            if "task_id" in transcript_columns:
-                conn.execute("ALTER TABLE transcript_items RENAME TO transcript_items_obsolete")
-                conn.execute(_TRANSCRIPT_ITEMS_TABLE_SQL)
-                conn.execute(
-                    """
-                    INSERT INTO transcript_items (
-                      id, conversation_id, node_id, anchor_node_id, run_id, plan_id,
-                      message_id, item_type, local_order, visibility, status, summary,
-                      preview, props_json, created_at, updated_at
-                    )
-                    SELECT
-                      id, conversation_id, node_id, anchor_node_id, run_id, plan_id,
-                      message_id, item_type, local_order, visibility, status, summary,
-                      preview, props_json, created_at, updated_at
-                    FROM transcript_items_obsolete
-                    """
+                SELECT
+                  id, conversation_id, source_run_id, source_run_kind, status,
+                  delivery_node_id, bound_at, bound_by, summary, content, payload_json,
+                  delivered_run_id, delivered_node_id, created_at, updated_at
+                FROM task_notifications_obsolete
+                """
+            )
+            conn.execute("DROP TABLE task_notifications_obsolete")
+        if "task_id" in transcript_columns:
+            conn.execute("ALTER TABLE transcript_items RENAME TO transcript_items_obsolete")
+            conn.execute(_TRANSCRIPT_ITEMS_TABLE_SQL)
+            conn.execute(
+                """
+                INSERT INTO transcript_items (
+                  id, conversation_id, node_id, anchor_node_id, run_id, plan_id,
+                  message_id, item_type, local_order, visibility, status, summary,
+                  preview, props_json, created_at, updated_at
                 )
-                conn.execute("DROP TABLE transcript_items_obsolete")
-            conn.execute("DROP TABLE IF EXISTS task_events")
-            conn.execute("DROP TABLE IF EXISTS task_steps")
-            conn.execute("DROP TABLE IF EXISTS tasks")
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
-        finally:
-            conn.execute("PRAGMA foreign_keys = ON")
+                SELECT
+                  id, conversation_id, node_id, anchor_node_id, run_id, plan_id,
+                  message_id, item_type, local_order, visibility, status, summary,
+                  preview, props_json, created_at, updated_at
+                FROM transcript_items_obsolete
+                """
+            )
+            conn.execute("DROP TABLE transcript_items_obsolete")
+        conn.execute("DROP TABLE IF EXISTS task_events")
+        conn.execute("DROP TABLE IF EXISTS task_steps")
+        conn.execute("DROP TABLE IF EXISTS tasks")
 
     def _active_task_schema_is_obsolete(
         self,
-        conn: sqlite3.Connection,
+        conn: MigrationConnection,
         active_tables: set[str],
     ) -> bool:
         if not active_tables:
@@ -152,66 +170,56 @@ class SQLitePersistence:
             ("active_tasks", "task_generation_id", "generation_id", "CASCADE"),
         }
 
-    def _repair_scoped_tool_call_schema(self, conn: sqlite3.Connection) -> None:
+    def _repair_scoped_tool_call_schema(self, conn: MigrationConnection) -> None:
         if not self._needs_scoped_tool_call_repair(conn):
             return
 
-        conn.commit()
-        conn.execute("PRAGMA foreign_keys = OFF")
-        try:
-            conn.execute("BEGIN")
-            conn.execute("ALTER TABLE tool_results RENAME TO tool_results_old")
-            conn.execute("ALTER TABLE tool_calls RENAME TO tool_calls_old")
-            conn.executescript(_SCOPED_TOOL_CALL_REPAIR_TABLES_SQL)
-            self._copy_common_columns(
-                conn,
-                "tool_calls_old",
-                "tool_calls",
-                (
-                    "id",
-                    "conversation_id",
-                    "node_id",
-                    "run_id",
-                    "assistant_message_id",
-                    "call_index",
-                    "name",
-                    "args_inline",
-                    "args_blob_id",
-                    "args_preview",
-                    "status",
-                    "created_at",
-                    "updated_at",
-                ),
-            )
-            self._copy_common_columns(
-                conn,
-                "tool_results_old",
-                "tool_results",
-                (
-                    "id",
-                    "conversation_id",
-                    "node_id",
-                    "run_id",
-                    "tool_call_id",
-                    "status",
-                    "output_preview",
-                    "output_blob_id",
-                    "output_size",
-                    "truncated",
-                    "metadata_json",
-                    "created_at",
-                ),
-            )
-            conn.execute("DROP TABLE tool_results_old")
-            conn.execute("DROP TABLE tool_calls_old")
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
-        finally:
-            conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("ALTER TABLE tool_results RENAME TO tool_results_old")
+        conn.execute("ALTER TABLE tool_calls RENAME TO tool_calls_old")
+        execute_sql_script(conn, _SCOPED_TOOL_CALL_REPAIR_TABLES_SQL)
+        self._copy_common_columns(
+            conn,
+            "tool_calls_old",
+            "tool_calls",
+            (
+                "id",
+                "conversation_id",
+                "node_id",
+                "run_id",
+                "assistant_message_id",
+                "call_index",
+                "name",
+                "args_inline",
+                "args_blob_id",
+                "args_preview",
+                "status",
+                "created_at",
+                "updated_at",
+            ),
+        )
+        self._copy_common_columns(
+            conn,
+            "tool_results_old",
+            "tool_results",
+            (
+                "id",
+                "conversation_id",
+                "node_id",
+                "run_id",
+                "tool_call_id",
+                "status",
+                "output_preview",
+                "output_blob_id",
+                "output_size",
+                "truncated",
+                "metadata_json",
+                "created_at",
+            ),
+        )
+        conn.execute("DROP TABLE tool_results_old")
+        conn.execute("DROP TABLE tool_calls_old")
 
-    def _needs_scoped_tool_call_repair(self, conn: sqlite3.Connection) -> bool:
+    def _needs_scoped_tool_call_repair(self, conn: MigrationConnection) -> bool:
         tool_call_columns = {
             row["name"]: row["pk"]
             for row in conn.execute("PRAGMA table_info(tool_calls)").fetchall()
@@ -222,7 +230,7 @@ class SQLitePersistence:
             return True
         return self._tool_results_has_global_tool_call_fk(conn)
 
-    def _tool_results_has_global_tool_call_fk(self, conn: sqlite3.Connection) -> bool:
+    def _tool_results_has_global_tool_call_fk(self, conn: MigrationConnection) -> bool:
         grouped: dict[int, list[sqlite3.Row]] = {}
         for row in conn.execute("PRAGMA foreign_key_list(tool_results)").fetchall():
             if row["table"] == "tool_calls":
@@ -232,7 +240,7 @@ class SQLitePersistence:
                 return True
         return False
 
-    def _repair_run_lifecycle_schema(self, conn: sqlite3.Connection) -> None:
+    def _repair_run_lifecycle_schema(self, conn: MigrationConnection) -> None:
         columns = {
             row["name"]
             for row in conn.execute("PRAGMA table_info(runs)").fetchall()
@@ -244,7 +252,7 @@ class SQLitePersistence:
         if "cancellation_parent_run_id" not in columns:
             conn.execute("ALTER TABLE runs ADD COLUMN cancellation_parent_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL")
 
-    def _ensure_node_context_schema(self, conn: sqlite3.Connection) -> None:
+    def _ensure_node_context_schema(self, conn: MigrationConnection) -> None:
         columns = {
             row["name"]
             for row in conn.execute("PRAGMA table_info(nodes)").fetchall()
@@ -256,7 +264,7 @@ class SQLitePersistence:
 
     def _copy_common_columns(
         self,
-        conn: sqlite3.Connection,
+        conn: MigrationConnection,
         source_table: str,
         target_table: str,
         columns: tuple[str, ...],
@@ -288,9 +296,7 @@ class SQLitePersistence:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA busy_timeout = 5000")
-        conn.execute("PRAGMA journal_mode = WAL")
-        conn.execute("PRAGMA synchronous = NORMAL")
-        conn.execute("PRAGMA temp_store = MEMORY")
+        self._apply_storage_pragmas(conn)
         try:
             yield conn
             conn.commit()
@@ -299,6 +305,12 @@ class SQLitePersistence:
             raise
         finally:
             conn.close()
+
+    @staticmethod
+    def _apply_storage_pragmas(conn: sqlite3.Connection) -> None:
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
+        conn.execute("PRAGMA temp_store = MEMORY")
 
 
 _TASK_NOTIFICATIONS_TABLE_SQL = """
