@@ -66,7 +66,7 @@ class ApprovalDecision:
 
 
 class ApprovalManager:
-    def __init__(self, timeout_seconds: float = 600):
+    def __init__(self, timeout_seconds: Optional[float] = None):
         self.timeout_seconds = timeout_seconds
         self._pending: Dict[str, ApprovalRequest] = {}
         self._futures: Dict[str, asyncio.Future[ApprovalDecision]] = {}
@@ -87,7 +87,11 @@ class ApprovalManager:
         if request.id in self._pending:
             raise ValueError(f"Approval request already pending: {request.id}")
 
-        request.expires_at = int(time.time() + self.timeout_seconds)
+        request.expires_at = (
+            int(time.time() + self.timeout_seconds)
+            if self.timeout_seconds is not None
+            else None
+        )
         self._pending[request.id] = request
         self._futures[request.id] = asyncio.get_running_loop().create_future()
         return asyncio.create_task(self._wait_for_decision(request.id))

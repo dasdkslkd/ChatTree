@@ -68,6 +68,33 @@ def test_begin_request_registers_before_waiting():
     asyncio.run(_begin_request_registers_before_waiting_case())
 
 
+async def _default_has_no_timeout_case():
+    manager = ApprovalManager()
+    request = make_request()
+
+    wait_task = manager.begin_request(request)
+    await asyncio.sleep(0.02)
+
+    try:
+        assert request.expires_at is None
+        assert not wait_task.done()
+        assert manager.list_pending("conv-1")[0]["expires_at"] is None
+
+        manager.decide("approval-1", decision="approve", scope="once")
+        result = await asyncio.wait_for(wait_task, timeout=1)
+
+        assert result.status == "approved"
+        assert manager.get("approval-1") is None
+    finally:
+        if not wait_task.done():
+            manager.cancel_for_node("node-1")
+            await wait_task
+
+
+def test_default_approval_request_has_no_timeout():
+    asyncio.run(_default_has_no_timeout_case())
+
+
 async def _denied_case():
     manager = ApprovalManager(timeout_seconds=5)
     request = make_request()
@@ -143,6 +170,7 @@ async def _timeout_case():
 
     assert result.status == "expired"
     assert result.scope is None
+    assert request.expires_at is not None
     assert request.status == "expired"
     assert manager.get("approval-1") is None
 
