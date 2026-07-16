@@ -43,6 +43,11 @@ def _loopback_port_is_available(port: int) -> bool:
     return True
 
 
+def _configured_python_path(value: str | os.PathLike[str]) -> Path:
+    expanded = os.path.expanduser(os.fspath(value))
+    return Path(os.path.abspath(expanded))
+
+
 @dataclass(frozen=True)
 class ConnectedServer:
     endpoint: str
@@ -473,7 +478,7 @@ class LocalServerConnector:
         safe_profile_id = safe_profile_id.strip("._-")[:80] or "local"
         log_path = log_dir / f"local-server-{safe_profile_id}.log"
         project_root = Path(self._settings.project_root).expanduser().resolve()
-        server_python = Path(self._settings.server_python).expanduser().resolve()
+        server_python = _configured_python_path(self._settings.server_python)
         argv = [
             str(server_python),
             "-m",

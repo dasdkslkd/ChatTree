@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,6 +9,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+import client_launcher.local_server as local_server
 from client_launcher.local_server import (
     LocalServerConnector,
     LocalServerIdentityError,
@@ -21,6 +23,21 @@ from client_launcher.local_server import (
 
 SERVER_ID = "5fb0d7cc-785e-40c2-875d-218447b15583"
 OTHER_SERVER_ID = "74197461-d4b2-436f-9d7a-16131dccd034"
+
+
+def test_configured_python_path_never_resolves_symlinks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    configured = tmp_path / "venv" / "bin" / "python"
+    expected = Path(os.path.abspath(os.path.expanduser(str(configured))))
+
+    def fail_resolve(_path):
+        raise AssertionError("configured interpreter path must not resolve symlinks")
+
+    monkeypatch.setattr(Path, "resolve", fail_resolve)
+
+    assert local_server._configured_python_path(configured) == expected
 
 
 def _settings(tmp_path: Path, **overrides):
