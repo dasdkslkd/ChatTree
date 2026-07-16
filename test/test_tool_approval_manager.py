@@ -157,6 +157,27 @@ def test_immediate_waiter_cancellation_cleans_unlimited_request():
     asyncio.run(_immediate_waiter_cancellation_case())
 
 
+async def _cancelled_waiter_cannot_grant_session_permission_case():
+    manager = ApprovalManager()
+    request = make_request()
+
+    wait_task = manager.begin_request(request)
+    wait_task.cancel()
+
+    with pytest.raises(KeyError):
+        manager.decide(request.id, decision="approve", scope="session")
+    with pytest.raises(asyncio.CancelledError):
+        await wait_task
+
+    assert request.status == "cancelled"
+    assert manager.get(request.id) is None
+    assert not manager.is_session_allowed(request.conversation_id, request.tool_name)
+
+
+def test_cancelled_waiter_cannot_grant_session_permission():
+    asyncio.run(_cancelled_waiter_cannot_grant_session_permission_case())
+
+
 async def _terminal_decision_is_first_wins_case():
     manager = ApprovalManager()
     request = make_request()

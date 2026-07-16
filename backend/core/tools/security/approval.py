@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Literal, Optional, Set
+from typing import Callable, Coroutine, Dict, List, Literal, Optional, Set
 
 
 ApprovalStatus = Literal["pending", "approved", "denied", "expired", "cancelled"]
@@ -65,6 +65,23 @@ class ApprovalDecision:
     scope: Optional[ApprovalScope] = None
 
 
+class _ApprovalWaitTask(asyncio.Task[ApprovalDecision]):
+    def __init__(
+        self,
+        coroutine: Coroutine[object, object, ApprovalDecision],
+        *,
+        on_cancel: Callable[[], None],
+    ) -> None:
+        self._on_cancel = on_cancel
+        super().__init__(coroutine, loop=asyncio.get_running_loop())
+
+    def cancel(self, msg: object = None) -> bool:
+        accepted = super().cancel(msg)
+        if accepted:
+            self._on_cancel()
+        return accepted
+
+
 class ApprovalManager:
     def __init__(self, timeout_seconds: Optional[float] = None):
         self.timeout_seconds = timeout_seconds
@@ -94,7 +111,13 @@ class ApprovalManager:
         )
         self._pending[request.id] = request
         self._futures[request.id] = asyncio.get_running_loop().create_future()
-        task = asyncio.create_task(self._wait_for_decision(request.id))
+        task = _ApprovalWaitTask(
+            self._wait_for_decision(request.id),
+            on_cancel=lambda approval_id=request.id: self._try_resolve(
+                approval_id,
+                ApprovalDecision("cancelled"),
+            ),
+        )
         task.add_done_callback(
             lambda completed, approval_id=request.id: self._cleanup_cancelled_before_start(
                 approval_id,
