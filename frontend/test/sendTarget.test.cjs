@@ -20,7 +20,7 @@ require.extensions['.ts'] = function loadTs(module, filename) {
 const {
   resolveSendNodeId,
   resolveSlashStreamNodeId,
-  shouldSendSlashAnchorNode,
+  shouldDetachSlashStreamTarget,
 } = require(path.join(__dirname, '../src/utils/sendTarget.ts'));
 
 function testEditTargetWinsOverCurrentNode() {
@@ -62,7 +62,7 @@ function testDetachedSlashPoliciesDoNotUseStreamTarget() {
       }),
       undefined,
     );
-    assert.equal(shouldSendSlashAnchorNode(policy), true);
+    assert.equal(shouldDetachSlashStreamTarget(policy), true);
   }
 }
 
@@ -74,7 +74,7 @@ function testTargetNodePolicyUsesStreamTarget() {
     }),
     'node-current',
   );
-  assert.equal(shouldSendSlashAnchorNode('target_node'), false);
+  assert.equal(shouldDetachSlashStreamTarget('target_node'), false);
 }
 
 function main() {

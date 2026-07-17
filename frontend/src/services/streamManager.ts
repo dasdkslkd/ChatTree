@@ -167,6 +167,21 @@ function findToolRoundIndex(toolInteractions: any[], roundId: string | null): nu
   ));
 }
 
+function isProvisionalToolInteraction(interaction: any): boolean {
+  if (!interaction || typeof interaction !== 'object') return false;
+  const hasRound = Boolean(
+    normalizeToolRoundId(interaction.tool_round_id)
+    || normalizeToolRoundId(interaction.assistant?.tool_round_id)
+    || typeof interaction.tool_round === 'number'
+    || typeof interaction.assistant?.tool_round === 'number',
+  );
+  return !hasRound
+    && Array.isArray(interaction.assistant?.tool_calls)
+    && interaction.assistant.tool_calls.length === 0
+    && Array.isArray(interaction.tools)
+    && interaction.tools.length === 0;
+}
+
 function createToolRoundInteraction(
   toolCalls: any[],
   content: string,
@@ -202,7 +217,13 @@ function appendToolCalls(
   const normalizedCalls = toolCalls.map((toolCall) => withToolRound(toolCall, roundId, round));
   const next = [...toolInteractions];
   const roundIndex = findToolRoundIndex(next, roundId);
-  const index = roundIndex >= 0 ? roundIndex : -1;
+  const tail = next.at(-1);
+  const provisionalTailIndex = replaceSnapshot
+    && roundIndex < 0
+    && isProvisionalToolInteraction(tail)
+    ? next.length - 1
+    : -1;
+  const index = roundIndex >= 0 ? roundIndex : provisionalTailIndex;
   if (index >= 0) {
     const last = next[index];
     const existingCalls = Array.isArray(last?.assistant?.tool_calls) ? last.assistant.tool_calls : [];
@@ -292,16 +313,22 @@ function appendToolResultDelta(toolInteractions: any[], toolCall: any, roundId: 
   const targetId = toolCall.tool_call_id || toolCall.id;
   const delta = typeof toolCall.content_delta === 'string' ? toolCall.content_delta : '';
   if (!targetId || !delta) return appendToolProgress(toolInteractions, toolCall, roundId, round);
-  const current = toolInteractions.length > 0
-    ? toolInteractions.flatMap((interaction) => Array.isArray(interaction.tools) ? interaction.tools : [])
-        .find((tool) => tool?.tool_call_id === targetId)
+  const roundIndex = findToolRoundIndex(toolInteractions, roundId);
+  const candidateTools = roundIndex >= 0
+    ? toolInteractions[roundIndex]?.tools
+    : toolInteractions.flatMap((interaction) => Array.isArray(interaction.tools) ? interaction.tools : []);
+  const current = Array.isArray(candidateTools)
+    ? candidateTools.find((tool) => tool?.tool_call_id === targetId)
     : null;
+  const previousDelta = typeof current?.content_delta === 'string' ? current.content_delta : '';
+  const contentDelta = `${previousDelta}${delta}`;
   return appendToolResult(toolInteractions, {
     role: 'tool',
     tool_call_id: targetId,
     name: toolCall.name || toolCall.function?.name,
     status: toolCall.status || 'running',
-    content: `${current?.content || ''}${delta}`,
+    content: contentDelta,
+    content_delta: contentDelta,
   }, roundId, round);
 }
 
@@ -341,9 +368,10 @@ function summarizeToolInteractions(toolInteractions: any[]): string {
 }
 
 function appendProcessContent(toolInteractions: any[], content: string): any[] {
-  const next = toolInteractions.length > 0
-    ? [...toolInteractions]
-    : [{ assistant: { role: 'assistant', content: '', tool_calls: [] }, tools: [], reasoning: null }];
+  const next = [...toolInteractions];
+  if (!isProvisionalToolInteraction(next.at(-1))) {
+    next.push(createToolRoundInteraction([], '', '', null, null));
+  }
   const index = next.length - 1;
   const interaction = next[index];
   next[index] = {

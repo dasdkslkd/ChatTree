@@ -78,6 +78,10 @@ import { runsApi } from '../api/runs';
 import { taskStateApi, type TaskNotificationRecord, type TaskStateSnapshot } from '../api/taskState';
 import { plansService } from '../services/plans';
 import { transcriptService } from '../services/transcript';
+import {
+  createTranscriptRequestCoordinator,
+  type TranscriptRequestCoordinator,
+} from '../services/transcriptRequestCoordinator';
 import { taskStateCoordinator } from '../services/taskStateCoordinator';
 import {
   ConversationSyncCoordinator,
@@ -214,26 +218,11 @@ function getBrowserStorage(): Storage | null {
   return typeof window === 'undefined' ? null : window.localStorage;
 }
 
-function getTranscriptRequestKey(conversationId: string, nodeId?: string | null): string {
-  return `${conversationId}:${nodeId || ''}`;
-}
-
 function getCurrentVisibleTranscriptTip(): { conversationId: string; tipNodeId: string } | null {
   const state = useConversationStore.getState();
   const conversationId = state.currentConversation?.id;
   const tipNodeId = state.currentNodeId || state.currentConversation?.current_node_id || null;
   return conversationId && tipNodeId ? { conversationId, tipNodeId } : null;
-}
-
-function getCurrentVisibleTranscriptKey(): string | null {
-  const visible = getCurrentVisibleTranscriptTip();
-  return visible ? getTranscriptRequestKey(visible.conversationId, visible.tipNodeId) : null;
-}
-
-function isAbortError(error: unknown): boolean {
-  if (!error || typeof error !== 'object') return false;
-  const candidate = error as { name?: string; code?: string };
-  return candidate.name === 'AbortError' || candidate.code === 'ERR_CANCELED';
 }
 
 function getToolCallName(toolCall: unknown): string | null {
@@ -279,11 +268,6 @@ function getTaskToolSignal(runs: StreamState[]): string {
 function getTranscriptItemNodeId(item: TranscriptItem): string | null {
   return item.node_id || item.anchor_node_id || null;
 }
-
-type TranscriptSnapshotRequest = {
-  controller: AbortController;
-  promise: Promise<void>;
-};
 
 type TranscriptScrollTarget = {
   messageId?: string | null;
@@ -1177,7 +1161,20 @@ export default function ChatPage() {
   const programmaticScrollRef = useRef(false);
   const queuedMessagesRef = useRef<QueuedMessage[]>([]);
   const toolPermissionDraftRef = useRef<ToolPermissionDraft>(toolPermissionDraft);
-  const transcriptRequestsRef = useRef<Map<string, TranscriptSnapshotRequest>>(new Map());
+  const transcriptRequestCoordinatorRef = useRef<TranscriptRequestCoordinator | null>(null);
+  if (!transcriptRequestCoordinatorRef.current) {
+    transcriptRequestCoordinatorRef.current = createTranscriptRequestCoordinator({
+      fetchSnapshot: (conversationId, tipNodeId, signal) => (
+        transcriptService.fetchBranchSnapshot(conversationId, tipNodeId, signal)
+      ),
+      getVisibleTarget: getCurrentVisibleTranscriptTip,
+      onLoadingChange: setTranscriptLoading,
+      onSnapshot: (snapshot) => setTranscriptItems(normalizeTranscriptItems(snapshot.items || [])),
+      onErrorChange: (error) => setTranscriptError(
+        error ? '对话 transcript 刷新失败，已保留当前内容' : null,
+      ),
+    });
+  }
 
   const beginSidebarResize = useCallback((
     event: ReactPointerEvent<HTMLDivElement>,
@@ -1412,56 +1409,7 @@ export default function ChatPage() {
       return;
     }
 
-    const requestKey = getTranscriptRequestKey(conversationId, tipNodeId);
-    const existing = transcriptRequestsRef.current.get(requestKey);
-    if (existing) {
-      if (requestKey === getCurrentVisibleTranscriptKey()) {
-        setTranscriptLoading(true);
-      }
-      return existing.promise;
-    }
-
-    for (const [key, request] of transcriptRequestsRef.current) {
-      if (key !== requestKey) {
-        request.controller.abort();
-        transcriptRequestsRef.current.delete(key);
-      }
-    }
-
-    const controller = new AbortController();
-    const isCurrentVisibleRequest = () => requestKey === getCurrentVisibleTranscriptKey();
-    if (isCurrentVisibleRequest()) {
-      setTranscriptLoading(true);
-      setTranscriptError(null);
-    }
-
-    const promise = transcriptService.fetchBranchSnapshot(conversationId, tipNodeId, controller.signal)
-      .then((snapshot) => {
-        if (controller.signal.aborted) return;
-        if (transcriptRequestsRef.current.get(requestKey)?.controller !== controller) return;
-        if (!isCurrentVisibleRequest()) return;
-        if (snapshot.conversation_id !== conversationId || snapshot.tip_node_id !== tipNodeId) return;
-        setTranscriptItems(normalizeTranscriptItems(snapshot.items || []));
-        setTranscriptError(null);
-      })
-      .catch((error) => {
-        if (controller.signal.aborted || isAbortError(error)) return;
-        if (transcriptRequestsRef.current.get(requestKey)?.controller !== controller) return;
-        if (isCurrentVisibleRequest()) {
-          setTranscriptError('对话 transcript 刷新失败，已保留当前内容');
-        }
-      })
-      .finally(() => {
-        if (transcriptRequestsRef.current.get(requestKey)?.controller === controller) {
-          transcriptRequestsRef.current.delete(requestKey);
-          if (isCurrentVisibleRequest()) {
-            setTranscriptLoading(false);
-          }
-        }
-      });
-
-    transcriptRequestsRef.current.set(requestKey, { controller, promise });
-    return promise;
+    return transcriptRequestCoordinatorRef.current!.request({ conversationId, tipNodeId });
   }, []);
   const refreshVisibleTranscriptSnapshot = useCallback(async (conversationId?: string | null) => {
     const visible = getCurrentVisibleTranscriptTip();
@@ -1992,10 +1940,7 @@ export default function ChatPage() {
   }, [currentConversation?.id, loadTranscriptSnapshot, selectedBranchTipId]);
 
   useEffect(() => () => {
-    for (const request of transcriptRequestsRef.current.values()) {
-      request.controller.abort();
-    }
-    transcriptRequestsRef.current.clear();
+    transcriptRequestCoordinatorRef.current?.cancelActive();
   }, []);
 
   useEffect(() => {

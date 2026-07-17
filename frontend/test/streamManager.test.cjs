@@ -138,11 +138,48 @@ function chunk(overrides) {
   return {
     status: 'content',
     content: null,
+    run_id: 'run-1',
     node_id: 'node-1',
     conversation_id: 'conv-1',
     tokens_used: 0,
     ...overrides,
   };
+}
+
+function toolRoundFields(toolRound) {
+  return {
+    tool_round: toolRound,
+    tool_round_id: `run-1:tool-round-${toolRound}`,
+  };
+}
+
+function toolEvent(eventType, toolRound, overrides = {}) {
+  return chunk({
+    event_type: eventType,
+    ...toolRoundFields(toolRound),
+    ...overrides,
+  });
+}
+
+function executionToolEvent(eventType, toolRound, toolCall, overrides = {}) {
+  return toolEvent(eventType, toolRound, {
+    tool_call: {
+      ...toolCall,
+      tool_call_id: toolCall.tool_call_id || toolCall.id,
+      name: toolCall.name || toolCall.function?.name,
+      ...overrides,
+    },
+  });
+}
+
+async function pushToolStarted(controlled, toolRound, toolCall) {
+  await controlled.push(executionToolEvent('tool_call_start', toolRound, toolCall, {
+    status: 'running',
+  }));
+  await controlled.push(executionToolEvent('tool_progress', toolRound, toolCall, {
+    status: 'running',
+    progress: { phase: 'started', elapsed_ms: 0 },
+  }));
 }
 
 const { StreamManager, STREAM_DURATION_UPDATE_MS } = require(path.join(__dirname, '../src/services/streamManager.ts'));
@@ -192,7 +229,34 @@ async function testFlushesReasoningBeforeContentStarts() {
   });
 }
 
-async function testFlushesBufferedTextIntoSingleToolCall() {
+async function testProviderIncrementalEventsRemainNoOpDefenseOutsideCurrentSseContract() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    messageApi.stream = controlled.stream;
+    const content = '工具前说明'.repeat(80);
+    const partialToolCall = {
+      id: 'call-1',
+      type: 'function',
+      function: { name: 'read_file', arguments: '{"path":"notes' },
+    };
+    const running = manager.startStream('conv-1', { content: 'hello' });
+
+    await controlled.push(chunk({ event_type: 'text', content }));
+    await controlled.push(chunk({ event_type: 'tool_call_start' }));
+    await controlled.push(chunk({ event_type: 'tool_call', tool_call: partialToolCall }));
+
+    try {
+      const state = manager.getState('conv-1');
+      assert.equal(state.content, content);
+      assert.deepEqual(state.toolInteractions, []);
+    } finally {
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
+async function testCommittedToolCallsFlushBufferedTextExactlyOnce() {
   await withManager(async (manager) => {
     const controlled = createControlledStream();
     messageApi.stream = controlled.stream;
@@ -206,13 +270,66 @@ async function testFlushesBufferedTextIntoSingleToolCall() {
 
     await controlled.push(chunk({ event_type: 'text', content }));
     await controlled.push(chunk({ event_type: 'tool_call', tool_call: toolCall }));
+    await controlled.push(toolEvent('tool_calls_committed', 1, { tool_calls: [toolCall] }));
 
     try {
       const state = manager.getState('conv-1');
       assert.equal(state.content, '');
       assert.equal(state.toolInteractions.length, 1);
       assert.equal(state.toolInteractions[0].assistant.content, content);
-      assert.deepEqual(state.toolInteractions[0].assistant.tool_calls, [toolCall]);
+      assert.deepEqual(state.toolInteractions[0].assistant.tool_calls, [{
+        ...toolCall,
+        ...toolRoundFields(1),
+      }]);
+    } finally {
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
+async function testRepeatedCommittedSnapshotReplacesSameRoundWithoutDuplicate() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    messageApi.stream = controlled.stream;
+    const partialToolCall = {
+      id: 'call-1',
+      type: 'function',
+      function: { name: 'read_file', arguments: '{"path":"notes' },
+    };
+    const staleToolCall = {
+      id: 'call-stale',
+      type: 'function',
+      function: { name: 'glob', arguments: '{}' },
+    };
+    const committedToolCall = {
+      ...partialToolCall,
+      function: { name: 'read_file', arguments: '{"path":"notes.txt"}' },
+    };
+    const content = '提交快照前的缓冲文本';
+    const running = manager.startStream('conv-1', { content: 'hello' });
+
+    await controlled.push(chunk({ event_type: 'text', content }));
+    await controlled.push(toolEvent('tool_calls_committed', 1, {
+      tool_calls: [partialToolCall, staleToolCall],
+    }));
+    await controlled.push(toolEvent('tool_calls_committed', 1, {
+      tool_calls: [committedToolCall],
+    }));
+
+    try {
+      const state = manager.getState('conv-1');
+      assert.equal(state.toolInteractions.length, 1);
+      assert.equal(state.content, '');
+      assert.equal(state.toolInteractions[0].assistant.content, content);
+      assert.equal(
+        state.toolInteractions.map((interaction) => interaction.assistant.content).join(''),
+        content,
+      );
+      assert.deepEqual(state.toolInteractions[0].assistant.tool_calls, [{
+        ...committedToolCall,
+        ...toolRoundFields(1),
+      }]);
     } finally {
       await controlled.close();
       await runTimersUntil(running);
@@ -240,17 +357,21 @@ async function testMergesToolResultIntoExistingInteraction() {
     };
     const running = manager.startStream('conv-1', { content: 'hello' });
 
-    await controlled.push(chunk({ event_type: 'tool_call', tool_calls: [toolCall] }));
-    await controlled.push(chunk({ event_type: 'tool_result', tool_call: toolResult }));
+    await controlled.push(toolEvent('tool_calls_committed', 1, { tool_calls: [toolCall] }));
+    await pushToolStarted(controlled, 1, toolCall);
+    await controlled.push(executionToolEvent('tool_result', 1, toolCall, {
+      status: 'done',
+      content: toolResult.content,
+    }));
 
     try {
       const state = manager.getState('conv-1');
       assert.equal(state.toolInteractions.length, 1);
       assert.equal(state.toolInteractions[0].tools.length, 1);
-      assert.deepEqual(state.toolInteractions[0].tools[0], {
-        role: 'tool',
-        ...toolResult,
-      });
+      assert.equal(state.toolInteractions[0].tools[0].tool_call_id, toolResult.tool_call_id);
+      assert.equal(state.toolInteractions[0].tools[0].name, toolResult.name);
+      assert.equal(state.toolInteractions[0].tools[0].status, 'done');
+      assert.equal(state.toolInteractions[0].tools[0].content, toolResult.content);
     } finally {
       await controlled.close();
       await runTimersUntil(running);
@@ -269,16 +390,11 @@ async function testToolProgressUpdatesRunningToolInPlace() {
     };
     const running = manager.startStream('conv-1', { content: 'hello' });
 
-    await controlled.push(chunk({ event_type: 'tool_call', tool_calls: [toolCall] }));
-    await controlled.push(chunk({
-      event_type: 'tool_progress',
-      tool_call: {
-        id: 'call-1',
-        tool_call_id: 'call-1',
-        name: 'glob',
-        status: 'running',
-        progress: { phase: 'scan', scanned_entries: 100, matched_entries: 12 },
-      },
+    await controlled.push(toolEvent('tool_calls_committed', 1, { tool_calls: [toolCall] }));
+    await pushToolStarted(controlled, 1, toolCall);
+    await controlled.push(executionToolEvent('tool_progress', 1, toolCall, {
+      status: 'running',
+      progress: { phase: 'scan', scanned_entries: 100, matched_entries: 12 },
     }));
 
     try {
@@ -306,21 +422,18 @@ async function testToolResultDeltaAppendsOutputInPlace() {
     };
     const running = manager.startStream('conv-1', { content: 'hello' });
 
-    await controlled.push(chunk({ event_type: 'tool_call', tool_calls: [toolCall] }));
-    await controlled.push(chunk({
-      event_type: 'tool_result_delta',
-      tool_call: { id: 'call-1', tool_call_id: 'call-1', name: 'run_command', content_delta: 'hel' },
-    }));
-    await controlled.push(chunk({
-      event_type: 'tool_result_delta',
-      tool_call: { id: 'call-1', tool_call_id: 'call-1', name: 'run_command', content_delta: 'lo' },
-    }));
+    await controlled.push(toolEvent('tool_calls_committed', 1, { tool_calls: [toolCall] }));
+    await pushToolStarted(controlled, 1, toolCall);
+    // The backend does not currently emit this event; keep the frontend-reserved path defensive.
+    await controlled.push(executionToolEvent('tool_result_delta', 1, toolCall, { content_delta: 'hel' }));
+    await controlled.push(executionToolEvent('tool_result_delta', 1, toolCall, { content_delta: 'lo' }));
 
     try {
       const state = manager.getState('conv-1');
       assert.equal(state.toolInteractions.length, 1);
       assert.equal(state.toolInteractions[0].tools.length, 1);
       assert.equal(state.toolInteractions[0].tools[0].content, 'hello');
+      assert.equal(state.toolInteractions[0].tools[0].content_delta, 'hello');
       assert.equal(state.toolInteractions[0].tools[0].status, 'running');
     } finally {
       await controlled.close();
@@ -340,16 +453,11 @@ async function testToolCallErrorUpdatesToolInPlace() {
     };
     const running = manager.startStream('conv-1', { content: 'hello' });
 
-    await controlled.push(chunk({ event_type: 'tool_call', tool_calls: [toolCall] }));
-    await controlled.push(chunk({
-      event_type: 'tool_call_error',
-      tool_call: {
-        id: 'call-1',
-        tool_call_id: 'call-1',
-        name: 'glob',
-        status: 'error',
-        error: 'path is outside workspace roots',
-      },
+    await controlled.push(toolEvent('tool_calls_committed', 1, { tool_calls: [toolCall] }));
+    await pushToolStarted(controlled, 1, toolCall);
+    await controlled.push(executionToolEvent('tool_call_error', 1, toolCall, {
+      status: 'error',
+      error: 'path is outside workspace roots',
     }));
 
     try {
@@ -389,18 +497,40 @@ async function testProcessContentStaysWithCurrentToolInteraction() {
     }));
     const running = manager.startStream('conv-1', { content: 'hello' });
 
-    await controlled.push(chunk({ event_type: 'tool_call_start' }));
-    await controlled.push(chunk({ event_type: 'tool_call', tool_calls: toolCalls }));
     await controlled.push(chunk({ event_type: 'process_content', content: '\n\n' }));
-    await controlled.push(chunk({ event_type: 'tool_result', tool_call: results[0] }));
-    await controlled.push(chunk({ event_type: 'tool_result', tool_call: results[1] }));
+    await controlled.push(toolEvent('tool_calls_committed', 1, { tool_calls: toolCalls }));
+    await pushToolStarted(controlled, 1, toolCalls[0]);
+    await pushToolStarted(controlled, 1, toolCalls[1]);
+
+    const runningState = manager.getState('conv-1');
+    assert.equal(runningState.toolInteractions.length, 1);
+    assert.deepEqual(
+      runningState.toolInteractions[0].tools.map((tool) => tool.tool_call_id),
+      toolCalls.map((toolCall) => toolCall.id),
+    );
+    assert.ok(runningState.toolInteractions[0].tools.every((tool) => tool.status === 'running'));
+
+    await controlled.push(executionToolEvent('tool_result', 1, toolCalls[0], {
+      status: 'done',
+      content: results[0].content,
+    }));
+    await controlled.push(executionToolEvent('tool_result', 1, toolCalls[1], {
+      status: 'done',
+      content: results[1].content,
+    }));
 
     try {
       const state = manager.getState('conv-1');
       assert.equal(state.content, '');
       assert.equal(state.toolInteractions.length, 1);
       assert.equal(state.toolInteractions[0].assistant.content, '\n\n');
-      assert.deepEqual(state.toolInteractions[0].assistant.tool_calls, toolCalls);
+      assert.deepEqual(
+        state.toolInteractions[0].assistant.tool_calls.map((toolCall) => toolCall.id),
+        toolCalls.map((toolCall) => toolCall.id),
+      );
+      assert.ok(state.toolInteractions[0].assistant.tool_calls.every((toolCall) => (
+        toolCall.tool_round_id === toolRoundFields(1).tool_round_id
+      )));
       assert.equal(state.toolInteractions[0].tools.length, 2);
     } finally {
       await controlled.close();
@@ -409,77 +539,46 @@ async function testProcessContentStaysWithCurrentToolInteraction() {
   });
 }
 
-async function testToolCallStartFlushesBufferedTextBeforeToolCallCompletes() {
+async function testToolResultsMergeIntoTheirCommittedRounds() {
   await withManager(async (manager) => {
     const controlled = createControlledStream();
     messageApi.stream = controlled.stream;
-    const content = '工具调用前的说明'.repeat(80);
-    const running = manager.startStream('conv-1', { content: 'hello' });
-
-    await controlled.push(chunk({ event_type: 'text', content }));
-    await controlled.push(chunk({ event_type: 'tool_call_start' }));
-
-    try {
-      const state = manager.getState('conv-1');
-      assert.equal(state.content, '');
-      assert.equal(state.toolInteractions.length, 1);
-      assert.equal(state.toolInteractions[0].assistant.content, content);
-    } finally {
-      await controlled.close();
-      await runTimersUntil(running);
-    }
-  });
-}
-
-async function testToolCallStartCreatesRunningPlaceholder() {
-  await withManager(async (manager) => {
-    const controlled = createControlledStream();
-    messageApi.stream = controlled.stream;
-    const content = '准备调用文件工具。';
-    const running = manager.startStream('conv-1', { content: 'hello' });
-
-    await controlled.push(chunk({ event_type: 'text', content }));
-    await controlled.push(chunk({ event_type: 'tool_call_start' }));
-
-    try {
-      const state = manager.getState('conv-1');
-      assert.equal(state.content, '');
-      assert.equal(state.toolInteractions.length, 1);
-      assert.equal(state.toolInteractions[0].assistant.content, content);
-      assert.equal(state.toolInteractions[0].assistant.tool_calls.length, 1);
-      assert.equal(state.toolInteractions[0].assistant.tool_calls[0].pending, true);
-    } finally {
-      await controlled.close();
-      await runTimersUntil(running);
-    }
-  });
-}
-
-async function testToolCallDeltaUpdatesRunningPlaceholder() {
-  await withManager(async (manager) => {
-    const controlled = createControlledStream();
-    messageApi.stream = controlled.stream;
-    const partialToolCall = {
-      id: 'call-1',
+    const firstToolCall = {
+      id: 'call-reused',
       type: 'function',
-      function: { name: 'write_file', arguments: '{"path":"test_tools.py","content":"' },
+      function: { name: 'read_file', arguments: '{"path":"one.txt"}' },
+    };
+    const secondToolCall = {
+      id: 'call-reused',
+      type: 'function',
+      function: { name: 'read_file', arguments: '{"path":"two.txt"}' },
     };
     const running = manager.startStream('conv-1', { content: 'hello' });
 
-    await controlled.push(chunk({ event_type: 'tool_call_start' }));
-    await controlled.push(chunk({
-      event_type: 'tool_call',
-      tool_call: { tool_calls: [partialToolCall] },
-      tool_calls: [partialToolCall],
+    await controlled.push(chunk({ event_type: 'process_content', content: '第一轮说明' }));
+    await controlled.push(toolEvent('tool_calls_committed', 1, { tool_calls: [firstToolCall] }));
+    await pushToolStarted(controlled, 1, firstToolCall);
+    await controlled.push(executionToolEvent('tool_result', 1, firstToolCall, {
+      status: 'done',
+      content: 'one',
+    }));
+    await controlled.push(chunk({ event_type: 'process_content', content: '第二轮说明' }));
+    await controlled.push(toolEvent('tool_calls_committed', 2, { tool_calls: [secondToolCall] }));
+    await pushToolStarted(controlled, 2, secondToolCall);
+    await controlled.push(executionToolEvent('tool_result', 2, secondToolCall, {
+      status: 'done',
+      content: 'two',
     }));
 
     try {
       const state = manager.getState('conv-1');
-      assert.equal(state.toolInteractions.length, 1);
-      assert.equal(state.toolInteractions[0].assistant.tool_calls.length, 1);
-      assert.equal(state.toolInteractions[0].assistant.tool_calls[0].id, 'call-1');
-      assert.equal(state.toolInteractions[0].assistant.tool_calls[0].function.name, 'write_file');
-      assert.equal(state.toolInteractions[0].assistant.tool_calls[0].function.arguments, '{"path":"test_tools.py","content":"');
+      assert.equal(state.toolInteractions.length, 2);
+      assert.equal(state.toolInteractions[0].tool_round_id, toolRoundFields(1).tool_round_id);
+      assert.equal(state.toolInteractions[0].assistant.content, '第一轮说明');
+      assert.equal(state.toolInteractions[0].tools[0].content, 'one');
+      assert.equal(state.toolInteractions[1].tool_round_id, toolRoundFields(2).tool_round_id);
+      assert.equal(state.toolInteractions[1].assistant.content, '第二轮说明');
+      assert.equal(state.toolInteractions[1].tools[0].content, 'two');
     } finally {
       await controlled.close();
       await runTimersUntil(running);
@@ -1449,15 +1548,15 @@ function testGenerationStatusUsesPersistedErrorMessage() {
 
 async function main() {
   await testFlushesReasoningBeforeContentStarts();
-  await testFlushesBufferedTextIntoSingleToolCall();
+  await testProviderIncrementalEventsRemainNoOpDefenseOutsideCurrentSseContract();
+  await testCommittedToolCallsFlushBufferedTextExactlyOnce();
+  await testRepeatedCommittedSnapshotReplacesSameRoundWithoutDuplicate();
   await testMergesToolResultIntoExistingInteraction();
   await testToolProgressUpdatesRunningToolInPlace();
+  await testProcessContentStaysWithCurrentToolInteraction();
   await testToolResultDeltaAppendsOutputInPlace();
   await testToolCallErrorUpdatesToolInPlace();
-  await testProcessContentStaysWithCurrentToolInteraction();
-  await testToolCallStartFlushesBufferedTextBeforeToolCallCompletes();
-  await testToolCallStartCreatesRunningPlaceholder();
-  await testToolCallDeltaUpdatesRunningPlaceholder();
+  await testToolResultsMergeIntoTheirCommittedRounds();
   await testStreamErrorStatePreservesRealMessage();
   await testRequestNodeAndUiAnchorAreIndependent();
   await testPlanApprovalUsesControlStreamWithoutPendingUserMessage();
