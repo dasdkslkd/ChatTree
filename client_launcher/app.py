@@ -7,12 +7,15 @@ from uuid import uuid4
 
 import httpx
 from fastapi import FastAPI, Request, Response
-from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
-from starlette.exceptions import HTTPException as StarletteHTTPException
-from starlette.responses import JSONResponse
 
+from client_launcher.http_errors import (
+    ErrorEnvelope,
+    RequestBoundaryMiddleware,
+    install_error_handlers,
+    launcher_error_response,
+)
 from client_launcher.local_server import LocalServerConnector
 from client_launcher.models import LauncherError, LocalTarget, ServerProfile
 from client_launcher.profiles import ProfileStore
@@ -22,6 +25,31 @@ from client_launcher.settings import (
     PROFILES_FILENAME,
     LauncherSettings,
 )
+
+
+class _LauncherApp(FastAPI):
+    def __init__(
+        self,
+        *,
+        allowed_origins: tuple[str, ...],
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self._launcher_allowed_origins = allowed_origins
+
+    def build_middleware_stack(self):
+        stack = super().build_middleware_stack()
+        stack = CORSMiddleware(
+            stack,
+            allow_origins=list(self._launcher_allowed_origins),
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+        return RequestBoundaryMiddleware(
+            stack,
+            allowed_origins=self._launcher_allowed_origins,
+        )
 
 
 class StrictRequestModel(BaseModel):
@@ -80,16 +108,6 @@ def create_app(
             if owns_proxy_client:
                 await upstream_client.aclose()
 
-    app = FastAPI(
-        title="ChatTree Client Launcher",
-        version="0.1.0",
-        lifespan=lifespan,
-    )
-    app.state.launcher_settings = resolved_settings
-    app.state.profile_store = profile_store
-    app.state.session_manager = sessions
-    app.state.proxy_client = upstream_client
-
     allowed_origins = tuple(
         dict.fromkeys(
             (
@@ -99,56 +117,24 @@ def create_app(
             )
         )
     )
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=list(allowed_origins),
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+    app = _LauncherApp(
+        allowed_origins=allowed_origins,
+        title="ChatTree Client Launcher",
+        version="0.1.0",
+        lifespan=lifespan,
+        responses={422: {"model": ErrorEnvelope}},
     )
-
-    @app.middleware("http")
-    async def request_boundary(request: Request, call_next):
-        incoming_request_id = request.headers.get("x-request-id", "").strip()
-        request_id = (
-            incoming_request_id
-            if incoming_request_id and len(incoming_request_id) <= 128
-            else f"req_{uuid4().hex}"
-        )
-        request.state.request_id = request_id
-        origin = request.headers.get("origin")
-        if origin and origin not in allowed_origins:
-            response = _error_response(
-                request,
-                code="origin_not_allowed",
-                message=f"Origin is not allowed: {origin}",
-                retryable=False,
-                status_code=403,
-            )
-        else:
-            response = await call_next(request)
-        response.headers["X-Request-ID"] = request_id
-        return response
-
-    @app.exception_handler(LauncherError)
-    async def launcher_error_handler(
-        request: Request,
-        exc: LauncherError,
-    ) -> JSONResponse:
-        return _error_response(
-            request,
-            code=exc.code,
-            message=exc.message,
-            retryable=exc.retryable,
-            status_code=exc.status_code,
-            details=exc.details,
-        )
+    app.state.launcher_settings = resolved_settings
+    app.state.profile_store = profile_store
+    app.state.session_manager = sessions
+    app.state.proxy_client = upstream_client
+    install_error_handlers(app)
 
     @app.exception_handler(ProxyError)
     async def proxy_error_handler(
         request: Request,
         exc: ProxyError,
-    ) -> JSONResponse:
+    ) -> Response:
         profile_id = getattr(exc, "profile_id", None)
         connection_epoch = getattr(exc, "connection_epoch", None)
         if (
@@ -166,39 +152,7 @@ def create_app(
                 ),
                 connection_epoch=connection_epoch,
             )
-        return _error_response(
-            request,
-            code=exc.code,
-            message=exc.message,
-            retryable=exc.retryable,
-            status_code=exc.status_code,
-        )
-
-    @app.exception_handler(RequestValidationError)
-    async def validation_error_handler(
-        request: Request,
-        _exc: RequestValidationError,
-    ) -> JSONResponse:
-        return _error_response(
-            request,
-            code="invalid_request",
-            message="Request validation failed",
-            retryable=False,
-            status_code=422,
-        )
-
-    @app.exception_handler(StarletteHTTPException)
-    async def http_error_handler(
-        request: Request,
-        exc: StarletteHTTPException,
-    ) -> JSONResponse:
-        return _error_response(
-            request,
-            code="route_not_found" if exc.status_code == 404 else "http_error",
-            message=str(exc.detail),
-            retryable=False,
-            status_code=exc.status_code,
-        )
+        return await launcher_error_response(request, exc)
 
     @app.get("/client/v1/profiles")
     async def list_profiles() -> list[dict[str, Any]]:
@@ -267,6 +221,7 @@ def create_app(
     @app.post("/client/v1/profiles/{profile_id}/connect")
     async def connect_profile(
         profile_id: str,
+        request: Request,
         body: ConnectProfileRequest | None = None,
     ) -> dict[str, Any]:
         options = body or ConnectProfileRequest()
@@ -275,6 +230,7 @@ def create_app(
                 profile_id,
                 rebind=options.rebind,
                 expected_server_instance_id=options.expected_server_instance_id,
+                request_id=request.state.request_id,
             )
         ).to_dict()
 
@@ -296,27 +252,3 @@ def create_app(
         )
     )
     return app
-
-
-def _error_response(
-    request: Request,
-    *,
-    code: str,
-    message: str,
-    retryable: bool,
-    status_code: int,
-    details: dict[str, Any] | None = None,
-) -> JSONResponse:
-    request_id = getattr(request.state, "request_id", f"req_{uuid4().hex}")
-    error: dict[str, Any] = {
-        "code": code,
-        "message": message,
-        "retryable": retryable,
-        "request_id": request_id,
-    }
-    if details:
-        error["details"] = details
-    return JSONResponse(
-        status_code=status_code,
-        content={"error": error},
-    )

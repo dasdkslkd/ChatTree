@@ -14,6 +14,7 @@ from typing import Any, Awaitable, Callable, Mapping, TYPE_CHECKING
 
 import httpx
 
+from client_launcher.http_errors import canonical_request_id
 from client_launcher.models import LauncherError
 
 if TYPE_CHECKING:
@@ -186,14 +187,22 @@ class LocalServerConnector:
         self,
         profile: ServerProfile,
         phase_callback: PhaseCallback | None,
+        *,
+        request_id: str | None = None,
     ) -> ConnectedServer:
+        request_id = canonical_request_id(request_id)
         endpoint, server_home, port = self._connection_target(profile)
         lock_key = os.path.normcase(str(server_home))
         lock = self._locks.setdefault(lock_key, asyncio.Lock())
 
         async with lock:
             try:
-                return await self._probe(endpoint, profile, phase_callback)
+                return await self._probe(
+                    endpoint,
+                    profile,
+                    phase_callback,
+                    request_id=request_id,
+                )
             except _EndpointUnavailable as exc:
                 if exc.phase != "health":
                     raise self._transport_error(endpoint, exc) from exc.cause
@@ -209,6 +218,7 @@ class LocalServerConnector:
                 phase_callback,
                 process,
                 log_path,
+                request_id=request_id,
             )
 
     async def close(self) -> None:
@@ -287,9 +297,16 @@ class LocalServerConnector:
         endpoint: str,
         profile: ServerProfile,
         phase_callback: PhaseCallback | None,
+        *,
+        request_id: str,
     ) -> ConnectedServer:
         await self._emit_phase(phase_callback, "health")
-        health = await self._request_json(endpoint, _HEALTH_PATH, "health")
+        health = await self._request_json(
+            endpoint,
+            _HEALTH_PATH,
+            "health",
+            request_id=request_id,
+        )
         health_id = self._validate_health(health)
 
         await self._emit_phase(phase_callback, "handshake")
@@ -297,6 +314,7 @@ class LocalServerConnector:
             endpoint,
             _HANDSHAKE_PATH,
             "handshake",
+            request_id=request_id,
         )
         handshake_id = self._validate_handshake(handshake)
 
@@ -320,9 +338,14 @@ class LocalServerConnector:
         endpoint: str,
         path: str,
         phase: str,
+        *,
+        request_id: str,
     ) -> Mapping[str, Any]:
         try:
-            response = await self._client.get(f"{endpoint}{path}")
+            response = await self._client.get(
+                f"{endpoint}{path}",
+                headers={"X-Request-ID": request_id},
+            )
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
             raise _EndpointUnavailable(phase, exc) from exc
         except httpx.HTTPError as exc:
@@ -573,6 +596,8 @@ class LocalServerConnector:
         phase_callback: PhaseCallback | None,
         process: subprocess.Popen[Any],
         log_path: Path,
+        *,
+        request_id: str,
     ) -> ConnectedServer:
         deadline = self._monotonic() + float(
             self._settings.start_timeout_seconds
@@ -587,7 +612,12 @@ class LocalServerConnector:
                 )
             try:
                 return await asyncio.wait_for(
-                    self._probe(endpoint, profile, phase_callback),
+                    self._probe(
+                        endpoint,
+                        profile,
+                        phase_callback,
+                        request_id=request_id,
+                    ),
                     timeout=remaining,
                 )
             except asyncio.TimeoutError:

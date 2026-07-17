@@ -315,6 +315,23 @@ def test_real_launcher_entry_proxy_and_home_lock(tmp_path: Path) -> None:
             timeout=10,
             follow_redirects=False,
         ) as client:
+            missing = client.get(
+                "/client/v1/not-found",
+                headers={"X-Request-ID": "real-launcher-404"},
+            )
+            assert missing.status_code == 404
+            assert missing.headers.get_list("X-Request-ID") == [
+                "real-launcher-404"
+            ]
+            assert missing.json() == {
+                "error": {
+                    "code": "not_found",
+                    "message": "Not Found",
+                    "retryable": False,
+                    "request_id": "real-launcher-404",
+                }
+            }
+
             redirect = client.get("/p/local/api/v1/conversations/")
             assert redirect.status_code == 307
             assert redirect.headers["location"] == (

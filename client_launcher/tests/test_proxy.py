@@ -9,6 +9,7 @@ import pytest
 from fastapi import FastAPI
 from starlette.requests import Request
 
+from client_launcher.http_errors import REQUEST_ID_RE, RequestBoundaryMiddleware
 from client_launcher.models import EndpointLease
 from client_launcher.proxy import (
     ProxyEndpointUnavailable,
@@ -100,6 +101,7 @@ def test_proxy_preserves_http_semantics_and_filters_hop_by_hop_headers() -> None
                 read_timeout=9.5,
             )
         )
+        app.add_middleware(RequestBoundaryMiddleware)
 
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(
@@ -237,6 +239,114 @@ def test_proxy_replaces_incoming_request_id_with_launcher_canonical_id() -> None
     _run(scenario())
 
 
+@pytest.mark.parametrize(
+    "incoming_headers",
+    (
+        (("X-Request-ID", "not valid!"),),
+        (
+            ("X-Request-ID", "first-valid"),
+            ("X-Request-ID", "second-valid"),
+        ),
+    ),
+    ids=("invalid", "duplicate"),
+)
+def test_proxy_sends_one_canonical_id_and_preserves_idempotency_key(
+    incoming_headers: tuple[tuple[str, str], ...],
+) -> None:
+    async def scenario() -> None:
+        seen_request_ids: list[str] = []
+        seen_idempotency_keys: list[str] = []
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            seen_request_ids.extend(request.headers.get_list("x-request-id"))
+            seen_idempotency_keys.extend(
+                request.headers.get_list("idempotency-key")
+            )
+            return httpx.Response(204)
+
+        upstream_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(upstream)
+        )
+        inner = FastAPI()
+        inner.include_router(
+            create_proxy_router(
+                lambda _profile_id: "http://upstream.test",
+                upstream_client,
+            )
+        )
+        app = RequestBoundaryMiddleware(inner)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://launcher.test",
+        ) as launcher_client:
+            response = await launcher_client.get(
+                "/p/local/api/v1/health",
+                headers=[
+                    *incoming_headers,
+                    ("Idempotency-Key", "idem-tree-1"),
+                ],
+            )
+
+        await upstream_client.aclose()
+        assert len(seen_request_ids) == 1
+        assert REQUEST_ID_RE.fullmatch(seen_request_ids[0])
+        assert seen_request_ids[0].startswith("req_")
+        assert seen_request_ids[0] not in {
+            value for name, value in incoming_headers if name == "X-Request-ID"
+        }
+        assert seen_idempotency_keys == ["idem-tree-1"]
+        assert response.headers.get_list("X-Request-ID") == seen_request_ids
+
+    _run(scenario())
+
+
+def test_proxy_passes_upstream_error_envelope_through_byte_for_byte() -> None:
+    async def scenario() -> None:
+        upstream_body = (
+            b'{"error":{"code":"active_runs_present","message":"blocked",'
+            b'"retryable":true,"request_id":"proxy-tree","details":'
+            b'{"active_run_ids":["run-1","run-2"]}}}'
+        )
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            assert request.headers.get_list("x-request-id") == ["proxy-tree"]
+            return httpx.Response(
+                409,
+                headers=[
+                    ("Content-Type", "application/json"),
+                    ("X-Request-ID", "proxy-tree"),
+                ],
+                content=upstream_body,
+            )
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        handler = ProxyHandler(
+            lambda _profile_id: "http://upstream.test",
+            http_client=client,
+        )
+        request = _request("DELETE", "/p/local/api/v1/conversations/branch")
+        request.state.request_id = "proxy-tree"
+        response = await handler(request, "local", "conversations/branch")
+        body = b"".join([chunk async for chunk in response.body_iterator])
+        upstream_request_ids = [
+            value
+            for name, value in response.raw_headers
+            if name.lower() == b"x-request-id"
+        ]
+        if response.background is not None:
+            await response.background()
+        await client.aclose()
+
+        assert response.status_code == 409
+        assert body == upstream_body
+        assert body.count(b'"error"') == 1
+        assert b'"active_run_ids":["run-1","run-2"]' in body
+        assert upstream_request_ids == [b"proxy-tree"]
+
+    _run(scenario())
+
+
 def test_proxy_enforces_body_limit_while_reading_chunked_body() -> None:
     async def scenario() -> None:
         calls = 0
@@ -325,6 +435,66 @@ def test_proxy_returns_first_sse_chunk_without_buffering_the_stream() -> None:
         if response.background is not None:
             await response.background()
 
+        assert stream.closed.is_set()
+        assert stream.close_calls == 1
+        await client.aclose()
+
+    _run(scenario())
+
+
+def test_proxy_send_delivers_first_sse_chunk_before_upstream_unblocks() -> None:
+    async def scenario() -> None:
+        stream = _GatedStream()
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                stream=stream,
+            )
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        handler = ProxyHandler(
+            lambda _profile_id: "http://upstream.test",
+            http_client=client,
+        )
+        request = _request("GET", "/p/local/api/v1/runs/run-1/events")
+        request.state.request_id = "proxy-send-tree"
+        response = await handler(request, "local", "runs/run-1/events")
+        sent: list[dict[str, Any]] = []
+        first_body_sent = asyncio.Event()
+        never_disconnect = asyncio.Event()
+
+        async def receive() -> dict[str, str]:
+            await never_disconnect.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message: dict[str, Any]) -> None:
+            sent.append(message)
+            if (
+                message["type"] == "http.response.body"
+                and message.get("body") == b"data: first\n\n"
+            ):
+                first_body_sent.set()
+
+        response_task = asyncio.create_task(
+            response(request.scope, receive, send)
+        )
+        await asyncio.wait_for(first_body_sent.wait(), timeout=0.25)
+
+        assert not response_task.done()
+        assert any(
+            message["type"] == "http.response.start" for message in sent
+        )
+        assert any(
+            message["type"] == "http.response.body"
+            and message.get("body") == b"data: first\n\n"
+            and message.get("more_body") is True
+            for message in sent
+        )
+
+        stream.release.set()
+        await asyncio.wait_for(response_task, timeout=0.25)
         assert stream.closed.is_set()
         assert stream.close_calls == 1
         await client.aclose()

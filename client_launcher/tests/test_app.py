@@ -2,13 +2,26 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
 import httpx
+import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.exceptions import HTTPException
+from starlette.responses import StreamingResponse
 
 from client_launcher.app import create_app
+from client_launcher.http_errors import (
+    GENERIC_5XX_MESSAGE,
+    REQUEST_ID_RE,
+    ErrorEnvelope,
+    RequestBoundaryMiddleware,
+)
 from client_launcher.local_server import ConnectedServer
+from client_launcher.models import LauncherError
 from client_launcher.profiles import ProfileStore
+from client_launcher.proxy import ProxyError
 from client_launcher.settings import LauncherSettings
 
 
@@ -19,10 +32,19 @@ class ImmediateConnector:
     def __init__(self):
         self.instance_id = SERVER_A
         self.connect_calls = 0
+        self.request_ids: list[str] = []
         self.closed = False
 
-    async def connect(self, profile, phase_callback):
+    async def connect(
+        self,
+        profile,
+        phase_callback,
+        *,
+        request_id: str | None = None,
+    ):
         self.connect_calls += 1
+        assert request_id is not None
+        self.request_ids.append(request_id)
         phase_callback("health")
         phase_callback("handshake")
         return ConnectedServer(
@@ -47,7 +69,11 @@ def _settings(tmp_path: Path) -> LauncherSettings:
     )
 
 
-def _app(tmp_path: Path):
+def _app(
+    tmp_path: Path,
+    *,
+    proxy_client: httpx.AsyncClient | None = None,
+):
     settings = _settings(tmp_path)
     store = ProfileStore(
         settings.client_home / "profiles.json",
@@ -55,7 +81,16 @@ def _app(tmp_path: Path):
     )
     store.update("local", auto_connect=False)
     connector = ImmediateConnector()
-    return create_app(settings=settings, profiles=store, connector=connector), store, connector
+    return (
+        create_app(
+            settings=settings,
+            profiles=store,
+            connector=connector,
+            proxy_client=proxy_client,
+        ),
+        store,
+        connector,
+    )
 
 
 def test_profile_crud_and_stable_error_envelope(tmp_path: Path):
@@ -479,3 +514,459 @@ def test_deleted_profile_proxy_failure_preserves_transport_error(tmp_path: Path)
     asyncio.run(proxy_client.aclose())
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "proxy_upstream_unavailable"
+
+
+@pytest.mark.parametrize(
+    ("headers", "preserved"),
+    (
+        ([('X-Request-ID', 'client.request:1')], 'client.request:1'),
+        ([('X-Request-ID', 'contains space')], None),
+        (
+            [
+                ('X-Request-ID', 'first-request'),
+                ('X-Request-ID', 'second-request'),
+            ],
+            None,
+        ),
+        ([], None),
+    ),
+    ids=("valid", "invalid", "duplicate", "missing"),
+)
+def test_request_boundary_emits_one_canonical_id(
+    tmp_path: Path,
+    headers: list[tuple[str, str]],
+    preserved: str | None,
+):
+    app, _, _ = _app(tmp_path)
+
+    with TestClient(app) as client:
+        response = client.get("/client/v1/profiles", headers=headers)
+
+    request_ids = response.headers.get_list("X-Request-ID")
+    assert len(request_ids) == 1
+    request_id = request_ids[0]
+    assert REQUEST_ID_RE.fullmatch(request_id)
+    assert request_id.startswith("req_") is (preserved is None)
+    if preserved is None:
+        assert request_id not in {value for _, value in headers}
+    else:
+        assert request_id == preserved
+
+
+def test_connect_route_propagates_boundary_request_id(tmp_path: Path):
+    app, _, connector = _app(tmp_path)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/client/v1/profiles/local/connect",
+            headers={"X-Request-ID": "connect-tree:1"},
+        )
+
+    assert response.status_code == 200
+    assert connector.request_ids == ["connect-tree:1"]
+    assert response.headers["X-Request-ID"] == "connect-tree:1"
+
+
+@pytest.mark.parametrize(
+    ("status_code", "code", "retryable"),
+    (
+        (400, "invalid_request", False),
+        (401, "unauthorized", False),
+        (403, "forbidden", False),
+        (404, "not_found", False),
+        (405, "method_not_allowed", False),
+        (409, "conflict", False),
+        (410, "gone", False),
+        (412, "precondition_failed", False),
+        (413, "payload_too_large", False),
+        (415, "unsupported_media_type", False),
+        (418, "http_error", False),
+        (422, "invalid_request", False),
+        (428, "precondition_required", False),
+        (429, "rate_limited", True),
+        (451, "http_error", False),
+        (500, "internal_error", False),
+        (502, "service_unavailable", True),
+        (503, "service_unavailable", True),
+        (504, "service_unavailable", True),
+        (507, "internal_error", False),
+    ),
+)
+def test_http_exception_statuses_use_complete_fallback_matrix(
+    tmp_path: Path,
+    status_code: int,
+    code: str,
+    retryable: bool,
+):
+    app, _, _ = _app(tmp_path)
+
+    @app.get("/__contract__/status/{value}")
+    async def status_error(value: int):
+        raise HTTPException(value, "launcher status secret")
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get(
+            f"/__contract__/status/{status_code}",
+            headers={"X-Request-ID": f"status-{status_code}"},
+        )
+
+    error = response.json()["error"]
+    assert response.status_code == status_code
+    assert error["code"] == code
+    assert error["retryable"] is retryable
+    assert error["request_id"] == response.headers["X-Request-ID"]
+    if status_code >= 500:
+        assert error["message"] == GENERIC_5XX_MESSAGE
+        assert "launcher status secret" not in response.text
+
+
+def test_validation_issues_are_redacted_and_structured(tmp_path: Path):
+    app, _, _ = _app(tmp_path)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/client/v1/profiles",
+            json={
+                "label": "Sensitive",
+                "server_home": "secret-home-value",
+                "server_port": "secret-port-value",
+                "credentials": {"token": "secret-token-value"},
+            },
+        )
+
+    assert response.status_code == 422
+    error = response.json()["error"]
+    assert error["code"] == "invalid_request"
+    assert error["request_id"] == response.headers["X-Request-ID"]
+    assert error["details"]["issues"]
+    assert all(
+        set(issue) == {"path", "code", "message"}
+        for issue in error["details"]["issues"]
+    )
+    assert "secret-home-value" not in response.text
+    assert "secret-port-value" not in response.text
+    assert "secret-token-value" not in response.text
+
+
+@pytest.mark.parametrize(
+    ("path", "request_id", "secret", "code", "has_traceback"),
+    (
+        (
+            "/__contract__/launcher-5xx",
+            "launcher-5xx",
+            "launcher original reason",
+            "launcher_failed",
+            False,
+        ),
+        (
+            "/__contract__/proxy-5xx",
+            "proxy-5xx",
+            "proxy original reason",
+            "proxy_error",
+            False,
+        ),
+        (
+            "/__contract__/http-5xx",
+            "http-5xx",
+            "http original reason",
+            "internal_error",
+            False,
+        ),
+        (
+            "/__contract__/unknown-5xx",
+            "unknown-5xx",
+            "unknown original reason",
+            "internal_error",
+            True,
+        ),
+    ),
+)
+def test_launcher_5xx_sources_are_sanitized_and_logged(
+    tmp_path: Path,
+    caplog,
+    path: str,
+    request_id: str,
+    secret: str,
+    code: str,
+    has_traceback: bool,
+):
+    app, _, _ = _app(tmp_path)
+
+    @app.get("/__contract__/launcher-5xx")
+    async def launcher_5xx():
+        raise LauncherError(
+            "launcher_failed",
+            "launcher original reason",
+            retryable=True,
+            status_code=503,
+            details={"secret": "launcher detail secret"},
+        )
+
+    @app.get("/__contract__/proxy-5xx")
+    async def proxy_5xx():
+        raise ProxyError("proxy original reason")
+
+    @app.get("/__contract__/http-5xx")
+    async def http_5xx():
+        raise HTTPException(
+            500,
+            {"message": "http original reason", "secret": "http detail secret"},
+        )
+
+    @app.get("/__contract__/unknown-5xx")
+    async def unknown_5xx():
+        raise RuntimeError("unknown original reason")
+
+    caplog.set_level("ERROR", logger="client_launcher.http_errors")
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get(path, headers={"X-Request-ID": request_id})
+
+    error = response.json()["error"]
+    assert response.status_code >= 500
+    assert error["code"] == code
+    assert error["message"] == GENERIC_5XX_MESSAGE
+    assert "details" not in error
+    assert secret not in response.text
+    assert "detail secret" not in response.text
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "client_launcher.http_errors"
+        and request_id in record.getMessage()
+    ]
+    assert len(records) == 1
+    assert secret in records[0].getMessage()
+    assert (records[0].exc_info is not None) is has_traceback
+
+
+def test_boundary_wraps_server_errors_and_preserves_allowed_cors(tmp_path: Path):
+    app, _, _ = _app(tmp_path)
+
+    @app.get("/__contract__/outermost-unknown")
+    async def outermost_unknown():
+        raise RuntimeError("outermost unknown reason")
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get(
+            "/__contract__/outermost-unknown",
+            headers={
+                "Origin": "http://localhost:5173",
+                "X-Request-ID": "outermost-unknown",
+            },
+        )
+
+    assert isinstance(app.middleware_stack, RequestBoundaryMiddleware)
+    assert response.status_code == 500
+    assert response.headers["X-Request-ID"] == "outermost-unknown"
+    assert response.headers["Access-Control-Allow-Origin"] == (
+        "http://localhost:5173"
+    )
+    assert response.json()["error"]["request_id"] == "outermost-unknown"
+
+
+def test_proxy_preserves_a_different_valid_upstream_request_id(tmp_path: Path):
+    upstream_body = (
+        b'{"error":{"code":"active_runs_present","message":"blocked",'
+        b'"retryable":true,"request_id":"upstream-tree","details":'
+        b'{"active_run_ids":["run-1"]}}}'
+    )
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        assert request.headers.get_list("X-Request-ID") == ["launcher-tree"]
+        return httpx.Response(
+            409,
+            headers={
+                "Content-Type": "application/json",
+                "X-Request-ID": "upstream-tree",
+            },
+            content=upstream_body,
+        )
+
+    proxy_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    app, _, _ = _app(tmp_path, proxy_client=proxy_client)
+
+    with TestClient(app) as client:
+        assert client.post("/client/v1/profiles/local/connect").status_code == 200
+        response = client.delete(
+            "/p/local/api/v1/conversations/branch",
+            headers={"X-Request-ID": "launcher-tree"},
+        )
+
+    asyncio.run(proxy_client.aclose())
+    assert response.status_code == 409
+    assert response.content == upstream_body
+    assert response.headers.get_list("X-Request-ID") == ["upstream-tree"]
+    assert response.json()["error"]["request_id"] == "upstream-tree"
+
+
+def test_safe_exception_and_cors_headers_survive(tmp_path: Path):
+    app, _, _ = _app(tmp_path)
+
+    @app.get("/__contract__/headers")
+    async def headers_error():
+        raise HTTPException(
+            401,
+            "authenticate",
+            headers={
+                "Allow": "GET, HEAD",
+                "Retry-After": "17",
+                "WWW-Authenticate": 'Bearer realm="launcher"',
+                "ETag": '"revision-1"',
+                "Content-Type": "text/plain",
+                "Content-Length": "9999",
+                "X-Request-ID": "spoofed",
+                "X-Unsafe": "drop",
+            },
+        )
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/__contract__/headers",
+            headers={
+                "Origin": "http://localhost:5173",
+                "X-Request-ID": "safe-headers",
+            },
+        )
+        invalid_preflight = client.options(
+            "/client/v1/profiles",
+            headers={
+                "Origin": "https://evil.example",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        allowed_preflight = client.options(
+            "/client/v1/profiles",
+            headers={
+                "Origin": "http://localhost:5173",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+
+    assert response.headers["Allow"] == "GET, HEAD"
+    assert response.headers["Retry-After"] == "17"
+    assert response.headers["WWW-Authenticate"] == 'Bearer realm="launcher"'
+    assert response.headers["ETag"] == '"revision-1"'
+    assert response.headers["Content-Type"] == "application/json"
+    assert response.headers["Content-Length"] != "9999"
+    assert response.headers["X-Request-ID"] == "safe-headers"
+    assert "X-Unsafe" not in response.headers
+    assert response.headers["Access-Control-Allow-Origin"] == (
+        "http://localhost:5173"
+    )
+    assert invalid_preflight.status_code == 403
+    assert invalid_preflight.json()["error"]["code"] == "origin_not_allowed"
+    assert "evil.example" not in invalid_preflight.text
+    assert allowed_preflight.status_code == 200
+    assert allowed_preflight.headers["Access-Control-Allow-Origin"] == (
+        "http://localhost:5173"
+    )
+
+
+def test_launcher_openapi_uses_owned_error_envelope(tmp_path: Path):
+    app, _, _ = _app(tmp_path)
+
+    with pytest.warns(UserWarning, match="Duplicate Operation ID"):
+        schema = app.openapi()
+
+    assert ErrorEnvelope.__module__ == "client_launcher.http_errors"
+    assert "ErrorEnvelope" in schema["components"]["schemas"]
+    validation_schema = schema["paths"]["/client/v1/profiles"]["post"][
+        "responses"
+    ]["422"]["content"]["application/json"]["schema"]
+    assert validation_schema["$ref"].endswith("/ErrorEnvelope")
+
+
+def test_initial_sse_response_has_one_canonical_request_id(tmp_path: Path):
+    app, _, _ = _app(tmp_path)
+
+    async def events():
+        yield b"data: first\n\n"
+
+    @app.get("/__contract__/events")
+    async def stream_events():
+        return StreamingResponse(events(), media_type="text/event-stream")
+
+    with TestClient(app) as client:
+        with client.stream(
+            "GET",
+            "/__contract__/events",
+            headers={"X-Request-ID": "sse-header"},
+        ) as response:
+            assert response.status_code == 200
+            assert response.headers.get_list("X-Request-ID") == ["sse-header"]
+            assert next(response.iter_bytes()) == b"data: first\n\n"
+
+
+def test_request_boundary_sends_first_stream_chunk_before_unblock():
+    async def scenario() -> None:
+        release = asyncio.Event()
+        never_disconnect = asyncio.Event()
+
+        async def events():
+            yield b"data: first\n\n"
+            await release.wait()
+            yield b"data: second\n\n"
+
+        app = FastAPI()
+
+        @app.get("/events")
+        async def stream_events():
+            response = StreamingResponse(events(), media_type="text/event-stream")
+            response.raw_headers.extend(
+                [
+                    (b"x-request-id", b"spoofed"),
+                    (b"x-request-id", b"spoofed-again"),
+                ]
+            )
+            return response
+
+        app.add_middleware(RequestBoundaryMiddleware)
+        sent: list[dict[str, Any]] = []
+        first_recorded = asyncio.Event()
+
+        async def receive():
+            await never_disconnect.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            sent.append(message)
+            if (
+                message["type"] == "http.response.body"
+                and message.get("body") == b"data: first\n\n"
+            ):
+                first_recorded.set()
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.3"},
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/events",
+            "raw_path": b"/events",
+            "query_string": b"",
+            "headers": [(b"x-request-id", b"send-level")],
+            "client": ("127.0.0.1", 12345),
+            "server": ("launcher.test", 80),
+            "root_path": "",
+        }
+        task = asyncio.create_task(app(scope, receive, send))
+        await asyncio.wait_for(first_recorded.wait(), timeout=0.25)
+
+        assert not task.done()
+        assert sent[1] == {
+            "type": "http.response.body",
+            "body": b"data: first\n\n",
+            "more_body": True,
+        }
+        response_headers = [
+            value
+            for name, value in sent[0]["headers"]
+            if name.lower() == b"x-request-id"
+        ]
+        assert response_headers == [b"send-level"]
+
+        release.set()
+        await asyncio.wait_for(task, timeout=0.25)
+
+    asyncio.run(scenario())

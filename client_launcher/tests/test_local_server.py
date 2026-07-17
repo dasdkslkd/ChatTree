@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 import client_launcher.local_server as local_server
+from client_launcher.http_errors import REQUEST_ID_RE
 from client_launcher.local_server import (
     LocalServerConnector,
     LocalServerIdentityError,
@@ -154,9 +155,11 @@ class FakeClock:
 
 def test_existing_server_is_reused_without_spawn(tmp_path: Path):
     paths: list[str] = []
+    request_ids: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         paths.append(request.url.path)
+        request_ids.extend(request.headers.get_list("x-request-id"))
         return _health() if request.url.path.endswith("/health") else _handshake()
 
     popen = FakePopen()
@@ -166,13 +169,20 @@ def test_existing_server_is_reused_without_spawn(tmp_path: Path):
         popen_factory=popen,
     )
 
-    connected = asyncio.run(connector.connect(_profile(tmp_path), None))
+    connected = asyncio.run(
+        connector.connect(
+            _profile(tmp_path),
+            None,
+            request_id="existing-server-tree",
+        )
+    )
     asyncio.run(connector.close())
 
     assert connected.endpoint == "http://127.0.0.1:18001"
     assert connected.server_instance_id == SERVER_ID
     assert connected.handshake["provider_configured"] is False
     assert paths == ["/api/v1/health", "/api/v1/handshake"]
+    assert request_ids == ["existing-server-tree", "existing-server-tree"]
     assert popen.calls == []
 
 
@@ -535,6 +545,54 @@ def test_start_timeout_bounds_a_slow_readiness_probe(tmp_path: Path):
         assert process.kill_calls == 0
 
     asyncio.run(scenario())
+
+
+def test_startup_retries_reuse_one_canonical_parent_request_id(tmp_path: Path):
+    paths: list[str] = []
+    request_ids: list[str] = []
+    attempt = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempt
+        attempt += 1
+        paths.append(request.url.path)
+        request_ids.extend(request.headers.get_list("x-request-id"))
+        if attempt in {1, 2, 4}:
+            raise httpx.ConnectError("not ready", request=request)
+        return _health() if request.url.path.endswith("/health") else _handshake()
+
+    clock = FakeClock()
+    connector = LocalServerConnector(
+        _settings(tmp_path, start_timeout_seconds=2.0),
+        transport=httpx.MockTransport(handler),
+        popen_factory=FakePopen(FakeProcess([None])),
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    )
+
+    connected = asyncio.run(
+        connector.connect(
+            _profile(tmp_path),
+            None,
+            request_id="invalid parent id",
+        )
+    )
+    asyncio.run(connector.close())
+
+    assert connected.server_instance_id == SERVER_ID
+    assert paths == [
+        "/api/v1/health",
+        "/api/v1/health",
+        "/api/v1/health",
+        "/api/v1/handshake",
+        "/api/v1/health",
+        "/api/v1/handshake",
+    ]
+    assert len(request_ids) == len(paths)
+    assert len(set(request_ids)) == 1
+    assert request_ids[0] != "invalid parent id"
+    assert request_ids[0].startswith("req_")
+    assert REQUEST_ID_RE.fullmatch(request_ids[0])
 
 
 def test_spawned_server_exit_is_reaped_without_termination(tmp_path: Path):

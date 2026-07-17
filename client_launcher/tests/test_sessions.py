@@ -2,6 +2,7 @@ import asyncio
 
 import pytest
 
+from client_launcher.http_errors import REQUEST_ID_RE
 from client_launcher.local_server import ConnectedServer
 from client_launcher.models import LauncherError, LocalTarget, ServerProfile
 from client_launcher.profiles import ProfileStore
@@ -16,13 +17,22 @@ class FakeConnector:
     def __init__(self, instance_id=SERVER_A):
         self.instance_id = instance_id
         self.calls = 0
+        self.request_ids: list[str] = []
         self.closed = False
         self.started = asyncio.Event()
         self.release = asyncio.Event()
         self.ignore_cancellation = False
 
-    async def connect(self, profile, phase_callback):
+    async def connect(
+        self,
+        profile,
+        phase_callback,
+        *,
+        request_id: str | None = None,
+    ):
         self.calls += 1
+        assert request_id is not None
+        self.request_ids.append(request_id)
         phase_callback("health")
         self.started.set()
         try:
@@ -56,15 +66,20 @@ async def _concurrent_connect_is_singleflight_case(tmp_path):
     connector = FakeConnector()
     manager = SessionManager(store, connector)
 
-    first = asyncio.create_task(manager.connect("local"))
+    first = asyncio.create_task(
+        manager.connect("local", request_id="creator-tree")
+    )
     await connector.started.wait()
-    second = asyncio.create_task(manager.connect("local"))
+    second = asyncio.create_task(
+        manager.connect("local", request_id="joiner-tree")
+    )
     await asyncio.sleep(0)
     connector.release.set()
 
     first_status, second_status = await asyncio.gather(first, second)
 
     assert connector.calls == 1
+    assert connector.request_ids == ["creator-tree"]
     assert first_status.status == "ready"
     assert second_status.status == "ready"
     assert first_status.connection_epoch == 1
@@ -260,6 +275,33 @@ async def _auto_connect_start_then_immediate_disconnect_case(tmp_path):
 
 def test_auto_connect_start_then_immediate_disconnect_stays_disconnected(tmp_path):
     asyncio.run(_auto_connect_start_then_immediate_disconnect_case(tmp_path))
+
+
+async def _auto_connect_generates_a_new_tree_id_per_attempt_case(tmp_path):
+    store = _store(tmp_path)
+    connector = FakeConnector()
+    connector.release.set()
+    manager = SessionManager(store, connector)
+
+    await manager.start()
+    first_tasks = list(manager._background_tasks)
+    await asyncio.gather(*first_tasks)
+    await manager.disconnect("local")
+    await manager.start()
+    second_tasks = list(manager._background_tasks)
+    await asyncio.gather(*second_tasks)
+
+    assert connector.calls == 2
+    assert len(connector.request_ids) == 2
+    assert connector.request_ids[0] != connector.request_ids[1]
+    assert all(
+        request_id.startswith("req_") and REQUEST_ID_RE.fullmatch(request_id)
+        for request_id in connector.request_ids
+    )
+
+
+def test_auto_connect_generates_a_new_tree_id_per_attempt(tmp_path):
+    asyncio.run(_auto_connect_generates_a_new_tree_id_per_attempt_case(tmp_path))
 
 
 async def _delete_profile_serializes_against_connect_case(tmp_path):

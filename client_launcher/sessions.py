@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
 
+from client_launcher.http_errors import canonical_request_id
 from client_launcher.models import (
     ConnectionErrorInfo,
     EndpointLease,
@@ -99,6 +100,7 @@ class SessionManager:
                 profile.id,
                 rebind=False,
                 expected_server_instance_id=None,
+                request_id=canonical_request_id(None),
             )
             if isinstance(prepared, ServerSession):
                 continue
@@ -112,11 +114,14 @@ class SessionManager:
         *,
         rebind: bool = False,
         expected_server_instance_id: str | None = None,
+        request_id: str | None = None,
     ) -> ServerSession:
+        request_id = canonical_request_id(request_id)
         prepared = await self._prepare_connect(
             profile_id,
             rebind=rebind,
             expected_server_instance_id=expected_server_instance_id,
+            request_id=request_id,
         )
         if isinstance(prepared, ServerSession):
             return prepared
@@ -140,6 +145,7 @@ class SessionManager:
         *,
         rebind: bool,
         expected_server_instance_id: str | None,
+        request_id: str,
     ) -> ServerSession | asyncio.Task[ServerSession]:
         if self._closed:
             raise LauncherError(
@@ -202,6 +208,7 @@ class SessionManager:
                         generation,
                         rebind=rebind,
                         expected_server_instance_id=expected_server_instance_id,
+                        request_id=request_id,
                     )
                 )
                 self._connect_tasks[profile_id] = task
@@ -302,6 +309,7 @@ class SessionManager:
         *,
         rebind: bool,
         expected_server_instance_id: str | None,
+        request_id: str,
     ) -> ServerSession:
         profile = self.profiles.get(profile_id)
 
@@ -313,7 +321,11 @@ class SessionManager:
                 session.phase = phase
 
         try:
-            connected = await self.connector.connect(profile, set_phase)
+            connected = await self.connector.connect(
+                profile,
+                set_phase,
+                request_id=request_id,
+            )
             async with self._guard:
                 if self._attempt_generation.get(profile_id) != generation:
                     raise LauncherError(

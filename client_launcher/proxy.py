@@ -13,6 +13,7 @@ from starlette.requests import Request
 from starlette.responses import StreamingResponse
 from starlette.types import Receive, Scope, Send
 
+from client_launcher.http_errors import REQUEST_ID_RE, canonical_request_id
 from client_launcher.models import EndpointLease
 
 
@@ -199,6 +200,12 @@ class ProxyHandler:
                 connection_epoch,
             ) from exc
 
+        upstream_request_id = _response_request_id(
+            upstream_response.headers.raw
+        )
+        if upstream_request_id is not None:
+            request.state.request_id = upstream_request_id
+
         closer = _UpstreamCloser(upstream_response)
         return _ClosingStreamingResponse(
             _response_body(upstream_response, closer, invalidated),
@@ -318,17 +325,11 @@ def _request_headers(
     body: bytes,
 ) -> list[RawHeader]:
     request_id = getattr(request.state, "request_id", None)
-    canonical_request_id = (
-        request_id
-        if isinstance(request_id, str)
-        and request_id
-        and len(request_id) <= 128
-        and request_id.isascii()
-        else None
+    canonical_id = canonical_request_id(
+        request_id if isinstance(request_id, str) else None
     )
-    excluded = {b"content-length", b"host"}
-    if canonical_request_id is not None:
-        excluded.add(b"x-request-id")
+    request.state.request_id = canonical_id
+    excluded = {b"content-length", b"host", b"x-request-id"}
     headers = _filtered_headers(
         request.scope.get("headers", ()),
         extra_excluded=excluded,
@@ -336,8 +337,7 @@ def _request_headers(
     headers.append((b"host", target_url.netloc))
     if body or request.method.upper() in _CONTENT_LENGTH_METHODS:
         headers.append((b"content-length", str(len(body)).encode("ascii")))
-    if canonical_request_id is not None:
-        headers.append((b"x-request-id", canonical_request_id.encode("ascii")))
+    headers.append((b"x-request-id", canonical_id.encode("ascii")))
     return headers
 
 
@@ -383,6 +383,21 @@ def _response_headers(
         )
         for name, value in headers
     ]
+
+
+def _response_request_id(raw_headers: Iterable[RawHeader]) -> str | None:
+    values = [
+        value
+        for name, value in raw_headers
+        if name.lower() == b"x-request-id"
+    ]
+    if len(values) != 1:
+        return None
+    try:
+        request_id = values[0].decode("ascii")
+    except UnicodeDecodeError:
+        return None
+    return request_id if REQUEST_ID_RE.fullmatch(request_id) else None
 
 
 def _rewrite_location(
