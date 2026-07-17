@@ -127,8 +127,43 @@ def _port_is_closed(port: int) -> bool:
         return sock.connect_ex(("127.0.0.1", port)) != 0
 
 
+def _pid_is_running(pid: int) -> bool:
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    import ctypes
+    from ctypes import wintypes
+
+    synchronize = 0x00100000
+    wait_timeout = 0x00000102
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [
+        wintypes.DWORD,
+        wintypes.BOOL,
+        wintypes.DWORD,
+    ]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.OpenProcess(synchronize, False, pid)
+    if not handle:
+        return False
+    try:
+        return kernel32.WaitForSingleObject(handle, 0) == wait_timeout
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _stop_server(pid: int | None, port: int) -> None:
-    if pid is None or _port_is_closed(port):
+    if pid is None or not _pid_is_running(pid):
         return
     try:
         os.kill(pid, signal.SIGTERM)
@@ -136,20 +171,19 @@ def _stop_server(pid: int | None, port: int) -> None:
         return
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
-        if _port_is_closed(port):
+        if _port_is_closed(port) and not _pid_is_running(pid):
             return
         time.sleep(0.05)
-    if os.name != "nt":
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            return
+    try:
+        os.kill(pid, signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
+    except ProcessLookupError:
+        return
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
-        if _port_is_closed(port):
+        if _port_is_closed(port) and not _pid_is_running(pid):
             return
         time.sleep(0.05)
-    raise AssertionError(f"Server pid {pid} did not release port {port}")
+    raise AssertionError(f"Server pid {pid} did not exit and release port {port}")
 
 
 def test_real_launcher_entry_proxy_and_home_lock(tmp_path: Path) -> None:
