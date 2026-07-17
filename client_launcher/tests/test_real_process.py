@@ -471,7 +471,7 @@ def test_real_launcher_entry_proxy_and_home_lock(tmp_path: Path) -> None:
         with closing(
             sqlite3.connect(server_home / "chattree.sqlite")
         ) as connection:
-            assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+            assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
             assert connection.execute("PRAGMA quick_check").fetchone()[0] == "ok"
             assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:

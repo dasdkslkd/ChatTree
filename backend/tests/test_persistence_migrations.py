@@ -41,6 +41,114 @@ def _create_unversioned_database(db_path: Path) -> None:
             VALUES ('sentinel', 'Sentinel', 1, 1)
             """
         )
+        conn.execute(
+            """
+            INSERT INTO runs (
+              id, conversation_id, kind, status, summary, event_count,
+              created_at, updated_at
+            ) VALUES ('run-v1', 'sentinel', 'chat', 'completed', 'kept', 0, 1, 1)
+            """
+        )
+
+
+def _create_v1_run_database(
+    db_path: Path,
+    *,
+    extra_columns: tuple[str, ...] = (),
+    pair_check: str | None = None,
+    pair_check_is_comment: bool = False,
+) -> None:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    schema_sql = SCHEMA_V1_SQL
+    if pair_check is not None:
+        columns_tail = """  finished_at INTEGER,
+  UNIQUE(conversation_id, id),"""
+        constrained_columns_tail = f"""  finished_at INTEGER,
+  idempotency_key TEXT,
+  request_fingerprint TEXT,
+  UNIQUE(conversation_id, id),"""
+        runs_tail = """  FOREIGN KEY (conversation_id, target_node_id)
+    REFERENCES nodes(conversation_id, id)
+);"""
+        if pair_check_is_comment:
+            pair_constraint = f"  /* CHECK ( {pair_check} ) */"
+        else:
+            pair_constraint = f"  CHECK ({pair_check})"
+        constrained_runs_tail = f"""  FOREIGN KEY (conversation_id, target_node_id)
+    REFERENCES nodes(conversation_id, id){',' if not pair_check_is_comment else ''}
+{pair_constraint}
+);"""
+        assert schema_sql.count(columns_tail) == 1
+        assert schema_sql.count(runs_tail) == 1
+        schema_sql = schema_sql.replace(
+            columns_tail,
+            constrained_columns_tail,
+        ).replace(
+            runs_tail,
+            constrained_runs_tail,
+        )
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.executescript(schema_sql)
+        for column in extra_columns:
+            conn.execute(f"ALTER TABLE runs ADD COLUMN {column} TEXT")
+        conn.execute("PRAGMA user_version = 1")
+        conn.execute(
+            "INSERT INTO conversations (id, title, created_at, updated_at) "
+            "VALUES ('conv-v1', 'V1', 1, 1)"
+        )
+        conn.execute(
+            """
+            INSERT INTO runs (
+              id, conversation_id, kind, status, summary, event_count,
+              created_at, updated_at
+            ) VALUES ('run-v1', 'conv-v1', 'chat', 'completed', 'kept', 0, 1, 1)
+            """
+        )
+
+
+def _create_unversioned_conversations_only_database(db_path: Path) -> None:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE conversations (
+              id TEXT PRIMARY KEY,
+              title TEXT NOT NULL,
+              root_node_id TEXT,
+              current_node_id TEXT,
+              project_id TEXT,
+              provider_id TEXT,
+              model_id TEXT,
+              reasoning_effort TEXT,
+              thinking_enabled INTEGER,
+              multi_agent_mode TEXT NOT NULL DEFAULT 'explicit_request_only',
+              workspace_json TEXT,
+              settings_json TEXT,
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL
+            );
+            INSERT INTO conversations (id, title, created_at, updated_at)
+            VALUES ('root-only', 'Root only', 1, 1);
+            """
+        )
+
+
+def _run_idempotency_schema_state(
+    conn: sqlite3.Connection,
+) -> tuple[set[str], dict[str, tuple[bool, bool]], set[str]]:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}
+    indexes = {
+        row["name"]: (bool(row["unique"]), bool(row["partial"]))
+        for row in conn.execute("PRAGMA index_list(runs)")
+    }
+    triggers = {
+        row["name"]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'runs'"
+        )
+    }
+    return columns, indexes, triggers
 
 
 def _create_c1_initial_database(db_path: Path) -> None:
@@ -163,6 +271,301 @@ def test_empty_database_becomes_current_version_without_backup(tmp_path: Path):
 
     assert _user_version(persistence.db_path) == CURRENT_SCHEMA_VERSION
     assert _backup_files(tmp_path) == []
+
+
+def test_v1_run_migration_preserves_rows_and_enforces_pair_triggers(tmp_path: Path):
+    persistence = SQLitePersistence(tmp_path)
+    _create_v1_run_database(persistence.db_path)
+
+    persistence.initialize()
+
+    with persistence.connect() as conn:
+        row = conn.execute(
+            "SELECT summary, idempotency_key, request_fingerprint "
+            "FROM runs WHERE id = 'run-v1'"
+        ).fetchone()
+        columns, indexes, trigger_names = _run_idempotency_schema_state(conn)
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "UPDATE runs SET idempotency_key = 'op_half' WHERE id = 'run-v1'"
+            )
+        assert conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    assert row["summary"] == "kept"
+    assert row["idempotency_key"] is None
+    assert row["request_fingerprint"] is None
+    assert {"idempotency_key", "request_fingerprint"} <= columns
+    assert indexes["idx_runs_idempotency_key"] == (True, True)
+    assert trigger_names == {
+        "runs_idempotency_pair_insert",
+        "runs_idempotency_pair_update",
+    }
+    assert _user_version(persistence.db_path) == 2
+
+
+@pytest.mark.parametrize(
+    "extra_columns",
+    [
+        ("idempotency_key",),
+        ("request_fingerprint",),
+        ("idempotency_key", "request_fingerprint"),
+    ],
+    ids=["key-only", "fingerprint-only", "both-without-invariant"],
+)
+def test_v1_partial_run_migration_repairs_each_missing_invariant(
+    tmp_path: Path,
+    extra_columns: tuple[str, ...],
+):
+    persistence = SQLitePersistence(tmp_path)
+    _create_v1_run_database(
+        persistence.db_path,
+        extra_columns=extra_columns,
+    )
+
+    persistence.initialize()
+
+    with persistence.connect() as conn:
+        columns, indexes, triggers = _run_idempotency_schema_state(conn)
+        index_columns = [
+            row["name"]
+            for row in conn.execute("PRAGMA index_info(idx_runs_idempotency_key)")
+        ]
+        row = conn.execute(
+            "SELECT idempotency_key, request_fingerprint "
+            "FROM runs WHERE id = 'run-v1'"
+        ).fetchone()
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "UPDATE runs SET request_fingerprint = 'sha-only' WHERE id = 'run-v1'"
+            )
+
+    assert {"idempotency_key", "request_fingerprint"} <= columns
+    assert indexes["idx_runs_idempotency_key"] == (True, True)
+    assert index_columns == ["idempotency_key"]
+    assert triggers == {
+        "runs_idempotency_pair_insert",
+        "runs_idempotency_pair_update",
+    }
+    assert tuple(row) == (None, None)
+    assert _user_version(persistence.db_path) == 2
+
+
+def test_v1_run_migration_does_not_trust_non_equivalent_pair_check(tmp_path: Path):
+    persistence = SQLitePersistence(tmp_path)
+    _create_v1_run_database(
+        persistence.db_path,
+        pair_check=(
+            "idempotency_key IS NULL OR request_fingerprint IS NULL"
+        ),
+    )
+
+    persistence.initialize()
+
+    with persistence.connect() as conn:
+        _, _, triggers = _run_idempotency_schema_state(conn)
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "UPDATE runs SET idempotency_key = 'op_half' WHERE id = 'run-v1'"
+            )
+
+    assert triggers == {
+        "runs_idempotency_pair_insert",
+        "runs_idempotency_pair_update",
+    }
+    assert _user_version(persistence.db_path) == 2
+
+
+def test_v1_run_migration_does_not_trust_commented_pair_check(tmp_path: Path):
+    persistence = SQLitePersistence(tmp_path)
+    _create_v1_run_database(
+        persistence.db_path,
+        pair_check=(
+            "(idempotency_key IS NULL AND request_fingerprint IS NULL) "
+            "OR (idempotency_key IS NOT NULL "
+            "AND request_fingerprint IS NOT NULL)"
+        ),
+        pair_check_is_comment=True,
+    )
+
+    persistence.initialize()
+
+    with persistence.connect() as conn:
+        _, _, triggers = _run_idempotency_schema_state(conn)
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "UPDATE runs SET idempotency_key = 'op_half' WHERE id = 'run-v1'"
+            )
+
+    assert triggers == {
+        "runs_idempotency_pair_insert",
+        "runs_idempotency_pair_update",
+    }
+    assert _user_version(persistence.db_path) == 2
+
+
+def test_v1_run_migration_replaces_trigger_impostors(tmp_path: Path):
+    persistence = SQLitePersistence(tmp_path)
+    _create_v1_run_database(
+        persistence.db_path,
+        extra_columns=("idempotency_key", "request_fingerprint"),
+    )
+    with sqlite3.connect(persistence.db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TRIGGER runs_idempotency_pair_insert
+            BEFORE INSERT ON runs
+            WHEN 0
+            BEGIN
+              SELECT RAISE(ABORT, 'never');
+            END;
+            CREATE TRIGGER runs_idempotency_pair_update
+            BEFORE UPDATE OF idempotency_key, request_fingerprint ON runs
+            WHEN 0
+            BEGIN
+              SELECT RAISE(ABORT, 'never');
+            END;
+            """
+        )
+
+    persistence.initialize()
+
+    with persistence.connect() as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "UPDATE runs SET request_fingerprint = 'sha-half' "
+                "WHERE id = 'run-v1'"
+            )
+
+    assert _user_version(persistence.db_path) == 2
+
+
+def test_v1_partial_run_migration_rolls_back_existing_pair_mismatch(tmp_path: Path):
+    persistence = SQLitePersistence(tmp_path)
+    _create_v1_run_database(
+        persistence.db_path,
+        extra_columns=("idempotency_key",),
+    )
+    with sqlite3.connect(persistence.db_path) as conn:
+        conn.execute(
+            "UPDATE runs SET idempotency_key = 'op-existing' WHERE id = 'run-v1'"
+        )
+
+    with pytest.raises(RuntimeError, match="pair mismatch"):
+        persistence.initialize()
+
+    with sqlite3.connect(persistence.db_path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(runs)")}
+        row = conn.execute(
+            "SELECT idempotency_key FROM runs WHERE id = 'run-v1'"
+        ).fetchone()
+
+    assert columns >= {"idempotency_key"}
+    assert "request_fingerprint" not in columns
+    assert row[0] == "op-existing"
+    assert _user_version(persistence.db_path) == 1
+
+
+def test_v1_run_migration_rejects_non_unique_index_impostor(tmp_path: Path):
+    persistence = SQLitePersistence(tmp_path)
+    _create_v1_run_database(
+        persistence.db_path,
+        extra_columns=("idempotency_key", "request_fingerprint"),
+    )
+    with sqlite3.connect(persistence.db_path) as conn:
+        conn.execute(
+            "CREATE INDEX idx_runs_idempotency_key ON runs(idempotency_key) "
+            "WHERE idempotency_key IS NOT NULL"
+        )
+
+    with pytest.raises(RuntimeError, match="unique"):
+        persistence.initialize()
+
+    with sqlite3.connect(persistence.db_path) as conn:
+        index = next(
+            row
+            for row in conn.execute("PRAGMA index_list(runs)")
+            if row[1] == "idx_runs_idempotency_key"
+        )
+        triggers = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'trigger' AND tbl_name = 'runs'"
+            )
+        }
+
+    assert index[2] == 0
+    assert triggers == set()
+    assert _user_version(persistence.db_path) == 1
+
+
+@pytest.mark.parametrize(
+    "index_tail",
+    [
+        (
+            "ON runs(idempotency_key) "
+            "WHERE idempotency_key IS NOT NULL AND status = 'running'"
+        ),
+        (
+            "ON runs(idempotency_key COLLATE NOCASE) "
+            "WHERE idempotency_key IS NOT NULL"
+        ),
+    ],
+    ids=["extra-predicate", "non-canonical-collation"],
+)
+def test_v1_run_migration_rejects_unique_index_impostor_and_rolls_back(
+    tmp_path: Path,
+    index_tail: str,
+):
+    persistence = SQLitePersistence(tmp_path)
+    _create_v1_run_database(
+        persistence.db_path,
+        extra_columns=("idempotency_key", "request_fingerprint"),
+    )
+    with sqlite3.connect(persistence.db_path) as conn:
+        conn.execute(
+            "CREATE UNIQUE INDEX idx_runs_idempotency_key "
+            f"{index_tail}"
+        )
+
+    with pytest.raises(RuntimeError, match="unique partial index"):
+        persistence.initialize()
+
+    with sqlite3.connect(persistence.db_path) as conn:
+        index_sql = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'index' AND name = 'idx_runs_idempotency_key'"
+        ).fetchone()[0]
+        triggers = conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type = 'trigger' AND tbl_name = 'runs'"
+        ).fetchall()
+
+    assert index_tail in index_sql
+    assert triggers == []
+    assert _user_version(persistence.db_path) == 1
+
+
+def test_unversioned_root_application_table_uses_legacy_schema_path(tmp_path: Path):
+    persistence = SQLitePersistence(tmp_path)
+    _create_unversioned_conversations_only_database(persistence.db_path)
+
+    persistence.initialize()
+
+    with persistence.connect() as conn:
+        title = conn.execute(
+            "SELECT title FROM conversations WHERE id = 'root-only'"
+        ).fetchone()[0]
+        _, indexes, triggers = _run_idempotency_schema_state(conn)
+
+    assert title == "Root only"
+    assert indexes["idx_runs_idempotency_key"] == (True, True)
+    assert triggers == {
+        "runs_idempotency_pair_insert",
+        "runs_idempotency_pair_update",
+    }
+    assert _user_version(persistence.db_path) == 2
 
 
 def test_c1_initial_schema_is_rebuilt_with_data_and_scoped_constraints(
@@ -378,6 +781,12 @@ def test_repeated_initialize_does_not_migrate_or_back_up_again(tmp_path: Path):
     assert len(first_backups) == 1
     assert _backup_files(tmp_path) == first_backups
     assert _user_version(persistence.db_path) == CURRENT_SCHEMA_VERSION
+    with persistence.connect() as conn:
+        run = conn.execute(
+            "SELECT idempotency_key, request_fingerprint "
+            "FROM runs WHERE id = 'run-v1'"
+        ).fetchone()
+    assert tuple(run) == (None, None)
 
 
 def test_missing_adjacent_migration_path_fails_before_backup(tmp_path: Path):
