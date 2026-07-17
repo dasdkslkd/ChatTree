@@ -38,6 +38,17 @@ export type BoundServerContext = Readonly<{
   apiBase: string;
 }>;
 
+export function sameBoundServerContext(
+  left: BoundServerContext,
+  right: BoundServerContext,
+): boolean {
+  return left.profileId === right.profileId
+    && left.apiBase === right.apiBase
+    && left.serverInstanceId === right.serverInstanceId
+    && left.connectionEpoch === right.connectionEpoch
+    && left.connectionLeaseId === right.connectionLeaseId;
+}
+
 export function isCanonicalUuid(value: unknown): value is string {
   return typeof value === 'string' && CANONICAL_UUID_RE.test(value);
 }

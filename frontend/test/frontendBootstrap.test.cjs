@@ -242,9 +242,21 @@ function testMainDefersApplicationImportsUntilBootstrap() {
   assert.ok(initializeIndex >= 0, 'main.tsx must initialize the bootstrap');
   assert.ok(appImportIndex > initializeIndex, 'App must load only after bootstrap initialization');
 
-  const appSource = fs.readFileSync(path.join(__dirname, '../src/App.tsx'), 'utf8');
-  assert.match(appSource, /import type \{ FrontendBootstrap \} from ['"]\.\/runtime\/frontendBootstrap['"]/);
-  assert.match(appSource, /function App\(_props: \{ bootstrap: FrontendBootstrap \}\)/);
+  const appPath = path.join(__dirname, '../src/App.tsx');
+  const appSource = fs.readFileSync(appPath, 'utf8');
+  const appFile = ts.createSourceFile(appPath, appSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const appImports = appFile.statements
+    .filter(ts.isImportDeclaration)
+    .map((statement) => statement.moduleSpecifier.text);
+  assert.equal(
+    appImports.some((specifier) => /(?:pages|store|services|perf|components)\//.test(specifier)),
+    false,
+    'App binding shell must not statically import the business realm',
+  );
+  assert.match(appSource, /lazy\(\(\) => import\(['"]\.\/runtime\/ServerSessionApp['"]\)\)/);
+  assert.match(appSource, /if \(!state\.context\)/);
+  assert.match(appSource, /<ServerSessionApp binding=\{state\.context\} connected=\{state\.status === ['"]ready['"]\}/);
+  assert.doesNotMatch(appSource, /<ServerSessionApp[^>]*\bkey=/);
 }
 
 testExactProfileRoutes();

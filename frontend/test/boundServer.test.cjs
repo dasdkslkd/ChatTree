@@ -21,6 +21,8 @@ const frontendRoot = path.join(__dirname, '..');
 const bootstrapModule = path.join(frontendRoot, 'src/runtime/frontendBootstrap.ts');
 const identityModule = path.join(frontendRoot, 'src/runtime/connectionIdentity.ts');
 const boundServerModule = path.join(frontendRoot, 'src/runtime/boundServer.ts');
+const bindingStateModule = path.join(frontendRoot, 'src/runtime/bindingState.ts');
+const probeOwnerModule = path.join(frontendRoot, 'src/runtime/boundServerProbeOwner.ts');
 const clientModule = path.join(frontendRoot, 'src/api/client.ts');
 const serverModule = path.join(frontendRoot, 'src/api/server.ts');
 const launcherModule = path.join(frontendRoot, 'src/api/launcher.ts');
@@ -55,6 +57,8 @@ function loadRuntimeModules() {
     bootstrapModule,
     identityModule,
     boundServerModule,
+    bindingStateModule,
+    probeOwnerModule,
     clientModule,
     serverModule,
     launcherModule,
@@ -65,6 +69,8 @@ function loadRuntimeModules() {
   return {
     identity: require(identityModule),
     boundServer: require(boundServerModule),
+    binding: require(bindingStateModule),
+    probeOwner: require(probeOwnerModule),
     server: require(serverModule),
     launcher: require(launcherModule),
   };
@@ -102,6 +108,58 @@ function handshake(overrides = {}) {
     provider_configured: true,
     ...overrides,
   };
+}
+
+function boundContext(overrides = {}) {
+  return Object.freeze({
+    profileId: 'profile-a',
+    apiBase: '/p/profile-a/api/v1',
+    serverInstanceId: SERVER_A,
+    connectionEpoch: 4,
+    connectionLeaseId: LEASE_A,
+    ...overrides,
+  });
+}
+
+function createFakeScheduler() {
+  let nextId = 1;
+  const timers = new Map();
+  return {
+    setTimeout(callback, delay) {
+      const id = nextId;
+      nextId += 1;
+      timers.set(id, { callback, delay });
+      return id;
+    },
+    clearTimeout(id) {
+      timers.delete(id);
+    },
+    delays() {
+      return [...timers.values()].map((timer) => timer.delay);
+    },
+    runNext(expectedDelay) {
+      const entry = timers.entries().next().value;
+      assert.ok(entry, `expected a ${expectedDelay}ms timer`);
+      const [id, timer] = entry;
+      assert.equal(timer.delay, expectedDelay);
+      timers.delete(id);
+      timer.callback();
+    },
+  };
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function settleAsync() {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 function fakeProbeDependencies(options = {}) {
@@ -244,7 +302,6 @@ async function testProbeStartsHealthAndHandshakeInParallel() {
 async function testProbeClassifiesReadinessAndAllStatusRaces() {
   const { identity, boundServer } = loadRuntimeModules();
   const invalidBefore = [
-    readyStatus({ profile_id: 'profile-b' }),
     readyStatus({ status: 'connecting' }),
     readyStatus({ server_instance_id: null }),
     readyStatus({ connection_epoch: 0 }),
@@ -262,7 +319,6 @@ async function testProbeClassifiesReadinessAndAllStatusRaces() {
   }
 
   const changedAfter = [
-    readyStatus({ profile_id: 'profile-b' }),
     readyStatus({ server_instance_id: SERVER_B }),
     readyStatus({ connection_epoch: 5 }),
     readyStatus({ connection_lease_id: LEASE_B }),
@@ -274,6 +330,22 @@ async function testProbeClassifiesReadinessAndAllStatusRaces() {
         BOOTSTRAP,
       ),
       identity.BoundServerLeaseChangedError,
+    );
+  }
+}
+
+async function testProbeClassifiesProfileContradictionsAsFatal() {
+  const { identity, boundServer } = loadRuntimeModules();
+  for (const options of [
+    { before: readyStatus({ profile_id: 'profile-b' }) },
+    { after: readyStatus({ profile_id: 'profile-b' }) },
+  ]) {
+    await assert.rejects(
+      () => boundServer.probeBoundServerContext(
+        fakeProbeDependencies(options),
+        BOOTSTRAP,
+      ),
+      identity.BoundServerIdentityError,
     );
   }
 }
@@ -345,6 +417,322 @@ async function testStableProbeClassifiesProtocolAndIdentityAsFatal() {
     identity.isFatalBoundServerError(new identity.BoundServerLeaseChangedError('x')),
     false,
   );
+}
+
+function testSameBoundServerContextComparesTheCompleteBinding() {
+  const { identity } = loadRuntimeModules();
+  const context = boundContext();
+  assert.equal(identity.sameBoundServerContext(context, { ...context }), true);
+  for (const changed of [
+    { ...context, profileId: 'profile-b' },
+    { ...context, apiBase: '/p/profile-b/api/v1' },
+    { ...context, serverInstanceId: SERVER_B },
+    { ...context, connectionEpoch: 5 },
+    { ...context, connectionLeaseId: LEASE_B },
+  ]) {
+    assert.equal(identity.sameBoundServerContext(context, changed), false);
+  }
+}
+
+async function testProbeOwnerUsesCappedBackoffAndAbortsFailedAttempts() {
+  const { probeOwner } = loadRuntimeModules();
+  const scheduler = createFakeScheduler();
+  const signals = [];
+  const events = [];
+  const owner = new probeOwner.BoundServerProbeOwner({
+    probe(signal) {
+      signals.push(signal);
+      return Promise.reject(new Error(`offline-${signals.length}`));
+    },
+    dispatch(event) {
+      events.push(event);
+    },
+    scheduler,
+    reloadCurrentPage() {
+      assert.fail('a recoverable failure must not reload the page');
+    },
+  });
+
+  owner.start();
+  assert.equal(signals.length, 1, 'the first probe must start immediately');
+  const expectedDelays = [500, 1000, 2000, 5000, 5000];
+  for (let index = 0; index < expectedDelays.length; index += 1) {
+    await settleAsync();
+    assert.equal(signals[index].aborted, true);
+    assert.deepEqual(scheduler.delays(), [expectedDelays[index]]);
+    if (index < expectedDelays.length - 1) {
+      scheduler.runNext(expectedDelays[index]);
+      assert.equal(signals.length, index + 2);
+    }
+  }
+  assert.equal(events.length, expectedDelays.length);
+  assert.ok(events.every((event) => event.type === 'probe_failed'));
+  assert.equal(events.some((event) => event.type === 'probe_started'), false);
+
+  owner.dispose();
+  assert.deepEqual(scheduler.delays(), []);
+}
+
+async function testProbeOwnerSchedulesHealthAndResetsRetryBackoff() {
+  const { probeOwner } = loadRuntimeModules();
+  const scheduler = createFakeScheduler();
+  const context = boundContext();
+  const outcomes = [
+    { error: new Error('initially offline') },
+    { context },
+    { error: new Error('later offline') },
+  ];
+  const signals = [];
+  const order = [];
+  const owner = new probeOwner.BoundServerProbeOwner({
+    probe(signal) {
+      signals.push(signal);
+      const outcome = outcomes.shift();
+      return outcome.error ? Promise.reject(outcome.error) : Promise.resolve(outcome.context);
+    },
+    dispatch(event) {
+      order.push(event.type);
+    },
+    onInitialContext(installed) {
+      assert.equal(installed, context);
+      order.push('installed');
+    },
+    scheduler,
+    reloadCurrentPage() {
+      assert.fail('an unchanged binding must not reload the page');
+    },
+  });
+
+  owner.start();
+  await settleAsync();
+  assert.deepEqual(scheduler.delays(), [500]);
+  scheduler.runNext(500);
+  await settleAsync();
+  assert.deepEqual(order, ['probe_failed', 'installed', 'probe_ready']);
+  assert.deepEqual(scheduler.delays(), [30000]);
+  scheduler.runNext(30000);
+  await settleAsync();
+  assert.deepEqual(scheduler.delays(), [500]);
+  assert.ok(signals.every((signal) => signal.aborted));
+  owner.dispose();
+}
+
+async function testProbeOwnerRecoversEqualContextWithoutReplacingIt() {
+  const { binding, probeOwner } = loadRuntimeModules();
+  const scheduler = createFakeScheduler();
+  const installed = boundContext();
+  const outcomes = [installed, { ...installed }];
+  let state = binding.createInitialBindingState();
+  const installedContexts = [];
+  const owner = new probeOwner.BoundServerProbeOwner({
+    probe() {
+      return Promise.resolve(outcomes.shift());
+    },
+    dispatch(event) {
+      state = binding.reduceBindingState(state, event);
+    },
+    onInitialContext(context) {
+      installedContexts.push(context);
+    },
+    scheduler,
+    reloadCurrentPage() {
+      assert.fail('an equal context must recover in place');
+    },
+  });
+
+  owner.start();
+  await settleAsync();
+  assert.equal(state.context, installed);
+  scheduler.runNext(30000);
+  await settleAsync();
+  assert.equal(state.status, 'ready');
+  assert.equal(state.context, installed);
+  assert.deepEqual(installedContexts, [installed]);
+  assert.deepEqual(scheduler.delays(), [30000]);
+  owner.dispose();
+}
+
+async function testProbeOwnerReloadsOnceForEveryNewServerGeneration() {
+  const { probeOwner } = loadRuntimeModules();
+  const original = boundContext();
+  for (const changed of [
+    { ...original, serverInstanceId: SERVER_B },
+    { ...original, connectionLeaseId: LEASE_B },
+    { ...original, connectionEpoch: 5 },
+    { ...original, connectionEpoch: 1 },
+  ]) {
+    const scheduler = createFakeScheduler();
+    const outcomes = [original, changed];
+    const events = [];
+    const installed = [];
+    let reloads = 0;
+    let probes = 0;
+    const owner = new probeOwner.BoundServerProbeOwner({
+      probe() {
+        probes += 1;
+        return Promise.resolve(outcomes.shift());
+      },
+      dispatch(event) {
+        events.push(event);
+      },
+      onInitialContext(context) {
+        installed.push(context);
+      },
+      scheduler,
+      reloadCurrentPage() {
+        reloads += 1;
+      },
+    });
+
+    owner.start();
+    await settleAsync();
+    scheduler.runNext(30000);
+    await settleAsync();
+    assert.equal(reloads, 1);
+    assert.deepEqual(events.map((event) => event.type), ['probe_ready']);
+    assert.deepEqual(installed, [original]);
+    assert.deepEqual(scheduler.delays(), []);
+    owner.start();
+    assert.equal(probes, 2, 'a stopped owner must not restart');
+    owner.dispose();
+  }
+}
+
+async function testProbeOwnerTreatsProfileAndApiBaseChangesAsFatal() {
+  const { identity, probeOwner } = loadRuntimeModules();
+  const original = boundContext();
+  for (const changed of [
+    { ...original, profileId: 'profile-b' },
+    { ...original, apiBase: '/p/profile-b/api/v1' },
+  ]) {
+    const scheduler = createFakeScheduler();
+    const outcomes = [original, changed];
+    const events = [];
+    let reloads = 0;
+    const owner = new probeOwner.BoundServerProbeOwner({
+      probe() {
+        return Promise.resolve(outcomes.shift());
+      },
+      dispatch(event) {
+        events.push(event);
+      },
+      scheduler,
+      reloadCurrentPage() {
+        reloads += 1;
+      },
+    });
+
+    owner.start();
+    await settleAsync();
+    scheduler.runNext(30000);
+    await settleAsync();
+    assert.deepEqual(events.map((event) => event.type), ['probe_ready', 'fatal_error']);
+    assert.ok(events[1].error instanceof identity.BoundServerIdentityError);
+    assert.equal(reloads, 0);
+    assert.deepEqual(scheduler.delays(), []);
+    owner.dispose();
+  }
+}
+
+async function testProbeOwnerStopsForFatalProbeAndInitialInstallErrors() {
+  const { identity, probeOwner } = loadRuntimeModules();
+  for (const error of [
+    new identity.BoundServerIdentityError('contradictory profile'),
+    new identity.BoundServerProtocolError('unsupported protocol'),
+  ]) {
+    const scheduler = createFakeScheduler();
+    const events = [];
+    const signals = [];
+    let probes = 0;
+    const owner = new probeOwner.BoundServerProbeOwner({
+      probe(signal) {
+        probes += 1;
+        signals.push(signal);
+        return Promise.reject(error);
+      },
+      dispatch(event) {
+        events.push(event);
+      },
+      scheduler,
+      reloadCurrentPage() {
+        assert.fail('a fatal probe error must not reload');
+      },
+    });
+    owner.start();
+    await settleAsync();
+    assert.deepEqual(events, [{ type: 'fatal_error', error }]);
+    assert.equal(signals[0].aborted, true);
+    assert.deepEqual(scheduler.delays(), []);
+    owner.start();
+    assert.equal(probes, 1);
+    owner.dispose();
+  }
+
+  const installError = new Error('cannot install initial context');
+  const scheduler = createFakeScheduler();
+  const events = [];
+  const owner = new probeOwner.BoundServerProbeOwner({
+    probe() {
+      return Promise.resolve(boundContext());
+    },
+    dispatch(event) {
+      events.push(event);
+    },
+    onInitialContext() {
+      throw installError;
+    },
+    scheduler,
+    reloadCurrentPage() {
+      assert.fail('an install error must not reload');
+    },
+  });
+  owner.start();
+  await settleAsync();
+  assert.deepEqual(events, [{ type: 'fatal_error', error: installError }]);
+  assert.deepEqual(scheduler.delays(), []);
+  owner.dispose();
+}
+
+async function testProbeOwnerDisposeMakesLateCompletionInert() {
+  const { probeOwner } = loadRuntimeModules();
+  for (const completion of ['resolve', 'reject']) {
+    const scheduler = createFakeScheduler();
+    const gate = deferred();
+    const events = [];
+    const installed = [];
+    const signals = [];
+    let reloads = 0;
+    const owner = new probeOwner.BoundServerProbeOwner({
+      probe(signal) {
+        signals.push(signal);
+        return gate.promise;
+      },
+      dispatch(event) {
+        events.push(event);
+      },
+      onInitialContext(context) {
+        installed.push(context);
+      },
+      scheduler,
+      reloadCurrentPage() {
+        reloads += 1;
+      },
+    });
+
+    owner.start();
+    owner.dispose();
+    assert.equal(signals[0].aborted, true);
+    if (completion === 'resolve') {
+      gate.resolve(boundContext());
+    } else {
+      gate.reject(new Error('late failure'));
+    }
+    await settleAsync();
+    assert.deepEqual(events, []);
+    assert.deepEqual(installed, []);
+    assert.equal(reloads, 0);
+    assert.deepEqual(scheduler.delays(), []);
+  }
 }
 
 async function testServerApiGuardsLeaseHeaderAndKeepsSignalPosition() {
@@ -481,9 +869,18 @@ async function main() {
     await testProbeBuildsFrozenContextInRequiredOrder();
     await testProbeStartsHealthAndHandshakeInParallel();
     await testProbeClassifiesReadinessAndAllStatusRaces();
+    await testProbeClassifiesProfileContradictionsAsFatal();
     await testProbeChecksResponseLeaseBeforeSecondStatus();
     await testLeaseRaceWinsBeforeProtocolOrIdentityFatal();
     await testStableProbeClassifiesProtocolAndIdentityAsFatal();
+    testSameBoundServerContextComparesTheCompleteBinding();
+    await testProbeOwnerUsesCappedBackoffAndAbortsFailedAttempts();
+    await testProbeOwnerSchedulesHealthAndResetsRetryBackoff();
+    await testProbeOwnerRecoversEqualContextWithoutReplacingIt();
+    await testProbeOwnerReloadsOnceForEveryNewServerGeneration();
+    await testProbeOwnerTreatsProfileAndApiBaseChangesAsFatal();
+    await testProbeOwnerStopsForFatalProbeAndInitialInstallErrors();
+    await testProbeOwnerDisposeMakesLateCompletionInert();
     await testServerApiGuardsLeaseHeaderAndKeepsSignalPosition();
     await testLegacyServerApiNeverTreatsSignalAsLeaseId();
     await testLauncherStatusUsesOriginDerivedFromBootstrapAndPageHref();

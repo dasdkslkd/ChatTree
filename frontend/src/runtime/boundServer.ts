@@ -33,9 +33,11 @@ export async function probeBoundServerContext(
   signal?: AbortSignal,
 ): Promise<BoundServerContext> {
   const before = await deps.getStatus(signal);
+  if (before.profile_id !== bootstrap.profileId) {
+    throw new BoundServerIdentityError('Launcher returned a different Profile');
+  }
   if (
-    before.profile_id !== bootstrap.profileId
-    || before.status !== 'ready'
+    before.status !== 'ready'
     || !before.server_instance_id
     || !Number.isInteger(before.connection_epoch)
     || before.connection_epoch < 1
@@ -58,9 +60,11 @@ export async function probeBoundServerContext(
   }
 
   const after = await deps.getStatus(signal);
+  if (after.profile_id !== bootstrap.profileId) {
+    throw new BoundServerIdentityError('Launcher returned a different Profile');
+  }
   if (
-    after.profile_id !== bootstrap.profileId
-    || after.status !== 'ready'
+    after.status !== 'ready'
     || after.connection_epoch !== before.connection_epoch
     || after.connection_lease_id !== before.connection_lease_id
     || after.server_instance_id !== before.server_instance_id
