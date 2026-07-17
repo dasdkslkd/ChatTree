@@ -23,7 +23,6 @@ if TYPE_CHECKING:
 
 PROTOCOL_VERSION = 1
 STARTUP_LOG_TAIL_BYTES = 8 * 1024
-SPAWN_PID_LOG_PREFIX = "[ChatTree Launcher] spawned local Server pid="
 _HEALTH_PATH = "/api/v1/health"
 _HANDSHAKE_PATH = "/api/v1/handshake"
 _WINDOWS_DETACHED_PROCESS = 0x00000008
@@ -141,13 +140,7 @@ def _read_log_tail(log_path: Path) -> str:
             tail = log_file.read(STARTUP_LOG_TAIL_BYTES)
     except OSError:
         return ""
-    decoded = tail.decode("utf-8", errors="replace")
-    visible_lines = [
-        line
-        for line in decoded.splitlines()
-        if not line.startswith(SPAWN_PID_LOG_PREFIX)
-    ]
-    return "\n".join(visible_lines).strip()
+    return tail.decode("utf-8", errors="replace").strip()
 
 
 class _EndpointUnavailable(Exception):
@@ -555,10 +548,10 @@ class LocalServerConnector:
                 and spawn_pid > 0
             ):
                 try:
-                    log_handle.write(
-                        f"\n{SPAWN_PID_LOG_PREFIX}{spawn_pid}\n".encode("utf-8")
+                    log_path.with_suffix(".spawn.pid").write_text(
+                        f"{spawn_pid}\n",
+                        encoding="ascii",
                     )
-                    log_handle.flush()
                 except OSError:
                     pass
         except OSError as exc:

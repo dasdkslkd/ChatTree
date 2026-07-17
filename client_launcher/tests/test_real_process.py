@@ -15,8 +15,6 @@ from typing import Any, Callable
 
 import httpx
 
-from client_launcher.local_server import SPAWN_PID_LOG_PREFIX
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -124,21 +122,14 @@ def _server_owner_pid(lock_path: Path, timeout: float = 10.0) -> int:
     raise AssertionError(f"Could not read Server owner pid: {last_error}")
 
 
-def _spawned_server_pid(log_path: Path, timeout: float = 5.0) -> int:
+def _spawned_server_pid(pid_path: Path, timeout: float = 5.0) -> int:
     deadline = time.monotonic() + timeout
     last_error: BaseException | None = None
     while time.monotonic() < deadline:
         try:
-            lines = log_path.read_text(
-                encoding="utf-8",
-                errors="replace",
-            ).splitlines()
-            for line in reversed(lines):
-                if not line.startswith(SPAWN_PID_LOG_PREFIX):
-                    continue
-                pid = int(line.removeprefix(SPAWN_PID_LOG_PREFIX))
-                if pid > 0:
-                    return pid
+            pid = int(pid_path.read_text(encoding="ascii").strip())
+            if pid > 0:
+                return pid
         except (OSError, ValueError) as exc:
             last_error = exc
         time.sleep(0.05)
@@ -186,10 +177,15 @@ def _pid_is_running(pid: int) -> bool:
         kernel32.CloseHandle(handle)
 
 
-def _stop_server(pid: int | None, port: int) -> None:
+def _stop_server(
+    pid: int | None,
+    port: int,
+    *,
+    trusted_spawn_record: bool = False,
+) -> None:
     if pid is None or not _pid_is_running(pid):
         return
-    if _port_is_closed(port):
+    if _port_is_closed(port) and not trusted_spawn_record:
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             if not _pid_is_running(pid):
@@ -219,20 +215,35 @@ def _stop_server(pid: int | None, port: int) -> None:
     raise AssertionError(f"Server pid {pid} did not exit and release port {port}")
 
 
-def test_spawned_server_pid_uses_latest_launcher_record(tmp_path: Path) -> None:
-    log_path = tmp_path / "local-server.log"
-    log_path.write_text(
-        "\n".join(
-            (
-                f"{SPAWN_PID_LOG_PREFIX}123",
-                "INFO: Started server process [123]",
-                f"{SPAWN_PID_LOG_PREFIX}456",
-            )
-        ),
-        encoding="utf-8",
-    )
+def test_spawned_server_pid_reads_launcher_sidecar(tmp_path: Path) -> None:
+    pid_path = tmp_path / "local-server.spawn.pid"
+    pid_path.write_text("456\n", encoding="ascii")
 
-    assert _spawned_server_pid(log_path, timeout=0.1) == 456
+    assert _spawned_server_pid(pid_path, timeout=0.1) == 456
+
+
+def test_stop_server_accepts_trusted_pre_bind_spawn_record() -> None:
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        shell=False,
+        close_fds=True,
+    )
+    try:
+        _stop_server(
+            process.pid,
+            _free_port(),
+            trusted_spawn_record=True,
+        )
+        process.wait(timeout=5)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+
+    assert process.returncode is not None
 
 
 def test_real_launcher_entry_proxy_and_home_lock(tmp_path: Path) -> None:
@@ -277,7 +288,7 @@ def test_real_launcher_entry_proxy_and_home_lock(tmp_path: Path) -> None:
         instance_id = str(ready["server_instance_id"])
         server_pid = _server_owner_pid(server_home / ".server.lock")
         assert _spawned_server_pid(
-            client_home / "logs" / "local-server-local.log"
+            client_home / "logs" / "local-server-local.spawn.pid"
         ) == server_pid
 
         direct_status, direct_headers = _raw_headers(
@@ -412,12 +423,14 @@ def test_real_launcher_entry_proxy_and_home_lock(tmp_path: Path) -> None:
     finally:
         _stop_process(second_server)
         _stop_process(launcher)
+        trusted_spawn_record = False
         if server_pid is None:
             try:
                 server_pid = _spawned_server_pid(
-                    client_home / "logs" / "local-server-local.log",
+                    client_home / "logs" / "local-server-local.spawn.pid",
                     timeout=1,
                 )
+                trusted_spawn_record = True
             except AssertionError:
                 if (server_home / ".server.lock").exists():
                     try:
@@ -427,7 +440,11 @@ def test_real_launcher_entry_proxy_and_home_lock(tmp_path: Path) -> None:
                         )
                     except AssertionError:
                         pass
-        _stop_server(server_pid, server_port)
+        _stop_server(
+            server_pid,
+            server_port,
+            trusted_spawn_record=trusted_spawn_record,
+        )
 
     assert _port_is_closed(launcher_port)
     assert _port_is_closed(server_port)

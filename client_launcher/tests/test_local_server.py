@@ -17,7 +17,6 @@ from client_launcher.local_server import (
     LocalServerResponseError,
     LocalServerStartExitedError,
     LocalServerStartTimeoutError,
-    SPAWN_PID_LOG_PREFIX,
     STARTUP_LOG_TAIL_BYTES,
 )
 
@@ -238,13 +237,13 @@ def test_connection_refusal_spawns_detached_production_server(tmp_path: Path):
     assert kwargs["env"]["PYTHONUNBUFFERED"] == "1"
     assert kwargs["env"]["PYTHONIOENCODING"] == "utf-8"
     assert kwargs["stdout"].closed
-    server_log = (
-        tmp_path / "client" / "logs" / "local-server-local-profile.log"
+    spawn_pid_path = (
+        tmp_path
+        / "client"
+        / "logs"
+        / "local-server-local-profile.spawn.pid"
     )
-    assert server_log.read_text(encoding="utf-8").splitlines() == [
-        "",
-        f"{SPAWN_PID_LOG_PREFIX}{process.pid}",
-    ]
+    assert spawn_pid_path.read_text(encoding="ascii") == f"{process.pid}\n"
     assert phases == ["health", "local_start", "health", "handshake"]
     assert process.terminate_calls == 0
     assert process.kill_calls == 0
