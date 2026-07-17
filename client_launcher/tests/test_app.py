@@ -82,7 +82,6 @@ def _app(
     tmp_path: Path,
     *,
     proxy_client: httpx.AsyncClient | None = None,
-    require_connection_lease: bool = False,
     max_request_body_bytes: int | None = None,
 ):
     settings = _settings(tmp_path)
@@ -103,7 +102,6 @@ def _app(
             profiles=store,
             connector=connector,
             proxy_client=proxy_client,
-            require_connection_lease=require_connection_lease,
         ),
         store,
         connector,
@@ -292,7 +290,7 @@ def test_connect_disconnect_and_endpoint_change_reset_session(tmp_path: Path):
     assert connector.closed is True
 
 
-def test_app_threads_strict_connection_lease_switch_through_proxy(tmp_path: Path):
+def test_app_requires_connection_lease_for_every_proxy_request(tmp_path: Path):
     upstream_calls = 0
     forwarded_leases: list[str] = []
 
@@ -314,7 +312,6 @@ def test_app_threads_strict_connection_lease_switch_through_proxy(tmp_path: Path
     app, _, _ = _app(
         tmp_path,
         proxy_client=proxy_client,
-        require_connection_lease=True,
     )
 
     with TestClient(app) as client:
@@ -356,7 +353,6 @@ def test_strict_proxy_body_limit_error_carries_captured_connection_lease(
     app, _, _ = _app(
         tmp_path,
         proxy_client=proxy_client,
-        require_connection_lease=True,
         max_request_body_bytes=5,
     )
 
@@ -626,8 +622,14 @@ def test_stale_proxy_failure_does_not_break_reconnected_session(tmp_path: Path):
     )
 
     with TestClient(app) as client:
-        assert client.post("/client/v1/profiles/local/connect").status_code == 200
-        response = client.get("/p/local/api/v1/health")
+        connected = client.post("/client/v1/profiles/local/connect")
+        assert connected.status_code == 200
+        response = client.get(
+            "/p/local/api/v1/health",
+            headers={
+                CONNECTION_LEASE_HEADER: connected.json()["connection_lease_id"]
+            },
+        )
         status = client.get("/client/v1/profiles/local/status")
 
     asyncio.run(proxy_client.aclose())
@@ -673,7 +675,12 @@ def test_deleted_profile_proxy_failure_preserves_transport_error(tmp_path: Path)
         connected = client.post(f"/client/v1/profiles/{profile_id}/connect")
         assert connected.status_code == 200
 
-        response = client.get(f"/p/{profile_id}/api/v1/health")
+        response = client.get(
+            f"/p/{profile_id}/api/v1/health",
+            headers={
+                CONNECTION_LEASE_HEADER: connected.json()["connection_lease_id"]
+            },
+        )
 
     asyncio.run(proxy_client.aclose())
     assert response.status_code == 502
@@ -950,10 +957,14 @@ def test_proxy_preserves_a_different_valid_upstream_request_id(tmp_path: Path):
     app, _, _ = _app(tmp_path, proxy_client=proxy_client)
 
     with TestClient(app) as client:
-        assert client.post("/client/v1/profiles/local/connect").status_code == 200
+        connected = client.post("/client/v1/profiles/local/connect")
+        assert connected.status_code == 200
         response = client.delete(
             "/p/local/api/v1/conversations/branch",
-            headers={"X-Request-ID": "launcher-tree"},
+            headers={
+                "X-Request-ID": "launcher-tree",
+                CONNECTION_LEASE_HEADER: connected.json()["connection_lease_id"],
+            },
         )
 
     asyncio.run(proxy_client.aclose())

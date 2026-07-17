@@ -94,10 +94,15 @@ def _wait_for_json(
     )
 
 
-def _raw_headers(port: int, path: str) -> tuple[int, list[tuple[str, str]]]:
+def _raw_headers(
+    port: int,
+    path: str,
+    *,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, list[tuple[str, str]]]:
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     try:
-        connection.request("GET", path)
+        connection.request("GET", path, headers=headers or {})
         response = connection.getresponse()
         response.read()
         return response.status, response.getheaders()
@@ -286,6 +291,8 @@ def test_real_launcher_entry_proxy_and_home_lock(tmp_path: Path) -> None:
             log_path=launcher_log,
         )
         instance_id = str(ready["server_instance_id"])
+        lease_id = str(ready["connection_lease_id"])
+        lease_headers = {"X-ChatTree-Connection-Lease-ID": lease_id}
         server_pid = _server_owner_pid(server_home / ".server.lock")
         assert _spawned_server_pid(
             client_home / "logs" / "local-server-local.spawn.pid"
@@ -295,11 +302,27 @@ def test_real_launcher_entry_proxy_and_home_lock(tmp_path: Path) -> None:
             server_port,
             "/api/v1/health",
         )
-        proxy_status, proxy_headers = _raw_headers(
+        missing_proxy_status, missing_proxy_headers = _raw_headers(
             launcher_port,
             "/p/local/api/v1/health",
         )
+        proxy_status, proxy_headers = _raw_headers(
+            launcher_port,
+            "/p/local/api/v1/health",
+            headers=lease_headers,
+        )
+        assert missing_proxy_status == 409
+        assert [
+            value
+            for key, value in missing_proxy_headers
+            if key.lower() == "x-chattree-connection-lease-id"
+        ] == [lease_id]
         assert direct_status == proxy_status == 200
+        assert [
+            value
+            for key, value in proxy_headers
+            if key.lower() == "x-chattree-connection-lease-id"
+        ] == [lease_id]
         for name in ("date", "server"):
             assert len(
                 [value for key, value in direct_headers if key.lower() == name]
@@ -332,17 +355,27 @@ def test_real_launcher_entry_proxy_and_home_lock(tmp_path: Path) -> None:
                 }
             }
 
-            redirect = client.get("/p/local/api/v1/conversations/")
+            redirect = client.get(
+                "/p/local/api/v1/conversations/",
+                headers=lease_headers,
+            )
             assert redirect.status_code == 307
+            assert redirect.headers.get_list(
+                "X-ChatTree-Connection-Lease-ID"
+            ) == [lease_id]
             assert redirect.headers["location"] == (
                 "/p/local/api/v1/conversations"
             )
 
             conversation = client.post(
                 "/p/local/api/v1/conversations",
+                headers=lease_headers,
                 json={"title": "Launcher E2E"},
             )
             conversation.raise_for_status()
+            assert conversation.headers.get_list(
+                "X-ChatTree-Connection-Lease-ID"
+            ) == [lease_id]
             conversation_data = conversation.json()
             statuses: list[str] = []
             content_parts: list[str] = []
@@ -351,6 +384,7 @@ def test_real_launcher_entry_proxy_and_home_lock(tmp_path: Path) -> None:
                 "POST",
                 "/p/local/api/v1/conversations/"
                 f"{conversation_data['id']}/messages/stream",
+                headers=lease_headers,
                 json={
                     "content": "/help",
                     "parent_node_id": conversation_data["current_node_id"],
@@ -360,6 +394,9 @@ def test_real_launcher_entry_proxy_and_home_lock(tmp_path: Path) -> None:
                 assert stream.headers["content-type"].startswith(
                     "text/event-stream"
                 )
+                assert stream.headers.get_list(
+                    "X-ChatTree-Connection-Lease-ID"
+                ) == [lease_id]
                 for line in stream.iter_lines():
                     if not line.startswith("data:"):
                         continue

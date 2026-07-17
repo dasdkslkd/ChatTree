@@ -1,4 +1,4 @@
-import { apiClient, serverApiUrl } from './client';
+import { apiClient } from './client';
 import type {
   Message,
   SendMessageRequest,
@@ -8,6 +8,12 @@ import type {
   ToolApprovalScope,
 } from '../types/message';
 import { perfNow, recordMark, recordSpan } from '../perf/marks';
+import {
+  connectionEpochRuntime,
+  StaleConnectionEpochError,
+  type ConnectionEpochToken,
+} from '../runtime/connectionEpoch';
+import { leaseGuardedFetch } from './leaseFetch';
 
 export type ToolResultSlice = {
   tool_result_id: string;
@@ -55,24 +61,62 @@ export interface ActiveStreamInfo {
   updated_at: number;
 }
 
+export type MessageStreamOptions = {
+  token: ConnectionEpochToken;
+  signal?: AbortSignal;
+  nodeId?: string;
+};
+
+export type MessageAttachStreamOptions = {
+  token: ConnectionEpochToken;
+  signal?: AbortSignal;
+  fromEvent?: number;
+};
+
+export type PlanStreamOptions = {
+  token: ConnectionEpochToken;
+  signal?: AbortSignal;
+};
+
+function assertStreamCurrent(token: ConnectionEpochToken): void {
+  if (!connectionEpochRuntime.isCurrent(token)) {
+    throw new StaleConnectionEpochError();
+  }
+}
+
+async function acquireSseReader(
+  response: Response,
+  token: ConnectionEpochToken,
+): Promise<ReadableStreamDefaultReader<Uint8Array>> {
+  try {
+    assertStreamCurrent(token);
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error('Response body is not readable');
+    return reader;
+  } catch (error) {
+    try {
+      await response.body?.cancel();
+    } catch {
+      // The transport may already have closed or cancelled the body.
+    }
+    throw error;
+  }
+}
+
 async function* parseSseResponse(
   response: Response,
+  token: ConnectionEpochToken,
   perfAttrs: Record<string, unknown> = {},
 ): AsyncGenerator<StreamChunk, void> {
-  if (!response.ok) {
-    throw new Error(`HTTP error! status: ${response.status}`);
-  }
-
+  const reader = await acquireSseReader(response, token);
   recordMark('stream.response_headers', {
     ...perfAttrs,
     status: response.status,
   });
-  const reader = response.body?.getReader();
   const decoder = new TextDecoder();
-
-  if (!reader) {
-    throw new Error('Response body is not readable');
-  }
 
   let buffer = '';
   let firstChunk = true;
@@ -81,7 +125,15 @@ async function* parseSseResponse(
   try {
     while (true) {
       const readStarted = perfNow();
-      const { done, value } = await reader.read();
+      let readResult: ReadableStreamReadResult<Uint8Array>;
+      try {
+        readResult = await reader.read();
+      } catch (error) {
+        assertStreamCurrent(token);
+        throw error;
+      }
+      assertStreamCurrent(token);
+      const { done, value } = readResult;
       recordSpan('stream.reader_read', readStarted, {
         ...perfAttrs,
         done,
@@ -122,8 +174,10 @@ async function* parseSseResponse(
               run_id: (parsed as any).run_id,
               event_index: (parsed as any).event_index,
             });
+            assertStreamCurrent(token);
             yield parsed;
           } catch (e) {
+            if (e instanceof StaleConnectionEpochError) throw e;
             recordMark('stream.parse_error', { ...perfAttrs });
             console.error('Failed to parse stream chunk:', e, jsonData);
           }
@@ -147,8 +201,10 @@ async function* parseSseResponse(
               run_id: (parsed as any).run_id,
               event_index: (parsed as any).event_index,
             });
+            assertStreamCurrent(token);
             yield parsed;
           } catch (e) {
+            if (e instanceof StaleConnectionEpochError) throw e;
             recordMark('stream.parse_error', { ...perfAttrs, final_buffer: true });
             console.error('Failed to parse final stream chunk:', e, jsonData);
           }
@@ -158,8 +214,8 @@ async function* parseSseResponse(
   } finally {
     try {
       await reader.cancel();
-    } catch (_) {
-      // reader 可能已关闭，忽略
+    } catch {
+      // The reader may already be closed or cancelled.
     }
   }
 }
@@ -169,24 +225,24 @@ export const messageApi = {
   stream: async function* (
     conversationId: string,
     data: SendMessageRequest,
-    nodeId?: string,
-    signal?: AbortSignal
+    options: MessageStreamOptions,
   ): AsyncGenerator<StreamChunk, void> {
+    const { nodeId, signal, token } = options;
     const started = perfNow();
-    const response = await fetch(serverApiUrl(`/conversations/${conversationId}/messages/stream`), {
+    const response = await leaseGuardedFetch(`/conversations/${encodeURIComponent(conversationId)}/messages/stream`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ ...data, parent_node_id: nodeId ?? data.parent_node_id, focus_new_node: data.focus_new_node ?? true }),
       signal,
-    });
+    }, token);
     recordSpan('stream.fetch', started, {
       conversation_id: conversationId,
       route: 'messages.stream',
     });
 
-    yield* parseSseResponse(response, {
+    yield* parseSseResponse(response, token, {
       conversation_id: conversationId,
       route: 'messages.stream',
     });
@@ -205,13 +261,15 @@ export const messageApi = {
   attachStream: async function* (
     conversationId: string,
     nodeId: string,
-    fromEvent = 0,
-    signal?: AbortSignal,
+    options: MessageAttachStreamOptions,
   ): AsyncGenerator<StreamChunk, void> {
+    const { token, signal } = options;
+    const fromEvent = options.fromEvent ?? 0;
     const started = perfNow();
-    const response = await fetch(
-      serverApiUrl(`/conversations/${conversationId}/messages/${nodeId}/stream/attach?from_event=${fromEvent}`),
+    const response = await leaseGuardedFetch(
+      `/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(nodeId)}/stream/attach?from_event=${fromEvent}`,
       { signal },
+      token,
     );
     recordSpan('stream.fetch', started, {
       conversation_id: conversationId,
@@ -219,7 +277,7 @@ export const messageApi = {
       from_event: fromEvent,
       route: 'messages.attach',
     });
-    yield* parseSseResponse(response, {
+    yield* parseSseResponse(response, token, {
       conversation_id: conversationId,
       node_id: nodeId,
       from_event: fromEvent,
@@ -231,60 +289,66 @@ export const messageApi = {
     conversationId: string,
     planId: string,
     data: PlanActionStreamRequest,
-    signal?: AbortSignal,
+    options: PlanStreamOptions,
   ): AsyncGenerator<StreamChunk, void> {
+    const { signal, token } = options;
     const started = perfNow();
-    const response = await fetch(
-      serverApiUrl(`/conversations/${encodeURIComponent(conversationId)}/plans/${encodeURIComponent(planId)}/approve/stream`),
+    const response = await leaseGuardedFetch(
+      `/conversations/${encodeURIComponent(conversationId)}/plans/${encodeURIComponent(planId)}/approve/stream`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
         signal,
       },
+      token,
     );
     recordSpan('stream.fetch', started, { conversation_id: conversationId, plan_id: planId, route: 'plans.approve' });
-    yield* parseSseResponse(response, { conversation_id: conversationId, plan_id: planId, route: 'plans.approve' });
+    yield* parseSseResponse(response, token, { conversation_id: conversationId, plan_id: planId, route: 'plans.approve' });
   },
 
   streamPlanAnswer: async function* (
     conversationId: string,
     planId: string,
     data: PlanAnswerStreamRequest,
-    signal?: AbortSignal,
+    options: PlanStreamOptions,
   ): AsyncGenerator<StreamChunk, void> {
+    const { signal, token } = options;
     const started = perfNow();
-    const response = await fetch(
-      serverApiUrl(`/conversations/${encodeURIComponent(conversationId)}/plans/${encodeURIComponent(planId)}/answer/stream`),
+    const response = await leaseGuardedFetch(
+      `/conversations/${encodeURIComponent(conversationId)}/plans/${encodeURIComponent(planId)}/answer/stream`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
         signal,
       },
+      token,
     );
     recordSpan('stream.fetch', started, { conversation_id: conversationId, plan_id: planId, route: 'plans.answer' });
-    yield* parseSseResponse(response, { conversation_id: conversationId, plan_id: planId, route: 'plans.answer' });
+    yield* parseSseResponse(response, token, { conversation_id: conversationId, plan_id: planId, route: 'plans.answer' });
   },
 
   streamPlanReject: async function* (
     conversationId: string,
     planId: string,
     data: PlanRejectStreamRequest,
-    signal?: AbortSignal,
+    options: PlanStreamOptions,
   ): AsyncGenerator<StreamChunk, void> {
+    const { signal, token } = options;
     const started = perfNow();
-    const response = await fetch(
-      serverApiUrl(`/conversations/${encodeURIComponent(conversationId)}/plans/${encodeURIComponent(planId)}/reject/stream`),
+    const response = await leaseGuardedFetch(
+      `/conversations/${encodeURIComponent(conversationId)}/plans/${encodeURIComponent(planId)}/reject/stream`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
         signal,
       },
+      token,
     );
     recordSpan('stream.fetch', started, { conversation_id: conversationId, plan_id: planId, route: 'plans.reject' });
-    yield* parseSseResponse(response, { conversation_id: conversationId, plan_id: planId, route: 'plans.reject' });
+    yield* parseSseResponse(response, token, { conversation_id: conversationId, plan_id: planId, route: 'plans.reject' });
   },
 
   // 获取消息历史

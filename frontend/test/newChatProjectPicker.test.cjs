@@ -3,6 +3,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const source = fs.readFileSync(path.join(__dirname, '../src/pages/MainPage.tsx'), 'utf8');
+const epochHelperSource = fs.readFileSync(
+  path.join(__dirname, '../src/runtime/projectWorkspaceEpoch.ts'),
+  'utf8',
+);
 
 function testProjectPickerClosesAfterSelectingProject() {
   assert.match(
@@ -40,7 +44,36 @@ function testNewChatTitleUsesSelectedWorkspaceLabel() {
   );
 }
 
+function testProjectFolderResolutionUsesOneEpochOwner() {
+  assert.match(
+    source,
+    /const token = captureConnectionEpoch\(\);[\s\S]*resolveProjectWorkspaceForEpoch\(token, \{/,
+    'project folder submit should capture one epoch before starting remote work',
+  );
+  assert.match(
+    source,
+    /onSuccess: \(workspace\) => \{[\s\S]*rememberProjectWorkspace\(workspace\);[\s\S]*setProjectFolderDialogMode\(null\);/,
+    'workspace persistence and dialog success state should share the guarded success callback',
+  );
+  assert.match(
+    source,
+    /onFinally: \(\) => setProjectFolderSubmitting\(false\)/,
+    'submitting state should be released only through the epoch helper',
+  );
+  assert.match(
+    epochHelperSource,
+    /if \(!epochSource\.isCurrent\(token\)\) return null;[\s\S]*callbacks\.onSuccess\(value\)/,
+    'the helper should check token currency before success commits',
+  );
+  assert.match(
+    epochHelperSource,
+    /finally \{[\s\S]*if \(epochSource\.isCurrent\(token\)\) callbacks\.onFinally\(\);/,
+    'the helper should suppress stale finally commits',
+  );
+}
+
 testProjectPickerClosesAfterSelectingProject();
 testNewChatTitleUsesSelectedWorkspaceLabel();
+testProjectFolderResolutionUsesOneEpochOwner();
 
 console.log('PASS newChatProjectPicker');

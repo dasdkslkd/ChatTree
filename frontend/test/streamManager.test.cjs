@@ -134,6 +134,80 @@ function createControlledStream() {
   return { stream, push, close };
 }
 
+function createEpochSource() {
+  const token = Object.freeze({
+    profileId: 'local',
+    serverInstanceId: '11111111-1111-4111-8111-111111111111',
+    connectionEpoch: 1,
+    connectionLeaseId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    generation: 1,
+  });
+  const controller = new AbortController();
+  let current = true;
+  let captures = 0;
+  return {
+    token,
+    source: {
+      capture() {
+        captures += 1;
+        return token;
+      },
+      isCurrent(candidate) {
+        return current && candidate === token;
+      },
+      signalFor(candidate) {
+        return current && candidate === token ? controller.signal : AbortSignal.abort();
+      },
+    },
+    invalidate() {
+      current = false;
+      controller.abort();
+    },
+    get captures() {
+      return captures;
+    },
+  };
+}
+
+function createSwitchableEpochSource() {
+  const tokenA = Object.freeze({
+    profileId: 'local',
+    serverInstanceId: '11111111-1111-4111-8111-111111111111',
+    connectionEpoch: 1,
+    connectionLeaseId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    generation: 1,
+  });
+  const tokenB = Object.freeze({
+    profileId: 'local',
+    serverInstanceId: '22222222-2222-4222-8222-222222222222',
+    connectionEpoch: 2,
+    connectionLeaseId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+    generation: 2,
+  });
+  const controllers = new Map([
+    [tokenA, new AbortController()],
+    [tokenB, new AbortController()],
+  ]);
+  let current = tokenA;
+  return {
+    tokenA,
+    tokenB,
+    source: {
+      capture: () => current,
+      isCurrent: (candidate) => candidate === current,
+      signalFor(candidate) {
+        return candidate === current
+          ? controllers.get(candidate).signal
+          : AbortSignal.abort();
+      },
+    },
+    switchToB() {
+      controllers.get(tokenA).abort();
+      current = tokenB;
+    },
+  };
+}
+
 function chunk(overrides) {
   return {
     status: 'content',
@@ -204,7 +278,7 @@ const { messageApi } = require(messageModule);
 const { runsApi } = require(runsModule);
 const { getGenerationStatusText, getStreamStatusText } = require(path.join(__dirname, '../src/utils/generationStatus.ts'));
 
-async function withManager(run) {
+async function withManager(run, epoch = createEpochSource()) {
   resetTimers();
   installWindowTimers();
   const originalStream = messageApi.stream;
@@ -212,9 +286,9 @@ async function withManager(run) {
   const originalStreamPlanAnswer = messageApi.streamPlanAnswer;
   const originalAttach = runsApi.attach;
   const originalStop = runsApi.stop;
-  const manager = new StreamManager();
+  const manager = new StreamManager(epoch.source);
   try {
-    await run(manager);
+    await run(manager, epoch);
   } finally {
     messageApi.stream = originalStream;
     messageApi.streamPlanApproval = originalStreamPlanApproval;
@@ -223,6 +297,137 @@ async function withManager(run) {
     runsApi.stop = originalStop;
     manager.resetAll();
   }
+}
+
+async function testInvalidatedEpochCannotApplyLateChunkAliasOrFinish() {
+  const epoch = createEpochSource();
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    const calls = [];
+    const finishes = [];
+    manager.onFinish((info) => finishes.push(info));
+    messageApi.stream = (...args) => {
+      calls.push(args);
+      return controlled.stream();
+    };
+    const running = manager.startStream('conv-1', { content: 'hello' });
+    await tick();
+
+    const initial = manager.getConversationStates('conv-1')[0];
+    assert.equal(initial.epochToken, epoch.token);
+    assert.equal(calls[0][2].token, epoch.token);
+    assert.equal(calls[0][2].signal.aborted, false);
+    epoch.invalidate();
+    assert.equal(calls[0][2].signal.aborted, true);
+
+    await controlled.push(chunk({
+      run_id: 'run-late-epoch',
+      event_type: 'text',
+      content: 'must-not-commit',
+    }));
+    await controlled.close();
+    await runTimersUntil(running);
+
+    assert.deepEqual(manager.getConversationStates('conv-1'), []);
+    assert.equal(manager.getState('conv-1'), undefined);
+    assert.equal(manager.isStreaming('conv-1'), false);
+    assert.equal(manager.hasRun(initial.runId), false);
+    assert.equal(manager.streams.size, 0);
+    assert.equal(manager.runsByConversation.size, 0);
+    assert.equal(manager.conversationSnapshots.size, 0);
+    assert.equal(manager.durationTimers.size, 0);
+    assert.equal(manager.runAliases.size, 0);
+    assert.equal(initial.abortController.signal.aborted, true);
+    assert.equal(manager.resolveRunId(initial.runId), initial.runId);
+    assert.deepEqual(finishes, []);
+    assert.equal(intervals.size, 0);
+    assert.equal(epoch.captures, 1);
+  }, epoch);
+}
+
+async function testStaleRestoreRemovesPartiallyBuiltState() {
+  const base = createEpochSource();
+  let checks = 0;
+  const epoch = {
+    source: {
+      capture: base.source.capture,
+      signalFor: base.source.signalFor,
+      isCurrent(candidate) {
+        checks += 1;
+        return candidate === base.token && checks <= 4;
+      },
+    },
+  };
+  await withManager(async (manager) => {
+    manager.restoreRunFromEvents(
+      {
+        run_id: 'run-partial',
+        conversation_id: 'conv-1',
+        kind: 'chat',
+        status: 'completed',
+        event_count: 2,
+        created_at: 10,
+        updated_at: 11,
+        finished_at: 11,
+      },
+      [
+        chunk({ run_id: 'run-partial', event_index: 0, content: 'first' }),
+        chunk({ run_id: 'run-partial', event_index: 1, content: 'second' }),
+      ],
+    );
+
+    assert.ok(checks > 4, 'epoch must expire while replaying events');
+    assert.equal(manager.streams.size, 0);
+    assert.equal(manager.runsByConversation.size, 0);
+    assert.equal(manager.conversationSnapshots.size, 0);
+    assert.equal(manager.runAliases.size, 0);
+  }, epoch);
+}
+
+async function testStaleCleanupDoesNotDeleteSuccessorRunState() {
+  const epoch = createSwitchableEpochSource();
+  await withManager(async (manager) => {
+    const oldStream = createControlledStream();
+    const successorStream = createControlledStream();
+    messageApi.stream = oldStream.stream;
+    runsApi.attach = successorStream.stream;
+
+    const oldRunning = manager.startStream('conv-1', { content: 'old' });
+    await tick();
+    const initial = manager.getConversationStates('conv-1')[0];
+    const oldController = initial.abortController;
+    await oldStream.push(chunk({
+      run_id: 'run-shared',
+      event_type: 'text',
+      content: 'old-content',
+    }));
+
+    epoch.switchToB();
+    const successorRunning = manager.resumeStream(
+      'conv-1',
+      null,
+      'run-shared',
+    );
+    await tick();
+    const successor = manager.getConversationStates('conv-1')[0];
+    assert.equal(successor.epochToken, epoch.tokenB);
+    assert.notEqual(successor.abortController, oldController);
+
+    await oldStream.push(chunk({ content: 'late-old-content' }));
+    await oldStream.close();
+    await runTimersUntil(oldRunning);
+
+    const afterOldCleanup = manager.getConversationStates('conv-1')[0];
+    assert.equal(afterOldCleanup.epochToken, epoch.tokenB);
+    assert.equal(afterOldCleanup.abortController, successor.abortController);
+    assert.equal(afterOldCleanup.abortController.signal.aborted, false);
+    assert.equal(oldController.signal.aborted, true);
+    assert.equal(manager.runAliases.size, 0);
+    assert.equal(manager.durationTimers.size, 1);
+
+    await successorStream.close();
+    await runTimersUntil(successorRunning);
+  }, epoch);
 }
 
 async function testFlushesReasoningBeforeContentStarts() {
@@ -642,7 +847,8 @@ async function testRequestNodeAndUiAnchorAreIndependent() {
 
     await tick();
     let state = manager.getConversationStates('conv-1')[0];
-    assert.equal(streamArgs[2], undefined);
+    assert.equal(streamArgs[2].nodeId, undefined);
+    assert.ok(streamArgs[2].token);
     assert.equal(state.anchorNodeId, 'node-current');
     assert.equal(state.nodeId, null);
     assert.equal(state.targetNodeId, null);
@@ -1602,6 +1808,9 @@ async function main() {
   await testCoalescesContentNotificationsAndFlushesCompletionImmediately();
   await testDurationNotificationsUseCoarseInterval();
   await testWaitingApprovalStatusIsVisible();
+  await testInvalidatedEpochCannotApplyLateChunkAliasOrFinish();
+  await testStaleRestoreRemovesPartiallyBuiltState();
+  await testStaleCleanupDoesNotDeleteSuccessorRunState();
   testGenerationStatusUsesPersistedErrorMessage();
   console.log('streamManager tests passed');
 }

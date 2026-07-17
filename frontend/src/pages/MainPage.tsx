@@ -70,7 +70,6 @@ import {
   PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, ArrowLeft, Bell,
 } from 'lucide-react';
 import { conversationApi } from '../api/conversation';
-import { serverApiUrl } from '../api/client';
 import { getApiErrorMessage } from '../api/errors';
 import { configApi } from '../api/config';
 import { messageApi, type ToolResultSlice } from '../api/message';
@@ -111,6 +110,18 @@ import { useConversationStore } from '../store/conversationStore';
 import { useModelStore } from '../store/modelStore';
 import { useNavigationStore } from '../store/navigationStore';
 import { useRunManager } from '../hooks/useRunManager';
+import {
+  captureConnectionEpoch,
+  commitForConnectionEpoch,
+  connectionEpochRuntime,
+  type ConnectionEpochToken,
+} from '../runtime/connectionEpoch';
+import {
+  ImportAssetMutationOwner,
+  ImportAssetMutationQueue,
+  ImportAssetPreviewCache,
+} from '../runtime/importAssetPreview';
+import { resolveProjectWorkspaceForEpoch } from '../runtime/projectWorkspaceEpoch';
 import { streamManager, type StreamState } from '../services/streamManager';
 import { slashRegistry } from '../services/slashRegistry';
 import { getStreamStatusText as getStreamStatusLabel } from '../utils/generationStatus';
@@ -1149,6 +1160,25 @@ export default function ChatPage() {
   const [projectFolderLabel, setProjectFolderLabel] = useState('');
   const [projectFolderError, setProjectFolderError] = useState('');
   const [projectFolderSubmitting, setProjectFolderSubmitting] = useState(false);
+  const [, refreshImportPreviews] = useState(0);
+  const importAssetPreviewCacheRef = useRef<ImportAssetPreviewCache | null>(null);
+  const importAssetMutationOwnerRef = useRef<ImportAssetMutationOwner | null>(null);
+  const importAssetMutationQueueRef = useRef<ImportAssetMutationQueue | null>(null);
+  if (!importAssetPreviewCacheRef.current) {
+    importAssetPreviewCacheRef.current = new ImportAssetPreviewCache(
+      conversationApi.fetchImportBlob,
+      connectionEpochRuntime,
+    );
+  }
+  const importAssetPreviewCache = importAssetPreviewCacheRef.current;
+  if (!importAssetMutationOwnerRef.current) {
+    importAssetMutationOwnerRef.current = new ImportAssetMutationOwner();
+  }
+  const importAssetMutationOwner = importAssetMutationOwnerRef.current;
+  if (!importAssetMutationQueueRef.current) {
+    importAssetMutationQueueRef.current = new ImportAssetMutationQueue();
+  }
+  const importAssetMutationQueue = importAssetMutationQueueRef.current;
   const scrollTimeoutRef = useRef<number | null>(null);
   const historyRef = useRef<HTMLDivElement>(null);
   const conversationSearchInputRef = useRef<HTMLInputElement>(null);
@@ -1336,6 +1366,43 @@ export default function ChatPage() {
     createConversation, selectConversation, deleteConversation, deleteNode, switchNode, loadConversations, loadTree,
     clearCurrentConversation, updateConversationTitle, refreshMessages, refreshBranches, patchAssistantMessageFromStream,
   } = useConversationStore();
+
+  const importPreviewFilenames = useMemo(() => Array.from(new Set([
+    ...attachedImageRefs.map((ref) => ref.filename),
+    ...messages.flatMap((message) => (message.image_refs ?? []).map((ref) => ref.filename)),
+  ].filter(Boolean))), [attachedImageRefs, messages]);
+
+  useEffect(() => importAssetPreviewCache.subscribe(() => {
+    refreshImportPreviews((revision) => revision + 1);
+  }), [importAssetPreviewCache]);
+
+  useEffect(() => {
+    setPreviewImage(null);
+    return () => {
+      importAssetMutationOwner.clear();
+      importAssetPreviewCache.clear();
+    };
+  }, [currentConversation?.id, importAssetMutationOwner, importAssetPreviewCache]);
+
+  useEffect(() => connectionEpochRuntime.subscribeInvalidation(() => {
+    importAssetMutationOwner.clear();
+    importAssetPreviewCache.clear();
+    setPreviewImage(null);
+  }), [importAssetMutationOwner, importAssetPreviewCache]);
+
+  useEffect(() => {
+    const conversationId = currentConversation?.id;
+    if (!conversationId || importPreviewFilenames.length === 0) return;
+    let token: ConnectionEpochToken;
+    try {
+      token = captureConnectionEpoch();
+    } catch {
+      return;
+    }
+    for (const filename of importPreviewFilenames) {
+      void importAssetPreviewCache.load(conversationId, filename, token).catch(() => {});
+    }
+  }, [currentConversation?.id, importAssetPreviewCache, importPreviewFilenames]);
 
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
   const [renameConversationId, setRenameConversationId] = useState<string | null>(null);
@@ -2146,22 +2213,29 @@ export default function ChatPage() {
       setProjectFolderError('请输入文件夹路径');
       return;
     }
-    setProjectFolderSubmitting(true);
-    setProjectFolderError('');
     try {
+      const token = captureConnectionEpoch();
+      setProjectFolderSubmitting(true);
+      setProjectFolderError('');
       const label = projectFolderLabel.trim() || undefined;
-      const workspace = projectFolderDialogMode === 'create'
-        ? await conversationApi.createProjectFolder(path, label)
-        : await conversationApi.resolveProjectFolder(path, label);
-      rememberProjectWorkspace(workspace);
-      setProjectPickerSearch('');
-      setProjectFolderDialogMode(null);
-      setProjectFolderPath('');
-      setProjectFolderLabel('');
-    } catch (err: unknown) {
-      setProjectFolderError(getApiErrorMessage(err, '项目文件夹处理失败'));
-    } finally {
-      setProjectFolderSubmitting(false);
+      await resolveProjectWorkspaceForEpoch(token, {
+        resolve: () => projectFolderDialogMode === 'create'
+          ? conversationApi.createProjectFolder(path, label)
+          : conversationApi.resolveProjectFolder(path, label),
+        onSuccess: (workspace) => {
+          rememberProjectWorkspace(workspace);
+          setProjectPickerSearch('');
+          setProjectFolderDialogMode(null);
+          setProjectFolderPath('');
+          setProjectFolderLabel('');
+        },
+        onError: (error) => {
+          setProjectFolderError(getApiErrorMessage(error, '项目文件夹处理失败'));
+        },
+        onFinally: () => setProjectFolderSubmitting(false),
+      }, connectionEpochRuntime);
+    } catch {
+      // Capture can fail only while this page is being invalidated for reload.
     }
   };
 
@@ -3097,6 +3171,12 @@ export default function ChatPage() {
   };
 
   const handleFilesPicked = async (files: File[]) => {
+    let token: ConnectionEpochToken;
+    try {
+      token = captureConnectionEpoch();
+    } catch {
+      return;
+    }
     let convId = currentConversation?.id;
     if (!convId) {
       const newConv = await createConversation({
@@ -3108,44 +3188,107 @@ export default function ChatPage() {
       convId = newConv.id;
     }
     for (const file of files) {
+      const uploadMutation = importAssetMutationOwner.begin(convId, file.name);
       try {
-        const res = await conversationApi.uploadImport(convId, file);
+        const res = await importAssetMutationQueue.run(
+          convId,
+          file.name,
+          async () => {
+            if (!connectionEpochRuntime.isCurrent(token)) return null;
+            return conversationApi.uploadImport(convId, file);
+          },
+        );
+        if (!res) continue;
+        if (!connectionEpochRuntime.isCurrent(token)) return;
+        if (useConversationStore.getState().currentConversation?.id !== convId) {
+          continue;
+        }
+        const mutation = importAssetMutationOwner.claim(
+          uploadMutation,
+          convId,
+          res.filename,
+        );
+        if (!mutation) continue;
         if (res.kind === 'image') {
-          setAttachedImageRefs(prev => prev.some(ref => ref.filename === res.filename)
-            ? prev
-            : [...prev, { filename: res.filename, mime_type: res.mime_type ?? file.type }]);
+          importAssetPreviewCache.installFile(convId, res.filename, file, token);
+          commitForConnectionEpoch(token, () => {
+            if (!importAssetMutationOwner.owns(mutation)
+                || useConversationStore.getState().currentConversation?.id !== convId) return;
+            setAttachedImageRefs(prev => prev.some(ref => ref.filename === res.filename)
+              ? prev
+              : [...prev, { filename: res.filename, mime_type: res.mime_type ?? file.type }]);
+          });
         } else {
-          setAttachedFiles(prev => prev.includes(res.filename) ? prev : [...prev, res.filename]);
+          commitForConnectionEpoch(token, () => {
+            if (!importAssetMutationOwner.owns(mutation)
+                || useConversationStore.getState().currentConversation?.id !== convId) return;
+            setAttachedFiles(prev => prev.includes(res.filename) ? prev : [...prev, res.filename]);
+          });
         }
       } catch (err: unknown) {
-        console.error('Upload failed:', getApiErrorMessage(err, '文件上传失败'));
+        if (connectionEpochRuntime.isCurrent(token)) {
+          console.error('Upload failed:', getApiErrorMessage(err, '文件上传失败'));
+        }
       }
     }
   };
 
   const handleRemoveFile = async (filename: string) => {
     if (!currentConversation) return;
+    let token: ConnectionEpochToken;
+    try {
+      token = captureConnectionEpoch();
+    } catch {
+      return;
+    }
+    const conversationId = currentConversation.id;
+    const mutation = importAssetMutationOwner.begin(conversationId, filename);
+    importAssetPreviewCache.remove(conversationId, filename);
     const isReferencedByHistory = messages.some((message) => messageReferencesAttachment(message, filename));
     const isProtectedEditAttachment = editProtectedAttachmentNames.includes(filename);
     try {
       if (!isReferencedByHistory && !isProtectedEditAttachment) {
-        await conversationApi.deleteImport(currentConversation.id, filename);
+        await importAssetMutationQueue.run(
+          conversationId,
+          filename,
+          async () => {
+            if (!connectionEpochRuntime.isCurrent(token)) return;
+            await conversationApi.deleteImport(conversationId, filename);
+          },
+        );
       }
-    } catch (_) {}
-    setAttachedFiles(prev => prev.filter(f => f !== filename));
-    setAttachedImageRefs(prev => prev.filter(ref => ref.filename !== filename));
-    setEditProtectedAttachmentNames(prev => prev.filter(name => name !== filename));
+    } catch {
+      // Keep the local attachment removal responsive if remote deletion fails.
+    }
+    commitForConnectionEpoch(token, () => {
+      if (!importAssetMutationOwner.owns(mutation)
+          || useConversationStore.getState().currentConversation?.id !== conversationId) return;
+      setAttachedFiles(prev => prev.filter(f => f !== filename));
+      setAttachedImageRefs(prev => prev.filter(ref => ref.filename !== filename));
+      setEditProtectedAttachmentNames(prev => prev.filter(name => name !== filename));
+    });
   };
 
-  const getImportAssetUrl = (filename: string, conversationId = currentConversation?.id) => {
-    if (!conversationId) return '';
-    return serverApiUrl(`/conversations/${conversationId}/imports/${encodeURIComponent(filename)}`);
+  const getImportAssetPreviewUrl = (filename: string, conversationId = currentConversation?.id) => {
+    if (!conversationId) return null;
+    return importAssetPreviewCache.peek(conversationId, filename);
   };
 
-  const handlePreviewImage = (filename: string) => {
-    const url = getImportAssetUrl(filename);
-    if (!url) return;
-    setPreviewImage({ name: filename, url });
+  const handlePreviewImage = async (filename: string) => {
+    const conversationId = currentConversation?.id;
+    if (!conversationId) return;
+    let token: ConnectionEpochToken | null = null;
+    try {
+      token = captureConnectionEpoch();
+      const url = getImportAssetPreviewUrl(filename, conversationId)
+        ?? await importAssetPreviewCache.load(conversationId, filename, token);
+      if (!url) return;
+      commitForConnectionEpoch(token, () => setPreviewImage({ name: filename, url }));
+    } catch (error: unknown) {
+      if (token && connectionEpochRuntime.isCurrent(token)) {
+        console.error('Preview failed:', getApiErrorMessage(error, '图片预览失败'));
+      }
+    }
   };
 
   const handleSend = async (
@@ -4109,7 +4252,7 @@ export default function ChatPage() {
                     attachedFiles={attachedFiles}
                     attachedImages={attachedImageRefs.map(ref => ({
                       filename: ref.filename,
-                      url: getImportAssetUrl(ref.filename),
+                      url: getImportAssetPreviewUrl(ref.filename),
                     }))}
                     onFilesPicked={handleFilesPicked}
                     onRemoveFile={handleRemoveFile}
@@ -4177,7 +4320,7 @@ export default function ChatPage() {
                   attachedFiles={attachedFiles}
                   attachedImages={attachedImageRefs.map(ref => ({
                     filename: ref.filename,
-                    url: getImportAssetUrl(ref.filename),
+                    url: getImportAssetPreviewUrl(ref.filename),
                   }))}
                   onFilesPicked={handleFilesPicked}
                   onRemoveFile={handleRemoveFile}

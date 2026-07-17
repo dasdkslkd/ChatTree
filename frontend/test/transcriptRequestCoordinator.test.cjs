@@ -100,7 +100,44 @@ function makeSnapshot(target, itemId = 'item-1') {
   };
 }
 
-function createHarness(initialTarget = makeTarget('conversation-a', 'node-a')) {
+function createEpochSource() {
+  const token = Object.freeze({
+    profileId: 'profile-a',
+    serverInstanceId: '11111111-1111-4111-8111-111111111111',
+    connectionEpoch: 1,
+    connectionLeaseId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    generation: 1,
+  });
+  const controller = new AbortController();
+  let current = true;
+  let captures = 0;
+  return {
+    source: {
+      capture() {
+        captures += 1;
+        return token;
+      },
+      isCurrent(candidate) {
+        return current && candidate === token;
+      },
+      signalFor(candidate) {
+        return current && candidate === token ? controller.signal : AbortSignal.abort();
+      },
+    },
+    invalidate() {
+      current = false;
+      controller.abort();
+    },
+    get captures() {
+      return captures;
+    },
+  };
+}
+
+function createHarness(
+  initialTarget = makeTarget('conversation-a', 'node-a'),
+  epochSource,
+) {
   let visibleTarget = initialTarget;
   const requests = [];
   const loading = [];
@@ -117,6 +154,7 @@ function createHarness(initialTarget = makeTarget('conversation-a', 'node-a')) {
     onLoadingChange: (value) => loading.push(value),
     onSnapshot: (snapshot) => snapshots.push(snapshot),
     onErrorChange: (error) => errors.push(error),
+    epochSource: epochSource ?? createEpochSource().source,
   });
 
   return {
@@ -129,6 +167,31 @@ function createHarness(initialTarget = makeTarget('conversation-a', 'node-a')) {
       visibleTarget = target;
     },
   };
+}
+
+async function testEpochInvalidationAbortsTransportAndSuppressesEveryLateCallback() {
+  const epoch = createEpochSource();
+  const harness = createHarness(makeTarget('conversation-a', 'node-a'), epoch.source);
+  const target = makeTarget('conversation-a', 'node-a');
+
+  const first = harness.coordinator.request(target);
+  await flushFetch();
+  assert.equal(epoch.captures, 1);
+  assert.equal(harness.requests[0].signal.aborted, false);
+  assert.deepEqual(harness.loading, [true]);
+
+  epoch.invalidate();
+  assert.equal(harness.requests[0].signal.aborted, true);
+  const shared = harness.coordinator.request(target);
+  assert.equal(shared, first);
+  assert.deepEqual(harness.loading, [true]);
+
+  harness.requests[0].resolve(makeSnapshot(target, 'late-epoch-a'));
+  await first;
+  assert.deepEqual(harness.snapshots, []);
+  assert.deepEqual(harness.errors.filter(Boolean), []);
+  assert.deepEqual(harness.loading, [true]);
+  assert.equal(epoch.captures, 1);
 }
 
 async function flushFetch() {
@@ -239,6 +302,52 @@ async function testSameTargetSharesOneInFlightRequest() {
   assert.deepEqual(harness.snapshots.map((snapshot) => snapshot.items[0].id), ['single-flight']);
 }
 
+async function testEverySequentialCallbackRechecksEpochOwnership() {
+  const target = makeTarget('conversation-a', 'node-a');
+
+  {
+    const epoch = createEpochSource();
+    const calls = [];
+    const coordinator = createTranscriptRequestCoordinator({
+      fetchSnapshot: async () => makeSnapshot(target),
+      getVisibleTarget: () => target,
+      onLoadingChange: (loading) => {
+        calls.push(`loading:${loading}`);
+        if (loading) epoch.invalidate();
+      },
+      onSnapshot: () => calls.push('snapshot'),
+      onErrorChange: () => calls.push('error'),
+      epochSource: epoch.source,
+    });
+
+    await coordinator.request(target);
+    assert.deepEqual(calls, ['loading:true']);
+  }
+
+  {
+    const epoch = createEpochSource();
+    const result = deferred();
+    const calls = [];
+    const coordinator = createTranscriptRequestCoordinator({
+      fetchSnapshot: () => result.promise,
+      getVisibleTarget: () => target,
+      onLoadingChange: (loading) => calls.push(`loading:${loading}`),
+      onSnapshot: () => {
+        calls.push('snapshot');
+        epoch.invalidate();
+      },
+      onErrorChange: () => calls.push('error'),
+      epochSource: epoch.source,
+    });
+
+    const pending = coordinator.request(target);
+    await flushFetch();
+    result.resolve(makeSnapshot(target));
+    await pending;
+    assert.deepEqual(calls, ['loading:true', 'error', 'snapshot']);
+  }
+}
+
 async function main() {
   testMainPageWiresCoordinatorRequestAndCleanup();
   await testNewTargetAbortsOldAndLateSettlementCannotCommitOrClearNewLoading();
@@ -246,6 +355,8 @@ async function main() {
   await testErrorsAreReportedOnlyForTheCurrentlyVisibleBranch();
   await testMismatchedSnapshotIdentityNeverCommits();
   await testSameTargetSharesOneInFlightRequest();
+  await testEverySequentialCallbackRechecksEpochOwnership();
+  await testEpochInvalidationAbortsTransportAndSuppressesEveryLateCallback();
   console.log('transcriptRequestCoordinator tests passed');
 }
 

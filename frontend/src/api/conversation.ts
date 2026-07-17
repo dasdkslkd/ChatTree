@@ -1,4 +1,10 @@
 import { apiClient } from './client';
+import { leaseGuardedFetch } from './leaseFetch';
+import {
+  connectionEpochRuntime,
+  StaleConnectionEpochError,
+  type ConnectionEpochToken,
+} from '../runtime/connectionEpoch';
 import type { Conversation, ConversationCreateRequest, MultiAgentMode, WorkspaceContext } from '../types/conversation';
 import type { NodeUsage, UsageInfo } from '../types/message';
 
@@ -168,6 +174,31 @@ export const conversationApi = {
       headers: { 'Content-Type': 'multipart/form-data' },
     });
     return response.data;
+  },
+
+  fetchImportBlob: async (
+    conversationId: string,
+    filename: string,
+    token: ConnectionEpochToken,
+    signal?: AbortSignal,
+  ): Promise<Blob> => {
+    const response = await leaseGuardedFetch(
+      `/conversations/${conversationId}/imports/${encodeURIComponent(filename)}`,
+      { signal },
+      token,
+    );
+    if (!response.ok) {
+      void response.body?.cancel().catch(() => {});
+      throw new Error(`Import asset request failed with status ${response.status}`);
+    }
+    try {
+      const blob = await response.blob();
+      connectionEpochRuntime.assertCurrent(token);
+      return blob;
+    } catch (error: unknown) {
+      if (!connectionEpochRuntime.isCurrent(token)) throw new StaleConnectionEpochError();
+      throw error;
+    }
   },
 
   // �г������ļ�

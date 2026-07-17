@@ -89,7 +89,6 @@ def create_app(
     profiles: ProfileStore | None = None,
     connector: Any | None = None,
     proxy_client: httpx.AsyncClient | None = None,
-    require_connection_lease: bool = False,
 ) -> FastAPI:
     resolved_settings = settings or LauncherSettings.from_env()
     profile_store = profiles or ProfileStore(
@@ -259,7 +258,6 @@ def create_app(
             resolved_settings.max_request_body_bytes,
             connect_timeout=resolved_settings.connect_timeout_seconds,
             read_timeout=resolved_settings.proxy_idle_timeout_seconds,
-            require_connection_lease=require_connection_lease,
         )
     )
     return app

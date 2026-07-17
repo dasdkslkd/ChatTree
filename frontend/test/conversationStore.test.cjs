@@ -21,7 +21,16 @@ const conversationApiModule = path.join(__dirname, '../src/api/conversation.ts')
 const errorsModule = path.join(__dirname, '../src/api/errors.ts');
 const messageApiModule = path.join(__dirname, '../src/api/message.ts');
 const modelStoreModule = path.join(__dirname, '../src/store/modelStore.ts');
+const epochModule = path.join(__dirname, '../src/runtime/connectionEpoch.ts');
 const storeModule = path.join(__dirname, '../src/store/conversationStore.ts');
+
+const CONTEXT_A = Object.freeze({
+  profileId: 'local',
+  apiBase: '/p/local/api/v1',
+  serverInstanceId: '11111111-1111-4111-8111-111111111111',
+  connectionEpoch: 1,
+  connectionLeaseId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+});
 
 const storage = new Map();
 global.localStorage = {
@@ -75,6 +84,11 @@ const refreshedTree = {
 };
 
 let getTreeCalls = 0;
+let epochGate = null;
+
+function afterEpochGate(value) {
+  return epochGate ? epochGate.promise.then(() => value) : Promise.resolve(value);
+}
 
 require.cache[require.resolve(conversationApiModule)] = {
   id: conversationApiModule,
@@ -82,24 +96,45 @@ require.cache[require.resolve(conversationApiModule)] = {
   loaded: true,
   exports: {
     conversationApi: {
+      list: async () => afterEpochGate([]),
+      create: async () => afterEpochGate({
+        id: 'conv-created',
+        title: 'created',
+        created_at: 1,
+        updated_at: 1,
+        model: '',
+        model_id: '',
+        provider_id: '',
+        current_node_id: 'root',
+        total_tokens: {},
+      }),
+      delete: async () => afterEpochGate(undefined),
+      updateTitle: async () => afterEpochGate(undefined),
+      updateModel: async () => afterEpochGate(undefined),
       switchNode: async (conversationId, nodeId) => {
         switchNodeCalls.push({ conversationId, nodeId });
-        return { current_node_id: nodeId };
+        return afterEpochGate({ current_node_id: nodeId });
       },
       updateMultiAgentMode: async (conversationId, mode) => {
         updateMultiAgentModeCalls.push({ conversationId, mode });
+        return afterEpochGate(undefined);
       },
       deleteNode: async (...args) => {
         deleteNodeCalls.push(args);
+        if (epochGate) return afterEpochGate({
+          deleted_node_id: args[1],
+          new_current_node_id: 'node-1',
+          parent_node_id: 'node-1',
+        });
         return deleteNodeHandler(...args);
       },
       getBranches: async () => {
         getBranchesCalls += 1;
-        return branchesResponse;
+        return afterEpochGate(branchesResponse);
       },
       getTree: async () => {
         getTreeCalls += 1;
-        return refreshedTree;
+        return afterEpochGate(refreshedTree);
       },
     },
   },
@@ -111,7 +146,7 @@ require.cache[require.resolve(messageApiModule)] = {
   loaded: true,
   exports: {
     messageApi: {
-      getHistory: async () => historyResponse,
+      getHistory: async () => afterEpochGate(historyResponse),
     },
   },
 };
@@ -131,6 +166,8 @@ require.cache[require.resolve(modelStoreModule)] = {
 };
 
 const { normalizeApiError } = require(errorsModule);
+const { connectionEpochRuntime } = require(epochModule);
+connectionEpochRuntime.install(CONTEXT_A);
 const { useConversationStore } = require(storeModule);
 
 async function testDeleteNodeRefreshesTreeData() {
@@ -545,6 +582,143 @@ function testPatchAssistantMessageFromStreamUpsertsCurrentNode() {
   assert.equal(replaced.messages[1].content, '后端前的最终回答');
 }
 
+function deferred() {
+  let resolve;
+  const promise = new Promise((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+async function testUpdateConversationModelIsImmutable() {
+  const conversation = {
+    id: 'conv-1',
+    title: 'immutable model',
+    created_at: 1,
+    updated_at: 1,
+    model: '',
+    model_id: 'old-model',
+    provider_id: 'old-provider',
+    current_node_id: 'node-1',
+    total_tokens: {},
+  };
+  epochGate = null;
+  useConversationStore.setState({
+    conversations: [conversation],
+    currentConversation: conversation,
+    loading: false,
+    error: null,
+  });
+
+  assert.equal(await useConversationStore.getState().updateConversationModel(
+    'conv-1',
+    'new-model',
+    'new-provider',
+    'high',
+    true,
+  ), true);
+
+  const state = useConversationStore.getState();
+  assert.equal(conversation.model_id, 'old-model');
+  assert.equal(conversation.provider_id, 'old-provider');
+  assert.notEqual(state.conversations[0], conversation);
+  assert.notEqual(state.currentConversation, conversation);
+  assert.equal(state.conversations[0].model_id, 'new-model');
+  assert.equal(state.currentConversation.provider_id, 'new-provider');
+}
+
+async function testEveryAsyncActionKeepsItsOriginalEpoch() {
+  const conversation = {
+    id: 'conv-1',
+    title: 'epoch matrix',
+    created_at: 1,
+    updated_at: 1,
+    model: '',
+    model_id: 'old-model',
+    provider_id: 'old-provider',
+    current_node_id: 'node-1',
+    multi_agent_mode: 'explicit_request_only',
+    total_tokens: {},
+  };
+  historyResponse = [];
+  branchesResponse = { old: ['branch'] };
+  epochGate = null;
+  useConversationStore.setState({
+    conversations: [conversation],
+    currentConversation: conversation,
+    messages: [{ id: 'old', role: 'user', content: 'old', node_id: 'node-1' }],
+    branches: branchesResponse,
+    treeData: refreshedTree,
+    currentNodeId: 'node-1',
+    loading: false,
+    error: 'old-error',
+  });
+
+  const retry = useConversationStore.getState().refreshMessages('conv-1', {
+    awaitNodeId: 'never-landed',
+    retries: 1,
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+
+  epochGate = deferred();
+  const actions = useConversationStore.getState();
+  const pending = [
+    actions.loadConversations(),
+    actions.createConversation(),
+    actions.selectConversation('conv-1'),
+    actions.deleteConversation('conv-1'),
+    actions.updateConversationTitle('conv-1', 'stale-title'),
+    actions.updateConversationModel('conv-1', 'stale-model', 'stale-provider'),
+    actions.updateMultiAgentMode('conv-1', 'proactive'),
+    actions.switchNode('stale-node'),
+    actions.refreshBranches('conv-1'),
+    actions.deleteNode('node-1'),
+    actions.loadTree('conv-1'),
+  ];
+  const atInvalidation = useConversationStore.getState();
+  connectionEpochRuntime.invalidate(connectionEpochRuntime.capture());
+  epochGate.resolve();
+  const results = await Promise.all([...pending, retry]);
+
+  const after = useConversationStore.getState();
+  assert.equal(results[5], false);
+  assert.equal(results.at(-1), false);
+  assert.equal(after.conversations, atInvalidation.conversations);
+  assert.equal(after.currentConversation, atInvalidation.currentConversation);
+  assert.equal(after.messages, atInvalidation.messages);
+  assert.equal(after.branches, atInvalidation.branches);
+  assert.equal(after.treeData, atInvalidation.treeData);
+  assert.equal(after.currentNodeId, atInvalidation.currentNodeId);
+  assert.equal(after.loading, atInvalidation.loading);
+  assert.equal(after.error, atInvalidation.error);
+
+  const callsBeforeCaptureFailures = {
+    deleteNode: deleteNodeCalls.length,
+    branches: getBranchesCalls,
+    tree: getTreeCalls,
+  };
+  await Promise.all([
+    useConversationStore.getState().loadConversations(),
+    useConversationStore.getState().createConversation(),
+    useConversationStore.getState().selectConversation('conv-1'),
+    useConversationStore.getState().deleteConversation('conv-1'),
+    useConversationStore.getState().updateConversationTitle('conv-1', 'never'),
+    useConversationStore.getState().updateConversationModel('conv-1', 'never', 'never'),
+    useConversationStore.getState().updateMultiAgentMode('conv-1', 'proactive'),
+    useConversationStore.getState().switchNode('never'),
+    useConversationStore.getState().refreshMessages('conv-1'),
+    useConversationStore.getState().refreshBranches('conv-1'),
+    useConversationStore.getState().deleteNode('node-1'),
+    useConversationStore.getState().loadTree('conv-1'),
+  ]);
+  assert.deepEqual({
+    deleteNode: deleteNodeCalls.length,
+    branches: getBranchesCalls,
+    tree: getTreeCalls,
+  }, callsBeforeCaptureFailures);
+}
+
 async function main() {
   await testDeleteNodeRefreshesTreeData();
   await testDeleteNodeRetriesForceWhenActiveRunBlocksDeletion();
@@ -555,6 +729,8 @@ async function main() {
   await testUpdateMultiAgentModeSyncsConversationSnapshots();
   testSetCurrentNodeIdLocalKeepsSnapshotsInSync();
   testPatchAssistantMessageFromStreamUpsertsCurrentNode();
+  await testUpdateConversationModelIsImmutable();
+  await testEveryAsyncActionKeepsItsOriginalEpoch();
   console.log('conversationStore tests passed');
 }
 

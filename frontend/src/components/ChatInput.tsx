@@ -24,7 +24,6 @@ import { useModelStore } from '../store/modelStore'
 import { usePromptStore } from '../store/promtStore'
 import { useNavigationStore } from '../store/navigationStore'
 import { useConversationStore } from '../store/conversationStore'
-import { conversationApi } from '../api/conversation'
 import { slashRegistry } from '../services/slashRegistry'
 import type { ToolApprovalDecision, ToolApprovalScope, ToolPermissionMode } from '../types/message'
 import type { MultiAgentMode } from '../types/conversation'
@@ -74,7 +73,7 @@ interface Props {
   onEditValueConsumed?: () => void;
   onCancelEdit?: () => void;
   attachedFiles?: string[];
-  attachedImages?: Array<{ filename: string; url: string }>;
+  attachedImages?: Array<{ filename: string; url: string | null }>;
   onFilesPicked?: (files: File[]) => void;
   onRemoveFile?: (filename: string) => void;
   onPreviewImage?: (filename: string) => void;
@@ -165,6 +164,7 @@ export function ChatInput({
   const treeData = useConversationStore((s) => s.treeData);
   const loadTree = useConversationStore((s) => s.loadTree);
   const updateMultiAgentMode = useConversationStore((s) => s.updateMultiAgentMode);
+  const updateConversationModel = useConversationStore((s) => s.updateConversationModel);
   const currentMultiAgentMode: MultiAgentMode = currentConversation?.multi_agent_mode ?? pendingMultiAgentMode;
   const currentMultiAgentModeOption = MULTI_AGENT_MODE_OPTIONS.find((option) => option.value === currentMultiAgentMode)
     ?? MULTI_AGENT_MODE_OPTIONS[0];
@@ -326,22 +326,13 @@ export function ChatInput({
     const result = confirmModelSelection();
     if (result && currentConversation) {
       try {
-        await conversationApi.updateModel(
+        await updateConversationModel(
           currentConversation.id,
           result.model,
           result.provider,
           result.reasoningEffort,
           result.thinkingEnabled,
         );
-        // 更新本地 conversation 对象
-        const { conversations } = useConversationStore.getState();
-        const conv = conversations.find(c => c.id === currentConversation.id);
-        if (conv) {
-          conv.model_id = result.model;
-          conv.provider_id = result.provider;
-          conv.reasoning_effort = result.reasoningEffort;
-          conv.thinking_enabled = result.thinkingEnabled;
-        }
       } catch (err) {
         console.error('保存模型设置失败:', err);
       }
@@ -832,11 +823,17 @@ export function ChatInput({
                     className="h-full w-full cursor-zoom-in p-0 border-0 bg-transparent"
                     onClick={() => onPreviewImage?.(image.filename)}
                   >
-                    <img
-                      src={image.url}
-                      alt={image.filename}
-                      className="h-full w-full object-cover"
-                    />
+                    {image.url ? (
+                      <img
+                        src={image.url}
+                        alt={image.filename}
+                        className="h-full w-full object-cover"
+                      />
+                    ) : (
+                      <span className="flex h-full w-full items-center justify-center">
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      </span>
+                    )}
                   </button>
                 </TextTooltip>
                 <button

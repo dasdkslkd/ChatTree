@@ -114,8 +114,12 @@ def test_proxy_preserves_http_semantics_and_filters_hop_by_hop_headers() -> None
         upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
         app = FastAPI()
 
-        async def resolve_endpoint(profile_id: str) -> str | None:
-            return "http://upstream.test:8443" if profile_id == "local" else None
+        async def resolve_endpoint(profile_id: str) -> EndpointLease | None:
+            return (
+                _lease(endpoint="http://upstream.test:8443")
+                if profile_id == "local"
+                else None
+            )
 
         app.include_router(
             create_proxy_router(
@@ -142,6 +146,7 @@ def test_proxy_preserves_http_semantics_and_filters_hop_by_hop_headers() -> None
                     "Idempotency-Key": "idem-123",
                     "X-Request-ID": "req-123",
                     "X-Business": "kept",
+                    CONNECTION_LEASE_HEADER: LEASE_A,
                 },
                 content=b'{"value":1}',
             )
@@ -501,7 +506,7 @@ def test_proxy_sends_one_canonical_id_and_preserves_idempotency_key(
         inner = FastAPI()
         inner.include_router(
             create_proxy_router(
-                lambda _profile_id: "http://upstream.test",
+                lambda _profile_id: _lease(),
                 upstream_client,
             )
         )
@@ -516,6 +521,7 @@ def test_proxy_sends_one_canonical_id_and_preserves_idempotency_key(
                 headers=[
                     *incoming_headers,
                     ("Idempotency-Key", "idem-tree-1"),
+                    (CONNECTION_LEASE_HEADER, LEASE_A),
                 ],
             )
 

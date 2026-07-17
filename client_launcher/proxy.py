@@ -326,7 +326,6 @@ def create_proxy_router(
     *,
     connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
     read_timeout: float = DEFAULT_READ_TIMEOUT,
-    require_connection_lease: bool = False,
 ) -> APIRouter:
     handler = ProxyHandler(
         resolve_endpoint,
@@ -334,7 +333,7 @@ def create_proxy_router(
         max_body_bytes=max_body_bytes,
         connect_timeout=connect_timeout,
         read_timeout=read_timeout,
-        require_connection_lease=require_connection_lease,
+        require_connection_lease=True,
     )
     router = APIRouter()
 

@@ -28,7 +28,7 @@ export function createLauncherApi(
   pageHref: string,
 ): LauncherApi {
   const origin = new URL(bootstrap.apiBase, pageHref).origin;
-  const client = createApiClient(`${origin}/client/v1`);
+  const client = createApiClient(`${origin}/client/v1`, null);
   return {
     async getProfileStatus(profileId, signal) {
       const response = await client.get<LauncherProfileStatus>(

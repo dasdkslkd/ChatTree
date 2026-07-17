@@ -1,4 +1,10 @@
 import type { TranscriptSnapshot } from '../types/transcript';
+import {
+  composeConnectionAbortSignal,
+  connectionEpochRuntime,
+  type ConnectionEpochRuntime,
+  type ConnectionEpochToken,
+} from '../runtime/connectionEpoch';
 
 export type TranscriptRequestTarget = {
   conversationId: string;
@@ -15,12 +21,19 @@ type TranscriptRequestCoordinatorOptions = {
   onLoadingChange: (loading: boolean) => void;
   onSnapshot: (snapshot: TranscriptSnapshot) => void;
   onErrorChange: (error: unknown | null) => void;
+  epochSource?: TranscriptRequestEpochSource;
 };
 
 type ActiveTranscriptRequest = TranscriptRequestTarget & {
   controller: AbortController;
+  epochToken: ConnectionEpochToken;
   promise: Promise<void>;
 };
+
+export type TranscriptRequestEpochSource = Pick<
+  ConnectionEpochRuntime,
+  'capture' | 'isCurrent' | 'signalFor'
+>;
 
 function targetsMatch(
   left: TranscriptRequestTarget | null,
@@ -40,12 +53,24 @@ export function createTranscriptRequestCoordinator(
   options: TranscriptRequestCoordinatorOptions,
 ) {
   let active: ActiveTranscriptRequest | null = null;
+  const epochSource = options.epochSource ?? connectionEpochRuntime;
 
   const isVisible = (request: TranscriptRequestTarget) => (
     targetsMatch(options.getVisibleTarget(), request)
   );
 
   const ownsRequest = (request: ActiveTranscriptRequest) => active === request;
+
+  const isCurrent = (request: ActiveTranscriptRequest) => (
+    epochSource.isCurrent(request.epochToken)
+  );
+
+  const canCommit = (request: ActiveTranscriptRequest) => (
+    !request.controller.signal.aborted
+    && isCurrent(request)
+    && ownsRequest(request)
+    && isVisible(request)
+  );
 
   const cancelActive = () => {
     const request = active;
@@ -56,7 +81,7 @@ export function createTranscriptRequestCoordinator(
 
   const request = (target: TranscriptRequestTarget): Promise<void> => {
     if (active && targetsMatch(active, target)) {
-      if (isVisible(active)) {
+      if (isCurrent(active) && isVisible(active)) {
         options.onLoadingChange(true);
       }
       return active.promise;
@@ -64,46 +89,61 @@ export function createTranscriptRequestCoordinator(
 
     cancelActive();
 
+    let epochToken: ConnectionEpochToken;
+    try {
+      epochToken = epochSource.capture();
+    } catch {
+      return Promise.resolve();
+    }
+    if (!epochSource.isCurrent(epochToken)) return Promise.resolve();
+
     const controller = new AbortController();
+    const signal = composeConnectionAbortSignal(
+      controller.signal,
+      epochSource.signalFor(epochToken),
+    );
     const current = {
       ...target,
       controller,
+      epochToken,
       promise: Promise.resolve(),
     } satisfies ActiveTranscriptRequest;
     active = current;
 
     current.promise = Promise.resolve()
-      .then(() => options.fetchSnapshot(
-        current.conversationId,
-        current.tipNodeId,
-        controller.signal,
-      ))
+      .then(() => {
+        if (!isCurrent(current)) return null;
+        return options.fetchSnapshot(
+          current.conversationId,
+          current.tipNodeId,
+          signal,
+        );
+      })
       .then((snapshot) => {
-        if (controller.signal.aborted || !ownsRequest(current) || !isVisible(current)) return;
+        if (!snapshot || !canCommit(current)) return;
         if (
           snapshot.conversation_id !== current.conversationId
           || snapshot.tip_node_id !== current.tipNodeId
         ) return;
         options.onSnapshot(snapshot);
-        options.onErrorChange(null);
+        if (canCommit(current)) options.onErrorChange(null);
       })
       .catch((error: unknown) => {
         if (controller.signal.aborted || isCancellationError(error)) return;
-        if (!ownsRequest(current) || !isVisible(current)) return;
+        if (!canCommit(current)) return;
         options.onErrorChange(error);
       })
       .finally(() => {
+        controller.abort();
         if (!ownsRequest(current)) return;
         active = null;
-        if (isVisible(current)) {
+        if (isCurrent(current) && isVisible(current)) {
           options.onLoadingChange(false);
         }
       });
 
-    if (isVisible(current)) {
-      options.onLoadingChange(true);
-      options.onErrorChange(null);
-    }
+    if (canCommit(current)) options.onLoadingChange(true);
+    if (canCommit(current)) options.onErrorChange(null);
 
     return current.promise;
   };

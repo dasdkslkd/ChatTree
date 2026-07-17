@@ -23,6 +23,7 @@ const {
   ChatTreeApiError,
   getApiErrorMessage,
   normalizeApiError,
+  parseModernErrorEnvelope,
 } = require(errorsModule);
 
 function axiosError({ status, data, headers = {}, code }) {
@@ -57,6 +58,15 @@ function testModernEnvelope() {
   assert.deepEqual(modern.details.active_run_ids, ['run_1']);
   assert.equal(modern.cause, source);
   assert.equal(getApiErrorMessage(modern, 'fallback'), 'blocked');
+
+  assert.deepEqual(parseModernErrorEnvelope(409, source.response.data), {
+    status: 409,
+    code: 'active_runs_present',
+    message: 'blocked',
+    retryable: true,
+    requestId: 'req_1',
+    details: { active_run_ids: ['run_1'] },
+  });
 }
 
 function testMalformedModernEnvelopesAreRejected() {
@@ -77,10 +87,19 @@ function testMalformedModernEnvelopesAreRejected() {
   ];
 
   for (const data of malformedBodies) {
+    assert.equal(parseModernErrorEnvelope(400, data), null);
     const normalized = normalizeApiError(axiosError({ status: 400, data }));
     assert.equal(normalized.code, 'unexpected_response');
     assert.equal(normalized.status, 400);
   }
+  assert.equal(parseModernErrorEnvelope(200, {
+    error: {
+      code: 'not_an_error_response',
+      message: 'invalid status',
+      retryable: false,
+      request_id: 'req_status',
+    },
+  }), null);
 }
 
 function testLegacyActiveRunConflict() {

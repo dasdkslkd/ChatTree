@@ -159,9 +159,9 @@ function loadHarness() {
 
   const stubs = new Map([
     [clientModule, {
-      createApiClient(apiBase) {
+      createApiClient(apiBase, runtime) {
         const client = { apiBase };
-        calls.apiClients.push({ apiBase, client });
+        calls.apiClients.push({ apiBase, runtime, client });
         return client;
       },
     }],
@@ -267,6 +267,7 @@ async function testOwnerOptionsWireEveryProbeDependency() {
   assert.deepEqual(harness.calls.apiClients.map((call) => call.apiBase), [
     BOOTSTRAP.apiBase,
   ]);
+  assert.equal(harness.calls.apiClients[0].runtime, null);
   assert.deepEqual(harness.calls.launcherFactories, [{
     bootstrap: BOOTSTRAP,
     pageHref: globalThis.window.location.href,

@@ -1,16 +1,55 @@
-import { apiClient, serverApiUrl } from './client';
+import { apiClient } from './client';
 import type { StreamChunk } from '../types/message';
 import type { RunEventPayload, RunRecord } from '../types/run';
 import { perfNow, recordMark, recordSpan } from '../perf/marks';
+import {
+  connectionEpochRuntime,
+  StaleConnectionEpochError,
+  type ConnectionEpochToken,
+} from '../runtime/connectionEpoch';
+import { leaseGuardedFetch } from './leaseFetch';
+
+export type RunAttachOptions = {
+  token: ConnectionEpochToken;
+  signal?: AbortSignal;
+  fromEvent?: number;
+};
+
+function assertStreamCurrent(token: ConnectionEpochToken): void {
+  if (!connectionEpochRuntime.isCurrent(token)) {
+    throw new StaleConnectionEpochError();
+  }
+}
+
+async function acquireSseReader(
+  response: Response,
+  token: ConnectionEpochToken,
+): Promise<ReadableStreamDefaultReader<Uint8Array>> {
+  try {
+    assertStreamCurrent(token);
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error('Response body is not readable');
+    return reader;
+  } catch (error) {
+    try {
+      await response.body?.cancel();
+    } catch {
+      // The transport may already have closed or cancelled the body.
+    }
+    throw error;
+  }
+}
 
 async function* parseSseResponse(
   response: Response,
+  token: ConnectionEpochToken,
   perfAttrs: Record<string, unknown> = {},
 ): AsyncGenerator<StreamChunk, void> {
-  if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+  const reader = await acquireSseReader(response, token);
   recordMark('stream.response_headers', { ...perfAttrs, status: response.status });
-  const reader = response.body?.getReader();
-  if (!reader) throw new Error('Response body is not readable');
   const decoder = new TextDecoder();
   let buffer = '';
   let eventCount = 0;
@@ -18,7 +57,15 @@ async function* parseSseResponse(
   try {
     while (true) {
       const readStarted = perfNow();
-      const { done, value } = await reader.read();
+      let readResult: ReadableStreamReadResult<Uint8Array>;
+      try {
+        readResult = await reader.read();
+      } catch (error) {
+        assertStreamCurrent(token);
+        throw error;
+      }
+      assertStreamCurrent(token);
+      const { done, value } = readResult;
       recordSpan('stream.reader_read', readStarted, { ...perfAttrs, done, bytes: value?.byteLength ?? 0 });
       if (done) break;
       if (firstChunk) {
@@ -46,11 +93,16 @@ async function* parseSseResponse(
           run_id: parsed?.run_id,
           event_index: parsed?.event_index,
         });
+        assertStreamCurrent(token);
         yield parsed;
       }
     }
   } finally {
-    try { await reader.cancel(); } catch (_) {}
+    try {
+      await reader.cancel();
+    } catch {
+      // The reader may already be closed or cancelled.
+    }
   }
 }
 
@@ -65,11 +117,20 @@ export const runsApi = {
     return response.data;
   },
 
-  attach: async function* (runId: string, fromEvent = 0, signal?: AbortSignal): AsyncGenerator<StreamChunk, void> {
+  attach: async function* (
+    runId: string,
+    options: RunAttachOptions,
+  ): AsyncGenerator<StreamChunk, void> {
+    const { token, signal } = options;
+    const fromEvent = options.fromEvent ?? 0;
     const started = perfNow();
-    const response = await fetch(serverApiUrl(`/runs/${runId}/attach?from_event=${fromEvent}`), { signal });
+    const response = await leaseGuardedFetch(
+      `/runs/${encodeURIComponent(runId)}/attach?from_event=${fromEvent}`,
+      { signal },
+      token,
+    );
     recordSpan('stream.fetch', started, { run_id: runId, from_event: fromEvent, route: 'runs.attach' });
-    yield* parseSseResponse(response, { run_id: runId, from_event: fromEvent, route: 'runs.attach' });
+    yield* parseSseResponse(response, token, { run_id: runId, from_event: fromEvent, route: 'runs.attach' });
   },
 
   stop: async (runId: string): Promise<void> => {

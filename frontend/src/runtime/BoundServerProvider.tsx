@@ -36,7 +36,7 @@ export function BoundServerProvider({
 
   useEffect(() => {
     const launcher = createLauncherApi(bootstrap, window.location.href);
-    const server = createServerApi(createApiClient(bootstrap.apiBase));
+    const server = createServerApi(createApiClient(bootstrap.apiBase, null));
     const owner = new BoundServerProbeOwner({
       probe: (signal) => probeBoundServerContext({
         getStatus: (requestSignal) => launcher.getProfileStatus(

@@ -14,6 +14,15 @@ type ChatTreeApiErrorOptions = {
   cause?: unknown;
 };
 
+export type ModernErrorEnvelope = Readonly<{
+  status: number;
+  code: string;
+  message: string;
+  retryable: boolean;
+  requestId: string;
+  details?: Record<string, unknown>;
+}>;
+
 export class ChatTreeApiError extends Error {
   status?: number;
   code: string;
@@ -103,12 +112,19 @@ function unexpectedResponse(status: number | undefined, cause: unknown) {
   });
 }
 
-function normalizeModernEnvelope(
+export function parseModernErrorEnvelope(
   status: number,
   data: unknown,
-  cause: unknown,
-): ChatTreeApiError | undefined {
-  if (!isRecord(data) || !isRecord(data.error)) return undefined;
+): ModernErrorEnvelope | null {
+  if (
+    !Number.isInteger(status)
+    || status < 400
+    || status > 599
+    || !isRecord(data)
+    || !isRecord(data.error)
+  ) {
+    return null;
+  }
   const body = data.error;
   if (
     typeof body.code !== 'string'
@@ -118,17 +134,34 @@ function normalizeModernEnvelope(
     || typeof body.retryable !== 'boolean'
     || !validRequestId(body.request_id)
   ) {
-    return undefined;
+    return null;
   }
   const hasDetails = Object.prototype.hasOwnProperty.call(body, 'details');
-  if (hasDetails && !isJsonObject(body.details)) return undefined;
+  if (hasDetails && !isJsonObject(body.details)) return null;
 
-  return new ChatTreeApiError(body.message, {
+  return Object.freeze({
     status,
     code: body.code,
+    message: body.message,
     retryable: body.retryable,
     requestId: body.request_id,
     details: hasDetails ? body.details as Record<string, unknown> : undefined,
+  });
+}
+
+function normalizeModernEnvelope(
+  status: number,
+  data: unknown,
+  cause: unknown,
+): ChatTreeApiError | undefined {
+  const parsed = parseModernErrorEnvelope(status, data);
+  if (!parsed) return undefined;
+  return new ChatTreeApiError(parsed.message, {
+    status: parsed.status,
+    code: parsed.code,
+    retryable: parsed.retryable,
+    requestId: parsed.requestId,
+    details: parsed.details,
     cause,
   });
 }

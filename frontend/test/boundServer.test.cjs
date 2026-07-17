@@ -20,10 +20,15 @@ require.extensions['.ts'] = function loadTs(module, filename) {
 const frontendRoot = path.join(__dirname, '..');
 const bootstrapModule = path.join(frontendRoot, 'src/runtime/frontendBootstrap.ts');
 const identityModule = path.join(frontendRoot, 'src/runtime/connectionIdentity.ts');
+const epochModule = path.join(frontendRoot, 'src/runtime/connectionEpoch.ts');
 const boundServerModule = path.join(frontendRoot, 'src/runtime/boundServer.ts');
 const bindingStateModule = path.join(frontendRoot, 'src/runtime/bindingState.ts');
 const probeOwnerModule = path.join(frontendRoot, 'src/runtime/boundServerProbeOwner.ts');
 const clientModule = path.join(frontendRoot, 'src/api/client.ts');
+const connectionLeaseHeaderModule = path.join(
+  frontendRoot,
+  'src/api/connectionLeaseHeader.ts',
+);
 const serverModule = path.join(frontendRoot, 'src/api/server.ts');
 const launcherModule = path.join(frontendRoot, 'src/api/launcher.ts');
 
@@ -56,10 +61,12 @@ function loadRuntimeModules() {
   for (const modulePath of [
     bootstrapModule,
     identityModule,
+    epochModule,
     boundServerModule,
     bindingStateModule,
     probeOwnerModule,
     clientModule,
+    connectionLeaseHeaderModule,
     serverModule,
     launcherModule,
   ]) {
@@ -222,8 +229,10 @@ function testBoundServerCanLoadBeforeBootstrapInitialization() {
   for (const modulePath of [
     bootstrapModule,
     identityModule,
+    epochModule,
     boundServerModule,
     clientModule,
+    connectionLeaseHeaderModule,
     serverModule,
   ]) {
     clearModule(modulePath);
@@ -232,6 +241,15 @@ function testBoundServerCanLoadBeforeBootstrapInitialization() {
     () => require(boundServerModule),
     'boundServer.ts must not initialize the bootstrap-bound API singleton',
   );
+  assert.doesNotThrow(
+    () => require(epochModule),
+    'connectionEpoch.ts must remain an uninitialized runtime leaf',
+  );
+  const server = require(serverModule);
+  assert.equal(typeof server.createServerApi, 'function');
+  assert.equal('serverApi' in server, false, 'api/server.ts exports no business singleton');
+  const serverSource = fs.readFileSync(serverModule, 'utf8');
+  assert.doesNotMatch(serverSource, /from ['"]\.\/client['"]/);
 }
 
 async function testProbeBuildsFrozenContextInRequiredOrder() {
@@ -794,32 +812,6 @@ async function testServerApiGuardsLeaseHeaderAndKeepsSignalPosition() {
   }
 }
 
-async function testLegacyServerApiNeverTreatsSignalAsLeaseId() {
-  const { server } = loadRuntimeModules();
-  const controller = new AbortController();
-  const singletonClient = require(clientModule).apiClient;
-  const originalGet = singletonClient.get;
-  const calls = [];
-  singletonClient.get = async (url, config) => {
-    calls.push({ url, config });
-    return {
-      data: url === '/health' ? health() : handshake(),
-      headers: {},
-    };
-  };
-  try {
-    await server.serverApi.health(controller.signal);
-    await server.serverApi.handshake(controller.signal);
-    assert.equal(calls.length, 2);
-    for (const call of calls) {
-      assert.equal(call.config.signal, controller.signal);
-      assert.equal(call.config.headers, undefined);
-    }
-  } finally {
-    singletonClient.get = originalGet;
-  }
-}
-
 async function testLauncherStatusUsesOriginDerivedFromBootstrapAndPageHref() {
   const { launcher } = loadRuntimeModules();
   const axios = require('axios');
@@ -882,7 +874,6 @@ async function main() {
     await testProbeOwnerStopsForFatalProbeAndInitialInstallErrors();
     await testProbeOwnerDisposeMakesLateCompletionInert();
     await testServerApiGuardsLeaseHeaderAndKeepsSignalPosition();
-    await testLegacyServerApiNeverTreatsSignalAsLeaseId();
     await testLauncherStatusUsesOriginDerivedFromBootstrapAndPageHref();
     console.log('bound server tests passed');
   } finally {
