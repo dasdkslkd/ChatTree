@@ -9,6 +9,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from contextlib import closing
 from pathlib import Path
 from typing import Any, Callable
 
@@ -351,7 +352,9 @@ def test_real_launcher_entry_proxy_and_home_lock(tmp_path: Path) -> None:
         assert restarted["server_instance_id"] == instance_id
         assert _server_owner_pid(server_home / ".server.lock") == server_pid
 
-        with sqlite3.connect(server_home / "chattree.sqlite") as connection:
+        with closing(
+            sqlite3.connect(server_home / "chattree.sqlite")
+        ) as connection:
             assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
             assert connection.execute("PRAGMA quick_check").fetchone()[0] == "ok"
             assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
