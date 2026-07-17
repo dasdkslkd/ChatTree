@@ -18,6 +18,7 @@ require.extensions['.ts'] = function loadTs(module, filename) {
 };
 
 const conversationApiModule = path.join(__dirname, '../src/api/conversation.ts');
+const errorsModule = path.join(__dirname, '../src/api/errors.ts');
 const messageApiModule = path.join(__dirname, '../src/api/message.ts');
 const modelStoreModule = path.join(__dirname, '../src/store/modelStore.ts');
 const storeModule = path.join(__dirname, '../src/store/conversationStore.ts');
@@ -129,6 +130,7 @@ require.cache[require.resolve(modelStoreModule)] = {
   },
 };
 
+const { normalizeApiError } = require(errorsModule);
 const { useConversationStore } = require(storeModule);
 
 async function testDeleteNodeRefreshesTreeData() {
@@ -189,25 +191,27 @@ async function testDeleteNodeRefreshesTreeData() {
 }
 
 async function testDeleteNodeRetriesForceWhenActiveRunBlocksDeletion() {
-  getTreeCalls = 0;
-  deleteNodeCalls = [];
-  let attempts = 0;
-  deleteNodeHandler = async () => {
-    attempts += 1;
-    if (attempts === 1) {
-      const error = new Error('Conflict');
-      error.response = {
-        status: 409,
-        data: { detail: { message: 'active run', active_run_ids: ['run-1'] } },
-      };
-      throw error;
-    }
-    return {
-      deleted_node_id: 'node-2',
-      new_current_node_id: 'node-1',
-      parent_node_id: 'node-1',
-    };
+  const normalize = (data, headers = {}) => {
+    const error = new Error('Conflict');
+    error.isAxiosError = true;
+    error.response = { status: 409, data, headers };
+    return normalizeApiError(error);
   };
+  const blockedErrors = [
+    normalize({
+      error: {
+        code: 'active_runs_present',
+        message: 'active run',
+        retryable: true,
+        request_id: 'req-modern',
+        details: { active_run_ids: ['run-modern'] },
+      },
+    }),
+    normalize(
+      { detail: { message: 'active run', active_run_ids: ['run-legacy'] } },
+      { 'x-request-id': 'req-legacy' },
+    ),
+  ];
   const currentConversation = {
     id: 'conv-1',
     title: '强制删除测试',
@@ -220,27 +224,42 @@ async function testDeleteNodeRetriesForceWhenActiveRunBlocksDeletion() {
     total_tokens: {},
   };
 
-  useConversationStore.setState({
-    conversations: [currentConversation],
-    currentConversation,
-    messages: [{ id: 'old', role: 'user', content: '待删除', node_id: 'node-2' }],
-    branches: {},
-    treeData: null,
-    currentNodeId: 'node-2',
-    loading: false,
-    error: null,
-  });
+  for (const blockedError of blockedErrors) {
+    getTreeCalls = 0;
+    deleteNodeCalls = [];
+    let attempts = 0;
+    deleteNodeHandler = async () => {
+      attempts += 1;
+      if (attempts === 1) throw blockedError;
+      return {
+        deleted_node_id: 'node-2',
+        new_current_node_id: 'node-1',
+        parent_node_id: 'node-1',
+      };
+    };
+    useConversationStore.setState({
+      conversations: [currentConversation],
+      currentConversation,
+      messages: [{ id: 'old', role: 'user', content: '待删除', node_id: 'node-2' }],
+      branches: {},
+      treeData: null,
+      currentNodeId: 'node-2',
+      loading: false,
+      error: null,
+    });
 
-  await useConversationStore.getState().deleteNode('node-2');
+    await useConversationStore.getState().deleteNode('node-2');
 
-  const state = useConversationStore.getState();
-  assert.deepEqual(deleteNodeCalls, [
-    ['conv-1', 'node-2'],
-    ['conv-1', 'node-2', { force: true }],
-  ]);
-  assert.equal(getTreeCalls, 1);
-  assert.equal(state.error, null);
-  assert.equal(state.currentNodeId, 'node-1');
+    const state = useConversationStore.getState();
+    assert.deepEqual(deleteNodeCalls, [
+      ['conv-1', 'node-2'],
+      ['conv-1', 'node-2', { force: true }],
+    ]);
+    assert.equal(attempts, 2);
+    assert.equal(getTreeCalls, 1);
+    assert.equal(state.error, null);
+    assert.equal(state.currentNodeId, 'node-1');
+  }
 }
 
 async function testRefreshMessagesUsesHistoryTipInsteadOfStaleConversationList() {

@@ -1,5 +1,7 @@
 import axios from 'axios';
 
+import { normalizeApiError } from './errors';
+
 export type FrontendBootstrap = {
   profileId?: string;
   apiBase: string;
@@ -46,12 +48,5 @@ export const apiClient = axios.create({
 
 apiClient.interceptors.response.use(
   (response) => response,
-  (error) => {
-    if (error.response?.status === 404) {
-      console.error('API endpoint not found', error);
-    } else if (error.response?.status === 500) {
-      console.error('Server error', error);
-    }
-    return Promise.reject(error);
-  },
+  (error) => Promise.reject(normalizeApiError(error)),
 );

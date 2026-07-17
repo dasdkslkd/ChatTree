@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from backend.api.dependencies import get_task_notification_service, get_task_service
+from backend.api.errors import RequestBoundaryMiddleware, install_error_handlers
 from backend.api.routes import tasks as tasks_route
 from backend.core.tasks import ActiveTaskService
 
@@ -15,6 +16,8 @@ class EmptyNotificationService:
 
 def client_for(service: ActiveTaskService) -> TestClient:
     app = FastAPI()
+    install_error_handlers(app)
+    app.add_middleware(RequestBoundaryMiddleware)
     app.include_router(tasks_route.router)
     app.dependency_overrides[get_task_service] = lambda: service
     app.dependency_overrides[get_task_notification_service] = lambda: EmptyNotificationService()
@@ -48,6 +51,7 @@ def test_task_routes_manage_single_active_task_until_completion():
         json={"title": "第二个任务", "steps": [{"title": "不应创建"}]},
     )
     assert duplicate.status_code == 409
+    assert duplicate.json()["error"]["code"] == "conflict"
 
     first = client.patch(
         "/conversations/conv-1/task/steps/1",
@@ -85,6 +89,7 @@ def test_task_routes_validate_order_evidence_and_cancel():
         json={"status": "blocked", "evidence": "missing"},
     )
     assert missing.status_code == 404
+    assert missing.json()["error"]["code"] == "not_found"
 
     created = client.post(
         "/conversations/conv-1/task",
@@ -96,18 +101,21 @@ def test_task_routes_validate_order_evidence_and_cancel():
         json={"status": "completed", "evidence": "missing version"},
     )
     assert missing_version.status_code == 428
+    assert missing_version.json()["error"]["code"] == "task_version_required"
     invalid_version = client.patch(
         "/conversations/conv-1/task/steps/1",
         json={"status": "completed", "evidence": "invalid version"},
         headers={"If-Match": '"a"'},
     )
     assert invalid_version.status_code == 400
+    assert invalid_version.json()["error"]["code"] == "invalid_request"
     out_of_order = client.patch(
         "/conversations/conv-1/task/steps/2",
         json={"status": "completed", "evidence": "too early"},
         headers={"If-Match": version},
     )
     assert out_of_order.status_code == 409
+    assert out_of_order.json()["error"]["code"] == "conflict"
 
     no_evidence = client.patch(
         "/conversations/conv-1/task/steps/1",
@@ -115,6 +123,7 @@ def test_task_routes_validate_order_evidence_and_cancel():
         headers={"If-Match": version},
     )
     assert no_evidence.status_code == 400
+    assert no_evidence.json()["error"]["code"] == "invalid_request"
 
     cancelled = client.request(
         "DELETE",
@@ -153,6 +162,11 @@ def test_task_routes_reject_stale_version_after_task_replacement():
     )
 
     assert stale.status_code == 412
+    assert stale.json()["error"]["code"] == "task_version_conflict"
+    assert stale.json()["error"]["retryable"] is True
+    assert stale.json()["error"]["details"] == {
+        "current_version": replacement.headers["etag"],
+    }
     current = client.get("/conversations/conv-1/task-state")
     assert current.json()["task"]["title"] == "任务 B"
     assert current.json()["task"]["steps"][0]["status"] == "pending"

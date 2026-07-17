@@ -14,6 +14,7 @@ PROTOCOL_FEATURES = (
     "tools",
     "tool_approvals",
     "multi_agent",
+    "error_envelope_v1",
 )
 
 

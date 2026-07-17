@@ -8,12 +8,14 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from backend.api.dependencies import get_task_notification_service, get_task_service
+from backend.api.errors import ApiError
 from backend.api.task_state import apply_task_state_etag, build_task_state
 from backend.core.notifications import TaskNotificationService
 from backend.core.tasks import (
     ActiveTaskConflictError,
     ActiveTaskNotFoundError,
     ActiveTaskService,
+    ActiveTaskVersionConflictError,
     TaskStepStatus,
 )
 
@@ -21,15 +23,24 @@ from backend.core.tasks import (
 router = APIRouter()
 
 
-def _task_etag(task) -> str:
-    raw = f"{task.generation_id}:{task.revision}".encode("utf-8")
+def _task_etag_parts(generation_id: str, revision: int) -> str:
+    raw = f"{generation_id}:{revision}".encode("utf-8")
     token = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
     return f'"{token}"'
 
 
+def _task_etag(task) -> str:
+    return _task_etag_parts(task.generation_id, task.revision)
+
+
 def _parse_task_etag(value: Optional[str]) -> tuple[str, int]:
     if not value:
-        raise HTTPException(status_code=428, detail="If-Match task version is required")
+        raise ApiError(
+            428,
+            "task_version_required",
+            "If-Match task version is required",
+            False,
+        )
     token = value.strip()
     if token.startswith("W/"):
         raise HTTPException(status_code=400, detail="weak task versions are not supported")
@@ -44,13 +55,6 @@ def _parse_task_etag(value: Optional[str]) -> tuple[str, int]:
     if not generation_id or revision < 0:
         raise HTTPException(status_code=400, detail="invalid task version")
     return generation_id, revision
-
-
-def _task_conflict_status(exc: ActiveTaskConflictError) -> int:
-    message = str(exc)
-    if "generation changed" in message or "revision changed" in message:
-        return 412
-    return 409
 
 
 class TaskStepRequest(BaseModel):
@@ -142,8 +146,21 @@ async def set_active_task_step(
         )
     except ActiveTaskNotFoundError as exc:
         raise HTTPException(status_code=404, detail="active task or step not found") from exc
+    except ActiveTaskVersionConflictError as exc:
+        raise ApiError(
+            412,
+            "task_version_conflict",
+            "Task version changed",
+            True,
+            details={
+                "current_version": _task_etag_parts(
+                    exc.current_generation_id,
+                    exc.current_revision,
+                )
+            },
+        ) from exc
     except ActiveTaskConflictError as exc:
-        raise HTTPException(status_code=_task_conflict_status(exc), detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if result.task is not None:
@@ -171,8 +188,21 @@ async def cancel_active_task(
         )
     except ActiveTaskNotFoundError as exc:
         raise HTTPException(status_code=404, detail="active task not found") from exc
+    except ActiveTaskVersionConflictError as exc:
+        raise ApiError(
+            412,
+            "task_version_conflict",
+            "Task version changed",
+            True,
+            details={
+                "current_version": _task_etag_parts(
+                    exc.current_generation_id,
+                    exc.current_revision,
+                )
+            },
+        ) from exc
     except ActiveTaskConflictError as exc:
-        raise HTTPException(status_code=_task_conflict_status(exc), detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"cancelled": cancelled}

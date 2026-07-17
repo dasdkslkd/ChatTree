@@ -54,6 +54,9 @@ def test_handshake_returns_exact_protocol_contract():
     assert payload["server_version"] == "0.1.0"
     assert payload["platform"] in {"windows", "macos", "linux"}
     assert payload["features"] == list(PROTOCOL_FEATURES)
+    assert "error_envelope_v1" in payload["features"]
+    assert "idempotency" not in payload["features"]
+    assert "lifecycle" not in payload["features"]
     assert payload["provider_configured"] is False
     UUID(payload["server_instance_id"])
 

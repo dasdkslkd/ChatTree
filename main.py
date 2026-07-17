@@ -15,6 +15,7 @@ if sys.platform == "win32":
 
 # ---------- 导入路由 ----------
 from backend.api.router import api_v1_router
+from backend.api.errors import RequestBoundaryMiddleware, install_error_handlers
 
 # ---------- 导入核心 ----------
 from backend.core.chat.chat_manager import ChatManager
@@ -56,6 +57,8 @@ from backend.core.server import SERVER_VERSION, ServerHomeLock, ServerIdentitySt
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_SERVER_PORT = 8001
+SERVER_ALLOWED_ORIGINS = ("http://localhost:5173",)
+SERVER_ALLOWED_ORIGIN_PATTERN = r"http://(localhost|127\.0\.0\.1):\d+"
 logger = logging.getLogger(__name__)
 
 
@@ -105,8 +108,8 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
-    allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",
+    allow_origins=SERVER_ALLOWED_ORIGINS,
+    allow_origin_regex=SERVER_ALLOWED_ORIGIN_PATTERN,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -130,6 +133,14 @@ async def performance_middleware(request: Request, call_next):
         status_code=response.status_code,
     )
     return response
+
+
+install_error_handlers(app)
+app.add_middleware(
+    RequestBoundaryMiddleware,
+    allowed_origins=SERVER_ALLOWED_ORIGINS,
+    allowed_origin_pattern=SERVER_ALLOWED_ORIGIN_PATTERN,
+)
 
 # ---------- 挂载管理器 ----------
 async def _close_server_resources() -> list[BaseException]:

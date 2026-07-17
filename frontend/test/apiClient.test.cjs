@@ -18,6 +18,7 @@ require.extensions['.ts'] = function loadTs(module, filename) {
 };
 
 const clientModule = path.join(__dirname, '../src/api/client.ts');
+const errorsModule = path.join(__dirname, '../src/api/errors.ts');
 const serverModule = path.join(__dirname, '../src/api/server.ts');
 const originalWindow = globalThis.window;
 
@@ -116,12 +117,44 @@ async function testServerProtocolContract() {
   }
 }
 
+async function testApiClientNormalizesRejectedResponses() {
+  const { apiClient } = loadClient(undefined);
+  const { ChatTreeApiError } = require(errorsModule);
+  const source = new Error('raw axios error');
+  source.isAxiosError = true;
+  source.response = {
+    status: 409,
+    headers: {},
+    data: {
+      error: {
+        code: 'active_runs_present',
+        message: 'blocked',
+        retryable: true,
+        request_id: 'req_interceptor',
+      },
+    },
+  };
+
+  await assert.rejects(
+    () => apiClient.get('/interceptor-test', {
+      adapter: () => Promise.reject(source),
+    }),
+    (error) => {
+      assert.ok(error instanceof ChatTreeApiError);
+      assert.equal(error.code, 'active_runs_present');
+      assert.equal(error.requestId, 'req_interceptor');
+      return true;
+    },
+  );
+}
+
 async function main() {
   try {
     testDefaultApiBase();
     testInjectedRelativeBaseAndProfile();
     testInjectedAbsoluteBase();
     await testServerProtocolContract();
+    await testApiClientNormalizesRejectedResponses();
     console.log('api client tests passed');
   } finally {
     setWindow(originalWindow);

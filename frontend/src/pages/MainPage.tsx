@@ -71,6 +71,7 @@ import {
 } from 'lucide-react';
 import { conversationApi } from '../api/conversation';
 import { serverApiUrl } from '../api/client';
+import { getApiErrorMessage } from '../api/errors';
 import { configApi } from '../api/config';
 import { messageApi, type ToolResultSlice } from '../api/message';
 import { runsApi } from '../api/runs';
@@ -2212,9 +2213,8 @@ export default function ChatPage() {
       setProjectFolderDialogMode(null);
       setProjectFolderPath('');
       setProjectFolderLabel('');
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail || err?.message || '项目文件夹处理失败';
-      setProjectFolderError(String(detail));
+    } catch (err: unknown) {
+      setProjectFolderError(getApiErrorMessage(err, '项目文件夹处理失败'));
     } finally {
       setProjectFolderSubmitting(false);
     }
@@ -3172,8 +3172,8 @@ export default function ChatPage() {
         } else {
           setAttachedFiles(prev => prev.includes(res.filename) ? prev : [...prev, res.filename]);
         }
-      } catch (err: any) {
-        console.error('Upload failed:', err?.response?.data?.detail || err.message);
+      } catch (err: unknown) {
+        console.error('Upload failed:', getApiErrorMessage(err, '文件上传失败'));
       }
     }
   };

@@ -6,6 +6,7 @@ import type {
   MultiAgentMode,
 } from '../types/conversation';
 import { conversationApi, type TreeData } from '../api/conversation';
+import { ChatTreeApiError } from '../api/errors';
 import type { Message } from '../types/message';
 import { messageApi } from '../api/message';
 import { useModelStore } from './modelStore';
@@ -44,12 +45,10 @@ interface ConversationActions {
   patchAssistantMessageFromStream: (conversationId: string, message: Message, pendingUserContent?: string | null) => boolean;
 }
 
-function isActiveRunDeleteConflict(err: any): boolean {
-  const detail = err?.response?.data?.detail;
-  return err?.response?.status === 409
-    && detail != null
-    && Array.isArray(detail.active_run_ids)
-    && detail.active_run_ids.length > 0;
+function isActiveRunDeleteConflict(err: unknown): boolean {
+  return err instanceof ChatTreeApiError
+    && err.status === 409
+    && err.code === 'active_runs_present';
 }
 
 async function deleteNodeAllowingActiveRuns(conversationId: string, nodeId: string) {

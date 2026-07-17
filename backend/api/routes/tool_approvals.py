@@ -1,8 +1,9 @@
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 
+from ..errors import ApiError
 from ...core.tools.security.approval import ApprovalManager
 from ..dependencies import get_approval_manager
 
@@ -38,7 +39,13 @@ async def decide_tool_approval(
             scope=request.scope,
         )
     except KeyError:
-        raise HTTPException(status_code=410, detail="审批请求已失效")
+        raise ApiError(
+            410,
+            "approval_expired",
+            "审批请求已失效",
+            False,
+            details={"approval_id": approval_id},
+        )
 
     return {
         "approval_id": approval_id,

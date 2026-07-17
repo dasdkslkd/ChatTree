@@ -1,10 +1,11 @@
-from .service import (
+from .errors import (
     ActiveTaskConflictError,
     ActiveTaskError,
     ActiveTaskNotFoundError,
-    ActiveTaskService,
+    ActiveTaskVersionConflictError,
     TaskContextDisabledError,
 )
+from .service import ActiveTaskService
 from .types import (
     ActiveTask,
     ActiveTaskStep,
@@ -25,6 +26,7 @@ __all__ = [
     "ActiveTaskError",
     "ActiveTaskNotFoundError",
     "ActiveTaskService",
+    "ActiveTaskVersionConflictError",
     "ActiveTaskStep",
     "TaskContextDisabledError",
     "TaskContextMode",
