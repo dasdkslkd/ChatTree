@@ -4,9 +4,16 @@ import gzip
 import hashlib
 import json
 import os
+import sqlite3
 import uuid
 from time import time
 from typing import Any
+
+from backend.core.runs.idempotency import (
+    RunIdempotencyConflictError,
+    RunReferenceConversationMismatchError,
+    RunReferenceNotFoundError,
+)
 
 from .blob_store import BlobStore
 from .content import INLINE_TEXT_LIMIT, StoredText
@@ -25,6 +32,8 @@ anchor_node_id,
 target_node_id,
 summary,
 metadata_json,
+idempotency_key,
+request_fingerprint,
 event_count,
 created_at,
 updated_at,
@@ -50,58 +59,220 @@ class SQLiteRunRepository:
         metadata: dict[str, Any] | None = None,
         task_binding: dict[str, Any] | None = None,
     ) -> str:
-        run_id = str(uuid.uuid4())
-        run_metadata = dict(metadata or {})
-        with self.persistence.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute(
-                """
-                INSERT INTO runs (
-                  id,
-                  conversation_id,
-                  kind,
-                  status,
-                  created_by_run_id,
-                  cancellation_parent_run_id,
-                  anchor_node_id,
-                  target_node_id,
-                  summary,
-                  metadata_json,
-                  created_at,
-                  updated_at
-                )
-                VALUES (
-                  ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?,
-                  strftime('%s', 'now'),
-                  strftime('%s', 'now')
-                )
-                """,
-                (
-                    run_id,
-                    conversation_id,
-                    kind,
-                    created_by_run_id,
-                    cancellation_parent_run_id,
-                    anchor_node_id,
-                    target_node_id,
-                    summary,
-                    self._json_field(run_metadata),
-                ),
+        run, created = self.create_or_get_run(
+            conversation_id,
+            kind=kind,
+            idempotency_key=None,
+            request_fingerprint=None,
+            anchor_node_id=anchor_node_id,
+            target_node_id=target_node_id,
+            created_by_run_id=created_by_run_id,
+            cancellation_parent_run_id=cancellation_parent_run_id,
+            summary=summary,
+            metadata=metadata,
+            task_binding=task_binding,
+        )
+        if not created:
+            raise RuntimeError("non-idempotent run creation returned an existing run")
+        return str(run["run_id"])
+
+    def create_or_get_run(
+        self,
+        conversation_id: str,
+        *,
+        kind: str,
+        idempotency_key: str | None,
+        request_fingerprint: str | None,
+        anchor_node_id: str | None = None,
+        target_node_id: str | None = None,
+        created_by_run_id: str | None = None,
+        cancellation_parent_run_id: str | None = None,
+        summary: str = "",
+        metadata: dict[str, Any] | None = None,
+        task_binding: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        if (idempotency_key is None) != (request_fingerprint is None):
+            raise ValueError(
+                "idempotency key and request fingerprint must be provided together"
             )
-            if task_binding is not None:
-                if self.task_repository is None:
-                    raise RuntimeError("task repository is required for bound runs")
-                bound = self.task_repository.bind_run_in_connection(
+        run_id = str(uuid.uuid4())
+        try:
+            with self.persistence.connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                self._insert_run_in_connection(
                     conn,
                     run_id=run_id,
-                    binding=task_binding,
+                    conversation_id=conversation_id,
+                    kind=kind,
+                    idempotency_key=idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    anchor_node_id=anchor_node_id,
+                    target_node_id=target_node_id,
+                    created_by_run_id=created_by_run_id,
+                    cancellation_parent_run_id=cancellation_parent_run_id,
+                    summary=summary,
+                    metadata=metadata,
+                    task_binding=task_binding,
                 )
-                run_metadata.update(bound)
-                conn.execute(
-                    "UPDATE runs SET metadata_json = ? WHERE id = ?",
-                    (self._json_field(run_metadata), run_id),
+                created_row = conn.execute(
+                    f"SELECT {RUN_COLUMNS} FROM runs WHERE id = ?",
+                    (run_id,),
+                ).fetchone()
+                if created_row is None:
+                    raise RuntimeError(f"created run {run_id} is missing")
+                created_run = self._run_from_row(created_row)
+        except sqlite3.IntegrityError:
+            if idempotency_key is None:
+                raise
+            existing = self.get_run_by_idempotency_key(idempotency_key)
+            if existing is None:
+                raise
+            if existing["request_fingerprint"] != request_fingerprint:
+                raise RunIdempotencyConflictError(str(existing["run_id"]))
+            return existing, False
+        return created_run, True
+
+    def get_run_by_idempotency_key(
+        self,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        with self.persistence.connect() as conn:
+            row = conn.execute(
+                f"SELECT {RUN_COLUMNS} FROM runs WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._run_from_row(row)
+
+    def validate_run_references(
+        self,
+        conversation_id: str,
+        *,
+        anchor_node_id: str | None = None,
+        created_by_run_id: str | None = None,
+        cancellation_parent_run_id: str | None = None,
+    ) -> None:
+        with self.persistence.connect() as conn:
+            conversation = conn.execute(
+                "SELECT id FROM conversations WHERE id = ?",
+                (conversation_id,),
+            ).fetchone()
+            if conversation is None:
+                raise RunReferenceNotFoundError("conversation_id", conversation_id)
+
+            if anchor_node_id is not None:
+                anchor = conn.execute(
+                    "SELECT conversation_id FROM nodes WHERE id = ?",
+                    (anchor_node_id,),
+                ).fetchone()
+                self._validate_reference_conversation(
+                    anchor,
+                    conversation_id=conversation_id,
+                    reference_kind="anchor_node_id",
+                    reference_id=anchor_node_id,
                 )
-        return run_id
+
+            for reference_kind, reference_id in (
+                ("created_by_run_id", created_by_run_id),
+                ("cancellation_parent_run_id", cancellation_parent_run_id),
+            ):
+                if reference_id is None:
+                    continue
+                run = conn.execute(
+                    "SELECT conversation_id FROM runs WHERE id = ?",
+                    (reference_id,),
+                ).fetchone()
+                self._validate_reference_conversation(
+                    run,
+                    conversation_id=conversation_id,
+                    reference_kind=reference_kind,
+                    reference_id=reference_id,
+                )
+
+    def _insert_run_in_connection(
+        self,
+        conn: Any,
+        *,
+        run_id: str,
+        conversation_id: str,
+        kind: str,
+        idempotency_key: str | None,
+        request_fingerprint: str | None,
+        anchor_node_id: str | None,
+        target_node_id: str | None,
+        created_by_run_id: str | None,
+        cancellation_parent_run_id: str | None,
+        summary: str,
+        metadata: dict[str, Any] | None,
+        task_binding: dict[str, Any] | None,
+    ) -> None:
+        run_metadata = dict(metadata or {})
+        conn.execute(
+            """
+            INSERT INTO runs (
+              id,
+              conversation_id,
+              kind,
+              status,
+              created_by_run_id,
+              cancellation_parent_run_id,
+              anchor_node_id,
+              target_node_id,
+              summary,
+              metadata_json,
+              idempotency_key,
+              request_fingerprint,
+              created_at,
+              updated_at
+            )
+            VALUES (
+              ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?,
+              strftime('%s', 'now'),
+              strftime('%s', 'now')
+            )
+            """,
+            (
+                run_id,
+                conversation_id,
+                kind,
+                created_by_run_id,
+                cancellation_parent_run_id,
+                anchor_node_id,
+                target_node_id,
+                summary,
+                self._json_field(run_metadata),
+                idempotency_key,
+                request_fingerprint,
+            ),
+        )
+        if task_binding is None:
+            return
+        if self.task_repository is None:
+            raise RuntimeError("task repository is required for bound runs")
+        bound = self.task_repository.bind_run_in_connection(
+            conn,
+            run_id=run_id,
+            binding=task_binding,
+        )
+        run_metadata.update(bound)
+        conn.execute(
+            "UPDATE runs SET metadata_json = ? WHERE id = ?",
+            (self._json_field(run_metadata), run_id),
+        )
+
+    @staticmethod
+    def _validate_reference_conversation(
+        row: Any,
+        *,
+        conversation_id: str,
+        reference_kind: str,
+        reference_id: str,
+    ) -> None:
+        if row is None:
+            raise RunReferenceNotFoundError(reference_kind, reference_id)
+        if row["conversation_id"] != conversation_id:
+            raise RunReferenceConversationMismatchError(reference_kind, reference_id)
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         with self.persistence.connect() as conn:

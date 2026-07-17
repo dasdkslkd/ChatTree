@@ -13,6 +13,8 @@ PRIVATE_TASK_METADATA_KEYS = {
 
 def public_run_dict(run: Dict[str, Any]) -> Dict[str, Any]:
     data = deepcopy(dict(run))
+    for private_key in ("id", "idempotency_key", "request_fingerprint"):
+        data.pop(private_key, None)
     metadata = dict(data.get("metadata") or {})
     step = metadata.pop("task_step_position", None)
     for key in PRIVATE_TASK_METADATA_KEYS:
