@@ -33,6 +33,10 @@ const identityModule = path.join(
   frontendRoot,
   'src/runtime/connectionIdentity.ts',
 );
+const ownershipModule = path.join(
+  frontendRoot,
+  'src/runtime/profileRendererOwnership.ts',
+);
 
 const BOOTSTRAP = Object.freeze({
   profileId: 'profile-a',
@@ -56,10 +60,14 @@ function createHookRuntime() {
   const slots = [];
   let cursor = 0;
   let pendingEffects = [];
+  let lazyRenders = 0;
 
   const react = {
     lazy() {
-      return function LazyServerSessionApp() { return null; };
+      return function LazyServerSessionApp() {
+        lazyRenders += 1;
+        return null;
+      };
     },
     Suspense({ children }) {
       return children;
@@ -69,6 +77,22 @@ function createHookRuntime() {
       cursor += 1;
       if (!slots[index]) slots[index] = { kind: 'ref', current: initialValue };
       return slots[index];
+    },
+    useState(initialValue) {
+      const index = cursor;
+      cursor += 1;
+      if (slots[index]?.kind !== 'state') {
+        slots[index] = {
+          kind: 'state',
+          value: typeof initialValue === 'function' ? initialValue() : initialValue,
+        };
+      }
+      const setValue = (next) => {
+        slots[index].value = typeof next === 'function'
+          ? next(slots[index].value)
+          : next;
+      };
+      return [slots[index].value, setValue];
     },
     useCallback(callback, dependencies) {
       const index = cursor;
@@ -130,6 +154,9 @@ function createHookRuntime() {
       slots.length = 0;
       pendingEffects = [];
     },
+    get lazyRenders() {
+      return lazyRenders;
+    },
   };
 }
 
@@ -141,8 +168,8 @@ function clearModule(modulePath) {
   }
 }
 
-function loadHarness(onReload) {
-  for (const modulePath of [appModule, epochModule, identityModule]) {
+function loadHarness(onReload, options = {}) {
+  for (const modulePath of [appModule, epochModule, identityModule, ownershipModule]) {
     clearModule(modulePath);
   }
 
@@ -151,15 +178,29 @@ function loadHarness(onReload) {
   const providerStub = {
     BoundServerProvider: FakeBoundServerProvider,
     useBoundServer() {
+      if (options.boundState) return options.boundState;
       throw new Error('BoundApp is not rendered by this App hook harness');
     },
   };
-  globalThis.window = {
+  const ownershipStub = {
+    acquireProfileRendererOwnership: options.acquireOwnership
+      ?? (() => Promise.resolve()),
+  };
+  const windowObject = {
     location: {
       href: 'http://127.0.0.1:4111/s/profile-a',
       reload: onReload,
     },
   };
+  if (options.localStorageGetter) {
+    Object.defineProperty(windowObject, 'localStorage', {
+      configurable: true,
+      get: options.localStorageGetter,
+    });
+  } else if (options.storage) {
+    windowObject.localStorage = options.storage;
+  }
+  globalThis.window = windowObject;
 
   const originalLoad = Module._load;
   Module._load = function loadWithStubs(request, parent, isMain) {
@@ -172,6 +213,7 @@ function loadHarness(onReload) {
       return originalLoad.call(this, request, parent, isMain);
     }
     if (resolved === providerModule) return providerStub;
+    if (resolved === ownershipModule) return ownershipStub;
     return originalLoad.call(this, request, parent, isMain);
   };
 
@@ -245,6 +287,45 @@ function renderApp(harness) {
   });
   assert.equal(element.type, harness.FakeBoundServerProvider);
   return element.props;
+}
+
+function renderBoundApp(harness, providerProps) {
+  const element = providerProps.children;
+  assert.equal(typeof element.type, 'function');
+  return harness.hookRuntime.render(element.type, element.props);
+}
+
+async function renderReadyProfileGate(harness, providerProps) {
+  const gate = renderBoundApp(harness, providerProps);
+  assert.equal(typeof gate.type, 'function');
+  const pending = harness.hookRuntime.render(gate.type, gate.props);
+  assert.equal(pending.type, 'main');
+  assert.match(pending.props.children, /Profile 页面所有权/);
+  harness.hookRuntime.flushEffects();
+  await Promise.resolve();
+  await Promise.resolve();
+  return harness.hookRuntime.render(gate.type, gate.props);
+}
+
+function createMemoryStorage(failingMethod = null) {
+  const values = new Map();
+  return {
+    values,
+    storage: {
+      getItem(key) {
+        if (failingMethod === 'get') throw new DOMException('blocked');
+        return values.get(key) ?? null;
+      },
+      setItem(key, value) {
+        if (failingMethod === 'set') throw new DOMException('blocked');
+        values.set(key, String(value));
+      },
+      removeItem(key) {
+        if (failingMethod === 'remove') throw new DOMException('blocked');
+        values.delete(key);
+      },
+    },
+  };
 }
 
 function testInitialInstallRerenderAndValidatedChangeReload() {
@@ -357,12 +438,86 @@ function testEffectOrderReplayAndUnmountCleanup() {
   assert.equal(calls.unsubscriptions, 1);
 }
 
-function main() {
+async function testStoragePreparationGatesLazyBusinessImport() {
+  for (const failingMethod of ['get', 'set', 'remove']) {
+    const memory = createMemoryStorage(failingMethod);
+    const boundState = { status: 'ready', context: CONTEXT_A, error: null };
+    const harness = loadHarness(() => {}, {
+      boundState,
+      storage: memory.storage,
+    });
+    const props = renderApp(harness);
+    props.onInitialContext(CONTEXT_A);
+    const result = await renderReadyProfileGate(harness, props);
+    assert.equal(result.type, 'main');
+    assert.equal(result.props.role, 'alert');
+    assert.match(result.props.children, /Profile storage is unavailable/);
+    assert.equal(harness.hookRuntime.lazyRenders, 0);
+  }
+
+  const getterHarness = loadHarness(() => {}, {
+    boundState: { status: 'ready', context: CONTEXT_A, error: null },
+    localStorageGetter() {
+      throw new DOMException('blocked');
+    },
+  });
+  const getterProps = renderApp(getterHarness);
+  getterProps.onInitialContext(CONTEXT_A);
+  const getterResult = await renderReadyProfileGate(getterHarness, getterProps);
+  assert.equal(getterResult.type, 'main');
+  assert.equal(getterResult.props.role, 'alert');
+  assert.match(getterResult.props.children, /Profile storage is unavailable/);
+  assert.equal(getterHarness.hookRuntime.lazyRenders, 0);
+
+  const memory = createMemoryStorage();
+  const successHarness = loadHarness(() => {}, {
+    boundState: { status: 'ready', context: CONTEXT_A, error: null },
+    storage: memory.storage,
+  });
+  const successProps = renderApp(successHarness);
+  successProps.onInitialContext(CONTEXT_A);
+  const first = await renderReadyProfileGate(successHarness, successProps);
+  const gate = renderBoundApp(successHarness, successProps);
+  const second = successHarness.hookRuntime.render(gate.type, gate.props);
+  assert.equal(first.type, successHarness.hookRuntime.react.Suspense);
+  assert.equal(second.type, successHarness.hookRuntime.react.Suspense);
+  assert.equal(successHarness.hookRuntime.lazyRenders, 0);
+  first.props.children.type();
+  assert.equal(successHarness.hookRuntime.lazyRenders, 1);
+
+  const blockedStorage = createMemoryStorage();
+  const blockedHarness = loadHarness(() => {}, {
+    boundState: { status: 'ready', context: CONTEXT_A, error: null },
+    storage: blockedStorage.storage,
+    acquireOwnership: () => Promise.reject(new Error('Profile is already open in another tab')),
+  });
+  const blockedProps = renderApp(blockedHarness);
+  blockedProps.onInitialContext(CONTEXT_A);
+  const blockedResult = await renderReadyProfileGate(blockedHarness, blockedProps);
+  assert.equal(blockedResult.type, 'main');
+  assert.equal(blockedResult.props.role, 'alert');
+  assert.match(blockedResult.props.children, /already open in another tab/);
+  assert.equal(blockedStorage.values.size, 0, 'duplicate renderer cannot prepare storage');
+  assert.equal(blockedHarness.hookRuntime.lazyRenders, 0);
+}
+
+function testBusinessRuntimeRemainsBehindLazyBoundary() {
+  const source = fs.readFileSync(appModule, 'utf8');
+  assert.match(
+    source,
+    /const ServerSessionApp = lazy\(\(\) => import\('\.\/runtime\/ServerSessionApp'\)\);/,
+  );
+  assert.doesNotMatch(source, /^import[^;]+(?:ServerSessionApp|MainPage|\/store\/)/m);
+}
+
+async function main() {
   const originalWindow = globalThis.window;
   try {
     testInitialInstallRerenderAndValidatedChangeReload();
     testRuntimeInvalidationUsesSameGuardedReloadCallback();
     testEffectOrderReplayAndUnmountCleanup();
+    await testStoragePreparationGatesLazyBusinessImport();
+    testBusinessRuntimeRemainsBehindLazyBoundary();
     console.log('app connection runtime tests passed');
   } finally {
     if (originalWindow === undefined) delete globalThis.window;
@@ -370,4 +525,7 @@ function main() {
   }
 }
 
-main();
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

@@ -1,3 +1,8 @@
+import {
+  LEFT_SIDEBAR_STORAGE_KEY,
+  RIGHT_PANEL_STORAGE_KEY,
+} from '../runtime/profileStorage';
+
 export type SidebarResizeSide = 'left' | 'right';
 
 export type SidebarWidthConfig = {
@@ -8,8 +13,8 @@ export type SidebarWidthConfig = {
 
 export const SIDEBAR_KEYBOARD_STEP = 16;
 
-export const LEFT_SIDEBAR_WIDTH_STORAGE_KEY = 'chattree.leftSidebarWidth';
-export const RIGHT_PANEL_WIDTH_STORAGE_KEY = 'chattree.rightPanelWidth';
+export const LEFT_SIDEBAR_WIDTH_STORAGE_KEY = LEFT_SIDEBAR_STORAGE_KEY;
+export const RIGHT_PANEL_WIDTH_STORAGE_KEY = RIGHT_PANEL_STORAGE_KEY;
 
 export const LEFT_SIDEBAR_WIDTH: SidebarWidthConfig = {
   defaultWidth: 300,

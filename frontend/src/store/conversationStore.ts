@@ -17,6 +17,16 @@ import {
   connectionEpochRuntime,
   type ConnectionEpochToken,
 } from '../runtime/connectionEpoch';
+import { getFrontendBootstrap } from '../runtime/frontendBootstrap';
+import {
+  CONVERSATION_STORAGE_KEY,
+  profileStorageKey,
+} from '../runtime/profileStorage';
+
+const conversationStorageKey = profileStorageKey(
+  getFrontendBootstrap().profileId,
+  CONVERSATION_STORAGE_KEY,
+);
 
 interface ConversationState {
   conversations: Conversation[];
@@ -638,7 +648,7 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
 
       }),
       {
-        name: 'conversation-storage',
+        name: conversationStorageKey,
         partialize: (state) => ({ conversations: state.conversations }),
         onRehydrateStorage: () => (state) => {
           if (state) state.currentConversation = null;

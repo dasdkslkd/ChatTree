@@ -255,7 +255,11 @@ function testMainDefersApplicationImportsUntilBootstrap() {
   );
   assert.match(appSource, /lazy\(\(\) => import\(['"]\.\/runtime\/ServerSessionApp['"]\)\)/);
   assert.match(appSource, /if \(!state\.context\)/);
-  assert.match(appSource, /<ServerSessionApp binding=\{state\.context\} connected=\{state\.status === ['"]ready['"]\}/);
+  assert.match(
+    appSource,
+    /<ProfileRendererGate\s+context=\{state\.context\}\s+connected=\{state\.status === ['"]ready['"]\}/,
+  );
+  assert.match(appSource, /<ServerSessionApp binding=\{context\} connected=\{connected\}/);
   assert.doesNotMatch(appSource, /<ServerSessionApp[^>]*\bkey=/);
 }
 

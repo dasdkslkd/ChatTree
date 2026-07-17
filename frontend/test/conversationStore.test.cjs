@@ -22,11 +22,13 @@ const errorsModule = path.join(__dirname, '../src/api/errors.ts');
 const messageApiModule = path.join(__dirname, '../src/api/message.ts');
 const modelStoreModule = path.join(__dirname, '../src/store/modelStore.ts');
 const epochModule = path.join(__dirname, '../src/runtime/connectionEpoch.ts');
+const bootstrapModule = path.join(__dirname, '../src/runtime/frontendBootstrap.ts');
+const profileStorageModule = path.join(__dirname, '../src/runtime/profileStorage.ts');
 const storeModule = path.join(__dirname, '../src/store/conversationStore.ts');
 
 const CONTEXT_A = Object.freeze({
-  profileId: 'local',
-  apiBase: '/p/local/api/v1',
+  profileId: 'profile-a',
+  apiBase: '/p/profile-a/api/v1',
   serverInstanceId: '11111111-1111-4111-8111-111111111111',
   connectionEpoch: 1,
   connectionLeaseId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
@@ -38,6 +40,40 @@ global.localStorage = {
   setItem: (key, value) => storage.set(key, String(value)),
   removeItem: (key) => storage.delete(key),
 };
+global.window = {
+  location: {
+    href: 'http://127.0.0.1:5173/s/profile-a',
+    pathname: '/s/profile-a',
+  },
+  localStorage: global.localStorage,
+};
+require(bootstrapModule).initializeFrontendBootstrap();
+const { profileStorageKey } = require(profileStorageModule);
+const boundConversationStorageKey = profileStorageKey('profile-a', 'conversation-storage');
+const otherConversationStorageKey = profileStorageKey('profile-b', 'conversation-storage');
+const persistedConversation = {
+  id: 'profile-a-conversation',
+  title: 'Profile A only',
+  created_at: 1,
+  updated_at: 1,
+  model: '',
+  model_id: '',
+  provider_id: '',
+  current_node_id: 'root',
+  total_tokens: {},
+};
+storage.set('conversation-storage', JSON.stringify({
+  state: { conversations: [{ ...persistedConversation, id: 'legacy-conversation' }] },
+  version: 0,
+}));
+storage.set(otherConversationStorageKey, JSON.stringify({
+  state: { conversations: [{ ...persistedConversation, id: 'profile-b-conversation' }] },
+  version: 0,
+}));
+storage.set(boundConversationStorageKey, JSON.stringify({
+  state: { conversations: [persistedConversation] },
+  version: 0,
+}));
 
 let historyResponse = [
   { id: 'msg-1', role: 'user', content: '保留的问题', node_id: 'node-1' },
@@ -169,6 +205,20 @@ const { normalizeApiError } = require(errorsModule);
 const { connectionEpochRuntime } = require(epochModule);
 connectionEpochRuntime.install(CONTEXT_A);
 const { useConversationStore } = require(storeModule);
+
+function testPersistUsesProfileScopedKey() {
+  assert.deepEqual(
+    useConversationStore.getState().conversations.map((conversation) => conversation.id),
+    ['profile-a-conversation'],
+    'rehydration reads only the immutable bootstrap Profile',
+  );
+  storage.delete(boundConversationStorageKey);
+  storage.delete('conversation-storage');
+  useConversationStore.setState({ conversations: [] });
+  assert.equal(storage.has(boundConversationStorageKey), true);
+  assert.equal(storage.has('conversation-storage'), false);
+  assert.match(storage.get(otherConversationStorageKey), /profile-b-conversation/);
+}
 
 async function testDeleteNodeRefreshesTreeData() {
   getTreeCalls = 0;
@@ -720,6 +770,7 @@ async function testEveryAsyncActionKeepsItsOriginalEpoch() {
 }
 
 async function main() {
+  testPersistUsesProfileScopedKey();
   await testDeleteNodeRefreshesTreeData();
   await testDeleteNodeRetriesForceWhenActiveRunBlocksDeletion();
   await testRefreshMessagesUsesHistoryTipInsteadOfStaleConversationList();

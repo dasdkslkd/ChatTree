@@ -121,6 +121,12 @@ import {
   ImportAssetMutationQueue,
   ImportAssetPreviewCache,
 } from '../runtime/importAssetPreview';
+import { getFrontendBootstrap } from '../runtime/frontendBootstrap';
+import {
+  MANUAL_PROJECTS_STORAGE_KEY,
+  PROJECT_ORDER_STORAGE_KEY,
+  profileStorageKey,
+} from '../runtime/profileStorage';
 import { resolveProjectWorkspaceForEpoch } from '../runtime/projectWorkspaceEpoch';
 import { streamManager, type StreamState } from '../services/streamManager';
 import { slashRegistry } from '../services/slashRegistry';
@@ -211,8 +217,11 @@ import {
 import { createTaskPanelItem } from '../utils/activeTask';
 
 const MarkdownContent = lazy(() => import('../components/MarkdownContent'));
-const MANUAL_PROJECTS_STORAGE_KEY = 'chattree.manualProjectWorkspaces';
-const PROJECT_ORDER_STORAGE_KEY = 'chattree.projectOrder';
+const profileId = getFrontendBootstrap().profileId;
+const PROFILE_MANUAL_PROJECTS_STORAGE_KEY = profileStorageKey(profileId, MANUAL_PROJECTS_STORAGE_KEY);
+const PROFILE_PROJECT_ORDER_STORAGE_KEY = profileStorageKey(profileId, PROJECT_ORDER_STORAGE_KEY);
+const PROFILE_LEFT_SIDEBAR_STORAGE_KEY = profileStorageKey(profileId, LEFT_SIDEBAR_WIDTH_STORAGE_KEY);
+const PROFILE_RIGHT_PANEL_STORAGE_KEY = profileStorageKey(profileId, RIGHT_PANEL_WIDTH_STORAGE_KEY);
 const PLAN_MODE_TOOL_NAMES = new Set(['plan', 'enter_plan_mode', 'update_plan', 'exit_plan_mode', 'ask_user_question']);
 const TASK_TOOL_NAMES = new Set(['create_task', 'set_task_step', 'cancel_task']);
 const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled', 'interrupted', 'stopped']);
@@ -396,7 +405,7 @@ SyntaxHighlighter.registerLanguage('yaml', yaml);
 
 function loadManualProjectWorkspaces(): WorkspaceContext[] {
   try {
-    const raw = window.localStorage.getItem(MANUAL_PROJECTS_STORAGE_KEY);
+    const raw = window.localStorage.getItem(PROFILE_MANUAL_PROJECTS_STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -409,12 +418,12 @@ function loadManualProjectWorkspaces(): WorkspaceContext[] {
 }
 
 function saveManualProjectWorkspaces(workspaces: WorkspaceContext[]) {
-  window.localStorage.setItem(MANUAL_PROJECTS_STORAGE_KEY, JSON.stringify(workspaces));
+  window.localStorage.setItem(PROFILE_MANUAL_PROJECTS_STORAGE_KEY, JSON.stringify(workspaces));
 }
 
 function loadProjectOrder(): string[] {
   try {
-    const raw = window.localStorage.getItem(PROJECT_ORDER_STORAGE_KEY);
+    const raw = window.localStorage.getItem(PROFILE_PROJECT_ORDER_STORAGE_KEY);
     const parsed = raw ? JSON.parse(raw) : [];
     return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
   } catch (_) {
@@ -423,7 +432,7 @@ function loadProjectOrder(): string[] {
 }
 
 function saveProjectOrder(order: string[]) {
-  window.localStorage.setItem(PROJECT_ORDER_STORAGE_KEY, JSON.stringify(order));
+  window.localStorage.setItem(PROFILE_PROJECT_ORDER_STORAGE_KEY, JSON.stringify(order));
 }
 
 function mergeManualProjectWorkspace(workspaces: WorkspaceContext[], workspace: WorkspaceContext): WorkspaceContext[] {
@@ -1111,10 +1120,10 @@ export default function ChatPage() {
   const [rightPanelView, setRightPanelView] = useState<'outline' | 'side' | 'tasks'>('outline');
   const [selectedSideRunId, setSelectedSideRunId] = useState<string | null>(null);
   const [leftSidebarWidth, setLeftSidebarWidth] = useState(() =>
-    readStoredSidebarWidth(getBrowserStorage(), LEFT_SIDEBAR_WIDTH_STORAGE_KEY, LEFT_SIDEBAR_WIDTH),
+    readStoredSidebarWidth(getBrowserStorage(), PROFILE_LEFT_SIDEBAR_STORAGE_KEY, LEFT_SIDEBAR_WIDTH),
   );
   const [rightPanelWidth, setRightPanelWidth] = useState(() =>
-    readStoredSidebarWidth(getBrowserStorage(), RIGHT_PANEL_WIDTH_STORAGE_KEY, RIGHT_PANEL_WIDTH),
+    readStoredSidebarWidth(getBrowserStorage(), PROFILE_RIGHT_PANEL_STORAGE_KEY, RIGHT_PANEL_WIDTH),
   );
   const [resizingSidebar, setResizingSidebar] = useState<SidebarResizeSide | null>(null);
   const [scrollPositions, setScrollPositions] = useState<Record<string, number>>({});
@@ -1217,14 +1226,14 @@ export default function ChatPage() {
           side,
           startClientX: event.clientX,
           startWidth: leftSidebarWidth,
-          storageKey: LEFT_SIDEBAR_WIDTH_STORAGE_KEY,
+          storageKey: PROFILE_LEFT_SIDEBAR_STORAGE_KEY,
           config: LEFT_SIDEBAR_WIDTH,
         }
       : {
           side,
           startClientX: event.clientX,
           startWidth: rightPanelWidth,
-          storageKey: RIGHT_PANEL_WIDTH_STORAGE_KEY,
+          storageKey: PROFILE_RIGHT_PANEL_STORAGE_KEY,
           config: RIGHT_PANEL_WIDTH,
         };
 
@@ -1246,7 +1255,7 @@ export default function ChatPage() {
       const nextWidth = getKeyboardResizedSidebarWidth(side, event.key, leftSidebarWidth, LEFT_SIDEBAR_WIDTH);
       setLeftSidebarWidth(writeStoredSidebarWidth(
         getBrowserStorage(),
-        LEFT_SIDEBAR_WIDTH_STORAGE_KEY,
+        PROFILE_LEFT_SIDEBAR_STORAGE_KEY,
         nextWidth,
         LEFT_SIDEBAR_WIDTH,
       ));
@@ -1256,7 +1265,7 @@ export default function ChatPage() {
     const nextWidth = getKeyboardResizedSidebarWidth(side, event.key, rightPanelWidth, RIGHT_PANEL_WIDTH);
     setRightPanelWidth(writeStoredSidebarWidth(
       getBrowserStorage(),
-      RIGHT_PANEL_WIDTH_STORAGE_KEY,
+      PROFILE_RIGHT_PANEL_STORAGE_KEY,
       nextWidth,
       RIGHT_PANEL_WIDTH,
     ));
