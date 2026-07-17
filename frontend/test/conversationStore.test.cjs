@@ -121,6 +121,8 @@ const refreshedTree = {
 
 let getTreeCalls = 0;
 let epochGate = null;
+let resetToDefaultCalls = [];
+let resetToDefaultHandler = async () => {};
 
 function afterEpochGate(value) {
   return epochGate ? epochGate.promise.then(() => value) : Promise.resolve(value);
@@ -194,7 +196,10 @@ require.cache[require.resolve(modelStoreModule)] = {
   exports: {
     useModelStore: {
       getState: () => ({
-        resetToDefault: async () => {},
+        resetToDefault: async (token) => {
+          resetToDefaultCalls.push(token);
+          return resetToDefaultHandler(token);
+        },
         syncFromConversation: async () => {},
       }),
     },
@@ -769,6 +774,34 @@ async function testEveryAsyncActionKeepsItsOriginalEpoch() {
   }, callsBeforeCaptureFailures);
 }
 
+async function testClearCurrentConversationAwaitsTokenOwnedModelReset() {
+  let releaseReset;
+  const resetGate = new Promise((resolve) => {
+    releaseReset = resolve;
+  });
+  resetToDefaultCalls = [];
+  resetToDefaultHandler = async () => resetGate;
+  useConversationStore.setState({
+    currentConversation: { ...persistedConversation, id: 'conv-clear' },
+    messages: [{ id: 'message-clear' }],
+    currentNodeId: 'node-clear',
+  });
+  const token = connectionEpochRuntime.capture();
+  let settled = false;
+  const clearing = useConversationStore.getState().clearCurrentConversation(token)
+    .then(() => { settled = true; });
+
+  assert.equal(useConversationStore.getState().currentConversation, null);
+  assert.equal(useConversationStore.getState().currentNodeId, null);
+  await Promise.resolve();
+  assert.equal(settled, false, 'clear must keep its owner pending until model reset settles');
+  assert.deepEqual(resetToDefaultCalls, [token]);
+  releaseReset();
+  await clearing;
+  assert.equal(settled, true);
+  resetToDefaultHandler = async () => {};
+}
+
 async function main() {
   testPersistUsesProfileScopedKey();
   await testDeleteNodeRefreshesTreeData();
@@ -781,6 +814,7 @@ async function main() {
   testSetCurrentNodeIdLocalKeepsSnapshotsInSync();
   testPatchAssistantMessageFromStreamUpsertsCurrentNode();
   await testUpdateConversationModelIsImmutable();
+  await testClearCurrentConversationAwaitsTokenOwnedModelReset();
   await testEveryAsyncActionKeepsItsOriginalEpoch();
   console.log('conversationStore tests passed');
 }

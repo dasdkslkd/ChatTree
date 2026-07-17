@@ -13,6 +13,7 @@ import { perfNow, recordMark, recordSpan } from '../perf/marks';
 import {
   composeConnectionAbortSignal,
   connectionEpochRuntime,
+  StaleConnectionEpochError,
   type ConnectionEpochRuntime,
   type ConnectionEpochToken,
 } from '../runtime/connectionEpoch';
@@ -120,6 +121,20 @@ type RunAlias = {
   runId: string;
   epochToken: ConnectionEpochToken;
 };
+
+type ManagedRunSubscription = {
+  epochToken: ConnectionEpochToken;
+  controller: AbortController;
+  task: Promise<void>;
+};
+
+const TERMINAL_RUN_STATUSES = new Set([
+  'completed',
+  'failed',
+  'cancelled',
+  'interrupted',
+  'stopped',
+]);
 
 function mergeToolCalls(existing: any[], incoming: any[]): any[] {
   const merged = incoming.length > 0
@@ -420,13 +435,59 @@ function mergeApproval(
   };
 }
 
+function removeApproval(
+  pendingApprovals: Record<string, ToolApprovalPayload>,
+  approval: ToolApprovalPayload | undefined,
+): Record<string, ToolApprovalPayload> {
+  if (!approval?.id || !pendingApprovals[approval.id]) return pendingApprovals;
+  const next = { ...pendingApprovals };
+  delete next[approval.id];
+  return next;
+}
+
+function isTerminalRunStatus(status: unknown): boolean {
+  return typeof status === 'string' && TERMINAL_RUN_STATUSES.has(status);
+}
+
+function isTerminalStreamStatus(status: StreamState['status']): boolean {
+  return status === 'completed' || status === 'error' || status === 'stopped';
+}
+
+function runEventIndex(event: RunEventPayload): number | null {
+  return typeof event.event_index === 'number' && Number.isFinite(event.event_index)
+    ? Math.trunc(event.event_index)
+    : null;
+}
+
+function orderRunEvents(events: RunEventPayload[]): RunEventPayload[] {
+  return events
+    .map((event, position) => ({ event, position, index: runEventIndex(event) }))
+    .sort((left, right) => {
+      if (left.index === null && right.index === null) return left.position - right.position;
+      if (left.index === null) return 1;
+      if (right.index === null) return -1;
+      return left.index - right.index || left.position - right.position;
+    })
+    .map(({ event }) => event);
+}
+
+function nextRunEventCursor(record: RunRecord, events: RunEventPayload[]): number {
+  const recordEventCount = Number.isFinite(record.event_count)
+    ? Math.max(0, Math.trunc(record.event_count))
+    : 0;
+  return events.reduce((cursor, event) => {
+    const index = runEventIndex(event);
+    return index === null ? cursor : Math.max(cursor, index + 1);
+  }, recordEventCount);
+}
+
 function mapRunStatus(status: unknown): 'streaming' | 'waiting_approval' | 'stopping' | 'completed' | 'error' | 'stopped' | null {
-  if (status === 'running' || status === 'content' || status === 'start') return 'streaming';
+  if (status === 'queued' || status === 'running' || status === 'content' || status === 'start') return 'streaming';
   if (status === 'waiting_approval') return 'waiting_approval';
   if (status === 'stopping') return 'stopping';
   if (status === 'complete' || status === 'completed') return 'completed';
   if (status === 'error' || status === 'failed') return 'error';
-  if (status === 'stopped' || status === 'cancelled') return 'stopped';
+  if (status === 'stopped' || status === 'cancelled' || status === 'interrupted') return 'stopped';
   return null;
 }
 
@@ -435,8 +496,32 @@ function mapRunRecordStatus(status: unknown): StreamState['status'] {
   if (status === 'stopping') return 'stopping';
   if (status === 'completed') return 'completed';
   if (status === 'failed') return 'error';
-  if (status === 'cancelled') return 'stopped';
+  if (status === 'cancelled' || status === 'interrupted' || status === 'stopped') return 'stopped';
   return 'streaming';
+}
+
+function transitionRunStatus(
+  current: StreamState['status'],
+  mapped: ReturnType<typeof mapRunStatus>,
+): StreamState['status'] {
+  if (mapped === 'completed'
+      || mapped === 'stopped'
+      || mapped === 'error'
+      || mapped === 'waiting_approval'
+      || mapped === 'stopping') return mapped;
+  if (mapped === 'streaming' && current === 'waiting_approval') return 'streaming';
+  return current;
+}
+
+function restoredSnapshotStatus(
+  record: RunRecord,
+  events: RunEventPayload[],
+): StreamState['status'] {
+  let status = mapRunRecordStatus(record.status);
+  for (const event of orderRunEvents(events)) {
+    status = transitionRunStatus(status, mapRunStatus(event.status));
+  }
+  return isTerminalRunStatus(record.status) ? mapRunRecordStatus(record.status) : status;
 }
 
 function createCommandState(): CommandRunState {
@@ -566,6 +651,7 @@ export class StreamManager {
     epochToken: ConnectionEpochToken;
   }>();
   private runAliases = new Map<string, RunAlias>();
+  private managedSubscriptionTasks = new Map<string, ManagedRunSubscription>();
   private tempSeq = 0;
   private readonly epochSource: StreamEpochSource;
 
@@ -584,6 +670,10 @@ export class StreamManager {
       && left.connectionEpoch === right.connectionEpoch
       && left.connectionLeaseId === right.connectionLeaseId
       && left.generation === right.generation;
+  }
+
+  private assertEpochCurrent(epochToken: ConnectionEpochToken): void {
+    if (!this.epochSource.isCurrent(epochToken)) throw new StaleConnectionEpochError();
   }
 
   private ownsState(
@@ -645,6 +735,23 @@ export class StreamManager {
     for (const source of ownedAliases) this.runAliases.delete(source);
   }
 
+  private removeManagedSubscriptionsForRun(
+    runId: string,
+    epochToken?: ConnectionEpochToken,
+    controller?: AbortController | null,
+  ): void {
+    for (const [key, subscription] of this.managedSubscriptionTasks.entries()) {
+      if (epochToken && !this.tokensMatch(subscription.epochToken, epochToken)) continue;
+      if (controller !== undefined && subscription.controller !== controller) continue;
+      const resolvedKey = this.resolveRunIdForToken(key, subscription.epochToken);
+      if (key !== runId && resolvedKey !== runId) continue;
+      subscription.controller.abort();
+      if (this.managedSubscriptionTasks.get(key) === subscription) {
+        this.managedSubscriptionTasks.delete(key);
+      }
+    }
+  }
+
   private cleanupOwnedState(
     runId: string,
     epochToken: ConnectionEpochToken,
@@ -656,6 +763,7 @@ export class StreamManager {
     if (!this.ownsState(state, epochToken)
         || state.abortController !== controller) return false;
 
+    this.removeManagedSubscriptionsForRun(runId, epochToken, controller);
     this.deleteAliasesEndingAt(runId, epochToken);
     const timer = this.durationTimers.get(runId);
     if (timer !== undefined) window.clearInterval(timer);
@@ -1050,28 +1158,20 @@ export class StreamManager {
     } else if (chunk.event_type === 'tool_approval_request') {
       next.pendingApprovals = mergeApproval(next.pendingApprovals, chunk.approval, 'pending');
     } else if (chunk.event_type === 'tool_approval_result') {
-      next.pendingApprovals = mergeApproval(next.pendingApprovals, chunk.approval);
+      next.pendingApprovals = removeApproval(next.pendingApprovals, chunk.approval);
     }
     if (chunk.tokens_used) next.tokensUsed = chunk.tokens_used;
     const mappedStatus = mapRunStatus(chunk.status);
-    if (mappedStatus === 'completed') {
-      next.status = 'completed';
-      next.reasoningActive = false;
-    } else if (mappedStatus === 'stopped') {
-      next.status = 'stopped';
-      next.reasoningActive = false;
-    } else if (mappedStatus === 'error') {
-      next.status = 'error';
+    next.status = transitionRunStatus(next.status, mappedStatus);
+    if (mappedStatus === 'error') {
       next.errorMessage = typeof chunk.error === 'string' ? chunk.error : next.errorMessage;
+    }
+    if (mappedStatus === 'completed'
+        || mappedStatus === 'stopped'
+        || mappedStatus === 'error'
+        || mappedStatus === 'waiting_approval'
+        || mappedStatus === 'stopping') {
       next.reasoningActive = false;
-    } else if (mappedStatus === 'waiting_approval') {
-      next.status = 'waiting_approval';
-      next.reasoningActive = false;
-    } else if (mappedStatus === 'stopping') {
-      next.status = 'stopping';
-      next.reasoningActive = false;
-    } else if (mappedStatus === 'streaming' && next.status === 'waiting_approval') {
-      next.status = 'streaming';
     }
     this.streams.set(runId, next);
     this.notify(
@@ -1130,8 +1230,11 @@ export class StreamManager {
     };
   }
 
-  restoreRunFromEvents(record: RunRecord, events: RunEventPayload[]): void {
-    const epochToken = this.epochSource.capture();
+  private restoreRunSnapshot(
+    record: RunRecord,
+    events: RunEventPayload[],
+    epochToken: ConnectionEpochToken,
+  ): string {
     const initialRunId = record.run_id;
     let runId = initialRunId;
     const createdAt = Number.isFinite(record.created_at) ? record.created_at * 1000 : Date.now();
@@ -1169,42 +1272,156 @@ export class StreamManager {
       eventCount: 0,
       createdAt,
     };
-    if (!this.epochSource.isCurrent(epochToken)) return;
-    this.streams.set(runId, initialState);
-    this.addToConversation(record.conversation_id, runId, epochToken);
-    const orderedEvents = [...events].sort((a, b) => (a.event_index ?? 0) - (b.event_index ?? 0));
-    for (const event of orderedEvents) {
-      if (event.event_type === 'tool_approval_request' || event.event_type === 'tool_approval_result') {
-        continue;
+    let installed = false;
+    try {
+      this.assertEpochCurrent(epochToken);
+      this.streams.set(runId, initialState);
+      installed = true;
+      this.assertEpochCurrent(epochToken);
+      this.addToConversation(record.conversation_id, runId, epochToken);
+      this.assertEpochCurrent(epochToken);
+      for (const event of orderRunEvents(events)) {
+        this.assertEpochCurrent(epochToken);
+        runId = this.applyChunk(runId, event, epochToken);
+        this.assertEpochCurrent(epochToken);
       }
-      if (!this.epochSource.isCurrent(epochToken)) {
-        this.cleanupOwnedState(runId, epochToken, null, initialRunId);
-        return;
+      const restored = this.streams.get(runId);
+      if (!this.ownsState(restored, epochToken)) throw new StaleConnectionEpochError();
+      const replayIsTerminal = isTerminalStreamStatus(restored.status);
+      const pendingApprovals = isTerminalRunStatus(record.status) || replayIsTerminal
+        ? {}
+        : Object.fromEntries(Object.entries(restored.pendingApprovals)
+            .filter(([, approval]) => approval.status === 'pending'));
+      const finalState: StreamState = {
+        ...restored,
+        status: isTerminalRunStatus(record.status)
+          ? mapRunRecordStatus(record.status)
+          : restored.status,
+        eventCount: nextRunEventCursor(record, events),
+        duration: restored.duration || duration,
+        errorMessage: restored.errorMessage ?? (typeof record.metadata?.error === 'string' ? record.metadata.error : null),
+        abortController: null,
+        reasoningActive: false,
+        pendingApprovals,
+        createdByRunId: record.created_by_run_id ?? restored.createdByRunId ?? null,
+        cancellationParentRunId: record.cancellation_parent_run_id ?? restored.cancellationParentRunId ?? null,
+        summary: record.summary || restored.summary || '',
+        metadata: {
+          ...(record.metadata || {}),
+          ...(restored.metadata || {}),
+        },
+      };
+      this.assertEpochCurrent(epochToken);
+      this.streams.set(runId, finalState);
+      this.assertEpochCurrent(epochToken);
+      this.notify(record.conversation_id, epochToken, true);
+      this.assertEpochCurrent(epochToken);
+      return runId;
+    } catch (error) {
+      if (installed) this.cleanupOwnedState(runId, epochToken, null, initialRunId);
+      throw error;
+    }
+  }
+
+  restoreRunFromEvents(record: RunRecord, events: RunEventPayload[]): void {
+    const epochToken = this.epochSource.capture();
+    try {
+      this.restoreRunSnapshot(record, events, epochToken);
+    } catch (error) {
+      if (!(error instanceof StaleConnectionEpochError)) throw error;
+    }
+  }
+
+  restoreAndAttachRun(
+    record: RunRecord,
+    events: RunEventPayload[],
+    epochToken: ConnectionEpochToken,
+  ): void {
+    this.assertEpochCurrent(epochToken);
+    const subscriptionKey = record.run_id;
+    let managed = this.managedSubscriptionTasks.get(subscriptionKey);
+    if (managed && !this.tokensMatch(managed.epochToken, epochToken)) {
+      managed.controller.abort();
+      if (this.managedSubscriptionTasks.get(subscriptionKey) === managed) {
+        this.managedSubscriptionTasks.delete(subscriptionKey);
       }
-      runId = this.applyChunk(runId, event, epochToken);
+      managed = undefined;
     }
-    const restored = this.streams.get(runId);
-    if (!this.ownsCurrentState(restored, epochToken)) {
-      this.cleanupOwnedState(runId, epochToken, null, initialRunId);
-      return;
+
+    const activeRunId = this.resolveRunIdForToken(subscriptionKey, epochToken);
+    const candidate = this.streams.get(activeRunId);
+    const activeState = this.ownsCurrentState(candidate, epochToken) ? candidate : null;
+    const activeController = activeState?.abortController
+      && !activeState.abortController.signal.aborted
+      && (this.durationTimers.has(activeRunId)
+        || managed?.controller === activeState.abortController)
+      ? activeState.abortController
+      : null;
+    if (managed && managed.controller !== activeController) {
+      managed.controller.abort();
+      if (this.managedSubscriptionTasks.get(subscriptionKey) === managed) {
+        this.managedSubscriptionTasks.delete(subscriptionKey);
+      }
+      managed = undefined;
     }
-    this.streams.set(runId, {
-      ...restored,
-      status: mapRunRecordStatus(record.status),
-      eventCount: Math.max(restored.eventCount, record.event_count ?? restored.eventCount),
-      duration: restored.duration || duration,
-      errorMessage: restored.errorMessage ?? (typeof record.metadata?.error === 'string' ? record.metadata.error : null),
-      abortController: null,
-      reasoningActive: false,
-      createdByRunId: record.created_by_run_id ?? restored.createdByRunId ?? null,
-      cancellationParentRunId: record.cancellation_parent_run_id ?? restored.cancellationParentRunId ?? null,
-      summary: record.summary || restored.summary || '',
-      metadata: {
-        ...(record.metadata || {}),
-        ...(restored.metadata || {}),
-      },
-    });
-    this.notify(record.conversation_id, epochToken, true);
+
+    if (activeController) {
+      const snapshotIsTerminal = isTerminalStreamStatus(restoredSnapshotStatus(record, events));
+      if (!snapshotIsTerminal) return;
+      this.removeManagedSubscriptionsForRun(activeRunId, epochToken, activeController);
+      this.cleanupOwnedState(activeRunId, epochToken, activeController, subscriptionKey);
+    }
+
+    const runId = this.restoreRunSnapshot(record, events, epochToken);
+    if (isTerminalRunStatus(record.status)) return;
+
+    const controller = new AbortController();
+    let controllerInstalled = false;
+    try {
+      this.assertEpochCurrent(epochToken);
+      const restored = this.streams.get(runId);
+      if (!this.ownsState(restored, epochToken)) throw new StaleConnectionEpochError();
+      const attachedState: StreamState = {
+        ...restored,
+        abortController: controller,
+      };
+      this.streams.set(runId, attachedState);
+      controllerInstalled = true;
+      this.assertEpochCurrent(epochToken);
+      this.notify(attachedState.conversationId, epochToken, true);
+      this.assertEpochCurrent(epochToken);
+
+      const fromEvent = nextRunEventCursor(record, events);
+      const signal = composeConnectionAbortSignal(
+        controller.signal,
+        this.epochSource.signalFor(epochToken),
+      );
+      const task = this.consume(runId, epochToken, controller, () => runsApi.attach(
+        subscriptionKey,
+        { token: epochToken, fromEvent, signal },
+      )).finally(() => {
+        if (this.managedSubscriptionTasks.get(subscriptionKey)?.task === task) {
+          this.managedSubscriptionTasks.delete(subscriptionKey);
+        }
+      });
+      const subscription: ManagedRunSubscription = {
+        epochToken,
+        controller,
+        task,
+      };
+      this.managedSubscriptionTasks.set(subscriptionKey, subscription);
+      this.assertEpochCurrent(epochToken);
+    } catch (error) {
+      controller.abort();
+      this.removeManagedSubscriptionsForRun(runId, epochToken, controller);
+      this.cleanupOwnedState(
+        runId,
+        epochToken,
+        controllerInstalled ? controller : null,
+        record.run_id,
+      );
+      throw error;
+    }
   }
 
   async startStream(
@@ -1466,7 +1683,8 @@ export class StreamManager {
       finishStatus = err instanceof Error && err.name === 'AbortError' ? 'stopped' : 'error';
       const state = this.streams.get(runId);
       if (this.ownsCurrentState(state, epochToken)
-          && state.abortController === controller) {
+          && state.abortController === controller
+          && !isTerminalStreamStatus(state.status)) {
         this.streams.set(runId, {
           ...state,
           status: finishStatus === 'error' ? 'error' : 'stopped',
@@ -1559,7 +1777,11 @@ export class StreamManager {
 
   cleanupRun(runId: string): void {
     const state = this.streams.get(runId);
-    if (!state) return;
+    if (!state) {
+      this.removeManagedSubscriptionsForRun(runId);
+      return;
+    }
+    this.removeManagedSubscriptionsForRun(runId, state.epochToken);
     const timer = this.durationTimers.get(runId);
     if (timer !== undefined) window.clearInterval(timer);
     this.durationTimers.delete(runId);
@@ -1607,6 +1829,9 @@ export class StreamManager {
   }
 
   resetAll(): void {
+    for (const subscription of this.managedSubscriptionTasks.values()) {
+      subscription.controller.abort();
+    }
     for (const state of this.streams.values()) {
       state.abortController?.abort();
     }
@@ -1618,6 +1843,7 @@ export class StreamManager {
     this.runsByConversation.clear();
     this.conversationSnapshots.clear();
     this.runAliases.clear();
+    this.managedSubscriptionTasks.clear();
     this.listeners.clear();
     this.finishListeners.clear();
     this.durationTimers.clear();

@@ -1,4 +1,4 @@
-import { parseFrontendRoute } from './profileRoute';
+import { readFrontendRouteLocation } from './profileRoute';
 
 export type FrontendBootstrap = Readonly<{ profileId: string; apiBase: string }>;
 export type BootstrapSource = Readonly<{ injected?: unknown; href: string }>;
@@ -79,23 +79,7 @@ function validateApiBase(value: string, profileId: string, trustedInjected: bool
 }
 
 export function resolveFrontendBootstrap(source: BootstrapSource): FrontendBootstrap {
-  let pageUrl: URL;
-  try {
-    pageUrl = new URL(source.href);
-  } catch {
-    throw new Error('Launcher HTTP origin is required');
-  }
-  if (pageUrl.protocol !== 'http:' && pageUrl.protocol !== 'https:') {
-    throw new Error('Launcher HTTP origin is required');
-  }
-  if (source.href.includes('?') || source.href.includes('#') || pageUrl.search || pageUrl.hash) {
-    throw new Error('Frontend route may not contain query or hash');
-  }
-  if (source.href.includes('\\') || rawHttpPathname(source.href) !== pageUrl.pathname) {
-    throw new Error('Frontend page URL must use a canonical pathname');
-  }
-
-  const route = parseFrontendRoute(pageUrl.pathname);
+  const route = readFrontendRouteLocation({ href: source.href });
   const candidate = validateInjectedBootstrap(source.injected);
   const profileId = candidate === undefined ? route.profileId : candidate.profileId;
   if (profileId !== route.profileId) {

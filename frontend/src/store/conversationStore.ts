@@ -57,7 +57,7 @@ interface ConversationActions {
     token?: ConnectionEpochToken,
   ) => Promise<boolean>;
   updateMultiAgentMode: (id: string, mode: MultiAgentMode, token?: ConnectionEpochToken) => Promise<void>;
-  clearCurrentConversation: () => void;
+  clearCurrentConversation: (token?: ConnectionEpochToken) => Promise<void>;
   switchNode: (nodeId: string, token?: ConnectionEpochToken) => Promise<void>;
   setCurrentNodeIdLocal: (nodeId: string) => void;
   deleteNode: (nodeId: string, token?: ConnectionEpochToken) => Promise<void>;
@@ -579,18 +579,26 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
           }
         },
 
-        clearCurrentConversation: () => {
-          set({
-            currentConversation: null,
-            messages: [],
-            branches: {},
-            treeData: null,
-            streamingContent: '',
-            currentNodeId: null,
-            pendingScrollNodeId: null,
-          });
-          // 清空对话时重置为默认模型
-          useModelStore.getState().resetToDefault();
+        clearCurrentConversation: async (ownerToken) => {
+          let token: ConnectionEpochToken | null = null;
+          try {
+            token = resolveEpochToken(ownerToken);
+            commitForConnectionEpoch(token, () => set({
+              currentConversation: null,
+              messages: [],
+              branches: {},
+              treeData: null,
+              streamingContent: '',
+              currentNodeId: null,
+              pendingScrollNodeId: null,
+            }));
+            await useModelStore.getState().resetToDefault(token);
+            connectionEpochRuntime.assertCurrent(token);
+          } catch (error) {
+            if (!isStaleEpoch(error, token)) {
+              commitForConnectionEpoch(token, () => set({ error: errorMessage(error) }));
+            }
+          }
         },
 
         deleteNode: async (nodeId, ownerToken) => {

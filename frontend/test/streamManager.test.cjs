@@ -220,6 +220,20 @@ function chunk(overrides) {
   };
 }
 
+function runRecord(overrides = {}) {
+  return {
+    run_id: 'run-restored',
+    conversation_id: 'conv-1',
+    kind: 'subagent',
+    status: 'running',
+    event_count: 0,
+    created_at: 10,
+    updated_at: 11,
+    finished_at: null,
+    ...overrides,
+  };
+}
+
 function toolRoundFields(toolRound) {
   return {
     tool_round: toolRound,
@@ -1289,6 +1303,541 @@ async function testRestoreRunKeepsParentSummaryAndMetadata() {
   });
 }
 
+async function testRestoreAndAttachRunReplaysOnceAndUsesFreshCursor() {
+  const epoch = createEpochSource();
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    const attachCalls = [];
+    runsApi.attach = (runId, options) => {
+      attachCalls.push([runId, options]);
+      return controlled.stream();
+    };
+    const record = runRecord({
+      run_id: 'run-managed',
+      event_count: 3,
+    });
+    const events = [
+      chunk({
+        run_id: 'run-managed',
+        event_index: 4,
+        content: 'tail',
+      }),
+      chunk({
+        run_id: 'run-managed',
+        event_index: 0,
+        content: 'head',
+      }),
+    ];
+
+    assert.equal(manager.restoreAndAttachRun(record, events, epoch.token), undefined);
+    const initialState = manager.getConversationStates('conv-1')[0];
+    const initialSubscription = manager.managedSubscriptionTasks.get('run-managed');
+    assert.equal(initialState.content, 'headtail');
+    assert.ok(initialState.abortController instanceof AbortController);
+    assert.equal(initialSubscription.controller, initialState.abortController);
+    assert.equal(attachCalls.length, 1);
+    assert.equal(attachCalls[0][0], 'run-managed');
+    assert.equal(attachCalls[0][1].token, epoch.token);
+    assert.equal(attachCalls[0][1].fromEvent, 5);
+    assert.equal(attachCalls[0][1].signal.aborted, false);
+
+    let settled = false;
+    initialSubscription.task.finally(() => {
+      settled = true;
+    });
+    await tick();
+    assert.equal(settled, false, 'restore must not wait for the managed SSE lifetime');
+
+    manager.restoreAndAttachRun(record, events, epoch.token);
+    const reusedState = manager.getConversationStates('conv-1')[0];
+    assert.equal(attachCalls.length, 1);
+    assert.equal(reusedState.content, 'headtail');
+    assert.equal(reusedState.abortController, initialState.abortController);
+    assert.equal(manager.managedSubscriptionTasks.get('run-managed'), initialSubscription);
+
+    await controlled.close();
+    await runTimersUntil(initialSubscription.task);
+    assert.equal(manager.managedSubscriptionTasks.has('run-managed'), false);
+  }, epoch);
+}
+
+async function testRestoreAndAttachRunReconcilesTerminalRecordOverManagedAttach() {
+  const epoch = createEpochSource();
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    const attachCalls = [];
+    runsApi.attach = (runId, options) => {
+      attachCalls.push([runId, options]);
+      return controlled.stream();
+    };
+    const runningRecord = runRecord({
+      run_id: 'run-terminal-reopen',
+      event_count: 1,
+    });
+
+    manager.restoreAndAttachRun(runningRecord, [chunk({
+      run_id: 'run-terminal-reopen',
+      event_index: 0,
+      content: 'running',
+    })], epoch.token);
+    const originalSubscription = manager.managedSubscriptionTasks.get('run-terminal-reopen');
+    assert.ok(originalSubscription);
+
+    manager.restoreAndAttachRun(runRecord({
+      run_id: 'run-terminal-reopen',
+      status: 'completed',
+      event_count: 2,
+      finished_at: 12,
+    }), [
+      chunk({
+        run_id: 'run-terminal-reopen',
+        event_index: 0,
+        content: 'running',
+      }),
+      chunk({
+        run_id: 'run-terminal-reopen',
+        event_index: 1,
+        status: 'completed',
+      }),
+    ], epoch.token);
+
+    const terminalState = manager.getConversationStates('conv-1')[0];
+    assert.equal(originalSubscription.controller.signal.aborted, true);
+    assert.equal(terminalState.status, 'completed');
+    assert.equal(terminalState.abortController, null);
+    assert.equal(terminalState.content, 'running');
+    assert.equal(manager.managedSubscriptionTasks.has('run-terminal-reopen'), false);
+    assert.equal(attachCalls.length, 1, 'terminal reconciliation must not open a replacement attach');
+
+    await controlled.close();
+    await runTimersUntil(originalSubscription.task);
+    assert.equal(manager.getConversationStates('conv-1')[0].status, 'completed');
+    assert.equal(manager.managedSubscriptionTasks.has('run-terminal-reopen'), false);
+  }, epoch);
+}
+
+async function testRestoreAndAttachRunReplacesManagedAttachForNewTerminalEvents() {
+  const epoch = createEpochSource();
+  await withManager(async (manager) => {
+    const originalStream = createControlledStream();
+    const replacementStream = createControlledStream();
+    const attachCalls = [];
+    runsApi.attach = (runId, options) => {
+      attachCalls.push([runId, options]);
+      return attachCalls.length === 1 ? originalStream.stream() : replacementStream.stream();
+    };
+    const record = runRecord({
+      run_id: 'run-terminal-events-reopen',
+      event_count: 1,
+    });
+
+    manager.restoreAndAttachRun(record, [chunk({
+      run_id: 'run-terminal-events-reopen',
+      event_index: 0,
+      content: 'persisted',
+    })], epoch.token);
+    const originalSubscription = manager.managedSubscriptionTasks.get('run-terminal-events-reopen');
+
+    manager.restoreAndAttachRun(record, [
+      chunk({
+        run_id: 'run-terminal-events-reopen',
+        event_index: 0,
+        content: 'persisted',
+      }),
+      chunk({
+        run_id: 'run-terminal-events-reopen',
+        event_index: 2,
+        status: 'interrupted',
+      }),
+    ], epoch.token);
+    const replacementSubscription = manager.managedSubscriptionTasks.get('run-terminal-events-reopen');
+    const restoredState = manager.getConversationStates('conv-1')[0];
+
+    assert.notEqual(replacementSubscription, originalSubscription);
+    assert.equal(originalSubscription.controller.signal.aborted, true);
+    assert.equal(attachCalls.length, 2);
+    assert.equal(attachCalls[1][1].fromEvent, 3);
+    assert.equal(restoredState.status, 'stopped');
+    assert.equal(restoredState.content, 'persisted');
+    assert.equal(restoredState.abortController, replacementSubscription.controller);
+
+    await originalStream.close();
+    await runTimersUntil(originalSubscription.task);
+    assert.equal(
+      manager.managedSubscriptionTasks.get('run-terminal-events-reopen'),
+      replacementSubscription,
+    );
+    assert.equal(manager.getConversationStates('conv-1')[0].status, 'stopped');
+
+    await replacementStream.close();
+    await runTimersUntil(replacementSubscription.task);
+    assert.equal(manager.managedSubscriptionTasks.has('run-terminal-events-reopen'), false);
+    assert.equal(manager.getConversationStates('conv-1')[0].status, 'stopped');
+  }, epoch);
+}
+
+async function testRestoreAndAttachRunReusesResumeStreamTransport() {
+  const epoch = createEpochSource();
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    const attachCalls = [];
+    runsApi.attach = (runId, options) => {
+      attachCalls.push([runId, options]);
+      return controlled.stream();
+    };
+
+    const running = manager.resumeStream('conv-1', null, 'run-resume-owned');
+    await controlled.push(chunk({
+      run_id: 'run-resume-owned',
+      event_index: 0,
+      content: 'live',
+    }));
+    const originalState = manager.getConversationStates('conv-1')[0];
+
+    manager.restoreAndAttachRun(runRecord({
+      run_id: 'run-resume-owned',
+      event_count: 1,
+    }), [chunk({
+      run_id: 'run-resume-owned',
+      event_index: 0,
+      content: 'persisted',
+    })], epoch.token);
+
+    const reusedState = manager.getConversationStates('conv-1')[0];
+    assert.equal(attachCalls.length, 1);
+    assert.equal(reusedState.abortController, originalState.abortController);
+    assert.equal(reusedState.content, 'live');
+    assert.equal(manager.managedSubscriptionTasks.has('run-resume-owned'), false);
+
+    await controlled.close();
+    await runTimersUntil(running);
+  }, epoch);
+}
+
+async function testRestoreAndAttachRunReusesStartStreamAndReconcilesTerminalSnapshot() {
+  const epoch = createEpochSource();
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    const runAttachCalls = [];
+    messageApi.stream = controlled.stream;
+    runsApi.attach = (...args) => {
+      runAttachCalls.push(args);
+      return createControlledStream().stream();
+    };
+
+    const running = manager.startStream('conv-1', { content: 'hello' });
+    await controlled.push(chunk({
+      run_id: 'run-start-owned',
+      event_index: 0,
+      content: 'live',
+    }));
+    const originalState = manager.getConversationStates('conv-1')[0];
+
+    manager.restoreAndAttachRun(runRecord({
+      run_id: 'run-start-owned',
+      event_count: 1,
+    }), [chunk({
+      run_id: 'run-start-owned',
+      event_index: 0,
+      content: 'persisted',
+    })], epoch.token);
+    const reusedState = manager.getConversationStates('conv-1')[0];
+    assert.equal(reusedState.abortController, originalState.abortController);
+    assert.equal(reusedState.content, 'live');
+    assert.equal(runAttachCalls.length, 0);
+
+    manager.restoreAndAttachRun(runRecord({
+      run_id: 'run-start-owned',
+      status: 'completed',
+      event_count: 2,
+      finished_at: 12,
+    }), [
+      chunk({
+        run_id: 'run-start-owned',
+        event_index: 0,
+        content: 'persisted',
+      }),
+      chunk({
+        run_id: 'run-start-owned',
+        event_index: 1,
+        status: 'completed',
+      }),
+    ], epoch.token);
+
+    const terminalState = manager.getConversationStates('conv-1')[0];
+    assert.equal(originalState.abortController.signal.aborted, true);
+    assert.equal(terminalState.status, 'completed');
+    assert.equal(terminalState.abortController, null);
+    assert.equal(terminalState.content, 'persisted');
+    assert.equal(runAttachCalls.length, 0);
+
+    await controlled.close();
+    await runTimersUntil(running);
+    assert.equal(manager.getConversationStates('conv-1')[0].status, 'completed');
+  }, epoch);
+}
+
+async function testRestoreAndAttachRunFoldsApprovalHistoryBeforeAttach() {
+  const epoch = createEpochSource();
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    const attachCalls = [];
+    runsApi.attach = (runId, options) => {
+      attachCalls.push([runId, options]);
+      return controlled.stream();
+    };
+    const record = runRecord({
+      run_id: 'run-approval-replay',
+      status: 'waiting_approval',
+      event_count: 2,
+    });
+    const events = [
+      {
+        run_id: 'run-approval-replay',
+        conversation_id: 'conv-1',
+        status: 'waiting_approval',
+        event_type: 'tool_approval_request',
+        approval: { id: 'approval-live', status: 'pending', tool_name: 'write_file' },
+        event_index: 2,
+      },
+      {
+        run_id: 'run-approval-replay',
+        conversation_id: 'conv-1',
+        status: 'running',
+        event_type: 'tool_approval_result',
+        approval: { id: 'approval-resolved', status: 'approved' },
+        event_index: 1,
+      },
+      {
+        run_id: 'run-approval-replay',
+        conversation_id: 'conv-1',
+        status: 'waiting_approval',
+        event_type: 'tool_approval_request',
+        approval: { id: 'approval-resolved', status: 'pending', tool_name: 'run_command' },
+        event_index: 0,
+      },
+    ];
+
+    manager.restoreAndAttachRun(record, events, epoch.token);
+    const state = manager.getConversationStates('conv-1')[0];
+    const subscription = manager.managedSubscriptionTasks.get('run-approval-replay');
+    assert.equal(state.status, 'waiting_approval');
+    assert.deepEqual(Object.keys(state.pendingApprovals), ['approval-live']);
+    assert.equal(state.pendingApprovals['approval-live'].tool_name, 'write_file');
+    assert.equal(attachCalls[0][1].fromEvent, 3);
+
+    await controlled.close();
+    await runTimersUntil(subscription.task);
+  }, epoch);
+}
+
+async function testRestoreAndAttachRunKeepsEveryTerminalStatusStatic() {
+  const epoch = createEpochSource();
+  await withManager(async (manager) => {
+    const attachCalls = [];
+    runsApi.attach = (...args) => {
+      attachCalls.push(args);
+      return createControlledStream().stream();
+    };
+    const expectedStatuses = new Map([
+      ['completed', 'completed'],
+      ['failed', 'error'],
+      ['cancelled', 'stopped'],
+      ['interrupted', 'stopped'],
+      ['stopped', 'stopped'],
+    ]);
+
+    for (const [status, expectedStatus] of expectedStatuses) {
+      const runId = `run-terminal-${status}`;
+      const conversationId = `conv-terminal-${status}`;
+      manager.restoreAndAttachRun(
+        runRecord({
+          run_id: runId,
+          conversation_id: conversationId,
+          status,
+          event_count: 1,
+          finished_at: 12,
+        }),
+        [{
+          run_id: runId,
+          conversation_id: conversationId,
+          status: 'waiting_approval',
+          event_type: 'tool_approval_request',
+          approval: { id: `approval-${status}`, status: 'pending' },
+          event_index: 0,
+        }],
+        epoch.token,
+      );
+
+      const state = manager.getConversationStates(conversationId)[0];
+      assert.equal(state.status, expectedStatus);
+      assert.equal(state.abortController, null);
+      assert.deepEqual(state.pendingApprovals, {});
+    }
+
+    assert.equal(attachCalls.length, 0);
+    assert.equal(manager.managedSubscriptionTasks.size, 0);
+  }, epoch);
+}
+
+async function testRestoreAndAttachRunPreservesNewerTerminalEventStatus() {
+  const epoch = createEpochSource();
+  await withManager(async (manager) => {
+    const attachCalls = [];
+    runsApi.attach = async function* attach(runId, options) {
+      attachCalls.push([runId, options]);
+    };
+    manager.restoreAndAttachRun(
+      runRecord({
+        run_id: 'run-status-race',
+        status: 'running',
+        event_count: 1,
+      }),
+      [
+        {
+          run_id: 'run-status-race',
+          conversation_id: 'conv-1',
+          status: 'running',
+          event_index: 0,
+        },
+        {
+          run_id: 'run-status-race',
+          conversation_id: 'conv-1',
+          status: 'waiting_approval',
+          event_type: 'tool_approval_request',
+          approval: { id: 'approval-before-terminal', status: 'pending' },
+          event_index: 1,
+        },
+        {
+          type: 'run_finished',
+          run_id: 'run-status-race',
+          conversation_id: 'conv-1',
+          status: 'interrupted',
+          event_index: 2,
+        },
+      ],
+      epoch.token,
+    );
+    const subscription = manager.managedSubscriptionTasks.get('run-status-race');
+    await runTimersUntil(subscription.task);
+
+    const state = manager.getConversationStates('conv-1')[0];
+    assert.equal(attachCalls.length, 1);
+    assert.equal(attachCalls[0][1].fromEvent, 3);
+    assert.equal(state.status, 'stopped');
+    assert.deepEqual(state.pendingApprovals, {});
+  }, epoch);
+}
+
+async function testRestoreAndAttachRunKeepsEventTerminalStatusOnAttachFailure() {
+  const epoch = createEpochSource();
+  await withManager(async (manager) => {
+    runsApi.attach = async function* attach() {
+      throw new Error('attach transport failed');
+    };
+    const expectedStatuses = new Map([
+      ['completed', 'completed'],
+      ['interrupted', 'stopped'],
+    ]);
+
+    for (const [eventStatus, expectedStatus] of expectedStatuses) {
+      const runId = `run-event-terminal-${eventStatus}`;
+      const conversationId = `conv-event-terminal-${eventStatus}`;
+      manager.restoreAndAttachRun(
+        runRecord({
+          run_id: runId,
+          conversation_id: conversationId,
+          status: 'running',
+          event_count: 0,
+        }),
+        [{
+          type: 'run_finished',
+          run_id: runId,
+          conversation_id: conversationId,
+          status: eventStatus,
+          event_index: 0,
+        }],
+        epoch.token,
+      );
+      const subscription = manager.managedSubscriptionTasks.get(runId);
+      await runTimersUntil(subscription.task);
+
+      const state = manager.getConversationStates(conversationId)[0];
+      assert.equal(state.status, expectedStatus);
+      assert.equal(state.errorMessage, null);
+    }
+  }, epoch);
+}
+
+async function testManagedRestoreInvalidationAbortsEveryAttach() {
+  const epoch = createEpochSource();
+  await withManager(async (manager) => {
+    const controlledByRun = new Map([
+      ['run-invalidated-a', createControlledStream()],
+      ['run-invalidated-b', createControlledStream()],
+    ]);
+    const attachSignals = [];
+    runsApi.attach = (runId, options) => {
+      attachSignals.push(options.signal);
+      return controlledByRun.get(runId).stream();
+    };
+
+    for (const runId of controlledByRun.keys()) {
+      manager.restoreAndAttachRun(runRecord({ run_id: runId }), [], epoch.token);
+    }
+    const subscriptions = [...manager.managedSubscriptionTasks.values()];
+    assert.equal(subscriptions.length, 2);
+
+    epoch.invalidate();
+    assert.equal(attachSignals.every((signal) => signal.aborted), true);
+
+    await Promise.all([...controlledByRun.values()].map((controlled) => controlled.close()));
+    await Promise.all(subscriptions.map((subscription) => subscription.task));
+    assert.equal(manager.managedSubscriptionTasks.size, 0);
+    assert.equal(manager.streams.size, 0);
+    assert.equal(subscriptions.every((subscription) => subscription.controller.signal.aborted), true);
+  }, epoch);
+}
+
+async function testManagedRestoreOldCompletionCannotDeleteSuccessorTask() {
+  const epoch = createSwitchableEpochSource();
+  await withManager(async (manager) => {
+    const streamA = createControlledStream();
+    const streamB = createControlledStream();
+    runsApi.attach = (_runId, options) => (
+      options.token === epoch.tokenA ? streamA.stream() : streamB.stream()
+    );
+    const record = runRecord({ run_id: 'run-managed-successor' });
+
+    manager.restoreAndAttachRun(record, [chunk({
+      run_id: 'run-managed-successor',
+      content: 'lease-a',
+      event_index: 0,
+    })], epoch.tokenA);
+    const subscriptionA = manager.managedSubscriptionTasks.get('run-managed-successor');
+
+    epoch.switchToB();
+    manager.restoreAndAttachRun(record, [chunk({
+      run_id: 'run-managed-successor',
+      content: 'lease-b',
+      event_index: 0,
+    })], epoch.tokenB);
+    const subscriptionB = manager.managedSubscriptionTasks.get('run-managed-successor');
+    assert.notEqual(subscriptionB, subscriptionA);
+    assert.equal(subscriptionA.controller.signal.aborted, true);
+    assert.equal(manager.getConversationStates('conv-1')[0].content, 'lease-b');
+
+    await streamA.close();
+    await runTimersUntil(subscriptionA.task);
+    assert.equal(manager.managedSubscriptionTasks.get('run-managed-successor'), subscriptionB);
+    assert.equal(manager.getConversationStates('conv-1')[0].content, 'lease-b');
+
+    await streamB.close();
+    await runTimersUntil(subscriptionB.task);
+    assert.equal(manager.managedSubscriptionTasks.has('run-managed-successor'), false);
+  }, epoch);
+}
+
 async function testSubagentResultDoesNotAppendAlreadyStreamedContent() {
   await withManager(async (manager) => {
     const controlled = createControlledStream();
@@ -1793,6 +2342,17 @@ async function main() {
   await testRestoreCompletedSideRunFromBackendEvents();
   await testRestoreRunDoesNotReviveHistoricalApprovalRequests();
   await testRestoreRunKeepsParentSummaryAndMetadata();
+  await testRestoreAndAttachRunReplaysOnceAndUsesFreshCursor();
+  await testRestoreAndAttachRunReconcilesTerminalRecordOverManagedAttach();
+  await testRestoreAndAttachRunReplacesManagedAttachForNewTerminalEvents();
+  await testRestoreAndAttachRunReusesResumeStreamTransport();
+  await testRestoreAndAttachRunReusesStartStreamAndReconcilesTerminalSnapshot();
+  await testRestoreAndAttachRunFoldsApprovalHistoryBeforeAttach();
+  await testRestoreAndAttachRunKeepsEveryTerminalStatusStatic();
+  await testRestoreAndAttachRunPreservesNewerTerminalEventStatus();
+  await testRestoreAndAttachRunKeepsEventTerminalStatusOnAttachFailure();
+  await testManagedRestoreInvalidationAbortsEveryAttach();
+  await testManagedRestoreOldCompletionCannotDeleteSuccessorTask();
   await testSubagentResultDoesNotAppendAlreadyStreamedContent();
   await testWorkflowResultDoesNotAppendAggregateContentToRunBody();
   await testCommandOutputUsesDedicatedBufferInsteadOfRunContent();

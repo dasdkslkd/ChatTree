@@ -117,6 +117,11 @@ export const runsApi = {
     return response.data;
   },
 
+  get: async (runId: string): Promise<RunRecord> => {
+    const response = await apiClient.get(`/runs/${encodeURIComponent(runId)}`);
+    return response.data;
+  },
+
   attach: async function* (
     runId: string,
     options: RunAttachOptions,
@@ -134,7 +139,7 @@ export const runsApi = {
   },
 
   stop: async (runId: string): Promise<void> => {
-    await apiClient.post(`/runs/${runId}/stop`);
+    await apiClient.post(`/runs/${encodeURIComponent(runId)}/stop`);
   },
 
   stopConversation: async (conversationId: string): Promise<{ run_ids: string[] }> => {
@@ -143,7 +148,7 @@ export const runsApi = {
   },
 
   events: async (runId: string, fromEvent = 0): Promise<RunEventPayload[]> => {
-    const response = await apiClient.get(`/runs/${runId}/events`, { params: { from_event: fromEvent } });
+    const response = await apiClient.get(`/runs/${encodeURIComponent(runId)}/events`, { params: { from_event: fromEvent } });
     return response.data;
   },
 };

@@ -104,7 +104,7 @@ import type {
 import type { PlanSession } from '../types/plan';
 import type { ActiveTaskRecord } from '../types/task';
 import type { TranscriptItem } from '../types/transcript';
-import type { MultiAgentMode, WorkspaceContext } from '../types/conversation';
+import type { ConversationCreateRequest, MultiAgentMode, WorkspaceContext } from '../types/conversation';
 import type { ProjectCapabilityConfig } from '../types/model';
 import { useConversationStore } from '../store/conversationStore';
 import { useModelStore } from '../store/modelStore';
@@ -122,6 +122,16 @@ import {
   ImportAssetPreviewCache,
 } from '../runtime/importAssetPreview';
 import { getFrontendBootstrap } from '../runtime/frontendBootstrap';
+import {
+  BoundRouteRestorer,
+  bindBoundFrontendPopstate,
+  navigateBoundFrontend,
+  readFrontendRouteLocation,
+  waitForRouteReadiness,
+  waitForRouteRender,
+  type RouteRestoreResult,
+} from '../runtime/profileNavigation';
+import type { FrontendRoute } from '../runtime/profileRoute';
 import {
   MANUAL_PROJECTS_STORAGE_KEY,
   PROJECT_ORDER_STORAGE_KEY,
@@ -224,7 +234,9 @@ const PROFILE_LEFT_SIDEBAR_STORAGE_KEY = profileStorageKey(profileId, LEFT_SIDEB
 const PROFILE_RIGHT_PANEL_STORAGE_KEY = profileStorageKey(profileId, RIGHT_PANEL_WIDTH_STORAGE_KEY);
 const PLAN_MODE_TOOL_NAMES = new Set(['plan', 'enter_plan_mode', 'update_plan', 'exit_plan_mode', 'ask_user_question']);
 const TASK_TOOL_NAMES = new Set(['create_task', 'set_task_step', 'cancel_task']);
-const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled', 'interrupted', 'stopped']);
+const ROUTED_SIDE_RUN_KINDS = new Set(['side_question', 'subagent', 'command', 'workflow', 'workflow_step']);
+const ROUTE_TRANSCRIPT_READY_TIMEOUT_MS = 10_000;
+const ROUTE_TRANSCRIPT_RENDER_TIMEOUT_MS = 2_000;
 
 type SidebarResizeSession = {
   side: SidebarResizeSide;
@@ -243,6 +255,20 @@ function getCurrentVisibleTranscriptTip(): { conversationId: string; tipNodeId: 
   const conversationId = state.currentConversation?.id;
   const tipNodeId = state.currentNodeId || state.currentConversation?.current_node_id || null;
   return conversationId && tipNodeId ? { conversationId, tipNodeId } : null;
+}
+
+function getCurrentConversationRoute(): FrontendRoute {
+  const state = useConversationStore.getState();
+  const conversationId = state.currentConversation?.id;
+  if (!conversationId) return { kind: 'profile', profileId };
+  const nodeId = state.currentNodeId || state.currentConversation?.current_node_id || null;
+  return nodeId
+    ? { kind: 'node', profileId, conversationId, nodeId }
+    : { kind: 'conversation', profileId, conversationId };
+}
+
+function reportFrontendRouteError(error: unknown): void {
+  console.error('Frontend route restoration failed:', error);
 }
 
 function getToolCallName(toolCall: unknown): string | null {
@@ -1194,6 +1220,32 @@ export default function ChatPage() {
   const pendingScrollId = useRef<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const sidebarResizeRef = useRef<SidebarResizeSession | null>(null);
+  const routeMountTokenRef = useRef<ConnectionEpochToken | null>(null);
+  const routeRestorerRef = useRef<BoundRouteRestorer | null>(null);
+  if (!routeMountTokenRef.current) {
+    routeMountTokenRef.current = captureConnectionEpoch();
+  }
+  const runBoundRouteIntent = useCallback(<T,>(
+    operation: (token: ConnectionEpochToken, intent: number) => T | Promise<T>,
+  ): Promise<T> => {
+    const owner = routeRestorerRef.current;
+    if (!owner) return Promise.reject(new Error('Frontend route owner is not ready'));
+    return owner.run(operation);
+  }, []);
+  const submitBoundRoute = useCallback((
+    route: FrontendRoute,
+    mode: 'push' | 'replace' | null,
+    afterRestore?: (result: RouteRestoreResult, token: ConnectionEpochToken) => void,
+  ): Promise<RouteRestoreResult> => {
+    const owner = routeRestorerRef.current;
+    if (!owner) return Promise.reject(new Error('Frontend route owner is not ready'));
+    return owner.submit(route, {
+      afterRestore: (_restoredRoute, result, token) => {
+        afterRestore?.(result, token);
+        if (mode) navigateBoundFrontend(route, mode);
+      },
+    });
+  }, []);
 
   const userScrollingRef = useRef(false);
   const scrollEndTimeoutRef = useRef<number | null>(null);
@@ -1372,9 +1424,23 @@ export default function ChatPage() {
   const {
     conversations, currentConversation, messages,
     currentNodeId, pendingScrollNodeId, clearPendingScroll,
-    createConversation, selectConversation, deleteConversation, deleteNode, switchNode, loadConversations, loadTree,
-    clearCurrentConversation, updateConversationTitle, refreshMessages, refreshBranches, patchAssistantMessageFromStream,
+    loadConversations, loadTree, updateConversationTitle,
+    refreshMessages, refreshBranches, patchAssistantMessageFromStream,
   } = useConversationStore();
+  const createConversationAndNavigate = useCallback((request: ConversationCreateRequest) => (
+    runBoundRouteIntent(async (token) => {
+      const conversation = await useConversationStore.getState().createConversation(request, token);
+      connectionEpochRuntime.assertCurrent(token);
+      if (!conversation) return null;
+      if (useConversationStore.getState().currentConversation?.id !== conversation.id) return null;
+      navigateBoundFrontend({
+        kind: 'conversation',
+        profileId,
+        conversationId: conversation.id,
+      }, 'push');
+      return conversation;
+    })
+  ), [runBoundRouteIntent]);
 
   const importPreviewFilenames = useMemo(() => Array.from(new Set([
     ...attachedImageRefs.map((ref) => ref.filename),
@@ -1535,6 +1601,17 @@ export default function ChatPage() {
       };
     });
   }, []);
+  const openSideRun = useCallback((runId: string, mode: 'push' | 'replace' = 'push') => {
+    void submitBoundRoute({ kind: 'run', profileId, runId }, mode)
+      .catch(reportFrontendRouteError);
+  }, [submitBoundRoute]);
+  const closeSideRun = useCallback((mode: 'push' | 'replace' = 'replace') => {
+    void runBoundRouteIntent(() => {
+      setSelectedSideRunId(null);
+      setSelectedTaskNotificationId(null);
+      navigateBoundFrontend(getCurrentConversationRoute(), mode);
+    }).catch(reportFrontendRouteError);
+  }, [runBoundRouteIntent]);
   const attachDeliveringTaskNotifications = useCallback((
     conversationId: string,
     notifications: TaskNotificationRecord[],
@@ -2020,10 +2097,10 @@ export default function ChatPage() {
   }, []);
 
   useEffect(() => {
-    if (selectedSideRunId && !selectedSideRunItem) {
-      setSelectedSideRunId(null);
+    if (selectedSideRunId && !selectedSideRunItem && !streamManager.hasRun(selectedSideRunId)) {
+      closeSideRun();
     }
-  }, [selectedSideRunId, selectedSideRunItem]);
+  }, [closeSideRun, selectedSideRunId, selectedSideRunItem]);
 
   useEffect(() => {
     if (selectedTaskNotificationId && !visibleTaskNotifications.some((item) => item.id === selectedTaskNotificationId)) {
@@ -2358,7 +2435,8 @@ export default function ChatPage() {
     setEditToolPermissionMode(null);
     setEditReturnNodeId(null);
     setEditProtectedAttachmentNames([]);
-    clearCurrentConversation();
+    void submitBoundRoute({ kind: 'profile', profileId }, 'push')
+      .catch(reportFrontendRouteError);
   };
   const sendNextQueuedMessage = useCallback(async (conversationId: string): Promise<boolean> => {
     const nextMessage = queuedMessagesRef.current.find((message) =>
@@ -2604,33 +2682,22 @@ export default function ChatPage() {
     if (!conversationId || notification.conversation_id !== conversationId) return;
     const runId = notification.source_run_id;
     if (!runId) return;
-    setSelectedTaskNotificationId(notification.id);
-    showSideRun(conversationId, runId);
-    setOutlineCollapsed(false);
-    setRightPanelView('side');
-    const existing = streamManager.getConversationStates(conversationId).find((run) => run.runId === runId);
-    if (existing) {
-      setSelectedSideRunId(runId);
-      return;
-    }
-    const runs = await runsApi.listConversation(conversationId);
-    const run = runs.find((item) => item.run_id === runId);
-    if (!run) return;
-    if (TERMINAL_RUN_STATUSES.has(run.status)) {
-      const events = await runsApi.events(runId, 0);
-      streamManager.restoreRunFromEvents(run, events);
-    } else {
-      void streamManager.resumeStream(
-        conversationId,
-        run.target_node_id ?? null,
-        run.run_id,
-        0,
-        run.anchor_node_id ?? null,
-        run.kind,
+    try {
+      await submitBoundRoute(
+        { kind: 'run', profileId, runId },
+        'push',
+        (result) => {
+          if (result.conversationId !== conversationId) {
+            throw new Error('Task notification run changed conversations');
+          }
+          showSideRun(conversationId, runId);
+          setSelectedTaskNotificationId(notification.id);
+        },
       );
+    } catch (error) {
+      reportFrontendRouteError(error);
     }
-    setSelectedSideRunId(runId);
-  }, [currentConversation?.id, showSideRun]);
+  }, [currentConversation?.id, showSideRun, submitBoundRoute]);
 
   const handleCopyTranscriptItem = useCallback(async (_item: TranscriptItem, text: string) => {
     try {
@@ -2659,7 +2726,14 @@ export default function ChatPage() {
     setEditProtectedAttachmentNames(protectedAttachmentNames);
     setAttachedFiles(attachmentRefs.importFiles);
     setAttachedImageRefs(attachmentRefs.imageRefs);
-    await switchNode(parentNodeId);
+    if (currentConversation?.id) {
+      await submitBoundRoute({
+        kind: 'node',
+        profileId,
+        conversationId: currentConversation.id,
+        nodeId: parentNodeId,
+      }, 'replace').catch(reportFrontendRouteError);
+    }
   }, [
     currentBranchNodeIds,
     currentBranchToolPermissionMode,
@@ -2667,7 +2741,7 @@ export default function ChatPage() {
     liveBranchToolPermissionMode,
     messages,
     selectedBranchTipId,
-    switchNode,
+    submitBoundRoute,
   ]);
 
   const handleCancelEdit = useCallback(async () => {
@@ -2681,18 +2755,54 @@ export default function ChatPage() {
     setAttachedFiles([]);
     setAttachedImageRefs([]);
     if (conversationId && returnNodeId) {
-      await switchNode(returnNodeId);
+      await submitBoundRoute({
+        kind: 'node',
+        profileId,
+        conversationId,
+        nodeId: returnNodeId,
+      }, 'replace').catch(reportFrontendRouteError);
     }
-  }, [currentConversation?.id, editReturnNodeId, switchNode]);
+  }, [currentConversation?.id, editReturnNodeId, submitBoundRoute]);
+
+  const deleteNodeAndMaintainRoute = useCallback(async (nodeId: string): Promise<string | null> => (
+    runBoundRouteIntent(async (token) => {
+      const conversationId = useConversationStore.getState().currentConversation?.id;
+      if (!conversationId) return null;
+      await useConversationStore.getState().deleteNode(nodeId, token);
+      connectionEpochRuntime.assertCurrent(token);
+      if (useConversationStore.getState().currentConversation?.id !== conversationId) return null;
+      navigateBoundFrontend(getCurrentConversationRoute(), 'replace');
+      return conversationId;
+    })
+  ), [runBoundRouteIntent]);
+
+  const handleSelectTreeNode = useCallback(async (nodeId: string) => {
+    const conversationId = useConversationStore.getState().currentConversation?.id;
+    if (!conversationId) return;
+    await submitBoundRoute({
+      kind: 'node',
+      profileId,
+      conversationId,
+      nodeId,
+    }, 'replace');
+  }, [submitBoundRoute]);
+
+  const handleDeleteTreeNode = useCallback(async (nodeId: string) => {
+    await deleteNodeAndMaintainRoute(nodeId);
+  }, [deleteNodeAndMaintainRoute]);
 
   const handleDeleteUserMessage = useCallback(async (item: TranscriptItem) => {
     if (!isTranscriptItemVisibleNow(item, currentConversation?.id ?? null, selectedBranchTipId)) return;
     const nodeId = getTranscriptItemNodeId(item);
     if (!nodeId || !currentConversation?.id) return;
     if (!window.confirm('确定删除这条消息及其后续分支？')) return;
-    await deleteNode(nodeId);
-    await refreshVisibleTranscriptSnapshot(currentConversation.id);
-  }, [currentConversation?.id, deleteNode, refreshVisibleTranscriptSnapshot, selectedBranchTipId]);
+    try {
+      const conversationId = await deleteNodeAndMaintainRoute(nodeId);
+      if (conversationId) await refreshVisibleTranscriptSnapshot(conversationId);
+    } catch (error) {
+      reportFrontendRouteError(error);
+    }
+  }, [currentConversation?.id, deleteNodeAndMaintainRoute, refreshVisibleTranscriptSnapshot, selectedBranchTipId]);
 
   // Legacy static coverage still keys off the historical marker:
   // const handleApprovePlan = useCallback(async () => {
@@ -2979,8 +3089,125 @@ export default function ChatPage() {
   }, [pendingApprovalCount, scrollToBottom]);
 
   useEffect(() => {
-    loadConversations();
-  }, []);
+    const token = routeMountTokenRef.current!;
+    let mounted = true;
+
+    const applyRestoredRoute = async (
+      route: FrontendRoute,
+      result: RouteRestoreResult,
+      ownerToken: ConnectionEpochToken,
+    ) => {
+      connectionEpochRuntime.assertCurrent(ownerToken);
+      setSelectedTaskNotificationId(null);
+      useNavigationStore.getState().setChatViewMode('chat');
+
+      if (route.kind === 'profile') {
+        await useConversationStore.getState().clearCurrentConversation(ownerToken);
+        connectionEpochRuntime.assertCurrent(ownerToken);
+        setSelectedSideRunId(null);
+        setRightPanelView('outline');
+        return;
+      }
+
+      if (route.kind !== 'run') {
+        setSelectedSideRunId(null);
+        setRightPanelView('outline');
+        return;
+      }
+
+      const restoredRun = result.conversationId
+        ? streamManager.getConversationStates(result.conversationId)
+          .find((state) => state.runId === result.runId)
+        : null;
+      if (restoredRun && ROUTED_SIDE_RUN_KINDS.has(restoredRun.kind)) {
+        setOutlineCollapsed(false);
+        setRightPanelView('side');
+        setSelectedSideRunId(restoredRun.runId);
+        return;
+      }
+
+      setSelectedSideRunId(null);
+      setRightPanelView('outline');
+      const targetNodeId = restoredRun?.targetNodeId;
+      if (!targetNodeId) return;
+      const conversationState = useConversationStore.getState();
+      const tipNodeId = conversationState.currentNodeId
+        || conversationState.currentConversation?.current_node_id
+        || null;
+      if (result.conversationId && tipNodeId) {
+        const ready = await waitForRouteReadiness(
+          ownerToken,
+          async () => {
+            await loadTranscriptSnapshot(result.conversationId, tipNodeId);
+          },
+          {
+            timeoutMs: ROUTE_TRANSCRIPT_READY_TIMEOUT_MS,
+            cancel: () => transcriptRequestCoordinatorRef.current?.cancelActive(),
+          },
+        );
+        if (!ready) return;
+      }
+      const routeOwnerSignal = routeRestorerRef.current?.signal;
+      if (!routeOwnerSignal) throw new Error('Frontend route owner is not ready');
+      await waitForRouteRender(ownerToken, () => {
+        const element = findTranscriptAnchorElement(historyRef.current, { nodeId: targetNodeId });
+        if (!element) return false;
+        element.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        return true;
+      }, {
+        timeoutMs: ROUTE_TRANSCRIPT_RENDER_TIMEOUT_MS,
+        signals: [connectionEpochRuntime.signalFor(ownerToken), routeOwnerSignal],
+      });
+    };
+
+    const restorer = new BoundRouteRestorer({
+      boundProfileId: profileId,
+      selectConversation: async (id, ownerToken) => {
+        await useConversationStore.getState().selectConversation(id, ownerToken);
+        return useConversationStore.getState().currentConversation?.id === id;
+      },
+      switchNode: async (id, ownerToken) => {
+        await useConversationStore.getState().switchNode(id, ownerToken);
+        const state = useConversationStore.getState();
+        return state.currentNodeId === id && state.currentConversation?.current_node_id === id;
+      },
+      getRun: (id) => runsApi.get(id),
+      getEvents: (id, fromEvent) => runsApi.events(id, fromEvent),
+      restoreAndAttachRun: (run, events, ownerToken) => {
+        streamManager.restoreAndAttachRun(run, events, ownerToken);
+      },
+      applyRestoredRoute,
+    }, token);
+    routeRestorerRef.current = restorer;
+    const initialRoute = restorer.submit(
+      () => readFrontendRouteLocation(window.location),
+      {
+        prepare: async (ownerToken) => {
+          await useConversationStore.getState().loadConversations(ownerToken);
+          connectionEpochRuntime.assertCurrent(ownerToken);
+        },
+      },
+    );
+    const unbindPopstate = bindBoundFrontendPopstate(
+      window,
+      profileId,
+      restorer,
+      reportFrontendRouteError,
+      (route) => navigateBoundFrontend(route, 'replace'),
+    );
+
+    void initialRoute.catch((error) => {
+      if (mounted) reportFrontendRouteError(error);
+    });
+
+    return () => {
+      mounted = false;
+      unbindPopstate();
+      restorer.dispose();
+      transcriptRequestCoordinatorRef.current?.cancelActive();
+      if (routeRestorerRef.current === restorer) routeRestorerRef.current = null;
+    };
+  }, [loadTranscriptSnapshot]);
 
   useEffect(() => {
     const updateLocalStreamingIds = () => {
@@ -3110,7 +3337,24 @@ export default function ChatPage() {
       const group = allProjectGroups.find((item) => item.path === selected.workspace?.cwd);
       if (group) setSelectedProjectId(group.id);
     }
-    await selectConversation(id);
+    await submitBoundRoute(
+      { kind: 'conversation', profileId, conversationId: id },
+      'push',
+    ).catch(reportFrontendRouteError);
+  };
+
+  const handleDeleteConversation = async (id: string) => {
+    await runBoundRouteIntent(async (token) => {
+      const wasCurrent = useConversationStore.getState().currentConversation?.id === id;
+      await useConversationStore.getState().deleteConversation(id, token);
+      connectionEpochRuntime.assertCurrent(token);
+      if (wasCurrent && !useConversationStore.getState().currentConversation) {
+        setSelectedSideRunId(null);
+        setSelectedTaskNotificationId(null);
+        setRightPanelView('outline');
+        navigateBoundFrontend({ kind: 'profile', profileId }, 'replace');
+      }
+    }).catch(reportFrontendRouteError);
   };
 
   useLayoutEffect(() => {
@@ -3188,7 +3432,7 @@ export default function ChatPage() {
     }
     let convId = currentConversation?.id;
     if (!convId) {
-      const newConv = await createConversation({
+      const newConv = await createConversationAndNavigate({
         title: files[0]?.name?.slice(0, 20) || 'New',
         workspace: workspaceForCreateRequest(),
         multi_agent_mode: newConversationMultiAgentMode,
@@ -3370,7 +3614,7 @@ export default function ChatPage() {
     }
 
     if (!conversationId) {
-      const newConv = await createConversation({
+      const newConv = await createConversationAndNavigate({
         title: val.slice(0, 20),
         prompt_id: promptId || undefined,
         prompt_mode: promptId ? promptMode : undefined,
@@ -3577,7 +3821,7 @@ export default function ChatPage() {
           className="app-run-action-button"
           onClick={(event) => {
             event.stopPropagation();
-            if (selectedSideRunId === draft.run.runId) setSelectedSideRunId(null);
+            if (selectedSideRunId === draft.run.runId) closeSideRun();
             if (currentConversation?.id) hideSideRun(currentConversation.id, draft.run.runId);
             streamManager.cleanupRun(draft.run.runId);
           }}
@@ -3979,7 +4223,7 @@ export default function ChatPage() {
                   type="button"
                   className="flex min-w-0 items-center gap-2 rounded-lg border px-2.5 py-2 text-left transition-colors"
                   style={{ borderColor: 'var(--border)', background: 'transparent', color: 'var(--fg-secondary)' }}
-                  onClick={() => setSelectedSideRunId(step.run.runId)}
+                  onClick={() => openSideRun(step.run.runId)}
                 >
                   <span className="min-w-0 flex-1 truncate text-sm">{getSideRunTitle(step.run)}</span>
                   <span className="text-xs" style={{ color: getSideRunStatusColor(step.run) }}>{getSideRunStatusText(step.run)}</span>
@@ -4128,7 +4372,7 @@ export default function ChatPage() {
                                       <Pencil className="h-4 w-4 mr-2" />
                                       重命名
                                     </DropdownMenuItem>
-                                    <DropdownMenuItem onClick={() => deleteConversation(c.id)}>
+                                    <DropdownMenuItem onClick={() => { void handleDeleteConversation(c.id); }}>
                                       <X className="h-4 w-4 mr-2" />
                                       删除对话
                                     </DropdownMenuItem>
@@ -4353,7 +4597,10 @@ export default function ChatPage() {
         {/* Tree view */}
         {chatViewMode === 'tree' && (
           <div className="flex-1 overflow-hidden">
-            <TreeView />
+            <TreeView
+              onSelectNode={handleSelectTreeNode}
+              onDeleteNode={handleDeleteTreeNode}
+            />
           </div>
         )}
       </section>
@@ -4488,8 +4735,8 @@ export default function ChatPage() {
                         const nextRunId = parentRun && SIDE_RUN_KINDS.has(parentRun.kind)
                           ? parentRun.runId
                           : null;
-                        setSelectedSideRunId(nextRunId);
-                        if (!nextRunId) setSelectedTaskNotificationId(null);
+                        if (nextRunId) openSideRun(nextRunId);
+                        else closeSideRun();
                       }}
                     >
                       <ArrowLeft className="h-3.5 w-3.5" />
@@ -4530,11 +4777,11 @@ export default function ChatPage() {
                           role="button"
                           tabIndex={0}
                           className="app-run-list-row p-0 text-left"
-                          onClick={() => setSelectedSideRunId(item.run.runId)}
+                          onClick={() => openSideRun(item.run.runId)}
                           onKeyDown={(event) => {
                             if (event.key !== 'Enter' && event.key !== ' ') return;
                             event.preventDefault();
-                            setSelectedSideRunId(item.run.runId);
+                            openSideRun(item.run.runId);
                           }}
                         >
                           <div className="flex items-center gap-2 px-3 py-2">

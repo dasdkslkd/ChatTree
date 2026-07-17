@@ -1,7 +1,6 @@
 ﻿import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import dagre from 'dagre';
-import { useConversationStore, conversationStore } from '../store/conversationStore';
-import { useNavigationStore } from '../store/navigationStore';
+import { useConversationStore } from '../store/conversationStore';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -68,10 +67,14 @@ function stripFileMention(content: string): string {
   return match ? content.slice(match[0].length) : content;
 }
 
-export default function TreeView() {
+type TreeViewProps = Readonly<{
+  onSelectNode: (nodeId: string) => Promise<void>;
+  onDeleteNode: (nodeId: string) => Promise<void>;
+}>;
+
+export default function TreeView({ onSelectNode, onDeleteNode }: TreeViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const { currentConversation, treeData, loadTree, deleteNode } = useConversationStore();
-  const { setChatViewMode } = useNavigationStore();
+  const { currentConversation, treeData, loadTree } = useConversationStore();
   const runStates = useRunManager(currentConversation?.id ?? null);
 
   const [transform, setTransform] = useState({ x: 0, y: 0, scale: 1 });
@@ -239,10 +242,8 @@ export default function TreeView() {
     if (!currentConversation) return;
     const node = treeData?.nodes.find(n => n.id === nodeId);
     if (!node || isRootNode(node)) return;
-    const { switchNode } = conversationStore.getState();
-    await switchNode(nodeId);
-    setChatViewMode('chat');
-  }, [currentConversation, treeData, setChatViewMode]);
+    await onSelectNode(nodeId);
+  }, [currentConversation, onSelectNode, treeData]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent, nodeId: string) => {
     e.preventDefault();
@@ -272,12 +273,12 @@ export default function TreeView() {
     if (!contextMenu || !currentConversation) return;
     if (!confirm(`确定删除「${contextMenu.label}」及其所有后续分支？`)) return;
     try {
-      await deleteNode(contextMenu.nodeId);
+      await onDeleteNode(contextMenu.nodeId);
     } catch (err) {
       console.error('删除失败:', err);
     }
     setContextMenu(null);
-  }, [contextMenu, currentConversation, deleteNode]);
+  }, [contextMenu, currentConversation, onDeleteNode]);
 
   const handleGeneratePruneSummary = useCallback(() => {
     if (!contextMenu || !currentConversation) return;

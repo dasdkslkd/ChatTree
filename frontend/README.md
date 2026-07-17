@@ -1,73 +1,27 @@
-# React + TypeScript + Vite
+# ChatTree Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+前端由本地 launcher 绑定到一个不可变的 Profile。先从仓库根目录启动 launcher：
 
-Currently, two official plugins are available:
-
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```powershell
+python -m client_launcher
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+开发前端时，在另一个 PowerShell 窗口运行：
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```powershell
+$env:VITE_LAUNCHER_PROXY_TARGET='http://127.0.0.1:8000'
+npm --prefix frontend run dev
 ```
+
+launcher 打开的第一个标签页使用 `http://127.0.0.1:5173/s/local`。每个额外标签页都使用其准确的 Profile ID，例如 `http://127.0.0.1:5173/s/<profile-id>`。
+
+Profile 路径支持对话、节点和运行深链接：
+
+```text
+/s/<profile-id>
+/s/<profile-id>/c/<conversation-id>
+/s/<profile-id>/c/<conversation-id>/n/<node-id>
+/s/<profile-id>/r/<run-id>
+```
+
+根路径 `/` 会被有意拒绝。查询参数和 URL hash 不属于深链接契约，也会被拒绝。Vite 只代理到 launcher 的 `8000` 端口，不会直接访问 Profile 后端的 `8001` 端口。
