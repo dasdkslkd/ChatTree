@@ -61,7 +61,7 @@ def test_startup_failure_releases_home_lock(monkeypatch, tmp_path: Path):
         pass
 
 
-def test_shutdown_failure_still_releases_home_lock(monkeypatch, tmp_path: Path):
+def test_shutdown_failure_retains_home_lock_for_cleanup_retry(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("CHATTREE_HOME", str(tmp_path))
     home_lock = ServerHomeLock(tmp_path)
     home_lock.acquire()
@@ -80,6 +80,8 @@ def test_shutdown_failure_still_releases_home_lock(monkeypatch, tmp_path: Path):
                 with ServerHomeLock(tmp_path):
                     pass
 
+    run_manager = FailingRunManager()
+    tool_manager = RecordingToolManager()
     monkeypatch.setattr(
         main.app.state,
         "server_home_lock",
@@ -89,23 +91,30 @@ def test_shutdown_failure_still_releases_home_lock(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(
         main.app.state,
         "run_manager",
-        FailingRunManager(),
+        run_manager,
         raising=False,
     )
     monkeypatch.setattr(
         main.app.state,
         "tool_manager",
-        RecordingToolManager(),
+        tool_manager,
         raising=False,
     )
 
     with pytest.raises(RuntimeError, match="shutdown failed"):
         asyncio.run(main.shutdown_event())
 
-    assert close_order == ["run", "tool"]
-    assert main.app.state.server_home_lock is None
-    with ServerHomeLock(tmp_path):
-        pass
+    assert close_order == ["run"]
+    assert main.app.state.run_manager is run_manager
+    assert main.app.state.tool_manager is tool_manager
+    assert main.app.state.server_home_lock is home_lock
+    try:
+        with pytest.raises(ServerHomeInUseError):
+            with ServerHomeLock(tmp_path):
+                pass
+    finally:
+        home_lock.release()
+        main.app.state.server_home_lock = None
 
 
 def test_startup_failure_closes_initialized_resources_before_unlock(

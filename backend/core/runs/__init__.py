@@ -15,10 +15,25 @@ from .run_manager import (
     RunNotFoundError,
     RunWriterConflictError,
 )
+from .start_service import (
+    MAX_PROVISIONAL_RETRIES,
+    RunBootstrap,
+    RunBootstrapBarrier,
+    RunBootstrapOutcome,
+    RunStartCoordinator,
+    RunStartDrainResult,
+    RunStartReservationError,
+    RunStartSchedulingError,
+    RunStartSpec,
+    RunStartValidationError,
+)
 from .types import FINISHED_RUN_STATUSES, RunEvent, RunKind, RunRecord, RunStatus
 
 __all__ = [
     "RunEvent",
+    "RunBootstrap",
+    "RunBootstrapBarrier",
+    "RunBootstrapOutcome",
     "RunIdempotency",
     "RunIdempotencyConflictError",
     "RunJournal",
@@ -32,8 +47,15 @@ __all__ = [
     "RunReferenceNotFoundError",
     "RunRequestFingerprintError",
     "RunStartResult",
+    "RunStartCoordinator",
+    "RunStartDrainResult",
+    "RunStartReservationError",
+    "RunStartSchedulingError",
+    "RunStartSpec",
+    "RunStartValidationError",
     "RunStatus",
     "RunWriterConflictError",
     "FINISHED_RUN_STATUSES",
+    "MAX_PROVISIONAL_RETRIES",
     "fingerprint_run_request",
 ]

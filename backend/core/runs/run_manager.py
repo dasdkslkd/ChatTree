@@ -808,8 +808,9 @@ class RunManager:
                     record = self._hydrate_run_locked(run_id)
                 if record is None:
                     raise RunNotFoundError(run_id)
-                hidden = self._is_hidden_run_id(run_id)
-                if not hidden:
+                was_hidden = self._is_hidden_run_id(run_id)
+                was_published = run_id in self._published_reservation_ids
+                if not was_hidden and not was_published:
                     if record.status in FINISHED_RUN_STATUSES:
                         return deepcopy(record)
                     raise RuntimeError(f"run {run_id} is not a pending reservation")
@@ -818,12 +819,12 @@ class RunManager:
                 run_id,
                 RunStatus.INTERRUPTED,
                 error,
-                _notify_listeners=False,
+                _notify_listeners=not was_hidden,
             )
             async with self._lock:
-                was_hidden = self._is_hidden_run_id(run_id)
                 self._pending_reservations.pop(run_id, None)
                 self._unpublished_run_ids.discard(run_id)
+                self._published_reservation_ids.discard(run_id)
                 self._publication_tasks.pop(run_id, None)
                 self._reservation_task_bound.discard(run_id)
                 self._reservation_child_event_published.discard(run_id)
@@ -849,14 +850,18 @@ class RunManager:
         error: Optional[str],
     ) -> RunRecord:
         async with self._lock:
-            if not self._is_hidden_run_id(run_id):
+            task = self._interruption_tasks.get(run_id)
+            recoverable = (
+                self._is_hidden_run_id(run_id)
+                or run_id in self._published_reservation_ids
+            )
+            if task is None and not recoverable:
                 record = self._runs.get(run_id) or self._hydrate_run_locked(run_id)
                 if record is None:
                     raise RunNotFoundError(run_id)
                 if record.status in FINISHED_RUN_STATUSES:
                     return deepcopy(record)
                 raise RuntimeError(f"run {run_id} is not a pending reservation")
-            task = self._interruption_tasks.get(run_id)
             if task is None:
                 self._interrupting_reservation_ids.add(run_id)
                 task = asyncio.create_task(
@@ -1119,6 +1124,7 @@ class RunManager:
             async with self._lock:
                 record = self._require_run_locked(run_id)
                 if record.status in FINISHED_RUN_STATUSES:
+                    self._published_reservation_ids.discard(run_id)
                     return deepcopy(record)
                 if self._event_writer is not None:
                     await self._event_writer.flush_run(run_id)
@@ -1205,6 +1211,7 @@ class RunManager:
                     record.event_count += 1
                     journal_event = event
                     journal_conversation_id = record.conversation_id
+                self._published_reservation_ids.discard(run_id)
                 if record.target_node_id and self._writers_by_node.get(record.target_node_id) == run_id:
                     self._writers_by_node.pop(record.target_node_id, None)
                 self._events.setdefault(run_id, []).append(event)

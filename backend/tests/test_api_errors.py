@@ -18,6 +18,7 @@ from backend.api.errors import (
     GENERIC_5XX_MESSAGE,
     REQUEST_ID_RE,
     ApiError,
+    ErrorEnvelope,
     RequestBoundaryMiddleware,
     canonical_request_id,
     error_response,
@@ -86,6 +87,17 @@ def contract_client():
             "typed server secret",
             True,
             {"secret": "drop"},
+        )
+
+    @app.get("/typed-server-error-already-logged")
+    async def typed_server_error_already_logged():
+        raise ApiError(
+            500,
+            "internal_error",
+            "already logged server secret",
+            False,
+            {"secret": "drop"},
+            already_logged=True,
         )
 
     @app.get("/http-server-error")
@@ -369,6 +381,49 @@ def test_server_errors_hide_original_text_and_log_request_id(
     assert len(matching_records) == 1
     assert matching_records[0].exc_info is not None
     assert matching_records[0].exc_info[2] is not None
+
+
+def test_already_logged_500_is_scrubbed_without_a_second_boundary_log(
+    contract_client,
+    caplog,
+):
+    caplog.set_level("ERROR", logger="backend.api.errors")
+
+    response = contract_client.get(
+        "/typed-server-error-already-logged",
+        headers={"X-Request-ID": "already-logged-5xx"},
+    )
+
+    assert response.status_code == 500
+    assert response.json()["error"] == {
+        "code": "internal_error",
+        "message": GENERIC_5XX_MESSAGE,
+        "retryable": False,
+        "request_id": "already-logged-5xx",
+    }
+    assert "already logged server secret" not in response.text
+    assert "drop" not in response.text
+    assert [
+        record
+        for record in caplog.records
+        if record.name == "backend.api.errors"
+    ] == []
+
+
+def test_api_error_already_logged_is_internal_only():
+    exc = ApiError(
+        500,
+        "internal_error",
+        "secret",
+        False,
+        already_logged=True,
+    )
+
+    assert exc.already_logged is True
+    error_body_properties = ErrorEnvelope.model_json_schema()["$defs"]["ErrorBody"][
+        "properties"
+    ]
+    assert "already_logged" not in error_body_properties
 
 
 def test_direct_5xx_error_response_redacts_and_logs_reason(caplog):

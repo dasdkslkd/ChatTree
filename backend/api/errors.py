@@ -117,6 +117,8 @@ class ApiError(Exception):
         message: str,
         retryable: bool,
         details: dict[str, object] | None = None,
+        *,
+        already_logged: bool = False,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
@@ -124,6 +126,7 @@ class ApiError(Exception):
         self.message = message
         self.retryable = retryable
         self.details = validate_json_object(details)
+        self.already_logged = bool(already_logged)
 
 
 class ErrorBody(BaseModel):
@@ -176,17 +179,19 @@ def _build_error_response(
     details: dict[str, object] | None = None,
     headers: Mapping[str, str] | None = None,
     cause: Exception | None = None,
+    log_server_error: bool = True,
 ) -> Response:
     request_id = _request_id(request)
     if 500 <= status_code < 600:
-        logger.error(
-            "request failed request_id=%s reason=%s",
-            request_id,
-            message,
-            exc_info=(type(cause), cause, cause.__traceback__)
-            if cause is not None
-            else None,
-        )
+        if log_server_error:
+            logger.error(
+                "request failed request_id=%s reason=%s",
+                request_id,
+                message,
+                exc_info=(type(cause), cause, cause.__traceback__)
+                if cause is not None
+                else None,
+            )
         message = GENERIC_5XX_MESSAGE
         details = None
     envelope = ErrorEnvelope(
@@ -285,6 +290,7 @@ async def _api_error_handler(request: Request, exc: ApiError) -> Response:
         retryable=exc.retryable,
         details=exc.details,
         cause=exc,
+        log_server_error=not exc.already_logged,
     )
 
 

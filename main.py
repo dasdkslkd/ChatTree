@@ -26,7 +26,7 @@ from backend.core.capabilities.bootstrap import (
 from backend.core.model.model_manager import ModelManager
 from backend.core.config.config import Config, cfg
 from backend.core.agents import AgentMailbox, AgentRuntime, SubagentExecutor
-from backend.core.runs import RunManager
+from backend.core.runs import RunManager, RunStartCoordinator
 from backend.core.plans import PlanLedger
 from backend.core.persistence import (
     ChatRepository,
@@ -143,17 +143,44 @@ app.add_middleware(
 )
 
 # ---------- 挂载管理器 ----------
+def _drain_report_error(
+    state_name: str,
+    report: object,
+) -> RuntimeError | None:
+    if report is None:
+        return None
+    if state_name == "run_start_coordinator":
+        exhausted = bool(getattr(report, "exhausted", False))
+    elif state_name == "run_manager":
+        exhausted = bool(getattr(report, "exhausted_run_ids", ()))
+    else:
+        exhausted = False
+    if not exhausted:
+        return None
+    return RuntimeError(f"{state_name} drain incomplete: {report!r}")
+
+
 async def _close_server_resources() -> list[BaseException]:
     errors: list[BaseException] = []
-    for state_name in ("run_manager", "tool_manager"):
+    for state_name in (
+        "run_start_coordinator",
+        "run_manager",
+        "tool_manager",
+    ):
         resource = getattr(app.state, state_name, None)
         if resource is None:
+            setattr(app.state, state_name, None)
             continue
         try:
-            await resource.close()
+            report = await resource.close()
+            drain_error = _drain_report_error(state_name, report)
+            if drain_error is not None:
+                errors.append(drain_error)
+                break
         except BaseException as exc:
             errors.append(exc)
-        finally:
+            break
+        else:
             if getattr(app.state, state_name, None) is resource:
                 setattr(app.state, state_name, None)
     return errors
@@ -201,6 +228,8 @@ async def _initialize_server() -> None:
     approval_manager = ApprovalManager()
     run_manager = RunManager(repository=run_repository)
     app.state.run_manager = run_manager
+    run_start_coordinator = RunStartCoordinator(run_manager)
+    app.state.run_start_coordinator = run_start_coordinator
     plan_ledger = PlanLedger(repository=plan_repository)
     task_service = ActiveTaskService(repository=task_repository)
     run_manager.task_service = task_service
@@ -283,6 +312,7 @@ async def _initialize_server() -> None:
     app.state.tool_manager = tool_manager
     app.state.approval_manager = approval_manager
     app.state.run_manager = run_manager
+    app.state.run_start_coordinator = run_start_coordinator
     app.state.plan_ledger = plan_ledger
     app.state.task_service = task_service
     app.state.command_executor = command_executor
@@ -300,14 +330,16 @@ async def startup_event() -> None:
     home_lock = ServerHomeLock()
     home_lock.acquire()
     app.state.server_home_lock = home_lock
+    app.state.run_start_coordinator = None
     app.state.run_manager = None
     app.state.tool_manager = None
     try:
         await _initialize_server()
     except BaseException:
-        try:
-            _log_cleanup_errors(await _close_server_resources())
-        finally:
+        cleanup_errors = await _close_server_resources()
+        if cleanup_errors:
+            _log_cleanup_errors(cleanup_errors)
+        else:
             home_lock.release()
             if getattr(app.state, "server_home_lock", None) is home_lock:
                 app.state.server_home_lock = None
@@ -316,18 +348,15 @@ async def startup_event() -> None:
 
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
-    cleanup_errors: list[BaseException] = []
-    try:
-        cleanup_errors = await _close_server_resources()
-    finally:
-        home_lock = getattr(app.state, "server_home_lock", None)
-        if home_lock:
-            home_lock.release()
-            if getattr(app.state, "server_home_lock", None) is home_lock:
-                app.state.server_home_lock = None
+    cleanup_errors = await _close_server_resources()
     if cleanup_errors:
-        _log_cleanup_errors(cleanup_errors[1:])
+        _log_cleanup_errors(cleanup_errors)
         raise cleanup_errors[0]
+    home_lock = getattr(app.state, "server_home_lock", None)
+    if home_lock:
+        home_lock.release()
+        if getattr(app.state, "server_home_lock", None) is home_lock:
+            app.state.server_home_lock = None
 
 # ---------- 注册路由 ----------
 app.include_router(api_v1_router)

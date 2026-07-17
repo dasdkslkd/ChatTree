@@ -315,6 +315,127 @@ def test_concurrent_reservation_interruption_emits_one_terminal_event_and_notifi
     ] == ["run_finished"]
 
 
+def test_published_reservation_interruption_is_singleflight_and_exactly_once():
+    class TaskService:
+        def __init__(self):
+            self.bind_calls = 0
+            self.finished = []
+
+        async def bind_in_memory_run(self, _run_id, _binding):
+            self.bind_calls += 1
+
+        async def handle_run_finished(self, run):
+            self.finished.append(run)
+            return None
+
+    async def run():
+        manager = RunManager()
+        service = TaskService()
+        notifications = []
+        manager.task_service = service
+        manager.add_finish_listener(notifications.append)
+        record, _created = await manager.reserve_or_get_run(
+            conversation_id="conv-1",
+            kind=RunKind.WORKFLOW_STEP,
+            idempotency_key="op_published_interrupt",
+            request_fingerprint="7" * 64,
+            task_binding={"task_generation_id": "generation-1", "step_position": 1},
+        )
+        await manager.publish_reserved_run(record.run_id)
+
+        results = await asyncio.gather(*(
+            manager.interrupt_reserved_run(record.run_id, "bootstrap failed")
+            for _ in range(8)
+        ))
+        repeated = await manager.interrupt_reserved_run(
+            record.run_id,
+            "ignored duplicate",
+        )
+        return manager, service, notifications, record, results, repeated
+
+    manager, service, notifications, record, results, repeated = asyncio.run(run())
+    assert {item.run_id for item in results} == {record.run_id}
+    assert {item.status for item in results} == {RunStatus.INTERRUPTED}
+    assert repeated.run_id == record.run_id
+    assert repeated.status == RunStatus.INTERRUPTED
+    assert service.bind_calls == 1
+    assert len(service.finished) == 1
+    assert service.finished[0]["run_id"] == record.run_id
+    assert len(notifications) == 1
+    assert notifications[0]["run_id"] == record.run_id
+    assert [event["type"] for event in manager.read_events(record.run_id, 0)] == [
+        "run_started",
+        "run_finished",
+    ]
+    assert record.run_id not in manager._published_reservation_ids
+
+
+def test_repository_published_reservation_interruption_persists_event_order(tmp_path):
+    async def run():
+        manager, repository, conversation_id, node_id = _sqlite_run_manager(tmp_path)
+        record, _created = await manager.reserve_or_get_run(
+            conversation_id=conversation_id,
+            kind=RunKind.CHAT,
+            anchor_node_id=node_id,
+            idempotency_key="op_repository_published_interrupt",
+            request_fingerprint="8" * 64,
+        )
+        await manager.publish_reserved_run(record.run_id)
+        results = await asyncio.gather(*(
+            manager.interrupt_reserved_run(record.run_id, "bootstrap failed")
+            for _ in range(4)
+        ))
+        repeated = await manager.interrupt_reserved_run(
+            record.run_id,
+            "ignored duplicate",
+        )
+        await manager.close()
+        return repository, record, results, repeated
+
+    repository, record, results, repeated = asyncio.run(run())
+    assert {item.status for item in results} == {RunStatus.INTERRUPTED}
+    assert repeated.status == RunStatus.INTERRUPTED
+    assert [
+        event["payload"]["type"]
+        for event in repository.read_events(record.run_id, 0)
+    ] == ["run_started", "run_finished"]
+
+
+def test_published_interrupt_claim_fences_duplicate_publish():
+    async def run():
+        manager = RunManager()
+        record, _created = await manager.reserve_or_get_run(
+            conversation_id="conv-1",
+            kind=RunKind.CHAT,
+            idempotency_key="op_published_interrupt_fence",
+            request_fingerprint="9" * 64,
+        )
+        await manager.publish_reserved_run(record.run_id)
+
+        await manager._lock.acquire()
+        interruption = asyncio.create_task(
+            manager.interrupt_reserved_run(record.run_id, "bootstrap failed")
+        )
+        await asyncio.sleep(0)
+        duplicate_publish = asyncio.create_task(
+            manager.publish_reserved_run(record.run_id)
+        )
+        await asyncio.sleep(0)
+        manager._lock.release()
+
+        interrupted = await interruption
+        with pytest.raises(RuntimeError, match="interruption"):
+            await duplicate_publish
+        return manager, interrupted
+
+    manager, interrupted = asyncio.run(run())
+    assert interrupted.status == RunStatus.INTERRUPTED
+    assert [event["type"] for event in manager.read_events(interrupted.run_id, 0)] == [
+        "run_started",
+        "run_finished",
+    ]
+
+
 def test_interrupt_claim_prevents_later_publish_from_appending_start():
     async def run():
         manager = RunManager()
