@@ -11,6 +11,7 @@ import pytest
 from fastapi import Body, FastAPI, Request, Response
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, field_validator
+from pydantic_core import PydanticCustomError
 from starlette.exceptions import HTTPException
 
 from backend.api.errors import (
@@ -19,6 +20,7 @@ from backend.api.errors import (
     ApiError,
     RequestBoundaryMiddleware,
     canonical_request_id,
+    error_response,
     install_error_handlers,
 )
 
@@ -29,7 +31,15 @@ class _SensitiveValidationBody(BaseModel):
     @field_validator("value")
     @classmethod
     def reject_sensitive_value(cls, value: str) -> str:
-        raise ValueError(f"ctx contained {value}")
+        raise PydanticCustomError(
+            "sensitive_custom_error",
+            "ctx contained {sensitive}",
+            {"sensitive": value},
+        )
+
+
+class _DictionaryValidationBody(BaseModel):
+    values: dict[str, int]
 
 
 @pytest.fixture
@@ -120,12 +130,26 @@ def contract_client():
         request.state.request_id = "not valid!"
         raise ApiError(400, "invalid_request", "invalid", False)
 
+    @app.get("/non-string-request-id/{kind}")
+    async def non_string_request_id(request: Request, kind: str):
+        values = {
+            "uuid": UUID("3d4108fc-d044-448f-8520-8d2fb826eaf8"),
+            "integer": 17,
+            "object": object(),
+        }
+        request.state.request_id = values[kind]
+        raise ApiError(400, "invalid_request", "invalid", False)
+
     @app.post("/validated")
     async def validated(value: Annotated[int, Body()]):
         return {"value": value}
 
     @app.post("/validated-ctx")
     async def validated_ctx(payload: _SensitiveValidationBody):
+        return payload
+
+    @app.post("/validated-dictionary")
+    async def validated_dictionary(payload: _DictionaryValidationBody):
         return payload
 
     return TestClient(app, raise_server_exceptions=False)
@@ -135,9 +159,20 @@ def contract_client():
     ("status_code", "code", "retryable"),
     (
         (400, "invalid_request", False),
+        (401, "unauthorized", False),
+        (403, "forbidden", False),
+        (404, "not_found", False),
         (405, "method_not_allowed", False),
+        (409, "conflict", False),
+        (410, "gone", False),
+        (412, "precondition_failed", False),
+        (413, "payload_too_large", False),
+        (415, "unsupported_media_type", False),
         (418, "http_error", False),
+        (422, "invalid_request", False),
+        (428, "precondition_required", False),
         (429, "rate_limited", True),
+        (451, "http_error", False),
         (500, "internal_error", False),
         (502, "service_unavailable", True),
         (503, "service_unavailable", True),
@@ -188,6 +223,22 @@ def test_canonical_request_id_replaces_missing_or_invalid_values(value):
 
 
 @pytest.mark.parametrize(
+    "value",
+    (
+        UUID("3d4108fc-d044-448f-8520-8d2fb826eaf8"),
+        17,
+        object(),
+    ),
+    ids=("uuid", "integer", "object"),
+)
+def test_canonical_request_id_replaces_non_string_values(value):
+    request_id = canonical_request_id(value)
+
+    assert REQUEST_ID_RE.fullmatch(request_id)
+    UUID(request_id)
+
+
+@pytest.mark.parametrize(
     ("incoming", "preserved"),
     (
         ("client-request:1", True),
@@ -230,6 +281,22 @@ def test_mutated_request_state_still_produces_one_canonical_response_id(
     assert response.headers["X-Request-ID"] == body_request_id
 
 
+@pytest.mark.parametrize("kind", ("uuid", "integer", "object"))
+def test_non_string_request_state_produces_one_canonical_response_id(
+    contract_client,
+    kind,
+):
+    response = contract_client.get(
+        f"/non-string-request-id/{kind}",
+        headers={"X-Request-ID": "initial-id"},
+    )
+
+    assert response.status_code == 400
+    body_request_id = response.json()["error"]["request_id"]
+    assert REQUEST_ID_RE.fullmatch(body_request_id)
+    assert response.headers["X-Request-ID"] == body_request_id
+
+
 def test_legacy_string_detail_becomes_the_message(contract_client):
     response = contract_client.get("/legacy-string")
 
@@ -249,7 +316,7 @@ def test_legacy_list_is_not_echoed(contract_client):
     response = contract_client.get("/legacy-list")
 
     assert response.status_code == 409
-    assert response.json()["error"]["code"] == "http_error"
+    assert response.json()["error"]["code"] == "conflict"
     assert "blocked" not in response.text
     assert "secret" not in response.text
 
@@ -292,6 +359,37 @@ def test_server_errors_hide_original_text_and_log_request_id(
     assert "drop" not in response.text
     assert "details" not in response.json()["error"]
     assert request_id in caplog.text
+    assert secret in caplog.text
+    matching_records = [
+        record
+        for record in caplog.records
+        if record.name == "backend.api.errors"
+        and request_id in record.getMessage()
+    ]
+    assert len(matching_records) == 1
+    assert matching_records[0].exc_info is not None
+    assert matching_records[0].exc_info[2] is not None
+
+
+def test_direct_5xx_error_response_redacts_and_logs_reason(caplog):
+    caplog.set_level("ERROR", logger="backend.api.errors")
+
+    response = error_response(
+        _request(request_id="direct-5xx-id"),
+        status_code=500,
+        code="internal_error",
+        message="direct server secret",
+        retryable=False,
+        details={"secret": "direct details secret"},
+    )
+
+    payload = json.loads(response.body)["error"]
+    assert payload["message"] == GENERIC_5XX_MESSAGE
+    assert "details" not in payload
+    assert "direct server secret" not in response.body.decode("utf-8")
+    assert "direct details secret" not in response.body.decode("utf-8")
+    assert "direct-5xx-id" in caplog.text
+    assert "direct server secret" in caplog.text
 
 
 def test_validation_issues_do_not_echo_input_or_ctx(contract_client):
@@ -310,6 +408,21 @@ def test_validation_issue_message_does_not_echo_custom_validator_ctx(contract_cl
 
     assert response.status_code == 422
     assert "sensitive-context-value" not in response.text
+
+    issue = response.json()["error"]["details"]["issues"][0]
+    assert issue["code"] == "validation_error"
+    assert "sensitive_custom_error" not in response.text
+
+
+def test_validation_issue_path_redacts_untrusted_string_segments(contract_client):
+    response = contract_client.post(
+        "/validated-dictionary",
+        json={"values": {"malicious-dictionary-key": "not-an-integer"}},
+    )
+
+    issue = response.json()["error"]["details"]["issues"][0]
+    assert issue["path"] == "body.*.*"
+    assert "malicious-dictionary-key" not in response.text
 
 
 @pytest.mark.parametrize("kind", ("none", "empty"))
@@ -423,6 +536,20 @@ def test_details_accept_nested_json_values():
     }
 
     assert ApiError(400, "invalid", "invalid", False, details).details == details
+
+
+@pytest.mark.parametrize("kind", ("dict", "list"))
+def test_details_reject_circular_references_with_stable_value_error(kind):
+    if kind == "dict":
+        details = {}
+        details["self"] = details
+    else:
+        circular_list = []
+        circular_list.append(circular_list)
+        details = {"self": circular_list}
+
+    with pytest.raises(ValueError, match="details.*circular"):
+        ApiError(400, "invalid", "invalid", False, details)
 
 
 def test_invalid_origin_is_rejected_before_the_downstream_app():

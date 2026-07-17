@@ -24,9 +24,35 @@ GENERIC_5XX_MESSAGE = "服务暂时不可用，请稍后重试"
 _SAFE_EXCEPTION_HEADERS = frozenset(
     {"allow", "retry-after", "www-authenticate", "etag"}
 )
+_TRUSTED_VALIDATION_ROOTS = frozenset(
+    {"body", "query", "path", "header", "cookie"}
+)
+_HTTP_ERROR_CONTRACTS = {
+    400: ("invalid_request", False),
+    401: ("unauthorized", False),
+    403: ("forbidden", False),
+    404: ("not_found", False),
+    405: ("method_not_allowed", False),
+    409: ("conflict", False),
+    410: ("gone", False),
+    412: ("precondition_failed", False),
+    413: ("payload_too_large", False),
+    415: ("unsupported_media_type", False),
+    422: ("invalid_request", False),
+    428: ("precondition_required", False),
+    429: ("rate_limited", True),
+    500: ("internal_error", False),
+    502: ("service_unavailable", True),
+    503: ("service_unavailable", True),
+    504: ("service_unavailable", True),
+}
 
 
-def _validate_json_value(value: object, path: str) -> object:
+def _validate_json_value(
+    value: object,
+    path: str,
+    active_containers: set[int],
+) -> object:
     if value is None or isinstance(value, (str, bool, int)):
         return value
     if isinstance(value, float):
@@ -34,17 +60,39 @@ def _validate_json_value(value: object, path: str) -> object:
             return value
         raise ValueError(f"{path} must contain only finite numbers")
     if isinstance(value, list):
-        return [
-            _validate_json_value(item, f"{path}[{index}]")
-            for index, item in enumerate(value)
-        ]
+        container_id = id(value)
+        if container_id in active_containers:
+            raise ValueError(f"{path} must not contain circular references")
+        active_containers.add(container_id)
+        try:
+            return [
+                _validate_json_value(
+                    item,
+                    f"{path}[{index}]",
+                    active_containers,
+                )
+                for index, item in enumerate(value)
+            ]
+        finally:
+            active_containers.remove(container_id)
     if isinstance(value, dict):
-        normalized: dict[str, object] = {}
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise ValueError(f"{path} must contain only string keys")
-            normalized[key] = _validate_json_value(item, f"{path}.{key}")
-        return normalized
+        container_id = id(value)
+        if container_id in active_containers:
+            raise ValueError(f"{path} must not contain circular references")
+        active_containers.add(container_id)
+        try:
+            normalized: dict[str, object] = {}
+            for key, item in value.items():
+                if not isinstance(key, str):
+                    raise ValueError(f"{path} must contain only string keys")
+                normalized[key] = _validate_json_value(
+                    item,
+                    f"{path}.{key}",
+                    active_containers,
+                )
+            return normalized
+        finally:
+            active_containers.remove(container_id)
     raise ValueError(f"{path} must contain only JSON-compatible values")
 
 
@@ -55,7 +103,7 @@ def validate_json_object(
         return None
     if not isinstance(details, dict):
         raise ValueError("details must be a JSON object")
-    normalized = _validate_json_value(details, "details")
+    normalized = _validate_json_value(details, "details", set())
     if not normalized:
         return None
     return normalized  # type: ignore[return-value]
@@ -91,16 +139,19 @@ class ErrorEnvelope(BaseModel):
 
 
 def canonical_request_id(value: str | None) -> str:
-    if value is not None and REQUEST_ID_RE.fullmatch(value):
+    if isinstance(value, str) and REQUEST_ID_RE.fullmatch(value):
         return value
     return uuid4().hex
 
 
 def _request_id(request: Request) -> str:
-    request_id = canonical_request_id(
-        getattr(request.state, "request_id", None)
-        or request.headers.get("x-request-id")
+    state = request.scope.setdefault("state", {})
+    candidate = (
+        state["request_id"]
+        if "request_id" in state
+        else request.headers.get("x-request-id")
     )
+    request_id = canonical_request_id(candidate)
     request.state.request_id = request_id
     return request_id
 
@@ -115,7 +166,7 @@ def _safe_headers(headers: Mapping[str, str] | None) -> dict[str, str]:
     }
 
 
-def error_response(
+def _build_error_response(
     request: Request,
     *,
     status_code: int,
@@ -124,8 +175,20 @@ def error_response(
     retryable: bool,
     details: dict[str, object] | None = None,
     headers: Mapping[str, str] | None = None,
+    cause: Exception | None = None,
 ) -> Response:
     request_id = _request_id(request)
+    if 500 <= status_code < 600:
+        logger.error(
+            "request failed request_id=%s reason=%s",
+            request_id,
+            message,
+            exc_info=(type(cause), cause, cause.__traceback__)
+            if cause is not None
+            else None,
+        )
+        message = GENERIC_5XX_MESSAGE
+        details = None
     envelope = ErrorEnvelope(
         error=ErrorBody(
             code=code,
@@ -153,15 +216,30 @@ def error_response(
     return response
 
 
+def error_response(
+    request: Request,
+    *,
+    status_code: int,
+    code: str,
+    message: str,
+    retryable: bool,
+    details: dict[str, object] | None = None,
+    headers: Mapping[str, str] | None = None,
+) -> Response:
+    return _build_error_response(
+        request,
+        status_code=status_code,
+        code=code,
+        message=message,
+        retryable=retryable,
+        details=details,
+        headers=headers,
+    )
+
+
 def _status_contract(status_code: int) -> tuple[str, bool]:
-    if status_code == 400:
-        return "invalid_request", False
-    if status_code == 405:
-        return "method_not_allowed", False
-    if status_code == 429:
-        return "rate_limited", True
-    if status_code in {502, 503, 504}:
-        return "service_unavailable", True
+    if status_code in _HTTP_ERROR_CONTRACTS:
+        return _HTTP_ERROR_CONTRACTS[status_code]
     if 500 <= status_code < 600:
         return "internal_error", False
     return "http_error", False
@@ -180,29 +258,33 @@ def _legacy_http_message(status_code: int, detail: object) -> str:
         return "HTTP error"
 
 
-def _log_server_error(request: Request, exc: Exception) -> None:
-    request_id = _request_id(request)
-    logger.error(
-        "request failed request_id=%s",
-        request_id,
-        exc_info=(type(exc), exc, exc.__traceback__),
-    )
+def _safe_validation_path(location: object) -> str:
+    if not isinstance(location, (list, tuple)):
+        return "*"
+    safe_parts = []
+    for index, part in enumerate(location):
+        if (
+            index == 0
+            and isinstance(part, str)
+            and part in _TRUSTED_VALIDATION_ROOTS
+        ):
+            safe_parts.append(str(part))
+        elif isinstance(part, int) and not isinstance(part, bool):
+            safe_parts.append(str(part))
+        else:
+            safe_parts.append("*")
+    return ".".join(safe_parts) or "*"
 
 
 async def _api_error_handler(request: Request, exc: ApiError) -> Response:
-    message = exc.message
-    details = exc.details
-    if 500 <= exc.status_code < 600:
-        _log_server_error(request, exc)
-        message = GENERIC_5XX_MESSAGE
-        details = None
-    return error_response(
+    return _build_error_response(
         request,
         status_code=exc.status_code,
         code=exc.code,
-        message=message,
+        message=exc.message,
         retryable=exc.retryable,
-        details=details,
+        details=exc.details,
+        cause=exc,
     )
 
 
@@ -212,48 +294,46 @@ async def _validation_error_handler(
 ) -> Response:
     issues = []
     for issue in exc.errors():
-        location = issue.get("loc", ())
         issues.append(
             {
-                "path": ".".join(str(part) for part in location),
-                "code": str(issue.get("type", "validation_error")),
+                "path": _safe_validation_path(issue.get("loc", ())),
+                "code": "validation_error",
                 "message": "输入值无效",
             }
         )
-    return error_response(
+    return _build_error_response(
         request,
         status_code=422,
         code="invalid_request",
         message="请求参数无效",
         retryable=False,
         details={"issues": issues},
+        cause=exc,
     )
 
 
 async def _http_error_handler(request: Request, exc: HTTPException) -> Response:
     code, retryable = _status_contract(exc.status_code)
     message = _legacy_http_message(exc.status_code, exc.detail)
-    if 500 <= exc.status_code < 600:
-        _log_server_error(request, exc)
-        message = GENERIC_5XX_MESSAGE
-    return error_response(
+    return _build_error_response(
         request,
         status_code=exc.status_code,
         code=code,
         message=message,
         retryable=retryable,
         headers=exc.headers,
+        cause=exc,
     )
 
 
 async def _unknown_error_handler(request: Request, exc: Exception) -> Response:
-    _log_server_error(request, exc)
-    return error_response(
+    return _build_error_response(
         request,
         status_code=500,
         code="internal_error",
-        message=GENERIC_5XX_MESSAGE,
+        message=str(exc) or type(exc).__name__,
         retryable=False,
+        cause=exc,
     )
 
 
