@@ -1,4 +1,6 @@
 import asyncio
+from dataclasses import FrozenInstanceError
+from uuid import UUID
 
 import pytest
 
@@ -11,6 +13,13 @@ from client_launcher.sessions import SessionManager
 
 SERVER_A = "11111111-1111-4111-8111-111111111111"
 SERVER_B = "22222222-2222-4222-8222-222222222222"
+
+
+def _is_canonical_uuid(value: str) -> bool:
+    try:
+        return str(UUID(value)) == value
+    except (AttributeError, TypeError, ValueError):
+        return False
 
 
 class FakeConnector:
@@ -61,10 +70,21 @@ def _store(tmp_path):
     )
 
 
+def test_disconnected_epoch_zero_has_a_canonical_connection_lease(tmp_path):
+    manager = SessionManager(_store(tmp_path), FakeConnector())
+
+    status = manager.status("local")
+
+    assert status.status == "disconnected"
+    assert status.connection_epoch == 0
+    assert _is_canonical_uuid(status.connection_lease_id)
+
+
 async def _concurrent_connect_is_singleflight_case(tmp_path):
     store = _store(tmp_path)
     connector = FakeConnector()
     manager = SessionManager(store, connector)
+    initial_lease_id = manager.status("local").connection_lease_id
 
     first = asyncio.create_task(
         manager.connect("local", request_id="creator-tree")
@@ -84,6 +104,9 @@ async def _concurrent_connect_is_singleflight_case(tmp_path):
     assert second_status.status == "ready"
     assert first_status.connection_epoch == 1
     assert second_status.connection_epoch == 1
+    assert first_status.connection_lease_id == second_status.connection_lease_id
+    assert first_status.connection_lease_id != initial_lease_id
+    assert _is_canonical_uuid(first_status.connection_lease_id)
     assert store.get("local").bound_server_instance_id == SERVER_A
 
 
@@ -133,6 +156,7 @@ async def _ready_connect_is_idempotent_case(tmp_path):
 
     assert connector.calls == 1
     assert first.connection_epoch == second.connection_epoch == 1
+    assert first.connection_lease_id == second.connection_lease_id
 
 
 def test_ready_connect_is_idempotent(tmp_path):
@@ -147,12 +171,23 @@ async def _stale_transport_error_does_not_break_reconnected_session_case(tmp_pat
 
     first = await manager.connect("local")
     first_lease = manager.resolve_endpoint("local")
+    assert first_lease.profile_id == "local"
+    assert first_lease.server_instance_id == SERVER_A
+    assert first_lease.connection_epoch == first.connection_epoch
+    assert first_lease.connection_lease_id == first.connection_lease_id
     assert first_lease.invalidated is not None
     assert not first_lease.invalidated.is_set()
-    await manager.disconnect("local")
+    disconnected = await manager.disconnect("local")
+    assert disconnected.connection_lease_id != first.connection_lease_id
+    assert _is_canonical_uuid(disconnected.connection_lease_id)
     assert first_lease.invalidated.is_set()
+    with pytest.raises(FrozenInstanceError):
+        first_lease.connection_epoch = 99
     second = await manager.connect("local")
     second_lease = manager.resolve_endpoint("local")
+    assert second.connection_lease_id != disconnected.connection_lease_id
+    assert second.connection_lease_id != first.connection_lease_id
+    assert second_lease.connection_lease_id == second.connection_lease_id
     assert second_lease.invalidated is not None
     transport_error = LauncherError(
         "proxy_upstream_unavailable",
@@ -177,7 +212,9 @@ async def _stale_transport_error_does_not_break_reconnected_session_case(tmp_pat
         transport_error,
         connection_epoch=second.connection_epoch,
     )
-    assert manager.status("local").status == "error"
+    errored = manager.status("local")
+    assert errored.status == "error"
+    assert _is_canonical_uuid(errored.connection_lease_id)
     assert second_lease.invalidated.is_set()
 
 
@@ -356,6 +393,9 @@ async def _identity_change_requires_explicit_rebind_case(tmp_path):
     with pytest.raises(LauncherError) as exc_info:
         await manager.connect("local")
     assert exc_info.value.code == "server_identity_changed"
+    errored = manager.status("local")
+    assert errored.status == "error"
+    assert _is_canonical_uuid(errored.connection_lease_id)
     assert store.get("local").bound_server_instance_id == SERVER_A
 
     rebound = await manager.connect(
@@ -366,6 +406,8 @@ async def _identity_change_requires_explicit_rebind_case(tmp_path):
 
     assert first.connection_epoch == 1
     assert rebound.connection_epoch == 2
+    assert rebound.connection_lease_id != errored.connection_lease_id
+    assert rebound.connection_lease_id != first.connection_lease_id
     assert rebound.server_instance_id == SERVER_B
     assert store.get("local").bound_server_instance_id == SERVER_B
 

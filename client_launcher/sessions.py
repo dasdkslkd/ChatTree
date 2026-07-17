@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
+from uuid import uuid4
 
 from client_launcher.http_errors import canonical_request_id
 from client_launcher.models import (
@@ -46,7 +47,14 @@ class SessionManager:
         self.profiles.get(profile_id)
         session = self._session(profile_id)
         endpoint = self._endpoints.get(profile_id)
-        if session.status != "ready" or not endpoint:
+        invalidated = self._lease_invalidations.get(profile_id)
+        server_instance_id = session.server_instance_id
+        if (
+            session.status != "ready"
+            or not endpoint
+            or server_instance_id is None
+            or invalidated is None
+        ):
             raise LauncherError(
                 "profile_not_ready",
                 f"Profile {profile_id} is not connected",
@@ -55,8 +63,11 @@ class SessionManager:
             )
         return EndpointLease(
             endpoint=endpoint,
+            profile_id=profile_id,
+            server_instance_id=server_instance_id,
             connection_epoch=session.connection_epoch,
-            invalidated=self._lease_invalidations.get(profile_id),
+            connection_lease_id=session.connection_lease_id,
+            invalidated=invalidated,
         )
 
     def mark_error(
@@ -284,6 +295,7 @@ class SessionManager:
         session.phase = None
         session.server_instance_id = None
         session.error = None
+        session.connection_lease_id = str(uuid4())
         self._invalidate_lease(profile_id)
         self._endpoints.pop(profile_id, None)
         return replace(session), task
@@ -385,6 +397,7 @@ class SessionManager:
                 session.status = "ready"
                 session.phase = None
                 session.connection_epoch += 1
+                session.connection_lease_id = str(uuid4())
                 session.server_instance_id = bound_profile.bound_server_instance_id
                 session.error = None
                 self._invalidate_lease(profile_id)

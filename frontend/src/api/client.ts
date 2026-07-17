@@ -1,4 +1,4 @@
-import axios from 'axios';
+import axios, { type AxiosInstance } from 'axios';
 
 import { getFrontendBootstrap } from '../runtime/frontendBootstrap';
 import { normalizeApiError } from './errors';
@@ -10,15 +10,19 @@ export function serverApiUrl(path: string): string {
   return `${frontendBootstrap.apiBase}${suffix}`;
 }
 
-export const apiClient = axios.create({
-  baseURL: frontendBootstrap.apiBase,
-  timeout: 30000,
-  headers: {
-    'Content-Type': 'application/json',
-  },
-});
+export function createApiClient(apiBase: string): AxiosInstance {
+  const client = axios.create({
+    baseURL: apiBase,
+    timeout: 30000,
+    headers: {
+      'Content-Type': 'application/json',
+    },
+  });
+  client.interceptors.response.use(
+    (response) => response,
+    (error) => Promise.reject(normalizeApiError(error)),
+  );
+  return client;
+}
 
-apiClient.interceptors.response.use(
-  (response) => response,
-  (error) => Promise.reject(normalizeApiError(error)),
-);
+export const apiClient = createApiClient(frontendBootstrap.apiBase);

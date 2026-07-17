@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -12,12 +12,20 @@ from starlette.requests import Request
 from client_launcher.http_errors import REQUEST_ID_RE, RequestBoundaryMiddleware
 from client_launcher.models import EndpointLease
 from client_launcher.proxy import (
+    CONNECTION_LEASE_HEADER,
     ProxyEndpointUnavailable,
     ProxyHandler,
     ProxyRequestBodyTooLarge,
+    ProxyStaleConnectionEpoch,
     ProxyUpstreamTransportError,
     create_proxy_router,
 )
+
+
+PROFILE_ID = "local"
+SERVER_A = "11111111-1111-4111-8111-111111111111"
+LEASE_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+LEASE_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 
 
 def _run(coro: Any) -> Any:
@@ -30,6 +38,7 @@ def _request(
     *,
     chunks: tuple[bytes, ...] = (b"",),
     headers: tuple[tuple[bytes, bytes], ...] = (),
+    receive_override: Callable[[], Awaitable[dict[str, Any]]] | None = None,
 ) -> Request:
     path, _, query = target.partition("?")
     index = 0
@@ -60,7 +69,22 @@ def _request(
         "server": ("launcher.test", 80),
         "root_path": "",
     }
-    return Request(scope, receive)
+    return Request(scope, receive_override or receive)
+
+
+def _lease(
+    *,
+    endpoint: str = "http://upstream.test",
+    invalidated: asyncio.Event | None = None,
+) -> EndpointLease:
+    return EndpointLease(
+        endpoint=endpoint,
+        profile_id=PROFILE_ID,
+        server_instance_id=SERVER_A,
+        connection_epoch=7,
+        connection_lease_id=LEASE_A,
+        invalidated=invalidated or asyncio.Event(),
+    )
 
 
 def test_proxy_preserves_http_semantics_and_filters_hop_by_hop_headers() -> None:
@@ -174,6 +198,213 @@ def test_proxy_rejects_non_ready_profile_without_contacting_upstream() -> None:
         assert captured.value.code == "profile_not_ready"
         assert captured.value.status_code == 503
         assert calls == 0
+
+    _run(scenario())
+
+
+def test_invalid_resolved_endpoint_error_carries_captured_connection_lease() -> None:
+    async def scenario() -> None:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: None))
+        handler = ProxyHandler(
+            lambda _profile_id: _lease(endpoint="not-an-http-endpoint"),
+            http_client=client,
+            require_connection_lease=True,
+        )
+        request = _request(
+            "GET",
+            "/p/local/api/v1/health",
+            headers=((b"x-chattree-connection-lease-id", LEASE_A.encode("ascii")),),
+        )
+
+        with pytest.raises(ProxyEndpointUnavailable) as captured:
+            await handler(request, PROFILE_ID, "health")
+
+        await client.aclose()
+        assert captured.value.connection_lease_id == LEASE_A
+
+    _run(scenario())
+
+
+@pytest.mark.parametrize(
+    "lease_headers",
+    (
+        (
+            (b"x-chattree-connection-lease-id", LEASE_A.encode("ascii")),
+            (b"X-ChatTree-Connection-Lease-ID", LEASE_A.encode("ascii")),
+        ),
+        ((b"x-chattree-connection-lease-id", f"{LEASE_A},{LEASE_A}".encode("ascii")),),
+        ((b"x-chattree-connection-lease-id", LEASE_A.upper().encode("ascii")),),
+        ((b"x-chattree-connection-lease-id", b"not-a-uuid"),),
+        ((b"x-chattree-connection-lease-id", b"\xff"),),
+        ((b"x-chattree-connection-lease-id", LEASE_B.encode("ascii")),),
+    ),
+    ids=("duplicate", "comma-joined", "noncanonical", "invalid", "non-ascii", "stale"),
+)
+def test_proxy_rejects_invalid_raw_lease_header_before_body_or_upstream(
+    lease_headers: tuple[tuple[bytes, bytes], ...],
+) -> None:
+    async def scenario() -> None:
+        body_reads = 0
+        upstream_calls = 0
+
+        async def receive() -> dict[str, Any]:
+            nonlocal body_reads
+            body_reads += 1
+            return {"type": "http.request", "body": b"payload", "more_body": False}
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal upstream_calls
+            upstream_calls += 1
+            return httpx.Response(204)
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        handler = ProxyHandler(
+            lambda _profile_id: _lease(),
+            http_client=client,
+            require_connection_lease=False,
+        )
+        request = _request(
+            "POST",
+            "/p/local/api/v1/upload",
+            headers=lease_headers,
+            receive_override=receive,
+        )
+
+        with pytest.raises(ProxyStaleConnectionEpoch) as captured:
+            await handler(request, PROFILE_ID, "upload")
+
+        await client.aclose()
+        assert captured.value.code == "stale_connection_epoch"
+        assert captured.value.status_code == 409
+        assert captured.value.retryable is False
+        assert captured.value.details == {"current_connection_epoch": 7}
+        assert captured.value.connection_lease_id == LEASE_A
+        assert body_reads == 0
+        assert upstream_calls == 0
+
+    _run(scenario())
+
+
+def test_proxy_matching_lease_is_stripped_and_response_spoof_is_replaced() -> None:
+    async def scenario() -> None:
+        resolve_calls = 0
+        upstream_lease_headers: list[str] = []
+        upstream_idempotency_keys: list[str] = []
+
+        def resolve_endpoint(profile_id: str) -> EndpointLease:
+            nonlocal resolve_calls
+            resolve_calls += 1
+            assert profile_id == PROFILE_ID
+            return _lease()
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            upstream_lease_headers.extend(
+                request.headers.get_list("x-chattree-connection-lease-id")
+            )
+            upstream_idempotency_keys.extend(
+                request.headers.get_list("idempotency-key")
+            )
+            return httpx.Response(
+                409,
+                headers=[
+                    (CONNECTION_LEASE_HEADER, LEASE_B),
+                    (CONNECTION_LEASE_HEADER, LEASE_B),
+                    ("X-Upstream", "kept"),
+                ],
+                content=b"backend-error",
+            )
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        handler = ProxyHandler(
+            resolve_endpoint,
+            http_client=client,
+            require_connection_lease=True,
+        )
+        request = _request(
+            "POST",
+            "/p/local/api/v1/widgets",
+            chunks=(b"{}",),
+            headers=(
+                (b"x-chattree-connection-lease-id", LEASE_A.encode("ascii")),
+                (b"idempotency-key", b"idem-tree-1"),
+            ),
+        )
+
+        response = await handler(request, PROFILE_ID, "widgets")
+        body = b"".join([chunk async for chunk in response.body_iterator])
+        response_leases = [
+            value.decode("ascii")
+            for name, value in response.raw_headers
+            if name.lower() == b"x-chattree-connection-lease-id"
+        ]
+        if response.background is not None:
+            await response.background()
+        await client.aclose()
+
+        assert resolve_calls == 1
+        assert upstream_lease_headers == []
+        assert upstream_idempotency_keys == ["idem-tree-1"]
+        assert response.status_code == 409
+        assert body == b"backend-error"
+        assert [
+            value
+            for name, value in response.raw_headers
+            if name.lower() == b"x-upstream"
+        ] == [b"kept"]
+        assert response_leases == [LEASE_A]
+
+    _run(scenario())
+
+
+def test_proxy_missing_lease_is_only_allowed_by_explicit_transition_switch() -> None:
+    async def scenario() -> None:
+        upstream_calls = 0
+        body_reads = 0
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal upstream_calls
+            upstream_calls += 1
+            return httpx.Response(204)
+
+        async def receive() -> dict[str, Any]:
+            nonlocal body_reads
+            body_reads += 1
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        transitional = ProxyHandler(
+            lambda _profile_id: _lease(),
+            http_client=client,
+            require_connection_lease=False,
+        )
+        allowed = await transitional(
+            _request("GET", "/p/local/api/v1/health"),
+            PROFILE_ID,
+            "health",
+        )
+        if allowed.background is not None:
+            await allowed.background()
+
+        strict = ProxyHandler(
+            lambda _profile_id: _lease(),
+            http_client=client,
+            require_connection_lease=True,
+        )
+        with pytest.raises(ProxyStaleConnectionEpoch) as captured:
+            await strict(
+                _request(
+                    "POST",
+                    "/p/local/api/v1/upload",
+                    receive_override=receive,
+                ),
+                PROFILE_ID,
+                "upload",
+            )
+
+        await client.aclose()
+        assert upstream_calls == 1
+        assert body_reads == 0
+        assert captured.value.details == {"current_connection_epoch": 7}
 
     _run(scenario())
 
@@ -380,6 +611,65 @@ def test_proxy_enforces_body_limit_while_reading_chunked_body() -> None:
     _run(scenario())
 
 
+def test_proxy_rechecks_endpoint_invalidation_after_slow_body() -> None:
+    async def scenario() -> None:
+        invalidated = asyncio.Event()
+        waiting_for_final_chunk = asyncio.Event()
+        release_final_chunk = asyncio.Event()
+        upstream_calls = 0
+        receive_calls = 0
+
+        async def receive() -> dict[str, Any]:
+            nonlocal receive_calls
+            receive_calls += 1
+            if receive_calls == 1:
+                return {
+                    "type": "http.request",
+                    "body": b"first-",
+                    "more_body": True,
+                }
+            waiting_for_final_chunk.set()
+            await release_final_chunk.wait()
+            return {
+                "type": "http.request",
+                "body": b"second",
+                "more_body": False,
+            }
+
+        async def upstream(request: httpx.Request) -> httpx.Response:
+            nonlocal upstream_calls
+            upstream_calls += 1
+            return httpx.Response(204)
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        handler = ProxyHandler(
+            lambda _profile_id: _lease(invalidated=invalidated),
+            http_client=client,
+            require_connection_lease=True,
+        )
+        request = _request(
+            "POST",
+            "/p/local/api/v1/upload",
+            headers=((b"x-chattree-connection-lease-id", LEASE_A.encode("ascii")),),
+            receive_override=receive,
+        )
+        proxy_task = asyncio.create_task(handler(request, PROFILE_ID, "upload"))
+        await asyncio.wait_for(waiting_for_final_chunk.wait(), timeout=0.25)
+
+        invalidated.set()
+        release_final_chunk.set()
+
+        with pytest.raises(ProxyStaleConnectionEpoch) as captured:
+            await asyncio.wait_for(proxy_task, timeout=0.25)
+
+        await client.aclose()
+        assert captured.value.details == {"expected_connection_epoch": 7}
+        assert receive_calls == 2
+        assert upstream_calls == 0
+
+    _run(scenario())
+
+
 class _GatedStream(httpx.AsyncByteStream):
     def __init__(self) -> None:
         self.waiting_for_release = asyncio.Event()
@@ -518,7 +808,10 @@ def test_proxy_stops_stream_when_endpoint_lease_is_invalidated() -> None:
         handler = ProxyHandler(
             lambda _profile_id: EndpointLease(
                 endpoint="http://upstream.test",
+                profile_id=PROFILE_ID,
+                server_instance_id=SERVER_A,
                 connection_epoch=1,
+                connection_lease_id=LEASE_A,
                 invalidated=invalidated,
             ),
             http_client=client,
@@ -635,7 +928,11 @@ def test_transport_error_carries_resolved_connection_epoch() -> None:
         handler = ProxyHandler(
             lambda _profile_id: EndpointLease(
                 endpoint="http://upstream.test",
+                profile_id=PROFILE_ID,
+                server_instance_id=SERVER_A,
                 connection_epoch=7,
+                connection_lease_id=LEASE_A,
+                invalidated=asyncio.Event(),
             ),
             http_client=client,
         )
@@ -646,6 +943,7 @@ def test_transport_error_carries_resolved_connection_epoch() -> None:
 
         await client.aclose()
         assert captured.value.connection_epoch == 7
+        assert captured.value.connection_lease_id == LEASE_A
 
     _run(scenario())
 

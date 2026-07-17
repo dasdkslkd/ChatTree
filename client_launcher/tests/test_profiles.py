@@ -24,6 +24,9 @@ from client_launcher.settings import (
 )
 
 
+LEASE_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
+
 def _profile(
     profile_id: str,
     home: Path,
@@ -193,6 +196,7 @@ def test_profile_and_session_models_have_stable_wire_shapes(tmp_path: Path):
         status="error",
         phase="handshake",
         connection_epoch=3,
+        connection_lease_id=LEASE_A,
         server_instance_id="server-a",
         error=ConnectionErrorInfo(
             code="protocol_mismatch",
@@ -205,6 +209,7 @@ def test_profile_and_session_models_have_stable_wire_shapes(tmp_path: Path):
         "status": "error",
         "phase": "handshake",
         "connection_epoch": 3,
+        "connection_lease_id": LEASE_A,
         "server_instance_id": "server-a",
         "error": {
             "code": "protocol_mismatch",
@@ -212,6 +217,12 @@ def test_profile_and_session_models_have_stable_wire_shapes(tmp_path: Path):
             "retryable": False,
         },
     }
+
+    with pytest.raises(ValueError, match="connection_lease_id"):
+        ServerSession(
+            profile_id="work",
+            connection_lease_id=LEASE_A.upper(),
+        )
 
 
 def test_crud_normalizes_home_and_update_never_changes_binding(tmp_path: Path):

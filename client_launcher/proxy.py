@@ -5,6 +5,7 @@ import inspect
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from typing import TypeAlias
 from urllib.parse import quote, urljoin, urlsplit
+from uuid import UUID
 
 import httpx
 from fastapi import APIRouter
@@ -20,6 +21,8 @@ from client_launcher.models import EndpointLease
 DEFAULT_MAX_BODY_BYTES = 64 * 1024 * 1024
 DEFAULT_CONNECT_TIMEOUT = 5.0
 DEFAULT_READ_TIMEOUT = 60.0
+CONNECTION_LEASE_HEADER = "X-ChatTree-Connection-Lease-ID"
+_CONNECTION_LEASE_HEADER_BYTES = CONNECTION_LEASE_HEADER.lower().encode("ascii")
 
 _PROXY_METHODS = (
     "DELETE",
@@ -61,6 +64,7 @@ class ProxyError(RuntimeError):
     def __init__(self, message: str) -> None:
         super().__init__(message)
         self.message = message
+        self.connection_lease_id: str | None = None
 
 
 class ProxyEndpointUnavailable(ProxyError):
@@ -81,6 +85,30 @@ class ProxyRequestBodyTooLarge(ProxyError):
     def __init__(self, limit_bytes: int) -> None:
         self.limit_bytes = limit_bytes
         super().__init__(f"Request body exceeds the {limit_bytes}-byte limit")
+
+
+class ProxyStaleConnectionEpoch(ProxyError):
+    code = "stale_connection_epoch"
+    status_code = 409
+    retryable = False
+
+    def __init__(
+        self,
+        profile_id: str,
+        *,
+        current_connection_epoch: int | None = None,
+        expected_connection_epoch: int | None = None,
+        connection_lease_id: str | None = None,
+    ) -> None:
+        self.profile_id = profile_id
+        details: dict[str, int] = {}
+        if expected_connection_epoch is not None:
+            details["expected_connection_epoch"] = expected_connection_epoch
+        if current_connection_epoch is not None:
+            details["current_connection_epoch"] = current_connection_epoch
+        self.details = details
+        super().__init__(f"Connection lease for Profile '{profile_id}' is stale")
+        self.connection_lease_id = connection_lease_id
 
 
 class ProxyUpstreamTransportError(ProxyError):
@@ -150,6 +178,7 @@ class ProxyHandler:
         max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
         connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
         read_timeout: float = DEFAULT_READ_TIMEOUT,
+        require_connection_lease: bool = False,
     ) -> None:
         if max_body_bytes < 0:
             raise ValueError("max_body_bytes must be non-negative")
@@ -157,10 +186,13 @@ class ProxyHandler:
             raise ValueError("connect_timeout must be positive")
         if read_timeout <= 0:
             raise ValueError("read_timeout must be positive")
+        if not isinstance(require_connection_lease, bool):
+            raise ValueError("require_connection_lease must be a boolean")
 
         self._resolve_endpoint = resolve_endpoint
         self._http_client = http_client
         self._max_body_bytes = max_body_bytes
+        self._require_connection_lease = require_connection_lease
         self._timeout = httpx.Timeout(
             connect=connect_timeout,
             read=read_timeout,
@@ -174,8 +206,56 @@ class ProxyHandler:
         profile_id: str,
         path: str,
     ) -> StreamingResponse:
-        endpoint, connection_epoch, invalidated = await self._ready_endpoint(
-            profile_id
+        resolved = await self._ready_endpoint(profile_id)
+        if isinstance(resolved, EndpointLease):
+            endpoint = resolved.endpoint
+            connection_epoch = resolved.connection_epoch
+            connection_lease_id = resolved.connection_lease_id
+            invalidated = resolved.invalidated
+            if resolved.profile_id != profile_id:
+                raise ProxyStaleConnectionEpoch(
+                    profile_id,
+                    current_connection_epoch=connection_epoch,
+                    connection_lease_id=connection_lease_id,
+                )
+        else:
+            endpoint = resolved
+            connection_epoch = None
+            connection_lease_id = None
+            invalidated = None
+        try:
+            return await self._forward_resolved(
+                request,
+                profile_id=profile_id,
+                path=path,
+                endpoint=endpoint,
+                connection_epoch=connection_epoch,
+                connection_lease_id=connection_lease_id,
+                invalidated=invalidated,
+            )
+        except ProxyError as exc:
+            if connection_lease_id is not None:
+                exc.connection_lease_id = connection_lease_id
+            raise
+
+    async def _forward_resolved(
+        self,
+        request: Request,
+        *,
+        profile_id: str,
+        path: str,
+        endpoint: Endpoint,
+        connection_epoch: int | None,
+        connection_lease_id: str | None,
+        invalidated: asyncio.Event | None,
+    ) -> StreamingResponse:
+        _validate_connection_lease(
+            request,
+            profile_id=profile_id,
+            current_connection_epoch=connection_epoch,
+            current_connection_lease_id=connection_lease_id,
+            invalidated=invalidated,
+            required=self._require_connection_lease,
         )
         target_url = _target_url(endpoint, request, profile_id, path)
         body = await _read_bounded_body(request, self._max_body_bytes)
@@ -188,6 +268,12 @@ class ProxyHandler:
             extensions={"timeout": self._timeout.as_dict()},
         )
 
+        _raise_if_invalidated(
+            profile_id,
+            connection_epoch=connection_epoch,
+            connection_lease_id=connection_lease_id,
+            invalidated=invalidated,
+        )
         try:
             upstream_response = await self._http_client.send(
                 upstream_request,
@@ -214,6 +300,7 @@ class ProxyHandler:
                 upstream_response.headers.raw,
                 target_url=target_url,
                 profile_id=profile_id,
+                connection_lease_id=connection_lease_id,
             ),
             closer=closer,
         )
@@ -221,19 +308,15 @@ class ProxyHandler:
     async def _ready_endpoint(
         self,
         profile_id: str,
-    ) -> tuple[Endpoint, int | None, asyncio.Event | None]:
+    ) -> Endpoint | EndpointLease:
         resolved = self._resolve_endpoint(profile_id)
         if inspect.isawaitable(resolved):
             resolved = await resolved
         if isinstance(resolved, EndpointLease):
-            return (
-                resolved.endpoint,
-                resolved.connection_epoch,
-                resolved.invalidated,
-            )
+            return resolved
         if resolved is None or (isinstance(resolved, str) and not resolved.strip()):
             raise ProxyEndpointUnavailable(profile_id)
-        return resolved, None, None
+        return resolved
 
 
 def create_proxy_router(
@@ -243,6 +326,7 @@ def create_proxy_router(
     *,
     connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
     read_timeout: float = DEFAULT_READ_TIMEOUT,
+    require_connection_lease: bool = False,
 ) -> APIRouter:
     handler = ProxyHandler(
         resolve_endpoint,
@@ -250,6 +334,7 @@ def create_proxy_router(
         max_body_bytes=max_body_bytes,
         connect_timeout=connect_timeout,
         read_timeout=read_timeout,
+        require_connection_lease=require_connection_lease,
     )
     router = APIRouter()
 
@@ -267,6 +352,67 @@ def create_proxy_router(
         name="proxy_server_api",
     )
     return router
+
+
+def _validate_connection_lease(
+    request: Request,
+    *,
+    profile_id: str,
+    current_connection_epoch: int | None,
+    current_connection_lease_id: str | None,
+    invalidated: asyncio.Event | None,
+    required: bool,
+) -> None:
+    _raise_if_invalidated(
+        profile_id,
+        connection_epoch=current_connection_epoch,
+        connection_lease_id=current_connection_lease_id,
+        invalidated=invalidated,
+    )
+    values = [
+        value
+        for name, value in request.scope.get("headers", ())
+        if name.lower() == _CONNECTION_LEASE_HEADER_BYTES
+    ]
+    if not values and not required:
+        return
+    supplied = _canonical_lease_header(values)
+    if (
+        supplied is None
+        or current_connection_lease_id is None
+        or supplied != current_connection_lease_id
+    ):
+        raise ProxyStaleConnectionEpoch(
+            profile_id,
+            current_connection_epoch=current_connection_epoch,
+            connection_lease_id=current_connection_lease_id,
+        )
+
+
+def _canonical_lease_header(values: list[bytes]) -> str | None:
+    if len(values) != 1:
+        return None
+    try:
+        value = values[0].decode("ascii")
+        canonical = str(UUID(value))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    return value if value == canonical else None
+
+
+def _raise_if_invalidated(
+    profile_id: str,
+    *,
+    connection_epoch: int | None,
+    connection_lease_id: str | None,
+    invalidated: asyncio.Event | None,
+) -> None:
+    if invalidated is not None and invalidated.is_set():
+        raise ProxyStaleConnectionEpoch(
+            profile_id,
+            expected_connection_epoch=connection_epoch,
+            connection_lease_id=connection_lease_id,
+        )
 
 
 async def _read_bounded_body(request: Request, limit_bytes: int) -> bytes:
@@ -329,7 +475,12 @@ def _request_headers(
         request_id if isinstance(request_id, str) else None
     )
     request.state.request_id = canonical_id
-    excluded = {b"content-length", b"host", b"x-request-id"}
+    excluded = {
+        b"content-length",
+        b"host",
+        b"x-request-id",
+        _CONNECTION_LEASE_HEADER_BYTES,
+    }
     headers = _filtered_headers(
         request.scope.get("headers", ()),
         extra_excluded=excluded,
@@ -372,9 +523,13 @@ def _response_headers(
     *,
     target_url: httpx.URL,
     profile_id: str,
+    connection_lease_id: str | None,
 ) -> list[RawHeader]:
-    headers = _filtered_headers(raw_headers)
-    return [
+    headers = _filtered_headers(
+        raw_headers,
+        extra_excluded={_CONNECTION_LEASE_HEADER_BYTES},
+    )
+    response_headers = [
         (
             name,
             _rewrite_location(value, target_url, profile_id)
@@ -383,6 +538,14 @@ def _response_headers(
         )
         for name, value in headers
     ]
+    if connection_lease_id is not None:
+        response_headers.append(
+            (
+                _CONNECTION_LEASE_HEADER_BYTES,
+                connection_lease_id.encode("ascii"),
+            )
+        )
+    return response_headers
 
 
 def _response_request_id(raw_headers: Iterable[RawHeader]) -> str | None:

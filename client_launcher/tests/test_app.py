@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import httpx
 import pytest
@@ -21,11 +23,18 @@ from client_launcher.http_errors import (
 from client_launcher.local_server import ConnectedServer
 from client_launcher.models import LauncherError
 from client_launcher.profiles import ProfileStore
-from client_launcher.proxy import ProxyError
+from client_launcher.proxy import CONNECTION_LEASE_HEADER, ProxyError
 from client_launcher.settings import LauncherSettings
 
 
 SERVER_A = "11111111-1111-4111-8111-111111111111"
+
+
+def _is_canonical_uuid(value: str) -> bool:
+    try:
+        return str(UUID(value)) == value
+    except (AttributeError, TypeError, ValueError):
+        return False
 
 
 class ImmediateConnector:
@@ -73,8 +82,15 @@ def _app(
     tmp_path: Path,
     *,
     proxy_client: httpx.AsyncClient | None = None,
+    require_connection_lease: bool = False,
+    max_request_body_bytes: int | None = None,
 ):
     settings = _settings(tmp_path)
+    if max_request_body_bytes is not None:
+        settings = replace(
+            settings,
+            max_request_body_bytes=max_request_body_bytes,
+        )
     store = ProfileStore(
         settings.client_home / "profiles.json",
         default_server_home=tmp_path / "default-server",
@@ -87,10 +103,31 @@ def _app(
             profiles=store,
             connector=connector,
             proxy_client=proxy_client,
+            require_connection_lease=require_connection_lease,
         ),
         store,
         connector,
     )
+
+
+def test_independent_launcher_apps_issue_distinct_epoch_zero_leases(tmp_path: Path):
+    first_app, _, _ = _app(tmp_path / "first")
+    second_app, _, _ = _app(tmp_path / "second")
+
+    with TestClient(first_app) as first_client:
+        first_status = first_client.get(
+            "/client/v1/profiles/local/status"
+        ).json()
+    with TestClient(second_app) as second_client:
+        second_status = second_client.get(
+            "/client/v1/profiles/local/status"
+        ).json()
+
+    assert first_status["status"] == second_status["status"] == "disconnected"
+    assert first_status["connection_epoch"] == second_status["connection_epoch"] == 0
+    assert _is_canonical_uuid(first_status["connection_lease_id"])
+    assert _is_canonical_uuid(second_status["connection_lease_id"])
+    assert first_status["connection_lease_id"] != second_status["connection_lease_id"]
 
 
 def test_profile_crud_and_stable_error_envelope(tmp_path: Path):
@@ -255,6 +292,90 @@ def test_connect_disconnect_and_endpoint_change_reset_session(tmp_path: Path):
     assert connector.closed is True
 
 
+def test_app_threads_strict_connection_lease_switch_through_proxy(tmp_path: Path):
+    upstream_calls = 0
+    forwarded_leases: list[str] = []
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal upstream_calls
+        upstream_calls += 1
+        forwarded_leases.extend(
+            request.headers.get_list("x-chattree-connection-lease-id")
+        )
+        return httpx.Response(
+            204,
+            headers=[
+                (CONNECTION_LEASE_HEADER, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+                (CONNECTION_LEASE_HEADER, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+            ],
+        )
+
+    proxy_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    app, _, _ = _app(
+        tmp_path,
+        proxy_client=proxy_client,
+        require_connection_lease=True,
+    )
+
+    with TestClient(app) as client:
+        connected = client.post("/client/v1/profiles/local/connect")
+        lease_id = connected.json()["connection_lease_id"]
+        missing = client.get("/p/local/api/v1/health")
+        matching = client.get(
+            "/p/local/api/v1/health",
+            headers={CONNECTION_LEASE_HEADER: lease_id},
+        )
+
+    asyncio.run(proxy_client.aclose())
+    assert missing.status_code == 409
+    assert missing.json()["error"] == {
+        "code": "stale_connection_epoch",
+        "message": missing.json()["error"]["message"],
+        "retryable": False,
+        "request_id": missing.headers["X-Request-ID"],
+        "details": {"current_connection_epoch": 1},
+    }
+    assert missing.headers.get_list(CONNECTION_LEASE_HEADER) == [lease_id]
+    assert matching.status_code == 204
+    assert matching.headers.get_list(CONNECTION_LEASE_HEADER) == [lease_id]
+    assert forwarded_leases == []
+    assert upstream_calls == 1
+
+
+def test_strict_proxy_body_limit_error_carries_captured_connection_lease(
+    tmp_path: Path,
+):
+    upstream_calls = 0
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal upstream_calls
+        upstream_calls += 1
+        return httpx.Response(204)
+
+    proxy_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    app, _, _ = _app(
+        tmp_path,
+        proxy_client=proxy_client,
+        require_connection_lease=True,
+        max_request_body_bytes=5,
+    )
+
+    with TestClient(app) as client:
+        connected = client.post("/client/v1/profiles/local/connect")
+        lease_id = connected.json()["connection_lease_id"]
+        response = client.post(
+            "/p/local/api/v1/upload",
+            headers={CONNECTION_LEASE_HEADER: lease_id},
+            content=b"too-large",
+        )
+
+    asyncio.run(proxy_client.aclose())
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "request_body_too_large"
+    assert response.headers.get_list(CONNECTION_LEASE_HEADER) == [lease_id]
+    assert upstream_calls == 0
+
+
 def test_rebind_requires_confirmed_instance_id(tmp_path: Path):
     app, _, connector = _app(tmp_path)
 
@@ -398,6 +519,49 @@ def test_origin_and_validation_are_rejected_with_launcher_errors(tmp_path: Path)
         assert invalid.status_code == 422
         assert invalid.json()["error"]["code"] == "invalid_request"
         assert invalid.json()["error"]["request_id"].startswith("req_")
+
+
+def test_allowed_cors_exposes_connection_lease_and_request_id(tmp_path: Path):
+    app, _, _ = _app(tmp_path)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/client/v1/profiles/local/status",
+            headers={"Origin": "http://localhost:5173"},
+        )
+        preflight = client.options(
+            "/p/local/api/v1/health",
+            headers={
+                "Origin": "http://localhost:5173",
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": (
+                    f"{CONNECTION_LEASE_HEADER}, X-Request-ID"
+                ),
+            },
+        )
+
+    exposed = {
+        value.strip().lower()
+        for value in response.headers["Access-Control-Expose-Headers"].split(",")
+    }
+    allowed = {
+        value.strip().lower()
+        for value in preflight.headers["Access-Control-Allow-Headers"].split(",")
+    }
+    assert response.status_code == 200
+    assert response.headers["Access-Control-Allow-Origin"] == (
+        "http://localhost:5173"
+    )
+    assert exposed == {
+        CONNECTION_LEASE_HEADER.lower(),
+        "x-request-id",
+    }
+    assert preflight.status_code == 200
+    assert preflight.headers["Access-Control-Allow-Origin"] == (
+        "http://localhost:5173"
+    )
+    assert CONNECTION_LEASE_HEADER.lower() in allowed
+    assert "x-request-id" in allowed
 
 
 def test_profile_requests_reject_coercion_and_unknown_fields(tmp_path: Path):

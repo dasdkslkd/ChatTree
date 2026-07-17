@@ -19,7 +19,11 @@ from client_launcher.http_errors import (
 from client_launcher.local_server import LocalServerConnector
 from client_launcher.models import LauncherError, LocalTarget, ServerProfile
 from client_launcher.profiles import ProfileStore
-from client_launcher.proxy import ProxyError, create_proxy_router
+from client_launcher.proxy import (
+    CONNECTION_LEASE_HEADER,
+    ProxyError,
+    create_proxy_router,
+)
 from client_launcher.sessions import SessionManager
 from client_launcher.settings import (
     PROFILES_FILENAME,
@@ -45,6 +49,7 @@ class _LauncherApp(FastAPI):
             allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],
+            expose_headers=[CONNECTION_LEASE_HEADER, "X-Request-ID"],
         )
         return RequestBoundaryMiddleware(
             stack,
@@ -84,6 +89,7 @@ def create_app(
     profiles: ProfileStore | None = None,
     connector: Any | None = None,
     proxy_client: httpx.AsyncClient | None = None,
+    require_connection_lease: bool = False,
 ) -> FastAPI:
     resolved_settings = settings or LauncherSettings.from_env()
     profile_store = profiles or ProfileStore(
@@ -152,7 +158,11 @@ def create_app(
                 ),
                 connection_epoch=connection_epoch,
             )
-        return await launcher_error_response(request, exc)
+        response = await launcher_error_response(request, exc)
+        connection_lease_id = getattr(exc, "connection_lease_id", None)
+        if isinstance(connection_lease_id, str):
+            response.headers[CONNECTION_LEASE_HEADER] = connection_lease_id
+        return response
 
     @app.get("/client/v1/profiles")
     async def list_profiles() -> list[dict[str, Any]]:
@@ -249,6 +259,7 @@ def create_app(
             resolved_settings.max_request_body_bytes,
             connect_timeout=resolved_settings.connect_timeout_seconds,
             read_timeout=resolved_settings.proxy_idle_timeout_seconds,
+            require_connection_lease=require_connection_lease,
         )
     )
     return app

@@ -163,6 +163,47 @@ async function testApiClientNormalizesRejectedResponses() {
   );
 }
 
+async function testApiClientFactoriesKeepIndependentFixedBasesAndNormalizers() {
+  const { createApiClient } = loadClient(undefined);
+  const { ChatTreeApiError } = require(errorsModule);
+  const first = createApiClient('/p/profile-a/api/v1');
+  const second = createApiClient('/p/profile-b/api/v1');
+
+  assert.equal(first.defaults.baseURL, '/p/profile-a/api/v1');
+  assert.equal(second.defaults.baseURL, '/p/profile-b/api/v1');
+  assert.notEqual(first, second);
+
+  for (const [client, requestId] of [
+    [first, 'req_factory_a'],
+    [second, 'req_factory_b'],
+  ]) {
+    const source = new Error('raw axios error');
+    source.isAxiosError = true;
+    source.response = {
+      status: 503,
+      headers: {},
+      data: {
+        error: {
+          code: 'service_unavailable',
+          message: 'temporarily unavailable',
+          retryable: true,
+          request_id: requestId,
+        },
+      },
+    };
+    await assert.rejects(
+      () => client.get('/interceptor-test', {
+        adapter: () => Promise.reject(source),
+      }),
+      (error) => {
+        assert.ok(error instanceof ChatTreeApiError);
+        assert.equal(error.requestId, requestId);
+        return true;
+      },
+    );
+  }
+}
+
 async function main() {
   try {
     testUninitializedClientFailsClosed();
@@ -170,6 +211,7 @@ async function main() {
     testInjectedAbsoluteBase();
     await testServerProtocolContract();
     await testApiClientNormalizesRejectedResponses();
+    await testApiClientFactoriesKeepIndependentFixedBasesAndNormalizers();
     console.log('api client tests passed');
   } finally {
     setWindow(originalWindow);
