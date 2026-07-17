@@ -182,9 +182,26 @@ async function pushToolStarted(controlled, toolRound, toolCall) {
   }));
 }
 
-const { StreamManager, STREAM_DURATION_UPDATE_MS } = require(path.join(__dirname, '../src/services/streamManager.ts'));
-const { messageApi } = require(path.join(__dirname, '../src/api/message.ts'));
-const { runsApi } = require(path.join(__dirname, '../src/api/runs.ts'));
+const bootstrapModule = path.join(__dirname, '../src/runtime/frontendBootstrap.ts');
+const clientModule = path.join(__dirname, '../src/api/client.ts');
+const streamManagerModule = path.join(__dirname, '../src/services/streamManager.ts');
+const messageModule = path.join(__dirname, '../src/api/message.ts');
+const runsModule = path.join(__dirname, '../src/api/runs.ts');
+
+globalThis.window = {
+  location: {
+    href: 'http://127.0.0.1:5173/s/local',
+    pathname: '/s/local',
+  },
+};
+for (const modulePath of [bootstrapModule, clientModule, streamManagerModule, messageModule, runsModule]) {
+  delete require.cache[require.resolve(modulePath)];
+}
+require(bootstrapModule).initializeFrontendBootstrap();
+
+const { StreamManager, STREAM_DURATION_UPDATE_MS } = require(streamManagerModule);
+const { messageApi } = require(messageModule);
+const { runsApi } = require(runsModule);
 const { getGenerationStatusText, getStreamStatusText } = require(path.join(__dirname, '../src/utils/generationStatus.ts'));
 
 async function withManager(run) {

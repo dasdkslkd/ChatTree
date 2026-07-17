@@ -17,9 +17,22 @@ require.extensions['.ts'] = function loadTs(module, filename) {
   module._compile(output, filename);
 };
 
-const {
-  TaskStateCoordinator,
-} = require(path.join(__dirname, '../src/services/taskStateCoordinator.ts'));
+const bootstrapModule = path.join(__dirname, '../src/runtime/frontendBootstrap.ts');
+const clientModule = path.join(__dirname, '../src/api/client.ts');
+const coordinatorModule = path.join(__dirname, '../src/services/taskStateCoordinator.ts');
+
+globalThis.window = {
+  location: {
+    href: 'http://127.0.0.1:5173/s/local',
+    pathname: '/s/local',
+  },
+};
+delete require.cache[require.resolve(bootstrapModule)];
+delete require.cache[require.resolve(clientModule)];
+delete require.cache[require.resolve(coordinatorModule)];
+require(bootstrapModule).initializeFrontendBootstrap();
+
+const { TaskStateCoordinator } = require(coordinatorModule);
 
 function snapshot(version, overrides = {}) {
   return {

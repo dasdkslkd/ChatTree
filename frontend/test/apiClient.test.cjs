@@ -18,6 +18,7 @@ require.extensions['.ts'] = function loadTs(module, filename) {
 };
 
 const clientModule = path.join(__dirname, '../src/api/client.ts');
+const bootstrapModule = path.join(__dirname, '../src/runtime/frontendBootstrap.ts');
 const errorsModule = path.join(__dirname, '../src/api/errors.ts');
 const serverModule = path.join(__dirname, '../src/api/server.ts');
 const originalWindow = globalThis.window;
@@ -30,46 +31,60 @@ function setWindow(value) {
   }
 }
 
-function loadClient(bootstrap) {
-  setWindow(bootstrap === undefined ? undefined : { __CHATTREE_BOOTSTRAP__: bootstrap });
+function loadClient(bootstrap, pathname = '/s/profile-7') {
+  setWindow({
+    __CHATTREE_BOOTSTRAP__: bootstrap,
+    location: { href: `http://127.0.0.1:5173${pathname}`, pathname },
+  });
+  delete require.cache[require.resolve(bootstrapModule)];
   delete require.cache[require.resolve(clientModule)];
+  delete require.cache[require.resolve(serverModule)];
+  require(bootstrapModule).initializeFrontendBootstrap();
   return require(clientModule);
 }
 
-function testDefaultApiBase() {
-  const { apiClient, frontendBootstrap, serverApiUrl } = loadClient(undefined);
+function loadUninitializedClient(pathname = '/s/profile-7') {
+  setWindow({
+    location: {
+      href: `http://127.0.0.1:5173${pathname}`,
+      pathname,
+    },
+  });
+  delete require.cache[require.resolve(bootstrapModule)];
+  delete require.cache[require.resolve(clientModule)];
+  delete require.cache[require.resolve(serverModule)];
+  return () => require(clientModule);
+}
 
-  assert.equal(frontendBootstrap.apiBase, '/api/v1');
-  assert.equal(apiClient.defaults.baseURL, '/api/v1');
-  assert.equal(serverApiUrl('/health'), '/api/v1/health');
-  assert.equal(serverApiUrl('health'), '/api/v1/health');
+function testUninitializedClientFailsClosed() {
+  assert.throws(loadUninitializedClient(), /Frontend bootstrap has not been initialized/);
 }
 
 function testInjectedRelativeBaseAndProfile() {
   const { apiClient, frontendBootstrap, serverApiUrl } = loadClient({
-    apiBase: ' custom/api/v2/// ',
     profileId: 'profile-7',
+    apiBase: '/p/profile-7/api/v1',
   });
 
-  assert.equal(frontendBootstrap.apiBase, '/custom/api/v2');
+  assert.equal(frontendBootstrap.apiBase, '/p/profile-7/api/v1');
   assert.equal(frontendBootstrap.profileId, 'profile-7');
-  assert.equal(apiClient.defaults.baseURL, '/custom/api/v2');
-  assert.equal(serverApiUrl('/runs'), '/custom/api/v2/runs');
-  assert.equal(serverApiUrl('runs'), '/custom/api/v2/runs');
+  assert.equal(apiClient.defaults.baseURL, '/p/profile-7/api/v1');
+  assert.equal(serverApiUrl('/runs'), '/p/profile-7/api/v1/runs');
+  assert.equal(serverApiUrl('runs'), '/p/profile-7/api/v1/runs');
 }
 
 function testInjectedAbsoluteBase() {
   const { frontendBootstrap, serverApiUrl } = loadClient({
-    apiBase: 'https://server.example/root/api/v1///',
+    profileId: 'profile-7',
+    apiBase: 'https://launcher.example/p/profile-7/api/v1',
   });
 
-  assert.equal(frontendBootstrap.apiBase, 'https://server.example/root/api/v1');
-  assert.equal(serverApiUrl('/handshake'), 'https://server.example/root/api/v1/handshake');
+  assert.equal(frontendBootstrap.apiBase, 'https://launcher.example/p/profile-7/api/v1');
+  assert.equal(serverApiUrl('/handshake'), 'https://launcher.example/p/profile-7/api/v1/handshake');
 }
 
 async function testServerProtocolContract() {
   const client = loadClient(undefined);
-  delete require.cache[require.resolve(serverModule)];
 
   const calls = [];
   let protocolVersion = 1;
@@ -150,7 +165,7 @@ async function testApiClientNormalizesRejectedResponses() {
 
 async function main() {
   try {
-    testDefaultApiBase();
+    testUninitializedClientFailsClosed();
     testInjectedRelativeBaseAndProfile();
     testInjectedAbsoluteBase();
     await testServerProtocolContract();

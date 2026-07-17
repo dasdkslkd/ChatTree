@@ -10,6 +10,7 @@ import { useConversationStore } from './store/conversationStore'
 import { flushPerfEventsSync, loadPerfConfig } from './perf/client'
 import { serverApi } from './api/server'
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
+import type { FrontendBootstrap } from './runtime/frontendBootstrap'
 
 const ChatPage = lazy(() => import('./pages/MainPage'));
 const SERVER_PROBE_INTERVAL_MS = 30000;
@@ -52,7 +53,7 @@ function formatTokens(value?: number | null): string {
   return String(value);
 }
 
-function App() {
+function App(_props: { bootstrap: FrontendBootstrap }) {
   const { activePage, settingsSection, openSettings } = useNavigationStore();
   const { currentProvider, currentModel, loadConfig, loadProviders, loadMetadata, getMetadata } = useModelStore();
   const { messages } = useConversationStore();
