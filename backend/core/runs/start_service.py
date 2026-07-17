@@ -127,6 +127,68 @@ class RunStartCoordinator:
         self._close_lock = asyncio.Lock()
         self._closing = False
 
+    async def replay_existing(
+        self,
+        idempotency: RunIdempotency,
+    ) -> RunStartResult | None:
+        if not isinstance(idempotency, RunIdempotency):
+            raise RunStartValidationError("validated run idempotency is required")
+
+        while True:
+            async with self._state_lock:
+                if self._closing:
+                    logger.error(
+                        "run replay rejected while coordinator is closing key=%s",
+                        idempotency.key,
+                    )
+                    raise RunStartReservationError(
+                        "run start coordinator is closing"
+                    )
+                await self._prune_missing_failures_locked()
+                barrier = self._bootstrap_barriers.get(idempotency.key)
+                if barrier is None:
+                    record = await self.run_manager.get_idempotent_run(
+                        idempotency_key=idempotency.key,
+                        request_fingerprint=idempotency.request_fingerprint,
+                    )
+                else:
+                    record = None
+
+            if record is not None:
+                return await self._replay_record(record)
+            if barrier is None:
+                return None
+
+            outcome = await asyncio.shield(barrier.future)
+            if outcome.conflict_run_id is not None:
+                if (
+                    idempotency.request_fingerprint
+                    == barrier.request_fingerprint
+                ):
+                    raise RunIdempotencyConflictError(
+                        outcome.conflict_run_id
+                    )
+                # The active owner may conflict with an older durable run whose
+                # fingerprint matches this replay, so resolve from storage again.
+                continue
+            if outcome.retry:
+                continue
+
+            run_id = self._bootstrap_outcome_run_id(outcome)
+            if idempotency.request_fingerprint != barrier.request_fingerprint:
+                if run_id is None:
+                    raise RunStartReservationError(
+                        "canonical run ID is missing from settled reservation"
+                    )
+                raise RunIdempotencyConflictError(run_id)
+            if outcome.error is not None:
+                raise outcome.error
+            if outcome.run is None:
+                raise RunStartReservationError(
+                    "settled reservation did not contain a run"
+                )
+            return await self._replay_record(outcome.run)
+
     async def start(
         self,
         spec: RunStartSpec,
@@ -221,6 +283,23 @@ class RunStartCoordinator:
                     "settled reservation did not contain a run"
                 )
             return RunStartResult(run=outcome.run, created=False)
+
+    @staticmethod
+    def _bootstrap_outcome_run_id(
+        outcome: RunBootstrapOutcome,
+    ) -> str | None:
+        if outcome.run is not None:
+            return outcome.run.run_id
+        if outcome.error is not None:
+            return outcome.error.run_id
+        return outcome.conflict_run_id
+
+    async def _replay_record(self, record: RunRecord) -> RunStartResult:
+        refreshed = await self._refresh_existing_record(record)
+        failure = await self._failure_for_existing(refreshed)
+        if failure is not None:
+            raise failure
+        return RunStartResult(run=refreshed, created=False)
 
     async def _run_barrier_owner(
         self,

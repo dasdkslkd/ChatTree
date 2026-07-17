@@ -4,7 +4,8 @@ import asyncio
 import json
 import logging
 from contextlib import suppress
-from typing import Any, Dict, Optional
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable, Dict, Mapping, Optional
 
 from backend.core.capabilities.registry import CapabilityRegistry
 from backend.core.chat.chat_manager import ChatManager
@@ -15,7 +16,18 @@ from backend.core.projects import filter_capability_registry_for_workspace
 from backend.core.prompts import PromptBuilder, PromptBuildRequest
 from backend.core.prompts.catalog import load_prompt_template
 from backend.core.prompts.types import RuntimePromptContext
-from backend.core.runs import RunKind, RunManager, RunStatus
+from backend.core.runs import (
+    FINISHED_RUN_STATUSES,
+    RunIdempotency,
+    RunKind,
+    RunManager,
+    RunRecord,
+    RunStartCoordinator,
+    RunStartResult,
+    RunStartSpec,
+    RunStartValidationError,
+    RunStatus,
+)
 from backend.core.tools.exposure import ToolExposureContext
 from backend.core.tools.security.permissions import normalize_permission_mode
 from backend.core.tools.task_tools import filter_task_tools_for_context
@@ -29,6 +41,16 @@ DEFAULT_MAX_TOOL_ROUNDS = 500
 DEFAULT_MAX_TURNS = 1000
 
 
+@dataclass(frozen=True)
+class _PreparedSubagentStart:
+    agent_name: str
+    workspace: Optional[Dict[str, Any]]
+    context_mode: str
+    delivery_policy: str
+    summary: str
+    metadata: Dict[str, Any]
+
+
 class SubagentExecutor:
     def __init__(
         self,
@@ -37,13 +59,21 @@ class SubagentExecutor:
         run_manager: RunManager,
         capability_registry: CapabilityRegistry,
         mailbox: Any = None,
+        run_start_coordinator: RunStartCoordinator | None = None,
     ) -> None:
         self.chat_manager = chat_manager
         self.run_manager = run_manager
         self.capability_registry = capability_registry
         self.mailbox = mailbox
+        self.run_start_coordinator = run_start_coordinator
         self._controllers: dict[str, StreamController] = {}
         self._tasks: dict[str, asyncio.Task] = {}
+        self._coordinator_owned_run_ids: set[str] = set()
+        self._shutdown_cancelled_run_ids: set[str] = set()
+        self._notification_tasks: set[asyncio.Task[Any]] = set()
+        self._shutdown_terminalization_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._lifecycle_lock = asyncio.Lock()
+        self._closing = False
 
     async def start(
         self,
@@ -63,39 +93,276 @@ class SubagentExecutor:
         delivery_policy: str = "auto",
         context_mode: str = "fresh",
         task_binding: Optional[Dict[str, Any]] = None,
+        runtime_metadata: Mapping[str, Any] | None = None,
     ) -> Dict[str, Any]:
-        delivery_policy = AgentDeliveryPolicy(str(delivery_policy or "auto")).value
-        scope_workspace = self._scope_workspace(conversation_id, workspace)
-        agent = self._scoped_registry(scope_workspace).get_agent(agent_name)
-        if agent is None:
-            raise KeyError(agent_name)
-        self._validate_schema(agent.input_schema, input_data, "input_schema")
+        async with self._lifecycle_lock:
+            self._ensure_open_locked()
+            prepared = self._prepare_start(
+                conversation_id=conversation_id,
+                agent_name=agent_name,
+                input_data=input_data,
+                provider_id=provider_id,
+                model_id=model_id,
+                permission_mode=permission_mode,
+                workspace=workspace,
+                delegated_task=delegated_task,
+                original_slash_input=original_slash_input,
+                delivery_policy=delivery_policy,
+                context_mode=context_mode,
+                runtime_metadata=runtime_metadata,
+            )
+            run = await self.run_manager.create_run(
+                conversation_id=conversation_id,
+                kind=RunKind.SUBAGENT,
+                anchor_node_id=parent_node_id,
+                created_by_run_id=created_by_run_id,
+                cancellation_parent_run_id=cancellation_parent_run_id,
+                summary=prepared.summary,
+                metadata=prepared.metadata,
+                task_binding=task_binding,
+            )
+            self._schedule_existing_locked(
+                run=run,
+                conversation_id=conversation_id,
+                agent_name=prepared.agent_name,
+                input_data=input_data,
+                parent_node_id=parent_node_id,
+                created_by_run_id=created_by_run_id,
+                cancellation_parent_run_id=cancellation_parent_run_id,
+                provider_id=provider_id,
+                model_id=model_id,
+                permission_mode=permission_mode,
+                workspace=prepared.workspace,
+                context_mode=prepared.context_mode,
+            )
+        return run.to_dict()
 
-        summary = f"{agent.name}: {str(input_data)[:80]}"
-        run = await self.run_manager.create_run(
+    async def start_idempotent(
+        self,
+        *,
+        conversation_id: str,
+        agent_name: str,
+        input_data: Any,
+        idempotency: RunIdempotency,
+        request_id: str,
+        parent_node_id: Optional[str] = None,
+        created_by_run_id: Optional[str] = None,
+        cancellation_parent_run_id: Optional[str] = None,
+        provider_id: Optional[str] = None,
+        model_id: Optional[str] = None,
+        permission_mode: Optional[str] = None,
+        workspace: Optional[Dict[str, Any]] = None,
+        delegated_task: Any = None,
+        original_slash_input: Optional[str] = None,
+        delivery_policy: str = "auto",
+        context_mode: str = "fresh",
+        task_binding: Optional[Dict[str, Any]] = None,
+        winner_anchor_factory: Callable[[RunRecord], Awaitable[str | None]] | None = None,
+        runtime_metadata: Mapping[str, Any] | None = None,
+    ) -> RunStartResult:
+        coordinator = self.run_start_coordinator
+        if coordinator is not None:
+            replay = await coordinator.replay_existing(idempotency)
+            if replay is not None:
+                return replay
+        try:
+            prepared = self._prepare_start(
+                conversation_id=conversation_id,
+                agent_name=agent_name,
+                input_data=input_data,
+                provider_id=provider_id,
+                model_id=model_id,
+                permission_mode=permission_mode,
+                workspace=workspace,
+                delegated_task=delegated_task,
+                original_slash_input=original_slash_input,
+                delivery_policy=delivery_policy,
+                context_mode=context_mode,
+                runtime_metadata=runtime_metadata,
+            )
+        except Exception:
+            if coordinator is not None:
+                replay = await coordinator.replay_existing(idempotency)
+                if replay is not None:
+                    return replay
+            raise
+        if coordinator is None:
+            raise RuntimeError("run start coordinator is not configured")
+
+        spec = RunStartSpec(
             conversation_id=conversation_id,
             kind=RunKind.SUBAGENT,
             anchor_node_id=parent_node_id,
             created_by_run_id=created_by_run_id,
             cancellation_parent_run_id=cancellation_parent_run_id,
-            summary=summary,
-            metadata={
-                "agent_name": agent.name,
-                "provider_id": provider_id or agent.provider_id,
-                "model_id": model_id or agent.model_id or agent.model,
-                "permission_mode": permission_mode or agent.permission_mode,
-                "delegated_task": delegated_task if delegated_task is not None else input_data,
-                "original_slash_input": original_slash_input,
-                "delivery_policy": delivery_policy,
-                "context_mode": context_mode if context_mode in {"fresh", "fork"} else "fresh",
-            },
+            summary=prepared.summary,
+            metadata=prepared.metadata,
             task_binding=task_binding,
+            idempotency=idempotency,
+            request_id=request_id,
         )
+
+        async def bootstrap(run: RunRecord) -> asyncio.Task[Any]:
+            scheduled_run = run
+            effective_parent_node_id = run.anchor_node_id
+            if winner_anchor_factory is not None:
+                winner_anchor_node_id = await winner_anchor_factory(run)
+                if (
+                    winner_anchor_node_id is not None
+                    and winner_anchor_node_id != run.anchor_node_id
+                ):
+                    scheduled_run = await self.run_manager.bind_anchor_node(
+                        run.run_id,
+                        winner_anchor_node_id,
+                    )
+                    effective_parent_node_id = winner_anchor_node_id
+            return await self.schedule_existing(
+                run=scheduled_run,
+                conversation_id=conversation_id,
+                agent_name=prepared.agent_name,
+                input_data=input_data,
+                parent_node_id=effective_parent_node_id,
+                created_by_run_id=created_by_run_id,
+                cancellation_parent_run_id=cancellation_parent_run_id,
+                provider_id=provider_id,
+                model_id=model_id,
+                permission_mode=permission_mode,
+                workspace=prepared.workspace,
+                context_mode=prepared.context_mode,
+                _coordinator_owned=True,
+            )
+
+        return await coordinator.start(spec, bootstrap)
+
+    def _prepare_start(
+        self,
+        *,
+        conversation_id: str,
+        agent_name: str,
+        input_data: Any,
+        provider_id: Optional[str],
+        model_id: Optional[str],
+        permission_mode: Optional[str],
+        workspace: Optional[Dict[str, Any]],
+        delegated_task: Any,
+        original_slash_input: Optional[str],
+        delivery_policy: str,
+        context_mode: str,
+        runtime_metadata: Mapping[str, Any] | None,
+    ) -> _PreparedSubagentStart:
+        normalized_delivery = AgentDeliveryPolicy(
+            str(delivery_policy or "auto")
+        ).value
+        normalized_context = context_mode if context_mode in {"fresh", "fork"} else "fresh"
         try:
-            await self._register_task_notification(run.run_id, agent_name=agent.name)
-        except Exception:
-            logger.exception("Failed to register subagent notification for %s", run.run_id)
-        task = asyncio.create_task(self._produce(
+            scope_workspace = self._scope_workspace(conversation_id, workspace)
+            agent = self._scoped_registry(scope_workspace).get_agent(agent_name)
+        except ValueError as exc:
+            raise RunStartValidationError(str(exc)) from exc
+        if agent is None:
+            raise KeyError(agent_name)
+        try:
+            self._validate_schema(agent.input_schema, input_data, "input_schema")
+        except ValueError as exc:
+            raise RunStartValidationError(str(exc)) from exc
+
+        metadata = {
+            "agent_name": agent.name,
+            "provider_id": provider_id or agent.provider_id,
+            "model_id": model_id or agent.model_id or agent.model,
+            "permission_mode": permission_mode or agent.permission_mode,
+            "delegated_task": delegated_task if delegated_task is not None else input_data,
+            "original_slash_input": original_slash_input,
+            "delivery_policy": normalized_delivery,
+            "context_mode": normalized_context,
+        }
+        if runtime_metadata is not None:
+            metadata.update(dict(runtime_metadata))
+        return _PreparedSubagentStart(
+            agent_name=agent.name,
+            workspace=scope_workspace,
+            context_mode=normalized_context,
+            delivery_policy=normalized_delivery,
+            summary=f"{agent.name}: {self._render_input_summary(input_data, limit=80)}",
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _render_input_summary(input_data: Any, *, limit: int) -> str:
+        if isinstance(input_data, str):
+            rendered = input_data
+        else:
+            try:
+                rendered = json.dumps(
+                    input_data,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+            except (TypeError, ValueError) as exc:
+                raise RunStartValidationError(
+                    "agent input must contain finite JSON values"
+                ) from exc
+        return rendered[:limit]
+
+    async def schedule_existing(
+        self,
+        *,
+        run: RunRecord,
+        conversation_id: str,
+        agent_name: str,
+        input_data: Any,
+        parent_node_id: Optional[str],
+        created_by_run_id: Optional[str],
+        cancellation_parent_run_id: Optional[str],
+        provider_id: Optional[str],
+        model_id: Optional[str],
+        permission_mode: Optional[str],
+        workspace: Optional[Dict[str, Any]],
+        context_mode: str,
+        _coordinator_owned: bool = False,
+    ) -> asyncio.Task[Any]:
+        async with self._lifecycle_lock:
+            self._ensure_open_locked()
+            return self._schedule_existing_locked(
+                run=run,
+                conversation_id=conversation_id,
+                agent_name=agent_name,
+                input_data=input_data,
+                parent_node_id=parent_node_id,
+                created_by_run_id=created_by_run_id,
+                cancellation_parent_run_id=cancellation_parent_run_id,
+                provider_id=provider_id,
+                model_id=model_id,
+                permission_mode=permission_mode,
+                workspace=workspace,
+                context_mode=context_mode,
+                _coordinator_owned=_coordinator_owned,
+            )
+
+    def _ensure_open_locked(self) -> None:
+        if self._closing:
+            raise RuntimeError("subagent executor is closing")
+
+    def _schedule_existing_locked(
+        self,
+        *,
+        run: RunRecord,
+        conversation_id: str,
+        agent_name: str,
+        input_data: Any,
+        parent_node_id: Optional[str],
+        created_by_run_id: Optional[str],
+        cancellation_parent_run_id: Optional[str],
+        provider_id: Optional[str],
+        model_id: Optional[str],
+        permission_mode: Optional[str],
+        workspace: Optional[Dict[str, Any]],
+        context_mode: str,
+        _coordinator_owned: bool = False,
+    ) -> asyncio.Task[Any]:
+        producer_coro = self._produce(
             run_id=run.run_id,
             conversation_id=conversation_id,
             agent_name=agent_name,
@@ -106,11 +373,290 @@ class SubagentExecutor:
             provider_id=provider_id,
             model_id=model_id,
             permission_mode=permission_mode,
-            workspace=scope_workspace,
+            workspace=workspace,
             context_mode=context_mode,
-        ))
+            _coordinator_owned=_coordinator_owned,
+        )
+        try:
+            task = asyncio.create_task(
+                producer_coro,
+                name=f"subagent-producer:{run.run_id}",
+            )
+        except BaseException:
+            producer_coro.close()
+            raise
         self._tasks[run.run_id] = task
-        return run.to_dict()
+        if _coordinator_owned:
+            self._coordinator_owned_run_ids.add(run.run_id)
+        else:
+            self._coordinator_owned_run_ids.discard(run.run_id)
+        task.add_done_callback(
+            lambda completed, run_id=run.run_id: self._consume_producer_task(
+                run_id,
+                completed,
+            )
+        )
+
+        notification_coro = self._register_task_notification(
+            run.run_id,
+            agent_name=agent_name,
+        )
+        try:
+            notification_task = asyncio.create_task(
+                notification_coro,
+                name=f"subagent-notification:{run.run_id}",
+            )
+        except Exception:
+            notification_coro.close()
+            logger.exception(
+                "Failed to schedule subagent notification for %s",
+                run.run_id,
+            )
+        else:
+            self._notification_tasks.add(notification_task)
+            notification_task.add_done_callback(self._consume_notification_task)
+        return task
+
+    def _consume_producer_task(
+        self,
+        run_id: str,
+        task: asyncio.Task[Any],
+    ) -> None:
+        if not task.cancelled():
+            try:
+                task.exception()
+            except asyncio.CancelledError:
+                pass
+        if self._tasks.get(run_id) is not task:
+            return
+        if run_id not in self._coordinator_owned_run_ids:
+            run = self.run_manager.get_run(run_id)
+            if (
+                run is not None
+                and RunStatus(str(run["status"])) not in FINISHED_RUN_STATUSES
+            ):
+                self._shutdown_cancelled_run_ids.add(run_id)
+                return
+        self._discard_producer_task(run_id, task)
+
+    def _discard_producer_task(
+        self,
+        run_id: str,
+        task: asyncio.Task[Any],
+    ) -> None:
+        if self._tasks.get(run_id) is not task:
+            return
+        self._tasks.pop(run_id, None)
+        self._coordinator_owned_run_ids.discard(run_id)
+        self._shutdown_cancelled_run_ids.discard(run_id)
+
+    def _consume_notification_task(self, task: asyncio.Task[Any]) -> None:
+        if task not in self._notification_tasks:
+            return
+        self._notification_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("Failed to register subagent notification")
+
+    async def close(self, timeout: float = 5.0) -> tuple[str, ...]:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, float(timeout))
+        self._closing = True
+        if not await self._acquire_lifecycle_lock_until(deadline):
+            return ("subagent-lifecycle-lock",)
+        try:
+            self._shutdown_cancelled_run_ids.update(
+                run_id
+                for run_id in self._tasks
+                if run_id not in self._coordinator_owned_run_ids
+            )
+            owned_tasks = {
+                task: (f"subagent-producer:{run_id}", run_id)
+                for run_id, task in self._tasks.items()
+                if not task.done()
+            }
+            internal_run_ids = {
+                task: run_id
+                for run_id, task in self._tasks.items()
+                if run_id in self._shutdown_cancelled_run_ids
+            }
+            owned_tasks.update(
+                {
+                    task: (task.get_name(), None)
+                    for task in self._notification_tasks
+                    if not task.done()
+                }
+            )
+        finally:
+            self._lifecycle_lock.release()
+
+        for task in owned_tasks:
+            task.cancel()
+        if owned_tasks:
+            remaining = max(0.0, deadline - loop.time())
+            if remaining > 0:
+                await asyncio.wait(owned_tasks, timeout=remaining)
+
+        for task in tuple(self._notification_tasks):
+            if task.done():
+                self._consume_notification_task(task)
+
+        terminalization_tasks: dict[asyncio.Task[Any], tuple[str, str]] = {}
+        for run_id, task in tuple(self._shutdown_terminalization_tasks.items()):
+            if task.done():
+                self._reap_shutdown_terminalization_task(run_id, task)
+            else:
+                terminalization_tasks[task] = (
+                    f"subagent-terminalize:{run_id}",
+                    run_id,
+                )
+
+        terminalization_start_failures: set[str] = set()
+        for task, run_id in internal_run_ids.items():
+            if not task.done() or self._tasks.get(run_id) is not task:
+                continue
+            if run_id in self._shutdown_terminalization_tasks:
+                continue
+            run = self.run_manager.get_run(run_id)
+            if (
+                run is None
+                or RunStatus(str(run["status"])) in FINISHED_RUN_STATUSES
+            ):
+                self._discard_producer_task(run_id, task)
+                continue
+            terminalization_task = self._start_shutdown_terminalization(run_id)
+            if terminalization_task is None:
+                terminalization_start_failures.add(
+                    f"subagent-terminalize:{run_id}"
+                )
+                continue
+            terminalization_tasks[terminalization_task] = (
+                f"subagent-terminalize:{run_id}",
+                run_id,
+            )
+
+        if terminalization_tasks:
+            remaining = max(0.0, deadline - loop.time())
+            if remaining > 0:
+                await asyncio.wait(terminalization_tasks, timeout=remaining)
+
+        terminalization_failures = set(terminalization_start_failures)
+        for task, (label, run_id) in terminalization_tasks.items():
+            if not task.done():
+                terminalization_failures.add(label)
+                continue
+            if not self._reap_shutdown_terminalization_task(run_id, task):
+                terminalization_failures.add(label)
+
+        return tuple(
+            sorted(
+                {
+                    label
+                    for task, (label, _run_id) in owned_tasks.items()
+                    if not task.done()
+                }
+                | terminalization_failures
+            )
+        )
+
+    async def _acquire_lifecycle_lock_until(self, deadline: float) -> bool:
+        remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+        if remaining <= 0:
+            return False
+        waiter = asyncio.create_task(
+            self._lifecycle_lock.acquire(),
+            name="subagent-lifecycle-lock",
+        )
+        try:
+            done, _pending = await asyncio.wait({waiter}, timeout=remaining)
+        except BaseException:
+            waiter.cancel()
+            await asyncio.gather(waiter, return_exceptions=True)
+            if (
+                not waiter.cancelled()
+                and waiter.exception() is None
+                and waiter.result()
+            ):
+                self._lifecycle_lock.release()
+            raise
+        if waiter not in done:
+            waiter.cancel()
+            await asyncio.gather(waiter, return_exceptions=True)
+            if (
+                not waiter.cancelled()
+                and waiter.exception() is None
+                and waiter.result()
+            ):
+                self._lifecycle_lock.release()
+            return False
+        return bool(waiter.result())
+
+    def _start_shutdown_terminalization(
+        self,
+        run_id: str,
+    ) -> asyncio.Task[Any] | None:
+        terminalization_coro = self.run_manager.finish_run(
+            run_id,
+            RunStatus.CANCELLED,
+        )
+        try:
+            task = asyncio.create_task(
+                terminalization_coro,
+                name=f"subagent-terminalize:{run_id}",
+            )
+        except Exception:
+            terminalization_coro.close()
+            logger.exception(
+                "Failed to schedule subagent shutdown terminalization for %s",
+                run_id,
+            )
+            return None
+        self._shutdown_terminalization_tasks[run_id] = task
+        task.add_done_callback(self._consume_shutdown_terminalization_task)
+        return task
+
+    @staticmethod
+    def _consume_shutdown_terminalization_task(task: asyncio.Task[Any]) -> None:
+        if task.cancelled():
+            return
+        try:
+            task.exception()
+        except asyncio.CancelledError:
+            pass
+
+    def _reap_shutdown_terminalization_task(
+        self,
+        run_id: str,
+        task: asyncio.Task[Any],
+    ) -> bool:
+        if self._shutdown_terminalization_tasks.get(run_id) is not task:
+            return True
+        if not task.done():
+            return False
+        self._shutdown_terminalization_tasks.pop(run_id, None)
+        if task.cancelled():
+            logger.warning(
+                "Subagent shutdown terminalization was cancelled for %s",
+                run_id,
+            )
+            return False
+        error = task.exception()
+        if error is not None:
+            logger.warning(
+                "Subagent shutdown terminalization failed for %s: %s",
+                run_id,
+                error,
+            )
+            return False
+        producer_task = self._tasks.get(run_id)
+        if producer_task is not None and producer_task.done():
+            self._discard_producer_task(run_id, producer_task)
+        return True
 
     async def _register_task_notification(self, run_id: str, *, agent_name: str) -> None:
         run = self.run_manager.get_run(run_id)
@@ -168,10 +714,12 @@ class SubagentExecutor:
         permission_mode: Optional[str],
         workspace: Optional[Dict[str, Any]],
         context_mode: str = "fresh",
+        _coordinator_owned: bool = False,
     ) -> None:
         final_status = RunStatus.COMPLETED
         final_error: Optional[str] = None
         notification_payload: Optional[Dict[str, Any]] = None
+        defer_cancel_terminalization = False
         try:
             agent = self._scoped_registry(workspace).get_agent(agent_name)
             if agent is None:
@@ -208,6 +756,11 @@ class SubagentExecutor:
                     context_mode=context_mode,
                 )
         except asyncio.CancelledError:
+            if _coordinator_owned:
+                defer_cancel_terminalization = True
+                if not await self.run_manager.is_stop_requested(run_id):
+                    raise
+                defer_cancel_terminalization = False
             final_status = RunStatus.CANCELLED
             notification_payload = {
                 "status": "stopped",
@@ -242,27 +795,27 @@ class SubagentExecutor:
             await self.run_manager.append_event(run_id, notification_payload)
         finally:
             self._controllers.pop(run_id, None)
-            self._tasks.pop(run_id, None)
-            await self.run_manager.finish_run(run_id, final_status, final_error)
-            if notification_payload and final_status in {
-                RunStatus.COMPLETED,
-                RunStatus.FAILED,
-                RunStatus.CANCELLED,
-            }:
-                source_status = {
-                    RunStatus.COMPLETED: "completed",
-                    RunStatus.FAILED: "failed",
-                    RunStatus.CANCELLED: "cancelled",
-                }[final_status]
-                try:
-                    await self._publish_task_notification(
-                        run_id,
-                        source_status,
-                        notification_payload.get("content") or notification_payload.get("error") or "",
-                        event_payload=notification_payload,
-                    )
-                except Exception:
-                    logger.exception("Failed to publish subagent notification for %s", run_id)
+            if not defer_cancel_terminalization:
+                await self.run_manager.finish_run(run_id, final_status, final_error)
+                if notification_payload and final_status in {
+                    RunStatus.COMPLETED,
+                    RunStatus.FAILED,
+                    RunStatus.CANCELLED,
+                }:
+                    source_status = {
+                        RunStatus.COMPLETED: "completed",
+                        RunStatus.FAILED: "failed",
+                        RunStatus.CANCELLED: "cancelled",
+                    }[final_status]
+                    try:
+                        await self._publish_task_notification(
+                            run_id,
+                            source_status,
+                            notification_payload.get("content") or notification_payload.get("error") or "",
+                            event_payload=notification_payload,
+                        )
+                    except Exception:
+                        logger.exception("Failed to publish subagent notification for %s", run_id)
 
     async def _produce_inner(
         self,
@@ -446,7 +999,10 @@ class SubagentExecutor:
                             "agent_name": agent_name,
                             "delivery_policy": run_metadata.get("delivery_policy"),
                             "task_context_mode": "detached",
-                            "task_summary": str(input_data)[:160],
+                            "task_summary": self._render_input_summary(
+                                input_data,
+                                limit=160,
+                            ),
                             "suppress_task_notification": agent_name == "workflow-worker"
                             or run_metadata.get("delivery_policy") == "silent",
                         },

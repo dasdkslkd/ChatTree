@@ -105,6 +105,11 @@ class TaskNotificationService:
         metadata = dict(run.get("metadata") or {})
         if metadata.get("result_observed_at"):
             return None
+        existing = self.repository.get_by_source_run(run_id)
+        if existing is not None and self._has_terminal_publication(existing):
+            return existing
+        if str(run.get("status") or "") in TERMINAL_STATUS_VALUES:
+            return existing
         return self.repository.upsert_for_run(
             conversation_id=str(run["conversation_id"]),
             source_run_id=run_id,

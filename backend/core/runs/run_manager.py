@@ -372,6 +372,26 @@ class RunManager:
         if self._closing:
             raise RunManagerClosingError("run manager is closing")
 
+    def validate_run_references(
+        self,
+        conversation_id: str,
+        *,
+        anchor_node_id: Optional[str] = None,
+        created_by_run_id: Optional[str] = None,
+        cancellation_parent_run_id: Optional[str] = None,
+    ) -> None:
+        if self.repository is None or not hasattr(
+            self.repository,
+            "validate_run_references",
+        ):
+            return
+        self.repository.validate_run_references(
+            conversation_id,
+            anchor_node_id=anchor_node_id,
+            created_by_run_id=created_by_run_id,
+            cancellation_parent_run_id=cancellation_parent_run_id,
+        )
+
     def _is_hidden_run_id(self, run_id: str) -> bool:
         return run_id in self._pending_reservations or run_id in self._unpublished_run_ids
 
@@ -509,6 +529,23 @@ class RunManager:
             self._ensure_events_loaded_locked(run_id)
         return record
 
+    async def get_idempotent_run(
+        self,
+        *,
+        idempotency_key: str,
+        request_fingerprint: str,
+    ) -> Optional[RunRecord]:
+        if not isinstance(idempotency_key, str) or not idempotency_key:
+            raise ValueError("idempotency key is required")
+        if not isinstance(request_fingerprint, str) or not request_fingerprint:
+            raise ValueError("request fingerprint is required")
+        async with self._lock:
+            record = self._existing_idempotent_run_locked(
+                idempotency_key,
+                request_fingerprint,
+            )
+            return deepcopy(record) if record is not None else None
+
     async def reserve_or_get_run(
         self,
         *,
@@ -631,6 +668,24 @@ class RunManager:
                 "metadata": dict(child.metadata or {}),
             },
         })
+
+    async def bind_anchor_node(self, run_id: str, anchor_node_id: str) -> RunRecord:
+        async with self._lock:
+            record = self._require_run_locked(run_id)
+            if record.anchor_node_id == anchor_node_id:
+                return deepcopy(record)
+            persisted: Optional[Dict[str, Any]] = None
+            if self.repository and hasattr(self.repository, "update_anchor_node"):
+                persisted = self.repository.update_anchor_node(run_id, anchor_node_id)
+            record.anchor_node_id = anchor_node_id
+            record.updated_at = float((persisted or {}).get("updated_at") or time())
+            snapshot = deepcopy(record)
+        await self.append_event(run_id, {
+            "type": "run_anchor_bound",
+            "run_id": run_id,
+            "anchor_node_id": anchor_node_id,
+        })
+        return snapshot
 
     async def bind_target_node(self, run_id: str, target_node_id: str) -> RunRecord:
         async with self._lock:

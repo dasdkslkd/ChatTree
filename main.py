@@ -151,6 +151,8 @@ def _drain_report_error(
         return None
     if state_name == "run_start_coordinator":
         exhausted = bool(getattr(report, "exhausted", False))
+    elif state_name in {"workflow_manager", "subagent_executor"}:
+        exhausted = bool(report)
     elif state_name == "run_manager":
         exhausted = bool(getattr(report, "exhausted_run_ids", ()))
     else:
@@ -164,6 +166,8 @@ async def _close_server_resources() -> list[BaseException]:
     errors: list[BaseException] = []
     for state_name in (
         "run_start_coordinator",
+        "workflow_manager",
+        "subagent_executor",
         "run_manager",
         "tool_manager",
     ):
@@ -263,11 +267,13 @@ async def _initialize_server() -> None:
         run_manager=run_manager,
         capability_registry=capability_registry,
         mailbox=agent_mailbox,
+        run_start_coordinator=run_start_coordinator,
     )
     workflow_manager = WorkflowManager(
         run_manager=run_manager,
         subagent_executor=subagent_executor,
         mailbox=agent_mailbox,
+        run_start_coordinator=run_start_coordinator,
     )
     agent_runtime = AgentRuntime(
         run_manager=run_manager,
@@ -331,6 +337,8 @@ async def startup_event() -> None:
     home_lock.acquire()
     app.state.server_home_lock = home_lock
     app.state.run_start_coordinator = None
+    app.state.workflow_manager = None
+    app.state.subagent_executor = None
     app.state.run_manager = None
     app.state.tool_manager = None
     try:

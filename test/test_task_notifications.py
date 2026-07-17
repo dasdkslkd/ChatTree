@@ -165,6 +165,67 @@ def test_observed_run_suppresses_pending_task_notification():
     asyncio.run(scenario())
 
 
+def test_late_running_registration_preserves_terminal_publication():
+    async def scenario():
+        repository = MemoryNotificationRepository()
+        run_manager = RunManager()
+        service = TaskNotificationService(repository=repository, run_manager=run_manager)
+        source = await run_manager.create_run(
+            conversation_id="conv-1",
+            kind=RunKind.SUBAGENT,
+            anchor_node_id="node-1",
+            summary="worker",
+        )
+        await run_manager.finish_run(source.run_id, RunStatus.COMPLETED)
+        terminal = await service.publish_run_notification(
+            run_id=source.run_id,
+            source_status="completed",
+            summary="Subagent completed",
+            content="done",
+            payload={"result": "done"},
+        )
+
+        late = await service.register_run_notification(
+            run_id=source.run_id,
+            summary="Subagent running",
+            payload={"agent_name": "explorer"},
+        )
+
+        assert late == terminal
+        assert repository.items[source.run_id]["summary"] == "Subagent completed"
+        assert repository.items[source.run_id]["content"] == "done"
+        assert repository.items[source.run_id]["payload"] == {
+            "result": "done",
+            "source_status": "completed",
+        }
+
+    asyncio.run(scenario())
+
+
+def test_running_registration_skips_terminal_run_without_publication():
+    async def scenario():
+        repository = MemoryNotificationRepository()
+        run_manager = RunManager()
+        service = TaskNotificationService(repository=repository, run_manager=run_manager)
+        source = await run_manager.create_run(
+            conversation_id="conv-1",
+            kind=RunKind.SUBAGENT,
+            anchor_node_id="node-1",
+            summary="worker",
+        )
+        await run_manager.finish_run(source.run_id, RunStatus.FAILED, "boom")
+
+        notification = await service.register_run_notification(
+            run_id=source.run_id,
+            summary="Subagent running",
+        )
+
+        assert notification is None
+        assert source.run_id not in repository.items
+
+    asyncio.run(scenario())
+
+
 def test_bound_notification_focuses_only_when_delivery_node_is_current():
     class FakeChatManager:
         def __init__(self, conversation):

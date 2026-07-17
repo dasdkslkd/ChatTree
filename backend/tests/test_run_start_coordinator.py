@@ -1086,6 +1086,8 @@ def test_close_cancels_registered_producer_and_drains_before_manager_close(caplo
                     _spec(key="after-close", request_id="after-close"),
                     _completed_producer,
                 )
+            with pytest.raises(RunStartReservationError, match="closing"):
+                await coordinator.replay_existing(_spec().idempotency)
         assert "request_id=after-close" in caplog.text
 
     asyncio.run(run())

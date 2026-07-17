@@ -303,6 +303,68 @@ def test_validate_run_references_distinguishes_missing_references_without_insert
     assert final_count == initial_count
 
 
+def test_validate_run_references_rejects_existing_ids_of_wrong_entity_type(
+    tmp_path,
+):
+    persistence, _chat, runs, conv_id, node_id = _repositories(tmp_path)
+    run_id = runs.create_run(
+        conv_id,
+        kind="chat",
+        anchor_node_id=node_id,
+    )
+    cases = (
+        ("conversation_id", node_id, node_id, {}),
+        ("conversation_id", run_id, run_id, {}),
+        (
+            "anchor_node_id",
+            conv_id,
+            conv_id,
+            {"anchor_node_id": conv_id},
+        ),
+        (
+            "anchor_node_id",
+            run_id,
+            conv_id,
+            {"anchor_node_id": run_id},
+        ),
+        (
+            "created_by_run_id",
+            conv_id,
+            conv_id,
+            {"created_by_run_id": conv_id},
+        ),
+        (
+            "created_by_run_id",
+            node_id,
+            conv_id,
+            {"created_by_run_id": node_id},
+        ),
+        (
+            "cancellation_parent_run_id",
+            conv_id,
+            conv_id,
+            {"cancellation_parent_run_id": conv_id},
+        ),
+        (
+            "cancellation_parent_run_id",
+            node_id,
+            conv_id,
+            {"cancellation_parent_run_id": node_id},
+        ),
+    )
+
+    with persistence.connect() as conn:
+        initial_count = conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+    for reference_kind, reference_id, conversation_id, arguments in cases:
+        with pytest.raises(RunReferenceConversationMismatchError) as raised:
+            runs.validate_run_references(conversation_id, **arguments)
+        assert raised.value.reference_kind == reference_kind
+        assert raised.value.reference_id == reference_id
+    with persistence.connect() as conn:
+        final_count = conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+    assert final_count == initial_count
+
+
 def test_validate_run_references_rejects_cross_conversation_references(tmp_path):
     persistence, chat, runs, conv_id, _node_id = _repositories(tmp_path)
     other_conv_id = chat.create_conversation(title="Other")
@@ -332,6 +394,18 @@ def test_validate_run_references_rejects_cross_conversation_references(tmp_path)
     with persistence.connect() as conn:
         final_count = conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
     assert final_count == initial_count
+
+
+def test_run_manager_validate_run_references_delegates_to_repository(tmp_path):
+    _persistence, chat, runs, conv_id, node_id = _repositories(tmp_path)
+    other_conv_id = chat.create_conversation(title="Other")
+    other_node_id = chat.create_node(other_conv_id, parent_id=None)
+    manager = RunManager(repository=runs)
+
+    manager.validate_run_references(conv_id, anchor_node_id=node_id)
+
+    with pytest.raises(RunReferenceConversationMismatchError):
+        manager.validate_run_references(conv_id, anchor_node_id=other_node_id)
 
 
 def test_reference_deleted_after_validation_reraises_foreign_key_failure(tmp_path):
@@ -652,6 +726,87 @@ def test_run_manager_bind_target_node_persists_sqlite_run_record(tmp_path):
         events = runs.read_events(record.run_id)
         assert events[-1]["payload"]["type"] == "run_target_bound"
         assert events[-1]["payload"]["target_node_id"] == target_node_id
+
+    asyncio.run(scenario())
+
+
+def test_run_manager_bind_anchor_node_persists_once(tmp_path):
+    async def scenario():
+        _persistence, chat, runs, conv_id, node_id = _repositories(tmp_path)
+        next_anchor_id = chat.create_node(conv_id, parent_id=node_id)
+        manager = RunManager(repository=runs)
+        record = await manager.create_run(
+            conversation_id=conv_id,
+            kind="workflow",
+            anchor_node_id=node_id,
+        )
+
+        updated = await manager.bind_anchor_node(record.run_id, next_anchor_id)
+        repeated = await manager.bind_anchor_node(record.run_id, next_anchor_id)
+
+        assert updated.anchor_node_id == next_anchor_id
+        assert repeated.anchor_node_id == next_anchor_id
+        assert manager.get_run(record.run_id)["anchor_node_id"] == next_anchor_id
+        assert runs.get_run(record.run_id)["anchor_node_id"] == next_anchor_id
+        await manager.flush_run_events(record.run_id)
+        bound_events = [
+            event["payload"]
+            for event in runs.read_events(record.run_id)
+            if event["payload"].get("type") == "run_anchor_bound"
+        ]
+        assert len(bound_events) == 1
+        assert bound_events[0]["type"] == "run_anchor_bound"
+        assert bound_events[0]["run_id"] == record.run_id
+        assert bound_events[0]["anchor_node_id"] == next_anchor_id
+        await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_run_manager_bind_anchor_node_preserves_cross_conversation_fk(tmp_path):
+    async def scenario():
+        _persistence, chat, runs, conv_id, node_id = _repositories(tmp_path)
+        other_conv_id = chat.create_conversation(title="Other")
+        other_anchor_id = chat.create_node(other_conv_id, parent_id=None)
+        manager = RunManager(repository=runs)
+        record = await manager.create_run(
+            conversation_id=conv_id,
+            kind="workflow",
+            anchor_node_id=node_id,
+        )
+
+        with pytest.raises(sqlite3.IntegrityError):
+            await manager.bind_anchor_node(record.run_id, other_anchor_id)
+
+        assert manager.get_run(record.run_id)["anchor_node_id"] == node_id
+        assert runs.get_run(record.run_id)["anchor_node_id"] == node_id
+        await manager.flush_run_events(record.run_id)
+        assert not [
+            event
+            for event in runs.read_events(record.run_id)
+            if event["payload"].get("type") == "run_anchor_bound"
+        ]
+        await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_run_manager_bind_anchor_node_preserves_missing_anchor_fk(tmp_path):
+    async def scenario():
+        _persistence, _chat, runs, conv_id, node_id = _repositories(tmp_path)
+        manager = RunManager(repository=runs)
+        record = await manager.create_run(
+            conversation_id=conv_id,
+            kind="workflow",
+            anchor_node_id=node_id,
+        )
+
+        with pytest.raises(sqlite3.IntegrityError):
+            await manager.bind_anchor_node(record.run_id, "missing-anchor")
+
+        assert manager.get_run(record.run_id)["anchor_node_id"] == node_id
+        assert runs.get_run(record.run_id)["anchor_node_id"] == node_id
+        await manager.close()
 
     asyncio.run(scenario())
 

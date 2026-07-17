@@ -159,7 +159,11 @@ class SQLiteRunRepository:
                 (conversation_id,),
             ).fetchone()
             if conversation is None:
-                raise RunReferenceNotFoundError("conversation_id", conversation_id)
+                self._raise_missing_or_wrong_type_reference(
+                    conn,
+                    reference_kind="conversation_id",
+                    reference_id=conversation_id,
+                )
 
             if anchor_node_id is not None:
                 anchor = conn.execute(
@@ -167,6 +171,7 @@ class SQLiteRunRepository:
                     (anchor_node_id,),
                 ).fetchone()
                 self._validate_reference_conversation(
+                    conn,
                     anchor,
                     conversation_id=conversation_id,
                     reference_kind="anchor_node_id",
@@ -184,6 +189,7 @@ class SQLiteRunRepository:
                     (reference_id,),
                 ).fetchone()
                 self._validate_reference_conversation(
+                    conn,
                     run,
                     conversation_id=conversation_id,
                     reference_kind=reference_kind,
@@ -261,8 +267,10 @@ class SQLiteRunRepository:
             (self._json_field(run_metadata), run_id),
         )
 
-    @staticmethod
+    @classmethod
     def _validate_reference_conversation(
+        cls,
+        conn: Any,
         row: Any,
         *,
         conversation_id: str,
@@ -270,9 +278,38 @@ class SQLiteRunRepository:
         reference_id: str,
     ) -> None:
         if row is None:
-            raise RunReferenceNotFoundError(reference_kind, reference_id)
+            cls._raise_missing_or_wrong_type_reference(
+                conn,
+                reference_kind=reference_kind,
+                reference_id=reference_id,
+            )
         if row["conversation_id"] != conversation_id:
             raise RunReferenceConversationMismatchError(reference_kind, reference_id)
+
+    @staticmethod
+    def _raise_missing_or_wrong_type_reference(
+        conn: Any,
+        *,
+        reference_kind: str,
+        reference_id: str,
+    ) -> None:
+        existing = conn.execute(
+            """
+            SELECT 1 FROM conversations WHERE id = ?
+            UNION ALL
+            SELECT 1 FROM nodes WHERE id = ?
+            UNION ALL
+            SELECT 1 FROM runs WHERE id = ?
+            LIMIT 1
+            """,
+            (reference_id, reference_id, reference_id),
+        ).fetchone()
+        if existing is not None:
+            raise RunReferenceConversationMismatchError(
+                reference_kind,
+                reference_id,
+            )
+        raise RunReferenceNotFoundError(reference_kind, reference_id)
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         with self.persistence.connect() as conn:
@@ -294,6 +331,27 @@ class SQLiteRunRepository:
                 WHERE id = ?
                 """,
                 (target_node_id, run_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(run_id)
+            row = conn.execute(
+                f"SELECT {RUN_COLUMNS} FROM runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(run_id)
+        return self._run_from_row(row)
+
+    def update_anchor_node(self, run_id: str, anchor_node_id: str) -> dict[str, Any]:
+        with self.persistence.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE runs
+                SET anchor_node_id = ?,
+                    updated_at = strftime('%s', 'now')
+                WHERE id = ?
+                """,
+                (anchor_node_id, run_id),
             )
             if cursor.rowcount == 0:
                 raise KeyError(run_id)
