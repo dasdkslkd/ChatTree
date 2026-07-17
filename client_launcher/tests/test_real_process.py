@@ -15,6 +15,8 @@ from typing import Any, Callable
 
 import httpx
 
+from client_launcher.local_server import SPAWN_PID_LOG_PREFIX
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -122,6 +124,27 @@ def _server_owner_pid(lock_path: Path, timeout: float = 10.0) -> int:
     raise AssertionError(f"Could not read Server owner pid: {last_error}")
 
 
+def _spawned_server_pid(log_path: Path, timeout: float = 5.0) -> int:
+    deadline = time.monotonic() + timeout
+    last_error: BaseException | None = None
+    while time.monotonic() < deadline:
+        try:
+            lines = log_path.read_text(
+                encoding="utf-8",
+                errors="replace",
+            ).splitlines()
+            for line in reversed(lines):
+                if not line.startswith(SPAWN_PID_LOG_PREFIX):
+                    continue
+                pid = int(line.removeprefix(SPAWN_PID_LOG_PREFIX))
+                if pid > 0:
+                    return pid
+        except (OSError, ValueError) as exc:
+            last_error = exc
+        time.sleep(0.05)
+    raise AssertionError(f"Could not read spawned Server pid: {last_error}")
+
+
 def _port_is_closed(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(0.1)
@@ -166,6 +189,15 @@ def _pid_is_running(pid: int) -> bool:
 def _stop_server(pid: int | None, port: int) -> None:
     if pid is None or not _pid_is_running(pid):
         return
+    if _port_is_closed(port):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if not _pid_is_running(pid):
+                return
+            time.sleep(0.05)
+        raise AssertionError(
+            f"Refusing to signal pid {pid}: Server port {port} is already closed"
+        )
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
@@ -185,6 +217,22 @@ def _stop_server(pid: int | None, port: int) -> None:
             return
         time.sleep(0.05)
     raise AssertionError(f"Server pid {pid} did not exit and release port {port}")
+
+
+def test_spawned_server_pid_uses_latest_launcher_record(tmp_path: Path) -> None:
+    log_path = tmp_path / "local-server.log"
+    log_path.write_text(
+        "\n".join(
+            (
+                f"{SPAWN_PID_LOG_PREFIX}123",
+                "INFO: Started server process [123]",
+                f"{SPAWN_PID_LOG_PREFIX}456",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    assert _spawned_server_pid(log_path, timeout=0.1) == 456
 
 
 def test_real_launcher_entry_proxy_and_home_lock(tmp_path: Path) -> None:
@@ -228,6 +276,9 @@ def test_real_launcher_entry_proxy_and_home_lock(tmp_path: Path) -> None:
         )
         instance_id = str(ready["server_instance_id"])
         server_pid = _server_owner_pid(server_home / ".server.lock")
+        assert _spawned_server_pid(
+            client_home / "logs" / "local-server-local.log"
+        ) == server_pid
 
         direct_status, direct_headers = _raw_headers(
             server_port,
@@ -361,14 +412,21 @@ def test_real_launcher_entry_proxy_and_home_lock(tmp_path: Path) -> None:
     finally:
         _stop_process(second_server)
         _stop_process(launcher)
-        if server_pid is None and (server_home / ".server.lock").exists():
+        if server_pid is None:
             try:
-                server_pid = _server_owner_pid(
-                    server_home / ".server.lock",
+                server_pid = _spawned_server_pid(
+                    client_home / "logs" / "local-server-local.log",
                     timeout=1,
                 )
             except AssertionError:
-                pass
+                if (server_home / ".server.lock").exists():
+                    try:
+                        server_pid = _server_owner_pid(
+                            server_home / ".server.lock",
+                            timeout=1,
+                        )
+                    except AssertionError:
+                        pass
         _stop_server(server_pid, server_port)
 
     assert _port_is_closed(launcher_port)
