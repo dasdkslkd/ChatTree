@@ -5,7 +5,13 @@ import json
 import logging
 from typing import Any
 
-from backend.core.runs import FINISHED_RUN_STATUSES, RunKind, RunManager, RunStatus
+from backend.core.runs import (
+    FINISHED_RUN_STATUSES,
+    ProducerRegistry,
+    RunKind,
+    RunManager,
+    RunStatus,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,10 +54,14 @@ class TaskNotificationService:
         repository: Any,
         run_manager: RunManager,
         chat_manager: Any = None,
+        producer_registry: ProducerRegistry | None = None,
     ) -> None:
         self.repository = repository
         self.run_manager = run_manager
         self.chat_manager = chat_manager
+        self.producer_registry = (
+            producer_registry or ProducerRegistry.for_run_manager(run_manager)
+        )
         self._delivering: set[str] = set()
 
     async def publish_run_notification(
@@ -194,7 +204,7 @@ class TaskNotificationService:
 
     def handle_run_finished(self, run: dict[str, Any]) -> None:
         try:
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
         except RuntimeError:
             return
         conversation_id = str(run.get("conversation_id") or "")
@@ -205,9 +215,15 @@ class TaskNotificationService:
             and notification.get("status") == "bound"
             and self._has_terminal_publication(notification)
         ):
-            loop.create_task(self.try_deliver(str(notification["id"])))
+            self.producer_registry.create_background(
+                self.try_deliver(str(notification["id"])),
+                name=f"task-notification-deliver:{notification['id']}",
+            )
         if run.get("kind") == RunKind.CHAT.value and conversation_id:
-            loop.create_task(self.try_deliver_bound_for_conversation(conversation_id))
+            self.producer_registry.create_background(
+                self.try_deliver_bound_for_conversation(conversation_id),
+                name=f"task-notification-deliver-bound:{conversation_id}",
+            )
 
     async def delete(self, notification_id: str) -> dict[str, Any]:
         return self.repository.delete(notification_id)
@@ -353,6 +369,10 @@ class TaskNotificationService:
                         final_error = chunk_data.get("error")
                     elif chunk_data.get("status") == "stopped":
                         final_status = RunStatus.CANCELLED
+            except asyncio.CancelledError:
+                final_status = RunStatus.CANCELLED
+                final_error = "task notification producer cancelled"
+                raise
             except Exception as exc:
                 logger.exception("Task notification delivery failed")
                 final_status = RunStatus.FAILED
@@ -387,7 +407,25 @@ class TaskNotificationService:
                         error=final_error,
                     )
 
-        asyncio.create_task(produce())
+        try:
+            self.producer_registry.create(
+                run.run_id,
+                produce(),
+                name=f"task-notification:{run.run_id}",
+            )
+        except BaseException as exc:
+            try:
+                await self.producer_registry.terminalize(
+                    run.run_id,
+                    RunStatus.INTERRUPTED,
+                    f"task notification scheduling failed: {exc}",
+                )
+            except BaseException:
+                logger.exception(
+                    "failed to terminalize unscheduled task notification %s",
+                    run.run_id,
+                )
+            raise
         return run.to_dict()
 
     def _should_focus_delivery(self, conversation_id: str, delivery_node_id: str) -> bool:

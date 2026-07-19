@@ -2,17 +2,19 @@
 import json
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from backend.api.routes.run_control import stop_run_tree
-from backend.core.command_runtime import CommandExecutor
+from backend.core.command_runtime import CommandExecutor, CommandExecutorClosingError
 from backend.core.persistence.database import SQLitePersistence
 from backend.core.persistence.repository import ChatRepository
 from backend.core.persistence.run_repository import SQLiteRunRepository
 from backend.core.notifications import TaskNotificationService
 from backend.core.runs import RunKind, RunManager, RunStatus
+from backend.core.runs.repository import MemoryRunRepository
 from backend.core.tasks import ActiveTaskService, TaskContextDisabledError
 from backend.core.tools.code_tools import CodeToolConfig, RunCommandTool
 from backend.core.tools.tool_manager import ToolManager
@@ -806,6 +808,636 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(parent.run_id, stopped)
             self.assertIn(child["run_id"], stopped)
             self.assertEqual(run_manager.get_run(child["run_id"])["status"], RunStatus.CANCELLED.value)
+
+    async def test_stop_run_tree_continues_command_stop_after_event_writer_failure(self):
+        class FailOneWriteRepository(MemoryRunRepository):
+            def __init__(self):
+                super().__init__()
+                self.fail_run_id = None
+                self.failed = False
+
+            def append_indexed_events(self, run_id, events):
+                if run_id == self.fail_run_id and not self.failed:
+                    self.failed = True
+                    raise OSError("transient event write failure")
+                return super().append_events(
+                    run_id,
+                    [dict(event["payload"]) for event in events],
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repository = FailOneWriteRepository()
+            run_manager = RunManager(repository=repository)
+            command_executor = CommandExecutor(run_manager)
+            started = await command_executor.start(
+                conversation_id="conv_1",
+                command=f'{sys.executable} -c "import time; time.sleep(30)"',
+                cwd=tmpdir,
+            )
+            run_id = started["run_id"]
+            async with asyncio.timeout(5):
+                while not any(
+                    event.get("event_type") == "command_started"
+                    for event in run_manager.read_events(run_id, 0)
+                ):
+                    await asyncio.sleep(0.01)
+            await run_manager.flush_events()
+            repository.fail_run_id = run_id
+            await run_manager.append_event(
+                run_id,
+                {"status": "content", "content": "not persisted"},
+            )
+            with self.assertRaisesRegex(RuntimeError, run_id):
+                await run_manager.flush_run_events(run_id)
+
+            stopped = await stop_run_tree(
+                run_id,
+                run_manager=run_manager,
+                command_executor=command_executor,
+            )
+            await command_executor.wait(run_id, timeout=5)
+
+            self.assertEqual(stopped, [run_id])
+            self.assertEqual(
+                run_manager.get_run(run_id)["status"],
+                RunStatus.CANCELLED.value,
+            )
+            persisted = repository.get_run(run_id)
+            self.assertEqual(persisted["status"], RunStatus.CANCELLED.value)
+            self.assertEqual(
+                persisted["metadata"]["event_persistence_error"],
+                "run event persistence failed",
+            )
+            await run_manager.close()
+
+    async def test_command_started_write_failure_kills_asyncio_process_immediately(self):
+        class FailCommandStartedRepository(MemoryRunRepository):
+            def append_indexed_events(self, run_id, events):
+                if any(
+                    event["payload"].get("event_type") == "command_started"
+                    for event in events
+                ):
+                    raise OSError("command_started persistence failed")
+                return super().append_events(
+                    run_id,
+                    [dict(event["payload"]) for event in events],
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repository = FailCommandStartedRepository()
+            run_manager = RunManager(repository=repository)
+            command_executor = CommandExecutor(run_manager)
+            spawned = []
+            create_subprocess_exec = asyncio.create_subprocess_exec
+
+            async def recording_create_subprocess_exec(*args, **kwargs):
+                process = await create_subprocess_exec(*args, **kwargs)
+                spawned.append(process)
+                return process
+
+            with patch(
+                "backend.core.command_runtime.asyncio.create_subprocess_exec",
+                new=recording_create_subprocess_exec,
+            ):
+                started = await command_executor.start(
+                    conversation_id="conv_1",
+                    command=f'{sys.executable} -c "import time; time.sleep(30)"',
+                    cwd=tmpdir,
+                )
+                await command_executor.wait(started["run_id"], timeout=5)
+
+            self.assertEqual(len(spawned), 1)
+            self.assertIsNotNone(spawned[0].returncode)
+            self.assertEqual(
+                run_manager.get_run(started["run_id"])["status"],
+                RunStatus.FAILED.value,
+            )
+            self.assertEqual(
+                repository.get_run(started["run_id"])["metadata"]["error"],
+                "run event persistence failed",
+            )
+            await run_manager.close()
+
+    async def test_command_started_write_failure_kills_popen_fallback_immediately(self):
+        class FailCommandStartedRepository(MemoryRunRepository):
+            def append_indexed_events(self, run_id, events):
+                if any(
+                    event["payload"].get("event_type") == "command_started"
+                    for event in events
+                ):
+                    raise OSError("command_started persistence failed")
+                return super().append_events(
+                    run_id,
+                    [dict(event["payload"]) for event in events],
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repository = FailCommandStartedRepository()
+            run_manager = RunManager(repository=repository)
+            command_executor = CommandExecutor(run_manager)
+            spawned = []
+
+            from backend.core import command_runtime
+
+            popen = command_runtime.subprocess.Popen
+
+            def recording_popen(*args, **kwargs):
+                process = popen(*args, **kwargs)
+                spawned.append(process)
+                return process
+
+            with (
+                patch(
+                    "backend.core.command_runtime.asyncio.create_subprocess_exec",
+                    new=AsyncMock(side_effect=NotImplementedError),
+                ),
+                patch(
+                    "backend.core.command_runtime.subprocess.Popen",
+                    new=recording_popen,
+                ),
+            ):
+                started = await command_executor.start(
+                    conversation_id="conv_1",
+                    command=f'{sys.executable} -c "import time; time.sleep(30)"',
+                    cwd=tmpdir,
+                )
+                await command_executor.wait(started["run_id"], timeout=5)
+
+            # Windows taskkill also uses the patched subprocess.Popen.
+            self.assertGreaterEqual(len(spawned), 1)
+            self.assertIsNotNone(spawned[0].returncode)
+            self.assertEqual(
+                run_manager.get_run(started["run_id"])["status"],
+                RunStatus.FAILED.value,
+            )
+            await run_manager.close()
+
+    async def test_popen_spawn_cancellation_cannot_lose_process_handle(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_manager = RunManager()
+            command_executor = CommandExecutor(run_manager)
+            spawned = []
+            spawned_event = threading.Event()
+            release_popen = threading.Event()
+
+            from backend.core import command_runtime
+
+            popen = command_runtime.subprocess.Popen
+
+            def blocking_popen(*args, **kwargs):
+                process = popen(*args, **kwargs)
+                spawned.append(process)
+                spawned_event.set()
+                release_popen.wait(timeout=5)
+                return process
+
+            with (
+                patch(
+                    "backend.core.command_runtime.asyncio.create_subprocess_exec",
+                    new=AsyncMock(side_effect=NotImplementedError),
+                ),
+                patch(
+                    "backend.core.command_runtime.subprocess.Popen",
+                    new=blocking_popen,
+                ),
+            ):
+                started = await command_executor.start(
+                    conversation_id="conv_1",
+                    command=f'{sys.executable} -c "import time; time.sleep(30)"',
+                    cwd=tmpdir,
+                )
+                run_id = started["run_id"]
+                producer = command_executor._tasks[run_id]
+                loop = asyncio.get_running_loop()
+
+                def request_cancel_during_spawn():
+                    self.assertTrue(spawned_event.wait(timeout=5))
+                    loop.call_soon_threadsafe(producer.cancel)
+                    release_popen.set()
+
+                canceller = threading.Thread(
+                    target=request_cancel_during_spawn,
+                    daemon=True,
+                )
+                canceller.start()
+                await asyncio.gather(producer, return_exceptions=True)
+                canceller.join(timeout=5)
+
+            self.assertGreaterEqual(len(spawned), 1)
+            self.assertIsNotNone(spawned[0].returncode)
+            self.assertEqual(
+                run_manager.repository.get_run(run_id)["status"],
+                RunStatus.CANCELLED.value,
+            )
+            self.assertEqual(await command_executor.close(timeout=1), ())
+            await run_manager.close()
+
+    async def test_stop_run_tree_kills_command_when_all_stop_writes_fail(self):
+        class PersistentStopFailureRepository(MemoryRunRepository):
+            def __init__(self):
+                super().__init__()
+                self.fail_run_id = None
+                self.event_failed = False
+                self.stop_requested = 0
+
+            def append_indexed_events(self, run_id, events):
+                if run_id == self.fail_run_id and not self.event_failed:
+                    self.event_failed = True
+                    raise OSError("event persistence unavailable")
+                return super().append_events(
+                    run_id,
+                    [dict(event["payload"]) for event in events],
+                )
+
+            def merge_metadata(self, run_id, patch):
+                if run_id == self.fail_run_id and "event_persistence_error" in patch:
+                    raise OSError("metadata persistence unavailable")
+                return super().merge_metadata(run_id, patch)
+
+            def request_stop(self, run_id):
+                if run_id == self.fail_run_id:
+                    self.stop_requested += 1
+                    raise OSError("stop persistence unavailable")
+                return super().request_stop(run_id)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repository = PersistentStopFailureRepository()
+            run_manager = RunManager(repository=repository)
+            command_executor = CommandExecutor(run_manager)
+            started = await command_executor.start(
+                conversation_id="conv_1",
+                command=f'{sys.executable} -c "import time; time.sleep(30)"',
+                cwd=tmpdir,
+            )
+            run_id = started["run_id"]
+            async with asyncio.timeout(5):
+                while not any(
+                    event.get("event_type") == "command_started"
+                    for event in run_manager.read_events(run_id, 0)
+                ):
+                    await asyncio.sleep(0.01)
+            await run_manager.flush_run_events(run_id)
+            process = command_executor._processes[run_id]
+            repository.fail_run_id = run_id
+            await run_manager.append_event(
+                run_id,
+                {"status": "content", "content": "not persisted"},
+            )
+            with self.assertRaisesRegex(RuntimeError, run_id):
+                await run_manager.flush_run_events(run_id)
+
+            with self.assertRaisesRegex(OSError, "metadata persistence unavailable"):
+                await stop_run_tree(
+                    run_id,
+                    run_manager=run_manager,
+                    command_executor=command_executor,
+                )
+            await command_executor.wait(run_id, timeout=5)
+
+            self.assertIsNotNone(process.returncode)
+            self.assertGreaterEqual(repository.stop_requested, 1)
+            self.assertEqual(
+                run_manager.get_run(run_id)["status"],
+                RunStatus.CANCELLED.value,
+            )
+            await run_manager.close()
+
+    async def test_close_kills_asyncio_process_and_terminalizes_run(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_manager = RunManager()
+            command_executor = CommandExecutor(run_manager)
+            started = await command_executor.start(
+                conversation_id="conv_1",
+                command=f'{sys.executable} -c "import time; time.sleep(30)"',
+                cwd=tmpdir,
+            )
+            run_id = started["run_id"]
+            async with asyncio.timeout(5):
+                while run_id not in command_executor._processes:
+                    await asyncio.sleep(0.01)
+            process = command_executor._processes[run_id]
+
+            self.assertEqual(await command_executor.close(timeout=5), ())
+
+            self.assertIsNotNone(process.returncode)
+            self.assertEqual(
+                run_manager.get_run(run_id)["status"],
+                RunStatus.CANCELLED.value,
+            )
+            with self.assertRaises(CommandExecutorClosingError):
+                await command_executor.start(
+                    conversation_id="conv_1",
+                    command="echo rejected",
+                    cwd=tmpdir,
+                )
+            await run_manager.close()
+
+    async def test_close_kills_popen_fallback_and_terminalizes_run(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_manager = RunManager()
+            command_executor = CommandExecutor(run_manager)
+            with patch(
+                "backend.core.command_runtime.asyncio.create_subprocess_exec",
+                new=AsyncMock(side_effect=NotImplementedError),
+            ):
+                started = await command_executor.start(
+                    conversation_id="conv_1",
+                    command=f'{sys.executable} -c "import time; time.sleep(30)"',
+                    cwd=tmpdir,
+                )
+                run_id = started["run_id"]
+                async with asyncio.timeout(5):
+                    while run_id not in command_executor._processes:
+                        await asyncio.sleep(0.01)
+                process = command_executor._processes[run_id]
+
+                self.assertEqual(await command_executor.close(timeout=5), ())
+
+            self.assertIsNotNone(process.returncode)
+            self.assertEqual(
+                run_manager.get_run(run_id)["status"],
+                RunStatus.CANCELLED.value,
+            )
+            await run_manager.close()
+
+    async def test_close_kills_process_when_stop_persistence_fails(self):
+        class FailingStopRepository(MemoryRunRepository):
+            def __init__(self):
+                super().__init__()
+                self.fail_run_id = None
+
+            def request_stop(self, run_id):
+                if run_id == self.fail_run_id:
+                    raise OSError("stop persistence unavailable")
+                return super().request_stop(run_id)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repository = FailingStopRepository()
+            run_manager = RunManager(repository=repository)
+            command_executor = CommandExecutor(run_manager)
+            started = await command_executor.start(
+                conversation_id="conv_1",
+                command=f'{sys.executable} -c "import time; time.sleep(30)"',
+                cwd=tmpdir,
+            )
+            run_id = started["run_id"]
+            async with asyncio.timeout(5):
+                while run_id not in command_executor._processes:
+                    await asyncio.sleep(0.01)
+            process = command_executor._processes[run_id]
+            repository.fail_run_id = run_id
+
+            self.assertEqual(await command_executor.close(timeout=5), ())
+
+            self.assertIsNotNone(process.returncode)
+            self.assertEqual(
+                run_manager.get_run(run_id)["status"],
+                RunStatus.CANCELLED.value,
+            )
+            await run_manager.close()
+
+    async def test_close_racing_start_interrupts_run_before_process_spawn(self):
+        class BlockingNotificationService:
+            def __init__(self):
+                self.entered = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def register_run_notification(self, **kwargs):
+                self.entered.set()
+                await self.release.wait()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_manager = RunManager()
+            notification_service = BlockingNotificationService()
+            run_manager.notification_service = notification_service
+            command_executor = CommandExecutor(run_manager)
+            starting = asyncio.create_task(command_executor.start(
+                conversation_id="conv_1",
+                command=f'{sys.executable} -c "import time; time.sleep(30)"',
+                cwd=tmpdir,
+            ))
+            await asyncio.wait_for(notification_service.entered.wait(), timeout=5)
+
+            closing = asyncio.create_task(command_executor.close(timeout=5))
+            await asyncio.sleep(0)
+            self.assertFalse(closing.done())
+            notification_service.release.set()
+            with self.assertRaises(CommandExecutorClosingError):
+                await starting
+            self.assertEqual(await closing, ())
+
+            runs = run_manager.list_runs()
+            self.assertEqual(len(runs), 1)
+            self.assertEqual(runs[0]["status"], RunStatus.INTERRUPTED.value)
+            self.assertEqual(command_executor._processes, {})
+            await run_manager.close()
+
+    async def test_cancel_during_notification_interrupts_unowned_command_run(self):
+        class BlockingNotificationService:
+            def __init__(self):
+                self.entered = asyncio.Event()
+
+            async def register_run_notification(self, **kwargs):
+                self.entered.set()
+                await asyncio.Event().wait()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_manager = RunManager()
+            notification_service = BlockingNotificationService()
+            run_manager.notification_service = notification_service
+            command_executor = CommandExecutor(run_manager)
+            starting = asyncio.create_task(command_executor.start(
+                conversation_id="conv_1",
+                command=f'{sys.executable} -c "import time; time.sleep(30)"',
+                cwd=tmpdir,
+            ))
+            await asyncio.wait_for(notification_service.entered.wait(), timeout=5)
+
+            starting.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await starting
+
+            runs = run_manager.list_runs()
+            self.assertEqual(len(runs), 1)
+            self.assertEqual(runs[0]["status"], RunStatus.INTERRUPTED.value)
+            self.assertEqual(
+                run_manager.repository.get_run(runs[0]["run_id"])["status"],
+                RunStatus.INTERRUPTED.value,
+            )
+            self.assertEqual(command_executor._tasks, {})
+            self.assertEqual(command_executor._processes, {})
+            self.assertEqual(await command_executor.close(timeout=1), ())
+            await run_manager.close()
+
+    async def test_close_timeout_covers_inflight_start_admission(self):
+        class BlockingNotificationService:
+            def __init__(self):
+                self.entered = asyncio.Event()
+
+            async def register_run_notification(self, **kwargs):
+                self.entered.set()
+                await asyncio.Event().wait()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_manager = RunManager()
+            notification_service = BlockingNotificationService()
+            run_manager.notification_service = notification_service
+            command_executor = CommandExecutor(run_manager)
+            starting = asyncio.create_task(command_executor.start(
+                conversation_id="conv_1",
+                command=f'{sys.executable} -c "import time; time.sleep(30)"',
+                cwd=tmpdir,
+            ))
+            await asyncio.wait_for(notification_service.entered.wait(), timeout=5)
+            run_id = run_manager.list_runs()[0]["run_id"]
+
+            report = await asyncio.wait_for(
+                command_executor.close(timeout=0.05),
+                timeout=0.2,
+            )
+
+            self.assertEqual(report, (run_id,))
+            starting.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await starting
+            self.assertEqual(
+                run_manager.repository.get_run(run_id)["status"],
+                RunStatus.INTERRUPTED.value,
+            )
+            await run_manager.close()
+
+    async def test_close_reports_unresolved_when_terminal_persistence_fails(self):
+        class FailingFinishRepository(MemoryRunRepository):
+            def __init__(self):
+                super().__init__()
+                self.fail_run_id = None
+
+            def finish_run(self, run_id, status, error=None):
+                if run_id == self.fail_run_id:
+                    raise OSError("finish persistence unavailable")
+                return super().finish_run(run_id, status, error)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repository = FailingFinishRepository()
+            run_manager = RunManager(repository=repository)
+            command_executor = CommandExecutor(run_manager)
+            started = await command_executor.start(
+                conversation_id="conv_1",
+                command=f'{sys.executable} -c "import time; time.sleep(30)"',
+                cwd=tmpdir,
+            )
+            run_id = started["run_id"]
+            async with asyncio.timeout(5):
+                while run_id not in command_executor._processes:
+                    await asyncio.sleep(0.01)
+            process = command_executor._processes[run_id]
+            producer = command_executor._tasks[run_id]
+            repository.fail_run_id = run_id
+
+            self.assertEqual(
+                await command_executor.close(timeout=0.5),
+                (run_id,),
+            )
+
+            await asyncio.wait_for(process.wait(), timeout=5)
+            self.assertIsNotNone(process.returncode)
+            self.assertTrue(producer.done())
+            self.assertIsInstance(producer.exception(), OSError)
+            self.assertNotIn(run_id, command_executor._processes)
+            self.assertNotIn(run_id, command_executor._tasks)
+            self.assertEqual(
+                repository.get_run(run_id)["status"],
+                RunStatus.STOPPING.value,
+            )
+            repository.fail_run_id = None
+            await run_manager.finish_run(run_id, RunStatus.INTERRUPTED)
+            await run_manager.close()
+
+    async def test_close_remembers_terminal_failure_after_command_task_is_gone(self):
+        class FailingFinishRepository(MemoryRunRepository):
+            def __init__(self):
+                super().__init__()
+                self.fail_run_id = None
+
+            def finish_run(self, run_id, status, error=None):
+                if run_id == self.fail_run_id:
+                    raise OSError("finish persistence unavailable")
+                return super().finish_run(run_id, status, error)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repository = FailingFinishRepository()
+            run_manager = RunManager(repository=repository)
+            command_executor = CommandExecutor(run_manager)
+            started = await command_executor.start(
+                conversation_id="conv_1",
+                command=f'{sys.executable} -c "import time; time.sleep(0.2)"',
+                cwd=tmpdir,
+            )
+            run_id = started["run_id"]
+            repository.fail_run_id = run_id
+            producer = command_executor._tasks[run_id]
+            await asyncio.gather(producer, return_exceptions=True)
+            await asyncio.sleep(0)
+
+            self.assertNotIn(run_id, command_executor._processes)
+            self.assertNotIn(run_id, command_executor._tasks)
+            self.assertIn(run_id, command_executor._undrained_run_ids)
+            self.assertEqual(
+                await command_executor.close(timeout=0.2),
+                (run_id,),
+            )
+            repository.fail_run_id = None
+            await run_manager.finish_run(run_id, RunStatus.INTERRUPTED)
+            await run_manager.close()
+
+    async def test_close_retries_cleanup_when_initial_process_kill_fails(self):
+        class FailCommandStartedRepository(MemoryRunRepository):
+            def append_indexed_events(self, run_id, events):
+                if any(
+                    event["payload"].get("event_type") == "command_started"
+                    for event in events
+                ):
+                    raise OSError("command_started persistence failed")
+                return super().append_events(
+                    run_id,
+                    [dict(event["payload"]) for event in events],
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repository = FailCommandStartedRepository()
+            run_manager = RunManager(repository=repository)
+            command_executor = CommandExecutor(run_manager)
+            kill_process_tree = command_executor._kill_process_tree
+            kill_calls = 0
+
+            async def fail_first_kill(process):
+                nonlocal kill_calls
+                kill_calls += 1
+                if kill_calls == 1:
+                    raise OSError("initial physical cleanup unavailable")
+                await kill_process_tree(process)
+
+            command_executor._kill_process_tree = fail_first_kill
+            started = await command_executor.start(
+                conversation_id="conv_1",
+                command=f'{sys.executable} -c "import time; time.sleep(30)"',
+                cwd=tmpdir,
+            )
+            run_id = started["run_id"]
+            producer = command_executor._tasks[run_id]
+            async with asyncio.timeout(5):
+                while run_id not in command_executor._processes:
+                    await asyncio.sleep(0.01)
+            process = command_executor._processes[run_id]
+            await asyncio.gather(producer, return_exceptions=True)
+
+            self.assertIsNone(process.returncode)
+            self.assertIn(run_id, command_executor._processes)
+            self.assertIn(run_id, command_executor._undrained_run_ids)
+            self.assertEqual(await command_executor.close(timeout=5), ())
+            self.assertIsNotNone(process.returncode)
+            self.assertGreaterEqual(kill_calls, 2)
+            await run_manager.close()
 
     @unittest.skip("legacy command control tools removed; shell auto-background is the only model-visible command API")
     async def test_model_started_background_command_is_not_stopped_with_creator_stream(self):

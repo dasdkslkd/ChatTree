@@ -107,7 +107,6 @@ def run_start_api_error(exc: Exception) -> ApiError:
             "internal_error",
             GENERIC_5XX_MESSAGE,
             False,
-            already_logged=True,
         )
     if isinstance(exc, RunReferenceNotFoundError):
         return ApiError(

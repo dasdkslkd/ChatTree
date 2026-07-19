@@ -3,12 +3,47 @@ import json
 
 from backend.api.routes import messages as messages_route
 from backend.core.config.types import StreamChunk, StreamStatus
-from backend.core.runs import RunManager
+from backend.core.runs import RunKind, RunManager
+from backend.core.slash import SlashCommandDispatcher, SlashDispatchKind
 
 
 def parse_sse(event: str):
     assert event.startswith("data: ")
     return json.loads(event.removeprefix("data: ").strip())
+
+
+async def _start_test_producer(
+    request: messages_route.SendMessageRequest,
+    chat_manager,
+    run_manager: RunManager,
+):
+    slash_result = SlashCommandDispatcher().dispatch(request.content)
+    run_kind = RunKind(str(slash_result.run_kind or RunKind.CHAT.value))
+    run = await run_manager.create_run(
+        conversation_id="conv-1",
+        kind=run_kind,
+        anchor_node_id=request.parent_node_id,
+        summary=request.content[:80],
+        metadata=messages_route._message_run_metadata(request, slash_result),
+    )
+    if slash_result.kind == SlashDispatchKind.DIRECT_RESPONSE:
+        producer = messages_route._produce_direct_response(
+            run=run,
+            conversation_id="conv-1",
+            request=request,
+            slash_result=slash_result,
+            chat_manager=chat_manager,
+            run_manager=run_manager,
+        )
+    else:
+        producer = messages_route._produce_chat_run(
+            run=run,
+            conversation_id="conv-1",
+            request=request,
+            chat_manager=chat_manager,
+            run_manager=run_manager,
+        )
+    return run, asyncio.create_task(producer)
 
 
 class FakeChatManager:
@@ -73,187 +108,124 @@ class DelayedStartChatManager:
 
 class SideQuestionChatManager:
     async def send_message_stream(self, **kwargs):
-        yield StreamChunk(
-            status=StreamStatus.START,
-            content=None,
-            node_id=None,
-            target_node_id=None,
-            conversation_id=kwargs["conversation_id"],
-            run_id=kwargs.get("run_id"),
-            tokens_used=0,
-        )
-        yield StreamChunk(
-            status=StreamStatus.CONTENT,
-            content="aside",
-            node_id=None,
-            target_node_id=None,
-            conversation_id=kwargs["conversation_id"],
-            run_id=kwargs.get("run_id"),
-            tokens_used=0,
-        )
-        yield StreamChunk(
-            status=StreamStatus.COMPLETE,
-            content=None,
-            node_id=None,
-            target_node_id=None,
-            conversation_id=kwargs["conversation_id"],
-            run_id=kwargs.get("run_id"),
-            tokens_used=1,
-        )
+        for status, content in (
+            (StreamStatus.START, None),
+            (StreamStatus.CONTENT, "aside"),
+            (StreamStatus.COMPLETE, None),
+        ):
+            yield StreamChunk(
+                status=status,
+                content=content,
+                node_id=None,
+                target_node_id=None,
+                conversation_id=kwargs["conversation_id"],
+                run_id=kwargs.get("run_id"),
+                tokens_used=1 if status == StreamStatus.COMPLETE else 0,
+            )
 
 
 class FailingChatManager:
     async def send_message_stream(self, **kwargs):
-        raise AssertionError("chat stream should not be used for direct-response slash commands")
+        raise AssertionError("chat stream must not run for direct responses")
 
 
-def test_detached_stream_continues_after_client_disconnect():
-    async def run():
+def test_subscriber_disconnect_does_not_cancel_the_message_producer():
+    async def scenario():
         manager = FakeChatManager()
+        run_manager = RunManager()
         request = messages_route.SendMessageRequest(
             content="hello",
             parent_node_id="node-anchor",
             model_id="fake-model",
         )
-        stream = messages_route.detached_stream_event_generator("conv-1", request, manager)
+        run, producer = await _start_test_producer(request, manager, run_manager)
+        stream = messages_route._subscribe_sse(run_manager, run.run_id)
 
-        started_event = await anext(stream)
-        assert parse_sse(started_event)["type"] == "run_started"
-
-        bound_event = await anext(stream)
-        assert parse_sse(bound_event)["type"] == "run_target_bound"
-
-        first_event = await anext(stream)
-        assert "first" in first_event
-
+        assert parse_sse(await anext(stream))["type"] == "run_started"
+        assert parse_sse(await anext(stream))["type"] == "run_target_bound"
+        assert parse_sse(await anext(stream))["content"] == "first"
         await stream.aclose()
-        manager.allow_continue.set()
 
-        await asyncio.wait_for(manager.completed.wait(), timeout=1)
+        manager.allow_continue.set()
+        await asyncio.wait_for(producer, timeout=1)
+        assert manager.completed.is_set()
         assert manager.cancelled is False
 
-    asyncio.run(run())
+    asyncio.run(scenario())
 
 
-def test_detached_stream_attach_replays_buffer_and_continues_live():
-    async def run():
+def test_run_event_subscription_replays_then_continues_live():
+    async def scenario():
         manager = FakeChatManager()
+        run_manager = RunManager()
         request = messages_route.SendMessageRequest(
             content="hello",
             parent_node_id="node-anchor",
             model_id="fake-model",
         )
-        stream = messages_route.detached_stream_event_generator("conv-1", request, manager)
+        run, producer = await _start_test_producer(request, manager, run_manager)
+        first = messages_route._subscribe_sse(run_manager, run.run_id)
+        replayed = [await anext(first) for _ in range(3)]
+        await first.aclose()
 
-        started_event = await anext(stream)
-        assert parse_sse(started_event)["type"] == "run_started"
-        bound_event = await anext(stream)
-        assert parse_sse(bound_event)["type"] == "run_target_bound"
-        first_event = await anext(stream)
-        assert "first" in first_event
-
-        session = messages_route._STREAM_SESSIONS["node-1"]
-        active_streams = await messages_route.get_all_active_streams()
-        assert active_streams[0]["conversation_id"] == "conv-1"
-        assert active_streams[0]["node_id"] == "node-1"
-        attached = session.subscribe(0)
-
-        replayed_started = await anext(attached)
-        assert replayed_started == started_event
-        replayed_bound = await anext(attached)
-        assert replayed_bound == bound_event
-        replayed_first = await anext(attached)
-        assert replayed_first == first_event
-
+        attached = messages_route._subscribe_sse(run_manager, run.run_id)
+        assert [await anext(attached) for _ in range(3)] == replayed
         manager.allow_continue.set()
-        live_event = await anext(attached)
-        assert "second" in live_event
+        assert parse_sse(await anext(attached))["content"] == "second"
+        assert "[DONE]" in await anext(attached)
+        await asyncio.wait_for(producer, timeout=1)
 
-        done_event = await anext(attached)
-        assert "[DONE]" in done_event
-
-        await asyncio.wait_for(manager.completed.wait(), timeout=1)
-        await stream.aclose()
-
-    asyncio.run(run())
+    asyncio.run(scenario())
 
 
-def test_detached_btw_stream_uses_side_question_run_without_target_bind():
-    async def run():
-        manager = SideQuestionChatManager()
+def test_side_question_run_does_not_bind_a_target_node():
+    async def scenario():
         run_manager = RunManager()
         request = messages_route.SendMessageRequest(
             content="/btw explain this",
             parent_node_id="node-anchor",
             model_id="fake-model",
         )
-        stream = messages_route.detached_stream_event_generator("conv-1", request, manager, run_manager)
+        run, producer = await _start_test_producer(
+            request,
+            SideQuestionChatManager(),
+            run_manager,
+        )
+        await producer
 
-        started_event = parse_sse(await anext(stream))
-        assert started_event["type"] == "run_started"
-        assert started_event["kind"] == "side_question"
-        assert started_event["anchor_node_id"] == "node-anchor"
-        assert started_event["target_node_id"] is None
+        events = run_manager.read_events(run.run_id)
+        assert events[0]["kind"] == "side_question"
+        assert [event.get("content") for event in events if event.get("status") == "content"] == ["aside"]
+        assert run_manager.get_run(run.run_id)["target_node_id"] is None
 
-        start_chunk = parse_sse(await anext(stream))
-        content_chunk = parse_sse(await anext(stream))
-        complete_chunk = parse_sse(await anext(stream))
-
-        assert start_chunk["target_node_id"] is None
-        assert content_chunk["content"] == "aside"
-        assert content_chunk["target_node_id"] is None
-        assert complete_chunk["status"] == "complete"
-        assert complete_chunk["target_node_id"] is None
-        assert run_manager.get_run(started_event["run_id"])["target_node_id"] is None
-
-        done_event = await anext(stream)
-        assert "[DONE]" in done_event
-
-    asyncio.run(run())
+    asyncio.run(scenario())
 
 
-def test_detached_direct_response_stream_creates_run_without_target_or_chat_node():
-    async def run():
+def test_direct_response_run_never_calls_the_chat_stream():
+    async def scenario():
         run_manager = RunManager()
         request = messages_route.SendMessageRequest(
             content="/status",
             parent_node_id="node-anchor",
             model_id="fake-model",
         )
-        stream = messages_route.detached_stream_event_generator(
-            "conv-1",
+        run, producer = await _start_test_producer(
             request,
             FailingChatManager(),
             run_manager,
         )
+        await producer
 
-        started_event = parse_sse(await anext(stream))
-        assert started_event["type"] == "run_started"
-        assert started_event["kind"] == "direct_response"
-        assert started_event["anchor_node_id"] == "node-anchor"
-        assert started_event["target_node_id"] is None
+        events = run_manager.read_events(run.run_id)
+        assert events[0]["kind"] == "direct_response"
+        assert any("ChatTree" in str(event.get("content") or "") for event in events)
+        assert run_manager.get_run(run.run_id)["target_node_id"] is None
 
-        start_chunk = parse_sse(await anext(stream))
-        content_chunk = parse_sse(await anext(stream))
-        complete_chunk = parse_sse(await anext(stream))
-
-        assert start_chunk["status"] == "start"
-        assert start_chunk["target_node_id"] is None
-        assert content_chunk["status"] == "content"
-        assert "ChatTree" in content_chunk["content"]
-        assert content_chunk["target_node_id"] is None
-        assert complete_chunk["status"] == "complete"
-        assert complete_chunk["target_node_id"] is None
-        assert run_manager.get_run(started_event["run_id"])["target_node_id"] is None
-
-        done_event = await anext(stream)
-        assert "[DONE]" in done_event
-
-    asyncio.run(run())
+    asyncio.run(scenario())
 
 
-def test_active_streams_include_direct_response_runs_without_target_node():
-    async def run():
+def test_active_streams_include_targetless_direct_responses():
+    async def scenario():
         run_manager = RunManager()
         direct = await run_manager.create_run(
             conversation_id="conv-1",
@@ -263,29 +235,16 @@ def test_active_streams_include_direct_response_runs_without_target_node():
 
         active_streams = await messages_route.get_all_active_streams(run_manager)
 
-        assert active_streams == [
-            {
-                "run_id": direct.run_id,
-                "conversation_id": "conv-1",
-                "anchor_node_id": "node-anchor",
-                "node_id": None,
-                "target_node_id": None,
-                "created_by_run_id": None,
-                "cancellation_parent_run_id": None,
-                "kind": "direct_response",
-                "status": "running",
-                "event_count": 1,
-                "done": False,
-                "created_at": direct.created_at,
-                "updated_at": direct.updated_at,
-            }
-        ]
+        assert len(active_streams) == 1
+        assert active_streams[0]["run_id"] == direct.run_id
+        assert active_streams[0]["kind"] == "direct_response"
+        assert active_streams[0]["target_node_id"] is None
 
-    asyncio.run(run())
+    asyncio.run(scenario())
 
 
-def test_stop_before_target_bind_is_applied_when_node_arrives():
-    async def run():
+def test_stop_requested_before_target_bind_is_applied_when_node_arrives():
+    async def scenario():
         manager = DelayedStartChatManager()
         run_manager = RunManager()
         request = messages_route.SendMessageRequest(
@@ -293,16 +252,12 @@ def test_stop_before_target_bind_is_applied_when_node_arrives():
             parent_node_id="node-anchor",
             model_id="fake-model",
         )
-        stream = messages_route.detached_stream_event_generator("conv-1", request, manager, run_manager)
-
-        started_event = await anext(stream)
-        started = parse_sse(started_event)
-        assert started["type"] == "run_started"
-        await run_manager.request_stop(started["run_id"])
+        run, producer = await _start_test_producer(request, manager, run_manager)
+        assert await run_manager.request_stop(run.run_id) is True
 
         manager.allow_start.set()
         await asyncio.wait_for(manager.stopped.wait(), timeout=1)
+        await asyncio.wait_for(producer, timeout=1)
         assert manager.stop_calls == ["node-early"]
-        await stream.aclose()
 
-    asyncio.run(run())
+    asyncio.run(scenario())

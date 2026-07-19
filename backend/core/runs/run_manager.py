@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import uuid
+import logging
 from copy import deepcopy
-from dataclasses import dataclass
 from time import time
 from typing import Any, AsyncIterator, Callable, Dict, Iterable, Optional
 
@@ -13,7 +12,11 @@ from backend.core.perf import get_profiler
 from .idempotency import RunIdempotencyConflictError
 from .journal import RunJournal
 from .public import public_run_dict, public_run_event
+from .repository import MemoryRunRepository, RunRepository
 from .types import FINISHED_RUN_STATUSES, RunKind, RunRecord, RunStatus
+
+
+logger = logging.getLogger(__name__)
 
 
 class RunNotFoundError(Exception):
@@ -28,10 +31,11 @@ class RunManagerClosingError(RuntimeError):
     pass
 
 
-@dataclass(frozen=True)
-class PendingReservationDrainResult:
-    pending_run_ids: tuple[str, ...]
-    exhausted_run_ids: tuple[str, ...]
+class _RunEventWriteError(RuntimeError):
+    def __init__(self, run_id: str, cause: BaseException) -> None:
+        super().__init__(f"run event writer failed for run {run_id}")
+        self.run_id = run_id
+        self.__cause__ = cause
 
 
 class _RunEventWriteBuffer:
@@ -54,14 +58,12 @@ class _RunEventWriteBuffer:
         self._flush_all_requested = False
         self._closed = False
         self._task: Optional[asyncio.Task[None]] = None
-        self._error: Optional[BaseException] = None
         self._run_errors: Dict[str, BaseException] = {}
 
     async def enqueue_many(self, events: list[Dict[str, Any]]) -> None:
         if not events:
             return
         async with self._condition:
-            self._raise_if_failed_locked()
             for run_id in {str(event["run_id"]) for event in events}:
                 self._raise_run_if_failed_locked(run_id)
             if self._closed:
@@ -74,7 +76,6 @@ class _RunEventWriteBuffer:
     async def flush_run(self, run_id: str) -> None:
         run_key = str(run_id)
         async with self._condition:
-            self._raise_if_failed_locked()
             self._raise_run_if_failed_locked(run_key)
             if self._pending.get(run_key):
                 self._ensure_started_locked()
@@ -82,7 +83,6 @@ class _RunEventWriteBuffer:
             self._condition.notify_all()
             while self._pending.get(run_key) or self._inflight.get(run_key, 0):
                 await self._condition.wait()
-                self._raise_if_failed_locked()
                 self._raise_run_if_failed_locked(run_key)
             self._raise_run_if_failed_locked(run_key)
             self._flush_requested.discard(run_key)
@@ -99,15 +99,14 @@ class _RunEventWriteBuffer:
 
     async def flush_all(self) -> None:
         async with self._condition:
-            self._raise_if_failed_locked()
             if self._pending:
                 self._ensure_started_locked()
             self._flush_all_requested = True
             self._condition.notify_all()
             while self._pending or any(self._inflight.values()):
                 await self._condition.wait()
-                self._raise_if_failed_locked()
             self._flush_all_requested = False
+            self._raise_any_run_failure_locked()
 
     async def close(self) -> None:
         async with self._condition:
@@ -122,7 +121,7 @@ class _RunEventWriteBuffer:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         async with self._condition:
-            self._raise_if_failed_locked()
+            self._raise_any_run_failure_locked()
 
     def _ensure_started_locked(self) -> None:
         if self._task is None or self._task.done():
@@ -131,11 +130,8 @@ class _RunEventWriteBuffer:
     async def _run(self) -> None:
         while True:
             async with self._condition:
-                while not self._pending and not self._closed and self._error is None:
+                while not self._pending and not self._closed:
                     await self._condition.wait()
-                if self._error is not None:
-                    self._condition.notify_all()
-                    return
                 if not self._pending and self._closed:
                     self._condition.notify_all()
                     return
@@ -162,7 +158,7 @@ class _RunEventWriteBuffer:
             error: Optional[BaseException] = None
             try:
                 await asyncio.to_thread(self._repository.append_indexed_events, run_id, batch)
-            except BaseException as exc:
+            except Exception as exc:
                 error = exc
 
             async with self._condition:
@@ -173,15 +169,11 @@ class _RunEventWriteBuffer:
                     self._inflight.pop(run_id, None)
                 if not self._pending.get(run_id) and not self._inflight.get(run_id):
                     self._flush_requested.discard(run_id)
-                if isinstance(error, KeyError):
+                if error is not None:
                     self._run_errors[run_id] = error
                     self._pending.pop(run_id, None)
                     self._flush_requested.discard(run_id)
-                elif error is not None:
-                    self._error = error
                 self._condition.notify_all()
-                if error is not None and not isinstance(error, KeyError):
-                    return
 
     def _take_batch_locked(self) -> tuple[str, list[Dict[str, Any]]]:
         run_id = self._select_run_locked()
@@ -209,14 +201,16 @@ class _RunEventWriteBuffer:
     def _pending_has_flush_request_locked(self) -> bool:
         return any(self._pending.get(run_id) for run_id in self._flush_requested)
 
-    def _raise_if_failed_locked(self) -> None:
-        if self._error is not None:
-            raise RuntimeError("run event writer failed") from self._error
-
     def _raise_run_if_failed_locked(self, run_id: str) -> None:
         error = self._run_errors.get(run_id)
         if error is not None:
-            raise RuntimeError(f"run event writer failed for run {run_id}") from error
+            raise _RunEventWriteError(run_id, error)
+
+    def _raise_any_run_failure_locked(self) -> None:
+        if not self._run_errors:
+            return
+        run_id = next(iter(self._run_errors))
+        self._raise_run_if_failed_locked(run_id)
 
 
 class RunManager:
@@ -225,15 +219,15 @@ class RunManager:
     def __init__(
         self,
         journal: Optional[RunJournal] = None,
-        repository: Optional[Any] = None,
+        repository: Optional[RunRepository] = None,
     ) -> None:
         self.journal = journal or RunJournal()
-        self.repository = repository
+        self.repository: RunRepository = repository or MemoryRunRepository()
         self.notification_service: Any = None
         self.task_service: Any = None
         self._event_writer: Optional[_RunEventWriteBuffer] = (
-            _RunEventWriteBuffer(repository)
-            if repository is not None and hasattr(repository, "append_indexed_events")
+            _RunEventWriteBuffer(self.repository)
+            if hasattr(self.repository, "append_indexed_events")
             else None
         )
         self._runs: Dict[str, RunRecord] = {}
@@ -241,19 +235,10 @@ class RunManager:
         self._conditions: Dict[str, asyncio.Condition] = {}
         self._writers_by_node: Dict[str, str] = {}
         self._stop_events: Dict[str, asyncio.Event] = {}
-        self._idempotent_runs: Dict[str, tuple[str, str]] = {}
-        self._pending_reservations: Dict[str, Dict[str, Any]] = {}
-        self._unpublished_run_ids: set[str] = set()
-        self._publication_tasks: Dict[str, asyncio.Task[RunRecord]] = {}
-        self._published_reservation_ids: set[str] = set()
-        self._interrupting_reservation_ids: set[str] = set()
-        self._interruption_tasks: Dict[str, asyncio.Task[RunRecord]] = {}
-        self._reservation_task_bound: set[str] = set()
-        self._reservation_child_event_published: set[str] = set()
         self._finish_listeners: list[Callable[[Dict[str, Any]], None]] = []
         self._lock = asyncio.Lock()
         self._closing = False
-        self._close_task: Optional[asyncio.Task[PendingReservationDrainResult]] = None
+        self._close_task: Optional[asyncio.Task[None]] = None
         self._hydrate_active_runs()
 
     def add_finish_listener(self, listener: Callable[[Dict[str, Any]], None]) -> None:
@@ -274,30 +259,23 @@ class RunManager:
     ) -> RunRecord:
         profiler = get_profiler()
         run_kind = kind if isinstance(kind, RunKind) else RunKind(str(kind))
-        with profiler.span(
-            "run.create",
-            conversation_id=conversation_id,
-            kind=run_kind.value,
-            anchor_node_id=anchor_node_id,
-            target_node_id=target_node_id,
-            created_by_run_id=created_by_run_id,
-        ):
-            async with self._lock:
-                self._ensure_creation_admitted_locked()
-                if target_node_id:
-                    existing = self._writers_by_node.get(target_node_id)
-                    if existing:
-                        existing_record = self._runs.get(existing)
-                        if (
-                            existing_record
-                            and existing_record.status not in FINISHED_RUN_STATUSES
-                        ):
-                            raise RunWriterConflictError(
-                                f"target node {target_node_id} already has active writer {existing}"
-                            )
-                if self.repository:
-                    create_kwargs = {
+        run_id: str | None = None
+        try:
+            with profiler.span(
+                "run.create",
+                conversation_id=conversation_id,
+                kind=run_kind.value,
+                anchor_node_id=anchor_node_id,
+                target_node_id=target_node_id,
+                created_by_run_id=created_by_run_id,
+            ):
+                async with self._lock:
+                    self._ensure_creation_admitted_locked()
+                    self._assert_target_available_locked(target_node_id)
+                    create_kwargs: Dict[str, Any] = {
                         "kind": run_kind.value,
+                        "idempotency_key": None,
+                        "request_fingerprint": None,
                         "anchor_node_id": anchor_node_id,
                         "target_node_id": target_node_id,
                         "created_by_run_id": created_by_run_id,
@@ -307,66 +285,54 @@ class RunManager:
                     }
                     if task_binding is not None:
                         create_kwargs["task_binding"] = task_binding
-                    run_id = self.repository.create_run(conversation_id, **create_kwargs)
-                    stored_run = self.repository.get_run(run_id) or {}
-                    created_at = float(stored_run.get("created_at") or time())
-                    updated_at = float(stored_run.get("updated_at") or created_at)
-                    stored_metadata = dict(stored_run.get("metadata") or metadata or {})
-                else:
-                    run_id = f"run_{uuid.uuid4().hex}"
-                    created_at = time()
-                    updated_at = created_at
-                    stored_metadata = dict(metadata or {})
-                    if task_binding is not None:
-                        stored_metadata["task_generation_id"] = task_binding.get("task_generation_id")
-                        stored_metadata["task_step_position"] = task_binding.get("step_position")
-                record = RunRecord(
-                    run_id=run_id,
-                    conversation_id=conversation_id,
-                    kind=run_kind,
-                    status=RunStatus.RUNNING,
-                    anchor_node_id=anchor_node_id,
-                    target_node_id=target_node_id,
-                    created_by_run_id=created_by_run_id,
-                    cancellation_parent_run_id=cancellation_parent_run_id,
-                    summary=summary,
-                    metadata=stored_metadata,
-                    created_at=created_at,
-                    updated_at=updated_at,
+                    stored_run, created = self.repository.create_or_get_run(
+                        conversation_id,
+                        **create_kwargs,
+                    )
+                    if not created:
+                        raise RuntimeError(
+                            "non-idempotent run creation returned an existing run"
+                        )
+                    run_id = str(stored_run["run_id"])
+                    record = self._hydrate_record(stored_run)
+
+            if task_binding is not None and not self.repository.manages_task_bindings:
+                task_service = getattr(self, "task_service", None)
+                if task_service is None:
+                    await self._discard_cached_run(run_id)
+                    raise RuntimeError("task service is required for bound runs")
+                try:
+                    await task_service.bind_in_memory_run(run_id, task_binding)
+                except Exception:
+                    await self._discard_cached_run(run_id)
+                    raise
+            await self.append_event(run_id, {
+                "type": "run_started",
+                "run_id": run_id,
+                "conversation_id": conversation_id,
+                "kind": record.kind.value,
+                "status": record.status.value,
+                "anchor_node_id": anchor_node_id,
+                "target_node_id": target_node_id,
+                "created_by_run_id": created_by_run_id,
+                "cancellation_parent_run_id": cancellation_parent_run_id,
+                "summary": summary,
+                "metadata": record.metadata,
+                "created_at": record.created_at,
+            })
+            if created_by_run_id:
+                await self._append_child_started_event(created_by_run_id, record)
+            await self.flush_run_events(run_id)
+            return deepcopy(record)
+        except BaseException:
+            if run_id is not None:
+                await asyncio.shield(
+                    self._interrupt_committed_creation(
+                        run_id,
+                        "run creation interrupted before publication",
+                    )
                 )
-                if target_node_id:
-                    self._writers_by_node[target_node_id] = run_id
-                self._runs[run_id] = record
-                self._events[run_id] = []
-                self._conditions[run_id] = asyncio.Condition()
-                self._stop_events[run_id] = asyncio.Event()
-        if task_binding is not None and not self.repository:
-            task_service = getattr(self, "task_service", None)
-            if task_service is None:
-                await self._discard_unpublished_run(run_id)
-                raise RuntimeError("task service is required for bound runs")
-            try:
-                await task_service.bind_in_memory_run(run_id, task_binding)
-            except Exception:
-                await self._discard_unpublished_run(run_id)
-                raise
-        await self.append_event(run_id, {
-            "type": "run_started",
-            "run_id": run_id,
-            "conversation_id": conversation_id,
-            "kind": record.kind.value,
-            "status": record.status.value,
-            "anchor_node_id": anchor_node_id,
-            "target_node_id": target_node_id,
-            "created_by_run_id": created_by_run_id,
-            "cancellation_parent_run_id": cancellation_parent_run_id,
-            "summary": summary,
-            "metadata": record.metadata,
-            "created_at": record.created_at,
-        })
-        if created_by_run_id:
-            await self._append_child_started_event(created_by_run_id, record)
-        return record
+            raise
 
     def _ensure_creation_admitted_locked(self) -> None:
         if self._closing:
@@ -380,20 +346,12 @@ class RunManager:
         created_by_run_id: Optional[str] = None,
         cancellation_parent_run_id: Optional[str] = None,
     ) -> None:
-        if self.repository is None or not hasattr(
-            self.repository,
-            "validate_run_references",
-        ):
-            return
         self.repository.validate_run_references(
             conversation_id,
             anchor_node_id=anchor_node_id,
             created_by_run_id=created_by_run_id,
             cancellation_parent_run_id=cancellation_parent_run_id,
         )
-
-    def _is_hidden_run_id(self, run_id: str) -> bool:
-        return run_id in self._pending_reservations or run_id in self._unpublished_run_ids
 
     def _assert_target_available_locked(self, target_node_id: Optional[str]) -> None:
         if not target_node_id:
@@ -405,128 +363,28 @@ class RunManager:
                 raise RunWriterConflictError(
                     f"target node {target_node_id} already has active writer {existing}"
                 )
-        for run_id, seed in self._pending_reservations.items():
-            if seed.get("target_node_id") == target_node_id:
-                raise RunWriterConflictError(
-                    f"target node {target_node_id} already has active writer {run_id}"
-                )
-
-    def _memory_reservation_seed(
-        self,
-        *,
-        run_id: str,
-        conversation_id: str,
-        kind: RunKind,
-        anchor_node_id: Optional[str],
-        target_node_id: Optional[str],
-        created_by_run_id: Optional[str],
-        cancellation_parent_run_id: Optional[str],
-        summary: str,
-        metadata: Optional[Dict[str, Any]],
-        task_binding: Optional[Dict[str, Any]],
-        idempotency_key: str,
-        request_fingerprint: str,
-    ) -> Dict[str, Any]:
-        now = time()
-        return {
-            "run_id": run_id,
-            "conversation_id": conversation_id,
-            "kind": kind.value,
-            "status": RunStatus.RUNNING.value,
-            "anchor_node_id": anchor_node_id,
-            "target_node_id": target_node_id,
-            "created_by_run_id": created_by_run_id,
-            "cancellation_parent_run_id": cancellation_parent_run_id,
-            "summary": summary,
-            "event_count": 0,
-            "metadata": metadata if metadata is not None else {},
-            "created_at": now,
-            "updated_at": now,
-            "finished_at": None,
-            "idempotency_key": idempotency_key,
-            "request_fingerprint": request_fingerprint,
-            "task_binding": task_binding,
-        }
-
-    def _materialize_reserved_run_locked(self, run_id: str) -> RunRecord:
-        existing = self._runs.get(run_id)
-        if existing is not None:
-            return existing
-        seed = self._pending_reservations.get(run_id)
-        if seed is None:
-            raise RunNotFoundError(run_id)
-        task_binding = seed.get("task_binding")
-        if not self.repository and task_binding is not None:
-            stored_metadata = dict(seed.get("metadata") or {})
-            stored_metadata["task_generation_id"] = task_binding.get(
-                "task_generation_id"
-            )
-            stored_metadata["task_step_position"] = task_binding.get(
-                "step_position"
-            )
-            seed["metadata"] = stored_metadata
-        record = self._hydrate_record(seed)
-        self._events.setdefault(run_id, [])
-        self._conditions.setdefault(run_id, asyncio.Condition())
-        self._stop_events.setdefault(run_id, asyncio.Event())
-        self._unpublished_run_ids.add(run_id)
-        return record
-
-    def _forget_missing_repository_run_locked(self, run_id: str) -> None:
+    def _forget_cached_run_locked(self, run_id: str) -> None:
         self._runs.pop(run_id, None)
-        self._pending_reservations.pop(run_id, None)
-        self._unpublished_run_ids.discard(run_id)
-        self._published_reservation_ids.discard(run_id)
-        self._reservation_task_bound.discard(run_id)
-        self._reservation_child_event_published.discard(run_id)
-        publication_task = self._publication_tasks.get(run_id)
-        if publication_task is None or publication_task.done():
-            self._publication_tasks.pop(run_id, None)
-        interruption_task = self._interruption_tasks.get(run_id)
-        if interruption_task is None or interruption_task.done():
-            self._interruption_tasks.pop(run_id, None)
-            self._interrupting_reservation_ids.discard(run_id)
         self._events.pop(run_id, None)
         self._conditions.pop(run_id, None)
         self._stop_events.pop(run_id, None)
         for target_node_id, writer_run_id in list(self._writers_by_node.items()):
             if writer_run_id == run_id:
                 self._writers_by_node.pop(target_node_id, None)
-        for idempotency_key, mapping in list(self._idempotent_runs.items()):
-            if mapping[0] == run_id:
-                self._idempotent_runs.pop(idempotency_key, None)
-
-    def _existing_idempotent_run_locked(
+    def _idempotent_run_locked(
         self,
         idempotency_key: str,
         request_fingerprint: str,
     ) -> Optional[RunRecord]:
-        mapping = self._idempotent_runs.get(idempotency_key)
-        stored: Optional[Dict[str, Any]] = None
-        if mapping is None and self.repository and hasattr(
-            self.repository,
-            "get_run_by_idempotency_key",
-        ):
-            stored = self.repository.get_run_by_idempotency_key(idempotency_key)
-            if stored is not None:
-                run_id = str(stored.get("run_id") or stored.get("id"))
-                stored_fingerprint = str(stored.get("request_fingerprint") or "")
-                mapping = (run_id, stored_fingerprint)
-                self._idempotent_runs[idempotency_key] = mapping
-        if mapping is None:
+        stored = self.repository.get_run_by_idempotency_key(idempotency_key)
+        if stored is None:
             return None
-        run_id, stored_fingerprint = mapping
+        run_id = str(stored.get("run_id") or stored.get("id"))
+        stored_fingerprint = str(stored.get("request_fingerprint") or "")
         if stored_fingerprint != request_fingerprint:
             raise RunIdempotencyConflictError(run_id)
-        record = self._runs.get(run_id)
-        if record is None and run_id in self._pending_reservations:
-            record = self._materialize_reserved_run_locked(run_id)
-        if record is None and self.repository:
-            stored = stored or self.repository.get_run(run_id)
-            if stored is not None:
-                record = self._hydrate_record(stored)
-        if record is not None and self.repository:
-            self._ensure_events_loaded_locked(run_id)
+        record = self._hydrate_record(stored)
+        self._ensure_events_loaded_locked(run_id)
         return record
 
     async def get_idempotent_run(
@@ -540,7 +398,7 @@ class RunManager:
         if not isinstance(request_fingerprint, str) or not request_fingerprint:
             raise ValueError("request fingerprint is required")
         async with self._lock:
-            record = self._existing_idempotent_run_locked(
+            record = self._idempotent_run_locked(
                 idempotency_key,
                 request_fingerprint,
             )
@@ -567,18 +425,19 @@ class RunManager:
         if not isinstance(request_fingerprint, str) or not request_fingerprint:
             raise ValueError("request fingerprint is required")
         run_kind = kind if isinstance(kind, RunKind) else RunKind(str(kind))
+        run_id: str | None = None
+        created = False
+        try:
+            async with self._lock:
+                self._ensure_creation_admitted_locked()
+                existing = self._idempotent_run_locked(
+                    idempotency_key,
+                    request_fingerprint,
+                )
+                if existing is not None:
+                    return deepcopy(existing), False
 
-        async with self._lock:
-            self._ensure_creation_admitted_locked()
-            existing = self._existing_idempotent_run_locked(
-                idempotency_key,
-                request_fingerprint,
-            )
-            if existing is not None:
-                return deepcopy(existing), False
-
-            self._assert_target_available_locked(target_node_id)
-            if self.repository:
+                self._assert_target_available_locked(target_node_id)
                 create_kwargs: Dict[str, Any] = {
                     "kind": run_kind.value,
                     "idempotency_key": idempotency_key,
@@ -596,53 +455,158 @@ class RunManager:
                     conversation_id,
                     **create_kwargs,
                 )
-                seed = stored
-                run_id = str(seed["run_id"])
-                stored_fingerprint = str(seed["request_fingerprint"])
-                if stored_fingerprint != request_fingerprint:
+                run_id = str(stored["run_id"])
+                if (
+                    str(stored.get("request_fingerprint") or "")
+                    != request_fingerprint
+                ):
                     raise RunIdempotencyConflictError(run_id)
-            else:
-                run_id = f"run_{uuid.uuid4().hex}"
-                created = True
-                seed = self._memory_reservation_seed(
-                    run_id=run_id,
-                    conversation_id=conversation_id,
-                    kind=run_kind,
-                    anchor_node_id=anchor_node_id,
-                    target_node_id=target_node_id,
-                    created_by_run_id=created_by_run_id,
-                    cancellation_parent_run_id=cancellation_parent_run_id,
-                    summary=summary,
-                    metadata=metadata,
-                    task_binding=task_binding,
-                    idempotency_key=idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                )
-
-            self._idempotent_runs[idempotency_key] = (run_id, request_fingerprint)
-            if not created:
-                seed = dict(seed)
-                record = self._runs.get(run_id)
-                if record is None:
-                    record = self._hydrate_record(seed)
+                if created and on_reserved is not None:
+                    on_reserved(run_id)
+                record = self._hydrate_record(stored)
+                if not created:
                     self._ensure_events_loaded_locked(run_id)
-                return deepcopy(record), False
+                    return deepcopy(record), False
 
-            seed["task_binding"] = task_binding
-            self._pending_reservations[run_id] = seed
-            if on_reserved is not None:
-                on_reserved(run_id)
-            record = self._materialize_reserved_run_locked(run_id)
+            if task_binding is not None and not self.repository.manages_task_bindings:
+                task_service = getattr(self, "task_service", None)
+                if task_service is None:
+                    await self._discard_cached_run(run_id)
+                    raise RuntimeError("task service is required for bound runs")
+                try:
+                    await task_service.bind_in_memory_run(run_id, task_binding)
+                except Exception:
+                    await self._discard_cached_run(run_id)
+                    raise
+
+            await self.append_event(run_id, {
+                "type": "run_started",
+                "run_id": run_id,
+                "conversation_id": conversation_id,
+                "kind": record.kind.value,
+                "status": record.status.value,
+                "anchor_node_id": anchor_node_id,
+                "target_node_id": target_node_id,
+                "created_by_run_id": created_by_run_id,
+                "cancellation_parent_run_id": cancellation_parent_run_id,
+                "summary": summary,
+                "metadata": record.metadata,
+                "created_at": record.created_at,
+            })
+            if created_by_run_id:
+                await self._append_child_started_event(created_by_run_id, record)
+            await self.flush_run_events(run_id)
             return deepcopy(record), True
+        except BaseException:
+            if created and run_id is not None:
+                await asyncio.shield(
+                    self._interrupt_committed_creation(
+                        run_id,
+                        "run reservation interrupted before publication",
+                    )
+                )
+            raise
 
-    async def _discard_unpublished_run(self, run_id: str) -> None:
+    async def _discard_cached_run(self, run_id: str) -> None:
         async with self._lock:
-            record = self._runs.pop(run_id, None)
-            if record and record.target_node_id and self._writers_by_node.get(record.target_node_id) == run_id:
-                self._writers_by_node.pop(record.target_node_id, None)
-            self._events.pop(run_id, None)
-            self._conditions.pop(run_id, None)
-            self._stop_events.pop(run_id, None)
+            self._forget_cached_run_locked(run_id)
+            delete_run = getattr(self.repository, "delete_run", None)
+            if delete_run is not None:
+                delete_run(run_id)
+
+    async def _interrupt_committed_creation(
+        self,
+        run_id: str,
+        reason: str,
+    ) -> None:
+        if self._event_writer is not None:
+            await self._event_writer.discard_run(run_id)
+        try:
+            async with self._lock:
+                record = self._runs.get(run_id)
+                stored = self.repository.get_run(run_id)
+                if stored is None:
+                    return
+                if record is None:
+                    record = self._hydrate_record(stored)
+                if record.status in FINISHED_RUN_STATUSES:
+                    return
+                if self._event_writer is not None:
+                    record.event_count = int(stored.get("event_count") or 0)
+                    record.updated_at = float(
+                        stored.get("updated_at") or record.updated_at
+                    )
+                    self._events[run_id] = []
+        except Exception:
+            await self._finish_unhydrated_creation(run_id, reason)
+            return
+        await self.finish_run(
+            run_id,
+            RunStatus.INTERRUPTED,
+            reason,
+            _skip_event_flush=True,
+        )
+
+    async def _finish_unhydrated_creation(
+        self,
+        run_id: str,
+        reason: str,
+    ) -> None:
+        persisted = self.repository.finish_run(
+            run_id,
+            RunStatus.INTERRUPTED.value,
+            reason,
+        )
+        try:
+            persisted_events = self.repository.read_events(run_id, 0)
+        except Exception:
+            persisted_events = []
+
+        condition: asyncio.Condition | None = None
+        snapshot: RunRecord | None = None
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is not None:
+                record.status = RunStatus(str(persisted["status"]))
+                record.finished_at = (
+                    float(persisted["finished_at"])
+                    if persisted.get("finished_at") is not None
+                    else time()
+                )
+                record.updated_at = float(
+                    persisted.get("updated_at") or record.finished_at
+                )
+                record.event_count = int(
+                    persisted.get("event_count") or record.event_count
+                )
+                record.metadata = dict(
+                    persisted.get("metadata") or record.metadata
+                )
+                if (
+                    record.target_node_id
+                    and self._writers_by_node.get(record.target_node_id) == run_id
+                ):
+                    self._writers_by_node.pop(record.target_node_id, None)
+                snapshot = deepcopy(record)
+                condition = self._conditions.setdefault(run_id, asyncio.Condition())
+            if persisted_events:
+                self._events[run_id] = [
+                    {
+                        "run_id": event["run_id"],
+                        "event_index": event["event_index"],
+                        "payload": deepcopy(event["payload"]),
+                        "created_at": event["created_at"],
+                    }
+                    for event in persisted_events
+                ]
+
+        if condition is not None:
+            async with condition:
+                condition.notify_all()
+        if snapshot is not None:
+            snapshot_dict = snapshot.to_dict()
+            for listener in list(self._finish_listeners):
+                listener(snapshot_dict)
 
     async def _append_child_started_event(self, created_by_run_id: str, child: RunRecord) -> None:
         if not self.get_run(created_by_run_id):
@@ -674,9 +638,7 @@ class RunManager:
             record = self._require_run_locked(run_id)
             if record.anchor_node_id == anchor_node_id:
                 return deepcopy(record)
-            persisted: Optional[Dict[str, Any]] = None
-            if self.repository and hasattr(self.repository, "update_anchor_node"):
-                persisted = self.repository.update_anchor_node(run_id, anchor_node_id)
+            persisted = self.repository.update_anchor_node(run_id, anchor_node_id)
             record.anchor_node_id = anchor_node_id
             record.updated_at = float((persisted or {}).get("updated_at") or time())
             snapshot = deepcopy(record)
@@ -694,10 +656,8 @@ class RunManager:
                 return deepcopy(record)
             previous_writer = self._writers_by_node.get(target_node_id)
             self._acquire_writer_locked(target_node_id, run_id)
-            persisted: Optional[Dict[str, Any]] = None
             try:
-                if self.repository and hasattr(self.repository, "update_target_node"):
-                    persisted = self.repository.update_target_node(run_id, target_node_id)
+                persisted = self.repository.update_target_node(run_id, target_node_id)
             except Exception:
                 if previous_writer is None:
                     if self._writers_by_node.get(target_node_id) == run_id:
@@ -726,9 +686,10 @@ class RunManager:
             record = self._require_run_locked(run_id)
             if record.cancellation_parent_run_id == cancellation_parent_run_id:
                 return deepcopy(record)
-            persisted: Optional[Dict[str, Any]] = None
-            if self.repository and hasattr(self.repository, "update_cancellation_parent"):
-                persisted = self.repository.update_cancellation_parent(run_id, cancellation_parent_run_id)
+            persisted = self.repository.update_cancellation_parent(
+                run_id,
+                cancellation_parent_run_id,
+            )
             record.cancellation_parent_run_id = cancellation_parent_run_id
             record.updated_at = float((persisted or {}).get("updated_at") or time())
             snapshot = deepcopy(record)
@@ -751,243 +712,71 @@ class RunManager:
         if self._event_writer is not None:
             await self._event_writer.flush_all()
 
-    def _has_cached_event_locked(self, run_id: str, event_type: str) -> bool:
-        return any(
-            event.get("payload", {}).get("type") == event_type
-            for event in self._events.get(run_id, [])
-        )
-
-    async def _publish_reserved_run_once(self, run_id: str) -> RunRecord:
-        current_task = asyncio.current_task()
-        async with self._lock:
-            if run_id in self._interrupting_reservation_ids:
-                raise RuntimeError(f"reservation interruption in progress for run {run_id}")
-            if not self._is_hidden_run_id(run_id):
-                if run_id not in self._published_reservation_ids:
-                    raise RuntimeError(f"run {run_id} is not a reserved run")
-                record = self._runs.get(run_id) or self._hydrate_run_locked(run_id)
-                if record is None:
-                    raise RunNotFoundError(run_id)
-                return deepcopy(record)
-            record = self._materialize_reserved_run_locked(run_id)
-            seed = deepcopy(self._pending_reservations.get(run_id) or {})
-            task_binding = seed.get("task_binding")
-            has_started_event = self._has_cached_event_locked(run_id, "run_started")
-
-        if task_binding is not None and not self.repository:
-            task_service = getattr(self, "task_service", None)
-            if task_service is None:
-                raise RuntimeError("task service is required for bound runs")
-            if run_id not in self._reservation_task_bound:
-                await task_service.bind_in_memory_run(run_id, task_binding)
-                self._reservation_task_bound.add(run_id)
-
-        if not has_started_event:
-            await self.append_event(run_id, {
-                "type": "run_started",
-                "run_id": run_id,
-                "conversation_id": record.conversation_id,
-                "kind": record.kind.value,
-                "status": record.status.value,
-                "anchor_node_id": record.anchor_node_id,
-                "target_node_id": record.target_node_id,
-                "created_by_run_id": record.created_by_run_id,
-                "cancellation_parent_run_id": record.cancellation_parent_run_id,
-                "summary": record.summary,
-                "metadata": record.metadata,
-                "created_at": record.created_at,
-            })
-        if (
-            record.created_by_run_id
-            and run_id not in self._reservation_child_event_published
-        ):
-            await self._append_child_started_event(record.created_by_run_id, record)
-            self._reservation_child_event_published.add(run_id)
-        await self.flush_run_events(run_id)
-
-        async with self._lock:
-            if self._closing:
-                raise RunManagerClosingError("run manager is closing")
-            if run_id in self._interrupting_reservation_ids:
-                raise RuntimeError(f"reservation interruption in progress for run {run_id}")
-            record = self._runs.get(run_id)
-            if record is None:
-                raise RunNotFoundError(run_id)
-            self._pending_reservations.pop(run_id, None)
-            self._unpublished_run_ids.discard(run_id)
-            self._published_reservation_ids.add(run_id)
-            self._reservation_task_bound.discard(run_id)
-            self._reservation_child_event_published.discard(run_id)
-            if self._publication_tasks.get(run_id) is current_task:
-                self._publication_tasks.pop(run_id, None)
-            return deepcopy(record)
-
-    async def publish_reserved_run(self, run_id: str) -> RunRecord:
-        async with self._lock:
-            if run_id in self._interrupting_reservation_ids:
-                raise RuntimeError(f"reservation interruption in progress for run {run_id}")
-            if not self._is_hidden_run_id(run_id):
-                if run_id not in self._published_reservation_ids:
-                    raise RuntimeError(f"run {run_id} is not a reserved run")
-                record = self._runs.get(run_id) or self._hydrate_run_locked(run_id)
-                if record is None:
-                    raise RunNotFoundError(run_id)
-                return deepcopy(record)
-            task = self._publication_tasks.get(run_id)
-            if task is None:
-                task = asyncio.create_task(self._publish_reserved_run_once(run_id))
-                self._publication_tasks[run_id] = task
-        return await asyncio.shield(task)
-
-    async def _interrupt_reserved_run_once(
+    async def _recover_event_write_failure_locked(
         self,
         run_id: str,
-        error: Optional[str],
-    ) -> RunRecord:
-        current_task = asyncio.current_task()
+        record: RunRecord,
+        failure: _RunEventWriteError,
+    ) -> None:
+        cause = failure.__cause__ or failure
+        logger.error(
+            "run event persistence failed for run %s",
+            run_id,
+            exc_info=(type(cause), cause, cause.__traceback__),
+        )
+        if self._event_writer is None:
+            raise failure
+        await self._event_writer.discard_run(run_id)
+        persisted = self.repository.get_run(run_id)
+        if persisted is None:
+            raise RunNotFoundError(run_id) from failure
+        persisted_events = self.repository.read_events(run_id, 0)
+        record.status = RunStatus(str(persisted["status"]))
+        record.finished_at = (
+            float(persisted["finished_at"])
+            if persisted.get("finished_at") is not None
+            else None
+        )
+        record.event_count = int(
+            persisted.get("event_count") or len(persisted_events)
+        )
+        record.updated_at = float(
+            persisted.get("updated_at") or record.updated_at
+        )
+        record.metadata = dict(persisted.get("metadata") or record.metadata)
+        self._events[run_id] = [
+            {
+                "run_id": event["run_id"],
+                "event_index": event["event_index"],
+                "payload": deepcopy(event["payload"]),
+                "created_at": event["created_at"],
+            }
+            for event in persisted_events
+        ]
+
+    async def _close_after_admission(self) -> None:
+        failure: BaseException | None = None
         try:
-            async with self._lock:
-                publication_task = self._publication_tasks.get(run_id)
-            if publication_task is not None:
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    if publication_task.done():
-                        publication_task.result()
-                    else:
-                        await asyncio.shield(publication_task)
-
-            async with self._lock:
-                record = self._runs.get(run_id)
-                if record is None and run_id in self._pending_reservations:
-                    record = self._materialize_reserved_run_locked(run_id)
-                if record is None:
-                    record = self._hydrate_run_locked(run_id)
-                if record is None:
-                    raise RunNotFoundError(run_id)
-                was_hidden = self._is_hidden_run_id(run_id)
-                was_published = run_id in self._published_reservation_ids
-                if not was_hidden and not was_published:
-                    if record.status in FINISHED_RUN_STATUSES:
-                        return deepcopy(record)
-                    raise RuntimeError(f"run {run_id} is not a pending reservation")
-
-            interrupted = await self.finish_run(
-                run_id,
-                RunStatus.INTERRUPTED,
-                error,
-                _notify_listeners=not was_hidden,
-            )
-            async with self._lock:
-                self._pending_reservations.pop(run_id, None)
-                self._unpublished_run_ids.discard(run_id)
-                self._published_reservation_ids.discard(run_id)
-                self._publication_tasks.pop(run_id, None)
-                self._reservation_task_bound.discard(run_id)
-                self._reservation_child_event_published.discard(run_id)
-                self._interrupting_reservation_ids.discard(run_id)
-                condition = self._conditions.setdefault(run_id, asyncio.Condition())
-                self._stop_events.setdefault(run_id, asyncio.Event()).set()
-            if was_hidden:
-                async with condition:
-                    condition.notify_all()
-                snapshot = interrupted.to_dict()
-                for listener in list(self._finish_listeners):
-                    listener(snapshot)
-            return interrupted
-        finally:
-            async with self._lock:
-                if self._interruption_tasks.get(run_id) is current_task:
-                    self._interruption_tasks.pop(run_id, None)
-                    self._interrupting_reservation_ids.discard(run_id)
-
-    async def interrupt_reserved_run(
-        self,
-        run_id: str,
-        error: Optional[str],
-    ) -> RunRecord:
-        async with self._lock:
-            task = self._interruption_tasks.get(run_id)
-            recoverable = (
-                self._is_hidden_run_id(run_id)
-                or run_id in self._published_reservation_ids
-            )
-            if task is None and not recoverable:
-                record = self._runs.get(run_id) or self._hydrate_run_locked(run_id)
-                if record is None:
-                    raise RunNotFoundError(run_id)
-                if record.status in FINISHED_RUN_STATUSES:
-                    return deepcopy(record)
-                raise RuntimeError(f"run {run_id} is not a pending reservation")
-            if task is None:
-                self._interrupting_reservation_ids.add(run_id)
-                task = asyncio.create_task(
-                    self._interrupt_reserved_run_once(run_id, error)
-                )
-                self._interruption_tasks[run_id] = task
-        return await asyncio.shield(task)
-
-    async def drain_pending_reservations(
-        self,
-        timeout: float = 5.0,
-    ) -> PendingReservationDrainResult:
-        async with self._lock:
-            pending_ids = tuple(sorted(self._pending_reservations))
-        if not pending_ids:
-            return PendingReservationDrainResult((), ())
-
-        tasks = {
-            run_id: asyncio.create_task(
-                self.interrupt_reserved_run(run_id, "run manager is closing")
-            )
-            for run_id in pending_ids
-        }
-        done, _pending = await asyncio.wait(
-            set(tasks.values()),
-            timeout=max(0.0, float(timeout)),
-        )
-        for task in done:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                task.result()
-        for task in _pending:
-            task.add_done_callback(
-                lambda completed: completed.exception()
-                if not completed.cancelled()
-                else None
-            )
-        async with self._lock:
-            exhausted = tuple(
-                run_id for run_id in pending_ids
-                if run_id in self._pending_reservations
-            )
-        return PendingReservationDrainResult(pending_ids, exhausted)
-
-    async def _close_after_admission(
-        self,
-        timeout: float,
-    ) -> PendingReservationDrainResult:
-        result = await self.drain_pending_reservations(timeout=timeout)
-        if result.exhausted_run_ids:
-            return result
-        await self.flush_events()
+            await self.flush_events()
+        except BaseException as exc:
+            failure = exc
         if self._event_writer is not None:
-            await self._event_writer.close()
-        return result
+            try:
+                await self._event_writer.close()
+            except BaseException as exc:
+                if failure is None:
+                    failure = exc
+        if failure is not None:
+            raise failure
 
-    async def close(
-        self,
-        timeout: float = 5.0,
-    ) -> PendingReservationDrainResult:
+    async def close(self) -> None:
         async with self._lock:
             self._closing = True
             task = self._close_task
             if task is None:
-                task = asyncio.create_task(self._close_after_admission(timeout))
+                task = asyncio.create_task(self._close_after_admission())
                 self._close_task = task
-        result = await asyncio.shield(task)
-        if result.exhausted_run_ids:
-            async with self._lock:
-                if self._close_task is task:
-                    self._close_task = None
-        return result
+        await asyncio.shield(task)
 
     async def append_events(self, run_id: str, payloads: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
         if not payloads:
@@ -1007,7 +796,7 @@ class RunManager:
         ):
             async with self._lock:
                 record = self._require_run_locked(run_id)
-                if self.repository and self._event_writer is None:
+                if self._event_writer is None:
                     normalized_payloads = []
                     for item in payloads:
                         payload = dict(item)
@@ -1035,6 +824,9 @@ class RunManager:
                         record.updated_at = event["created_at"]
                         self._events.setdefault(run_id, []).append(event)
                         returned_payloads.append(payload)
+                        if getattr(self.repository, "mirrors_to_journal", False):
+                            journal_events.append(event)
+                            journal_conversation_id = record.conversation_id
                 else:
                     for item in payloads:
                         event_index = record.event_count
@@ -1080,8 +872,6 @@ class RunManager:
         while True:
             with profiler.span("run.subscribe.poll", run_id=run_id, from_event=from_event):
                 async with self._lock:
-                    if self._is_hidden_run_id(run_id):
-                        raise RunNotFoundError(run_id)
                     record = self._runs.get(run_id) or self._hydrate_run_locked(run_id)
                     if not record:
                         raise RunNotFoundError(run_id)
@@ -1168,111 +958,85 @@ class RunManager:
         error: Optional[str] = None,
         *,
         _notify_listeners: bool = True,
+        _skip_event_flush: bool = False,
     ) -> RunRecord:
         profiler = get_profiler()
         run_status = status if isinstance(status, RunStatus) else RunStatus(str(status))
         if run_status not in FINISHED_RUN_STATUSES:
             raise ValueError(f"finish_run requires finished status, got {run_status}")
-        journal_event: Optional[Dict[str, Any]] = None
-        journal_conversation_id: Optional[str] = None
         with profiler.span("run.finish", run_id=run_id, status=run_status.value, has_error=bool(error)):
             async with self._lock:
                 record = self._require_run_locked(run_id)
                 if record.status in FINISHED_RUN_STATUSES:
-                    self._published_reservation_ids.discard(run_id)
                     return deepcopy(record)
-                if self._event_writer is not None:
-                    await self._event_writer.flush_run(run_id)
+                if self._event_writer is not None and not _skip_event_flush:
+                    try:
+                        await self._event_writer.flush_run(run_id)
+                    except _RunEventWriteError as exc:
+                        await self._recover_event_write_failure_locked(
+                            run_id,
+                            record,
+                            exc,
+                        )
+                        run_status = RunStatus.FAILED
+                        error = "run event persistence failed"
                 event_index = record.event_count
                 condition = self._conditions.setdefault(run_id, asyncio.Condition())
-                if self.repository:
-                    persisted_run = self.repository.finish_run(run_id, run_status.value, error)
-                    persisted_events = self.repository.read_events(run_id, event_index)
-                    persisted_status = RunStatus(str(persisted_run.get("status") or run_status.value))
-                    if persisted_status not in FINISHED_RUN_STATUSES:
-                        raise RuntimeError(f"repository did not finish run {run_id}")
-                    record.status = persisted_status
-                    record.finished_at = float(persisted_run.get("finished_at") or time())
-                    record.updated_at = float(persisted_run.get("updated_at") or record.finished_at)
-                    record.metadata = dict(persisted_run.get("metadata") or record.metadata)
-                    if persisted_events:
-                        event = {
-                            "run_id": run_id,
-                            "event_index": persisted_events[0]["event_index"],
-                            "payload": deepcopy(persisted_events[0]["payload"]),
-                            "created_at": persisted_events[0]["created_at"],
-                        }
-                    else:
-                        payload = {
-                            "type": "run_finished",
-                            "run_id": run_id,
-                            "conversation_id": record.conversation_id,
-                            "kind": record.kind.value,
-                            "target_node_id": record.target_node_id,
-                            "status": persisted_status.value,
-                            "error": error,
-                            "finished_at": record.finished_at,
-                            "event_index": event_index,
-                        }
-                        event = {
-                            "run_id": run_id,
-                            "event_index": event_index,
-                            "payload": payload,
-                            "created_at": record.finished_at,
-                        }
-                    record.event_count = int(persisted_run.get("event_count", event["event_index"] + 1))
-                else:
-                    finished_at = time()
-                    next_metadata = dict(record.metadata)
-                    if error:
-                        next_metadata["error"] = error
+                if not self.repository.manages_task_bindings:
                     task_service = getattr(self, "task_service", None)
-                    should_finalize_task = (
-                        not self._is_hidden_run_id(run_id)
-                        or run_id in self._reservation_task_bound
-                    )
-                    if task_service is not None and should_finalize_task:
+                    if task_service is not None:
+                        finished_at = time()
                         proposed_run = record.to_dict()
                         proposed_run.update({
                             "status": run_status.value,
                             "finished_at": finished_at,
                             "updated_at": finished_at,
-                            "metadata": next_metadata,
                         })
-                        task_outcome = await task_service.handle_run_finished(proposed_run)
+                        task_outcome = await task_service.handle_run_finished(
+                            proposed_run
+                        )
                         if task_outcome is not None:
-                            next_metadata["task_outcome"] = task_outcome.public_dict()
-                    record.status = run_status
-                    record.finished_at = finished_at
-                    record.updated_at = finished_at
-                    record.metadata = next_metadata
-                    payload = {
-                        "type": "run_finished",
-                        "run_id": run_id,
-                        "conversation_id": record.conversation_id,
-                        "kind": record.kind.value,
-                        "target_node_id": record.target_node_id,
-                        "status": run_status.value,
-                        "error": error,
-                        "finished_at": record.finished_at,
-                        "event_index": event_index,
-                    }
-                    event = {
-                        "run_id": run_id,
-                        "event_index": event_index,
-                        "payload": payload,
-                        "created_at": record.finished_at,
-                    }
-                    record.event_count += 1
-                    journal_event = event
-                    journal_conversation_id = record.conversation_id
-                self._published_reservation_ids.discard(run_id)
+                            self.repository.merge_metadata(
+                                run_id,
+                                {"task_outcome": task_outcome.public_dict()},
+                            )
+
+                persisted_run = self.repository.finish_run(
+                    run_id,
+                    run_status.value,
+                    error,
+                )
+                persisted_events = self.repository.read_events(run_id, event_index)
+                persisted_status = RunStatus(
+                    str(persisted_run.get("status") or run_status.value)
+                )
+                if persisted_status not in FINISHED_RUN_STATUSES:
+                    raise RuntimeError(f"repository did not finish run {run_id}")
+                record.status = persisted_status
+                record.finished_at = float(persisted_run.get("finished_at") or time())
+                record.updated_at = float(
+                    persisted_run.get("updated_at") or record.finished_at
+                )
+                record.metadata = dict(
+                    persisted_run.get("metadata") or record.metadata
+                )
+                if not persisted_events:
+                    raise RuntimeError(
+                        f"repository did not append terminal event for run {run_id}"
+                    )
+                event = {
+                    "run_id": run_id,
+                    "event_index": persisted_events[0]["event_index"],
+                    "payload": deepcopy(persisted_events[0]["payload"]),
+                    "created_at": persisted_events[0]["created_at"],
+                }
+                record.event_count = int(
+                    persisted_run.get("event_count", event["event_index"] + 1)
+                )
                 if record.target_node_id and self._writers_by_node.get(record.target_node_id) == run_id:
                     self._writers_by_node.pop(record.target_node_id, None)
                 self._events.setdefault(run_id, []).append(event)
                 snapshot = deepcopy(record)
-        if journal_event is not None and journal_conversation_id is not None:
-            self.journal.append_event(journal_conversation_id, run_id, journal_event)
         snapshot_dict = snapshot.to_dict()
         async with condition:
             condition.notify_all()
@@ -1293,32 +1057,48 @@ class RunManager:
             stop_event = self._stop_events.setdefault(run_id, asyncio.Event())
             stop_event.set()
             condition = self._conditions.setdefault(run_id, asyncio.Condition())
-            if self.repository:
-                if self._event_writer is not None:
+            if self._event_writer is not None:
+                try:
                     await self._event_writer.flush_run(run_id)
-                if not self.repository.request_stop(run_id):
-                    return False
-                persisted_run = self.repository.get_run(run_id) or {}
-                persisted_events = self.repository.read_events(run_id, event_index)
-                record.event_count = int(persisted_run.get("event_count", record.event_count))
-                record.updated_at = float(persisted_run.get("updated_at") or record.updated_at)
-                if persisted_events:
-                    repository_event = {
-                        "run_id": run_id,
-                        "event_index": persisted_events[0]["event_index"],
-                        "payload": deepcopy(persisted_events[0]["payload"]),
-                        "created_at": persisted_events[0]["created_at"],
-                    }
-                    self._events.setdefault(run_id, []).append(repository_event)
-        if repository_event is not None:
-            async with condition:
-                condition.notify_all()
-            return True
-        await self.append_event(run_id, {
-            "type": "run_stop_requested",
-            "run_id": run_id,
-            "status": RunStatus.STOPPING.value,
-        })
+                except _RunEventWriteError as exc:
+                    await self._recover_event_write_failure_locked(
+                        run_id,
+                        record,
+                        exc,
+                    )
+                    persisted = self.repository.merge_metadata(
+                        run_id,
+                        {"event_persistence_error": "run event persistence failed"},
+                    )
+                    record.metadata = dict(
+                        persisted.get("metadata") or record.metadata
+                    )
+                    record.status = RunStatus.STOPPING
+                    record.updated_at = time()
+                    event_index = record.event_count
+            if not self.repository.request_stop(run_id):
+                return False
+            persisted_events = self.repository.read_events(run_id, event_index)
+            persisted_run = self.repository.get_run(run_id) or {}
+            record.status = RunStatus(
+                str(persisted_run.get("status") or RunStatus.STOPPING.value)
+            )
+            record.event_count = int(
+                persisted_run.get("event_count", record.event_count)
+            )
+            record.updated_at = float(
+                persisted_run.get("updated_at") or record.updated_at
+            )
+            if persisted_events:
+                repository_event = {
+                    "run_id": run_id,
+                    "event_index": persisted_events[0]["event_index"],
+                    "payload": deepcopy(persisted_events[0]["payload"]),
+                    "created_at": persisted_events[0]["created_at"],
+                }
+                self._events.setdefault(run_id, []).append(repository_event)
+        async with condition:
+            condition.notify_all()
         return True
 
     async def update_status(self, run_id: str, status: RunStatus | str) -> RunRecord:
@@ -1331,8 +1111,9 @@ class RunManager:
                 return deepcopy(record)
             if record.status == run_status:
                 return deepcopy(record)
-            record.status = run_status
-            record.updated_at = time()
+            persisted = self.repository.update_status(run_id, run_status.value)
+            record.status = RunStatus(str(persisted["status"]))
+            record.updated_at = float(persisted.get("updated_at") or time())
             snapshot = deepcopy(record)
         await self.append_event(run_id, {
             "type": "run_status_changed",
@@ -1344,8 +1125,9 @@ class RunManager:
     async def update_metadata(self, run_id: str, metadata: Dict[str, Any]) -> RunRecord:
         async with self._lock:
             record = self._require_run_locked(run_id)
-            record.metadata.update(dict(metadata or {}))
-            record.updated_at = time()
+            persisted = self.repository.merge_metadata(run_id, metadata)
+            record.metadata = dict(persisted.get("metadata") or {})
+            record.updated_at = float(persisted.get("updated_at") or time())
             snapshot = deepcopy(record)
         await self.append_event(run_id, {
             "type": "run_metadata_updated",
@@ -1380,20 +1162,9 @@ class RunManager:
         return self.stop_event(run_id).is_set()
 
     def list_active(self, conversation_id: Optional[str] = None) -> list[Dict[str, Any]]:
-        if self.repository and hasattr(self.repository, "list_active"):
-            return [
-                self._normalize_repository_run(run)
-                for run in self.repository.list_active(conversation_id)
-                if not self._is_hidden_run_id(
-                    str(run.get("run_id") or run.get("id"))
-                )
-            ]
         return [
-            record.to_dict()
-            for run_id, record in self._runs.items()
-            if record.status not in FINISHED_RUN_STATUSES
-            and not self._is_hidden_run_id(run_id)
-            and (conversation_id is None or record.conversation_id == conversation_id)
+            self._normalize_repository_run(run)
+            for run in self.repository.list_active(conversation_id)
         ]
 
     def list_active_cancellation_children(
@@ -1402,41 +1173,36 @@ class RunManager:
         cancellation_parent_run_id: str,
         conversation_id: Optional[str] = None,
     ) -> list[Dict[str, Any]]:
-        if self.repository and hasattr(self.repository, "list_active"):
-            return [
-                run
-                for run in (
-                    self._normalize_repository_run(item)
-                    for item in self.repository.list_active(conversation_id)
-                    if not self._is_hidden_run_id(
-                        str(item.get("run_id") or item.get("id"))
-                    )
-                )
-                if run.get("cancellation_parent_run_id") == cancellation_parent_run_id
-            ]
+        return [
+            run
+            for run in (
+                self._normalize_repository_run(item)
+                for item in self.repository.list_active(conversation_id)
+            )
+            if run.get("cancellation_parent_run_id") == cancellation_parent_run_id
+        ]
+
+    def list_cached_active_cancellation_children(
+        self,
+        *,
+        cancellation_parent_run_id: str,
+        conversation_id: Optional[str] = None,
+    ) -> list[Dict[str, Any]]:
         return [
             record.to_dict()
-            for run_id, record in self._runs.items()
+            for record in self._runs.values()
             if record.status not in FINISHED_RUN_STATUSES
-            and not self._is_hidden_run_id(run_id)
             and record.cancellation_parent_run_id == cancellation_parent_run_id
-            and (conversation_id is None or record.conversation_id == conversation_id)
+            and (
+                conversation_id is None
+                or record.conversation_id == conversation_id
+            )
         ]
 
     def list_runs(self, conversation_id: Optional[str] = None) -> list[Dict[str, Any]]:
-        if self.repository and hasattr(self.repository, "list_runs"):
-            return [
-                self._normalize_repository_run(run)
-                for run in self.repository.list_runs(conversation_id)
-                if not self._is_hidden_run_id(
-                    str(run.get("run_id") or run.get("id"))
-                )
-            ]
         return [
-            record.to_dict()
-            for run_id, record in self._runs.items()
-            if not self._is_hidden_run_id(run_id)
-            if conversation_id is None or record.conversation_id == conversation_id
+            self._normalize_repository_run(run)
+            for run in self.repository.list_runs(conversation_id)
         ]
 
     def find_active_by_target(
@@ -1446,33 +1212,14 @@ class RunManager:
         target_node_id: str,
         kind: Optional[RunKind | str] = None,
     ) -> Optional[Dict[str, Any]]:
-        if self.repository and hasattr(self.repository, "list_active"):
-            expected_kind_value = (
-                kind.value if isinstance(kind, RunKind) else str(kind) if kind is not None else None
-            )
-            for run in self.repository.list_active(conversation_id):
-                if self._is_hidden_run_id(str(run.get("run_id") or run.get("id"))):
-                    continue
-                normalized = self._normalize_repository_run(run)
-                if normalized.get("target_node_id") != target_node_id:
-                    continue
-                if expected_kind_value is not None and normalized.get("kind") != expected_kind_value:
-                    continue
-                return normalized
-            return None
-        expected_kind = kind if isinstance(kind, RunKind) or kind is None else RunKind(str(kind))
-        for run_id, record in self._runs.items():
-            if self._is_hidden_run_id(run_id):
+        expected_kind = kind.value if isinstance(kind, RunKind) else str(kind) if kind is not None else None
+        for run in self.repository.list_active(conversation_id):
+            normalized = self._normalize_repository_run(run)
+            if normalized.get("target_node_id") != target_node_id:
                 continue
-            if record.status in FINISHED_RUN_STATUSES:
+            if expected_kind is not None and normalized.get("kind") != expected_kind:
                 continue
-            if record.conversation_id != conversation_id:
-                continue
-            if record.target_node_id != target_node_id:
-                continue
-            if expected_kind is not None and record.kind != expected_kind:
-                continue
-            return record.to_dict()
+            return normalized
         return None
 
     def find_active_by_anchor(
@@ -1482,33 +1229,14 @@ class RunManager:
         anchor_node_id: str,
         kind: Optional[RunKind | str] = None,
     ) -> Optional[Dict[str, Any]]:
-        if self.repository and hasattr(self.repository, "list_active"):
-            expected_kind_value = (
-                kind.value if isinstance(kind, RunKind) else str(kind) if kind is not None else None
-            )
-            for run in self.repository.list_active(conversation_id):
-                if self._is_hidden_run_id(str(run.get("run_id") or run.get("id"))):
-                    continue
-                normalized = self._normalize_repository_run(run)
-                if normalized.get("anchor_node_id") != anchor_node_id:
-                    continue
-                if expected_kind_value is not None and normalized.get("kind") != expected_kind_value:
-                    continue
-                return normalized
-            return None
-        expected_kind = kind if isinstance(kind, RunKind) or kind is None else RunKind(str(kind))
-        for run_id, record in self._runs.items():
-            if self._is_hidden_run_id(run_id):
+        expected_kind = kind.value if isinstance(kind, RunKind) else str(kind) if kind is not None else None
+        for run in self.repository.list_active(conversation_id):
+            normalized = self._normalize_repository_run(run)
+            if normalized.get("anchor_node_id") != anchor_node_id:
                 continue
-            if record.status in FINISHED_RUN_STATUSES:
+            if expected_kind is not None and normalized.get("kind") != expected_kind:
                 continue
-            if record.conversation_id != conversation_id:
-                continue
-            if record.anchor_node_id != anchor_node_id:
-                continue
-            if expected_kind is not None and record.kind != expected_kind:
-                continue
-            return record.to_dict()
+            return normalized
         return None
 
     def active_runs_for_targets(
@@ -1518,98 +1246,64 @@ class RunManager:
         target_node_ids: Iterable[str],
     ) -> list[Dict[str, Any]]:
         targets = set(target_node_ids)
-        if self.repository and hasattr(self.repository, "list_active"):
-            return [
-                run
-                for run in (
-                    self._normalize_repository_run(item)
-                    for item in self.repository.list_active(conversation_id)
-                    if not self._is_hidden_run_id(
-                        str(item.get("run_id") or item.get("id"))
-                    )
-                )
-                if run.get("target_node_id") in targets
-            ]
         return [
-            record.to_dict()
-            for run_id, record in self._runs.items()
-            if record.status not in FINISHED_RUN_STATUSES
-            and not self._is_hidden_run_id(run_id)
-            and record.conversation_id == conversation_id
-            and record.target_node_id in targets
+            run
+            for run in (
+                self._normalize_repository_run(item)
+                for item in self.repository.list_active(conversation_id)
+            )
+            if run.get("target_node_id") in targets
         ]
 
     async def get_run_for_recovery(self, run_id: str) -> Optional[RunRecord]:
-        """Return hidden or terminal run state for internal recovery only."""
-
+        """Return the durable run state used by startup recovery."""
         async with self._lock:
-            if self.repository and hasattr(self.repository, "get_run"):
-                stored = self.repository.get_run(run_id)
-                if stored is None:
-                    active_recovery_task = any(
-                        task is not None and not task.done()
-                        for task in (
-                            self._publication_tasks.get(run_id),
-                            self._interruption_tasks.get(run_id),
-                        )
-                    )
-                    self._forget_missing_repository_run_locked(run_id)
-                    if self._event_writer is not None and not active_recovery_task:
-                        await self._event_writer.discard_run(run_id)
-                    return None
-                return deepcopy(self._hydrate_record(stored))
-
-            record = self._runs.get(run_id)
-            if record is None and run_id in self._pending_reservations:
-                record = self._materialize_reserved_run_locked(run_id)
-            return deepcopy(record) if record is not None else None
+            stored = self.repository.get_run(run_id)
+            if stored is None:
+                self._forget_cached_run_locked(run_id)
+                if self._event_writer is not None:
+                    await self._event_writer.discard_run(run_id)
+                return None
+            return deepcopy(self._hydrate_record(stored))
 
     def get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
-        if self._is_hidden_run_id(run_id):
-            return None
         record = self._runs.get(run_id)
         if record:
             return record.to_dict()
-        if self.repository and hasattr(self.repository, "get_run"):
-            run = self.repository.get_run(run_id)
-            if run:
-                normalized = self._normalize_repository_run(run)
-                if normalized["status"] not in {status.value for status in FINISHED_RUN_STATUSES}:
-                    self._hydrate_record(run)
-                return normalized
+        run = self.repository.get_run(run_id)
+        if run:
+            normalized = self._normalize_repository_run(run)
+            if normalized["status"] not in {status.value for status in FINISHED_RUN_STATUSES}:
+                self._hydrate_record(run)
+            return normalized
         return None
 
     def read_events(self, run_id: str, from_event: int = 0) -> list[Dict[str, Any]]:
-        if self._is_hidden_run_id(run_id):
-            raise RunNotFoundError(run_id)
         start = max(0, int(from_event or 0))
         record = self._runs.get(run_id)
         cached = list(self._events.get(run_id, []))
         if record is not None:
-            if len(cached) >= record.event_count or not self.repository:
+            if len(cached) >= record.event_count:
                 return [public_run_event(event["payload"]) for event in cached[start:]]
-            if self.repository and hasattr(self.repository, "read_events"):
-                stored = {
-                    int(event["event_index"]): {
-                        "run_id": event["run_id"],
-                        "event_index": event["event_index"],
-                        "payload": deepcopy(event["payload"]),
-                        "created_at": event["created_at"],
-                    }
-                    for event in self.repository.read_events(run_id, 0)
+            stored = {
+                int(event["event_index"]): {
+                    "run_id": event["run_id"],
+                    "event_index": event["event_index"],
+                    "payload": deepcopy(event["payload"]),
+                    "created_at": event["created_at"],
                 }
-                for event in cached:
-                    stored[int(event["event_index"])] = event
-                merged = [stored[index] for index in sorted(stored) if index >= start]
-                return [public_run_event(event["payload"]) for event in merged]
-        if self.repository and hasattr(self.repository, "read_events"):
-            if not self.get_run(run_id):
-                raise RunNotFoundError(run_id)
-            return [
-                public_run_event(event["payload"])
-                for event in self.repository.read_events(run_id, start)
-            ]
-        raise RunNotFoundError(run_id)
+                for event in self.repository.read_events(run_id, 0)
+            }
+            for event in cached:
+                stored[int(event["event_index"])] = event
+            merged = [stored[index] for index in sorted(stored) if index >= start]
+            return [public_run_event(event["payload"]) for event in merged]
+        if not self.get_run(run_id):
+            raise RunNotFoundError(run_id)
+        return [
+            public_run_event(event["payload"])
+            for event in self.repository.read_events(run_id, start)
+        ]
 
     def _require_run_locked(self, run_id: str) -> RunRecord:
         record = self._runs.get(run_id) or self._hydrate_run_locked(run_id)
@@ -1628,14 +1322,10 @@ class RunManager:
         self._writers_by_node[target_node_id] = run_id
 
     def _hydrate_active_runs(self) -> None:
-        if not self.repository or not hasattr(self.repository, "list_active"):
-            return
         for run in self.repository.list_active():
             self._hydrate_record(run)
 
     def _hydrate_run_locked(self, run_id: str) -> Optional[RunRecord]:
-        if not self.repository or not hasattr(self.repository, "get_run"):
-            return None
         run = self.repository.get_run(run_id)
         if not run:
             return None
@@ -1643,13 +1333,6 @@ class RunManager:
 
     def _hydrate_record(self, run: Dict[str, Any]) -> RunRecord:
         run_id = str(run.get("run_id") or run.get("id"))
-        idempotency_key = run.get("idempotency_key")
-        request_fingerprint = run.get("request_fingerprint")
-        if idempotency_key is not None and request_fingerprint is not None:
-            self._idempotent_runs[str(idempotency_key)] = (
-                run_id,
-                str(request_fingerprint),
-            )
         existing = self._runs.get(run_id)
         status = RunStatus(str(run.get("status") or RunStatus.RUNNING.value))
         kind = RunKind(str(run.get("kind") or RunKind.CHAT.value))
@@ -1689,8 +1372,6 @@ class RunManager:
         return record
 
     def _ensure_events_loaded_locked(self, run_id: str) -> None:
-        if not self.repository or not hasattr(self.repository, "read_events"):
-            return
         record = self._runs.get(run_id)
         if not record:
             return

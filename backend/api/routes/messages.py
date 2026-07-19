@@ -1,7 +1,8 @@
 # backend/api/routes/messages.py
-from fastapi import APIRouter, Depends, HTTPException
+from typing import Annotated, Any, AsyncIterator, Dict, List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from typing import Any, AsyncIterator, Dict, List, Optional
 from pydantic import BaseModel
 import asyncio
 import json
@@ -9,10 +10,41 @@ import logging
 import re
 from ...core.agents import SubagentExecutor
 from ...core.chat.chat_manager import ChatManager
-from ..dependencies import get_chat_manager, get_run_manager, get_subagent_executor, get_command_executor, get_workflow_manager
+from ..dependencies import (
+    get_chat_manager,
+    get_command_executor,
+    get_run_manager,
+    get_run_start_coordinator,
+    get_subagent_executor,
+    get_workflow_manager,
+)
+from ..run_start import (
+    RunStartResponse,
+    require_idempotency_key,
+    run_start_api_error,
+    run_start_openapi_responses,
+    run_start_response,
+)
 from ...core.config.types import Message, StreamChunk
 from ...core.perf import get_profiler
-from ...core.runs import RunKind, RunManager, RunNotFoundError, RunStatus
+from ...core.runs import (
+    RunIdempotency,
+    RunIdempotencyConflictError,
+    RunKind,
+    RunManager,
+    RunNotFoundError,
+    RunRecord,
+    RunReferenceConversationMismatchError,
+    RunReferenceNotFoundError,
+    RunRequestFingerprintError,
+    RunStartCoordinator,
+    RunStartReservationError,
+    RunStartSchedulingError,
+    RunStartSpec,
+    RunStartValidationError,
+    RunStatus,
+    fingerprint_run_request,
+)
 from ...core.slash import SlashCommandDispatcher, SlashDispatchKind, SlashCommandRegistry
 from ...core.slash.direct_response import build_direct_response_text
 from ...core.workflows import WorkflowManager
@@ -20,8 +52,6 @@ from .run_control import stop_run_tree
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
-_DEFAULT_RUN_MANAGER = RunManager()
-_STREAM_SESSIONS: dict[str, "LegacyRunStreamSession"] = {}
 _ACTIVE_MESSAGE_STREAM_KINDS = {
     RunKind.CHAT.value,
     RunKind.SIDE_QUESTION.value,
@@ -109,26 +139,6 @@ class SendMessageRequest(BaseModel):
     image_refs: Optional[List[Dict[str, Any]]] = None
     tool_permission_mode: Optional[str] = None
     task_context_mode: Optional[str] = None
-
-
-class LegacyRunStreamSession:
-    def __init__(self, run_manager: RunManager, run_id: str, conversation_id: str):
-        self.run_manager = run_manager
-        self.run_id = run_id
-        self.conversation_id = conversation_id
-        self.node_id: str | None = None
-
-    async def subscribe(self, start_index: int = 0) -> AsyncIterator[str]:
-        async for event in _subscribe_sse(self.run_manager, self.run_id, start_index):
-            yield event
-
-    def snapshot(self) -> Dict[str, Any]:
-        run = self.run_manager.get_run(self.run_id) or {}
-        return _run_to_active_stream_info(run)
-
-
-def _resolve_run_manager(run_manager: Any = None) -> RunManager:
-    return run_manager if isinstance(run_manager, RunManager) else _DEFAULT_RUN_MANAGER
 
 
 def build_stream_chunk_data(chunk: StreamChunk, conversation_id: str) -> Dict[str, Any]:
@@ -255,93 +265,6 @@ def _parse_prune_summary_args(args: str, default_node_id: Optional[str]) -> tupl
     return target_node_id, custom_instructions
 
 
-async def _handle_prune_summary_command(
-    *,
-    conversation_id: str,
-    request: SendMessageRequest,
-    slash_result: Any,
-    chat_manager: ChatManager,
-    run_manager: RunManager,
-) -> AsyncIterator[str]:
-    target_node_id, custom_instructions = _parse_prune_summary_args(
-        slash_result.args,
-        request.parent_node_id,
-    )
-    run = await run_manager.create_run(
-        conversation_id=conversation_id,
-        kind=RunKind.DIRECT_RESPONSE,
-        anchor_node_id=target_node_id or request.parent_node_id,
-        summary=request.content[:80],
-        metadata={
-            "slash_command": _slash_command_metadata(slash_result),
-            "model_id": request.model_id,
-            "provider_id": request.provider_id,
-            "target_node_id": target_node_id,
-        },
-    )
-    start_payload = await run_manager.append_event(run.run_id, {
-        "status": "start",
-        "content": None,
-        "node_id": None,
-        "target_node_id": None,
-        "anchor_node_id": target_node_id or request.parent_node_id,
-        "conversation_id": conversation_id,
-        "run_id": run.run_id,
-        "tokens_used": 0,
-    })
-    yield _format_sse_data(start_payload)
-    try:
-        if not target_node_id:
-            raise ValueError("缺少目标节点")
-        result = await chat_manager.prune_summary(
-            conversation_id,
-            target_node_id,
-            custom_instructions=custom_instructions,
-            model_id=request.model_id,
-            provider_id=request.provider_id,
-        )
-        content = (
-            "剪枝摘要已生成\n\n"
-            f"- 目标节点: {result['parent_node_id']}\n"
-            f"- 摘要 ID: {result['summary_id']}\n"
-            f"- 覆盖节点: {result['covered_node_count']}\n"
-            f"- 直接子分支: {result['covered_direct_child_count']}\n"
-        )
-        if result.get("compact_node_ids"):
-            content += f"- 使用已有 compact: {', '.join(result['compact_node_ids'])}\n"
-        if result.get("truncated_node_ids"):
-            content += f"- 截断节点: {', '.join(result['truncated_node_ids'])}\n"
-        if result.get("coverage_notes"):
-            content += "\nCoverage:\n" + "\n".join(f"- {note}" for note in result["coverage_notes"]) + "\n"
-        content += "\n摘要预览:\n" + str(result.get("summary_preview") or "")
-        await run_manager.append_event(run.run_id, {
-            "status": "content",
-            "content": content,
-            "node_id": None,
-            "target_node_id": None,
-            "anchor_node_id": target_node_id,
-            "conversation_id": conversation_id,
-            "run_id": run.run_id,
-            "tokens_used": 0,
-        })
-        await run_manager.append_event(run.run_id, {
-            "status": "complete",
-            "content": None,
-            "node_id": None,
-            "target_node_id": None,
-            "anchor_node_id": target_node_id,
-            "conversation_id": conversation_id,
-            "run_id": run.run_id,
-            "tokens_used": 0,
-        })
-        await run_manager.finish_run(run.run_id, RunStatus.COMPLETED)
-    except Exception as exc:
-        await run_manager.append_event(run.run_id, _stream_error_chunk(conversation_id, str(exc)))
-        await run_manager.finish_run(run.run_id, RunStatus.FAILED, str(exc))
-
-    async for event in _subscribe_sse(run_manager, run.run_id, int(start_payload.get("event_index") or 0) + 1):
-        yield event
-
 def _slash_command_metadata(slash_result: Any) -> Dict[str, Any]:
     return {
         "command": slash_result.canonical_name,
@@ -452,231 +375,109 @@ async def _subscribe_sse(run_manager: RunManager, run_id: str, from_event: int =
     yield _format_sse_data("[DONE]")
 
 
-async def start_detached_chat_run(
+def _message_run_metadata(request: SendMessageRequest, slash_result: Any) -> Dict[str, Any]:
+    return {
+        "slash_command": (
+            _slash_command_metadata(slash_result)
+            if not slash_result.is_passthrough
+            else None
+        ),
+        "model_id": request.model_id,
+        "provider_id": request.provider_id,
+        "reasoning_effort": request.reasoning_effort,
+        "thinking_enabled": request.thinking_enabled,
+        "tool_permission_mode": request.tool_permission_mode,
+        "task_context_mode": request.task_context_mode,
+    }
+
+
+async def _produce_chat_run(
+    *,
+    run: RunRecord,
     conversation_id: str,
     request: SendMessageRequest,
     chat_manager: ChatManager,
     run_manager: RunManager,
-    slash_result: Any | None = None,
-) -> Dict[str, Any]:
-    slash_result = slash_result or SlashCommandDispatcher().dispatch(request.content)
-    run_kind = RunKind(str(slash_result.run_kind or RunKind.CHAT.value))
+) -> None:
     profiler = get_profiler()
-    with profiler.span(
-        "message.detached_run.create",
-        conversation_id=conversation_id,
-        anchor_node_id=request.parent_node_id,
-        kind=run_kind.value,
-    ):
-        run = await run_manager.create_run(
+    final_status = RunStatus.COMPLETED
+    final_error: str | None = None
+    bound_node_id: str | None = None
+    event_batcher = RunEventBatcher(run_manager, run.run_id)
+    try:
+        with profiler.span(
+            "message.run.produce",
             conversation_id=conversation_id,
-            kind=run_kind,
-            anchor_node_id=request.parent_node_id,
-            summary=request.content[:80],
-            metadata={
-                "slash_command": {
-                    "command": slash_result.canonical_name,
-                    "input_command": slash_result.command_name,
-                    "kind": slash_result.kind.value,
-                    "args": slash_result.args,
-                    "original_input": slash_result.original_input,
-                    "tool_policy": slash_result.tool_policy.value,
-                    "persistence_policy": slash_result.persistence_policy.value,
-                    "run_kind": slash_result.run_kind,
-                } if not slash_result.is_passthrough else None,
-                "model_id": request.model_id,
-                "provider_id": request.provider_id,
-                "reasoning_effort": request.reasoning_effort,
-                "thinking_enabled": request.thinking_enabled,
-                "tool_permission_mode": request.tool_permission_mode,
-                "task_context_mode": request.task_context_mode,
+            run_id=run.run_id,
+            kind=run.kind.value,
+            provider_id=request.provider_id,
+            model_id=request.model_id,
+        ):
+            async for chunk in chat_manager.send_message_stream(
+                conversation_id=conversation_id,
+                content=request.content,
+                model_id=request.model_id,
+                provider_id=request.provider_id,
+                parent_node_id=request.parent_node_id,
+                focus_new_node=request.focus_new_node,
+                reasoning_effort=request.reasoning_effort,
+                thinking_enabled=request.thinking_enabled,
+                import_files=request.import_files,
+                image_refs=request.image_refs,
+                tool_permission_mode=request.tool_permission_mode,
+                task_context_mode=request.task_context_mode,
+                run_id=run.run_id,
+            ):
+                chunk_data = build_stream_chunk_data(chunk, conversation_id)
+                node_id = chunk_data.get("node_id")
+                if node_id and node_id != bound_node_id:
+                    bound_node_id = node_id
+                    await run_manager.bind_target_node(run.run_id, node_id)
+                    chunk_data["target_node_id"] = node_id
+                    if await run_manager.is_stop_requested(run.run_id):
+                        await chat_manager.stop_stream(node_id)
+                await event_batcher.append(chunk_data)
+                if chunk_data.get("status") == "error":
+                    final_status = RunStatus.FAILED
+                    final_error = chunk_data.get("error")
+                elif chunk_data.get("status") == "stopped":
+                    final_status = RunStatus.CANCELLED
+    except asyncio.CancelledError:
+        final_status = RunStatus.CANCELLED
+        await event_batcher.flush()
+        await run_manager.append_event(
+            run.run_id,
+            {
+                "status": "stopped",
+                "content": "",
+                "node_id": bound_node_id,
+                "conversation_id": conversation_id,
             },
         )
+    except Exception as exc:
+        logger.exception("Message producer failed for conversation %s", conversation_id)
+        final_status = RunStatus.FAILED
+        final_error = str(exc) or exc.__class__.__name__
+        await event_batcher.flush()
+        await run_manager.append_event(
+            run.run_id,
+            _stream_error_chunk(conversation_id, final_error),
+        )
+    finally:
+        await event_batcher.flush()
+        await run_manager.finish_run(run.run_id, final_status, final_error)
 
-    async def produce() -> None:
-        final_status = RunStatus.COMPLETED
-        final_error: str | None = None
-        bound_node_id: str | None = None
-        event_batcher = RunEventBatcher(run_manager, run.run_id)
-        try:
-            with profiler.span(
-                "message.detached_run.produce",
-                conversation_id=conversation_id,
-                run_id=run.run_id,
-                kind=run_kind.value,
-                provider_id=request.provider_id,
-                model_id=request.model_id,
-            ):
-                async for chunk in chat_manager.send_message_stream(
-                    conversation_id=conversation_id,
-                    content=request.content,
-                    model_id=request.model_id,
-                    provider_id=request.provider_id,
-                    parent_node_id=request.parent_node_id,
-                    focus_new_node=request.focus_new_node,
-                    reasoning_effort=request.reasoning_effort,
-                    thinking_enabled=request.thinking_enabled,
-                    import_files=request.import_files,
-                    image_refs=request.image_refs,
-                    tool_permission_mode=request.tool_permission_mode,
-                    task_context_mode=request.task_context_mode,
-                    run_id=run.run_id,
-                ):
-                    chunk_data = build_stream_chunk_data(chunk, conversation_id)
-                    node_id = chunk_data.get("node_id")
-                    if node_id and node_id != bound_node_id:
-                        bound_node_id = node_id
-                        await run_manager.bind_target_node(run.run_id, node_id)
-                        legacy_session = LegacyRunStreamSession(run_manager, run.run_id, conversation_id)
-                        legacy_session.node_id = node_id
-                        _STREAM_SESSIONS[node_id] = legacy_session
-                        chunk_data["target_node_id"] = node_id
-                        if await run_manager.is_stop_requested(run.run_id):
-                            await chat_manager.stop_stream(node_id)
-                    with profiler.span(
-                        "message.detached_run.append_event",
-                        conversation_id=conversation_id,
-                        run_id=run.run_id,
-                        status=chunk_data.get("status"),
-                        event_type=chunk_data.get("event_type"),
-                    ):
-                        await event_batcher.append(chunk_data)
-                    if chunk_data.get("status") == "error":
-                        final_status = RunStatus.FAILED
-                        final_error = chunk_data.get("error")
-                    elif chunk_data.get("status") == "stopped":
-                        final_status = RunStatus.CANCELLED
 
-        except Exception as e:
-            logger.exception("Detached stream failed for conversation %s", conversation_id)
-            final_status = RunStatus.FAILED
-            final_error = str(e)
-            await event_batcher.flush()
-            await run_manager.append_event(run.run_id, _stream_error_chunk(conversation_id, str(e)))
-        finally:
-            await event_batcher.flush()
-            await run_manager.finish_run(run.run_id, final_status, final_error)
-            if bound_node_id:
-                _STREAM_SESSIONS.pop(bound_node_id, None)
-
-    asyncio.create_task(produce())
-    return run.to_dict()
-
-async def detached_stream_event_generator(
+async def _produce_direct_response(
+    *,
+    run: RunRecord,
     conversation_id: str,
     request: SendMessageRequest,
+    slash_result: Any,
     chat_manager: ChatManager,
-    run_manager: RunManager | None = None,
-    subagent_executor: SubagentExecutor | None = None,
-    workflow_manager: WorkflowManager | None = None,
-) -> AsyncIterator[str]:
-    """Stream SSE events without tying generation lifetime to the client socket."""
-    run_manager = _resolve_run_manager(run_manager)
-    slash_result = SlashCommandDispatcher().dispatch(request.content)
-
-    if slash_result.kind == SlashDispatchKind.ERROR:
-        yield _format_sse_data(_stream_error_chunk(conversation_id, slash_result.error or "Slash command error"))
-        yield _format_sse_data("[DONE]")
-        return
-
-    if slash_result.kind == SlashDispatchKind.SUBAGENT:
-        if subagent_executor is None:
-            yield _format_sse_data(_stream_error_chunk(conversation_id, "Subagent 执行器未初始化"))
-            yield _format_sse_data("[DONE]")
-            return
-        try:
-            anchor_node_id = await _create_visible_slash_anchor_node(
-                conversation_id=conversation_id,
-                request=request,
-                chat_manager=chat_manager,
-                slash_result=slash_result,
-            )
-            run = await subagent_executor.start(
-                conversation_id=conversation_id,
-                agent_name="implementer",
-                input_data=slash_result.args,
-                parent_node_id=anchor_node_id,
-                provider_id=request.provider_id,
-                model_id=request.model_id,
-                permission_mode=request.tool_permission_mode,
-                delegated_task=slash_result.args,
-                original_slash_input=slash_result.original_input,
-            )
-        except Exception as exc:
-            yield _format_sse_data(_stream_error_chunk(conversation_id, str(exc)))
-            yield _format_sse_data("[DONE]")
-            return
-        async for event in _subscribe_sse(run_manager, str(run["run_id"]), 0):
-            yield event
-        return
-
-    if slash_result.kind == SlashDispatchKind.WORKFLOW:
-        if workflow_manager is None:
-            yield _format_sse_data(_stream_error_chunk(conversation_id, "Workflow 管理器未初始化"))
-            yield _format_sse_data("[DONE]")
-            return
-        try:
-            anchor_node_id = await _create_visible_slash_anchor_node(
-                conversation_id=conversation_id,
-                request=request,
-                chat_manager=chat_manager,
-                slash_result=slash_result,
-            )
-            run = await workflow_manager.start(
-                conversation_id=conversation_id,
-                script=slash_result.args,
-                args={},
-                parent_node_id=anchor_node_id,
-                permission_mode=request.tool_permission_mode,
-                delegated_task=slash_result.args,
-                original_slash_input=slash_result.original_input,
-            )
-        except Exception as exc:
-            yield _format_sse_data(_stream_error_chunk(conversation_id, str(exc)))
-            yield _format_sse_data("[DONE]")
-            return
-        async for event in _subscribe_sse(run_manager, str(run["run_id"]), 0):
-            yield event
-        return
-
-    if (
-        slash_result.kind == SlashDispatchKind.DIRECT_RESPONSE
-        and slash_result.canonical_name == "prune-summary"
-    ):
-        async for event in _handle_prune_summary_command(
-            conversation_id=conversation_id,
-            request=request,
-            slash_result=slash_result,
-            chat_manager=chat_manager,
-            run_manager=run_manager,
-        ):
-            yield event
-        return
-
-    if slash_result.kind == SlashDispatchKind.DIRECT_RESPONSE:
-        run = await run_manager.create_run(
-            conversation_id=conversation_id,
-            kind=RunKind.DIRECT_RESPONSE,
-            anchor_node_id=request.parent_node_id,
-            summary=request.content[:80],
-            metadata={
-                "slash_command": {
-                    "command": slash_result.canonical_name,
-                    "input_command": slash_result.command_name,
-                    "kind": slash_result.kind.value,
-                    "args": slash_result.args,
-                    "original_input": slash_result.original_input,
-                    "tool_policy": slash_result.tool_policy.value,
-                    "persistence_policy": slash_result.persistence_policy.value,
-                    "run_kind": slash_result.run_kind,
-                },
-                "model_id": request.model_id,
-                "provider_id": request.provider_id,
-                "reasoning_effort": request.reasoning_effort,
-                "thinking_enabled": request.thinking_enabled,
-                "tool_permission_mode": request.tool_permission_mode,
-            },
-        )
+    run_manager: RunManager,
+) -> None:
+    try:
         content = build_direct_response_text(
             slash_result,
             SlashCommandRegistry.builtins().public_definitions(),
@@ -687,75 +488,242 @@ async def detached_stream_event_generator(
                 run_manager=run_manager,
             ),
         )
-        await run_manager.append_event(run.run_id, {
-            "status": "start",
-            "content": None,
-            "node_id": None,
-            "target_node_id": None,
-            "conversation_id": conversation_id,
-            "run_id": run.run_id,
-            "tokens_used": 0,
-        })
-        await run_manager.append_event(run.run_id, {
-            "status": "content",
-            "content": content,
-            "node_id": None,
-            "target_node_id": None,
-            "conversation_id": conversation_id,
-            "run_id": run.run_id,
-            "tokens_used": 0,
-        })
-        await run_manager.append_event(run.run_id, {
-            "status": "complete",
-            "content": None,
-            "node_id": None,
-            "target_node_id": None,
-            "conversation_id": conversation_id,
-            "run_id": run.run_id,
-            "tokens_used": 0,
-        })
+        await run_manager.append_events(
+            run.run_id,
+            [
+                {"status": "start", "content": None, "node_id": None, "tokens_used": 0},
+                {"status": "content", "content": content, "node_id": None, "tokens_used": 0},
+                {"status": "complete", "content": None, "node_id": None, "tokens_used": 0},
+            ],
+        )
         await run_manager.finish_run(run.run_id, RunStatus.COMPLETED)
-        async for event in _subscribe_sse(run_manager, run.run_id, 0):
-            yield event
-        return
+    except asyncio.CancelledError:
+        await run_manager.finish_run(run.run_id, RunStatus.CANCELLED)
+    except Exception as exc:
+        error = str(exc) or exc.__class__.__name__
+        await run_manager.append_event(
+            run.run_id,
+            _stream_error_chunk(conversation_id, error),
+        )
+        await run_manager.finish_run(run.run_id, RunStatus.FAILED, error)
 
-    run = await start_detached_chat_run(
-        conversation_id,
-        request,
-        chat_manager,
-        run_manager,
-        slash_result,
-    )
-    async for event in _subscribe_sse(run_manager, str(run["run_id"]), 0):
-        yield event
 
-@router.post("/conversations/{conversation_id}/messages/stream")
-async def stream_message(
+async def _produce_prune_summary(
+    *,
+    run: RunRecord,
     conversation_id: str,
     request: SendMessageRequest,
+    slash_result: Any,
+    chat_manager: ChatManager,
+    run_manager: RunManager,
+) -> None:
+    target_node_id, custom_instructions = _parse_prune_summary_args(
+        slash_result.args,
+        request.parent_node_id,
+    )
+    try:
+        await run_manager.append_event(
+            run.run_id,
+            {
+                "status": "start",
+                "content": None,
+                "node_id": None,
+                "anchor_node_id": target_node_id or request.parent_node_id,
+                "tokens_used": 0,
+            },
+        )
+        if not target_node_id:
+            raise ValueError("缺少目标节点")
+        result = await chat_manager.prune_summary(
+            conversation_id,
+            target_node_id,
+            custom_instructions=custom_instructions,
+            model_id=request.model_id,
+            provider_id=request.provider_id,
+        )
+        content = (
+            "剪枝摘要已生成\n\n"
+            f"- 目标节点: {result['parent_node_id']}\n"
+            f"- 摘要 ID: {result['summary_id']}\n"
+            f"- 覆盖节点: {result['covered_node_count']}\n"
+            f"- 直接子分支: {result['covered_direct_child_count']}\n"
+            f"\n摘要预览:\n{result.get('summary_preview') or ''}"
+        )
+        await run_manager.append_events(
+            run.run_id,
+            [
+                {
+                    "status": "content",
+                    "content": content,
+                    "node_id": None,
+                    "anchor_node_id": target_node_id,
+                    "tokens_used": 0,
+                },
+                {
+                    "status": "complete",
+                    "content": None,
+                    "node_id": None,
+                    "anchor_node_id": target_node_id,
+                    "tokens_used": 0,
+                },
+            ],
+        )
+        await run_manager.finish_run(run.run_id, RunStatus.COMPLETED)
+    except asyncio.CancelledError:
+        await run_manager.finish_run(run.run_id, RunStatus.CANCELLED)
+    except Exception as exc:
+        error = str(exc) or exc.__class__.__name__
+        await run_manager.append_event(
+            run.run_id,
+            _stream_error_chunk(conversation_id, error),
+        )
+        await run_manager.finish_run(run.run_id, RunStatus.FAILED, error)
+
+
+@router.post(
+    "/conversations/{conversation_id}/messages/runs",
+    response_model=RunStartResponse,
+    responses=run_start_openapi_responses(),
+)
+async def start_message_run(
+    conversation_id: str,
+    body: SendMessageRequest,
+    http_request: Request,
+    idempotency_key: Annotated[str, Depends(require_idempotency_key)],
     chat_manager: ChatManager = Depends(get_chat_manager),
     run_manager: RunManager = Depends(get_run_manager),
+    coordinator: RunStartCoordinator = Depends(get_run_start_coordinator),
     subagent_executor: SubagentExecutor = Depends(get_subagent_executor),
     workflow_manager: WorkflowManager = Depends(get_workflow_manager),
 ):
-    """流式发送消息 - 返回 SSE 格式"""
-    
-    return StreamingResponse(
-        detached_stream_event_generator(
+    try:
+        run_manager.validate_run_references(
             conversation_id,
-            request,
-            chat_manager,
-            run_manager,
-            subagent_executor,
-            workflow_manager,
-        ),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no"
-        }
-    )
+            anchor_node_id=body.parent_node_id,
+        )
+        slash_result = SlashCommandDispatcher().dispatch(body.content)
+        if slash_result.kind == SlashDispatchKind.ERROR:
+            raise RunStartValidationError(
+                slash_result.error or "Slash command error"
+            )
+        idempotency = RunIdempotency(
+            key=idempotency_key,
+            request_fingerprint=fingerprint_run_request(
+                operation="message",
+                conversation_id=conversation_id,
+                anchor_node_id=body.parent_node_id,
+                payload=body.model_dump(mode="json"),
+            ),
+        )
+
+        async def winner_anchor_factory(_run: RunRecord) -> str:
+            return await _create_visible_slash_anchor_node(
+                conversation_id=conversation_id,
+                request=body,
+                chat_manager=chat_manager,
+                slash_result=slash_result,
+            )
+
+        if slash_result.kind == SlashDispatchKind.SUBAGENT:
+            result = await subagent_executor.start_idempotent(
+                conversation_id=conversation_id,
+                agent_name="implementer",
+                input_data=slash_result.args,
+                idempotency=idempotency,
+                request_id=http_request.state.request_id,
+                parent_node_id=body.parent_node_id,
+                provider_id=body.provider_id,
+                model_id=body.model_id,
+                permission_mode=body.tool_permission_mode,
+                delegated_task=slash_result.args,
+                original_slash_input=slash_result.original_input,
+                winner_anchor_factory=winner_anchor_factory,
+            )
+            return run_start_response(result)
+
+        if slash_result.kind == SlashDispatchKind.WORKFLOW:
+            result = await workflow_manager.start_idempotent(
+                conversation_id=conversation_id,
+                script=slash_result.args,
+                args={},
+                idempotency=idempotency,
+                request_id=http_request.state.request_id,
+                parent_node_id=body.parent_node_id,
+                permission_mode=body.tool_permission_mode,
+                delegated_task=slash_result.args,
+                original_slash_input=slash_result.original_input,
+                winner_anchor_factory=winner_anchor_factory,
+            )
+            return run_start_response(result)
+
+        run_kind = RunKind(str(slash_result.run_kind or RunKind.CHAT.value))
+        anchor_node_id = body.parent_node_id
+        if (
+            slash_result.kind == SlashDispatchKind.DIRECT_RESPONSE
+            and slash_result.canonical_name == "prune-summary"
+        ):
+            target_node_id, _instructions = _parse_prune_summary_args(
+                slash_result.args,
+                body.parent_node_id,
+            )
+            anchor_node_id = target_node_id or body.parent_node_id
+
+        spec = RunStartSpec(
+            conversation_id=conversation_id,
+            kind=run_kind,
+            anchor_node_id=anchor_node_id,
+            summary=body.content[:80],
+            metadata=_message_run_metadata(body, slash_result),
+            idempotency=idempotency,
+            request_id=http_request.state.request_id,
+        )
+
+        async def bootstrap(run: RunRecord) -> asyncio.Task[Any]:
+            if slash_result.kind == SlashDispatchKind.DIRECT_RESPONSE:
+                producer = (
+                    _produce_prune_summary(
+                        run=run,
+                        conversation_id=conversation_id,
+                        request=body,
+                        slash_result=slash_result,
+                        chat_manager=chat_manager,
+                        run_manager=run_manager,
+                    )
+                    if slash_result.canonical_name == "prune-summary"
+                    else _produce_direct_response(
+                        run=run,
+                        conversation_id=conversation_id,
+                        request=body,
+                        slash_result=slash_result,
+                        chat_manager=chat_manager,
+                        run_manager=run_manager,
+                    )
+                )
+            else:
+                producer = _produce_chat_run(
+                    run=run,
+                    conversation_id=conversation_id,
+                    request=body,
+                    chat_manager=chat_manager,
+                    run_manager=run_manager,
+                )
+            return asyncio.create_task(
+                producer,
+                name=f"message-producer:{run.run_id}",
+            )
+
+        return run_start_response(await coordinator.start(spec, bootstrap))
+    except (
+        RunRequestFingerprintError,
+        RunReferenceNotFoundError,
+        RunReferenceConversationMismatchError,
+        RunIdempotencyConflictError,
+        RunStartReservationError,
+        RunStartSchedulingError,
+        RunStartValidationError,
+    ) as exc:
+        raise run_start_api_error(exc) from exc
+
 
 
 @router.get("/conversations/{conversation_id}/messages/streams/active", response_model=List[Dict[str, Any]])
@@ -764,7 +732,6 @@ async def get_active_streams(
     run_manager: RunManager = Depends(get_run_manager),
 ):
     """获取当前对话仍在生成中的可重连流。"""
-    run_manager = _resolve_run_manager(run_manager)
     return [
         _run_to_active_stream_info(run)
         for run in run_manager.list_active(conversation_id)
@@ -777,7 +744,6 @@ async def get_all_active_streams(
     run_manager: RunManager = Depends(get_run_manager),
 ):
     """获取所有仍在生成中的可重连流。"""
-    run_manager = _resolve_run_manager(run_manager)
     return [
         _run_to_active_stream_info(run)
         for run in run_manager.list_active()
@@ -793,7 +759,6 @@ async def attach_stream_message(
     run_manager: RunManager = Depends(get_run_manager),
 ):
     """重新订阅仍在运行的流式消息。"""
-    run_manager = _resolve_run_manager(run_manager)
     run = run_manager.find_active_by_target(
         conversation_id=conversation_id,
         target_node_id=node_id,

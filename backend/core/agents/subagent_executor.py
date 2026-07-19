@@ -17,10 +17,10 @@ from backend.core.prompts import PromptBuilder, PromptBuildRequest
 from backend.core.prompts.catalog import load_prompt_template
 from backend.core.prompts.types import RuntimePromptContext
 from backend.core.runs import (
-    FINISHED_RUN_STATUSES,
     RunIdempotency,
     RunKind,
     RunManager,
+    ProducerRegistry,
     RunRecord,
     RunStartCoordinator,
     RunStartResult,
@@ -60,20 +60,17 @@ class SubagentExecutor:
         capability_registry: CapabilityRegistry,
         mailbox: Any = None,
         run_start_coordinator: RunStartCoordinator | None = None,
+        producer_registry: ProducerRegistry | None = None,
     ) -> None:
         self.chat_manager = chat_manager
         self.run_manager = run_manager
         self.capability_registry = capability_registry
         self.mailbox = mailbox
         self.run_start_coordinator = run_start_coordinator
+        self.producer_registry = producer_registry or ProducerRegistry.for_run_manager(
+            run_manager
+        )
         self._controllers: dict[str, StreamController] = {}
-        self._tasks: dict[str, asyncio.Task] = {}
-        self._coordinator_owned_run_ids: set[str] = set()
-        self._shutdown_cancelled_run_ids: set[str] = set()
-        self._notification_tasks: set[asyncio.Task[Any]] = set()
-        self._shutdown_terminalization_tasks: dict[str, asyncio.Task[Any]] = {}
-        self._lifecycle_lock = asyncio.Lock()
-        self._closing = False
 
     async def start(
         self,
@@ -95,9 +92,7 @@ class SubagentExecutor:
         task_binding: Optional[Dict[str, Any]] = None,
         runtime_metadata: Mapping[str, Any] | None = None,
     ) -> Dict[str, Any]:
-        async with self._lifecycle_lock:
-            self._ensure_open_locked()
-            prepared = self._prepare_start(
+        prepared = self._prepare_start(
                 conversation_id=conversation_id,
                 agent_name=agent_name,
                 input_data=input_data,
@@ -111,7 +106,7 @@ class SubagentExecutor:
                 context_mode=context_mode,
                 runtime_metadata=runtime_metadata,
             )
-            run = await self.run_manager.create_run(
+        run = await self.run_manager.create_run(
                 conversation_id=conversation_id,
                 kind=RunKind.SUBAGENT,
                 anchor_node_id=parent_node_id,
@@ -121,6 +116,7 @@ class SubagentExecutor:
                 metadata=prepared.metadata,
                 task_binding=task_binding,
             )
+        try:
             self._schedule_existing_locked(
                 run=run,
                 conversation_id=conversation_id,
@@ -135,6 +131,19 @@ class SubagentExecutor:
                 workspace=prepared.workspace,
                 context_mode=prepared.context_mode,
             )
+        except BaseException:
+            try:
+                await self.producer_registry.terminalize(
+                    run.run_id,
+                    RunStatus.INTERRUPTED,
+                    "producer scheduling failed",
+                )
+            except BaseException:
+                logger.exception(
+                    "failed to terminalize unscheduled subagent run %s",
+                    run.run_id,
+                )
+            raise
         return run.to_dict()
 
     async def start_idempotent(
@@ -229,7 +238,6 @@ class SubagentExecutor:
                 permission_mode=permission_mode,
                 workspace=prepared.workspace,
                 context_mode=prepared.context_mode,
-                _coordinator_owned=True,
             )
 
         return await coordinator.start(spec, bootstrap)
@@ -321,11 +329,8 @@ class SubagentExecutor:
         permission_mode: Optional[str],
         workspace: Optional[Dict[str, Any]],
         context_mode: str,
-        _coordinator_owned: bool = False,
     ) -> asyncio.Task[Any]:
-        async with self._lifecycle_lock:
-            self._ensure_open_locked()
-            return self._schedule_existing_locked(
+        return self._schedule_existing_locked(
                 run=run,
                 conversation_id=conversation_id,
                 agent_name=agent_name,
@@ -338,12 +343,7 @@ class SubagentExecutor:
                 permission_mode=permission_mode,
                 workspace=workspace,
                 context_mode=context_mode,
-                _coordinator_owned=_coordinator_owned,
             )
-
-    def _ensure_open_locked(self) -> None:
-        if self._closing:
-            raise RuntimeError("subagent executor is closing")
 
     def _schedule_existing_locked(
         self,
@@ -360,7 +360,6 @@ class SubagentExecutor:
         permission_mode: Optional[str],
         workspace: Optional[Dict[str, Any]],
         context_mode: str,
-        _coordinator_owned: bool = False,
     ) -> asyncio.Task[Any]:
         producer_coro = self._produce(
             run_id=run.run_id,
@@ -375,26 +374,11 @@ class SubagentExecutor:
             permission_mode=permission_mode,
             workspace=workspace,
             context_mode=context_mode,
-            _coordinator_owned=_coordinator_owned,
         )
-        try:
-            task = asyncio.create_task(
-                producer_coro,
-                name=f"subagent-producer:{run.run_id}",
-            )
-        except BaseException:
-            producer_coro.close()
-            raise
-        self._tasks[run.run_id] = task
-        if _coordinator_owned:
-            self._coordinator_owned_run_ids.add(run.run_id)
-        else:
-            self._coordinator_owned_run_ids.discard(run.run_id)
-        task.add_done_callback(
-            lambda completed, run_id=run.run_id: self._consume_producer_task(
-                run_id,
-                completed,
-            )
+        task = self.producer_registry.create(
+            run.run_id,
+            producer_coro,
+            name=f"subagent-producer:{run.run_id}",
         )
 
         notification_coro = self._register_task_notification(
@@ -402,7 +386,7 @@ class SubagentExecutor:
             agent_name=agent_name,
         )
         try:
-            notification_task = asyncio.create_task(
+            self.producer_registry.create_background(
                 notification_coro,
                 name=f"subagent-notification:{run.run_id}",
             )
@@ -412,251 +396,7 @@ class SubagentExecutor:
                 "Failed to schedule subagent notification for %s",
                 run.run_id,
             )
-        else:
-            self._notification_tasks.add(notification_task)
-            notification_task.add_done_callback(self._consume_notification_task)
         return task
-
-    def _consume_producer_task(
-        self,
-        run_id: str,
-        task: asyncio.Task[Any],
-    ) -> None:
-        if not task.cancelled():
-            try:
-                task.exception()
-            except asyncio.CancelledError:
-                pass
-        if self._tasks.get(run_id) is not task:
-            return
-        if run_id not in self._coordinator_owned_run_ids:
-            run = self.run_manager.get_run(run_id)
-            if (
-                run is not None
-                and RunStatus(str(run["status"])) not in FINISHED_RUN_STATUSES
-            ):
-                self._shutdown_cancelled_run_ids.add(run_id)
-                return
-        self._discard_producer_task(run_id, task)
-
-    def _discard_producer_task(
-        self,
-        run_id: str,
-        task: asyncio.Task[Any],
-    ) -> None:
-        if self._tasks.get(run_id) is not task:
-            return
-        self._tasks.pop(run_id, None)
-        self._coordinator_owned_run_ids.discard(run_id)
-        self._shutdown_cancelled_run_ids.discard(run_id)
-
-    def _consume_notification_task(self, task: asyncio.Task[Any]) -> None:
-        if task not in self._notification_tasks:
-            return
-        self._notification_tasks.discard(task)
-        if task.cancelled():
-            return
-        try:
-            task.result()
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            logger.exception("Failed to register subagent notification")
-
-    async def close(self, timeout: float = 5.0) -> tuple[str, ...]:
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + max(0.0, float(timeout))
-        self._closing = True
-        if not await self._acquire_lifecycle_lock_until(deadline):
-            return ("subagent-lifecycle-lock",)
-        try:
-            self._shutdown_cancelled_run_ids.update(
-                run_id
-                for run_id in self._tasks
-                if run_id not in self._coordinator_owned_run_ids
-            )
-            owned_tasks = {
-                task: (f"subagent-producer:{run_id}", run_id)
-                for run_id, task in self._tasks.items()
-                if not task.done()
-            }
-            internal_run_ids = {
-                task: run_id
-                for run_id, task in self._tasks.items()
-                if run_id in self._shutdown_cancelled_run_ids
-            }
-            owned_tasks.update(
-                {
-                    task: (task.get_name(), None)
-                    for task in self._notification_tasks
-                    if not task.done()
-                }
-            )
-        finally:
-            self._lifecycle_lock.release()
-
-        for task in owned_tasks:
-            task.cancel()
-        if owned_tasks:
-            remaining = max(0.0, deadline - loop.time())
-            if remaining > 0:
-                await asyncio.wait(owned_tasks, timeout=remaining)
-
-        for task in tuple(self._notification_tasks):
-            if task.done():
-                self._consume_notification_task(task)
-
-        terminalization_tasks: dict[asyncio.Task[Any], tuple[str, str]] = {}
-        for run_id, task in tuple(self._shutdown_terminalization_tasks.items()):
-            if task.done():
-                self._reap_shutdown_terminalization_task(run_id, task)
-            else:
-                terminalization_tasks[task] = (
-                    f"subagent-terminalize:{run_id}",
-                    run_id,
-                )
-
-        terminalization_start_failures: set[str] = set()
-        for task, run_id in internal_run_ids.items():
-            if not task.done() or self._tasks.get(run_id) is not task:
-                continue
-            if run_id in self._shutdown_terminalization_tasks:
-                continue
-            run = self.run_manager.get_run(run_id)
-            if (
-                run is None
-                or RunStatus(str(run["status"])) in FINISHED_RUN_STATUSES
-            ):
-                self._discard_producer_task(run_id, task)
-                continue
-            terminalization_task = self._start_shutdown_terminalization(run_id)
-            if terminalization_task is None:
-                terminalization_start_failures.add(
-                    f"subagent-terminalize:{run_id}"
-                )
-                continue
-            terminalization_tasks[terminalization_task] = (
-                f"subagent-terminalize:{run_id}",
-                run_id,
-            )
-
-        if terminalization_tasks:
-            remaining = max(0.0, deadline - loop.time())
-            if remaining > 0:
-                await asyncio.wait(terminalization_tasks, timeout=remaining)
-
-        terminalization_failures = set(terminalization_start_failures)
-        for task, (label, run_id) in terminalization_tasks.items():
-            if not task.done():
-                terminalization_failures.add(label)
-                continue
-            if not self._reap_shutdown_terminalization_task(run_id, task):
-                terminalization_failures.add(label)
-
-        return tuple(
-            sorted(
-                {
-                    label
-                    for task, (label, _run_id) in owned_tasks.items()
-                    if not task.done()
-                }
-                | terminalization_failures
-            )
-        )
-
-    async def _acquire_lifecycle_lock_until(self, deadline: float) -> bool:
-        remaining = max(0.0, deadline - asyncio.get_running_loop().time())
-        if remaining <= 0:
-            return False
-        waiter = asyncio.create_task(
-            self._lifecycle_lock.acquire(),
-            name="subagent-lifecycle-lock",
-        )
-        try:
-            done, _pending = await asyncio.wait({waiter}, timeout=remaining)
-        except BaseException:
-            waiter.cancel()
-            await asyncio.gather(waiter, return_exceptions=True)
-            if (
-                not waiter.cancelled()
-                and waiter.exception() is None
-                and waiter.result()
-            ):
-                self._lifecycle_lock.release()
-            raise
-        if waiter not in done:
-            waiter.cancel()
-            await asyncio.gather(waiter, return_exceptions=True)
-            if (
-                not waiter.cancelled()
-                and waiter.exception() is None
-                and waiter.result()
-            ):
-                self._lifecycle_lock.release()
-            return False
-        return bool(waiter.result())
-
-    def _start_shutdown_terminalization(
-        self,
-        run_id: str,
-    ) -> asyncio.Task[Any] | None:
-        terminalization_coro = self.run_manager.finish_run(
-            run_id,
-            RunStatus.CANCELLED,
-        )
-        try:
-            task = asyncio.create_task(
-                terminalization_coro,
-                name=f"subagent-terminalize:{run_id}",
-            )
-        except Exception:
-            terminalization_coro.close()
-            logger.exception(
-                "Failed to schedule subagent shutdown terminalization for %s",
-                run_id,
-            )
-            return None
-        self._shutdown_terminalization_tasks[run_id] = task
-        task.add_done_callback(self._consume_shutdown_terminalization_task)
-        return task
-
-    @staticmethod
-    def _consume_shutdown_terminalization_task(task: asyncio.Task[Any]) -> None:
-        if task.cancelled():
-            return
-        try:
-            task.exception()
-        except asyncio.CancelledError:
-            pass
-
-    def _reap_shutdown_terminalization_task(
-        self,
-        run_id: str,
-        task: asyncio.Task[Any],
-    ) -> bool:
-        if self._shutdown_terminalization_tasks.get(run_id) is not task:
-            return True
-        if not task.done():
-            return False
-        self._shutdown_terminalization_tasks.pop(run_id, None)
-        if task.cancelled():
-            logger.warning(
-                "Subagent shutdown terminalization was cancelled for %s",
-                run_id,
-            )
-            return False
-        error = task.exception()
-        if error is not None:
-            logger.warning(
-                "Subagent shutdown terminalization failed for %s: %s",
-                run_id,
-                error,
-            )
-            return False
-        producer_task = self._tasks.get(run_id)
-        if producer_task is not None and producer_task.done():
-            self._discard_producer_task(run_id, producer_task)
-        return True
 
     async def _register_task_notification(self, run_id: str, *, agent_name: str) -> None:
         run = self.run_manager.get_run(run_id)
@@ -687,17 +427,21 @@ class SubagentExecutor:
         )
 
     async def stop(self, run_id: str) -> bool:
-        await self.run_manager.request_stop(run_id)
+        failures: list[BaseException] = []
+        try:
+            await self.run_manager.request_stop(run_id)
+        except BaseException as exc:
+            failures.append(exc)
         controller = self._controllers.get(run_id)
         if controller:
-            await controller.stop()
-        task = self._tasks.get(run_id)
-        if task and not task.done():
-            task.cancel()
-            return True
-        if controller:
-            return True
-        return False
+            try:
+                await controller.stop()
+            except BaseException as exc:
+                failures.append(exc)
+        stopped = self.producer_registry.cancel(run_id) or controller is not None
+        if failures:
+            raise failures[0]
+        return stopped
 
     async def _produce(
         self,
@@ -714,12 +458,10 @@ class SubagentExecutor:
         permission_mode: Optional[str],
         workspace: Optional[Dict[str, Any]],
         context_mode: str = "fresh",
-        _coordinator_owned: bool = False,
     ) -> None:
         final_status = RunStatus.COMPLETED
         final_error: Optional[str] = None
         notification_payload: Optional[Dict[str, Any]] = None
-        defer_cancel_terminalization = False
         try:
             agent = self._scoped_registry(workspace).get_agent(agent_name)
             if agent is None:
@@ -756,11 +498,6 @@ class SubagentExecutor:
                     context_mode=context_mode,
                 )
         except asyncio.CancelledError:
-            if _coordinator_owned:
-                defer_cancel_terminalization = True
-                if not await self.run_manager.is_stop_requested(run_id):
-                    raise
-                defer_cancel_terminalization = False
             final_status = RunStatus.CANCELLED
             notification_payload = {
                 "status": "stopped",
@@ -795,27 +532,26 @@ class SubagentExecutor:
             await self.run_manager.append_event(run_id, notification_payload)
         finally:
             self._controllers.pop(run_id, None)
-            if not defer_cancel_terminalization:
-                await self.run_manager.finish_run(run_id, final_status, final_error)
-                if notification_payload and final_status in {
+            await self.run_manager.finish_run(run_id, final_status, final_error)
+            if notification_payload and final_status in {
                     RunStatus.COMPLETED,
                     RunStatus.FAILED,
                     RunStatus.CANCELLED,
                 }:
-                    source_status = {
+                source_status = {
                         RunStatus.COMPLETED: "completed",
                         RunStatus.FAILED: "failed",
                         RunStatus.CANCELLED: "cancelled",
-                    }[final_status]
-                    try:
-                        await self._publish_task_notification(
+                }[final_status]
+                try:
+                    await self._publish_task_notification(
                             run_id,
                             source_status,
                             notification_payload.get("content") or notification_payload.get("error") or "",
                             event_payload=notification_payload,
-                        )
-                    except Exception:
-                        logger.exception("Failed to publish subagent notification for %s", run_id)
+                    )
+                except Exception:
+                    logger.exception("Failed to publish subagent notification for %s", run_id)
 
     async def _produce_inner(
         self,

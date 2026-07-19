@@ -230,7 +230,7 @@ def test_canonical_request_id_replaces_missing_or_invalid_values(value):
     request_id = canonical_request_id(value)
 
     assert REQUEST_ID_RE.fullmatch(request_id)
-    UUID(request_id)
+    assert request_id.startswith("req_")
     assert request_id != value
 
 
@@ -247,7 +247,7 @@ def test_canonical_request_id_replaces_non_string_values(value):
     request_id = canonical_request_id(value)
 
     assert REQUEST_ID_RE.fullmatch(request_id)
-    UUID(request_id)
+    assert request_id.startswith("req_")
 
 
 @pytest.mark.parametrize(

@@ -6,7 +6,13 @@ from backend.core.chat.conversation import Conversation
 from backend.core.chat.node import NodeManager
 from backend.core.config.types import Message, Role
 from backend.core.notifications.task_notifications import TaskNotificationService
-from backend.core.runs import RunKind, RunManager, RunStatus
+from backend.core.runs import (
+    ProducerRegistry,
+    ProducerRegistryClosingError,
+    RunKind,
+    RunManager,
+    RunStatus,
+)
 from backend.core.config.types import StreamChunk, StreamStatus
 
 
@@ -449,6 +455,173 @@ def test_cancelled_notification_delivery_is_not_marked_delivered():
         await asyncio.sleep(0)
 
         assert repository.items[source.run_id]["status"] == "delivery_cancelled"
+
+    asyncio.run(scenario())
+
+
+def test_notification_delivery_producer_is_owned_and_cancelled_by_registry():
+    class BlockingChatManager:
+        def __init__(self):
+            self.started = asyncio.Event()
+            self._active_controllers = {}
+
+        def get_conversation(self, conversation_id):
+            class FakeConversation:
+                current_node_id = "node-1"
+                nodes = {"node-1": {}}
+
+            return FakeConversation()
+
+        async def send_message_stream(self, **kwargs):
+            self.started.set()
+            await asyncio.Event().wait()
+            yield kwargs
+
+    async def scenario() -> None:
+        repository = MemoryNotificationRepository()
+        run_manager = RunManager()
+        producer_registry = ProducerRegistry.for_run_manager(run_manager)
+        chat_manager = BlockingChatManager()
+        service = TaskNotificationService(
+            repository=repository,
+            run_manager=run_manager,
+            chat_manager=chat_manager,
+            producer_registry=producer_registry,
+        )
+        source = await run_manager.create_run(
+            conversation_id="conv-1",
+            kind=RunKind.COMMAND,
+            anchor_node_id="node-1",
+            summary="command",
+        )
+        await run_manager.finish_run(source.run_id, RunStatus.COMPLETED)
+        notification = await service.publish_run_notification(
+            run_id=source.run_id,
+            source_status="completed",
+            summary="Command completed",
+            content="done",
+        )
+
+        delivering = await service.bind(
+            notification_id=notification["id"],
+            delivery_node_id="node-1",
+        )
+        delivery_run_id = str(delivering["delivered_run_id"])
+        producer = producer_registry.task_for(delivery_run_id)
+        assert producer is not None
+        await asyncio.wait_for(chat_manager.started.wait(), timeout=1)
+
+        assert await producer_registry.close(timeout=1) == ()
+        assert producer.done()
+        assert run_manager.get_run(delivery_run_id)["status"] == "cancelled"
+        assert repository.get(notification["id"])["status"] == "delivery_cancelled"
+        await run_manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_notification_finish_listener_registers_background_delivery_work():
+    class RecordingRegistry:
+        def __init__(self):
+            self.names = []
+
+        def create_background(self, coroutine, *, name):
+            self.names.append(name)
+            coroutine.close()
+            return None
+
+    async def scenario() -> None:
+        repository = MemoryNotificationRepository()
+        run_manager = RunManager()
+        registry = RecordingRegistry()
+        notification = repository.upsert_for_run(
+            conversation_id="conv-1",
+            source_run_id="source-1",
+            source_run_kind=RunKind.COMMAND.value,
+            summary="done",
+            content="done",
+            payload={"source_status": "completed"},
+        )
+        repository.bind(notification["id"], "node-1", bound_by="user")
+        service = TaskNotificationService(
+            repository=repository,
+            run_manager=run_manager,
+            producer_registry=registry,
+        )
+
+        service.handle_run_finished({
+            "conversation_id": "conv-1",
+            "run_id": "source-1",
+            "kind": RunKind.COMMAND.value,
+        })
+        service.handle_run_finished({
+            "conversation_id": "conv-1",
+            "run_id": "chat-1",
+            "kind": RunKind.CHAT.value,
+        })
+
+        assert registry.names == [
+            f"task-notification-deliver:{notification['id']}",
+            "task-notification-deliver-bound:conv-1",
+        ]
+        await run_manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_notification_scheduling_failure_interrupts_delivery_run():
+    class IdleChatManager:
+        _active_controllers = {}
+
+        def get_conversation(self, conversation_id):
+            class FakeConversation:
+                current_node_id = "node-1"
+                nodes = {"node-1": {}}
+
+            return FakeConversation()
+
+        async def send_message_stream(self, **kwargs):
+            yield kwargs
+
+    async def scenario() -> None:
+        repository = MemoryNotificationRepository()
+        run_manager = RunManager()
+        producer_registry = ProducerRegistry.for_run_manager(run_manager)
+        service = TaskNotificationService(
+            repository=repository,
+            run_manager=run_manager,
+            chat_manager=IdleChatManager(),
+            producer_registry=producer_registry,
+        )
+        source = await run_manager.create_run(
+            conversation_id="conv-1",
+            kind=RunKind.COMMAND,
+            anchor_node_id="node-1",
+        )
+        await run_manager.finish_run(source.run_id, RunStatus.COMPLETED)
+        notification = await service.publish_run_notification(
+            run_id=source.run_id,
+            source_status="completed",
+            summary="done",
+            content="done",
+        )
+        assert await producer_registry.close() == ()
+
+        with pytest.raises(ProducerRegistryClosingError):
+            await service.bind(
+                notification_id=notification["id"],
+                delivery_node_id="node-1",
+            )
+
+        delivery_runs = [
+            run
+            for run in run_manager.list_runs("conv-1")
+            if run["kind"] == RunKind.CHAT.value
+        ]
+        assert len(delivery_runs) == 1
+        assert delivery_runs[0]["status"] == "interrupted"
+        assert repository.get(notification["id"])["status"] == "bound"
+        await run_manager.close()
 
     asyncio.run(scenario())
 

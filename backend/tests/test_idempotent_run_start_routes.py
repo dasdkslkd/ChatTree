@@ -73,15 +73,10 @@ class _RouteHarness:
     async def close(self) -> None:
         self.agent_release.set()
         self.workflow_release.set()
-        tasks = [
-            *self.executor._tasks.values(),
-            *self.workflow_manager._tasks.values(),
-        ]
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
         await asyncio.sleep(0)
         await self.coordinator.close(timeout=1)
-        await self.run_manager.close(timeout=1)
+        await self.coordinator.producer_registry.close(timeout=1)
+        await self.run_manager.close()
 
 
 def _route_harness(tmp_path: Path) -> _RouteHarness:

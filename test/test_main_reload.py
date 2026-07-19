@@ -1,27 +1,7 @@
-from pathlib import Path
-
 import pytest
 
 import main
-from main import (
-    PROJECT_ROOT,
-    run_server,
-    uvicorn_reload_options,
-    uvicorn_server_options,
-)
-
-
-def test_uvicorn_reload_excludes_runtime_tool_workspace():
-    options = uvicorn_reload_options()
-
-    reload_dirs = [Path(path) for path in options["reload_dirs"]]
-    assert reload_dirs == [PROJECT_ROOT / "backend"]
-    assert options["reload_includes"] == ["*.py"]
-
-    assert not (PROJECT_ROOT / "tmp").is_relative_to(reload_dirs[0])
-    assert not (PROJECT_ROOT / "data").is_relative_to(reload_dirs[0])
-    assert not (PROJECT_ROOT / "frontend").is_relative_to(reload_dirs[0])
-    assert "**/__pycache__/**" in set(options["reload_excludes"])
+from main import run_server, uvicorn_server_options
 
 
 def test_uvicorn_server_defaults_to_loopback():
@@ -57,19 +37,100 @@ def test_uvicorn_server_reads_real_environment(monkeypatch):
     assert uvicorn_server_options() == {"host": "127.0.0.1", "port": 18002}
 
 
-def test_run_server_wires_loopback_port_and_reload_options(monkeypatch):
+def test_run_server_owns_uvicorn_server_and_cooperative_shutdown_hook(monkeypatch):
     captured = {}
-    monkeypatch.setattr(
-        main.uvicorn,
-        "run",
-        lambda app_ref, **kwargs: captured.update(app_ref=app_ref, **kwargs),
-    )
+
+    class FakeConfig:
+        def __init__(self, app, **kwargs):
+            captured["app"] = app
+            captured["options"] = kwargs
+
+    class FakeServer:
+        def __init__(self, config):
+            captured["config"] = config
+            self.should_exit = False
+
+        def run(self):
+            hook = main.app.state.request_shutdown
+            captured["hook_is_callable"] = callable(hook)
+            hook()
+            captured["should_exit"] = self.should_exit
+
+    monkeypatch.setattr(main.uvicorn, "Config", FakeConfig)
+    monkeypatch.setattr(main.uvicorn, "Server", FakeServer)
+    monkeypatch.setattr(main.app.state, "server_home_lock", None, raising=False)
 
     run_server({"CHATTREE_SERVER_PORT": "18003"})
 
-    assert captured["app_ref"] == "main:app"
-    assert captured["host"] == "127.0.0.1"
-    assert captured["port"] == 18003
-    assert captured["reload"] is True
-    assert captured["workers"] == 1
-    assert captured["reload_dirs"] == [str(main.PROJECT_ROOT / "backend")]
+    assert captured["app"] is main.app
+    assert captured["options"] == {
+        "host": "127.0.0.1",
+        "port": 18003,
+        "workers": 1,
+    }
+    assert captured["hook_is_callable"] is True
+    assert captured["should_exit"] is True
+    assert main.app.state.request_shutdown is None
+
+
+def test_run_server_does_not_exit_while_home_lock_is_retained(monkeypatch):
+    retained_lock = object()
+    held = []
+
+    class FakeConfig:
+        def __init__(self, app, **kwargs):
+            pass
+
+    class FakeServer:
+        def __init__(self, config):
+            self.should_exit = False
+
+        def run(self):
+            main.app.state.server_home_lock = retained_lock
+
+    monkeypatch.setattr(main.uvicorn, "Config", FakeConfig)
+    monkeypatch.setattr(main.uvicorn, "Server", FakeServer)
+    monkeypatch.setattr(
+        main,
+        "_hold_process_for_retained_home_lock",
+        lambda: held.append(True),
+    )
+
+    run_server({"CHATTREE_SERVER_PORT": "18004"})
+
+    assert held == [True]
+    assert main.app.state.server_home_lock is retained_lock
+    main.app.state.server_home_lock = None
+
+
+def test_run_server_guards_retained_home_lock_when_uvicorn_raises(monkeypatch):
+    retained_lock = object()
+    held = []
+
+    class FakeConfig:
+        def __init__(self, app, **kwargs):
+            pass
+
+    class FakeServer:
+        def __init__(self, config):
+            self.should_exit = False
+
+        def run(self):
+            main.app.state.server_home_lock = retained_lock
+            raise OSError("uvicorn failed")
+
+    monkeypatch.setattr(main.uvicorn, "Config", FakeConfig)
+    monkeypatch.setattr(main.uvicorn, "Server", FakeServer)
+    monkeypatch.setattr(
+        main,
+        "_hold_process_for_retained_home_lock",
+        lambda: held.append(True),
+    )
+
+    with pytest.raises(OSError, match="uvicorn failed"):
+        run_server({"CHATTREE_SERVER_PORT": "18005"})
+
+    assert held == [True]
+    assert main.app.state.request_shutdown is None
+    assert main.app.state.server_home_lock is retained_lock
+    main.app.state.server_home_lock = None

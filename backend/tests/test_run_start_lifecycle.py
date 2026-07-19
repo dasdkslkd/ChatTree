@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -30,535 +29,203 @@ def _request(app: FastAPI) -> Request:
     )
 
 
-def test_run_start_coordinator_dependency_rejects_missing_and_none():
+def test_run_start_coordinator_dependency_requires_initialized_state():
     missing_app = FastAPI()
     with pytest.raises(HTTPException) as missing:
         dependencies.get_run_start_coordinator(_request(missing_app))
     assert missing.value.status_code == 500
 
-    cleared_app = FastAPI()
-    cleared_app.state.run_start_coordinator = None
+    missing_app.state.run_start_coordinator = None
     with pytest.raises(HTTPException) as cleared:
-        dependencies.get_run_start_coordinator(_request(cleared_app))
+        dependencies.get_run_start_coordinator(_request(missing_app))
     assert cleared.value.status_code == 500
 
     coordinator = object()
-    ready_app = FastAPI()
-    ready_app.state.run_start_coordinator = coordinator
-    assert dependencies.get_run_start_coordinator(_request(ready_app)) is coordinator
+    missing_app.state.run_start_coordinator = coordinator
+    assert dependencies.get_run_start_coordinator(_request(missing_app)) is coordinator
 
 
-def test_shutdown_closes_background_owners_before_manager_and_tools(monkeypatch):
+class _Resource:
+    def __init__(self, name: str, order: list[str], report: object = None):
+        self.name = name
+        self.order = order
+        self.report = report
+
+    async def close(self):
+        self.order.append(self.name)
+        return self.report
+
+    def begin_close(self):
+        self.order.append(f"{self.name}-begin")
+
+
+def _install_resources(
+    monkeypatch,
+    order: list[str],
+    *,
+    coordinator_report=(),
+    registry_report=(),
+    command_report=(),
+):
+    resources = {
+        "run_start_coordinator": _Resource("coordinator", order, coordinator_report),
+        "producer_registry": _Resource("registry", order, registry_report),
+        "command_executor": _Resource("command_executor", order, command_report),
+        "run_manager": _Resource("run_manager", order),
+        "tool_manager": _Resource("tool_manager", order),
+    }
+    for state_name, resource in resources.items():
+        monkeypatch.setattr(main.app.state, state_name, resource, raising=False)
+    return resources
+
+
+def test_shutdown_closes_the_single_background_owner_chain_and_releases_home_lock(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("CHATTREE_HOME", str(tmp_path))
     order: list[str] = []
-
-    class Coordinator:
-        async def close(self):
-            order.append("coordinator")
-            return SimpleNamespace(exhausted=False)
-
-    class RunManager:
-        async def close(self):
-            order.append("run_manager")
-            return SimpleNamespace(exhausted_run_ids=())
-
-    class WorkflowManager:
-        async def close(self):
-            order.append("workflow_manager")
-            return ()
-
-    class SubagentExecutor:
-        async def close(self):
-            order.append("subagent_executor")
-            return ()
-
-    class ToolManager:
-        async def close(self):
-            order.append("tool_manager")
-
-    coordinator = Coordinator()
-    workflow_manager = WorkflowManager()
-    subagent_executor = SubagentExecutor()
-    run_manager = RunManager()
-    tool_manager = ToolManager()
-    monkeypatch.setattr(
-        main.app.state,
-        "run_start_coordinator",
-        coordinator,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        main.app.state,
-        "workflow_manager",
-        workflow_manager,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        main.app.state,
-        "subagent_executor",
-        subagent_executor,
-        raising=False,
-    )
-    monkeypatch.setattr(main.app.state, "run_manager", run_manager, raising=False)
-    monkeypatch.setattr(main.app.state, "tool_manager", tool_manager, raising=False)
-    monkeypatch.setattr(main.app.state, "server_home_lock", None, raising=False)
+    _install_resources(monkeypatch, order)
+    home_lock = ServerHomeLock(tmp_path)
+    home_lock.acquire()
+    monkeypatch.setattr(main.app.state, "server_home_lock", home_lock, raising=False)
 
     asyncio.run(main.shutdown_event())
 
     assert order == [
         "coordinator",
-        "workflow_manager",
-        "subagent_executor",
+        "registry-begin",
+        "command_executor",
+        "registry",
         "run_manager",
         "tool_manager",
     ]
-    assert main.app.state.run_start_coordinator is None
-    assert main.app.state.workflow_manager is None
-    assert main.app.state.subagent_executor is None
-    assert main.app.state.run_manager is None
-    assert main.app.state.tool_manager is None
-
-
-def test_shutdown_stops_before_run_manager_when_notification_drain_exhausts(
-    monkeypatch,
-    tmp_path,
-):
-    monkeypatch.setenv("CHATTREE_HOME", str(tmp_path))
-    order: list[str] = []
-
-    class Coordinator:
-        async def close(self):
-            order.append("coordinator")
-            return SimpleNamespace(exhausted=False)
-
-    class WorkflowManager:
-        async def close(self):
-            order.append("workflow_manager")
-            return ("workflow-notification:run-1",)
-
-    class SubagentExecutor:
-        async def close(self):
-            order.append("subagent_executor")
-            return ()
-
-    class RunManager:
-        async def close(self):
-            order.append("run_manager")
-            return SimpleNamespace(exhausted_run_ids=())
-
-    class ToolManager:
-        async def close(self):
-            order.append("tool_manager")
-
-    coordinator = Coordinator()
-    workflow_manager = WorkflowManager()
-    subagent_executor = SubagentExecutor()
-    run_manager = RunManager()
-    tool_manager = ToolManager()
-    home_lock = ServerHomeLock(tmp_path)
-    home_lock.acquire()
-    monkeypatch.setattr(
-        main.app.state,
+    for state_name in (
         "run_start_coordinator",
-        coordinator,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        main.app.state,
-        "workflow_manager",
-        workflow_manager,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        main.app.state,
-        "subagent_executor",
-        subagent_executor,
-        raising=False,
-    )
-    monkeypatch.setattr(main.app.state, "run_manager", run_manager, raising=False)
-    monkeypatch.setattr(main.app.state, "tool_manager", tool_manager, raising=False)
-    monkeypatch.setattr(main.app.state, "server_home_lock", home_lock, raising=False)
-
-    with pytest.raises(RuntimeError, match="workflow_manager drain incomplete"):
-        asyncio.run(main.shutdown_event())
-
-    assert order == ["coordinator", "workflow_manager"]
-    assert main.app.state.run_start_coordinator is None
-    assert main.app.state.workflow_manager is workflow_manager
-    assert main.app.state.subagent_executor is subagent_executor
-    assert main.app.state.run_manager is run_manager
-    assert main.app.state.tool_manager is tool_manager
-    assert main.app.state.server_home_lock is home_lock
-    try:
-        with pytest.raises(ServerHomeInUseError):
-            with ServerHomeLock(tmp_path):
-                pass
-    finally:
-        home_lock.release()
-        main.app.state.server_home_lock = None
-
-
-def test_shutdown_retains_home_lock_when_internal_producer_drain_exhausts(
-    monkeypatch,
-    tmp_path,
-):
-    monkeypatch.setenv("CHATTREE_HOME", str(tmp_path))
-    order: list[str] = []
-
-    class Resource:
-        def __init__(self, name, report=None):
-            self.name = name
-            self.report = report
-
-        async def close(self):
-            order.append(self.name)
-            return self.report
-
-    coordinator = Resource("coordinator", SimpleNamespace(exhausted=False))
-    workflow_manager = Resource("workflow_manager", ())
-    subagent_executor = Resource(
-        "subagent_executor",
-        ("subagent-producer:run-1",),
-    )
-    run_manager = Resource("run_manager", SimpleNamespace(exhausted_run_ids=()))
-    tool_manager = Resource("tool_manager")
-    home_lock = ServerHomeLock(tmp_path)
-    home_lock.acquire()
-    monkeypatch.setattr(
-        main.app.state,
-        "run_start_coordinator",
-        coordinator,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        main.app.state,
-        "workflow_manager",
-        workflow_manager,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        main.app.state,
-        "subagent_executor",
-        subagent_executor,
-        raising=False,
-    )
-    monkeypatch.setattr(main.app.state, "run_manager", run_manager, raising=False)
-    monkeypatch.setattr(main.app.state, "tool_manager", tool_manager, raising=False)
-    monkeypatch.setattr(main.app.state, "server_home_lock", home_lock, raising=False)
-
-    with pytest.raises(RuntimeError, match="subagent_executor drain incomplete"):
-        asyncio.run(main.shutdown_event())
-
-    assert order == ["coordinator", "workflow_manager", "subagent_executor"]
-    assert main.app.state.run_start_coordinator is None
-    assert main.app.state.workflow_manager is None
-    assert main.app.state.subagent_executor is subagent_executor
-    assert main.app.state.run_manager is run_manager
-    assert main.app.state.tool_manager is tool_manager
-    assert main.app.state.server_home_lock is home_lock
-    try:
-        with pytest.raises(ServerHomeInUseError):
-            with ServerHomeLock(tmp_path):
-                pass
-    finally:
-        home_lock.release()
-        main.app.state.server_home_lock = None
-
-
-def test_startup_rollback_after_coordinator_construction_uses_shutdown_order(
-    monkeypatch,
-    tmp_path,
-):
-    monkeypatch.setenv("CHATTREE_HOME", str(tmp_path))
-    order: list[str] = []
-    constructed_with: list[object] = []
-
-    class Coordinator:
-        def __init__(self, run_manager):
-            constructed_with.append(run_manager)
-
-        async def close(self):
-            order.append("coordinator")
-            return SimpleNamespace(exhausted=False)
-
-    class RunManager:
-        async def close(self):
-            order.append("run_manager")
-            return SimpleNamespace(exhausted_run_ids=())
-
-    class ToolManager:
-        async def close(self):
-            order.append("tool_manager")
-
-    async def fail_after_coordinator_construction():
-        run_manager = RunManager()
-        main.app.state.run_manager = run_manager
-        main.app.state.run_start_coordinator = main.RunStartCoordinator(run_manager)
-        main.app.state.tool_manager = ToolManager()
-        raise RuntimeError("startup failed after coordinator construction")
-
-    monkeypatch.setattr(main, "RunStartCoordinator", Coordinator)
-    monkeypatch.setattr(
-        main,
-        "_initialize_server",
-        fail_after_coordinator_construction,
-    )
-
-    with pytest.raises(RuntimeError, match="after coordinator construction"):
-        asyncio.run(main.startup_event())
-
-    assert order == ["coordinator", "run_manager", "tool_manager"]
-    assert len(constructed_with) == 1
-    assert main.app.state.run_start_coordinator is None
-    assert main.app.state.run_manager is None
-    assert main.app.state.tool_manager is None
-    assert main.app.state.server_home_lock is None
+        "producer_registry",
+        "command_executor",
+        "run_manager",
+        "tool_manager",
+        "server_home_lock",
+    ):
+        assert getattr(main.app.state, state_name) is None
     with ServerHomeLock(tmp_path):
         pass
 
 
-def test_startup_rollback_exhaustion_retains_home_lock_and_resources(
+@pytest.mark.parametrize(
+    (
+        "failing_owner",
+        "coordinator_report",
+        "registry_report",
+        "command_report",
+        "expected_order",
+    ),
+    [
+        ("run_start_coordinator", ("run-1",), (), (), ["coordinator"]),
+        (
+            "producer_registry",
+            (),
+            ("run-1",),
+            (),
+            ["coordinator", "registry-begin", "command_executor", "registry"],
+        ),
+        (
+            "command_executor",
+            (),
+            (),
+            ("run-1",),
+            ["coordinator", "registry-begin", "command_executor"],
+        ),
+    ],
+)
+def test_shutdown_stops_at_an_incomplete_background_drain_and_retains_home_lock(
     monkeypatch,
     tmp_path,
+    failing_owner,
+    coordinator_report,
+    registry_report,
+    command_report,
+    expected_order,
 ):
     monkeypatch.setenv("CHATTREE_HOME", str(tmp_path))
     order: list[str] = []
-
-    class Coordinator:
-        async def close(self):
-            order.append("coordinator")
-            return SimpleNamespace(
-                exhausted=True,
-                request_task_ids=("request-1",),
-                producer_run_ids=(),
-                pending_run_ids=(),
-            )
-
-    class RunManager:
-        async def close(self):
-            order.append("run_manager")
-            return SimpleNamespace(exhausted_run_ids=())
-
-    class ToolManager:
-        async def close(self):
-            order.append("tool_manager")
-
-    coordinator = Coordinator()
-    run_manager = RunManager()
-    tool_manager = ToolManager()
-
-    async def fail_after_coordinator_construction():
-        main.app.state.run_start_coordinator = coordinator
-        main.app.state.run_manager = run_manager
-        main.app.state.tool_manager = tool_manager
-        raise RuntimeError("startup failed after coordinator construction")
-
-    monkeypatch.setattr(
-        main,
-        "_initialize_server",
-        fail_after_coordinator_construction,
+    resources = _install_resources(
+        monkeypatch,
+        order,
+        coordinator_report=coordinator_report,
+        registry_report=registry_report,
+        command_report=command_report,
     )
-
-    with pytest.raises(RuntimeError, match="after coordinator construction"):
-        asyncio.run(main.startup_event())
-
-    home_lock = main.app.state.server_home_lock
-    assert order == ["coordinator"]
-    assert home_lock is not None
-    assert main.app.state.run_start_coordinator is coordinator
-    assert main.app.state.run_manager is run_manager
-    assert main.app.state.tool_manager is tool_manager
-    try:
-        with pytest.raises(ServerHomeInUseError):
-            with ServerHomeLock(tmp_path):
-                pass
-    finally:
-        home_lock.release()
-        main.app.state.server_home_lock = None
-        main.app.state.run_start_coordinator = None
-        main.app.state.run_manager = None
-        main.app.state.tool_manager = None
-
-
-def test_shutdown_stops_before_dependencies_for_exhausted_coordinator(
-    monkeypatch,
-    caplog,
-    tmp_path,
-):
-    monkeypatch.setenv("CHATTREE_HOME", str(tmp_path))
-    order: list[str] = []
-
-    class Coordinator:
-        def __init__(self):
-            self.close_calls = 0
-
-        async def close(self):
-            order.append("coordinator")
-            self.close_calls += 1
-            return SimpleNamespace(
-                exhausted=self.close_calls == 1,
-                request_task_ids=("request-1",) if self.close_calls == 1 else (),
-                producer_run_ids=(),
-                pending_run_ids=(),
-            )
-
-    class RunManager:
-        async def close(self):
-            order.append("run_manager")
-            return SimpleNamespace(
-                pending_run_ids=("observed-only",),
-                exhausted_run_ids=(),
-            )
-
-    class ToolManager:
-        async def close(self):
-            order.append("tool_manager")
-
-    coordinator = Coordinator()
-    run_manager = RunManager()
-    tool_manager = ToolManager()
     home_lock = ServerHomeLock(tmp_path)
     home_lock.acquire()
-    monkeypatch.setattr(
-        main.app.state,
-        "run_start_coordinator",
-        coordinator,
-        raising=False,
-    )
-    monkeypatch.setattr(main.app.state, "run_manager", run_manager, raising=False)
-    monkeypatch.setattr(main.app.state, "tool_manager", tool_manager, raising=False)
     monkeypatch.setattr(main.app.state, "server_home_lock", home_lock, raising=False)
 
-    with caplog.at_level("ERROR"):
-        with pytest.raises(RuntimeError, match="run_start_coordinator drain incomplete"):
-            asyncio.run(main.shutdown_event())
+    with pytest.raises(RuntimeError, match=f"{failing_owner} drain incomplete"):
+        asyncio.run(main.shutdown_event())
 
-    assert order == ["coordinator"]
-    assert "resource cleanup failed" in caplog.text
-    assert main.app.state.run_start_coordinator is coordinator
-    assert main.app.state.run_manager is run_manager
-    assert main.app.state.tool_manager is tool_manager
-    assert main.app.state.server_home_lock is home_lock
+    assert order == expected_order
+    assert getattr(main.app.state, failing_owner) is resources[failing_owner]
+    assert main.app.state.run_manager is resources["run_manager"]
+    assert main.app.state.tool_manager is resources["tool_manager"]
     with pytest.raises(ServerHomeInUseError):
         with ServerHomeLock(tmp_path):
             pass
 
-    asyncio.run(main.shutdown_event())
-    assert order == [
-        "coordinator",
-        "coordinator",
-        "run_manager",
-        "tool_manager",
-    ]
-    assert main.app.state.run_start_coordinator is None
-    assert main.app.state.run_manager is None
-    assert main.app.state.tool_manager is None
-    assert main.app.state.server_home_lock is None
-    with ServerHomeLock(tmp_path):
-        pass
+    home_lock.release()
+    main.app.state.server_home_lock = None
 
 
-@pytest.mark.parametrize("failure_layer", ["coordinator", "run_manager"])
-def test_shutdown_close_failure_stops_before_lower_dependencies(
+def test_startup_failure_rolls_back_resources_before_releasing_home_lock(
     monkeypatch,
-    failure_layer,
     tmp_path,
 ):
     monkeypatch.setenv("CHATTREE_HOME", str(tmp_path))
     order: list[str] = []
 
-    class Coordinator:
-        async def close(self):
-            order.append("coordinator")
-            if failure_layer == "coordinator":
-                raise RuntimeError("coordinator close failed")
-            return SimpleNamespace(exhausted=False)
+    async def fail_after_initialization():
+        _install_resources(monkeypatch, order)
+        raise RuntimeError("startup failed")
 
-    class RunManager:
-        async def close(self):
-            order.append("run_manager")
-            if failure_layer == "run_manager":
-                raise RuntimeError("run_manager close failed")
-            return SimpleNamespace(exhausted_run_ids=())
+    monkeypatch.setattr(main, "_initialize_server", fail_after_initialization)
 
-    class ToolManager:
-        async def close(self):
-            order.append("tool_manager")
+    with pytest.raises(RuntimeError, match="startup failed"):
+        asyncio.run(main.startup_event())
 
-    coordinator = Coordinator()
-    run_manager = RunManager()
-    tool_manager = ToolManager()
-    home_lock = ServerHomeLock(tmp_path)
-    home_lock.acquire()
-    monkeypatch.setattr(
-        main.app.state,
-        "run_start_coordinator",
-        coordinator,
-        raising=False,
-    )
-    monkeypatch.setattr(main.app.state, "run_manager", run_manager, raising=False)
-    monkeypatch.setattr(main.app.state, "tool_manager", tool_manager, raising=False)
-    monkeypatch.setattr(main.app.state, "server_home_lock", home_lock, raising=False)
-
-    with pytest.raises(RuntimeError, match=f"{failure_layer} close failed"):
-        asyncio.run(main.shutdown_event())
-
-    if failure_layer == "coordinator":
-        assert order == ["coordinator"]
-        assert main.app.state.run_start_coordinator is coordinator
-    else:
-        assert order == ["coordinator", "run_manager"]
-        assert main.app.state.run_start_coordinator is None
-    assert main.app.state.run_manager is run_manager
-    assert main.app.state.tool_manager is tool_manager
-    assert main.app.state.server_home_lock is home_lock
-    try:
-        with pytest.raises(ServerHomeInUseError):
-            with ServerHomeLock(tmp_path):
-                pass
-    finally:
-        home_lock.release()
-        main.app.state.server_home_lock = None
+    assert order == [
+        "coordinator",
+        "registry-begin",
+        "command_executor",
+        "registry",
+        "run_manager",
+        "tool_manager",
+    ]
+    assert main.app.state.server_home_lock is None
+    with ServerHomeLock(tmp_path):
+        pass
 
 
-def test_shutdown_surfaces_exhausted_run_manager_report(monkeypatch, caplog):
+def test_startup_failure_retains_home_lock_when_rollback_is_incomplete(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("CHATTREE_HOME", str(tmp_path))
     order: list[str] = []
 
-    class Coordinator:
-        async def close(self):
-            order.append("coordinator")
-            return SimpleNamespace(exhausted=False)
+    async def fail_after_initialization():
+        _install_resources(monkeypatch, order, coordinator_report=("run-1",))
+        raise RuntimeError("startup failed")
 
-    class RunManager:
-        async def close(self):
-            order.append("run_manager")
-            return SimpleNamespace(
-                pending_run_ids=("run-1",),
-                exhausted_run_ids=("run-1",),
-            )
+    monkeypatch.setattr(main, "_initialize_server", fail_after_initialization)
 
-    class ToolManager:
-        async def close(self):
-            order.append("tool_manager")
+    with pytest.raises(RuntimeError, match="startup failed"):
+        asyncio.run(main.startup_event())
 
-    coordinator = Coordinator()
-    run_manager = RunManager()
-    tool_manager = ToolManager()
-    monkeypatch.setattr(
-        main.app.state,
-        "run_start_coordinator",
-        coordinator,
-        raising=False,
-    )
-    monkeypatch.setattr(main.app.state, "run_manager", run_manager, raising=False)
-    monkeypatch.setattr(main.app.state, "tool_manager", tool_manager, raising=False)
-    monkeypatch.setattr(main.app.state, "server_home_lock", None, raising=False)
+    assert order == ["coordinator"]
+    home_lock = main.app.state.server_home_lock
+    with pytest.raises(ServerHomeInUseError):
+        with ServerHomeLock(tmp_path):
+            pass
 
-    with caplog.at_level("ERROR"):
-        with pytest.raises(RuntimeError, match="run_manager drain incomplete"):
-            asyncio.run(main.shutdown_event())
-
-    assert order == ["coordinator", "run_manager"]
-    assert "resource cleanup failed" in caplog.text
-    assert main.app.state.run_start_coordinator is None
-    assert main.app.state.run_manager is run_manager
-    assert main.app.state.tool_manager is tool_manager
+    home_lock.release()
+    main.app.state.server_home_lock = None

@@ -2,17 +2,32 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import FastAPI
+import pytest
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
-from backend.api.dependencies import get_chat_manager, get_plan_ledger, get_run_manager
+from backend.api.dependencies import (
+    get_chat_manager,
+    get_plan_ledger,
+    get_producer_registry,
+    get_run_manager,
+)
 from backend.api.routes.config import _sync_runtime_managers
 from backend.api.routes import plans as plans_route
 from backend.core.chat.conversation import Conversation
 from backend.core.persistence.database import SQLitePersistence
 from backend.core.persistence.repository import ChatRepository
 from backend.core.plans import PlanLedger, PlanStatus
-from backend.core.runs import RunManager
+from backend.core.runs import (
+    ProducerRegistry,
+    ProducerRegistryClosingError,
+    RunManager,
+)
+from backend.core.server.admission import (
+    MutationAdmission,
+    ServerBusyError,
+    ServerBusyState,
+)
 
 
 def run(coro):
@@ -103,8 +118,11 @@ def client_for_plan_stream(
     app = FastAPI()
     app.include_router(plans_route.router)
     app.state.chat_manager = chat_manager
+    producer_registry = ProducerRegistry.for_run_manager(run_manager)
+    app.state.producer_registry = producer_registry
     app.dependency_overrides[get_chat_manager] = lambda: chat_manager
     app.dependency_overrides[get_run_manager] = lambda: run_manager
+    app.dependency_overrides[get_producer_registry] = lambda: producer_registry
     app.dependency_overrides[get_plan_ledger] = lambda: ledger
     return TestClient(app)
 
@@ -116,6 +134,122 @@ class FakeToolManager:
 
     def register(self, tool) -> None:
         self.tools[tool.name] = tool
+
+
+def test_plan_stream_registers_active_producer_before_returning_response():
+    class BlockingPlanChatManager:
+        async def continue_plan_tool_result_stream(self, **kwargs):
+            await asyncio.Event().wait()
+            yield kwargs
+
+    async def scenario() -> None:
+        ledger = PlanLedger()
+        await ledger.enter_plan_mode(
+            conversation_id="conv-1",
+            node_id="node-current",
+            previous_permission_mode="modify_only",
+        )
+        awaiting = await ledger.submit_plan(
+            conversation_id="conv-1",
+            plan="## Plan\nDo it.",
+            node_id="node-current",
+            run_id="run-plan",
+            tool_call_id="call-exit-1",
+        )
+        run_manager = RunManager()
+        producer_registry = ProducerRegistry.for_run_manager(run_manager)
+        chat_manager = BlockingPlanChatManager()
+        app = FastAPI()
+        app.state.chat_manager = chat_manager
+        request_context = Request({
+            "type": "http",
+            "app": app,
+            "method": "POST",
+            "path": "/approve/stream",
+            "headers": [],
+            "query_string": b"",
+        })
+
+        response = await plans_route.approve_plan_stream(
+            request_context=request_context,
+            conversation_id="conv-1",
+            plan_id=awaiting.plan_id,
+            request=plans_route.PlanActionStreamRequest(),
+            chat_manager=chat_manager,
+            run_manager=run_manager,
+            producer_registry=producer_registry,
+            plan_ledger=ledger,
+        )
+
+        active = run_manager.list_active()
+        assert len(active) == 1
+        run_id = str(active[0]["run_id"])
+        producer = producer_registry.task_for(run_id)
+        assert producer is not None
+        admission = MutationAdmission()
+        with pytest.raises(ServerBusyError) as raised:
+            await admission.close_if_idle(
+                lambda: ServerBusyState(
+                    active_run_ids=tuple(
+                        str(item["run_id"])
+                        for item in run_manager.list_active()
+                    ),
+                    pending_approval_ids=(),
+                )
+            )
+        assert raised.value.state.active_run_ids == (run_id,)
+
+        producer_registry.cancel(run_id)
+        await asyncio.gather(producer, return_exceptions=True)
+        await response.body_iterator.aclose()
+        assert await producer_registry.close() == ()
+        assert run_manager.get_run(run_id)["status"] == "cancelled"
+        await run_manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_plan_stream_scheduling_failure_interrupts_reserved_run():
+    async def scenario() -> None:
+        ledger = PlanLedger()
+        await ledger.enter_plan_mode(
+            conversation_id="conv-1",
+            node_id="node-current",
+            previous_permission_mode="modify_only",
+        )
+        awaiting = await ledger.submit_plan(
+            conversation_id="conv-1",
+            plan="## Plan\nDo it.",
+            node_id="node-current",
+            run_id="run-plan",
+            tool_call_id="call-exit-1",
+        )
+        run_manager = RunManager()
+        producer_registry = ProducerRegistry.for_run_manager(run_manager)
+        assert await producer_registry.close() == ()
+
+        with pytest.raises(ProducerRegistryClosingError):
+            await plans_route._start_plan_action(
+                conversation_id="conv-1",
+                plan_id=awaiting.plan_id,
+                request=plans_route.PlanActionStreamRequest(),
+                content="Plan approved.",
+                message_subtype="plan_approval_response",
+                chat_manager=FakePlanChatManager(),
+                run_manager=run_manager,
+                producer_registry=producer_registry,
+                plan_ledger=ledger,
+                tool_call_id="call-exit-1",
+            )
+
+        runs = run_manager.list_runs("conv-1")
+        assert len(runs) == 1
+        assert runs[0]["status"] == "interrupted"
+        current = await ledger.get_plan("conv-1", awaiting.plan_id)
+        assert current.status == PlanStatus.AWAITING_APPROVAL
+        await run_manager.close()
+
+    asyncio.run(scenario())
 
 
 def test_plan_route_returns_null_when_no_active_or_awaiting_plan():

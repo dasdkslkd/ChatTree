@@ -42,6 +42,8 @@ finished_at
 
 
 class SQLiteRunRepository:
+    manages_task_bindings = True
+
     def __init__(self, persistence: SQLitePersistence, *, task_repository: Any = None) -> None:
         self.persistence = persistence
         self.task_repository = task_repository
@@ -598,6 +600,62 @@ class SQLiteRunRepository:
             },
         )
         return True
+
+    def update_status(self, run_id: str, status: str) -> dict[str, Any]:
+        with self.persistence.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE runs
+                SET status = ?,
+                    updated_at = strftime('%s', 'now')
+                WHERE id = ?
+                  AND status NOT IN ('completed', 'failed', 'cancelled', 'interrupted', 'stopped')
+                """,
+                (str(status), run_id),
+            )
+            row = conn.execute(
+                f"SELECT {RUN_COLUMNS} FROM runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(run_id)
+        return self._run_from_row(row)
+
+    def merge_metadata(
+        self,
+        run_id: str,
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        with self.persistence.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                f"SELECT {RUN_COLUMNS} FROM runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(run_id)
+            merged = self._load_json(row["metadata_json"]) or {}
+            merged.update(dict(metadata or {}))
+            conn.execute(
+                """
+                UPDATE runs
+                SET metadata_json = ?,
+                    updated_at = strftime('%s', 'now')
+                WHERE id = ?
+                """,
+                (self._json_field(merged), run_id),
+            )
+            updated = conn.execute(
+                f"SELECT {RUN_COLUMNS} FROM runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+        if updated is None:
+            raise KeyError(run_id)
+        return self._run_from_row(updated)
+
+    def delete_run(self, run_id: str) -> None:
+        with self.persistence.connect() as conn:
+            conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
 
     def mark_unfinished_as_interrupted(self) -> list[str]:
         placeholders = ",".join("?" for _ in FINISHED_STATUSES)
