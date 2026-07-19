@@ -11,6 +11,7 @@ from pathlib import Path
 from time import time
 from typing import Any, Deque, Dict, Optional
 
+from .subprocess_utils import subprocess_window_kwargs
 from .runs import RunKind, RunManager, RunStatus
 from .runs.public import public_run_dict
 from .runs.types import FINISHED_RUN_STATUSES
@@ -46,9 +47,7 @@ def _command_env() -> Dict[str, str]:
 
 
 def _subprocess_group_kwargs() -> Dict[str, Any]:
-    if os.name == "nt":
-        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
-    return {"start_new_session": True}
+    return subprocess_window_kwargs(new_process_group=True)
 
 
 class CommandExecutor:
@@ -935,6 +934,7 @@ class CommandExecutor:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,
+                **subprocess_window_kwargs(),
             )
             try:
                 await self._wait_process(process, timeout=2)

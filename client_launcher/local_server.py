@@ -15,6 +15,7 @@ from typing import Any, Awaitable, Callable, Mapping, TYPE_CHECKING
 import httpx
 
 from backend.core.server import ServerHomeInUseError, ServerHomeLock
+from backend.core.subprocess_utils import subprocess_window_kwargs
 from client_launcher.http_errors import canonical_request_id
 from client_launcher.models import LauncherError
 
@@ -27,8 +28,6 @@ MIN_PROTOCOL_VERSION = 1
 STARTUP_LOG_TAIL_BYTES = 8 * 1024
 _HANDSHAKE_PATH = "/api/v1/handshake"
 _SHUTDOWN_PATH = "/api/v1/server/shutdown"
-_WINDOWS_DETACHED_PROCESS = 0x00000008
-_WINDOWS_CREATE_NEW_PROCESS_GROUP = 0x00000200
 
 PhaseCallback = Callable[[str], object]
 Sleep = Callable[[float], Awaitable[None]]
@@ -644,15 +643,7 @@ class LocalServerConnector:
             "close_fds": True,
         }
         if self._platform_name == "nt":
-            kwargs["creationflags"] = getattr(
-                subprocess,
-                "DETACHED_PROCESS",
-                _WINDOWS_DETACHED_PROCESS,
-            ) | getattr(
-                subprocess,
-                "CREATE_NEW_PROCESS_GROUP",
-                _WINDOWS_CREATE_NEW_PROCESS_GROUP,
-            )
+            kwargs.update(subprocess_window_kwargs(new_process_group=True))
         else:
             kwargs["start_new_session"] = True
 

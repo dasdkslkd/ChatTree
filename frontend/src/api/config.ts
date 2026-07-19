@@ -51,6 +51,11 @@ export const configApi = {
     return response.data;
   },
 
+  disconnectMcpServer: async (serverName: string): Promise<ToolInventoryStatus> => {
+    const response = await apiClient.post(`/tools/mcp/servers/${encodeURIComponent(serverName)}/disconnect`);
+    return response.data;
+  },
+
   getProjects: async (): Promise<ProjectSettingsResponse> => {
     const response = await apiClient.get('/projects');
     return response.data;

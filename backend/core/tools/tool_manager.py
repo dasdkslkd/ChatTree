@@ -224,6 +224,8 @@ class ToolManager:
         for name, server_cfg in self._mcp_servers_config.items():
             if server_cfg.get("enabled", True) is False:
                 continue
+            if not self._mcp_server_auto_start(server_cfg):
+                continue
             try:
                 await self._connection_manager.add_server(name, server_cfg)
                 self._mcp_init_errors.pop(name, None)
@@ -440,6 +442,7 @@ class ToolManager:
         inventory = {
             "name": name,
             "enabled": server_config.get("enabled", True) is not False,
+            "auto_start": self._mcp_server_auto_start(server_config),
             "connected": name in connected_servers,
             "error": self._mcp_init_errors.get(name),
             "source": source,
@@ -460,6 +463,13 @@ class ToolManager:
             return False
         allowed = allowed_project_names(self._config, workspace, "enabled_mcp_servers")
         return allowed is None or server_name in allowed
+
+    @staticmethod
+    def _mcp_server_auto_start(server_config: Dict[str, Any]) -> bool:
+        configured = server_config.get("auto_start")
+        if configured is not None:
+            return bool(configured)
+        return str(server_config.get("transport", "streamable_http")) != "stdio"
 
     async def describe_inventory_async(self) -> Dict[str, Any]:
         inventory = self.describe_inventory()
@@ -491,6 +501,12 @@ class ToolManager:
             error = str(e) or type(e).__name__
             self._mcp_init_errors[name] = error
             logger.error(f"MCP server '{name}' connection failed: {error}")
+        return await self.describe_inventory_async()
+
+    async def disconnect_mcp_server(self, name: str) -> Dict[str, Any]:
+        if name not in self._mcp_servers_config:
+            raise KeyError(name)
+        await self._connection_manager.remove_server(name)
         return await self.describe_inventory_async()
 
     async def close(self):

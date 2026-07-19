@@ -123,6 +123,7 @@ const DEFAULT_MCP_SERVER: McpServerConfig = {
   tool_call_timeout: 120,
   heartbeat_enabled: true,
   heartbeat_interval: 30,
+  auto_start: undefined,
   auto_reconnect: true,
   max_reconnect_attempts: 3,
   http_retries: 2,
@@ -2058,6 +2059,7 @@ function McpSection() {
       endpoint: newServerTransport === 'streamable_http' ? DEFAULT_MCP_SERVER.endpoint : '',
       command: newServerTransport === 'stdio' ? 'npx' : '',
       args: newServerTransport === 'stdio' ? ['-y'] : [],
+      auto_start: newServerTransport === 'stdio' ? false : true,
     };
     updateTools(current => ({
       ...current,
@@ -2139,16 +2141,41 @@ function McpSection() {
     }
   };
 
+  const handleDisconnectServer = async (id: string) => {
+    try {
+      setConnectingServerId(id);
+      const status = await configApi.disconnectMcpServer(id);
+      setRuntimeStatus(status);
+      toast.success(`MCP Server "${id}" 已断开`);
+    } catch (err) {
+      toast.error('断开失败: ' + (err instanceof Error ? err.message : ''));
+      await loadRuntimeStatus();
+    } finally {
+      setConnectingServerId(null);
+    }
+  };
+
+  const handleToggleServerConnection = async (id: string) => {
+    if (runtimeByServer.get(id)?.connected) {
+      await handleDisconnectServer(id);
+      return;
+    }
+    await handleConnectServer(id);
+  };
+
   const getServerStatusView = (id: string, server: McpServerConfig) => {
     const status = runtimeByServer.get(id);
     if (server.enabled === false) {
       return { label: '已禁用', color: 'var(--fg-tertiary)', title: '此 Server 已禁用' };
     }
     if (status?.connected) {
-      return { label: '已连接', color: 'var(--accent-green)', title: `已连接，${status.tools_count ?? 0} 个工具` };
+      return { label: '运行中', color: 'var(--accent-green)', title: `运行中，${status.tools_count ?? 0} 个工具` };
     }
     if (status?.error) {
       return { label: '连接失败', color: 'var(--destructive, #ef4444)', title: status.error };
+    }
+    if (server.transport === 'stdio' && status?.auto_start === false) {
+      return { label: '未启动', color: 'var(--fg-tertiary)', title: 'stdio MCP 默认不随 Server 启动，可手动连接' };
     }
     return { label: '未连接', color: 'var(--fg-tertiary)', title: '尚未建立运行时连接' };
   };
@@ -2248,11 +2275,11 @@ function McpSection() {
                       disabled={isConnecting || toolsForm.enabled === false || toolsForm.mcp?.enabled !== true || server.enabled === false}
                       onClick={(e) => {
                         e.stopPropagation();
-                        handleConnectServer(id);
+                        handleToggleServerConnection(id);
                       }}
                     >
                       {isConnecting ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5 mr-1" />}
-                      {runtimeByServer.get(id)?.connected ? '重连' : '连接'}
+                      {runtimeByServer.get(id)?.connected ? '断开' : '连接'}
                     </Button>
                   </div>
                 );
@@ -2311,10 +2338,10 @@ function McpSection() {
                         variant="outline"
                         size="sm"
                         disabled={isConnecting || toolsForm.enabled === false || toolsForm.mcp?.enabled !== true || selectedServer.enabled === false}
-                        onClick={() => handleConnectServer(selectedServerId)}
+                        onClick={() => handleToggleServerConnection(selectedServerId)}
                       >
                         {isConnecting ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <RefreshCw className="h-4 w-4 mr-1" />}
-                        {runtimeByServer.get(selectedServerId)?.connected ? '重连' : '连接'}
+                        {runtimeByServer.get(selectedServerId)?.connected ? '断开' : '连接'}
                       </Button>
                     </div>
                   );
@@ -2346,6 +2373,8 @@ function McpSection() {
                           setServerField('url', DEFAULT_MCP_SERVER.url);
                           setServerField('endpoint', DEFAULT_MCP_SERVER.endpoint);
                         }
+                        if (transport === 'streamable_http') setServerField('auto_start', true);
+                        if (transport === 'stdio') setServerField('auto_start', false);
                         if (transport === 'stdio' && !commandToString(selectedServer.command)) {
                           setServerField('command', 'npx');
                           setServerField('args', ['-y']);
@@ -2473,6 +2502,13 @@ function McpSection() {
                   </div>
 
                   <div className="rounded-lg p-3 space-y-3" style={{ border: '0.5px solid var(--border)' }}>
+                    <div className="flex items-center justify-between">
+                      <Label>随 Server 启动</Label>
+                      <Switch
+                        checked={selectedServer.auto_start ?? selectedServer.transport !== 'stdio'}
+                        onCheckedChange={(checked) => setServerField('auto_start', checked)}
+                      />
+                    </div>
                     <div className="flex items-center justify-between">
                       <Label>自动重连</Label>
                       <Switch checked={selectedServer.auto_reconnect !== false} onCheckedChange={(checked) => setServerField('auto_reconnect', checked)} />

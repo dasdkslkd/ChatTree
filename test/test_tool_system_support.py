@@ -61,6 +61,106 @@ def test_tool_manager_keeps_builtin_inventory_when_mcp_servers_configured():
     assert "list_available_tools" not in names
 
 
+def test_tool_manager_does_not_auto_start_stdio_mcp_servers_by_default():
+    class FakeConnectionManager:
+        def __init__(self):
+            self.added = []
+
+        async def add_server(self, name, config):
+            self.added.append((name, dict(config)))
+
+        async def remove_server(self, name):
+            self.removed = name
+
+        def list_all_tools(self):
+            return []
+
+        def list_server_names(self):
+            return []
+
+    manager = ToolManager({
+        "tools": {
+            "enabled": True,
+            "mcp": {
+                "enabled": True,
+                "servers": {
+                    "searxng": {
+                        "enabled": True,
+                        "transport": "stdio",
+                        "command": "npx",
+                        "args": ["-y mcp-searxng"],
+                    },
+                    "remote": {
+                        "enabled": True,
+                        "transport": "streamable_http",
+                        "endpoint": "http://127.0.0.1:3001",
+                    },
+                    "explicit": {
+                        "enabled": True,
+                        "transport": "stdio",
+                        "auto_start": True,
+                        "command": "demo-mcp",
+                    },
+                },
+            },
+        }
+    })
+    fake = FakeConnectionManager()
+    manager._connection_manager = fake
+
+    asyncio.run(manager.init())
+    inventory = manager.describe_inventory()
+
+    assert [name for name, _config in fake.added] == ["remote", "explicit"]
+    servers = {server["name"]: server for server in inventory["mcp_servers"]}
+    assert servers["searxng"]["auto_start"] is False
+    assert servers["remote"]["auto_start"] is True
+    assert servers["explicit"]["auto_start"] is True
+
+
+def test_tool_manager_disconnects_mcp_server_runtime_without_disabling_config():
+    class FakeConnectionManager:
+        def __init__(self):
+            self.removed = []
+
+        async def remove_server(self, name):
+            self.removed.append(name)
+
+        def list_all_tools(self):
+            return []
+
+        def list_server_names(self):
+            return [] if self.removed else ["searxng"]
+
+        async def list_server_statuses(self):
+            return {}
+
+    manager = ToolManager({
+        "tools": {
+            "enabled": True,
+            "mcp": {
+                "enabled": True,
+                "servers": {
+                    "searxng": {
+                        "enabled": True,
+                        "transport": "stdio",
+                        "command": "npx",
+                    },
+                },
+            },
+        }
+    })
+    fake = FakeConnectionManager()
+    manager._connection_manager = fake
+
+    inventory = asyncio.run(manager.disconnect_mcp_server("searxng"))
+
+    assert fake.removed == ["searxng"]
+    assert inventory["mcp_servers"][0]["enabled"] is True
+    assert inventory["mcp_servers"][0]["auto_start"] is False
+    assert inventory["mcp_servers"][0]["connected"] is False
+
+
 def test_tool_manager_registers_builtin_code_tools():
     manager = ToolManager({
         "tools": {
@@ -407,13 +507,18 @@ def test_stdio_process_prefers_popen_on_windows(monkeypatch):
     process = asyncio.run(server._start_stdio_process(["demo-mcp"], None, {"A": "B"}))
 
     assert isinstance(process, mcp_server_module._PopenProcess)
-    assert popen_calls == [(["demo-mcp"], {
+    assert len(popen_calls) == 1
+    assert popen_calls[0][0] == ["demo-mcp"]
+    assert {
         "stdin": mcp_server_module.subprocess.PIPE,
         "stdout": mcp_server_module.subprocess.PIPE,
         "stderr": mcp_server_module.subprocess.PIPE,
         "cwd": None,
         "env": {"A": "B"},
-    })]
+        "creationflags": 0x08000000,
+    }.items() <= popen_calls[0][1].items()
+    if hasattr(mcp_server_module.subprocess, "STARTUPINFO"):
+        assert "startupinfo" in popen_calls[0][1]
 
 
 def test_prepare_messages_reconstructs_tool_interaction_order():

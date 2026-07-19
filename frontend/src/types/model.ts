@@ -57,6 +57,7 @@ export interface McpServerConfig {
   tool_call_timeout?: number;
   heartbeat_enabled?: boolean;
   heartbeat_interval?: number;
+  auto_start?: boolean;
   auto_reconnect?: boolean;
   max_reconnect_attempts?: number;
   http_retries?: number;
@@ -126,6 +127,7 @@ export interface McpServerStatus {
   name: string;
   enabled: boolean;
   transport?: McpTransport;
+  auto_start?: boolean;
   connected: boolean;
   tools_count?: number;
   error?: string | null;

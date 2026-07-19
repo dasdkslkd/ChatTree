@@ -27,6 +27,7 @@ from .task_contract import task_step_parameter_schema
 from ..persistence.home import resolve_chattree_home
 from ..runs.types import FINISHED_RUN_STATUSES
 from ..shell_profile import ShellProfileResolver, render_command_tool_guidance
+from ..subprocess_utils import subprocess_window_kwargs
 
 
 DEFAULT_CODE_WORKSPACE = Path("workspaces") / "default"
@@ -1064,6 +1065,7 @@ class RunCommandTool(_CodeTool):
                 env=_shell_env(),
                 capture_output=True,
                 timeout=timeout,
+                **subprocess_window_kwargs(),
             )
         except subprocess.TimeoutExpired as exc:
             return _json({
@@ -1737,6 +1739,7 @@ def _grep_with_rg(
             text=True,
             encoding="utf-8",
             errors="replace",
+            **subprocess_window_kwargs(),
         )
     except FileNotFoundError:
         return None, "ripgrep_not_installed"
@@ -2082,6 +2085,7 @@ def _glob_files_with_rg(
             text=True,
             encoding="utf-8",
             errors="replace",
+            **subprocess_window_kwargs(),
         )
     except FileNotFoundError:
         return None, "ripgrep_not_installed"

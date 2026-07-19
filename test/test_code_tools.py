@@ -7,6 +7,7 @@ import sys
 from types import SimpleNamespace
 from pathlib import Path
 
+from backend.core import subprocess_utils
 from backend.core.tools import code_tools
 from backend.core.tools.base import BaseTool
 from backend.core.tools.code_tools import (
@@ -1122,6 +1123,29 @@ def test_run_command_non_python_command_keeps_shell_path(tmp_path, monkeypatch):
     assert result["stdout"] == "plain shell"
     assert calls[0]["args"][-1] == "echo plain shell"
     assert calls[0]["shell"] is False
+
+
+def test_run_command_hides_windows_console_window(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_run(*args, **kwargs):
+        calls.append(kwargs.copy())
+        return subprocess.CompletedProcess(kwargs["args"], 0, b"quiet", b"")
+
+    monkeypatch.setattr(code_tools.subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess_utils.os, "name", "nt", raising=False)
+    monkeypatch.setattr(
+        subprocess_utils.subprocess,
+        "CREATE_NO_WINDOW",
+        0x08000000,
+        raising=False,
+    )
+    tool = RunCommandTool(make_config(tmp_path))
+
+    result = load(run(tool.execute(command="echo quiet")))
+
+    assert result["stdout"] == "quiet"
+    assert calls[0]["creationflags"] == 0x08000000
 
 
 def test_run_command_rejects_cwd_outside_workspace(tmp_path):

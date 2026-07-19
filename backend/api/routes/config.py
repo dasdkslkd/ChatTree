@@ -251,6 +251,20 @@ async def connect_mcp_server(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/tools/mcp/servers/{server_name}/disconnect", response_model=Dict[str, Any])
+async def disconnect_mcp_server(
+    server_name: str,
+    tool_manager: ToolManager = Depends(get_tool_manager),
+):
+    """断开指定 MCP Server 的运行时连接"""
+    try:
+        return await tool_manager.disconnect_mcp_server(server_name)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"MCP Server {server_name} 不存在")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.put("/config", response_model=Dict[str, str])
 async def update_config(
     request: ConfigUpdateRequest,

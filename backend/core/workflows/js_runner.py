@@ -9,6 +9,8 @@ from pathlib import Path
 from contextlib import suppress
 from typing import Any, BinaryIO, Dict
 
+from ..subprocess_utils import subprocess_window_kwargs
+
 
 FORBIDDEN_SCRIPT_TERMS = (
     "require(",
@@ -56,6 +58,7 @@ class WorkflowJsRunner:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            **subprocess_window_kwargs(),
         )
         assert process.stdin is not None
         assert process.stdout is not None

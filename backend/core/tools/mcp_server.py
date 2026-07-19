@@ -9,6 +9,7 @@ from typing import Any, BinaryIO, Dict, List, Optional
 
 from .mcp_client import MCPClient, MCPClientError
 from .tool_filter import ToolFilter
+from ..subprocess_utils import subprocess_window_kwargs
 from ..utils.logger import setup_logger
 
 logger = setup_logger("MCPServer")
@@ -176,6 +177,7 @@ class McpServerManager:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
                 env=env,
+                **subprocess_window_kwargs(),
             )
         except NotImplementedError:
             logger.warning(
@@ -197,6 +199,7 @@ class McpServerManager:
             stderr=subprocess.PIPE,
             cwd=cwd,
             env=env,
+            **subprocess_window_kwargs(),
         ))
 
     async def start(self):

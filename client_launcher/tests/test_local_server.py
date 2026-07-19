@@ -319,7 +319,7 @@ def test_handshake_connection_error_never_spawns(tmp_path: Path):
     assert popen.calls == []
 
 
-def test_windows_spawn_uses_detached_process_flags(tmp_path: Path):
+def test_windows_spawn_hides_console_and_keeps_process_group(tmp_path: Path):
     attempts = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -341,7 +341,7 @@ def test_windows_spawn_uses_detached_process_flags(tmp_path: Path):
     asyncio.run(connector.close())
 
     _, kwargs = popen.calls[0]
-    expected = getattr(subprocess, "DETACHED_PROCESS", 0x00000008) | getattr(
+    expected = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) | getattr(
         subprocess,
         "CREATE_NEW_PROCESS_GROUP",
         0x00000200,
