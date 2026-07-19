@@ -42,6 +42,9 @@ class ImmediateConnector:
         self.instance_id = SERVER_A
         self.connect_calls = 0
         self.request_ids: list[str] = []
+        self.shutdown_calls: list[tuple[str, str, str | None]] = []
+        self.wait_stopped_calls: list[tuple[str, object, float]] = []
+        self.shutdown_error: LauncherError | None = None
         self.closed = False
 
     async def connect(
@@ -54,7 +57,6 @@ class ImmediateConnector:
         self.connect_calls += 1
         assert request_id is not None
         self.request_ids.append(request_id)
-        phase_callback("health")
         phase_callback("handshake")
         return ConnectedServer(
             endpoint=f"http://127.0.0.1:{profile.local.server_port}",
@@ -64,6 +66,32 @@ class ImmediateConnector:
                 "protocol_version": 1,
             },
         )
+
+    async def request_shutdown(
+        self,
+        profile,
+        expected_server_instance_id: str,
+        *,
+        request_id: str | None = None,
+    ):
+        self.shutdown_calls.append(
+            (profile.id, expected_server_instance_id, request_id)
+        )
+        if self.shutdown_error is not None:
+            raise self.shutdown_error
+        return (
+            f"http://127.0.0.1:{profile.local.server_port}",
+            profile.local.server_home,
+        )
+
+    def shutdown_target(self, profile):
+        return (
+            f"http://127.0.0.1:{profile.local.server_port}",
+            profile.local.server_home,
+        )
+
+    async def wait_stopped(self, endpoint, server_home, *, timeout: float):
+        self.wait_stopped_calls.append((endpoint, server_home, timeout))
 
     async def close(self):
         self.closed = True
@@ -1043,7 +1071,7 @@ def test_launcher_openapi_uses_owned_error_envelope(tmp_path: Path):
     with pytest.warns(UserWarning, match="Duplicate Operation ID"):
         schema = app.openapi()
 
-    assert ErrorEnvelope.__module__ == "client_launcher.http_errors"
+    assert ErrorEnvelope.__module__ == "chattree_protocol.http_errors"
     assert "ErrorEnvelope" in schema["components"]["schemas"]
     validation_schema = schema["paths"]["/client/v1/profiles"]["post"][
         "responses"
@@ -1145,3 +1173,98 @@ def test_request_boundary_sends_first_stream_chunk_before_unblock():
         await asyncio.wait_for(task, timeout=0.25)
 
     asyncio.run(scenario())
+
+
+def test_local_server_stop_and_restart_routes(tmp_path: Path):
+    app, _, connector = _app(tmp_path)
+
+    with TestClient(app) as client:
+        ready = client.post(
+            "/client/v1/profiles/local/connect",
+            headers={"X-Request-ID": "connect-tree"},
+        ).json()
+        old_lease_id = ready["connection_lease_id"]
+
+        stopped = client.post(
+            "/client/v1/profiles/local/server/stop",
+            headers={"X-Request-ID": "stop-tree"},
+            json={
+                "expected_server_instance_id": SERVER_A,
+                "timeout_seconds": 12,
+            },
+        )
+        assert stopped.status_code == 200
+        assert stopped.json()["status"] == "disconnected"
+        assert stopped.json()["connection_lease_id"] != old_lease_id
+
+        client.post("/client/v1/profiles/local/connect").raise_for_status()
+        restarted = client.post(
+            "/client/v1/profiles/local/server/restart",
+            headers={"X-Request-ID": "restart-tree"},
+            json={
+                "expected_server_instance_id": SERVER_A,
+                "timeout_seconds": 8,
+            },
+        )
+        assert restarted.status_code == 200
+        assert restarted.json()["status"] == "ready"
+        assert restarted.json()["server_instance_id"] == SERVER_A
+
+    assert connector.shutdown_calls == [
+        ("local", SERVER_A, "stop-tree"),
+        ("local", SERVER_A, "restart-tree"),
+    ]
+    assert [call[2] for call in connector.wait_stopped_calls] == [12.0, 8.0]
+    assert connector.connect_calls == 3
+
+
+def test_local_server_lifecycle_routes_use_modern_error_contract(tmp_path: Path):
+    app, _, connector = _app(tmp_path)
+    connector.shutdown_error = LauncherError(
+        "server_busy",
+        "Active runs prevent shutdown",
+        retryable=True,
+        status_code=409,
+        details={"active_run_ids": ["run-1"]},
+    )
+
+    with TestClient(app) as client:
+        client.post("/client/v1/profiles/local/connect").raise_for_status()
+        response = client.post(
+            "/client/v1/profiles/local/server/stop",
+            headers={"X-Request-ID": "busy-tree"},
+            json={"expected_server_instance_id": SERVER_A},
+        )
+
+    assert response.status_code == 409
+    assert response.headers["X-Request-ID"] == "busy-tree"
+    assert response.json() == {
+        "error": {
+            "code": "server_busy",
+            "message": "Active runs prevent shutdown",
+            "retryable": True,
+            "details": {"active_run_ids": ["run-1"]},
+            "request_id": "busy-tree",
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"expected_server_instance_id": SERVER_A, "timeout_seconds": 0},
+        {"expected_server_instance_id": SERVER_A, "unknown": True},
+    ],
+)
+def test_local_server_lifecycle_request_is_strict(tmp_path: Path, payload: dict):
+    app, _, _ = _app(tmp_path)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/client/v1/profiles/local/server/stop",
+            json=payload,
+        )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_request"

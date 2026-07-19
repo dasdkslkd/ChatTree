@@ -15,8 +15,11 @@ from typing import Any, Callable
 
 import httpx
 
+from backend.core.server import ServerHomeLock
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+LEASE_HEADER = "X-ChatTree-Connection-Lease-ID"
 
 
 def _free_port() -> int:
@@ -94,20 +97,18 @@ def _wait_for_json(
     )
 
 
-def _raw_headers(
-    port: int,
-    path: str,
+def _wait_until(
+    predicate: Callable[[], bool],
     *,
-    headers: dict[str, str] | None = None,
-) -> tuple[int, list[tuple[str, str]]]:
-    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-    try:
-        connection.request("GET", path, headers=headers or {})
-        response = connection.getresponse()
-        response.read()
-        return response.status, response.getheaders()
-    finally:
-        connection.close()
+    timeout: float = 15.0,
+    description: str,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"Timed out waiting for {description}")
 
 
 def _server_owner_pid(lock_path: Path, timeout: float = 10.0) -> int:
@@ -125,20 +126,6 @@ def _server_owner_pid(lock_path: Path, timeout: float = 10.0) -> int:
             last_error = exc
         time.sleep(0.05)
     raise AssertionError(f"Could not read Server owner pid: {last_error}")
-
-
-def _spawned_server_pid(pid_path: Path, timeout: float = 5.0) -> int:
-    deadline = time.monotonic() + timeout
-    last_error: BaseException | None = None
-    while time.monotonic() < deadline:
-        try:
-            pid = int(pid_path.read_text(encoding="ascii").strip())
-            if pid > 0:
-                return pid
-        except (OSError, ValueError) as exc:
-            last_error = exc
-        time.sleep(0.05)
-    raise AssertionError(f"Could not read spawned Server pid: {last_error}")
 
 
 def _port_is_closed(port: int) -> bool:
@@ -182,23 +169,9 @@ def _pid_is_running(pid: int) -> bool:
         kernel32.CloseHandle(handle)
 
 
-def _stop_server(
-    pid: int | None,
-    port: int,
-    *,
-    trusted_spawn_record: bool = False,
-) -> None:
-    if pid is None or not _pid_is_running(pid):
+def _cleanup_server(pid: int, port: int) -> None:
+    if not _pid_is_running(pid):
         return
-    if _port_is_closed(port) and not trusted_spawn_record:
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            if not _pid_is_running(pid):
-                return
-            time.sleep(0.05)
-        raise AssertionError(
-            f"Refusing to signal pid {pid}: Server port {port} is already closed"
-        )
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
@@ -212,46 +185,50 @@ def _stop_server(
         os.kill(pid, signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
     except ProcessLookupError:
         return
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        if _port_is_closed(port) and not _pid_is_running(pid):
-            return
-        time.sleep(0.05)
-    raise AssertionError(f"Server pid {pid} did not exit and release port {port}")
 
 
-def test_spawned_server_pid_reads_launcher_sidecar(tmp_path: Path) -> None:
-    pid_path = tmp_path / "local-server.spawn.pid"
-    pid_path.write_text("456\n", encoding="ascii")
-
-    assert _spawned_server_pid(pid_path, timeout=0.1) == 456
-
-
-def test_stop_server_accepts_trusted_pre_bind_spawn_record() -> None:
-    process = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(60)"],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        shell=False,
-        close_fds=True,
-    )
+def _send_without_reading_response(
+    port: int,
+    path: str,
+    *,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+) -> None:
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     try:
-        _stop_server(
-            process.pid,
-            _free_port(),
-            trusted_spawn_record=True,
-        )
-        process.wait(timeout=5)
+        connection.putrequest("POST", path)
+        connection.putheader("Content-Type", "application/json")
+        connection.putheader("Content-Length", str(len(body)))
+        for name, value in headers.items():
+            connection.putheader(name, value)
+        connection.endheaders(body)
     finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait(timeout=5)
-
-    assert process.returncode is not None
+        connection.close()
 
 
-def test_real_launcher_entry_proxy_and_home_lock(tmp_path: Path) -> None:
+def _wait_for_conversation_run(
+    client: httpx.Client,
+    conversation_id: str,
+    headers: dict[str, str],
+    *,
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        response = client.get(
+            f"/p/local/api/v1/conversations/{conversation_id}/runs",
+            headers=headers,
+        )
+        response.raise_for_status()
+        runs = response.json()
+        if runs:
+            return runs[0]
+        time.sleep(0.05)
+    raise AssertionError("Response-lost start did not create a durable run")
+
+
+def test_real_process_protocol_idempotency_restart_and_stop(tmp_path: Path) -> None:
     client_home = tmp_path / "client"
     server_home = tmp_path / "server"
     ports: set[int] = set()
@@ -280,7 +257,8 @@ def test_real_launcher_entry_proxy_and_home_lock(tmp_path: Path) -> None:
     )
     launcher: subprocess.Popen[bytes] | None = None
     second_server: subprocess.Popen[bytes] | None = None
-    server_pid: int | None = None
+    server_pids: set[int] = set()
+    instance_id: str | None = None
 
     try:
         launcher = _start_launcher(env, launcher_log)
@@ -291,147 +269,115 @@ def test_real_launcher_entry_proxy_and_home_lock(tmp_path: Path) -> None:
             log_path=launcher_log,
         )
         instance_id = str(ready["server_instance_id"])
-        lease_id = str(ready["connection_lease_id"])
-        lease_headers = {"X-ChatTree-Connection-Lease-ID": lease_id}
-        server_pid = _server_owner_pid(server_home / ".server.lock")
-        assert _spawned_server_pid(
-            client_home / "logs" / "local-server-local.spawn.pid"
-        ) == server_pid
-
-        direct_status, direct_headers = _raw_headers(
-            server_port,
-            "/api/v1/health",
-        )
-        missing_proxy_status, missing_proxy_headers = _raw_headers(
-            launcher_port,
-            "/p/local/api/v1/health",
-        )
-        proxy_status, proxy_headers = _raw_headers(
-            launcher_port,
-            "/p/local/api/v1/health",
-            headers=lease_headers,
-        )
-        assert missing_proxy_status == 409
-        assert [
-            value
-            for key, value in missing_proxy_headers
-            if key.lower() == "x-chattree-connection-lease-id"
-        ] == [lease_id]
-        assert direct_status == proxy_status == 200
-        assert [
-            value
-            for key, value in proxy_headers
-            if key.lower() == "x-chattree-connection-lease-id"
-        ] == [lease_id]
-        for name in ("date", "server"):
-            assert len(
-                [value for key, value in direct_headers if key.lower() == name]
-            ) == 1
-            assert len(
-                [value for key, value in proxy_headers if key.lower() == name]
-            ) == 1
+        lease_1 = str(ready["connection_lease_id"])
+        lease_headers_1 = {LEASE_HEADER: lease_1}
+        server_pid_1 = _server_owner_pid(server_home / ".server.lock")
+        server_pids.add(server_pid_1)
+        assert not list((client_home / "logs").glob("*.spawn.pid"))
 
         base_url = f"http://127.0.0.1:{launcher_port}"
         with httpx.Client(
             base_url=base_url,
             trust_env=False,
-            timeout=10,
+            timeout=30,
             follow_redirects=False,
         ) as client:
-            missing = client.get(
-                "/client/v1/not-found",
-                headers={"X-Request-ID": "real-launcher-404"},
+            handshake = client.get(
+                "/p/local/api/v1/handshake",
+                headers=lease_headers_1,
             )
-            assert missing.status_code == 404
-            assert missing.headers.get_list("X-Request-ID") == [
-                "real-launcher-404"
-            ]
-            assert missing.json() == {
-                "error": {
-                    "code": "not_found",
-                    "message": "Not Found",
-                    "retryable": False,
-                    "request_id": "real-launcher-404",
-                }
-            }
+            handshake.raise_for_status()
+            assert handshake.json()["server_instance_id"] == instance_id
+            assert {
+                "error_envelope_v1",
+                "idempotent_run_start_v1",
+                "cooperative_shutdown_v1",
+            }.issubset(handshake.json()["features"])
 
-            redirect = client.get(
-                "/p/local/api/v1/conversations/",
-                headers=lease_headers,
-            )
-            assert redirect.status_code == 307
-            assert redirect.headers.get_list(
-                "X-ChatTree-Connection-Lease-ID"
-            ) == [lease_id]
-            assert redirect.headers["location"] == (
-                "/p/local/api/v1/conversations"
-            )
+            missing_lease = client.get("/p/local/api/v1/handshake")
+            assert missing_lease.status_code == 409
+            assert missing_lease.json()["error"]["code"] == "stale_connection_epoch"
 
             conversation = client.post(
                 "/p/local/api/v1/conversations",
-                headers=lease_headers,
+                headers=lease_headers_1,
                 json={"title": "Launcher E2E"},
             )
             conversation.raise_for_status()
-            assert conversation.headers.get_list(
-                "X-ChatTree-Connection-Lease-ID"
-            ) == [lease_id]
             conversation_data = conversation.json()
-            statuses: list[str] = []
-            content_parts: list[str] = []
-            done = False
-            with client.stream(
-                "POST",
+            conversation_id = str(conversation_data["id"])
+            start_path = (
                 "/p/local/api/v1/conversations/"
-                f"{conversation_data['id']}/messages/stream",
-                headers=lease_headers,
-                json={
-                    "content": "/help",
-                    "parent_node_id": conversation_data["current_node_id"],
+                f"{conversation_id}/messages/runs"
+            )
+            start_payload = {
+                "content": "/help",
+                "parent_node_id": conversation_data["current_node_id"],
+            }
+            idempotency_key = "real-response-loss-message"
+            _send_without_reading_response(
+                launcher_port,
+                start_path,
+                headers={
+                    **lease_headers_1,
+                    "Idempotency-Key": idempotency_key,
+                    "X-Request-ID": "real-lost-response",
                 },
-            ) as stream:
-                stream.raise_for_status()
-                assert stream.headers["content-type"].startswith(
-                    "text/event-stream"
-                )
-                assert stream.headers.get_list(
-                    "X-ChatTree-Connection-Lease-ID"
-                ) == [lease_id]
-                for line in stream.iter_lines():
+                payload=start_payload,
+            )
+            first_run = _wait_for_conversation_run(
+                client,
+                conversation_id,
+                lease_headers_1,
+            )
+
+            replay = client.post(
+                start_path,
+                headers={
+                    **lease_headers_1,
+                    "Idempotency-Key": idempotency_key,
+                },
+                json=start_payload,
+            )
+            assert replay.status_code == 200
+            assert replay.json()["created"] is False
+            assert replay.json()["run_id"] == first_run["run_id"]
+
+            conflict = client.post(
+                start_path,
+                headers={
+                    **lease_headers_1,
+                    "Idempotency-Key": idempotency_key,
+                },
+                json={**start_payload, "content": "/status"},
+            )
+            assert conflict.status_code == 409
+            assert conflict.json()["error"]["code"] == "idempotency_key_conflict"
+
+            statuses: list[str] = []
+            with client.stream(
+                "GET",
+                f"/p/local/api/v1/runs/{first_run['run_id']}/attach",
+                headers=lease_headers_1,
+            ) as attached:
+                attached.raise_for_status()
+                done = False
+                for line in attached.iter_lines():
                     if not line.startswith("data:"):
                         continue
                     value = line[5:].strip()
                     if value == "[DONE]":
                         done = True
                         break
-                    event = json.loads(value)
-                    statuses.append(str(event.get("status")))
-                    if event.get("content"):
-                        content_parts.append(str(event["content"]))
+                    statuses.append(str(json.loads(value).get("status")))
             assert done is True
             assert {"start", "content", "complete"}.issubset(statuses)
-            assert "".join(content_parts).strip()
 
         second_env = env.copy()
         second_env["CHATTREE_SERVER_PORT"] = str(second_server_port)
         with second_server_log.open("wb") as output:
             second_server = subprocess.Popen(
-                [
-                    sys.executable,
-                    "-m",
-                    "uvicorn",
-                    "main:app",
-                    "--host",
-                    "127.0.0.1",
-                    "--port",
-                    str(second_server_port),
-                    "--workers",
-                    "1",
-                    "--lifespan",
-                    "on",
-                    "--app-dir",
-                    str(PROJECT_ROOT),
-                ],
+                [sys.executable, "-m", "main"],
                 cwd=PROJECT_ROOT,
                 env=second_env,
                 stdin=subprocess.DEVNULL,
@@ -440,14 +386,11 @@ def test_real_launcher_entry_proxy_and_home_lock(tmp_path: Path) -> None:
                 shell=False,
                 close_fds=True,
             )
-            assert second_server.wait(timeout=15) != 0
-        assert "CHATTREE_HOME" in _read_log(second_server_log)
-        health = httpx.get(
-            f"http://127.0.0.1:{server_port}/api/v1/health",
-            trust_env=False,
-            timeout=2,
-        )
-        assert health.json()["server_instance_id"] == instance_id
+            second_server.wait(timeout=15)
+        second_log = _read_log(second_server_log)
+        assert "ServerHomeInUseError" in second_log
+        assert "CHATTREE_HOME" in second_log
+        assert _port_is_closed(second_server_port)
 
         _stop_process(launcher)
         launcher = None
@@ -459,47 +402,123 @@ def test_real_launcher_entry_proxy_and_home_lock(tmp_path: Path) -> None:
         assert direct_health.json()["server_instance_id"] == instance_id
 
         launcher = _start_launcher(env, launcher_log)
-        restarted = _wait_for_json(
+        reconnected = _wait_for_json(
             status_url,
             lambda payload: payload.get("status") == "ready",
             process=launcher,
             log_path=launcher_log,
         )
-        assert restarted["server_instance_id"] == instance_id
-        assert _server_owner_pid(server_home / ".server.lock") == server_pid
+        assert reconnected["server_instance_id"] == instance_id
+        assert _server_owner_pid(server_home / ".server.lock") == server_pid_1
+        lease_before_restart = str(reconnected["connection_lease_id"])
 
-        with closing(
-            sqlite3.connect(server_home / "chattree.sqlite")
-        ) as connection:
+        with httpx.Client(
+            base_url=f"http://127.0.0.1:{launcher_port}",
+            trust_env=False,
+            timeout=60,
+        ) as client:
+            stale_after_launcher_restart = client.post(
+                "/p/local/api/v1/conversations",
+                headers=lease_headers_1,
+                json={"title": "must not be created"},
+            )
+            assert stale_after_launcher_restart.status_code == 409
+            assert stale_after_launcher_restart.json()["error"]["code"] == (
+                "stale_connection_epoch"
+            )
+
+            restarted = client.post(
+                "/client/v1/profiles/local/server/restart",
+                json={
+                    "expected_server_instance_id": instance_id,
+                    "timeout_seconds": 30,
+                },
+            )
+            restarted.raise_for_status()
+            restarted_data = restarted.json()
+            assert restarted_data["status"] == "ready"
+            assert restarted_data["server_instance_id"] == instance_id
+            lease_2 = str(restarted_data["connection_lease_id"])
+            assert lease_2 != lease_before_restart
+
+            server_pid_2 = _server_owner_pid(server_home / ".server.lock")
+            server_pids.add(server_pid_2)
+            assert server_pid_2 != server_pid_1
+            _wait_until(
+                lambda: not _pid_is_running(server_pid_1),
+                description="old Server process exit after restart",
+            )
+
+            stale_after_server_restart = client.post(
+                "/p/local/api/v1/conversations",
+                headers={LEASE_HEADER: lease_before_restart},
+                json={"title": "must not be created either"},
+            )
+            assert stale_after_server_restart.status_code == 409
+            assert stale_after_server_restart.headers[LEASE_HEADER] == lease_2
+
+            current_handshake = client.get(
+                "/p/local/api/v1/handshake",
+                headers={LEASE_HEADER: lease_2},
+            )
+            current_handshake.raise_for_status()
+            assert current_handshake.json()["server_instance_id"] == instance_id
+
+            stopped = client.post(
+                "/client/v1/profiles/local/server/stop",
+                json={
+                    "expected_server_instance_id": instance_id,
+                    "timeout_seconds": 30,
+                },
+            )
+            stopped.raise_for_status()
+            assert stopped.json()["status"] == "disconnected"
+
+            rejected_after_stop = client.post(
+                "/p/local/api/v1/conversations",
+                headers={LEASE_HEADER: lease_2},
+                json={"title": "Server is stopped"},
+            )
+            assert rejected_after_stop.status_code == 503
+            assert rejected_after_stop.json()["error"]["code"] == "profile_not_ready"
+
+        _wait_until(
+            lambda: _port_is_closed(server_port),
+            description="Server port release after cooperative stop",
+        )
+        _wait_until(
+            lambda: not _pid_is_running(server_pid_2),
+            description="Server process exit after cooperative stop",
+        )
+        with ServerHomeLock(server_home):
+            pass
+        assert not list((client_home / "logs").glob("*.spawn.pid"))
+
+        with closing(sqlite3.connect(server_home / "chattree.sqlite")) as connection:
             assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
             assert connection.execute("PRAGMA quick_check").fetchone()[0] == "ok"
             assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         _stop_process(second_server)
-        _stop_process(launcher)
-        trusted_spawn_record = False
-        if server_pid is None:
+        if launcher is not None and launcher.poll() is None and instance_id is not None:
             try:
-                server_pid = _spawned_server_pid(
-                    client_home / "logs" / "local-server-local.spawn.pid",
-                    timeout=1,
+                httpx.post(
+                    f"http://127.0.0.1:{launcher_port}"
+                    "/client/v1/profiles/local/server/stop",
+                    json={
+                        "expected_server_instance_id": instance_id,
+                        "timeout_seconds": 5,
+                    },
+                    trust_env=False,
+                    timeout=10,
                 )
-                trusted_spawn_record = True
-            except AssertionError:
-                if (server_home / ".server.lock").exists():
-                    try:
-                        server_pid = _server_owner_pid(
-                            server_home / ".server.lock",
-                            timeout=1,
-                        )
-                    except AssertionError:
-                        pass
-        _stop_server(
-            server_pid,
-            server_port,
-            trusted_spawn_record=trusted_spawn_record,
-        )
+            except httpx.HTTPError:
+                pass
+        _stop_process(launcher)
+        for pid in server_pids:
+            _cleanup_server(pid, server_port)
 
     assert _port_is_closed(launcher_port)
     assert _port_is_closed(server_port)
     assert _port_is_closed(second_server_port)
+    assert all(not _pid_is_running(pid) for pid in server_pids)

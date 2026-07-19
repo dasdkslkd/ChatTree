@@ -7,6 +7,7 @@ from typing import Any
 from uuid import uuid4
 
 from client_launcher.http_errors import canonical_request_id
+from client_launcher.local_server import LocalServerShutdownUncertainError
 from client_launcher.models import (
     ConnectionErrorInfo,
     EndpointLease,
@@ -29,6 +30,7 @@ class SessionManager:
         self._attempt_generation: dict[str, int] = {}
         self._connect_tasks: dict[str, asyncio.Task[ServerSession]] = {}
         self._connect_intents: dict[str, tuple[bool, str | None]] = {}
+        self._lifecycle_locks: dict[str, asyncio.Lock] = {}
         self._background_tasks: set[asyncio.Task[object]] = set()
         self._guard = asyncio.Lock()
         self._closed = False
@@ -107,17 +109,18 @@ class SessionManager:
         for profile in self.profiles.list():
             if not profile.auto_connect:
                 continue
-            prepared = await self._prepare_connect(
-                profile.id,
-                rebind=False,
-                expected_server_instance_id=None,
-                request_id=canonical_request_id(None),
-            )
+            async with self._profile_lifecycle_lock(profile.id):
+                prepared = await self._prepare_connect(
+                    profile.id,
+                    rebind=False,
+                    expected_server_instance_id=None,
+                    request_id=canonical_request_id(None),
+                )
             if isinstance(prepared, ServerSession):
                 continue
-            if prepared not in self._background_tasks:
-                self._background_tasks.add(prepared)
-                prepared.add_done_callback(self._background_done)
+            task = prepared
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_done)
 
     async def connect(
         self,
@@ -128,12 +131,37 @@ class SessionManager:
         request_id: str | None = None,
     ) -> ServerSession:
         request_id = canonical_request_id(request_id)
+        async with self._profile_lifecycle_lock(profile_id):
+            prepared = await self._prepare_connect(
+                profile_id,
+                rebind=rebind,
+                expected_server_instance_id=expected_server_instance_id,
+                request_id=request_id,
+            )
+        return await self._await_connect(profile_id, prepared)
+
+    async def _connect_locked(
+        self,
+        profile_id: str,
+        *,
+        rebind: bool,
+        expected_server_instance_id: str | None,
+        request_id: str | None,
+    ) -> ServerSession:
+        request_id = canonical_request_id(request_id)
         prepared = await self._prepare_connect(
             profile_id,
             rebind=rebind,
             expected_server_instance_id=expected_server_instance_id,
             request_id=request_id,
         )
+        return await self._await_connect(profile_id, prepared)
+
+    @staticmethod
+    async def _await_connect(
+        profile_id: str,
+        prepared: ServerSession | asyncio.Task[ServerSession],
+    ) -> ServerSession:
         if isinstance(prepared, ServerSession):
             return prepared
         task = prepared
@@ -210,7 +238,7 @@ class SessionManager:
                 generation = self._attempt_generation.get(profile_id, 0) + 1
                 self._attempt_generation[profile_id] = generation
                 current.status = "connecting"
-                current.phase = "health"
+                current.phase = "handshake"
                 current.error = None
                 self._endpoints.pop(profile_id, None)
                 task = asyncio.create_task(
@@ -235,6 +263,10 @@ class SessionManager:
             return task
 
     async def disconnect(self, profile_id: str) -> ServerSession:
+        async with self._profile_lifecycle_lock(profile_id):
+            return await self._disconnect_profile_locked(profile_id)
+
+    async def _disconnect_profile_locked(self, profile_id: str) -> ServerSession:
         task: asyncio.Task[ServerSession] | None
         async with self._guard:
             self.profiles.get(profile_id)
@@ -242,6 +274,148 @@ class SessionManager:
 
         if task is not None:
             await asyncio.gather(task, return_exceptions=True)
+        return snapshot
+
+    async def stop(
+        self,
+        profile_id: str,
+        *,
+        expected_server_instance_id: str,
+        timeout: float,
+        request_id: str | None = None,
+    ) -> ServerSession:
+        async with self._profile_lifecycle_lock(profile_id):
+            return await self._stop_locked(
+                profile_id,
+                expected_server_instance_id=expected_server_instance_id,
+                timeout=timeout,
+                request_id=request_id,
+            )
+
+    async def restart(
+        self,
+        profile_id: str,
+        *,
+        expected_server_instance_id: str,
+        timeout: float,
+        request_id: str | None = None,
+    ) -> ServerSession:
+        async with self._profile_lifecycle_lock(profile_id):
+            await self._stop_locked(
+                profile_id,
+                expected_server_instance_id=expected_server_instance_id,
+                timeout=timeout,
+                request_id=request_id,
+            )
+            return await self._connect_locked(
+                profile_id,
+                rebind=False,
+                expected_server_instance_id=None,
+                request_id=request_id,
+            )
+
+    async def _stop_locked(
+        self,
+        profile_id: str,
+        *,
+        expected_server_instance_id: str,
+        timeout: float,
+        request_id: str | None,
+    ) -> ServerSession:
+        async with self._guard:
+            profile = self.profiles.get(profile_id)
+            session = self._session(profile_id)
+            if profile.kind != "local":
+                raise LauncherError(
+                    "server_lifecycle_unsupported",
+                    "Launcher stop/restart only supports local Server profiles",
+                    retryable=False,
+                    status_code=409,
+                )
+            if session.status != "ready" or session.server_instance_id is None:
+                raise LauncherError(
+                    "profile_not_ready",
+                    f"Profile {profile_id} is not connected",
+                    retryable=True,
+                    status_code=409,
+                )
+            if session.server_instance_id != expected_server_instance_id:
+                raise LauncherError(
+                    "server_identity_mismatch",
+                    "Connected Server does not match expected_server_instance_id",
+                    retryable=False,
+                    status_code=409,
+                    details={
+                        "expected_server_instance_id": expected_server_instance_id,
+                        "observed_server_instance_id": session.server_instance_id,
+                    },
+                )
+
+        endpoint, server_home = self.connector.shutdown_target(profile)
+        pending_cancellation: asyncio.CancelledError | None = None
+        try:
+            endpoint, server_home = await self.connector.request_shutdown(
+                profile,
+                expected_server_instance_id,
+                request_id=request_id,
+            )
+        except LocalServerShutdownUncertainError as exc:
+            endpoint = exc.endpoint
+            server_home = exc.server_home
+        except asyncio.CancelledError as exc:
+            pending_cancellation = exc
+
+        reconciliation = asyncio.create_task(
+            self._reconcile_stopped_session(
+                profile_id,
+                expected_server_instance_id=expected_server_instance_id,
+                endpoint=endpoint,
+                server_home=server_home,
+                timeout=timeout,
+            ),
+            name=f"local-server-stop-reconcile:{profile_id}",
+        )
+        while True:
+            try:
+                snapshot = await asyncio.shield(reconciliation)
+                break
+            except asyncio.CancelledError as exc:
+                if pending_cancellation is None:
+                    pending_cancellation = exc
+                continue
+            except BaseException as exc:
+                if pending_cancellation is not None:
+                    raise pending_cancellation from exc
+                raise
+        if pending_cancellation is not None:
+            raise pending_cancellation
+        return snapshot
+
+    async def _reconcile_stopped_session(
+        self,
+        profile_id: str,
+        *,
+        expected_server_instance_id: str,
+        endpoint: str,
+        server_home: Any,
+        timeout: float,
+    ) -> ServerSession:
+        async with self._guard:
+            current = self._session(profile_id)
+            if (
+                current.status == "ready"
+                and current.server_instance_id == expected_server_instance_id
+            ):
+                snapshot, task = self._disconnect_locked(profile_id)
+            else:
+                snapshot, task = replace(current), None
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
+        await self.connector.wait_stopped(
+            endpoint,
+            server_home,
+            timeout=timeout,
+        )
         return snapshot
 
     async def update_profile(
@@ -252,32 +426,34 @@ class SessionManager:
         auto_connect: bool | None = None,
         local: LocalTarget | None = None,
     ) -> ServerProfile:
-        task: asyncio.Task[ServerSession] | None = None
-        async with self._guard:
-            current = self.profiles.get(profile_id)
-            updated = self.profiles.update(
-                profile_id,
-                label=label,
-                auto_connect=auto_connect,
-                local=local,
-            )
-            if updated.local != current.local:
-                _, task = self._disconnect_locked(profile_id)
+        async with self._profile_lifecycle_lock(profile_id):
+            task: asyncio.Task[ServerSession] | None = None
+            async with self._guard:
+                current = self.profiles.get(profile_id)
+                updated = self.profiles.update(
+                    profile_id,
+                    label=label,
+                    auto_connect=auto_connect,
+                    local=local,
+                )
+                if updated.local != current.local:
+                    _, task = self._disconnect_locked(profile_id)
 
-        if task is not None:
-            await asyncio.gather(task, return_exceptions=True)
-        return updated
+            if task is not None:
+                await asyncio.gather(task, return_exceptions=True)
+            return updated
 
     async def delete_profile(self, profile_id: str) -> ServerProfile:
-        task: asyncio.Task[ServerSession] | None
-        async with self._guard:
-            deleted = self.profiles.delete(profile_id)
-            _, task = self._disconnect_locked(profile_id)
-            self._sessions.pop(profile_id, None)
+        async with self._profile_lifecycle_lock(profile_id):
+            task: asyncio.Task[ServerSession] | None
+            async with self._guard:
+                deleted = self.profiles.delete(profile_id)
+                _, task = self._disconnect_locked(profile_id)
+                self._sessions.pop(profile_id, None)
 
-        if task is not None:
-            await asyncio.gather(task, return_exceptions=True)
-        return deleted
+            if task is not None:
+                await asyncio.gather(task, return_exceptions=True)
+            return deleted
 
     def _disconnect_locked(
         self,
@@ -304,14 +480,14 @@ class SessionManager:
         if self._closed:
             return
         self._closed = True
-        profile_ids = {profile.id for profile in self.profiles.list()}
-        profile_ids.update(self._connect_tasks)
-        for profile_id in profile_ids:
-            await self.disconnect(profile_id)
         for task in list(self._background_tasks):
             task.cancel()
         if self._background_tasks:
             await asyncio.gather(*self._background_tasks, return_exceptions=True)
+        profile_ids = {profile.id for profile in self.profiles.list()}
+        profile_ids.update(self._connect_tasks)
+        for profile_id in profile_ids:
+            await self.disconnect(profile_id)
         await self.connector.close()
 
     async def _run_connect(
@@ -454,6 +630,9 @@ class SessionManager:
         invalidated = self._lease_invalidations.pop(profile_id, None)
         if invalidated is not None:
             invalidated.set()
+
+    def _profile_lifecycle_lock(self, profile_id: str) -> asyncio.Lock:
+        return self._lifecycle_locks.setdefault(profile_id, asyncio.Lock())
 
     def _background_done(self, task: asyncio.Task[object]) -> None:
         self._background_tasks.discard(task)

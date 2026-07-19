@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -16,10 +17,14 @@ from client_launcher.local_server import (
     LocalServerIdentityError,
     LocalServerProtocolError,
     LocalServerResponseError,
+    LocalServerShutdownUncertainError,
     LocalServerStartExitedError,
     LocalServerStartTimeoutError,
+    LocalServerStopTimeoutError,
     STARTUP_LOG_TAIL_BYTES,
 )
+from client_launcher.models import LauncherError
+from backend.core.server import ServerHomeInUseError
 
 
 SERVER_ID = "5fb0d7cc-785e-40c2-875d-218447b15583"
@@ -70,17 +75,6 @@ def _profile(
             server_home=str(tmp_path / "server-home"),
             server_port=port,
         ),
-    )
-
-
-def _health(server_id: str = SERVER_ID) -> httpx.Response:
-    return httpx.Response(
-        200,
-        json={
-            "status": "ok",
-            "server_instance_id": server_id,
-            "time": 1784112000,
-        },
     )
 
 
@@ -153,6 +147,22 @@ class FakeClock:
         self.now += delay
 
 
+class FakeHomeLock:
+    def __init__(self, *, busy: bool) -> None:
+        self.busy = busy
+        self.acquired = False
+        self.release_calls = 0
+
+    def acquire(self) -> None:
+        if self.busy:
+            raise ServerHomeInUseError("home is locked")
+        self.acquired = True
+
+    def release(self) -> None:
+        self.release_calls += 1
+        self.acquired = False
+
+
 def test_existing_server_is_reused_without_spawn(tmp_path: Path):
     paths: list[str] = []
     request_ids: list[str] = []
@@ -160,7 +170,7 @@ def test_existing_server_is_reused_without_spawn(tmp_path: Path):
     def handler(request: httpx.Request) -> httpx.Response:
         paths.append(request.url.path)
         request_ids.extend(request.headers.get_list("x-request-id"))
-        return _health() if request.url.path.endswith("/health") else _handshake()
+        return _handshake()
 
     popen = FakePopen()
     connector = LocalServerConnector(
@@ -181,8 +191,8 @@ def test_existing_server_is_reused_without_spawn(tmp_path: Path):
     assert connected.endpoint == "http://127.0.0.1:18001"
     assert connected.server_instance_id == SERVER_ID
     assert connected.handshake["provider_configured"] is False
-    assert paths == ["/api/v1/health", "/api/v1/handshake"]
-    assert request_ids == ["existing-server-tree", "existing-server-tree"]
+    assert paths == ["/api/v1/handshake"]
+    assert request_ids == ["existing-server-tree"]
     assert popen.calls == []
 
 
@@ -194,7 +204,7 @@ def test_connection_refusal_spawns_detached_production_server(tmp_path: Path):
         requests += 1
         if requests == 1:
             raise httpx.ConnectError("refused", request=request)
-        return _health() if request.url.path.endswith("/health") else _handshake()
+        return _handshake()
 
     phases: list[str] = []
     process = FakeProcess()
@@ -221,18 +231,7 @@ def test_connection_refusal_spawns_detached_production_server(tmp_path: Path):
     assert argv == [
         str(server_python.resolve()),
         "-m",
-        "uvicorn",
-        "main:app",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        "18001",
-        "--workers",
-        "1",
-        "--lifespan",
-        "on",
-        "--app-dir",
-        str(project_root.resolve()),
+        "main",
     ]
     assert kwargs["shell"] is False
     assert kwargs["close_fds"] is True
@@ -247,14 +246,8 @@ def test_connection_refusal_spawns_detached_production_server(tmp_path: Path):
     assert kwargs["env"]["PYTHONUNBUFFERED"] == "1"
     assert kwargs["env"]["PYTHONIOENCODING"] == "utf-8"
     assert kwargs["stdout"].closed
-    spawn_pid_path = (
-        tmp_path
-        / "client"
-        / "logs"
-        / "local-server-local-profile.spawn.pid"
-    )
-    assert spawn_pid_path.read_text(encoding="ascii") == f"{process.pid}\n"
-    assert phases == ["health", "local_start", "health", "handshake"]
+    assert not list((tmp_path / "client" / "logs").glob("*.spawn.pid"))
+    assert phases == ["handshake", "local_start", "handshake"]
     assert process.terminate_calls == 0
     assert process.kill_calls == 0
 
@@ -267,7 +260,7 @@ def test_loopback_connect_timeout_still_starts_server(tmp_path: Path):
         requests += 1
         if requests == 1:
             raise httpx.ConnectTimeout("timed out", request=request)
-        return _health() if request.url.path.endswith("/health") else _handshake()
+        return _handshake()
 
     popen = FakePopen()
     connector = LocalServerConnector(
@@ -285,7 +278,7 @@ def test_loopback_connect_timeout_still_starts_server(tmp_path: Path):
 
 
 @pytest.mark.parametrize("error_type", [httpx.ConnectError, httpx.ConnectTimeout])
-def test_unavailable_health_on_occupied_port_never_spawns(
+def test_unavailable_handshake_on_occupied_port_never_spawns(
     tmp_path: Path,
     error_type,
 ):
@@ -309,8 +302,6 @@ def test_unavailable_health_on_occupied_port_never_spawns(
 
 def test_handshake_connection_error_never_spawns(tmp_path: Path):
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/health"):
-            return _health()
         raise httpx.ConnectError("dropped", request=request)
 
     popen = FakePopen()
@@ -318,6 +309,7 @@ def test_handshake_connection_error_never_spawns(tmp_path: Path):
         _settings(tmp_path),
         transport=httpx.MockTransport(handler),
         popen_factory=popen,
+        port_available=lambda _port: False,
     )
 
     with pytest.raises(LocalServerResponseError):
@@ -335,7 +327,7 @@ def test_windows_spawn_uses_detached_process_flags(tmp_path: Path):
         attempts += 1
         if attempts == 1:
             raise httpx.ConnectError("refused", request=request)
-        return _health() if request.url.path.endswith("/health") else _handshake()
+        return _handshake()
 
     popen = FakePopen()
     connector = LocalServerConnector(
@@ -359,7 +351,7 @@ def test_windows_spawn_uses_detached_process_flags(tmp_path: Path):
 
 
 @pytest.mark.parametrize("status_code", [301, 404, 500])
-def test_http_response_on_health_never_spawns(tmp_path: Path, status_code: int):
+def test_http_response_on_handshake_never_spawns(tmp_path: Path, status_code: int):
     popen = FakePopen()
     connector = LocalServerConnector(
         _settings(tmp_path),
@@ -374,7 +366,7 @@ def test_http_response_on_health_never_spawns(tmp_path: Path, status_code: int):
     assert popen.calls == []
 
 
-def test_malformed_health_never_spawns(tmp_path: Path):
+def test_malformed_handshake_never_spawns(tmp_path: Path):
     popen = FakePopen()
     connector = LocalServerConnector(
         _settings(tmp_path),
@@ -397,9 +389,7 @@ def test_malformed_health_never_spawns(tmp_path: Path):
 
 def test_protocol_mismatch_fails_without_spawn(tmp_path: Path):
     def handler(request: httpx.Request) -> httpx.Response:
-        return _health() if request.url.path.endswith("/health") else _handshake(
-            protocol_version=2
-        )
+        return _handshake(protocol_version=0)
 
     popen = FakePopen()
     connector = LocalServerConnector(
@@ -415,11 +405,26 @@ def test_protocol_mismatch_fails_without_spawn(tmp_path: Path):
     assert popen.calls == []
 
 
-def test_health_and_handshake_identity_must_match(tmp_path: Path):
+def test_future_protocol_version_is_accepted_without_spawn(tmp_path: Path):
+    popen = FakePopen()
+    connector = LocalServerConnector(
+        _settings(tmp_path),
+        transport=httpx.MockTransport(
+            lambda request: _handshake(protocol_version=2)
+        ),
+        popen_factory=popen,
+    )
+
+    connected = asyncio.run(connector.connect(_profile(tmp_path), None))
+    asyncio.run(connector.close())
+
+    assert connected.handshake["protocol_version"] == 2
+    assert popen.calls == []
+
+
+def test_handshake_identity_must_be_canonical_uuid4(tmp_path: Path):
     def handler(request: httpx.Request) -> httpx.Response:
-        return _health() if request.url.path.endswith("/health") else _handshake(
-            OTHER_SERVER_ID
-        )
+        return _handshake("not-a-server-id")
 
     connector = LocalServerConnector(
         _settings(tmp_path),
@@ -434,7 +439,7 @@ def test_health_and_handshake_identity_must_match(tmp_path: Path):
 
 def test_profile_binding_is_left_to_session_manager(tmp_path: Path):
     def handler(request: httpx.Request) -> httpx.Response:
-        return _health() if request.url.path.endswith("/health") else _handshake()
+        return _handshake()
 
     connector = LocalServerConnector(
         _settings(tmp_path),
@@ -557,9 +562,9 @@ def test_startup_retries_reuse_one_canonical_parent_request_id(tmp_path: Path):
         attempt += 1
         paths.append(request.url.path)
         request_ids.extend(request.headers.get_list("x-request-id"))
-        if attempt in {1, 2, 4}:
+        if attempt in {1, 2}:
             raise httpx.ConnectError("not ready", request=request)
-        return _health() if request.url.path.endswith("/health") else _handshake()
+        return _handshake()
 
     clock = FakeClock()
     connector = LocalServerConnector(
@@ -581,11 +586,8 @@ def test_startup_retries_reuse_one_canonical_parent_request_id(tmp_path: Path):
 
     assert connected.server_instance_id == SERVER_ID
     assert paths == [
-        "/api/v1/health",
-        "/api/v1/health",
-        "/api/v1/health",
         "/api/v1/handshake",
-        "/api/v1/health",
+        "/api/v1/handshake",
         "/api/v1/handshake",
     ]
     assert len(request_ids) == len(paths)
@@ -604,7 +606,7 @@ def test_spawned_server_exit_is_reaped_without_termination(tmp_path: Path):
             requests += 1
             if requests == 1:
                 raise httpx.ConnectError("refused", request=request)
-            return _health() if request.url.path.endswith("/health") else _handshake()
+            return _handshake()
 
         process = FakeProcess([None])
         connector = LocalServerConnector(
@@ -624,3 +626,183 @@ def test_spawned_server_exit_is_reaped_without_termination(tmp_path: Path):
         assert process.kill_calls == 0
 
     asyncio.run(scenario())
+
+
+def test_shutdown_request_uses_expected_identity_and_request_id(tmp_path: Path):
+    seen: list[tuple[str, dict, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(
+            (
+                request.url.path,
+                json.loads(request.content.decode("utf-8")),
+                request.headers.get("x-request-id"),
+            )
+        )
+        return httpx.Response(
+            202,
+            json={"server_instance_id": SERVER_ID, "status": "stopping"},
+        )
+
+    connector = LocalServerConnector(
+        _settings(tmp_path),
+        transport=httpx.MockTransport(handler),
+        popen_factory=FakePopen(),
+    )
+
+    endpoint, server_home = asyncio.run(
+        connector.request_shutdown(
+            _profile(tmp_path),
+            SERVER_ID,
+            request_id="stop-request-tree",
+        )
+    )
+    asyncio.run(connector.close())
+
+    assert endpoint == "http://127.0.0.1:18001"
+    assert server_home == (tmp_path / "server-home").resolve()
+    assert seen == [
+        (
+            "/api/v1/server/shutdown",
+            {"expected_server_instance_id": SERVER_ID},
+            "stop-request-tree",
+        )
+    ]
+
+
+def test_shutdown_preserves_modern_server_error(tmp_path: Path):
+    response = httpx.Response(
+        409,
+        json={
+            "error": {
+                "code": "server_busy",
+                "message": "Active runs prevent shutdown",
+                "retryable": True,
+                "details": {"active_run_ids": ["run-1"]},
+            },
+            "request_id": "stop-busy-tree",
+        },
+    )
+    connector = LocalServerConnector(
+        _settings(tmp_path),
+        transport=httpx.MockTransport(lambda _request: response),
+        popen_factory=FakePopen(),
+    )
+
+    with pytest.raises(LauncherError) as exc_info:
+        asyncio.run(connector.request_shutdown(_profile(tmp_path), SERVER_ID))
+    asyncio.run(connector.close())
+
+    assert exc_info.value.code == "server_busy"
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.retryable is True
+    assert exc_info.value.details == {"active_run_ids": ["run-1"]}
+
+
+def test_shutdown_marks_invalid_accepted_payload_as_uncertain(tmp_path: Path):
+    connector = LocalServerConnector(
+        _settings(tmp_path),
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                202,
+                json={"server_instance_id": OTHER_SERVER_ID, "status": "stopping"},
+            )
+        ),
+        popen_factory=FakePopen(),
+    )
+
+    with pytest.raises(LocalServerShutdownUncertainError) as exc_info:
+        asyncio.run(connector.request_shutdown(_profile(tmp_path), SERVER_ID))
+    asyncio.run(connector.close())
+
+    assert exc_info.value.code == "local_server_shutdown_uncertain"
+    assert exc_info.value.endpoint == "http://127.0.0.1:18001"
+    assert exc_info.value.server_home == (tmp_path / "server-home").resolve()
+
+
+def test_shutdown_marks_transport_failure_as_uncertain(tmp_path: Path):
+    def fail(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("response lost", request=request)
+
+    connector = LocalServerConnector(
+        _settings(tmp_path),
+        transport=httpx.MockTransport(fail),
+        popen_factory=FakePopen(),
+    )
+
+    with pytest.raises(LocalServerShutdownUncertainError) as exc_info:
+        asyncio.run(connector.request_shutdown(_profile(tmp_path), SERVER_ID))
+    asyncio.run(connector.close())
+
+    assert exc_info.value.retryable is True
+    assert exc_info.value.endpoint == "http://127.0.0.1:18001"
+    assert exc_info.value.server_home == (tmp_path / "server-home").resolve()
+
+
+def test_wait_stopped_requires_endpoint_down_and_home_lock_free(tmp_path: Path):
+    attempts = 0
+    locks: list[FakeHomeLock] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return _handshake()
+        raise httpx.ConnectError("stopped", request=request)
+
+    def home_lock_factory(_server_home: Path) -> FakeHomeLock:
+        lock = FakeHomeLock(busy=len(locks) == 0)
+        locks.append(lock)
+        return lock
+
+    clock = FakeClock()
+    connector = LocalServerConnector(
+        _settings(tmp_path),
+        transport=httpx.MockTransport(handler),
+        popen_factory=FakePopen(),
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+        home_lock_factory=home_lock_factory,
+    )
+
+    asyncio.run(
+        connector.wait_stopped(
+            "http://127.0.0.1:18001",
+            (tmp_path / "server-home").resolve(),
+            timeout=1.0,
+        )
+    )
+    asyncio.run(connector.close())
+
+    assert attempts == 2
+    assert len(locks) == 2
+    assert locks[0].release_calls == 0
+    assert locks[1].release_calls == 1
+
+
+def test_wait_stopped_times_out_without_terminating_process(tmp_path: Path):
+    process = FakeProcess()
+    popen = FakePopen(process)
+    clock = FakeClock()
+    connector = LocalServerConnector(
+        _settings(tmp_path, poll_interval_seconds=0.1),
+        transport=httpx.MockTransport(lambda _request: _handshake()),
+        popen_factory=popen,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+        home_lock_factory=lambda _path: FakeHomeLock(busy=True),
+    )
+
+    with pytest.raises(LocalServerStopTimeoutError):
+        asyncio.run(
+            connector.wait_stopped(
+                "http://127.0.0.1:18001",
+                (tmp_path / "server-home").resolve(),
+                timeout=0.2,
+            )
+        )
+    asyncio.run(connector.close())
+
+    assert popen.calls == []
+    assert process.terminate_calls == 0
+    assert process.kill_calls == 0

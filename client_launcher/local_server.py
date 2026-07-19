@@ -14,6 +14,7 @@ from typing import Any, Awaitable, Callable, Mapping, TYPE_CHECKING
 
 import httpx
 
+from backend.core.server import ServerHomeInUseError, ServerHomeLock
 from client_launcher.http_errors import canonical_request_id
 from client_launcher.models import LauncherError
 
@@ -22,10 +23,10 @@ if TYPE_CHECKING:
     from client_launcher.settings import LauncherSettings
 
 
-PROTOCOL_VERSION = 1
+MIN_PROTOCOL_VERSION = 1
 STARTUP_LOG_TAIL_BYTES = 8 * 1024
-_HEALTH_PATH = "/api/v1/health"
 _HANDSHAKE_PATH = "/api/v1/handshake"
+_SHUTDOWN_PATH = "/api/v1/server/shutdown"
 _WINDOWS_DETACHED_PROCESS = 0x00000008
 _WINDOWS_CREATE_NEW_PROCESS_GROUP = 0x00000200
 
@@ -78,6 +79,23 @@ class LocalServerResponseError(LocalServerError):
     pass
 
 
+class LocalServerShutdownUncertainError(LocalServerResponseError):
+    def __init__(
+        self,
+        endpoint: str,
+        server_home: Path,
+        message: str,
+    ) -> None:
+        super().__init__(
+            "local_server_shutdown_uncertain",
+            message,
+            phase="local_stop",
+            retryable=True,
+        )
+        self.endpoint = endpoint
+        self.server_home = server_home
+
+
 class LocalServerProtocolError(LocalServerError):
     pass
 
@@ -125,6 +143,22 @@ class LocalServerStartTimeoutError(LocalServerError):
         self.log_tail = log_tail
 
 
+class LocalServerStopTimeoutError(LocalServerError):
+    def __init__(self, endpoint: str, server_home: Path) -> None:
+        super().__init__(
+            "local_server_stop_timeout",
+            (
+                "Local server did not complete cooperative shutdown; "
+                f"endpoint={endpoint}; CHATTREE_HOME={server_home}"
+            ),
+            phase="local_stop",
+            retryable=True,
+            status_code=504,
+        )
+        self.endpoint = endpoint
+        self.server_home = server_home
+
+
 def _startup_error_message(base: str, log_path: Path, log_tail: str) -> str:
     message = f"{base}; see {log_path}"
     if log_tail:
@@ -163,6 +197,7 @@ class LocalServerConnector:
         sleep: Sleep = asyncio.sleep,
         reaper_interval_seconds: float = 1.0,
         port_available: Callable[[int], bool] = _loopback_port_is_available,
+        home_lock_factory: Callable[[Path], ServerHomeLock] = ServerHomeLock,
     ) -> None:
         if reaper_interval_seconds <= 0:
             raise ValueError("reaper_interval_seconds must be positive")
@@ -173,6 +208,7 @@ class LocalServerConnector:
         self._sleep = sleep
         self._reaper_interval_seconds = reaper_interval_seconds
         self._port_available = port_available
+        self._home_lock_factory = home_lock_factory
         self._client = httpx.AsyncClient(
             transport=transport,
             timeout=httpx.Timeout(float(settings.connect_timeout_seconds)),
@@ -204,8 +240,6 @@ class LocalServerConnector:
                     request_id=request_id,
                 )
             except _EndpointUnavailable as exc:
-                if exc.phase != "health":
-                    raise self._transport_error(endpoint, exc) from exc.cause
                 if not self._port_available(port):
                     raise self._transport_error(endpoint, exc) from exc.cause
 
@@ -230,6 +264,127 @@ class LocalServerConnector:
         self._poll_spawned_processes()
         self._spawned_processes.clear()
         await self._client.aclose()
+
+    async def request_shutdown(
+        self,
+        profile: ServerProfile,
+        expected_server_instance_id: str,
+        *,
+        request_id: str | None = None,
+    ) -> tuple[str, Path]:
+        endpoint, server_home, _port = self._connection_target(profile)
+        request_id = canonical_request_id(request_id)
+        try:
+            response = await self._client.post(
+                f"{endpoint}{_SHUTDOWN_PATH}",
+                json={
+                    "expected_server_instance_id": expected_server_instance_id,
+                },
+                headers={"X-Request-ID": request_id},
+            )
+        except httpx.HTTPError as exc:
+            raise LocalServerShutdownUncertainError(
+                endpoint,
+                server_home,
+                f"Local server shutdown request failed: {exc}",
+            ) from exc
+        if response.status_code != 202:
+            raise self._shutdown_response_error(response)
+        try:
+            payload = response.json()
+        except (TypeError, ValueError) as exc:
+            raise LocalServerShutdownUncertainError(
+                endpoint,
+                server_home,
+                "Local server shutdown returned invalid JSON",
+            ) from exc
+        if (
+            not isinstance(payload, Mapping)
+            or payload.get("server_instance_id") != expected_server_instance_id
+            or payload.get("status") != "stopping"
+        ):
+            raise LocalServerShutdownUncertainError(
+                endpoint,
+                server_home,
+                "Local server shutdown returned an invalid response",
+            )
+        return endpoint, server_home
+
+    def shutdown_target(self, profile: ServerProfile) -> tuple[str, Path]:
+        endpoint, server_home, _port = self._connection_target(profile)
+        return endpoint, server_home
+
+    async def wait_stopped(
+        self,
+        endpoint: str,
+        server_home: Path,
+        *,
+        timeout: float,
+    ) -> None:
+        deadline = self._monotonic() + max(0.0, float(timeout))
+        while True:
+            endpoint_down = await self._endpoint_is_down(endpoint)
+            home_unlocked = self._home_is_unlocked(server_home)
+            if endpoint_down and home_unlocked:
+                return
+            remaining = deadline - self._monotonic()
+            if remaining <= 0:
+                raise LocalServerStopTimeoutError(endpoint, server_home)
+            await self._sleep(
+                min(float(self._settings.poll_interval_seconds), remaining)
+            )
+
+    async def _endpoint_is_down(self, endpoint: str) -> bool:
+        try:
+            await self._client.get(f"{endpoint}{_HANDSHAKE_PATH}")
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            return True
+        except httpx.HTTPError:
+            return False
+        return False
+
+    def _home_is_unlocked(self, server_home: Path) -> bool:
+        lock = self._home_lock_factory(server_home)
+        try:
+            lock.acquire()
+        except ServerHomeInUseError:
+            return False
+        finally:
+            if lock.acquired:
+                lock.release()
+        return True
+
+    @staticmethod
+    def _shutdown_response_error(response: httpx.Response) -> LauncherError:
+        try:
+            payload = response.json()
+            body = payload.get("error") if isinstance(payload, Mapping) else None
+        except (TypeError, ValueError):
+            body = None
+        if isinstance(body, Mapping):
+            code = body.get("code")
+            message = body.get("message")
+            retryable = body.get("retryable")
+            details = body.get("details")
+            if (
+                isinstance(code, str)
+                and isinstance(message, str)
+                and isinstance(retryable, bool)
+            ):
+                return LauncherError(
+                    code,
+                    message,
+                    retryable,
+                    response.status_code,
+                    details=details if isinstance(details, Mapping) else None,
+                )
+        return LocalServerResponseError(
+            "local_server_shutdown_http_error",
+            f"Local server shutdown returned HTTP {response.status_code}",
+            phase="local_stop",
+            retryable=response.status_code >= 500,
+            status_code=response.status_code,
+        )
 
     def _track_process(self, process: subprocess.Popen[Any]) -> None:
         self._spawned_processes.add(process)
@@ -258,7 +413,7 @@ class LocalServerConnector:
             raise LocalServerConfigurationError(
                 "invalid_local_profile",
                 "Local server connector requires a local profile",
-                phase="health",
+                phase="handshake",
                 retryable=False,
                 status_code=400,
             )
@@ -272,7 +427,7 @@ class LocalServerConnector:
             raise LocalServerConfigurationError(
                 "invalid_local_profile",
                 "Local server home must be a non-empty path",
-                phase="health",
+                phase="handshake",
                 retryable=False,
                 status_code=400,
             )
@@ -284,7 +439,7 @@ class LocalServerConnector:
             raise LocalServerConfigurationError(
                 "invalid_local_profile",
                 "Local server port must be an integer from 1 to 65535",
-                phase="health",
+                phase="handshake",
                 retryable=False,
                 status_code=400,
             )
@@ -300,15 +455,6 @@ class LocalServerConnector:
         *,
         request_id: str,
     ) -> ConnectedServer:
-        await self._emit_phase(phase_callback, "health")
-        health = await self._request_json(
-            endpoint,
-            _HEALTH_PATH,
-            "health",
-            request_id=request_id,
-        )
-        health_id = self._validate_health(health)
-
         await self._emit_phase(phase_callback, "handshake")
         handshake = await self._request_json(
             endpoint,
@@ -317,15 +463,6 @@ class LocalServerConnector:
             request_id=request_id,
         )
         handshake_id = self._validate_handshake(handshake)
-
-        if health_id != handshake_id:
-            raise LocalServerIdentityError(
-                "server_identity_inconsistent",
-                "Health and handshake returned different server instance ids",
-                phase="handshake",
-                retryable=False,
-                status_code=409,
-            )
 
         return ConnectedServer(
             endpoint=endpoint,
@@ -382,36 +519,18 @@ class LocalServerConnector:
             )
         return payload
 
-    def _validate_health(self, payload: Mapping[str, Any]) -> str:
-        if payload.get("status") != "ok":
-            raise LocalServerResponseError(
-                "local_server_not_ready",
-                "Local server health status is not 'ok'",
-                phase="health",
-                retryable=True,
-            )
-        timestamp = payload.get("time")
-        if isinstance(timestamp, bool) or not isinstance(timestamp, int):
-            raise LocalServerResponseError(
-                "local_server_invalid_health",
-                "Local server health time must be an integer",
-                phase="health",
-                retryable=False,
-            )
-        return self._server_id(payload, "health")
-
     def _validate_handshake(self, payload: Mapping[str, Any]) -> str:
         protocol_version = payload.get("protocol_version")
         if (
             isinstance(protocol_version, bool)
             or not isinstance(protocol_version, int)
-            or protocol_version != PROTOCOL_VERSION
+            or protocol_version < MIN_PROTOCOL_VERSION
         ):
             raise LocalServerProtocolError(
                 "local_server_protocol_mismatch",
                 (
                     "Local server protocol version is incompatible: "
-                    f"expected {PROTOCOL_VERSION}, got {protocol_version!r}"
+                    f"minimum {MIN_PROTOCOL_VERSION}, got {protocol_version!r}"
                 ),
                 phase="handshake",
                 retryable=False,
@@ -505,18 +624,7 @@ class LocalServerConnector:
         argv = [
             str(server_python),
             "-m",
-            "uvicorn",
-            "main:app",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port),
-            "--workers",
-            "1",
-            "--lifespan",
-            "on",
-            "--app-dir",
-            str(project_root),
+            "main",
         ]
         env = os.environ.copy()
         env.update(
@@ -564,19 +672,6 @@ class LocalServerConnector:
                 stdout=log_handle,
                 **kwargs,
             )
-            spawn_pid = getattr(process, "pid", None)
-            if (
-                isinstance(spawn_pid, int)
-                and not isinstance(spawn_pid, bool)
-                and spawn_pid > 0
-            ):
-                try:
-                    log_path.with_suffix(".spawn.pid").write_text(
-                        f"{spawn_pid}\n",
-                        encoding="ascii",
-                    )
-                except OSError:
-                    pass
         except OSError as exc:
             raise LocalServerSpawnError(
                 "local_server_spawn_failed",

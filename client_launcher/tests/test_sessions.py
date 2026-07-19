@@ -5,7 +5,11 @@ from uuid import UUID
 import pytest
 
 from client_launcher.http_errors import REQUEST_ID_RE
-from client_launcher.local_server import ConnectedServer
+from client_launcher.local_server import (
+    ConnectedServer,
+    LocalServerShutdownUncertainError,
+    LocalServerStopTimeoutError,
+)
 from client_launcher.models import LauncherError, LocalTarget, ServerProfile
 from client_launcher.profiles import ProfileStore
 from client_launcher.sessions import SessionManager
@@ -31,6 +35,16 @@ class FakeConnector:
         self.started = asyncio.Event()
         self.release = asyncio.Event()
         self.ignore_cancellation = False
+        self.shutdown_calls: list[tuple[str, str, str | None]] = []
+        self.shutdown_error: BaseException | None = None
+        self.wait_stopped_calls: list[tuple[str, object, float]] = []
+        self.wait_stopped_error: BaseException | None = None
+        self.shutdown_started = asyncio.Event()
+        self.shutdown_release = asyncio.Event()
+        self.shutdown_release.set()
+        self.wait_stopped_started = asyncio.Event()
+        self.wait_stopped_release = asyncio.Event()
+        self.wait_stopped_release.set()
 
     async def connect(
         self,
@@ -42,14 +56,13 @@ class FakeConnector:
         self.calls += 1
         assert request_id is not None
         self.request_ids.append(request_id)
-        phase_callback("health")
+        phase_callback("handshake")
         self.started.set()
         try:
             await self.release.wait()
         except asyncio.CancelledError:
             if not self.ignore_cancellation:
                 raise
-        phase_callback("handshake")
         return ConnectedServer(
             endpoint=f"http://127.0.0.1:{profile.local.server_port}",
             server_instance_id=self.instance_id,
@@ -58,6 +71,38 @@ class FakeConnector:
                 "protocol_version": 1,
             },
         )
+
+    async def request_shutdown(
+        self,
+        profile,
+        expected_server_instance_id: str,
+        *,
+        request_id: str | None = None,
+    ):
+        self.shutdown_calls.append(
+            (profile.id, expected_server_instance_id, request_id)
+        )
+        self.shutdown_started.set()
+        await self.shutdown_release.wait()
+        if self.shutdown_error is not None:
+            raise self.shutdown_error
+        return (
+            f"http://127.0.0.1:{profile.local.server_port}",
+            profile.local.server_home,
+        )
+
+    def shutdown_target(self, profile):
+        return (
+            f"http://127.0.0.1:{profile.local.server_port}",
+            profile.local.server_home,
+        )
+
+    async def wait_stopped(self, endpoint, server_home, *, timeout: float):
+        self.wait_stopped_calls.append((endpoint, server_home, timeout))
+        self.wait_stopped_started.set()
+        await self.wait_stopped_release.wait()
+        if self.wait_stopped_error is not None:
+            raise self.wait_stopped_error
 
     async def close(self):
         self.closed = True
@@ -427,3 +472,360 @@ async def _close_only_closes_connector_case(tmp_path):
 
 def test_close_only_closes_launcher_connector(tmp_path):
     asyncio.run(_close_only_closes_connector_case(tmp_path))
+
+
+async def _stop_invalidates_lease_after_server_accepts_case(tmp_path):
+    store = _store(tmp_path)
+    connector = FakeConnector()
+    connector.release.set()
+    manager = SessionManager(store, connector)
+    ready = await manager.connect("local")
+    lease = manager.resolve_endpoint("local")
+
+    stopped = await manager.stop(
+        "local",
+        expected_server_instance_id=SERVER_A,
+        timeout=7,
+        request_id="stop-tree",
+    )
+
+    assert stopped.status == "disconnected"
+    assert lease.invalidated.is_set()
+    assert manager.status("local").status == "disconnected"
+    assert manager.status("local").connection_lease_id != ready.connection_lease_id
+    assert connector.shutdown_calls == [("local", SERVER_A, "stop-tree")]
+    assert connector.wait_stopped_calls == [
+        (
+            "http://127.0.0.1:8001",
+            store.get("local").local.server_home,
+            7,
+        )
+    ]
+
+
+def test_stop_invalidates_lease_after_server_accepts(tmp_path):
+    asyncio.run(_stop_invalidates_lease_after_server_accepts_case(tmp_path))
+
+
+async def _stop_reconciles_lost_shutdown_response_case(tmp_path):
+    store = _store(tmp_path)
+    connector = FakeConnector()
+    connector.release.set()
+    manager = SessionManager(store, connector)
+    await manager.connect("local")
+    lease = manager.resolve_endpoint("local")
+    endpoint = "http://127.0.0.1:8001"
+    server_home = store.get("local").local.server_home
+    connector.shutdown_error = LocalServerShutdownUncertainError(
+        endpoint,
+        server_home,
+        "shutdown response was lost",
+    )
+
+    stopped = await manager.stop(
+        "local",
+        expected_server_instance_id=SERVER_A,
+        timeout=7,
+    )
+
+    assert stopped.status == "disconnected"
+    assert manager.status("local").status == "disconnected"
+    assert lease.invalidated.is_set()
+    assert connector.wait_stopped_calls == [(endpoint, server_home, 7)]
+
+
+def test_stop_reconciles_lost_shutdown_response(tmp_path):
+    asyncio.run(_stop_reconciles_lost_shutdown_response_case(tmp_path))
+
+
+async def _restart_reconciles_lost_shutdown_response_case(tmp_path):
+    store = _store(tmp_path)
+    connector = FakeConnector()
+    connector.release.set()
+    manager = SessionManager(store, connector)
+    first = await manager.connect("local")
+    first_lease = manager.resolve_endpoint("local")
+    connector.shutdown_error = LocalServerShutdownUncertainError(
+        "http://127.0.0.1:8001",
+        store.get("local").local.server_home,
+        "shutdown response was lost",
+    )
+
+    restarted = await manager.restart(
+        "local",
+        expected_server_instance_id=SERVER_A,
+        timeout=7,
+    )
+
+    assert restarted.status == "ready"
+    assert restarted.connection_epoch == first.connection_epoch + 1
+    assert first_lease.invalidated.is_set()
+    assert connector.calls == 2
+
+
+def test_restart_reconciles_lost_shutdown_response(tmp_path):
+    asyncio.run(_restart_reconciles_lost_shutdown_response_case(tmp_path))
+
+
+async def _lost_shutdown_response_timeout_leaves_disconnected_case(tmp_path):
+    store = _store(tmp_path)
+    connector = FakeConnector()
+    connector.release.set()
+    manager = SessionManager(store, connector)
+    await manager.connect("local")
+    lease = manager.resolve_endpoint("local")
+    endpoint = "http://127.0.0.1:8001"
+    server_home = store.get("local").local.server_home
+    connector.shutdown_error = LocalServerShutdownUncertainError(
+        endpoint,
+        server_home,
+        "shutdown response was lost",
+    )
+    connector.wait_stopped_error = LocalServerStopTimeoutError(
+        endpoint,
+        server_home,
+    )
+
+    with pytest.raises(LocalServerStopTimeoutError):
+        await manager.stop(
+            "local",
+            expected_server_instance_id=SERVER_A,
+            timeout=1,
+        )
+
+    assert manager.status("local").status == "disconnected"
+    assert lease.invalidated.is_set()
+    with pytest.raises(LauncherError) as exc_info:
+        manager.resolve_endpoint("local")
+    assert exc_info.value.code == "profile_not_ready"
+
+
+def test_lost_shutdown_response_timeout_leaves_disconnected(tmp_path):
+    asyncio.run(_lost_shutdown_response_timeout_leaves_disconnected_case(tmp_path))
+
+
+async def _cancelled_stop_request_reconciles_before_propagating_case(tmp_path):
+    connector = FakeConnector()
+    connector.release.set()
+    connector.shutdown_release.clear()
+    manager = SessionManager(_store(tmp_path), connector)
+    await manager.connect("local")
+    lease = manager.resolve_endpoint("local")
+
+    stopping = asyncio.create_task(
+        manager.stop(
+            "local",
+            expected_server_instance_id=SERVER_A,
+            timeout=5,
+        )
+    )
+    await connector.shutdown_started.wait()
+    stopping.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await stopping
+
+    assert manager.status("local").status == "disconnected"
+    assert lease.invalidated.is_set()
+    assert connector.wait_stopped_calls == [
+        (
+            "http://127.0.0.1:8001",
+            manager.profiles.get("local").local.server_home,
+            5,
+        )
+    ]
+
+
+def test_cancelled_stop_request_reconciles_before_propagating(tmp_path):
+    asyncio.run(_cancelled_stop_request_reconciles_before_propagating_case(tmp_path))
+
+
+async def _cancelled_restart_stops_without_spawning_replacement_case(tmp_path):
+    connector = FakeConnector()
+    connector.release.set()
+    connector.shutdown_release.clear()
+    manager = SessionManager(_store(tmp_path), connector)
+    await manager.connect("local")
+    lease = manager.resolve_endpoint("local")
+
+    restarting = asyncio.create_task(
+        manager.restart(
+            "local",
+            expected_server_instance_id=SERVER_A,
+            timeout=5,
+        )
+    )
+    await connector.shutdown_started.wait()
+    restarting.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await restarting
+
+    assert manager.status("local").status == "disconnected"
+    assert lease.invalidated.is_set()
+    assert connector.calls == 1
+
+
+def test_cancelled_restart_stops_without_spawning_replacement(tmp_path):
+    asyncio.run(_cancelled_restart_stops_without_spawning_replacement_case(tmp_path))
+
+
+async def _cancellation_during_stop_wait_does_not_abandon_reconciliation_case(
+    tmp_path,
+):
+    connector = FakeConnector()
+    connector.release.set()
+    connector.wait_stopped_release.clear()
+    manager = SessionManager(_store(tmp_path), connector)
+    await manager.connect("local")
+    lease = manager.resolve_endpoint("local")
+
+    stopping = asyncio.create_task(
+        manager.stop(
+            "local",
+            expected_server_instance_id=SERVER_A,
+            timeout=5,
+        )
+    )
+    await connector.wait_stopped_started.wait()
+    stopping.cancel()
+    await asyncio.sleep(0)
+
+    assert not stopping.done()
+    assert manager.status("local").status == "disconnected"
+    assert lease.invalidated.is_set()
+
+    connector.wait_stopped_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await stopping
+
+
+def test_cancellation_during_stop_wait_does_not_abandon_reconciliation(tmp_path):
+    asyncio.run(
+        _cancellation_during_stop_wait_does_not_abandon_reconciliation_case(
+            tmp_path
+        )
+    )
+
+
+async def _stop_rejects_stale_expected_identity_case(tmp_path):
+    connector = FakeConnector()
+    connector.release.set()
+    manager = SessionManager(_store(tmp_path), connector)
+    await manager.connect("local")
+
+    with pytest.raises(LauncherError) as exc_info:
+        await manager.stop(
+            "local",
+            expected_server_instance_id=SERVER_B,
+            timeout=5,
+        )
+
+    assert exc_info.value.code == "server_identity_mismatch"
+    assert connector.shutdown_calls == []
+    assert manager.status("local").status == "ready"
+
+
+def test_stop_rejects_stale_expected_identity(tmp_path):
+    asyncio.run(_stop_rejects_stale_expected_identity_case(tmp_path))
+
+
+async def _restart_is_stop_then_one_connect_case(tmp_path):
+    connector = FakeConnector()
+    connector.release.set()
+    manager = SessionManager(_store(tmp_path), connector)
+    first = await manager.connect("local")
+    first_lease = manager.resolve_endpoint("local")
+
+    restarted = await manager.restart(
+        "local",
+        expected_server_instance_id=SERVER_A,
+        timeout=9,
+        request_id="restart-tree",
+    )
+
+    assert first_lease.invalidated.is_set()
+    assert restarted.status == "ready"
+    assert restarted.server_instance_id == SERVER_A
+    assert restarted.connection_epoch == first.connection_epoch + 1
+    assert restarted.connection_lease_id != first.connection_lease_id
+    assert connector.calls == 2
+    assert connector.shutdown_calls == [("local", SERVER_A, "restart-tree")]
+    assert connector.request_ids == [connector.request_ids[0], "restart-tree"]
+
+
+def test_restart_is_stop_then_one_connect(tmp_path):
+    asyncio.run(_restart_is_stop_then_one_connect_case(tmp_path))
+
+
+async def _profile_lifecycle_lock_serializes_stop_case(tmp_path):
+    connector = FakeConnector()
+    connector.release.set()
+    connector.shutdown_release.clear()
+    manager = SessionManager(_store(tmp_path), connector)
+    await manager.connect("local")
+
+    first = asyncio.create_task(
+        manager.stop(
+            "local",
+            expected_server_instance_id=SERVER_A,
+            timeout=5,
+        )
+    )
+    await connector.shutdown_started.wait()
+    second = asyncio.create_task(
+        manager.stop(
+            "local",
+            expected_server_instance_id=SERVER_A,
+            timeout=5,
+        )
+    )
+    await asyncio.sleep(0)
+    assert len(connector.shutdown_calls) == 1
+
+    connector.shutdown_release.set()
+    await first
+    with pytest.raises(LauncherError) as exc_info:
+        await second
+
+    assert exc_info.value.code == "profile_not_ready"
+    assert len(connector.shutdown_calls) == 1
+
+
+def test_profile_lifecycle_lock_serializes_stop(tmp_path):
+    asyncio.run(_profile_lifecycle_lock_serializes_stop_case(tmp_path))
+
+
+async def _profile_lifecycle_lock_blocks_connect_until_stop_finishes_case(tmp_path):
+    connector = FakeConnector()
+    connector.release.set()
+    manager = SessionManager(_store(tmp_path), connector)
+    await manager.connect("local")
+    connector.wait_stopped_release.clear()
+
+    stopping = asyncio.create_task(
+        manager.stop(
+            "local",
+            expected_server_instance_id=SERVER_A,
+            timeout=5,
+        )
+    )
+    await connector.wait_stopped_started.wait()
+    reconnecting = asyncio.create_task(manager.connect("local"))
+    await asyncio.sleep(0)
+
+    assert connector.calls == 1
+    assert not reconnecting.done()
+
+    connector.wait_stopped_release.set()
+    stopped, reconnected = await asyncio.gather(stopping, reconnecting)
+
+    assert stopped.status == "disconnected"
+    assert reconnected.status == "ready"
+    assert connector.calls == 2
+
+
+def test_profile_lifecycle_lock_blocks_connect_until_stop_finishes(tmp_path):
+    asyncio.run(
+        _profile_lifecycle_lock_blocks_connect_until_stop_finishes_case(tmp_path)
+    )

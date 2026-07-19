@@ -83,6 +83,11 @@ class ConnectProfileRequest(StrictRequestModel):
     expected_server_instance_id: str | None = None
 
 
+class ServerLifecycleRequest(StrictRequestModel):
+    expected_server_instance_id: str = Field(min_length=1, max_length=128)
+    timeout_seconds: int = Field(default=30, ge=1, le=600)
+
+
 def create_app(
     *,
     settings: LauncherSettings | None = None,
@@ -246,6 +251,36 @@ def create_app(
     @app.post("/client/v1/profiles/{profile_id}/disconnect")
     async def disconnect_profile(profile_id: str) -> dict[str, Any]:
         return (await sessions.disconnect(profile_id)).to_dict()
+
+    @app.post("/client/v1/profiles/{profile_id}/server/stop")
+    async def stop_profile_server(
+        profile_id: str,
+        request: Request,
+        body: ServerLifecycleRequest,
+    ) -> dict[str, Any]:
+        return (
+            await sessions.stop(
+                profile_id,
+                expected_server_instance_id=body.expected_server_instance_id,
+                timeout=float(body.timeout_seconds),
+                request_id=request.state.request_id,
+            )
+        ).to_dict()
+
+    @app.post("/client/v1/profiles/{profile_id}/server/restart")
+    async def restart_profile_server(
+        profile_id: str,
+        request: Request,
+        body: ServerLifecycleRequest,
+    ) -> dict[str, Any]:
+        return (
+            await sessions.restart(
+                profile_id,
+                expected_server_instance_id=body.expected_server_instance_id,
+                timeout=float(body.timeout_seconds),
+                request_id=request.state.request_id,
+            )
+        ).to_dict()
 
     @app.get("/client/v1/profiles/{profile_id}/status")
     async def profile_status(profile_id: str) -> dict[str, Any]:
