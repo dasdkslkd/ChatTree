@@ -12,6 +12,9 @@ docs/superpowers/*
 !docs/superpowers/plans/
 docs/superpowers/plans/*
 !docs/superpowers/plans/2026-07-01-chattree-prompt-framework.md
+!docs/superpowers/reviews/
+docs/superpowers/reviews/*
+!docs/superpowers/reviews/2026-07-18-protocol-contracts-reduction-audit.md
 .worktrees/
 tmp/
 .chattree/*
