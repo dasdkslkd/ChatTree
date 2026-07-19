@@ -30,6 +30,19 @@ def test_uvicorn_server_accepts_port_boundaries(value):
     )
 
 
+def test_uvicorn_server_accepts_explicit_loopback_host_and_port():
+    assert uvicorn_server_options(
+        {"CHATTREE_SERVER_PORT": "18001"},
+        host="localhost",
+        port=18006,
+    ) == {"host": "localhost", "port": 18006}
+
+
+def test_uvicorn_server_rejects_invalid_explicit_port():
+    with pytest.raises(ValueError, match="CHATTREE_SERVER_PORT"):
+        uvicorn_server_options({}, port=70000)
+
+
 def test_uvicorn_server_reads_real_environment(monkeypatch):
     monkeypatch.setenv("CHATTREE_SERVER_PORT", "18002")
     monkeypatch.setenv("CHATTREE_SERVER_HOST", "0.0.0.0")
@@ -70,6 +83,36 @@ def test_run_server_owns_uvicorn_server_and_cooperative_shutdown_hook(monkeypatc
     }
     assert captured["hook_is_callable"] is True
     assert captured["should_exit"] is True
+    assert main.app.state.request_shutdown is None
+
+
+def test_run_server_uses_explicit_host_and_port(monkeypatch):
+    captured = {}
+
+    class FakeConfig:
+        def __init__(self, app, **kwargs):
+            captured["app"] = app
+            captured["options"] = kwargs
+
+    class FakeServer:
+        def __init__(self, config):
+            self.should_exit = False
+
+        def run(self):
+            pass
+
+    monkeypatch.setattr(main.uvicorn, "Config", FakeConfig)
+    monkeypatch.setattr(main.uvicorn, "Server", FakeServer)
+    monkeypatch.setattr(main.app.state, "server_home_lock", None, raising=False)
+
+    run_server({"CHATTREE_SERVER_PORT": "18003"}, host="localhost", port=18007)
+
+    assert captured["app"] is main.app
+    assert captured["options"] == {
+        "host": "localhost",
+        "port": 18007,
+        "workers": 1,
+    }
     assert main.app.state.request_shutdown is None
 
 

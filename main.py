@@ -75,28 +75,39 @@ logger = logging.getLogger(__name__)
 
 def uvicorn_server_options(
     environ: Mapping[str, str] | None = None,
+    *,
+    host: str | None = None,
+    port: int | None = None,
 ) -> dict:
     values = os.environ if environ is None else environ
-    raw_port = values.get("CHATTREE_SERVER_PORT", str(DEFAULT_SERVER_PORT))
-    try:
-        port = int(raw_port)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            "CHATTREE_SERVER_PORT must be an integer from 1 to 65535"
-        ) from exc
-    if not 1 <= port <= 65535:
+    if port is None:
+        raw_port = values.get("CHATTREE_SERVER_PORT", str(DEFAULT_SERVER_PORT))
+        try:
+            resolved_port = int(raw_port)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "CHATTREE_SERVER_PORT must be an integer from 1 to 65535"
+            ) from exc
+    else:
+        resolved_port = port
+    if not 1 <= resolved_port <= 65535:
         raise ValueError(
             "CHATTREE_SERVER_PORT must be an integer from 1 to 65535"
         )
-    return {"host": "127.0.0.1", "port": port}
+    return {"host": host or "127.0.0.1", "port": resolved_port}
 
 
-def run_server(environ: Mapping[str, str] | None = None) -> None:
+def run_server(
+    environ: Mapping[str, str] | None = None,
+    *,
+    host: str | None = None,
+    port: int | None = None,
+) -> None:
     server = uvicorn.Server(
         uvicorn.Config(
             app,
             workers=1,
-            **uvicorn_server_options(environ),
+            **uvicorn_server_options(environ, host=host, port=port),
         )
     )
     request_shutdown = lambda: setattr(server, "should_exit", True)

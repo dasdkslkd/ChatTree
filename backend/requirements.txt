@@ -4,3 +4,4 @@ uvicorn==0.34.2
 httpx==0.28.1
 python-multipart==0.0.32
 tomli==2.4.1; python_version < "3.11"
+typing-extensions==4.15.0

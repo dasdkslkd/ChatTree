@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chattree-server"
+version = "0.1.0"
+description = "ChatTree local and remote server runtime"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi==0.115.12",
+  "starlette==0.46.2",
+  "uvicorn==0.34.2",
+  "httpx==0.28.1",
+  "python-multipart==0.0.32",
+  "tomli==2.4.1; python_version < \"3.11\"",
+  "typing-extensions==4.15.0",
+]
+
+[project.scripts]
+chattree-server = "backend.server_cli:main"
+
+[tool.setuptools]
+py-modules = ["main"]
+
+[tool.setuptools.packages.find]
+include = ["backend*", "chattree_protocol*"]
+
+[tool.setuptools.package-data]
+"backend.core.model" = ["model_metadata.toml"]
+"backend.core.prompts" = ["templates/*.md", "templates/agents/*.md"]
+"backend.workers" = ["workflow_runtime.mjs"]
