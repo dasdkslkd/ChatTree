@@ -34,17 +34,17 @@ function testRightPanelUsesOneWidthAcrossViews() {
 }
 
 function testEveryMainPagePersistenceKeyIsProfileScoped() {
-  assert.match(mainPage, /const profileId = getFrontendBootstrap\(\)\.profileId;/);
+  assert.match(mainPage, /const PROFILE_ID = getProfileContext\(\)\.profileId;/);
   for (const key of [
     'MANUAL_PROJECTS_STORAGE_KEY',
     'PROJECT_ORDER_STORAGE_KEY',
-    'LEFT_SIDEBAR_WIDTH_STORAGE_KEY',
-    'RIGHT_PANEL_WIDTH_STORAGE_KEY',
+    'LEFT_SIDEBAR_STORAGE_KEY',
+    'RIGHT_PANEL_STORAGE_KEY',
   ]) {
     assert.match(
       mainPage,
-      new RegExp(`profileStorageKey\\(profileId, ${key}\\)`),
-      `${key} must be scoped by the immutable bootstrap Profile`,
+      new RegExp(`profileStorageKey\\(PROFILE_ID, ${key}\\)`),
+      `${key} must be scoped by the immutable route Profile`,
     );
   }
   for (const key of [

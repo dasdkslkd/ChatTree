@@ -2,36 +2,38 @@ import { apiClient } from './client';
 import type { StreamChunk } from '../types/message';
 import type { RunEventPayload, RunRecord } from '../types/run';
 import { perfNow, recordMark, recordSpan } from '../perf/marks';
-import {
-  connectionEpochRuntime,
-  StaleConnectionEpochError,
-  type ConnectionEpochToken,
-} from '../runtime/connectionEpoch';
 import { leaseGuardedFetch } from './leaseFetch';
+import {
+  apiErrorFromResponse,
+  normalizeFetchError,
+  unexpectedApiResponse,
+} from './errors';
+
+export type RunStartResponse = {
+  run_id: string;
+  created: boolean;
+  status: string;
+};
 
 export type RunAttachOptions = {
-  token: ConnectionEpochToken;
   signal?: AbortSignal;
   fromEvent?: number;
 };
 
-function assertStreamCurrent(token: ConnectionEpochToken): void {
-  if (!connectionEpochRuntime.isCurrent(token)) {
-    throw new StaleConnectionEpochError();
-  }
-}
-
 async function acquireSseReader(
   response: Response,
-  token: ConnectionEpochToken,
 ): Promise<ReadableStreamDefaultReader<Uint8Array>> {
   try {
-    assertStreamCurrent(token);
     if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
+      throw await apiErrorFromResponse(response);
     }
     const reader = response.body?.getReader();
-    if (!reader) throw new Error('Response body is not readable');
+    if (!reader) {
+      throw unexpectedApiResponse(
+        response.status,
+        new Error('Response body is not readable'),
+      );
+    }
     return reader;
   } catch (error) {
     try {
@@ -39,16 +41,15 @@ async function acquireSseReader(
     } catch {
       // The transport may already have closed or cancelled the body.
     }
-    throw error;
+    throw normalizeFetchError(error);
   }
 }
 
 async function* parseSseResponse(
   response: Response,
-  token: ConnectionEpochToken,
   perfAttrs: Record<string, unknown> = {},
 ): AsyncGenerator<StreamChunk, void> {
-  const reader = await acquireSseReader(response, token);
+  const reader = await acquireSseReader(response);
   recordMark('stream.response_headers', { ...perfAttrs, status: response.status });
   const decoder = new TextDecoder();
   let buffer = '';
@@ -61,13 +62,14 @@ async function* parseSseResponse(
       try {
         readResult = await reader.read();
       } catch (error) {
-        assertStreamCurrent(token);
-        throw error;
+        throw normalizeFetchError(error);
       }
-      assertStreamCurrent(token);
       const { done, value } = readResult;
       recordSpan('stream.reader_read', readStarted, { ...perfAttrs, done, bytes: value?.byteLength ?? 0 });
-      if (done) break;
+      if (done) {
+        buffer += decoder.decode();
+        break;
+      }
       if (firstChunk) {
         firstChunk = false;
         recordMark('stream.first_bytes', { ...perfAttrs, bytes: value?.byteLength ?? 0 });
@@ -77,14 +79,19 @@ async function* parseSseResponse(
       buffer = parts.pop() || '';
       for (const part of parts) {
         const trimmed = part.trim();
-        if (!trimmed.startsWith('data: ')) continue;
-        const data = trimmed.slice(6);
+        if (!trimmed.startsWith('data:')) continue;
+        const data = trimmed.slice(5).trimStart();
         if (data === '[DONE]') {
           recordMark('stream.done', { ...perfAttrs, event_count: eventCount });
           return;
         }
         const parseStarted = perfNow();
-        const parsed = JSON.parse(data);
+        let parsed: StreamChunk;
+        try {
+          parsed = JSON.parse(data);
+        } catch (error) {
+          throw unexpectedApiResponse(response.status, error);
+        }
         eventCount += 1;
         recordSpan('stream.parse_event', parseStarted, {
           ...perfAttrs,
@@ -93,10 +100,29 @@ async function* parseSseResponse(
           run_id: parsed?.run_id,
           event_index: parsed?.event_index,
         });
-        assertStreamCurrent(token);
         yield parsed;
       }
     }
+
+    const finalPart = buffer.trim();
+    if (finalPart.startsWith('data:')) {
+      const data = finalPart.slice(5).trimStart();
+      if (data === '[DONE]') {
+        recordMark('stream.done', { ...perfAttrs, event_count: eventCount });
+        return;
+      }
+      try {
+        const parsed: StreamChunk = JSON.parse(data);
+        eventCount += 1;
+        yield parsed;
+      } catch (error) {
+        throw unexpectedApiResponse(response.status, error);
+      }
+    }
+    throw unexpectedApiResponse(
+      response.status,
+      new Error('SSE stream ended before data:[DONE]'),
+    );
   } finally {
     try {
       await reader.cancel();
@@ -126,16 +152,15 @@ export const runsApi = {
     runId: string,
     options: RunAttachOptions,
   ): AsyncGenerator<StreamChunk, void> {
-    const { token, signal } = options;
+    const { signal } = options;
     const fromEvent = options.fromEvent ?? 0;
     const started = perfNow();
     const response = await leaseGuardedFetch(
       `/runs/${encodeURIComponent(runId)}/attach?from_event=${fromEvent}`,
       { signal },
-      token,
     );
     recordSpan('stream.fetch', started, { run_id: runId, from_event: fromEvent, route: 'runs.attach' });
-    yield* parseSseResponse(response, token, { run_id: runId, from_event: fromEvent, route: 'runs.attach' });
+    yield* parseSseResponse(response, { run_id: runId, from_event: fromEvent, route: 'runs.attach' });
   },
 
   stop: async (runId: string): Promise<void> => {

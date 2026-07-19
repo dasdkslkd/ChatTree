@@ -134,85 +134,10 @@ function createControlledStream() {
   return { stream, push, close };
 }
 
-function createEpochSource() {
-  const token = Object.freeze({
-    profileId: 'local',
-    serverInstanceId: '11111111-1111-4111-8111-111111111111',
-    connectionEpoch: 1,
-    connectionLeaseId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
-    generation: 1,
-  });
-  const controller = new AbortController();
-  let current = true;
-  let captures = 0;
-  return {
-    token,
-    source: {
-      capture() {
-        captures += 1;
-        return token;
-      },
-      isCurrent(candidate) {
-        return current && candidate === token;
-      },
-      signalFor(candidate) {
-        return current && candidate === token ? controller.signal : AbortSignal.abort();
-      },
-    },
-    invalidate() {
-      current = false;
-      controller.abort();
-    },
-    get captures() {
-      return captures;
-    },
-  };
-}
-
-function createSwitchableEpochSource() {
-  const tokenA = Object.freeze({
-    profileId: 'local',
-    serverInstanceId: '11111111-1111-4111-8111-111111111111',
-    connectionEpoch: 1,
-    connectionLeaseId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
-    generation: 1,
-  });
-  const tokenB = Object.freeze({
-    profileId: 'local',
-    serverInstanceId: '22222222-2222-4222-8222-222222222222',
-    connectionEpoch: 2,
-    connectionLeaseId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
-    generation: 2,
-  });
-  const controllers = new Map([
-    [tokenA, new AbortController()],
-    [tokenB, new AbortController()],
-  ]);
-  let current = tokenA;
-  return {
-    tokenA,
-    tokenB,
-    source: {
-      capture: () => current,
-      isCurrent: (candidate) => candidate === current,
-      signalFor(candidate) {
-        return candidate === current
-          ? controllers.get(candidate).signal
-          : AbortSignal.abort();
-      },
-    },
-    switchToB() {
-      controllers.get(tokenA).abort();
-      current = tokenB;
-    },
-  };
-}
-
 function chunk(overrides) {
   return {
     status: 'content',
     content: null,
-    run_id: 'run-1',
     node_id: 'node-1',
     conversation_id: 'conv-1',
     tokens_used: 0,
@@ -220,79 +145,22 @@ function chunk(overrides) {
   };
 }
 
-function runRecord(overrides = {}) {
-  return {
-    run_id: 'run-restored',
-    conversation_id: 'conv-1',
-    kind: 'subagent',
-    status: 'running',
-    event_count: 0,
-    created_at: 10,
-    updated_at: 11,
-    finished_at: null,
-    ...overrides,
-  };
-}
-
-function toolRoundFields(toolRound) {
-  return {
-    tool_round: toolRound,
-    tool_round_id: `run-1:tool-round-${toolRound}`,
-  };
-}
-
-function toolEvent(eventType, toolRound, overrides = {}) {
-  return chunk({
-    event_type: eventType,
-    ...toolRoundFields(toolRound),
-    ...overrides,
-  });
-}
-
-function executionToolEvent(eventType, toolRound, toolCall, overrides = {}) {
-  return toolEvent(eventType, toolRound, {
-    tool_call: {
-      ...toolCall,
-      tool_call_id: toolCall.tool_call_id || toolCall.id,
-      name: toolCall.name || toolCall.function?.name,
-      ...overrides,
-    },
-  });
-}
-
-async function pushToolStarted(controlled, toolRound, toolCall) {
-  await controlled.push(executionToolEvent('tool_call_start', toolRound, toolCall, {
-    status: 'running',
-  }));
-  await controlled.push(executionToolEvent('tool_progress', toolRound, toolCall, {
-    status: 'running',
-    progress: { phase: 'started', elapsed_ms: 0 },
-  }));
-}
-
-const bootstrapModule = path.join(__dirname, '../src/runtime/frontendBootstrap.ts');
-const clientModule = path.join(__dirname, '../src/api/client.ts');
-const streamManagerModule = path.join(__dirname, '../src/services/streamManager.ts');
-const messageModule = path.join(__dirname, '../src/api/message.ts');
-const runsModule = path.join(__dirname, '../src/api/runs.ts');
-
-globalThis.window = {
-  location: {
-    href: 'http://127.0.0.1:5173/s/local',
-    pathname: '/s/local',
-  },
-};
-for (const modulePath of [bootstrapModule, clientModule, streamManagerModule, messageModule, runsModule]) {
-  delete require.cache[require.resolve(modulePath)];
-}
-require(bootstrapModule).initializeFrontendBootstrap();
-
-const { StreamManager, STREAM_DURATION_UPDATE_MS } = require(streamManagerModule);
-const { messageApi } = require(messageModule);
-const { runsApi } = require(runsModule);
+require('../src/runtime/profileContext.ts').initializeProfileContext(
+  'http://127.0.0.1:18100/s/local',
+);
+require('../src/runtime/connectionScope.ts').connectionScopeRuntime.install({
+  profileId: 'local',
+  apiBase: '/p/local/api/v1',
+  serverInstanceId: '11111111-1111-4111-8111-111111111111',
+  connectionEpoch: 1,
+  connectionLeaseId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+});
+const { StreamManager, STREAM_DURATION_UPDATE_MS } = require(path.join(__dirname, '../src/services/streamManager.ts'));
+const { messageApi } = require(path.join(__dirname, '../src/api/message.ts'));
+const { runsApi } = require(path.join(__dirname, '../src/api/runs.ts'));
 const { getGenerationStatusText, getStreamStatusText } = require(path.join(__dirname, '../src/utils/generationStatus.ts'));
 
-async function withManager(run, epoch = createEpochSource()) {
+async function withManager(run) {
   resetTimers();
   installWindowTimers();
   const originalStream = messageApi.stream;
@@ -300,9 +168,9 @@ async function withManager(run, epoch = createEpochSource()) {
   const originalStreamPlanAnswer = messageApi.streamPlanAnswer;
   const originalAttach = runsApi.attach;
   const originalStop = runsApi.stop;
-  const manager = new StreamManager(epoch.source);
+  const manager = new StreamManager();
   try {
-    await run(manager, epoch);
+    await run(manager);
   } finally {
     messageApi.stream = originalStream;
     messageApi.streamPlanApproval = originalStreamPlanApproval;
@@ -311,137 +179,6 @@ async function withManager(run, epoch = createEpochSource()) {
     runsApi.stop = originalStop;
     manager.resetAll();
   }
-}
-
-async function testInvalidatedEpochCannotApplyLateChunkAliasOrFinish() {
-  const epoch = createEpochSource();
-  await withManager(async (manager) => {
-    const controlled = createControlledStream();
-    const calls = [];
-    const finishes = [];
-    manager.onFinish((info) => finishes.push(info));
-    messageApi.stream = (...args) => {
-      calls.push(args);
-      return controlled.stream();
-    };
-    const running = manager.startStream('conv-1', { content: 'hello' });
-    await tick();
-
-    const initial = manager.getConversationStates('conv-1')[0];
-    assert.equal(initial.epochToken, epoch.token);
-    assert.equal(calls[0][2].token, epoch.token);
-    assert.equal(calls[0][2].signal.aborted, false);
-    epoch.invalidate();
-    assert.equal(calls[0][2].signal.aborted, true);
-
-    await controlled.push(chunk({
-      run_id: 'run-late-epoch',
-      event_type: 'text',
-      content: 'must-not-commit',
-    }));
-    await controlled.close();
-    await runTimersUntil(running);
-
-    assert.deepEqual(manager.getConversationStates('conv-1'), []);
-    assert.equal(manager.getState('conv-1'), undefined);
-    assert.equal(manager.isStreaming('conv-1'), false);
-    assert.equal(manager.hasRun(initial.runId), false);
-    assert.equal(manager.streams.size, 0);
-    assert.equal(manager.runsByConversation.size, 0);
-    assert.equal(manager.conversationSnapshots.size, 0);
-    assert.equal(manager.durationTimers.size, 0);
-    assert.equal(manager.runAliases.size, 0);
-    assert.equal(initial.abortController.signal.aborted, true);
-    assert.equal(manager.resolveRunId(initial.runId), initial.runId);
-    assert.deepEqual(finishes, []);
-    assert.equal(intervals.size, 0);
-    assert.equal(epoch.captures, 1);
-  }, epoch);
-}
-
-async function testStaleRestoreRemovesPartiallyBuiltState() {
-  const base = createEpochSource();
-  let checks = 0;
-  const epoch = {
-    source: {
-      capture: base.source.capture,
-      signalFor: base.source.signalFor,
-      isCurrent(candidate) {
-        checks += 1;
-        return candidate === base.token && checks <= 4;
-      },
-    },
-  };
-  await withManager(async (manager) => {
-    manager.restoreRunFromEvents(
-      {
-        run_id: 'run-partial',
-        conversation_id: 'conv-1',
-        kind: 'chat',
-        status: 'completed',
-        event_count: 2,
-        created_at: 10,
-        updated_at: 11,
-        finished_at: 11,
-      },
-      [
-        chunk({ run_id: 'run-partial', event_index: 0, content: 'first' }),
-        chunk({ run_id: 'run-partial', event_index: 1, content: 'second' }),
-      ],
-    );
-
-    assert.ok(checks > 4, 'epoch must expire while replaying events');
-    assert.equal(manager.streams.size, 0);
-    assert.equal(manager.runsByConversation.size, 0);
-    assert.equal(manager.conversationSnapshots.size, 0);
-    assert.equal(manager.runAliases.size, 0);
-  }, epoch);
-}
-
-async function testStaleCleanupDoesNotDeleteSuccessorRunState() {
-  const epoch = createSwitchableEpochSource();
-  await withManager(async (manager) => {
-    const oldStream = createControlledStream();
-    const successorStream = createControlledStream();
-    messageApi.stream = oldStream.stream;
-    runsApi.attach = successorStream.stream;
-
-    const oldRunning = manager.startStream('conv-1', { content: 'old' });
-    await tick();
-    const initial = manager.getConversationStates('conv-1')[0];
-    const oldController = initial.abortController;
-    await oldStream.push(chunk({
-      run_id: 'run-shared',
-      event_type: 'text',
-      content: 'old-content',
-    }));
-
-    epoch.switchToB();
-    const successorRunning = manager.resumeStream(
-      'conv-1',
-      null,
-      'run-shared',
-    );
-    await tick();
-    const successor = manager.getConversationStates('conv-1')[0];
-    assert.equal(successor.epochToken, epoch.tokenB);
-    assert.notEqual(successor.abortController, oldController);
-
-    await oldStream.push(chunk({ content: 'late-old-content' }));
-    await oldStream.close();
-    await runTimersUntil(oldRunning);
-
-    const afterOldCleanup = manager.getConversationStates('conv-1')[0];
-    assert.equal(afterOldCleanup.epochToken, epoch.tokenB);
-    assert.equal(afterOldCleanup.abortController, successor.abortController);
-    assert.equal(afterOldCleanup.abortController.signal.aborted, false);
-    assert.equal(oldController.signal.aborted, true);
-    assert.equal(manager.runAliases.size, 0);
-    assert.equal(manager.durationTimers.size, 1);
-
-    await successorStream.close();
-    await runTimersUntil(successorRunning);
-  }, epoch);
 }
 
 async function testFlushesReasoningBeforeContentStarts() {
@@ -465,34 +202,7 @@ async function testFlushesReasoningBeforeContentStarts() {
   });
 }
 
-async function testProviderIncrementalEventsRemainNoOpDefenseOutsideCurrentSseContract() {
-  await withManager(async (manager) => {
-    const controlled = createControlledStream();
-    messageApi.stream = controlled.stream;
-    const content = '工具前说明'.repeat(80);
-    const partialToolCall = {
-      id: 'call-1',
-      type: 'function',
-      function: { name: 'read_file', arguments: '{"path":"notes' },
-    };
-    const running = manager.startStream('conv-1', { content: 'hello' });
-
-    await controlled.push(chunk({ event_type: 'text', content }));
-    await controlled.push(chunk({ event_type: 'tool_call_start' }));
-    await controlled.push(chunk({ event_type: 'tool_call', tool_call: partialToolCall }));
-
-    try {
-      const state = manager.getState('conv-1');
-      assert.equal(state.content, content);
-      assert.deepEqual(state.toolInteractions, []);
-    } finally {
-      await controlled.close();
-      await runTimersUntil(running);
-    }
-  });
-}
-
-async function testCommittedToolCallsFlushBufferedTextExactlyOnce() {
+async function testFlushesBufferedTextIntoSingleToolCall() {
   await withManager(async (manager) => {
     const controlled = createControlledStream();
     messageApi.stream = controlled.stream;
@@ -505,67 +215,17 @@ async function testCommittedToolCallsFlushBufferedTextExactlyOnce() {
     const running = manager.startStream('conv-1', { content: 'hello' });
 
     await controlled.push(chunk({ event_type: 'text', content }));
-    await controlled.push(chunk({ event_type: 'tool_call', tool_call: toolCall }));
-    await controlled.push(toolEvent('tool_calls_committed', 1, { tool_calls: [toolCall] }));
+    await controlled.push(chunk({
+      event_type: 'tool_calls_committed',
+      tool_calls: [toolCall],
+    }));
 
     try {
       const state = manager.getState('conv-1');
       assert.equal(state.content, '');
       assert.equal(state.toolInteractions.length, 1);
       assert.equal(state.toolInteractions[0].assistant.content, content);
-      assert.deepEqual(state.toolInteractions[0].assistant.tool_calls, [{
-        ...toolCall,
-        ...toolRoundFields(1),
-      }]);
-    } finally {
-      await controlled.close();
-      await runTimersUntil(running);
-    }
-  });
-}
-
-async function testRepeatedCommittedSnapshotReplacesSameRoundWithoutDuplicate() {
-  await withManager(async (manager) => {
-    const controlled = createControlledStream();
-    messageApi.stream = controlled.stream;
-    const partialToolCall = {
-      id: 'call-1',
-      type: 'function',
-      function: { name: 'read_file', arguments: '{"path":"notes' },
-    };
-    const staleToolCall = {
-      id: 'call-stale',
-      type: 'function',
-      function: { name: 'glob', arguments: '{}' },
-    };
-    const committedToolCall = {
-      ...partialToolCall,
-      function: { name: 'read_file', arguments: '{"path":"notes.txt"}' },
-    };
-    const content = '提交快照前的缓冲文本';
-    const running = manager.startStream('conv-1', { content: 'hello' });
-
-    await controlled.push(chunk({ event_type: 'text', content }));
-    await controlled.push(toolEvent('tool_calls_committed', 1, {
-      tool_calls: [partialToolCall, staleToolCall],
-    }));
-    await controlled.push(toolEvent('tool_calls_committed', 1, {
-      tool_calls: [committedToolCall],
-    }));
-
-    try {
-      const state = manager.getState('conv-1');
-      assert.equal(state.toolInteractions.length, 1);
-      assert.equal(state.content, '');
-      assert.equal(state.toolInteractions[0].assistant.content, content);
-      assert.equal(
-        state.toolInteractions.map((interaction) => interaction.assistant.content).join(''),
-        content,
-      );
-      assert.deepEqual(state.toolInteractions[0].assistant.tool_calls, [{
-        ...committedToolCall,
-        ...toolRoundFields(1),
-      }]);
+      assert.deepEqual(state.toolInteractions[0].assistant.tool_calls, [toolCall]);
     } finally {
       await controlled.close();
       await runTimersUntil(running);
@@ -593,21 +253,17 @@ async function testMergesToolResultIntoExistingInteraction() {
     };
     const running = manager.startStream('conv-1', { content: 'hello' });
 
-    await controlled.push(toolEvent('tool_calls_committed', 1, { tool_calls: [toolCall] }));
-    await pushToolStarted(controlled, 1, toolCall);
-    await controlled.push(executionToolEvent('tool_result', 1, toolCall, {
-      status: 'done',
-      content: toolResult.content,
-    }));
+    await controlled.push(chunk({ event_type: 'tool_calls_committed', tool_calls: [toolCall] }));
+    await controlled.push(chunk({ event_type: 'tool_result', tool_call: toolResult }));
 
     try {
       const state = manager.getState('conv-1');
       assert.equal(state.toolInteractions.length, 1);
       assert.equal(state.toolInteractions[0].tools.length, 1);
-      assert.equal(state.toolInteractions[0].tools[0].tool_call_id, toolResult.tool_call_id);
-      assert.equal(state.toolInteractions[0].tools[0].name, toolResult.name);
-      assert.equal(state.toolInteractions[0].tools[0].status, 'done');
-      assert.equal(state.toolInteractions[0].tools[0].content, toolResult.content);
+      assert.deepEqual(state.toolInteractions[0].tools[0], {
+        role: 'tool',
+        ...toolResult,
+      });
     } finally {
       await controlled.close();
       await runTimersUntil(running);
@@ -626,11 +282,16 @@ async function testToolProgressUpdatesRunningToolInPlace() {
     };
     const running = manager.startStream('conv-1', { content: 'hello' });
 
-    await controlled.push(toolEvent('tool_calls_committed', 1, { tool_calls: [toolCall] }));
-    await pushToolStarted(controlled, 1, toolCall);
-    await controlled.push(executionToolEvent('tool_progress', 1, toolCall, {
-      status: 'running',
-      progress: { phase: 'scan', scanned_entries: 100, matched_entries: 12 },
+    await controlled.push(chunk({ event_type: 'tool_calls_committed', tool_calls: [toolCall] }));
+    await controlled.push(chunk({
+      event_type: 'tool_progress',
+      tool_call: {
+        id: 'call-1',
+        tool_call_id: 'call-1',
+        name: 'glob',
+        status: 'running',
+        progress: { phase: 'scan', scanned_entries: 100, matched_entries: 12 },
+      },
     }));
 
     try {
@@ -658,18 +319,21 @@ async function testToolResultDeltaAppendsOutputInPlace() {
     };
     const running = manager.startStream('conv-1', { content: 'hello' });
 
-    await controlled.push(toolEvent('tool_calls_committed', 1, { tool_calls: [toolCall] }));
-    await pushToolStarted(controlled, 1, toolCall);
-    // The backend does not currently emit this event; keep the frontend-reserved path defensive.
-    await controlled.push(executionToolEvent('tool_result_delta', 1, toolCall, { content_delta: 'hel' }));
-    await controlled.push(executionToolEvent('tool_result_delta', 1, toolCall, { content_delta: 'lo' }));
+    await controlled.push(chunk({ event_type: 'tool_calls_committed', tool_calls: [toolCall] }));
+    await controlled.push(chunk({
+      event_type: 'tool_result_delta',
+      tool_call: { id: 'call-1', tool_call_id: 'call-1', name: 'run_command', content_delta: 'hel' },
+    }));
+    await controlled.push(chunk({
+      event_type: 'tool_result_delta',
+      tool_call: { id: 'call-1', tool_call_id: 'call-1', name: 'run_command', content_delta: 'lo' },
+    }));
 
     try {
       const state = manager.getState('conv-1');
       assert.equal(state.toolInteractions.length, 1);
       assert.equal(state.toolInteractions[0].tools.length, 1);
       assert.equal(state.toolInteractions[0].tools[0].content, 'hello');
-      assert.equal(state.toolInteractions[0].tools[0].content_delta, 'hello');
       assert.equal(state.toolInteractions[0].tools[0].status, 'running');
     } finally {
       await controlled.close();
@@ -689,11 +353,16 @@ async function testToolCallErrorUpdatesToolInPlace() {
     };
     const running = manager.startStream('conv-1', { content: 'hello' });
 
-    await controlled.push(toolEvent('tool_calls_committed', 1, { tool_calls: [toolCall] }));
-    await pushToolStarted(controlled, 1, toolCall);
-    await controlled.push(executionToolEvent('tool_call_error', 1, toolCall, {
-      status: 'error',
-      error: 'path is outside workspace roots',
+    await controlled.push(chunk({ event_type: 'tool_calls_committed', tool_calls: [toolCall] }));
+    await controlled.push(chunk({
+      event_type: 'tool_call_error',
+      tool_call: {
+        id: 'call-1',
+        tool_call_id: 'call-1',
+        name: 'glob',
+        status: 'error',
+        error: 'path is outside workspace roots',
+      },
     }));
 
     try {
@@ -733,40 +402,17 @@ async function testProcessContentStaysWithCurrentToolInteraction() {
     }));
     const running = manager.startStream('conv-1', { content: 'hello' });
 
+    await controlled.push(chunk({ event_type: 'tool_calls_committed', tool_calls: toolCalls }));
     await controlled.push(chunk({ event_type: 'process_content', content: '\n\n' }));
-    await controlled.push(toolEvent('tool_calls_committed', 1, { tool_calls: toolCalls }));
-    await pushToolStarted(controlled, 1, toolCalls[0]);
-    await pushToolStarted(controlled, 1, toolCalls[1]);
-
-    const runningState = manager.getState('conv-1');
-    assert.equal(runningState.toolInteractions.length, 1);
-    assert.deepEqual(
-      runningState.toolInteractions[0].tools.map((tool) => tool.tool_call_id),
-      toolCalls.map((toolCall) => toolCall.id),
-    );
-    assert.ok(runningState.toolInteractions[0].tools.every((tool) => tool.status === 'running'));
-
-    await controlled.push(executionToolEvent('tool_result', 1, toolCalls[0], {
-      status: 'done',
-      content: results[0].content,
-    }));
-    await controlled.push(executionToolEvent('tool_result', 1, toolCalls[1], {
-      status: 'done',
-      content: results[1].content,
-    }));
+    await controlled.push(chunk({ event_type: 'tool_result', tool_call: results[0] }));
+    await controlled.push(chunk({ event_type: 'tool_result', tool_call: results[1] }));
 
     try {
       const state = manager.getState('conv-1');
       assert.equal(state.content, '');
       assert.equal(state.toolInteractions.length, 1);
       assert.equal(state.toolInteractions[0].assistant.content, '\n\n');
-      assert.deepEqual(
-        state.toolInteractions[0].assistant.tool_calls.map((toolCall) => toolCall.id),
-        toolCalls.map((toolCall) => toolCall.id),
-      );
-      assert.ok(state.toolInteractions[0].assistant.tool_calls.every((toolCall) => (
-        toolCall.tool_round_id === toolRoundFields(1).tool_round_id
-      )));
+      assert.deepEqual(state.toolInteractions[0].assistant.tool_calls, toolCalls);
       assert.equal(state.toolInteractions[0].tools.length, 2);
     } finally {
       await controlled.close();
@@ -775,46 +421,82 @@ async function testProcessContentStaysWithCurrentToolInteraction() {
   });
 }
 
-async function testToolResultsMergeIntoTheirCommittedRounds() {
+async function testToolCallStartFlushesBufferedTextBeforeToolCallCompletes() {
   await withManager(async (manager) => {
     const controlled = createControlledStream();
     messageApi.stream = controlled.stream;
-    const firstToolCall = {
-      id: 'call-reused',
-      type: 'function',
-      function: { name: 'read_file', arguments: '{"path":"one.txt"}' },
-    };
-    const secondToolCall = {
-      id: 'call-reused',
-      type: 'function',
-      function: { name: 'read_file', arguments: '{"path":"two.txt"}' },
-    };
+    const content = '工具调用前的说明'.repeat(80);
     const running = manager.startStream('conv-1', { content: 'hello' });
 
-    await controlled.push(chunk({ event_type: 'process_content', content: '第一轮说明' }));
-    await controlled.push(toolEvent('tool_calls_committed', 1, { tool_calls: [firstToolCall] }));
-    await pushToolStarted(controlled, 1, firstToolCall);
-    await controlled.push(executionToolEvent('tool_result', 1, firstToolCall, {
-      status: 'done',
-      content: 'one',
-    }));
-    await controlled.push(chunk({ event_type: 'process_content', content: '第二轮说明' }));
-    await controlled.push(toolEvent('tool_calls_committed', 2, { tool_calls: [secondToolCall] }));
-    await pushToolStarted(controlled, 2, secondToolCall);
-    await controlled.push(executionToolEvent('tool_result', 2, secondToolCall, {
-      status: 'done',
-      content: 'two',
+    await controlled.push(chunk({ event_type: 'text', content }));
+    await controlled.push(chunk({
+      event_type: 'tool_call_start',
+      tool_call: { id: 'call-start', pending: true },
     }));
 
     try {
       const state = manager.getState('conv-1');
-      assert.equal(state.toolInteractions.length, 2);
-      assert.equal(state.toolInteractions[0].tool_round_id, toolRoundFields(1).tool_round_id);
-      assert.equal(state.toolInteractions[0].assistant.content, '第一轮说明');
-      assert.equal(state.toolInteractions[0].tools[0].content, 'one');
-      assert.equal(state.toolInteractions[1].tool_round_id, toolRoundFields(2).tool_round_id);
-      assert.equal(state.toolInteractions[1].assistant.content, '第二轮说明');
-      assert.equal(state.toolInteractions[1].tools[0].content, 'two');
+      assert.equal(state.content, '');
+      assert.equal(state.toolInteractions.length, 1);
+      assert.equal(state.toolInteractions[0].assistant.content, content);
+    } finally {
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
+async function testToolCallStartCreatesRunningPlaceholder() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    messageApi.stream = controlled.stream;
+    const content = '准备调用文件工具。';
+    const running = manager.startStream('conv-1', { content: 'hello' });
+
+    await controlled.push(chunk({ event_type: 'text', content }));
+    await controlled.push(chunk({
+      event_type: 'tool_call_start',
+      tool_call: { id: 'call-start', pending: true },
+    }));
+
+    try {
+      const state = manager.getState('conv-1');
+      assert.equal(state.content, '');
+      assert.equal(state.toolInteractions.length, 1);
+      assert.equal(state.toolInteractions[0].assistant.content, content);
+      assert.equal(state.toolInteractions[0].assistant.tool_calls.length, 1);
+      assert.equal(state.toolInteractions[0].assistant.tool_calls[0].pending, true);
+    } finally {
+      await controlled.close();
+      await runTimersUntil(running);
+    }
+  });
+}
+
+async function testToolCallDeltaUpdatesRunningPlaceholder() {
+  await withManager(async (manager) => {
+    const controlled = createControlledStream();
+    messageApi.stream = controlled.stream;
+    const partialToolCall = {
+      id: 'call-1',
+      type: 'function',
+      function: { name: 'write_file', arguments: '{"path":"test_tools.py","content":"' },
+    };
+    const running = manager.startStream('conv-1', { content: 'hello' });
+
+    await controlled.push(chunk({
+      event_type: 'tool_call_start',
+      tool_call: { tool_calls: [partialToolCall] },
+      tool_calls: [partialToolCall],
+    }));
+
+    try {
+      const state = manager.getState('conv-1');
+      assert.equal(state.toolInteractions.length, 1);
+      assert.equal(state.toolInteractions[0].assistant.tool_calls.length, 1);
+      assert.equal(state.toolInteractions[0].assistant.tool_calls[0].id, 'call-1');
+      assert.equal(state.toolInteractions[0].assistant.tool_calls[0].function.name, 'write_file');
+      assert.equal(state.toolInteractions[0].assistant.tool_calls[0].function.arguments, '{"path":"test_tools.py","content":"');
     } finally {
       await controlled.close();
       await runTimersUntil(running);
@@ -862,7 +544,7 @@ async function testRequestNodeAndUiAnchorAreIndependent() {
     await tick();
     let state = manager.getConversationStates('conv-1')[0];
     assert.equal(streamArgs[2].nodeId, undefined);
-    assert.ok(streamArgs[2].token);
+    assert.equal(streamArgs[2].signal instanceof AbortSignal, true);
     assert.equal(state.anchorNodeId, 'node-current');
     assert.equal(state.nodeId, null);
     assert.equal(state.targetNodeId, null);
@@ -1301,541 +983,6 @@ async function testRestoreRunKeepsParentSummaryAndMetadata() {
     assert.equal(state.metadata.workflow_step_index, 1);
     assert.equal(state.metadata.workflow_step_name, '检查实现');
   });
-}
-
-async function testRestoreAndAttachRunReplaysOnceAndUsesFreshCursor() {
-  const epoch = createEpochSource();
-  await withManager(async (manager) => {
-    const controlled = createControlledStream();
-    const attachCalls = [];
-    runsApi.attach = (runId, options) => {
-      attachCalls.push([runId, options]);
-      return controlled.stream();
-    };
-    const record = runRecord({
-      run_id: 'run-managed',
-      event_count: 3,
-    });
-    const events = [
-      chunk({
-        run_id: 'run-managed',
-        event_index: 4,
-        content: 'tail',
-      }),
-      chunk({
-        run_id: 'run-managed',
-        event_index: 0,
-        content: 'head',
-      }),
-    ];
-
-    assert.equal(manager.restoreAndAttachRun(record, events, epoch.token), undefined);
-    const initialState = manager.getConversationStates('conv-1')[0];
-    const initialSubscription = manager.managedSubscriptionTasks.get('run-managed');
-    assert.equal(initialState.content, 'headtail');
-    assert.ok(initialState.abortController instanceof AbortController);
-    assert.equal(initialSubscription.controller, initialState.abortController);
-    assert.equal(attachCalls.length, 1);
-    assert.equal(attachCalls[0][0], 'run-managed');
-    assert.equal(attachCalls[0][1].token, epoch.token);
-    assert.equal(attachCalls[0][1].fromEvent, 5);
-    assert.equal(attachCalls[0][1].signal.aborted, false);
-
-    let settled = false;
-    initialSubscription.task.finally(() => {
-      settled = true;
-    });
-    await tick();
-    assert.equal(settled, false, 'restore must not wait for the managed SSE lifetime');
-
-    manager.restoreAndAttachRun(record, events, epoch.token);
-    const reusedState = manager.getConversationStates('conv-1')[0];
-    assert.equal(attachCalls.length, 1);
-    assert.equal(reusedState.content, 'headtail');
-    assert.equal(reusedState.abortController, initialState.abortController);
-    assert.equal(manager.managedSubscriptionTasks.get('run-managed'), initialSubscription);
-
-    await controlled.close();
-    await runTimersUntil(initialSubscription.task);
-    assert.equal(manager.managedSubscriptionTasks.has('run-managed'), false);
-  }, epoch);
-}
-
-async function testRestoreAndAttachRunReconcilesTerminalRecordOverManagedAttach() {
-  const epoch = createEpochSource();
-  await withManager(async (manager) => {
-    const controlled = createControlledStream();
-    const attachCalls = [];
-    runsApi.attach = (runId, options) => {
-      attachCalls.push([runId, options]);
-      return controlled.stream();
-    };
-    const runningRecord = runRecord({
-      run_id: 'run-terminal-reopen',
-      event_count: 1,
-    });
-
-    manager.restoreAndAttachRun(runningRecord, [chunk({
-      run_id: 'run-terminal-reopen',
-      event_index: 0,
-      content: 'running',
-    })], epoch.token);
-    const originalSubscription = manager.managedSubscriptionTasks.get('run-terminal-reopen');
-    assert.ok(originalSubscription);
-
-    manager.restoreAndAttachRun(runRecord({
-      run_id: 'run-terminal-reopen',
-      status: 'completed',
-      event_count: 2,
-      finished_at: 12,
-    }), [
-      chunk({
-        run_id: 'run-terminal-reopen',
-        event_index: 0,
-        content: 'running',
-      }),
-      chunk({
-        run_id: 'run-terminal-reopen',
-        event_index: 1,
-        status: 'completed',
-      }),
-    ], epoch.token);
-
-    const terminalState = manager.getConversationStates('conv-1')[0];
-    assert.equal(originalSubscription.controller.signal.aborted, true);
-    assert.equal(terminalState.status, 'completed');
-    assert.equal(terminalState.abortController, null);
-    assert.equal(terminalState.content, 'running');
-    assert.equal(manager.managedSubscriptionTasks.has('run-terminal-reopen'), false);
-    assert.equal(attachCalls.length, 1, 'terminal reconciliation must not open a replacement attach');
-
-    await controlled.close();
-    await runTimersUntil(originalSubscription.task);
-    assert.equal(manager.getConversationStates('conv-1')[0].status, 'completed');
-    assert.equal(manager.managedSubscriptionTasks.has('run-terminal-reopen'), false);
-  }, epoch);
-}
-
-async function testRestoreAndAttachRunReplacesManagedAttachForNewTerminalEvents() {
-  const epoch = createEpochSource();
-  await withManager(async (manager) => {
-    const originalStream = createControlledStream();
-    const replacementStream = createControlledStream();
-    const attachCalls = [];
-    runsApi.attach = (runId, options) => {
-      attachCalls.push([runId, options]);
-      return attachCalls.length === 1 ? originalStream.stream() : replacementStream.stream();
-    };
-    const record = runRecord({
-      run_id: 'run-terminal-events-reopen',
-      event_count: 1,
-    });
-
-    manager.restoreAndAttachRun(record, [chunk({
-      run_id: 'run-terminal-events-reopen',
-      event_index: 0,
-      content: 'persisted',
-    })], epoch.token);
-    const originalSubscription = manager.managedSubscriptionTasks.get('run-terminal-events-reopen');
-
-    manager.restoreAndAttachRun(record, [
-      chunk({
-        run_id: 'run-terminal-events-reopen',
-        event_index: 0,
-        content: 'persisted',
-      }),
-      chunk({
-        run_id: 'run-terminal-events-reopen',
-        event_index: 2,
-        status: 'interrupted',
-      }),
-    ], epoch.token);
-    const replacementSubscription = manager.managedSubscriptionTasks.get('run-terminal-events-reopen');
-    const restoredState = manager.getConversationStates('conv-1')[0];
-
-    assert.notEqual(replacementSubscription, originalSubscription);
-    assert.equal(originalSubscription.controller.signal.aborted, true);
-    assert.equal(attachCalls.length, 2);
-    assert.equal(attachCalls[1][1].fromEvent, 3);
-    assert.equal(restoredState.status, 'stopped');
-    assert.equal(restoredState.content, 'persisted');
-    assert.equal(restoredState.abortController, replacementSubscription.controller);
-
-    await originalStream.close();
-    await runTimersUntil(originalSubscription.task);
-    assert.equal(
-      manager.managedSubscriptionTasks.get('run-terminal-events-reopen'),
-      replacementSubscription,
-    );
-    assert.equal(manager.getConversationStates('conv-1')[0].status, 'stopped');
-
-    await replacementStream.close();
-    await runTimersUntil(replacementSubscription.task);
-    assert.equal(manager.managedSubscriptionTasks.has('run-terminal-events-reopen'), false);
-    assert.equal(manager.getConversationStates('conv-1')[0].status, 'stopped');
-  }, epoch);
-}
-
-async function testRestoreAndAttachRunReusesResumeStreamTransport() {
-  const epoch = createEpochSource();
-  await withManager(async (manager) => {
-    const controlled = createControlledStream();
-    const attachCalls = [];
-    runsApi.attach = (runId, options) => {
-      attachCalls.push([runId, options]);
-      return controlled.stream();
-    };
-
-    const running = manager.resumeStream('conv-1', null, 'run-resume-owned');
-    await controlled.push(chunk({
-      run_id: 'run-resume-owned',
-      event_index: 0,
-      content: 'live',
-    }));
-    const originalState = manager.getConversationStates('conv-1')[0];
-
-    manager.restoreAndAttachRun(runRecord({
-      run_id: 'run-resume-owned',
-      event_count: 1,
-    }), [chunk({
-      run_id: 'run-resume-owned',
-      event_index: 0,
-      content: 'persisted',
-    })], epoch.token);
-
-    const reusedState = manager.getConversationStates('conv-1')[0];
-    assert.equal(attachCalls.length, 1);
-    assert.equal(reusedState.abortController, originalState.abortController);
-    assert.equal(reusedState.content, 'live');
-    assert.equal(manager.managedSubscriptionTasks.has('run-resume-owned'), false);
-
-    await controlled.close();
-    await runTimersUntil(running);
-  }, epoch);
-}
-
-async function testRestoreAndAttachRunReusesStartStreamAndReconcilesTerminalSnapshot() {
-  const epoch = createEpochSource();
-  await withManager(async (manager) => {
-    const controlled = createControlledStream();
-    const runAttachCalls = [];
-    messageApi.stream = controlled.stream;
-    runsApi.attach = (...args) => {
-      runAttachCalls.push(args);
-      return createControlledStream().stream();
-    };
-
-    const running = manager.startStream('conv-1', { content: 'hello' });
-    await controlled.push(chunk({
-      run_id: 'run-start-owned',
-      event_index: 0,
-      content: 'live',
-    }));
-    const originalState = manager.getConversationStates('conv-1')[0];
-
-    manager.restoreAndAttachRun(runRecord({
-      run_id: 'run-start-owned',
-      event_count: 1,
-    }), [chunk({
-      run_id: 'run-start-owned',
-      event_index: 0,
-      content: 'persisted',
-    })], epoch.token);
-    const reusedState = manager.getConversationStates('conv-1')[0];
-    assert.equal(reusedState.abortController, originalState.abortController);
-    assert.equal(reusedState.content, 'live');
-    assert.equal(runAttachCalls.length, 0);
-
-    manager.restoreAndAttachRun(runRecord({
-      run_id: 'run-start-owned',
-      status: 'completed',
-      event_count: 2,
-      finished_at: 12,
-    }), [
-      chunk({
-        run_id: 'run-start-owned',
-        event_index: 0,
-        content: 'persisted',
-      }),
-      chunk({
-        run_id: 'run-start-owned',
-        event_index: 1,
-        status: 'completed',
-      }),
-    ], epoch.token);
-
-    const terminalState = manager.getConversationStates('conv-1')[0];
-    assert.equal(originalState.abortController.signal.aborted, true);
-    assert.equal(terminalState.status, 'completed');
-    assert.equal(terminalState.abortController, null);
-    assert.equal(terminalState.content, 'persisted');
-    assert.equal(runAttachCalls.length, 0);
-
-    await controlled.close();
-    await runTimersUntil(running);
-    assert.equal(manager.getConversationStates('conv-1')[0].status, 'completed');
-  }, epoch);
-}
-
-async function testRestoreAndAttachRunFoldsApprovalHistoryBeforeAttach() {
-  const epoch = createEpochSource();
-  await withManager(async (manager) => {
-    const controlled = createControlledStream();
-    const attachCalls = [];
-    runsApi.attach = (runId, options) => {
-      attachCalls.push([runId, options]);
-      return controlled.stream();
-    };
-    const record = runRecord({
-      run_id: 'run-approval-replay',
-      status: 'waiting_approval',
-      event_count: 2,
-    });
-    const events = [
-      {
-        run_id: 'run-approval-replay',
-        conversation_id: 'conv-1',
-        status: 'waiting_approval',
-        event_type: 'tool_approval_request',
-        approval: { id: 'approval-live', status: 'pending', tool_name: 'write_file' },
-        event_index: 2,
-      },
-      {
-        run_id: 'run-approval-replay',
-        conversation_id: 'conv-1',
-        status: 'running',
-        event_type: 'tool_approval_result',
-        approval: { id: 'approval-resolved', status: 'approved' },
-        event_index: 1,
-      },
-      {
-        run_id: 'run-approval-replay',
-        conversation_id: 'conv-1',
-        status: 'waiting_approval',
-        event_type: 'tool_approval_request',
-        approval: { id: 'approval-resolved', status: 'pending', tool_name: 'run_command' },
-        event_index: 0,
-      },
-    ];
-
-    manager.restoreAndAttachRun(record, events, epoch.token);
-    const state = manager.getConversationStates('conv-1')[0];
-    const subscription = manager.managedSubscriptionTasks.get('run-approval-replay');
-    assert.equal(state.status, 'waiting_approval');
-    assert.deepEqual(Object.keys(state.pendingApprovals), ['approval-live']);
-    assert.equal(state.pendingApprovals['approval-live'].tool_name, 'write_file');
-    assert.equal(attachCalls[0][1].fromEvent, 3);
-
-    await controlled.close();
-    await runTimersUntil(subscription.task);
-  }, epoch);
-}
-
-async function testRestoreAndAttachRunKeepsEveryTerminalStatusStatic() {
-  const epoch = createEpochSource();
-  await withManager(async (manager) => {
-    const attachCalls = [];
-    runsApi.attach = (...args) => {
-      attachCalls.push(args);
-      return createControlledStream().stream();
-    };
-    const expectedStatuses = new Map([
-      ['completed', 'completed'],
-      ['failed', 'error'],
-      ['cancelled', 'stopped'],
-      ['interrupted', 'stopped'],
-      ['stopped', 'stopped'],
-    ]);
-
-    for (const [status, expectedStatus] of expectedStatuses) {
-      const runId = `run-terminal-${status}`;
-      const conversationId = `conv-terminal-${status}`;
-      manager.restoreAndAttachRun(
-        runRecord({
-          run_id: runId,
-          conversation_id: conversationId,
-          status,
-          event_count: 1,
-          finished_at: 12,
-        }),
-        [{
-          run_id: runId,
-          conversation_id: conversationId,
-          status: 'waiting_approval',
-          event_type: 'tool_approval_request',
-          approval: { id: `approval-${status}`, status: 'pending' },
-          event_index: 0,
-        }],
-        epoch.token,
-      );
-
-      const state = manager.getConversationStates(conversationId)[0];
-      assert.equal(state.status, expectedStatus);
-      assert.equal(state.abortController, null);
-      assert.deepEqual(state.pendingApprovals, {});
-    }
-
-    assert.equal(attachCalls.length, 0);
-    assert.equal(manager.managedSubscriptionTasks.size, 0);
-  }, epoch);
-}
-
-async function testRestoreAndAttachRunPreservesNewerTerminalEventStatus() {
-  const epoch = createEpochSource();
-  await withManager(async (manager) => {
-    const attachCalls = [];
-    runsApi.attach = async function* attach(runId, options) {
-      attachCalls.push([runId, options]);
-    };
-    manager.restoreAndAttachRun(
-      runRecord({
-        run_id: 'run-status-race',
-        status: 'running',
-        event_count: 1,
-      }),
-      [
-        {
-          run_id: 'run-status-race',
-          conversation_id: 'conv-1',
-          status: 'running',
-          event_index: 0,
-        },
-        {
-          run_id: 'run-status-race',
-          conversation_id: 'conv-1',
-          status: 'waiting_approval',
-          event_type: 'tool_approval_request',
-          approval: { id: 'approval-before-terminal', status: 'pending' },
-          event_index: 1,
-        },
-        {
-          type: 'run_finished',
-          run_id: 'run-status-race',
-          conversation_id: 'conv-1',
-          status: 'interrupted',
-          event_index: 2,
-        },
-      ],
-      epoch.token,
-    );
-    const subscription = manager.managedSubscriptionTasks.get('run-status-race');
-    await runTimersUntil(subscription.task);
-
-    const state = manager.getConversationStates('conv-1')[0];
-    assert.equal(attachCalls.length, 1);
-    assert.equal(attachCalls[0][1].fromEvent, 3);
-    assert.equal(state.status, 'stopped');
-    assert.deepEqual(state.pendingApprovals, {});
-  }, epoch);
-}
-
-async function testRestoreAndAttachRunKeepsEventTerminalStatusOnAttachFailure() {
-  const epoch = createEpochSource();
-  await withManager(async (manager) => {
-    runsApi.attach = async function* attach() {
-      throw new Error('attach transport failed');
-    };
-    const expectedStatuses = new Map([
-      ['completed', 'completed'],
-      ['interrupted', 'stopped'],
-    ]);
-
-    for (const [eventStatus, expectedStatus] of expectedStatuses) {
-      const runId = `run-event-terminal-${eventStatus}`;
-      const conversationId = `conv-event-terminal-${eventStatus}`;
-      manager.restoreAndAttachRun(
-        runRecord({
-          run_id: runId,
-          conversation_id: conversationId,
-          status: 'running',
-          event_count: 0,
-        }),
-        [{
-          type: 'run_finished',
-          run_id: runId,
-          conversation_id: conversationId,
-          status: eventStatus,
-          event_index: 0,
-        }],
-        epoch.token,
-      );
-      const subscription = manager.managedSubscriptionTasks.get(runId);
-      await runTimersUntil(subscription.task);
-
-      const state = manager.getConversationStates(conversationId)[0];
-      assert.equal(state.status, expectedStatus);
-      assert.equal(state.errorMessage, null);
-    }
-  }, epoch);
-}
-
-async function testManagedRestoreInvalidationAbortsEveryAttach() {
-  const epoch = createEpochSource();
-  await withManager(async (manager) => {
-    const controlledByRun = new Map([
-      ['run-invalidated-a', createControlledStream()],
-      ['run-invalidated-b', createControlledStream()],
-    ]);
-    const attachSignals = [];
-    runsApi.attach = (runId, options) => {
-      attachSignals.push(options.signal);
-      return controlledByRun.get(runId).stream();
-    };
-
-    for (const runId of controlledByRun.keys()) {
-      manager.restoreAndAttachRun(runRecord({ run_id: runId }), [], epoch.token);
-    }
-    const subscriptions = [...manager.managedSubscriptionTasks.values()];
-    assert.equal(subscriptions.length, 2);
-
-    epoch.invalidate();
-    assert.equal(attachSignals.every((signal) => signal.aborted), true);
-
-    await Promise.all([...controlledByRun.values()].map((controlled) => controlled.close()));
-    await Promise.all(subscriptions.map((subscription) => subscription.task));
-    assert.equal(manager.managedSubscriptionTasks.size, 0);
-    assert.equal(manager.streams.size, 0);
-    assert.equal(subscriptions.every((subscription) => subscription.controller.signal.aborted), true);
-  }, epoch);
-}
-
-async function testManagedRestoreOldCompletionCannotDeleteSuccessorTask() {
-  const epoch = createSwitchableEpochSource();
-  await withManager(async (manager) => {
-    const streamA = createControlledStream();
-    const streamB = createControlledStream();
-    runsApi.attach = (_runId, options) => (
-      options.token === epoch.tokenA ? streamA.stream() : streamB.stream()
-    );
-    const record = runRecord({ run_id: 'run-managed-successor' });
-
-    manager.restoreAndAttachRun(record, [chunk({
-      run_id: 'run-managed-successor',
-      content: 'lease-a',
-      event_index: 0,
-    })], epoch.tokenA);
-    const subscriptionA = manager.managedSubscriptionTasks.get('run-managed-successor');
-
-    epoch.switchToB();
-    manager.restoreAndAttachRun(record, [chunk({
-      run_id: 'run-managed-successor',
-      content: 'lease-b',
-      event_index: 0,
-    })], epoch.tokenB);
-    const subscriptionB = manager.managedSubscriptionTasks.get('run-managed-successor');
-    assert.notEqual(subscriptionB, subscriptionA);
-    assert.equal(subscriptionA.controller.signal.aborted, true);
-    assert.equal(manager.getConversationStates('conv-1')[0].content, 'lease-b');
-
-    await streamA.close();
-    await runTimersUntil(subscriptionA.task);
-    assert.equal(manager.managedSubscriptionTasks.get('run-managed-successor'), subscriptionB);
-    assert.equal(manager.getConversationStates('conv-1')[0].content, 'lease-b');
-
-    await streamB.close();
-    await runTimersUntil(subscriptionB.task);
-    assert.equal(manager.managedSubscriptionTasks.has('run-managed-successor'), false);
-  }, epoch);
 }
 
 async function testSubagentResultDoesNotAppendAlreadyStreamedContent() {
@@ -2320,15 +1467,15 @@ function testGenerationStatusUsesPersistedErrorMessage() {
 
 async function main() {
   await testFlushesReasoningBeforeContentStarts();
-  await testProviderIncrementalEventsRemainNoOpDefenseOutsideCurrentSseContract();
-  await testCommittedToolCallsFlushBufferedTextExactlyOnce();
-  await testRepeatedCommittedSnapshotReplacesSameRoundWithoutDuplicate();
+  await testFlushesBufferedTextIntoSingleToolCall();
   await testMergesToolResultIntoExistingInteraction();
   await testToolProgressUpdatesRunningToolInPlace();
-  await testProcessContentStaysWithCurrentToolInteraction();
   await testToolResultDeltaAppendsOutputInPlace();
   await testToolCallErrorUpdatesToolInPlace();
-  await testToolResultsMergeIntoTheirCommittedRounds();
+  await testProcessContentStaysWithCurrentToolInteraction();
+  await testToolCallStartFlushesBufferedTextBeforeToolCallCompletes();
+  await testToolCallStartCreatesRunningPlaceholder();
+  await testToolCallDeltaUpdatesRunningPlaceholder();
   await testStreamErrorStatePreservesRealMessage();
   await testRequestNodeAndUiAnchorAreIndependent();
   await testPlanApprovalUsesControlStreamWithoutPendingUserMessage();
@@ -2342,17 +1489,6 @@ async function main() {
   await testRestoreCompletedSideRunFromBackendEvents();
   await testRestoreRunDoesNotReviveHistoricalApprovalRequests();
   await testRestoreRunKeepsParentSummaryAndMetadata();
-  await testRestoreAndAttachRunReplaysOnceAndUsesFreshCursor();
-  await testRestoreAndAttachRunReconcilesTerminalRecordOverManagedAttach();
-  await testRestoreAndAttachRunReplacesManagedAttachForNewTerminalEvents();
-  await testRestoreAndAttachRunReusesResumeStreamTransport();
-  await testRestoreAndAttachRunReusesStartStreamAndReconcilesTerminalSnapshot();
-  await testRestoreAndAttachRunFoldsApprovalHistoryBeforeAttach();
-  await testRestoreAndAttachRunKeepsEveryTerminalStatusStatic();
-  await testRestoreAndAttachRunPreservesNewerTerminalEventStatus();
-  await testRestoreAndAttachRunKeepsEventTerminalStatusOnAttachFailure();
-  await testManagedRestoreInvalidationAbortsEveryAttach();
-  await testManagedRestoreOldCompletionCannotDeleteSuccessorTask();
   await testSubagentResultDoesNotAppendAlreadyStreamedContent();
   await testWorkflowResultDoesNotAppendAggregateContentToRunBody();
   await testCommandOutputUsesDedicatedBufferInsteadOfRunContent();
@@ -2368,9 +1504,6 @@ async function main() {
   await testCoalescesContentNotificationsAndFlushesCompletionImmediately();
   await testDurationNotificationsUseCoarseInterval();
   await testWaitingApprovalStatusIsVisible();
-  await testInvalidatedEpochCannotApplyLateChunkAliasOrFinish();
-  await testStaleRestoreRemovesPartiallyBuiltState();
-  await testStaleCleanupDoesNotDeleteSuccessorRunState();
   testGenerationStatusUsesPersistedErrorMessage();
   console.log('streamManager tests passed');
 }

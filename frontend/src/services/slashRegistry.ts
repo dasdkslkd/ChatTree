@@ -1,10 +1,4 @@
 import { slashApi } from '../api/slash';
-import {
-  StaleConnectionEpochError,
-  captureConnectionEpoch,
-  connectionEpochRuntime,
-  type ConnectionEpochToken,
-} from '../runtime/connectionEpoch';
 import type { SlashCommandInfo } from '../types/slash';
 
 const DEFAULT_COMMANDS: SlashCommandInfo[] = [
@@ -154,25 +148,6 @@ const DEFAULT_COMMANDS: SlashCommandInfo[] = [
 
 let commands = DEFAULT_COMMANDS;
 let refreshPromise: Promise<SlashCommandInfo[]> | null = null;
-let refreshToken: ConnectionEpochToken | null = null;
-
-function sameEpochToken(
-  left: ConnectionEpochToken | null,
-  right: ConnectionEpochToken,
-): boolean {
-  return Boolean(left
-    && left.generation === right.generation
-    && left.profileId === right.profileId
-    && left.serverInstanceId === right.serverInstanceId
-    && left.connectionEpoch === right.connectionEpoch
-    && left.connectionLeaseId === right.connectionLeaseId);
-}
-
-function isStaleEpoch(error: unknown, token: ConnectionEpochToken | null): boolean {
-  return !token
-    || error instanceof StaleConnectionEpochError
-    || !connectionEpochRuntime.isCurrent(token);
-}
 
 function commandNames(command: SlashCommandInfo): string[] {
   return [command.name, ...(command.aliases || [])];
@@ -188,35 +163,17 @@ export const slashRegistry = {
   list: (): SlashCommandInfo[] => commands,
 
   refresh: async (): Promise<SlashCommandInfo[]> => {
-    let token: ConnectionEpochToken | null = null;
-    try {
-      token = captureConnectionEpoch();
-      if (refreshPromise && sameEpochToken(refreshToken, token)) {
-        return refreshPromise;
-      }
-
-      const promise = slashApi.listCommands()
+    if (!refreshPromise) {
+      refreshPromise = slashApi.listCommands()
         .then((next) => {
-          connectionEpochRuntime.assertCurrent(token!);
           commands = next.filter((command) => command.enabled);
           return commands;
         })
-        .catch((error: unknown) => {
-          if (isStaleEpoch(error, token)) return commands;
-          throw error;
-        })
         .finally(() => {
-          if (refreshPromise !== promise) return;
           refreshPromise = null;
-          refreshToken = null;
         });
-      refreshToken = token;
-      refreshPromise = promise;
-      return promise;
-    } catch (error) {
-      if (isStaleEpoch(error, token)) return commands;
-      throw error;
     }
+    return refreshPromise;
   },
 
   match: (text: string): SlashCommandMatch | null => {

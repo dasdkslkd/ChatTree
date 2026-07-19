@@ -1,5 +1,5 @@
 import { apiClient } from './client';
-import type { RunRecord } from '../types/run';
+import type { RunStartResponse } from './runs';
 
 export interface StartSubagentRequest {
   input: unknown;
@@ -22,10 +22,16 @@ export const agentsApi = {
     conversationId: string,
     agentName: string,
     request: StartSubagentRequest,
-  ): Promise<RunRecord> => {
-    const response = await apiClient.post(
-      `/conversations/${conversationId}/agents/${encodeURIComponent(agentName)}/runs`,
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ): Promise<RunStartResponse> => {
+    const response = await apiClient.post<RunStartResponse>(
+      `/conversations/${encodeURIComponent(conversationId)}/agents/${encodeURIComponent(agentName)}/runs`,
       request,
+      {
+        headers: { 'Idempotency-Key': idempotencyKey },
+        signal,
+      },
     );
     return response.data;
   },

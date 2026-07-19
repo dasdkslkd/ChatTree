@@ -10,21 +10,14 @@ import { ChatTreeApiError } from '../api/errors';
 import type { Message } from '../types/message';
 import { messageApi } from '../api/message';
 import { useModelStore } from './modelStore';
-import {
-  StaleConnectionEpochError,
-  captureConnectionEpoch,
-  commitForConnectionEpoch as commitForConnectionEpochStrict,
-  connectionEpochRuntime,
-  type ConnectionEpochToken,
-} from '../runtime/connectionEpoch';
-import { getFrontendBootstrap } from '../runtime/frontendBootstrap';
+import { getProfileContext } from '../runtime/profileContext';
 import {
   CONVERSATION_STORAGE_KEY,
   profileStorageKey,
 } from '../runtime/profileStorage';
 
 const conversationStorageKey = profileStorageKey(
-  getFrontendBootstrap().profileId,
+  getProfileContext().profileId,
   CONVERSATION_STORAGE_KEY,
 );
 
@@ -43,30 +36,29 @@ interface ConversationState {
 }
 
 interface ConversationActions {
-  loadConversations: (token?: ConnectionEpochToken) => Promise<void>;
-  createConversation: (request?: ConversationCreateRequest, token?: ConnectionEpochToken) => Promise<Conversation | null>;
-  selectConversation: (id: string, token?: ConnectionEpochToken) => Promise<void>;
-  deleteConversation: (id: string, token?: ConnectionEpochToken) => Promise<void>;
-  updateConversationTitle: (id: string, title: string, token?: ConnectionEpochToken) => Promise<void>;
+  loadConversations: () => Promise<void>;
+  createConversation: (request?: ConversationCreateRequest) => Promise<Conversation | null>;
+  selectConversation: (id: string) => Promise<void>;
+  deleteConversation: (id: string) => Promise<void>;
+  updateConversationTitle: (id: string, title: string) => Promise<void>;
   updateConversationModel: (
     id: string,
     modelId: string,
     providerId: string,
     reasoningEffort?: string | null,
     thinkingEnabled?: boolean | null,
-    token?: ConnectionEpochToken,
   ) => Promise<boolean>;
-  updateMultiAgentMode: (id: string, mode: MultiAgentMode, token?: ConnectionEpochToken) => Promise<void>;
-  clearCurrentConversation: (token?: ConnectionEpochToken) => Promise<void>;
-  switchNode: (nodeId: string, token?: ConnectionEpochToken) => Promise<void>;
+  updateMultiAgentMode: (id: string, mode: MultiAgentMode) => Promise<void>;
+  clearCurrentConversation: () => void;
+  switchNode: (nodeId: string) => Promise<void>;
   setCurrentNodeIdLocal: (nodeId: string) => void;
-  deleteNode: (nodeId: string, token?: ConnectionEpochToken) => Promise<void>;
+  deleteNode: (nodeId: string) => Promise<void>;
   abortStreaming: () => void;
   clearError: () => void;
-  loadTree: (conversationId: string, token?: ConnectionEpochToken) => Promise<void>;
+  loadTree: (conversationId: string) => Promise<void>;
   clearPendingScroll: () => void;
-  refreshMessages: (conversationId: string, opts?: { awaitNodeId?: string; awaitRole?: 'assistant' | 'user'; retries?: number }, token?: ConnectionEpochToken) => Promise<boolean>;
-  refreshBranches: (conversationId: string, token?: ConnectionEpochToken) => Promise<boolean>;
+  refreshMessages: (conversationId: string, opts?: { awaitNodeId?: string; awaitRole?: 'assistant' | 'user'; retries?: number }) => Promise<boolean>;
+  refreshBranches: (conversationId: string) => Promise<boolean>;
   patchAssistantMessageFromStream: (conversationId: string, message: Message, pendingUserContent?: string | null) => boolean;
 }
 
@@ -76,58 +68,11 @@ function isActiveRunDeleteConflict(err: unknown): boolean {
     && err.code === 'active_runs_present';
 }
 
-function resolveEpochToken(token?: ConnectionEpochToken): ConnectionEpochToken {
-  if (token) {
-    connectionEpochRuntime.assertCurrent(token);
-    return token;
-  }
-  return captureConnectionEpoch();
-}
-
-function isStaleEpoch(error: unknown, token: ConnectionEpochToken | null): boolean {
-  return !token
-    || error instanceof StaleConnectionEpochError
-    || !connectionEpochRuntime.isCurrent(token);
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function commitForConnectionEpoch(
-  token: ConnectionEpochToken | null,
-  commit: () => void,
-): boolean {
-  return token ? commitForConnectionEpochStrict(token, commit) : false;
-}
-
-function waitForEpochRetry(token: ConnectionEpochToken, delayMs: number): Promise<void> {
-  connectionEpochRuntime.assertCurrent(token);
-  const signal = connectionEpochRuntime.signalFor(token);
-  if (signal.aborted) return Promise.reject(new StaleConnectionEpochError());
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      signal.removeEventListener('abort', onAbort);
-      resolve();
-    }, delayMs);
-    const onAbort = () => {
-      clearTimeout(timeout);
-      reject(new StaleConnectionEpochError());
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
-}
-
-async function deleteNodeAllowingActiveRuns(
-  conversationId: string,
-  nodeId: string,
-  token: ConnectionEpochToken,
-) {
+async function deleteNodeAllowingActiveRuns(conversationId: string, nodeId: string) {
   try {
     return await conversationApi.deleteNode(conversationId, nodeId);
   } catch (err: any) {
     if (!isActiveRunDeleteConflict(err)) throw err;
-    connectionEpochRuntime.assertCurrent(token);
     return await conversationApi.deleteNode(conversationId, nodeId, { force: true });
   }
 }
@@ -148,38 +93,31 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
         loading: false,
         error: null,
 
-        loadConversations: async (ownerToken) => {
-          let token: ConnectionEpochToken | null = null;
+        loadConversations: async () => {
+          set({ loading: true, error: null });
           try {
-            token = resolveEpochToken(ownerToken);
-            set({ loading: true, error: null });
             const data = await conversationApi.list();
-            commitForConnectionEpoch(token, () => set({ conversations: data }));
-          } catch (err: unknown) {
-            if (isStaleEpoch(err, token)) return;
-            commitForConnectionEpoch(token, () => set({ error: errorMessage(err) }));
+            set({ conversations: data });
+          } catch (err: any) {
+            set({ error: err.message });
           } finally {
-            if (token) commitForConnectionEpoch(token, () => set({ loading: false }));
+            set({ loading: false });
           }
         },
 
-        createConversation: async (request, ownerToken) => {
-          let token: ConnectionEpochToken | null = null;
+        createConversation: async (request) => {
+          set({ loading: true, error: null });
           try {
-            token = resolveEpochToken(ownerToken);
-            set({ loading: true, error: null });
             const conversation = await conversationApi.create(request);
-            connectionEpochRuntime.assertCurrent(token);
-            commitForConnectionEpoch(token, () => set({
+            set({
               currentConversation: conversation,
               messages: [],
               treeData: null,
               streamingContent: '',
               currentNodeId: null,
               pendingScrollNodeId: null,
-            }));
-            await get().loadConversations(token);
-            connectionEpochRuntime.assertCurrent(token);
+            });
+            await get().loadConversations();
             // 保留用户已选模型：新建对话前若用户已在模型框里选过模型（store 里有
             // current 值），把它持久化到新对话，并保持 store 不变——否则
             // resetToDefault() 会把按钮显示回退到默认模型（请求仍用已选模型，但
@@ -194,7 +132,6 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
                   ms.currentReasoningEffort,
                   ms.currentThinkingEnabled,
                 );
-                connectionEpochRuntime.assertCurrent(token);
                 const updatedConversation = {
                   ...conversation,
                   model_id: ms.currentModel,
@@ -202,46 +139,40 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
                   reasoning_effort: ms.currentReasoningEffort,
                   thinking_enabled: ms.currentThinkingEnabled,
                 };
-                commitForConnectionEpoch(token, () => set((state) => ({
+                set((state) => ({
                   conversations: state.conversations.map((item) => (
                     item.id === conversation.id ? { ...item, ...updatedConversation } : item
                   )),
                   currentConversation: state.currentConversation?.id === conversation.id
                     ? { ...state.currentConversation, ...updatedConversation }
                     : state.currentConversation,
-                })));
+                }));
                 return updatedConversation;
-              } catch (error) {
-                if (isStaleEpoch(error, token)) throw error;
+              } catch (_) {
                 // 持久化失败不阻断创建；store 选择仍保留，显示不会串
               }
             } else {
-              await ms.resetToDefault(token);
-              connectionEpochRuntime.assertCurrent(token);
+              await ms.resetToDefault();
             }
             return conversation;
-          } catch (err: unknown) {
-            if (isStaleEpoch(err, token)) return null;
-            commitForConnectionEpoch(token, () => set({ error: errorMessage(err) }));
+          } catch (err: any) {
+            set({ error: err.message });
             return null;
           } finally {
-            if (token) commitForConnectionEpoch(token, () => set({ loading: false }));
+            set({ loading: false });
           }
         },
 
-        selectConversation: async (id, ownerToken) => {
-          let token: ConnectionEpochToken | null = null;
+        selectConversation: async (id) => {
+          set({ loading: true, error: null });
           try {
-            token = resolveEpochToken(ownerToken);
-            set({ loading: true, error: null });
             const [history, branches] = await Promise.all([
               messageApi.getHistory(id),
               conversationApi.getBranches(id),
             ]);
-            connectionEpochRuntime.assertCurrent(token);
             const conversation = get().conversations.find((c) => c.id === id);
             const currentNodeId = latestNodeIdFromHistory(history) || conversation?.current_node_id || null;
-            commitForConnectionEpoch(token, () => set({
+            set({
               currentConversation: conversation
                 ? { ...conversation, current_node_id: currentNodeId || conversation.current_node_id }
                 : null,
@@ -251,32 +182,24 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
               streamingContent: '',
               currentNodeId,
               pendingScrollNodeId: null,
-            }));
+            });
             // 同步模型选择到 modelStore
             await useModelStore.getState().syncFromConversation(
               conversation?.provider_id || null,
               conversation?.model_id || null,
-              undefined,
-              undefined,
-              token,
             );
-            connectionEpochRuntime.assertCurrent(token);
-          } catch (err: unknown) {
-            if (isStaleEpoch(err, token)) return;
-            commitForConnectionEpoch(token, () => set({ error: errorMessage(err) }));
+          } catch (err: any) {
+            set({ error: err.message });
           } finally {
-            if (token) commitForConnectionEpoch(token, () => set({ loading: false }));
+            set({ loading: false });
           }
         },
 
-        deleteConversation: async (id, ownerToken) => {
-          let token: ConnectionEpochToken | null = null;
+        deleteConversation: async (id) => {
           try {
-            token = resolveEpochToken(ownerToken);
             const isCurrent = get().currentConversation?.id === id;
             await conversationApi.delete(id);
-            connectionEpochRuntime.assertCurrent(token);
-            commitForConnectionEpoch(token, () => set((state) => ({
+            set((state) => ({
               conversations: state.conversations.filter((c) => c.id !== id),
               currentConversation: isCurrent ? null : state.currentConversation,
               messages: isCurrent ? [] : state.messages,
@@ -285,24 +208,19 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
               streamingContent: isCurrent ? '' : state.streamingContent,
               currentNodeId: isCurrent ? null : state.currentNodeId,
               pendingScrollNodeId: isCurrent ? null : state.pendingScrollNodeId,
-            })));
+            }));
             if (isCurrent) {
-              await useModelStore.getState().resetToDefault(token);
-              connectionEpochRuntime.assertCurrent(token);
+              await useModelStore.getState().resetToDefault();
             }
-          } catch (err: unknown) {
-            if (isStaleEpoch(err, token)) return;
-            commitForConnectionEpoch(token, () => set({ error: errorMessage(err) }));
+          } catch (err: any) {
+            set({ error: err.message });
           }
         },
 
-        updateConversationTitle: async (id, title, ownerToken) => {
-          let token: ConnectionEpochToken | null = null;
+        updateConversationTitle: async (id, title) => {
           try {
-            token = resolveEpochToken(ownerToken);
             await conversationApi.updateTitle(id, title);
-            connectionEpochRuntime.assertCurrent(token);
-            commitForConnectionEpoch(token, () => set((state) => ({
+            set((state) => ({
               conversations: state.conversations.map((c) =>
                 c.id === id ? { ...c, title } : c
               ),
@@ -310,10 +228,9 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
                 state.currentConversation?.id === id
                   ? { ...state.currentConversation, title }
                   : state.currentConversation,
-            })));
-          } catch (err: unknown) {
-            if (isStaleEpoch(err, token)) return;
-            commitForConnectionEpoch(token, () => set({ error: errorMessage(err) }));
+            }));
+          } catch (err: any) {
+            set({ error: err.message });
           }
         },
 
@@ -323,55 +240,43 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
           providerId,
           reasoningEffort,
           thinkingEnabled,
-          ownerToken,
         ) => {
-          let token: ConnectionEpochToken | null = null;
-          try {
-            token = resolveEpochToken(ownerToken);
-            await conversationApi.updateModel(
-              id,
-              modelId,
-              providerId,
-              reasoningEffort,
-              thinkingEnabled,
-            );
-            connectionEpochRuntime.assertCurrent(token);
-            commitForConnectionEpoch(token, () => set((state) => ({
-              conversations: state.conversations.map((conversation) => (
-                conversation.id === id
-                  ? {
-                    ...conversation,
-                    model_id: modelId,
-                    provider_id: providerId,
-                    reasoning_effort: reasoningEffort,
-                    thinking_enabled: thinkingEnabled,
-                  }
-                  : conversation
-              )),
-              currentConversation: state.currentConversation?.id === id
+          await conversationApi.updateModel(
+            id,
+            modelId,
+            providerId,
+            reasoningEffort,
+            thinkingEnabled,
+          );
+          set((state) => ({
+            conversations: state.conversations.map((conversation) => (
+              conversation.id === id
                 ? {
-                  ...state.currentConversation,
+                  ...conversation,
                   model_id: modelId,
                   provider_id: providerId,
                   reasoning_effort: reasoningEffort,
                   thinking_enabled: thinkingEnabled,
                 }
-                : state.currentConversation,
-            })));
-            return true;
-          } catch (err: unknown) {
-            if (isStaleEpoch(err, token)) return false;
-            throw err;
-          }
+                : conversation
+            )),
+            currentConversation: state.currentConversation?.id === id
+              ? {
+                ...state.currentConversation,
+                model_id: modelId,
+                provider_id: providerId,
+                reasoning_effort: reasoningEffort,
+                thinking_enabled: thinkingEnabled,
+              }
+              : state.currentConversation,
+          }));
+          return true;
         },
 
-        updateMultiAgentMode: async (id, mode, ownerToken) => {
-          let token: ConnectionEpochToken | null = null;
+        updateMultiAgentMode: async (id, mode) => {
           try {
-            token = resolveEpochToken(ownerToken);
             await conversationApi.updateMultiAgentMode(id, mode);
-            connectionEpochRuntime.assertCurrent(token);
-            commitForConnectionEpoch(token, () => set((state) => ({
+            set((state) => ({
               conversations: state.conversations.map((conversation) =>
                 conversation.id === id ? { ...conversation, multi_agent_mode: mode } : conversation
               ),
@@ -379,29 +284,23 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
                 state.currentConversation?.id === id
                   ? { ...state.currentConversation, multi_agent_mode: mode }
                   : state.currentConversation,
-            })));
-          } catch (err: unknown) {
-            if (isStaleEpoch(err, token)) return;
-            commitForConnectionEpoch(token, () => set({ error: errorMessage(err) }));
+            }));
+          } catch (err: any) {
+            set({ error: err.message });
           }
         },
 
-        switchNode: async (nodeId, ownerToken) => {
-          let token: ConnectionEpochToken | null = null;
+        switchNode: async (nodeId) => {
           const { currentConversation } = get();
           if (!currentConversation) return;
 
+          set({ loading: true, error: null });
           try {
-            token = resolveEpochToken(ownerToken);
-            set({ loading: true, error: null });
             await conversationApi.switchNode(currentConversation.id, nodeId);
-            connectionEpochRuntime.assertCurrent(token);
             const history = await messageApi.getHistory(currentConversation.id);
-            connectionEpochRuntime.assertCurrent(token);
             const branches = await conversationApi.getBranches(currentConversation.id);
-            connectionEpochRuntime.assertCurrent(token);
 
-            commitForConnectionEpoch(token, () => set((state) => ({
+            set((state) => ({
               messages: history,
               branches: branches || {},
               currentNodeId: nodeId,
@@ -415,12 +314,11 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
               ),
               streamingContent: '',
               pendingScrollNodeId: nodeId,
-            })));
-          } catch (err: unknown) {
-            if (isStaleEpoch(err, token)) return;
-            commitForConnectionEpoch(token, () => set({ error: errorMessage(err) }));
+            }));
+          } catch (err: any) {
+            set({ error: err.message });
           } finally {
-            if (token) commitForConnectionEpoch(token, () => set({ loading: false }));
+            set({ loading: false });
           }
         },
 
@@ -511,20 +409,16 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
         refreshMessages: async (
           conversationId: string,
           opts?: { awaitNodeId?: string; awaitRole?: 'assistant' | 'user'; retries?: number },
-          ownerToken?: ConnectionEpochToken,
         ): Promise<boolean> => {
-          let token: ConnectionEpochToken | null = null;
-          try {
-            token = resolveEpochToken(ownerToken);
-            if (get().currentConversation?.id !== conversationId) return false;
-            const awaitNodeId = opts?.awaitNodeId;
-            const awaitRole = opts?.awaitRole ?? 'assistant';
-            const retries = opts?.retries ?? 0;
-            const landed = (history: Message[]) =>
-              !awaitNodeId || history.some((m) => m.node_id === awaitNodeId && m.role === awaitRole);
-            for (let attempt = 0; attempt <= retries; attempt++) {
+          if (get().currentConversation?.id !== conversationId) return false;
+          const awaitNodeId = opts?.awaitNodeId;
+          const awaitRole = opts?.awaitRole ?? 'assistant';
+          const retries = opts?.retries ?? 0;
+          const landed = (history: Message[]) =>
+            !awaitNodeId || history.some((m) => m.node_id === awaitNodeId && m.role === awaitRole);
+          for (let attempt = 0; attempt <= retries; attempt++) {
+            try {
               const history = await messageApi.getHistory(conversationId);
-              connectionEpochRuntime.assertCurrent(token);
               // 再次校验：await 期间用户可能已切走
               if (get().currentConversation?.id !== conversationId) return false;
               const ok = landed(history);
@@ -536,7 +430,7 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
                 // 重试用尽仍未落地则返回 false，调用方保留气泡、择机再刷新。
                 const conv = get().conversations.find((c) => c.id === conversationId);
                 const currentNodeId = latestNodeIdFromHistory(history) || conv?.current_node_id || get().currentNodeId;
-                commitForConnectionEpoch(token, () => set((state) => ({
+                set((state) => ({
                   messages: history,
                   currentNodeId,
                   currentConversation: state.currentConversation?.id === conversationId
@@ -547,79 +441,61 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
                       ? { ...conversation, current_node_id: currentNodeId || conversation.current_node_id }
                       : conversation
                   ),
-                })));
+                }));
                 return ok;
               }
               // 后端尚未保存完成，稍候重试（保留乐观气泡）
-              await waitForEpochRetry(token, 150);
-              connectionEpochRuntime.assertCurrent(token);
+              await new Promise((r) => setTimeout(r, 150));
+            } catch (err: any) {
+              set({ error: err.message });
+              return false;
             }
-          } catch (err: unknown) {
-            if (isStaleEpoch(err, token)) return false;
-            commitForConnectionEpoch(token, () => set({ error: errorMessage(err) }));
-            return false;
           }
           return false;
         },
 
-        refreshBranches: async (conversationId: string, ownerToken?: ConnectionEpochToken): Promise<boolean> => {
-          let token: ConnectionEpochToken | null = null;
+        refreshBranches: async (conversationId: string): Promise<boolean> => {
+          if (get().currentConversation?.id !== conversationId) return false;
           try {
-            token = resolveEpochToken(ownerToken);
-            if (get().currentConversation?.id !== conversationId) return false;
             const branches = await conversationApi.getBranches(conversationId);
-            connectionEpochRuntime.assertCurrent(token);
             if (get().currentConversation?.id !== conversationId) return false;
-            commitForConnectionEpoch(token, () => set({ branches: branches || {} }));
+            set({ branches: branches || {} });
             return true;
-          } catch (err: unknown) {
-            if (isStaleEpoch(err, token)) return false;
-            commitForConnectionEpoch(token, () => set({ error: errorMessage(err) }));
+          } catch (err: any) {
+            set({ error: err.message });
             return false;
           }
         },
 
-        clearCurrentConversation: async (ownerToken) => {
-          let token: ConnectionEpochToken | null = null;
-          try {
-            token = resolveEpochToken(ownerToken);
-            commitForConnectionEpoch(token, () => set({
-              currentConversation: null,
-              messages: [],
-              branches: {},
-              treeData: null,
-              streamingContent: '',
-              currentNodeId: null,
-              pendingScrollNodeId: null,
-            }));
-            await useModelStore.getState().resetToDefault(token);
-            connectionEpochRuntime.assertCurrent(token);
-          } catch (error) {
-            if (!isStaleEpoch(error, token)) {
-              commitForConnectionEpoch(token, () => set({ error: errorMessage(error) }));
-            }
-          }
+        clearCurrentConversation: () => {
+          set({
+            currentConversation: null,
+            messages: [],
+            branches: {},
+            treeData: null,
+            streamingContent: '',
+            currentNodeId: null,
+            pendingScrollNodeId: null,
+          });
+          // 清空对话时重置为默认模型
+          useModelStore.getState().resetToDefault();
         },
 
-        deleteNode: async (nodeId, ownerToken) => {
-          let token: ConnectionEpochToken | null = null;
+        deleteNode: async (nodeId) => {
           const { currentConversation } = get();
           if (!currentConversation) return;
+          set({ loading: true, error: null });
           try {
-            token = resolveEpochToken(ownerToken);
-            set({ loading: true, error: null });
-            const result = await deleteNodeAllowingActiveRuns(currentConversation.id, nodeId, token);
-            connectionEpochRuntime.assertCurrent(token);
+            const result = await deleteNodeAllowingActiveRuns(currentConversation.id, nodeId);
             const [history, branches, treeData] = await Promise.all([
               messageApi.getHistory(currentConversation.id),
               conversationApi.getBranches(currentConversation.id),
               conversationApi.getTree(currentConversation.id),
             ]);
-            connectionEpochRuntime.assertCurrent(token);
             // await 期间用户可能已切走，避免把旧对话的删除结果写入新对话。
             if (get().currentConversation?.id !== currentConversation.id) return;
             const newCurrentNodeId = treeData.current_node_id || result.new_current_node_id;
-            commitForConnectionEpoch(token, () => set((state) => ({
+            set((state) => ({
               messages: history,
               branches: branches || {},
               treeData,
@@ -632,25 +508,20 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
                   ? { ...conversation, current_node_id: newCurrentNodeId }
                   : conversation
               ),
-            })));
-          } catch (err: unknown) {
-            if (isStaleEpoch(err, token)) return;
-            commitForConnectionEpoch(token, () => set({ error: errorMessage(err) }));
+            }));
+          } catch (err: any) {
+            set({ error: err.message });
           } finally {
-            if (token) commitForConnectionEpoch(token, () => set({ loading: false }));
+            set({ loading: false });
           }
         },
 
-        loadTree: async (conversationId: string, ownerToken) => {
-          let token: ConnectionEpochToken | null = null;
+        loadTree: async (conversationId: string) => {
           try {
-            token = resolveEpochToken(ownerToken);
             const data = await conversationApi.getTree(conversationId);
-            connectionEpochRuntime.assertCurrent(token);
-            commitForConnectionEpoch(token, () => set({ treeData: data }));
-          } catch (err: unknown) {
-            if (isStaleEpoch(err, token)) return;
-            commitForConnectionEpoch(token, () => set({ error: errorMessage(err) }));
+            set({ treeData: data });
+          } catch (err: any) {
+            set({ error: err.message });
           }
         },
 

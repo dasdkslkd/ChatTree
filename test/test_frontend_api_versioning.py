@@ -5,6 +5,7 @@ import re
 ROOT = Path(__file__).resolve().parents[1]
 FRONTEND_SRC = ROOT / "frontend" / "src"
 CLIENT = FRONTEND_SRC / "api" / "client.ts"
+PROFILE_CONTEXT = FRONTEND_SRC / "runtime" / "profileContext.ts"
 
 
 def test_frontend_api_literals_are_centralized():
@@ -23,14 +24,19 @@ def test_frontend_api_literals_are_centralized():
     assert direct_transport_offenders == []
 
     client_text = CLIENT.read_text(encoding="utf-8")
-    assert "'/api/v1'" in client_text
-    assert "baseURL: frontendBootstrap.apiBase" in client_text
+    profile_context_text = PROFILE_CONTEXT.read_text(encoding="utf-8")
+    assert "`/p/${encodeURIComponent(profileId)}/api/v1`" in profile_context_text
+    assert "baseURL: apiBase" in client_text
+    assert "createApiClient(profileContext.apiBase)" in client_text
     assert re.search(r"""baseURL:\s*[\"']/api[\"']""", client_text) is None
     assert "import.meta.env" not in client_text
 
 
-def test_vite_forwards_api_v1_without_root_rewrite():
+def test_vite_forwards_profile_and_launcher_routes_without_rewrite():
     text = (ROOT / "frontend" / "vite.config.ts").read_text(encoding="utf-8")
 
-    assert "'/api': {" in text
+    assert "'/p/':" in text
+    assert "'/client/':" in text
+    assert "'/api':" not in text
+    assert "VITE_LAUNCHER_PROXY_TARGET" in text
     assert "rewrite:" not in text

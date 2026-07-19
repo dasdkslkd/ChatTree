@@ -2,7 +2,6 @@ import type { AxiosInstance } from 'axios';
 
 import {
   BoundServerLeaseChangedError,
-  EXPECTED_PROTOCOL_VERSION,
   isCanonicalUuid,
 } from '../runtime/connectionIdentity';
 import {
@@ -10,14 +9,7 @@ import {
   requireMatchingConnectionLeaseHeader,
 } from './connectionLeaseHeader';
 
-export { EXPECTED_PROTOCOL_VERSION } from '../runtime/connectionIdentity';
 const SERVER_PROBE_TIMEOUT_MS = 5000;
-
-export type HealthResponse = {
-  status: 'ok';
-  server_instance_id: string;
-  time: number;
-};
 
 export type HandshakeResponse = {
   server_instance_id: string;
@@ -34,15 +26,7 @@ export type LeaseGuarded<T> = Readonly<{
 }>;
 
 export type ServerApi = Readonly<{
-  health(
-    expectedLeaseId: string,
-    signal?: AbortSignal,
-  ): Promise<LeaseGuarded<HealthResponse>>;
   handshake(
-    expectedLeaseId: string,
-    signal?: AbortSignal,
-  ): Promise<LeaseGuarded<HandshakeResponse>>;
-  assertCompatible(
     expectedLeaseId: string,
     signal?: AbortSignal,
   ): Promise<LeaseGuarded<HandshakeResponse>>;
@@ -69,24 +53,8 @@ export function createServerApi(client: AxiosInstance): ServerApi {
     return { data: response.data, connectionLeaseId };
   }
 
-  const health = (expectedLeaseId: string, signal?: AbortSignal) => (
-    getGuarded<HealthResponse>('/health', expectedLeaseId, signal)
-  );
   const handshake = (expectedLeaseId: string, signal?: AbortSignal) => (
     getGuarded<HandshakeResponse>('/handshake', expectedLeaseId, signal)
   );
-  const assertCompatible = async (
-    expectedLeaseId: string,
-    signal?: AbortSignal,
-  ): Promise<LeaseGuarded<HandshakeResponse>> => {
-    const guarded = await handshake(expectedLeaseId, signal);
-    if (guarded.data.protocol_version !== EXPECTED_PROTOCOL_VERSION) {
-      throw new Error(
-        `Unsupported ChatTree protocol version: ${guarded.data.protocol_version}`,
-      );
-    }
-    return guarded;
-  };
-
-  return { health, handshake, assertCompatible };
+  return { handshake };
 }

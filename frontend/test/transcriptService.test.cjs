@@ -17,20 +17,22 @@ require.extensions['.ts'] = function loadTs(module, filename) {
   module._compile(output, filename);
 };
 
-const bootstrapModule = path.join(__dirname, '../src/runtime/frontendBootstrap.ts');
 const clientModule = path.join(__dirname, '../src/api/client.ts');
 const transcriptModule = path.join(__dirname, '../src/services/transcript.ts');
 
-globalThis.window = {
-  location: {
-    href: 'http://127.0.0.1:5173/s/local',
-    pathname: '/s/local',
+require.cache[require.resolve(clientModule)] = {
+  id: clientModule,
+  filename: clientModule,
+  loaded: true,
+  exports: {
+    apiClient: {
+      get: async () => {
+        throw new Error('unexpected default client call');
+      },
+    },
   },
 };
-delete require.cache[require.resolve(bootstrapModule)];
-delete require.cache[require.resolve(clientModule)];
 delete require.cache[require.resolve(transcriptModule)];
-require(bootstrapModule).initializeFrontendBootstrap();
 
 const { createTranscriptService } = require(transcriptModule);
 

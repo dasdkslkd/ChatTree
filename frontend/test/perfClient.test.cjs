@@ -17,35 +17,18 @@ require.extensions['.ts'] = function loadTs(module, filename) {
   module._compile(output, filename);
 };
 
-const bootstrapModule = path.join(__dirname, '../src/runtime/frontendBootstrap.ts');
-const clientModule = path.join(__dirname, '../src/api/client.ts');
-const epochModule = path.join(__dirname, '../src/runtime/connectionEpoch.ts');
 const leaseFetchModule = path.join(__dirname, '../src/api/leaseFetch.ts');
-const perfModule = path.join(__dirname, '../src/perf/client.ts');
-
-const LEASE_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
-const CONTEXT_A = Object.freeze({
-  profileId: 'local',
-  apiBase: '/p/local/api/v1',
-  serverInstanceId: '11111111-1111-4111-8111-111111111111',
-  connectionEpoch: 1,
-  connectionLeaseId: LEASE_A,
-});
-
-globalThis.window = {
-  location: {
-    href: 'http://127.0.0.1:5173/s/local',
-    pathname: '/s/local',
+require.cache[require.resolve(leaseFetchModule)] = {
+  id: leaseFetchModule,
+  filename: leaseFetchModule,
+  loaded: true,
+  exports: {
+    leaseGuardedFetch: (url, init) => globalThis.fetch(
+      `/p/local/api/v1${url}`,
+      init,
+    ),
   },
 };
-delete require.cache[require.resolve(bootstrapModule)];
-delete require.cache[require.resolve(clientModule)];
-delete require.cache[require.resolve(epochModule)];
-delete require.cache[require.resolve(leaseFetchModule)];
-delete require.cache[require.resolve(perfModule)];
-require(bootstrapModule).initializeFrontendBootstrap();
-require(epochModule).connectionEpochRuntime.install(CONTEXT_A);
-
 const {
   flushPerfEvents,
   flushPerfEventsSync,
@@ -53,27 +36,17 @@ const {
   loadPerfConfig,
   recordFrontendEvent,
   resetPerfForTests,
-} = require(perfModule);
+} = require(path.join(__dirname, '../src/perf/client.ts'));
 
 function nextTick() {
   return new Promise((resolve) => setTimeout(resolve, 0));
-}
-
-function perfResponse(data = {}, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: {
-      'Content-Type': 'application/json',
-      'X-ChatTree-Connection-Lease-ID': LEASE_A,
-    },
-  });
 }
 
 async function testDisabledDoesNotSend() {
   let calls = 0;
   global.fetch = async () => {
     calls += 1;
-    return perfResponse({});
+    return { ok: true, json: async () => ({}) };
   };
   resetPerfForTests({ enabled: false });
   recordFrontendEvent({ type: 'mark', name: 'ignored' });
@@ -85,7 +58,7 @@ async function testEnabledBatchesEvents() {
   const requests = [];
   global.fetch = async (url, init) => {
     requests.push({ url, init });
-    return perfResponse({ accepted: 1 });
+    return { ok: true, json: async () => ({ accepted: 1 }) };
   };
   resetPerfForTests({
     enabled: true,
@@ -107,7 +80,7 @@ async function testDoesNotFlushBelowBatchLimit() {
   const requests = [];
   global.fetch = async (url, init) => {
     requests.push({ url, init });
-    return perfResponse({ accepted: 1 });
+    return { ok: true, json: async () => ({ accepted: 1 }) };
   };
   resetPerfForTests({
     enabled: true,
@@ -130,7 +103,7 @@ async function testFlushesAtConfiguredBatchLimit() {
   const requests = [];
   global.fetch = async (url, init) => {
     requests.push({ url, init });
-    return perfResponse({ accepted: 1 });
+    return { ok: true, json: async () => ({ accepted: 1 }) };
   };
   resetPerfForTests({
     enabled: true,
@@ -152,7 +125,7 @@ async function testCriticalEventsBypassSampling() {
   const requests = [];
   global.fetch = async (url, init) => {
     requests.push({ url, init });
-    return perfResponse({ accepted: 1 });
+    return { ok: true, json: async () => ({ accepted: 1 }) };
   };
   resetPerfForTests({
     enabled: true,
@@ -173,15 +146,18 @@ async function testPreInitEventsFlushAfterConfigLoads() {
   global.fetch = async (url, init) => {
     requests.push({ url, init });
     if (url === '/p/local/api/v1/perf/config') {
-      return perfResponse({
+      return {
+        ok: true,
+        json: async () => ({
           enabled: true,
           perf_run_id: 'front-test',
           sample_rate: 1,
           max_attr_length: 64,
           max_batch_events: 10,
-      });
+        }),
+      };
     }
-    return perfResponse({ accepted: 1 });
+    return { ok: true, json: async () => ({ accepted: 1 }) };
   };
   resetPerfForTests({}, { initialized: false });
 
@@ -203,15 +179,18 @@ async function testImmediatePreInitEventFlushesAfterConfigLoads() {
   global.fetch = async (url, init) => {
     requests.push({ url, init });
     if (url === '/p/local/api/v1/perf/config') {
-      return perfResponse({
+      return {
+        ok: true,
+        json: async () => ({
           enabled: true,
           perf_run_id: 'front-test',
           sample_rate: 1,
           max_attr_length: 64,
           max_batch_events: 10,
-      });
+        }),
+      };
     }
-    return perfResponse({ accepted: 1 });
+    return { ok: true, json: async () => ({ accepted: 1 }) };
   };
   resetPerfForTests({}, { initialized: false });
 
@@ -233,15 +212,18 @@ async function testConfigLoadFailureRetriesAndKeepsPreInitEvents() {
     if (url === '/p/local/api/v1/perf/config') {
       configAttempts += 1;
       if (configAttempts === 1) throw new Error('temporary config failure');
-      return perfResponse({
+      return {
+        ok: true,
+        json: async () => ({
           enabled: true,
           perf_run_id: 'front-test',
           sample_rate: 1,
           max_attr_length: 64,
           max_batch_events: 10,
-      });
+        }),
+      };
     }
-    return perfResponse({ accepted: 1 });
+    return { ok: true, json: async () => ({ accepted: 1 }) };
   };
   resetPerfForTests({}, { initialized: false });
 
@@ -260,18 +242,11 @@ async function testConfigLoadFailureRetriesAndKeepsPreInitEvents() {
   assert.deepEqual(body.events.map((event) => event.name), ['stream.fetch', 'stream.response_headers']);
 }
 
-async function testSyncFlushUsesGuardedKeepaliveFetch() {
+async function testSyncFlushUsesLeaseFetchKeepalive() {
   const requests = [];
-  const previousNavigator = globalThis.navigator;
-  Object.defineProperty(globalThis, 'navigator', {
-    configurable: true,
-    value: {
-      sendBeacon: () => assert.fail('sendBeacon cannot carry the connection lease'),
-    },
-  });
   global.fetch = async (url, init) => {
     requests.push({ url, init });
-    return perfResponse({ accepted: 1 });
+    return { ok: true, json: async () => ({ accepted: 1 }) };
   };
   resetPerfForTests({
     enabled: true,
@@ -286,55 +261,6 @@ async function testSyncFlushUsesGuardedKeepaliveFetch() {
   assert.equal(requests.length, 1);
   assert.equal(requests[0].url, '/p/local/api/v1/perf/events');
   assert.equal(requests[0].init.keepalive, true);
-  assert.equal(requests[0].init.headers.get('X-ChatTree-Connection-Lease-ID'), LEASE_A);
-  Object.defineProperty(globalThis, 'navigator', {
-    configurable: true,
-    value: previousNavigator,
-  });
-}
-
-function deferred() {
-  let resolve;
-  const promise = new Promise((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
-}
-
-function loadFreshPerfHarness() {
-  for (const modulePath of [perfModule, leaseFetchModule, clientModule, epochModule, bootstrapModule]) {
-    delete require.cache[require.resolve(modulePath)];
-  }
-  require(bootstrapModule).initializeFrontendBootstrap();
-  const { connectionEpochRuntime } = require(epochModule);
-  connectionEpochRuntime.install(CONTEXT_A);
-  return {
-    perf: require(perfModule),
-    connectionEpochRuntime,
-  };
-}
-
-async function testConfigAndFlushCompletionsAreNeutralAfterInvalidation() {
-  const configRequest = deferred();
-  global.fetch = () => configRequest.promise;
-  let harness = loadFreshPerfHarness();
-  harness.perf.resetPerfForTests({}, { initialized: false });
-  const configLoad = harness.perf.loadPerfConfig();
-  harness.connectionEpochRuntime.invalidate(harness.connectionEpochRuntime.capture());
-  configRequest.resolve(perfResponse({ enabled: true, perf_run_id: 'stale' }));
-  await configLoad;
-  assert.equal(harness.perf.getPerfConfig().enabled, false);
-
-  const flushRequest = deferred();
-  global.fetch = () => flushRequest.promise;
-  harness = loadFreshPerfHarness();
-  harness.perf.resetPerfForTests({ enabled: true, max_batch_events: 10 });
-  harness.perf.recordFrontendEvent({ type: 'mark', name: 'front.stale' });
-  const flush = harness.perf.flushPerfEvents();
-  harness.connectionEpochRuntime.invalidate(harness.connectionEpochRuntime.capture());
-  flushRequest.resolve(perfResponse({ accepted: 1 }));
-  await flush;
-  await harness.perf.flushPerfEvents();
 }
 
 (async () => {
@@ -346,8 +272,7 @@ async function testConfigAndFlushCompletionsAreNeutralAfterInvalidation() {
   await testPreInitEventsFlushAfterConfigLoads();
   await testImmediatePreInitEventFlushesAfterConfigLoads();
   await testConfigLoadFailureRetriesAndKeepsPreInitEvents();
-  await testSyncFlushUsesGuardedKeepaliveFetch();
-  await testConfigAndFlushCompletionsAreNeutralAfterInvalidation();
+  await testSyncFlushUsesLeaseFetchKeepalive();
   console.log('perf client tests passed');
 })().catch((error) => {
   console.error(error);

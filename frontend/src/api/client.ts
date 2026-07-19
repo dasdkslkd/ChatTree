@@ -7,70 +7,63 @@ import axios, {
 
 import {
   composeConnectionAbortSignal,
-  connectionEpochRuntime,
-  StaleConnectionEpochError,
-  type ConnectionEpochRuntime,
-  type ConnectionEpochToken,
-} from '../runtime/connectionEpoch';
-import { getFrontendBootstrap } from '../runtime/frontendBootstrap';
-import {
-  normalizeApiError,
-  parseModernErrorEnvelope,
-} from './errors';
+  connectionScopeRuntime,
+  StaleConnectionScopeError,
+  type ConnectionScope,
+  type ConnectionScopeRuntime,
+} from '../runtime/connectionScope';
+import { getProfileContext } from '../runtime/profileContext';
+import { normalizeApiError, parseModernErrorEnvelope } from './errors';
 import {
   CONNECTION_LEASE_HEADER,
   readConnectionLeaseHeader,
 } from './connectionLeaseHeader';
 
-export const frontendBootstrap = getFrontendBootstrap();
+export const profileContext = getProfileContext();
 
 export function serverApiUrl(path: string): string {
   const suffix = path.startsWith('/') ? path : `/${path}`;
-  return `${frontendBootstrap.apiBase}${suffix}`;
+  return `${profileContext.apiBase}${suffix}`;
 }
 
-const CONNECTION_EPOCH_CONFIG_KEY = '__chatTreeConnectionEpochToken';
+const CONNECTION_SCOPE_CONFIG_KEY = '__chatTreeConnectionScope';
 
-type EpochRequestConfig = InternalAxiosRequestConfig & {
-  [CONNECTION_EPOCH_CONFIG_KEY]?: ConnectionEpochToken;
+type ScopeRequestConfig = InternalAxiosRequestConfig & {
+  [CONNECTION_SCOPE_CONFIG_KEY]?: ConnectionScope;
 };
 
 export type ApiClientConnectionRuntime = Pick<
-  ConnectionEpochRuntime,
-  'capture' | 'isCurrent' | 'signalFor' | 'invalidate'
+  ConnectionScopeRuntime,
+  'current' | 'isActive' | 'invalidate'
 >;
 
-function responseToken(response: AxiosResponse): ConnectionEpochToken | undefined {
-  return (response.config as EpochRequestConfig)[CONNECTION_EPOCH_CONFIG_KEY];
+function responseScope(response: AxiosResponse): ConnectionScope | undefined {
+  return (response.config as ScopeRequestConfig)[CONNECTION_SCOPE_CONFIG_KEY];
 }
 
 function assertCurrentResponse(
   runtime: ApiClientConnectionRuntime,
-  token: ConnectionEpochToken | undefined,
+  scope: ConnectionScope | undefined,
   response: AxiosResponse,
 ): void {
-  if (!token) throw new StaleConnectionEpochError();
-  if (!runtime.isCurrent(token)) throw new StaleConnectionEpochError();
-  if (readConnectionLeaseHeader(response.headers) !== token.connectionLeaseId) {
-    runtime.invalidate(token);
-    throw new StaleConnectionEpochError();
+  if (!scope || !runtime.isActive(scope)) throw new StaleConnectionScopeError();
+  if (readConnectionLeaseHeader(response.headers) !== scope.leaseId) {
+    runtime.invalidate(scope);
+    throw new StaleConnectionScopeError();
   }
   const envelope = response.status === 409
     ? parseModernErrorEnvelope(response.status, response.data)
     : null;
   if (envelope?.code === 'stale_connection_epoch') {
-    runtime.invalidate(token);
-    throw new StaleConnectionEpochError();
+    runtime.invalidate(scope);
+    throw new StaleConnectionScopeError();
   }
 }
 
 function axiosErrorForResponse(response: AxiosResponse): AxiosError {
-  const code = response.status >= 500
-    ? AxiosError.ERR_BAD_RESPONSE
-    : AxiosError.ERR_BAD_REQUEST;
   return new AxiosError(
     `Request failed with status code ${response.status}`,
-    code,
+    response.status >= 500 ? AxiosError.ERR_BAD_RESPONSE : AxiosError.ERR_BAD_REQUEST,
     response.config,
     response.request,
     response,
@@ -79,29 +72,22 @@ function axiosErrorForResponse(response: AxiosResponse): AxiosError {
 
 export function createApiClient(
   apiBase: string,
-  runtime: ApiClientConnectionRuntime | null = connectionEpochRuntime,
+  runtime: ApiClientConnectionRuntime | null = connectionScopeRuntime,
 ): AxiosInstance {
   const client = axios.create({
     baseURL: apiBase,
     timeout: 30000,
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: { 'Content-Type': 'application/json' },
   });
 
   if (runtime) {
     client.interceptors.request.use((config) => {
-      const token = runtime.capture();
-      const epochConfig = config as EpochRequestConfig;
-      epochConfig[CONNECTION_EPOCH_CONFIG_KEY] = token;
-      config.headers.set(
-        CONNECTION_LEASE_HEADER,
-        token.connectionLeaseId,
-        true,
-      );
+      const scope = runtime.current();
+      (config as ScopeRequestConfig)[CONNECTION_SCOPE_CONFIG_KEY] = scope;
+      config.headers.set(CONNECTION_LEASE_HEADER, scope.leaseId, true);
       config.signal = composeConnectionAbortSignal(
         config.signal as AbortSignal | undefined,
-        runtime.signalFor(token),
+        scope.signal,
       );
       return config;
     });
@@ -110,34 +96,27 @@ export function createApiClient(
   client.interceptors.response.use(
     (response) => {
       if (!runtime) return response;
-      assertCurrentResponse(runtime, responseToken(response), response);
+      assertCurrentResponse(runtime, responseScope(response), response);
       if (response.status >= 400) {
         return Promise.reject(normalizeApiError(axiosErrorForResponse(response)));
       }
       return response;
     },
     (error: unknown) => {
-      if (error instanceof StaleConnectionEpochError) {
-        return Promise.reject(error);
-      }
+      if (error instanceof StaleConnectionScopeError) return Promise.reject(error);
       if (!runtime) return Promise.reject(normalizeApiError(error));
-      if (!axios.isAxiosError(error)) {
-        return Promise.reject(normalizeApiError(error));
-      }
-
-      const token = (error.config as EpochRequestConfig | undefined)?.[
-        CONNECTION_EPOCH_CONFIG_KEY
+      if (!axios.isAxiosError(error)) return Promise.reject(normalizeApiError(error));
+      const scope = (error.config as ScopeRequestConfig | undefined)?.[
+        CONNECTION_SCOPE_CONFIG_KEY
       ];
-      if (!token || !runtime.isCurrent(token)) {
-        return Promise.reject(new StaleConnectionEpochError());
+      if (!scope || !runtime.isActive(scope)) {
+        return Promise.reject(new StaleConnectionScopeError());
       }
-      if (error.response) {
-        assertCurrentResponse(runtime, token, error.response);
-      }
+      if (error.response) assertCurrentResponse(runtime, scope, error.response);
       return Promise.reject(normalizeApiError(error));
     },
   );
   return client;
 }
 
-export const apiClient = createApiClient(frontendBootstrap.apiBase);
+export const apiClient = createApiClient(profileContext.apiBase);

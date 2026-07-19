@@ -1,19 +1,12 @@
-import {
-  lazy,
-  Suspense,
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-} from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef } from 'react';
+
 import { BoundServerProvider, useBoundServer } from './runtime/BoundServerProvider';
 import {
-  connectionEpochRuntime,
-  type ConnectionEpochToken,
-} from './runtime/connectionEpoch';
+  connectionScopeRuntime,
+  type ConnectionScope,
+} from './runtime/connectionScope';
 import type { BoundServerContext } from './runtime/connectionIdentity';
-import type { FrontendBootstrap } from './runtime/frontendBootstrap';
-import { acquireProfileRendererOwnership } from './runtime/profileRendererOwnership';
+import type { ProfileContext } from './runtime/profileContext';
 import {
   ALL_PROFILE_STORAGE_KEYS,
   ProfileStorageUnavailableError,
@@ -23,18 +16,16 @@ import {
 } from './runtime/profileStorage';
 
 const ServerSessionApp = lazy(() => import('./runtime/ServerSessionApp'));
-const reloadBrowserPage = () => window.location.reload();
 
 function prepareBoundProfileStorage(context: BoundServerContext): void {
   try {
-    const storage = window.localStorage;
     migrateLegacyProfileStorage(
-      storage,
+      window.localStorage,
       context.profileId,
       ALL_PROFILE_STORAGE_KEYS,
     );
     prepareProfileStorageForServer(
-      storage,
+      window.localStorage,
       context.profileId,
       context.serverInstanceId,
       SERVER_BOUND_PROFILE_STORAGE_KEYS,
@@ -48,32 +39,30 @@ function prepareBoundProfileStorage(context: BoundServerContext): void {
   }
 }
 
-export default function App({ bootstrap }: { bootstrap: FrontendBootstrap }) {
+export default function App({ profile }: { profile: ProfileContext }) {
   const reloadStarted = useRef(false);
-  const installedToken = useRef<ConnectionEpochToken | null>(null);
+  const installedScope = useRef<ConnectionScope | null>(null);
   const reloadCurrentPage = useCallback(() => {
     if (reloadStarted.current) return;
     reloadStarted.current = true;
-    if (installedToken.current) {
-      connectionEpochRuntime.invalidate(installedToken.current);
+    if (installedScope.current) {
+      connectionScopeRuntime.invalidate(installedScope.current);
     }
-    reloadBrowserPage();
+    window.location.reload();
   }, []);
   const handleInitialContext = useCallback((context: BoundServerContext) => {
-    connectionEpochRuntime.install(context);
-    installedToken.current = connectionEpochRuntime.capture();
+    installedScope.current = connectionScopeRuntime.install(context);
   }, []);
 
   useEffect(
-    () => connectionEpochRuntime.subscribeInvalidation(reloadCurrentPage),
+    () => connectionScopeRuntime.subscribeInvalidation(reloadCurrentPage),
     [reloadCurrentPage],
   );
 
   return (
     <BoundServerProvider
-      bootstrap={bootstrap}
+      profile={profile}
       onInitialContext={handleInitialContext}
-      reloadCurrentPage={reloadCurrentPage}
     >
       <BoundApp />
     </BoundServerProvider>
@@ -83,61 +72,16 @@ export default function App({ bootstrap }: { bootstrap: FrontendBootstrap }) {
 function BoundApp() {
   const state = useBoundServer();
   if (state.status === 'error') {
-    const message = state.error instanceof Error ? state.error.message : 'Server binding failed';
+    const message = state.error instanceof Error
+      ? state.error.message
+      : 'Server binding failed';
     return <main role="alert" className="startup-error">{message}</main>;
   }
-  if (!state.context) return <main className="startup-status">正在连接当前 Server</main>;
-  return (
-    <ProfileRendererGate
-      context={state.context}
-      connected={state.status === 'ready'}
-    />
-  );
-}
-
-type RendererOwnershipState =
-  | Readonly<{ status: 'pending'; error: null }>
-  | Readonly<{ status: 'ready'; error: null }>
-  | Readonly<{ status: 'error'; error: unknown }>;
-
-function ProfileRendererGate({
-  context,
-  connected,
-}: {
-  context: BoundServerContext;
-  connected: boolean;
-}) {
-  const [ownership, setOwnership] = useState<RendererOwnershipState>({
-    status: 'pending',
-    error: null,
-  });
-
-  useEffect(() => {
-    let mounted = true;
-    void acquireProfileRendererOwnership(context.profileId).then(
-      () => {
-        if (mounted) setOwnership({ status: 'ready', error: null });
-      },
-      (error) => {
-        if (mounted) setOwnership({ status: 'error', error });
-      },
-    );
-    return () => {
-      mounted = false;
-    };
-  }, [context.profileId]);
-
-  if (ownership.status === 'pending') {
-    return <main className="startup-status">正在获取 Profile 页面所有权</main>;
-  }
-  if (ownership.status === 'error') {
-    const message = ownership.error instanceof Error
-      ? ownership.error.message
-      : 'Profile renderer ownership is unavailable';
-    return <main role="alert" className="startup-error">{message}</main>;
+  if (!state.context) {
+    return <main className="startup-status">正在连接当前 Server</main>;
   }
   try {
-    prepareBoundProfileStorage(context);
+    prepareBoundProfileStorage(state.context);
   } catch (error) {
     const message = error instanceof Error
       ? error.message
@@ -146,7 +90,10 @@ function ProfileRendererGate({
   }
   return (
     <Suspense fallback={<main className="startup-status">正在加载当前 Server</main>}>
-      <ServerSessionApp binding={context} connected={connected} />
+      <ServerSessionApp
+        binding={state.context}
+        connected={state.status === 'ready'}
+      />
     </Suspense>
   );
 }

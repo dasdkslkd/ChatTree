@@ -1,11 +1,5 @@
 import type { FrontendPerfEvent, PerfConfig } from './types';
 import { leaseGuardedFetch } from '../api/leaseFetch';
-import {
-  StaleConnectionEpochError,
-  captureConnectionEpoch,
-  connectionEpochRuntime,
-  type ConnectionEpochToken,
-} from '../runtime/connectionEpoch';
 
 const DEFAULT_CONFIG: PerfConfig = {
   enabled: false,
@@ -33,7 +27,6 @@ let queue: FrontendPerfEvent[] = [];
 let preInitQueue: FrontendPerfEvent[] = [];
 let flushTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
 let configLoadPromise: Promise<PerfConfig> | null = null;
-let configLoadToken: ConnectionEpochToken | null = null;
 
 function hasFetch(): boolean {
   return typeof fetch === 'function';
@@ -72,46 +65,12 @@ function clearScheduledFlush(): void {
   flushTimer = null;
 }
 
-function sameEpochToken(
-  left: ConnectionEpochToken | null,
-  right: ConnectionEpochToken,
-): boolean {
-  return Boolean(left
-    && left.generation === right.generation
-    && left.profileId === right.profileId
-    && left.serverInstanceId === right.serverInstanceId
-    && left.connectionEpoch === right.connectionEpoch
-    && left.connectionLeaseId === right.connectionLeaseId);
-}
-
-function resolveEpochToken(token?: ConnectionEpochToken): ConnectionEpochToken {
-  if (token) {
-    connectionEpochRuntime.assertCurrent(token);
-    return token;
-  }
-  return captureConnectionEpoch();
-}
-
-function isStaleEpoch(error: unknown, token: ConnectionEpochToken | null): boolean {
-  return !token
-    || error instanceof StaleConnectionEpochError
-    || !connectionEpochRuntime.isCurrent(token);
-}
-
-function scheduleFlush(ownerToken?: ConnectionEpochToken): void {
+function scheduleFlush(): void {
   if (!isPerfEnabled() || queue.length === 0 || flushTimer !== null) return;
-  let token: ConnectionEpochToken;
-  try {
-    token = resolveEpochToken(ownerToken);
-  } catch {
-    return;
-  }
-  const timer = globalThis.setTimeout(() => {
-    if (flushTimer === timer) flushTimer = null;
-    if (!connectionEpochRuntime.isCurrent(token)) return;
-    void flushPerfEvents(token).catch(() => {});
+  flushTimer = globalThis.setTimeout(() => {
+    flushTimer = null;
+    void flushPerfEvents();
   }, DEFAULT_FLUSH_INTERVAL_MS);
-  flushTimer = timer;
 }
 
 function enqueuePreInitEvent(event: FrontendPerfEvent): void {
@@ -121,48 +80,34 @@ function enqueuePreInitEvent(event: FrontendPerfEvent): void {
   preInitQueue.push(event);
 }
 
-function drainPreInitEvents(token: ConnectionEpochToken): void {
-  connectionEpochRuntime.assertCurrent(token);
+function drainPreInitEvents(): void {
   const pending = preInitQueue;
   preInitQueue = [];
   if (!isPerfEnabled() || pending.length === 0) return;
   for (const event of pending) {
-    recordFrontendEvent(event, token);
+    recordFrontendEvent(event);
   }
 }
 
-export async function loadPerfConfig(ownerToken?: ConnectionEpochToken): Promise<PerfConfig> {
-  let token: ConnectionEpochToken | null = null;
-  try {
-    token = resolveEpochToken(ownerToken);
-  } catch (error) {
-    if (isStaleEpoch(error, token)) return config;
-    throw error;
-  }
+export async function loadPerfConfig(): Promise<PerfConfig> {
   if (initialized) return config;
-  if (configLoadPromise && sameEpochToken(configLoadToken, token)) return configLoadPromise;
+  if (configLoadPromise) return configLoadPromise;
   if (!hasFetch()) {
-    connectionEpochRuntime.assertCurrent(token);
     initialized = true;
     config = DEFAULT_CONFIG;
     preInitQueue = [];
     return config;
   }
-
-  let ownedPromise: Promise<PerfConfig> | null = null;
-  const promise = (async () => {
+  configLoadPromise = (async () => {
     const controller = typeof AbortController === 'function' ? new AbortController() : null;
     const timeout = controller ? globalThis.setTimeout(() => controller.abort(), 2000) : null;
     try {
       const response = await leaseGuardedFetch('/perf/config', {
         method: 'GET',
         signal: controller?.signal,
-      }, token!);
-      connectionEpochRuntime.assertCurrent(token!);
-      if (!response.ok) throw new Error(`perf config ${response.status}`);
+      });
       const data = await response.json();
-      connectionEpochRuntime.assertCurrent(token!);
-      const nextConfig = {
+      config = {
         ...DEFAULT_CONFIG,
         ...data,
         enabled: Boolean(data?.enabled),
@@ -170,29 +115,19 @@ export async function loadPerfConfig(ownerToken?: ConnectionEpochToken): Promise
         max_attr_length: Number.isFinite(data?.max_attr_length) ? Number(data.max_attr_length) : 512,
         max_batch_events: Number.isFinite(data?.max_batch_events) ? Number(data.max_batch_events) : 500,
       };
-      connectionEpochRuntime.assertCurrent(token!);
-      config = nextConfig;
       initialized = true;
       if (!config.enabled) preInitQueue = [];
-      drainPreInitEvents(token!);
-    } catch (error) {
-      if (isStaleEpoch(error, token)) return config;
-      connectionEpochRuntime.assertCurrent(token!);
+      drainPreInitEvents();
+    } catch {
       config = DEFAULT_CONFIG;
       initialized = false;
     } finally {
       if (timeout !== null) globalThis.clearTimeout(timeout);
-      if (configLoadPromise === ownedPromise) {
-        configLoadPromise = null;
-        configLoadToken = null;
-      }
+      configLoadPromise = null;
     }
     return config;
   })();
-  ownedPromise = promise;
-  configLoadToken = token;
-  configLoadPromise = promise;
-  return promise;
+  return configLoadPromise;
 }
 
 export function getPerfConfig(): PerfConfig {
@@ -203,42 +138,26 @@ export function isPerfEnabled(): boolean {
   return initialized && config.enabled;
 }
 
-export function recordFrontendEvent(
-  event: FrontendPerfEvent,
-  ownerToken?: ConnectionEpochToken,
-): void {
-  let token: ConnectionEpochToken;
-  try {
-    token = resolveEpochToken(ownerToken);
-  } catch {
-    return;
-  }
+export function recordFrontendEvent(event: FrontendPerfEvent): void {
   if (!initialized) {
     enqueuePreInitEvent(event);
-    void loadPerfConfig(token).catch(() => {});
+    void loadPerfConfig();
     return;
   }
   if (!isPerfEnabled()) return;
   if (config.sample_rate < 1 && !CRITICAL_EVENTS.has(event.name) && Math.random() > config.sample_rate) return;
   queue.push(sanitizeEvent(event));
   if (IMMEDIATE_FLUSH_EVENTS.has(event.name) || queue.length >= batchLimit()) {
-    void flushPerfEvents(token).catch(() => {});
+    void flushPerfEvents();
     return;
   }
-  scheduleFlush(token);
+  scheduleFlush();
 }
 
-export async function flushPerfEvents(ownerToken?: ConnectionEpochToken): Promise<void> {
-  let token: ConnectionEpochToken | null = null;
-  try {
-    token = resolveEpochToken(ownerToken);
-  } catch (error) {
-    if (isStaleEpoch(error, token)) return;
-    throw error;
-  }
+export async function flushPerfEvents(): Promise<void> {
   if (!isPerfEnabled() || !hasFetch() || queue.length === 0) return;
   if (flushing) {
-    scheduleFlush(token);
+    scheduleFlush();
     return;
   }
   clearScheduledFlush();
@@ -249,31 +168,21 @@ export async function flushPerfEvents(ownerToken?: ConnectionEpochToken): Promis
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ events: batch }),
-    }, token);
-    connectionEpochRuntime.assertCurrent(token);
-  } catch (error) {
-    if (isStaleEpoch(error, token)) return;
+    });
+  } catch {
     // Drop failed perf batches. Telemetry must not disturb the app.
   } finally {
-    if (connectionEpochRuntime.isCurrent(token)) {
-      flushing = false;
-      if (queue.length >= batchLimit()) {
-        void flushPerfEvents(token).catch(() => {});
-      } else if (queue.length > 0) {
-        scheduleFlush(token);
-      }
+    flushing = false;
+    if (queue.length >= batchLimit()) {
+      void flushPerfEvents();
+    } else if (queue.length > 0) {
+      scheduleFlush();
     }
   }
 }
 
 export function flushPerfEventsSync(): boolean {
   if (!isPerfEnabled() || queue.length === 0) return false;
-  let token: ConnectionEpochToken;
-  try {
-    token = captureConnectionEpoch();
-  } catch {
-    return false;
-  }
   clearScheduledFlush();
   const pending = queue;
   queue = [];
@@ -287,14 +196,14 @@ export function flushPerfEventsSync(): boolean {
           headers: { 'Content-Type': 'application/json' },
           body,
           keepalive: true,
-        }, token).catch(() => {});
+        }).catch(() => {});
         continue;
       } catch {
         // Telemetry must not disturb app teardown.
       }
     }
     queue = batch.concat(pending, queue);
-    scheduleFlush(token);
+    scheduleFlush();
     return false;
   }
   return true;
@@ -308,7 +217,6 @@ export function resetPerfForTests(
   config = { ...DEFAULT_CONFIG, ...nextConfig };
   initialized = options.initialized ?? true;
   configLoadPromise = null;
-  configLoadToken = null;
   queue = [];
   preInitQueue = [];
   flushing = false;

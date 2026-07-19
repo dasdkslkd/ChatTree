@@ -70,7 +70,6 @@ import {
   PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, ArrowLeft, Bell,
 } from 'lucide-react';
 import { conversationApi } from '../api/conversation';
-import { getApiErrorMessage } from '../api/errors';
 import { configApi } from '../api/config';
 import { messageApi, type ToolResultSlice } from '../api/message';
 import { runsApi } from '../api/runs';
@@ -104,40 +103,25 @@ import type {
 import type { PlanSession } from '../types/plan';
 import type { ActiveTaskRecord } from '../types/task';
 import type { TranscriptItem } from '../types/transcript';
-import type { ConversationCreateRequest, MultiAgentMode, WorkspaceContext } from '../types/conversation';
+import type { MultiAgentMode, WorkspaceContext } from '../types/conversation';
 import type { ProjectCapabilityConfig } from '../types/model';
 import { useConversationStore } from '../store/conversationStore';
 import { useModelStore } from '../store/modelStore';
 import { useNavigationStore } from '../store/navigationStore';
-import { useRunManager } from '../hooks/useRunManager';
-import {
-  captureConnectionEpoch,
-  commitForConnectionEpoch,
-  connectionEpochRuntime,
-  type ConnectionEpochToken,
-} from '../runtime/connectionEpoch';
+import { getProfileContext } from '../runtime/profileContext';
 import {
   ImportAssetMutationOwner,
   ImportAssetMutationQueue,
   ImportAssetPreviewCache,
 } from '../runtime/importAssetPreview';
-import { getFrontendBootstrap } from '../runtime/frontendBootstrap';
 import {
-  BoundRouteRestorer,
-  bindBoundFrontendPopstate,
-  navigateBoundFrontend,
-  readFrontendRouteLocation,
-  waitForRouteReadiness,
-  waitForRouteRender,
-  type RouteRestoreResult,
-} from '../runtime/profileNavigation';
-import type { FrontendRoute } from '../runtime/profileRoute';
-import {
+  LEFT_SIDEBAR_STORAGE_KEY,
   MANUAL_PROJECTS_STORAGE_KEY,
   PROJECT_ORDER_STORAGE_KEY,
+  RIGHT_PANEL_STORAGE_KEY,
   profileStorageKey,
 } from '../runtime/profileStorage';
-import { resolveProjectWorkspaceForEpoch } from '../runtime/projectWorkspaceEpoch';
+import { useRunManager } from '../hooks/useRunManager';
 import { streamManager, type StreamState } from '../services/streamManager';
 import { slashRegistry } from '../services/slashRegistry';
 import { getStreamStatusText as getStreamStatusLabel } from '../utils/generationStatus';
@@ -209,9 +193,7 @@ import {
 } from '../utils/projectGroups';
 import {
   LEFT_SIDEBAR_WIDTH,
-  LEFT_SIDEBAR_WIDTH_STORAGE_KEY,
   RIGHT_PANEL_WIDTH,
-  RIGHT_PANEL_WIDTH_STORAGE_KEY,
   getKeyboardResizedSidebarWidth,
   getPointerResizedSidebarWidth,
   readStoredSidebarWidth,
@@ -227,16 +209,14 @@ import {
 import { createTaskPanelItem } from '../utils/activeTask';
 
 const MarkdownContent = lazy(() => import('../components/MarkdownContent'));
-const profileId = getFrontendBootstrap().profileId;
-const PROFILE_MANUAL_PROJECTS_STORAGE_KEY = profileStorageKey(profileId, MANUAL_PROJECTS_STORAGE_KEY);
-const PROFILE_PROJECT_ORDER_STORAGE_KEY = profileStorageKey(profileId, PROJECT_ORDER_STORAGE_KEY);
-const PROFILE_LEFT_SIDEBAR_STORAGE_KEY = profileStorageKey(profileId, LEFT_SIDEBAR_WIDTH_STORAGE_KEY);
-const PROFILE_RIGHT_PANEL_STORAGE_KEY = profileStorageKey(profileId, RIGHT_PANEL_WIDTH_STORAGE_KEY);
+const PROFILE_ID = getProfileContext().profileId;
+const PROFILE_MANUAL_PROJECTS_STORAGE_KEY = profileStorageKey(PROFILE_ID, MANUAL_PROJECTS_STORAGE_KEY);
+const PROFILE_PROJECT_ORDER_STORAGE_KEY = profileStorageKey(PROFILE_ID, PROJECT_ORDER_STORAGE_KEY);
+const PROFILE_LEFT_SIDEBAR_STORAGE_KEY = profileStorageKey(PROFILE_ID, LEFT_SIDEBAR_STORAGE_KEY);
+const PROFILE_RIGHT_PANEL_STORAGE_KEY = profileStorageKey(PROFILE_ID, RIGHT_PANEL_STORAGE_KEY);
 const PLAN_MODE_TOOL_NAMES = new Set(['plan', 'enter_plan_mode', 'update_plan', 'exit_plan_mode', 'ask_user_question']);
 const TASK_TOOL_NAMES = new Set(['create_task', 'set_task_step', 'cancel_task']);
-const ROUTED_SIDE_RUN_KINDS = new Set(['side_question', 'subagent', 'command', 'workflow', 'workflow_step']);
-const ROUTE_TRANSCRIPT_READY_TIMEOUT_MS = 10_000;
-const ROUTE_TRANSCRIPT_RENDER_TIMEOUT_MS = 2_000;
+const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled', 'interrupted', 'stopped']);
 
 type SidebarResizeSession = {
   side: SidebarResizeSide;
@@ -255,20 +235,6 @@ function getCurrentVisibleTranscriptTip(): { conversationId: string; tipNodeId: 
   const conversationId = state.currentConversation?.id;
   const tipNodeId = state.currentNodeId || state.currentConversation?.current_node_id || null;
   return conversationId && tipNodeId ? { conversationId, tipNodeId } : null;
-}
-
-function getCurrentConversationRoute(): FrontendRoute {
-  const state = useConversationStore.getState();
-  const conversationId = state.currentConversation?.id;
-  if (!conversationId) return { kind: 'profile', profileId };
-  const nodeId = state.currentNodeId || state.currentConversation?.current_node_id || null;
-  return nodeId
-    ? { kind: 'node', profileId, conversationId, nodeId }
-    : { kind: 'conversation', profileId, conversationId };
-}
-
-function reportFrontendRouteError(error: unknown): void {
-  console.error('Frontend route restoration failed:', error);
 }
 
 function getToolCallName(toolCall: unknown): string | null {
@@ -1202,17 +1168,16 @@ export default function ChatPage() {
   if (!importAssetPreviewCacheRef.current) {
     importAssetPreviewCacheRef.current = new ImportAssetPreviewCache(
       conversationApi.fetchImportBlob,
-      connectionEpochRuntime,
     );
   }
-  const importAssetPreviewCache = importAssetPreviewCacheRef.current;
   if (!importAssetMutationOwnerRef.current) {
     importAssetMutationOwnerRef.current = new ImportAssetMutationOwner();
   }
-  const importAssetMutationOwner = importAssetMutationOwnerRef.current;
   if (!importAssetMutationQueueRef.current) {
     importAssetMutationQueueRef.current = new ImportAssetMutationQueue();
   }
+  const importAssetPreviewCache = importAssetPreviewCacheRef.current;
+  const importAssetMutationOwner = importAssetMutationOwnerRef.current;
   const importAssetMutationQueue = importAssetMutationQueueRef.current;
   const scrollTimeoutRef = useRef<number | null>(null);
   const historyRef = useRef<HTMLDivElement>(null);
@@ -1220,32 +1185,6 @@ export default function ChatPage() {
   const pendingScrollId = useRef<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const sidebarResizeRef = useRef<SidebarResizeSession | null>(null);
-  const routeMountTokenRef = useRef<ConnectionEpochToken | null>(null);
-  const routeRestorerRef = useRef<BoundRouteRestorer | null>(null);
-  if (!routeMountTokenRef.current) {
-    routeMountTokenRef.current = captureConnectionEpoch();
-  }
-  const runBoundRouteIntent = useCallback(<T,>(
-    operation: (token: ConnectionEpochToken, intent: number) => T | Promise<T>,
-  ): Promise<T> => {
-    const owner = routeRestorerRef.current;
-    if (!owner) return Promise.reject(new Error('Frontend route owner is not ready'));
-    return owner.run(operation);
-  }, []);
-  const submitBoundRoute = useCallback((
-    route: FrontendRoute,
-    mode: 'push' | 'replace' | null,
-    afterRestore?: (result: RouteRestoreResult, token: ConnectionEpochToken) => void,
-  ): Promise<RouteRestoreResult> => {
-    const owner = routeRestorerRef.current;
-    if (!owner) return Promise.reject(new Error('Frontend route owner is not ready'));
-    return owner.submit(route, {
-      afterRestore: (_restoredRoute, result, token) => {
-        afterRestore?.(result, token);
-        if (mode) navigateBoundFrontend(route, mode);
-      },
-    });
-  }, []);
 
   const userScrollingRef = useRef(false);
   const scrollEndTimeoutRef = useRef<number | null>(null);
@@ -1255,17 +1194,24 @@ export default function ChatPage() {
   const transcriptRequestCoordinatorRef = useRef<TranscriptRequestCoordinator | null>(null);
   if (!transcriptRequestCoordinatorRef.current) {
     transcriptRequestCoordinatorRef.current = createTranscriptRequestCoordinator({
-      fetchSnapshot: (conversationId, tipNodeId, signal) => (
-        transcriptService.fetchBranchSnapshot(conversationId, tipNodeId, signal)
-      ),
+      fetchSnapshot: transcriptService.fetchBranchSnapshot,
       getVisibleTarget: getCurrentVisibleTranscriptTip,
       onLoadingChange: setTranscriptLoading,
-      onSnapshot: (snapshot) => setTranscriptItems(normalizeTranscriptItems(snapshot.items || [])),
+      onSnapshot: (snapshot) => setTranscriptItems(
+        normalizeTranscriptItems(snapshot.items || []),
+      ),
       onErrorChange: (error) => setTranscriptError(
         error ? '对话 transcript 刷新失败，已保留当前内容' : null,
       ),
     });
   }
+
+  useEffect(
+    () => importAssetPreviewCache.subscribe(
+      () => refreshImportPreviews((revision) => revision + 1),
+    ),
+    [importAssetPreviewCache],
+  );
 
   const beginSidebarResize = useCallback((
     event: ReactPointerEvent<HTMLDivElement>,
@@ -1424,32 +1370,9 @@ export default function ChatPage() {
   const {
     conversations, currentConversation, messages,
     currentNodeId, pendingScrollNodeId, clearPendingScroll,
-    loadConversations, loadTree, updateConversationTitle,
-    refreshMessages, refreshBranches, patchAssistantMessageFromStream,
+    createConversation, selectConversation, deleteConversation, deleteNode, switchNode, loadConversations, loadTree,
+    clearCurrentConversation, updateConversationTitle, refreshMessages, refreshBranches, patchAssistantMessageFromStream,
   } = useConversationStore();
-  const createConversationAndNavigate = useCallback((request: ConversationCreateRequest) => (
-    runBoundRouteIntent(async (token) => {
-      const conversation = await useConversationStore.getState().createConversation(request, token);
-      connectionEpochRuntime.assertCurrent(token);
-      if (!conversation) return null;
-      if (useConversationStore.getState().currentConversation?.id !== conversation.id) return null;
-      navigateBoundFrontend({
-        kind: 'conversation',
-        profileId,
-        conversationId: conversation.id,
-      }, 'push');
-      return conversation;
-    })
-  ), [runBoundRouteIntent]);
-
-  const importPreviewFilenames = useMemo(() => Array.from(new Set([
-    ...attachedImageRefs.map((ref) => ref.filename),
-    ...messages.flatMap((message) => (message.image_refs ?? []).map((ref) => ref.filename)),
-  ].filter(Boolean))), [attachedImageRefs, messages]);
-
-  useEffect(() => importAssetPreviewCache.subscribe(() => {
-    refreshImportPreviews((revision) => revision + 1);
-  }), [importAssetPreviewCache]);
 
   useEffect(() => {
     setPreviewImage(null);
@@ -1459,25 +1382,13 @@ export default function ChatPage() {
     };
   }, [currentConversation?.id, importAssetMutationOwner, importAssetPreviewCache]);
 
-  useEffect(() => connectionEpochRuntime.subscribeInvalidation(() => {
-    importAssetMutationOwner.clear();
-    importAssetPreviewCache.clear();
-    setPreviewImage(null);
-  }), [importAssetMutationOwner, importAssetPreviewCache]);
-
   useEffect(() => {
     const conversationId = currentConversation?.id;
-    if (!conversationId || importPreviewFilenames.length === 0) return;
-    let token: ConnectionEpochToken;
-    try {
-      token = captureConnectionEpoch();
-    } catch {
-      return;
+    if (!conversationId) return;
+    for (const { filename } of attachedImageRefs) {
+      void importAssetPreviewCache.load(conversationId, filename).catch(() => {});
     }
-    for (const filename of importPreviewFilenames) {
-      void importAssetPreviewCache.load(conversationId, filename, token).catch(() => {});
-    }
-  }, [currentConversation?.id, importAssetPreviewCache, importPreviewFilenames]);
+  }, [attachedImageRefs, currentConversation?.id, importAssetPreviewCache]);
 
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
   const [renameConversationId, setRenameConversationId] = useState<string | null>(null);
@@ -1545,13 +1456,16 @@ export default function ChatPage() {
     tipNodeId?: string | null,
   ) => {
     if (!conversationId || !tipNodeId) {
+      transcriptRequestCoordinatorRef.current?.cancelActive();
       setTranscriptItems([]);
       setTranscriptError(null);
       setTranscriptLoading(false);
       return;
     }
-
-    return transcriptRequestCoordinatorRef.current!.request({ conversationId, tipNodeId });
+    return transcriptRequestCoordinatorRef.current?.request({
+      conversationId,
+      tipNodeId,
+    });
   }, []);
   const refreshVisibleTranscriptSnapshot = useCallback(async (conversationId?: string | null) => {
     const visible = getCurrentVisibleTranscriptTip();
@@ -1601,17 +1515,6 @@ export default function ChatPage() {
       };
     });
   }, []);
-  const openSideRun = useCallback((runId: string, mode: 'push' | 'replace' = 'push') => {
-    void submitBoundRoute({ kind: 'run', profileId, runId }, mode)
-      .catch(reportFrontendRouteError);
-  }, [submitBoundRoute]);
-  const closeSideRun = useCallback((mode: 'push' | 'replace' = 'replace') => {
-    void runBoundRouteIntent(() => {
-      setSelectedSideRunId(null);
-      setSelectedTaskNotificationId(null);
-      navigateBoundFrontend(getCurrentConversationRoute(), mode);
-    }).catch(reportFrontendRouteError);
-  }, [runBoundRouteIntent]);
   const attachDeliveringTaskNotifications = useCallback((
     conversationId: string,
     notifications: TaskNotificationRecord[],
@@ -2092,15 +1995,16 @@ export default function ChatPage() {
     void loadTranscriptSnapshot(conversationId, selectedBranchTipId);
   }, [currentConversation?.id, loadTranscriptSnapshot, selectedBranchTipId]);
 
-  useEffect(() => () => {
-    transcriptRequestCoordinatorRef.current?.cancelActive();
-  }, []);
+  useEffect(
+    () => () => transcriptRequestCoordinatorRef.current?.cancelActive(),
+    [],
+  );
 
   useEffect(() => {
-    if (selectedSideRunId && !selectedSideRunItem && !streamManager.hasRun(selectedSideRunId)) {
-      closeSideRun();
+    if (selectedSideRunId && !selectedSideRunItem) {
+      setSelectedSideRunId(null);
     }
-  }, [closeSideRun, selectedSideRunId, selectedSideRunItem]);
+  }, [selectedSideRunId, selectedSideRunItem]);
 
   useEffect(() => {
     if (selectedTaskNotificationId && !visibleTaskNotifications.some((item) => item.id === selectedTaskNotificationId)) {
@@ -2299,29 +2203,23 @@ export default function ChatPage() {
       setProjectFolderError('请输入文件夹路径');
       return;
     }
+    setProjectFolderSubmitting(true);
+    setProjectFolderError('');
     try {
-      const token = captureConnectionEpoch();
-      setProjectFolderSubmitting(true);
-      setProjectFolderError('');
       const label = projectFolderLabel.trim() || undefined;
-      await resolveProjectWorkspaceForEpoch(token, {
-        resolve: () => projectFolderDialogMode === 'create'
-          ? conversationApi.createProjectFolder(path, label)
-          : conversationApi.resolveProjectFolder(path, label),
-        onSuccess: (workspace) => {
-          rememberProjectWorkspace(workspace);
-          setProjectPickerSearch('');
-          setProjectFolderDialogMode(null);
-          setProjectFolderPath('');
-          setProjectFolderLabel('');
-        },
-        onError: (error) => {
-          setProjectFolderError(getApiErrorMessage(error, '项目文件夹处理失败'));
-        },
-        onFinally: () => setProjectFolderSubmitting(false),
-      }, connectionEpochRuntime);
-    } catch {
-      // Capture can fail only while this page is being invalidated for reload.
+      const workspace = projectFolderDialogMode === 'create'
+        ? await conversationApi.createProjectFolder(path, label)
+        : await conversationApi.resolveProjectFolder(path, label);
+      rememberProjectWorkspace(workspace);
+      setProjectPickerSearch('');
+      setProjectFolderDialogMode(null);
+      setProjectFolderPath('');
+      setProjectFolderLabel('');
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || err?.message || '项目文件夹处理失败';
+      setProjectFolderError(String(detail));
+    } finally {
+      setProjectFolderSubmitting(false);
     }
   };
 
@@ -2435,8 +2333,7 @@ export default function ChatPage() {
     setEditToolPermissionMode(null);
     setEditReturnNodeId(null);
     setEditProtectedAttachmentNames([]);
-    void submitBoundRoute({ kind: 'profile', profileId }, 'push')
-      .catch(reportFrontendRouteError);
+    clearCurrentConversation();
   };
   const sendNextQueuedMessage = useCallback(async (conversationId: string): Promise<boolean> => {
     const nextMessage = queuedMessagesRef.current.find((message) =>
@@ -2682,22 +2579,33 @@ export default function ChatPage() {
     if (!conversationId || notification.conversation_id !== conversationId) return;
     const runId = notification.source_run_id;
     if (!runId) return;
-    try {
-      await submitBoundRoute(
-        { kind: 'run', profileId, runId },
-        'push',
-        (result) => {
-          if (result.conversationId !== conversationId) {
-            throw new Error('Task notification run changed conversations');
-          }
-          showSideRun(conversationId, runId);
-          setSelectedTaskNotificationId(notification.id);
-        },
-      );
-    } catch (error) {
-      reportFrontendRouteError(error);
+    setSelectedTaskNotificationId(notification.id);
+    showSideRun(conversationId, runId);
+    setOutlineCollapsed(false);
+    setRightPanelView('side');
+    const existing = streamManager.getConversationStates(conversationId).find((run) => run.runId === runId);
+    if (existing) {
+      setSelectedSideRunId(runId);
+      return;
     }
-  }, [currentConversation?.id, showSideRun, submitBoundRoute]);
+    const runs = await runsApi.listConversation(conversationId);
+    const run = runs.find((item) => item.run_id === runId);
+    if (!run) return;
+    if (TERMINAL_RUN_STATUSES.has(run.status)) {
+      const events = await runsApi.events(runId, 0);
+      streamManager.restoreRunFromEvents(run, events);
+    } else {
+      void streamManager.resumeStream(
+        conversationId,
+        run.target_node_id ?? null,
+        run.run_id,
+        0,
+        run.anchor_node_id ?? null,
+        run.kind,
+      );
+    }
+    setSelectedSideRunId(runId);
+  }, [currentConversation?.id, showSideRun]);
 
   const handleCopyTranscriptItem = useCallback(async (_item: TranscriptItem, text: string) => {
     try {
@@ -2726,14 +2634,7 @@ export default function ChatPage() {
     setEditProtectedAttachmentNames(protectedAttachmentNames);
     setAttachedFiles(attachmentRefs.importFiles);
     setAttachedImageRefs(attachmentRefs.imageRefs);
-    if (currentConversation?.id) {
-      await submitBoundRoute({
-        kind: 'node',
-        profileId,
-        conversationId: currentConversation.id,
-        nodeId: parentNodeId,
-      }, 'replace').catch(reportFrontendRouteError);
-    }
+    await switchNode(parentNodeId);
   }, [
     currentBranchNodeIds,
     currentBranchToolPermissionMode,
@@ -2741,7 +2642,7 @@ export default function ChatPage() {
     liveBranchToolPermissionMode,
     messages,
     selectedBranchTipId,
-    submitBoundRoute,
+    switchNode,
   ]);
 
   const handleCancelEdit = useCallback(async () => {
@@ -2755,54 +2656,18 @@ export default function ChatPage() {
     setAttachedFiles([]);
     setAttachedImageRefs([]);
     if (conversationId && returnNodeId) {
-      await submitBoundRoute({
-        kind: 'node',
-        profileId,
-        conversationId,
-        nodeId: returnNodeId,
-      }, 'replace').catch(reportFrontendRouteError);
+      await switchNode(returnNodeId);
     }
-  }, [currentConversation?.id, editReturnNodeId, submitBoundRoute]);
-
-  const deleteNodeAndMaintainRoute = useCallback(async (nodeId: string): Promise<string | null> => (
-    runBoundRouteIntent(async (token) => {
-      const conversationId = useConversationStore.getState().currentConversation?.id;
-      if (!conversationId) return null;
-      await useConversationStore.getState().deleteNode(nodeId, token);
-      connectionEpochRuntime.assertCurrent(token);
-      if (useConversationStore.getState().currentConversation?.id !== conversationId) return null;
-      navigateBoundFrontend(getCurrentConversationRoute(), 'replace');
-      return conversationId;
-    })
-  ), [runBoundRouteIntent]);
-
-  const handleSelectTreeNode = useCallback(async (nodeId: string) => {
-    const conversationId = useConversationStore.getState().currentConversation?.id;
-    if (!conversationId) return;
-    await submitBoundRoute({
-      kind: 'node',
-      profileId,
-      conversationId,
-      nodeId,
-    }, 'replace');
-  }, [submitBoundRoute]);
-
-  const handleDeleteTreeNode = useCallback(async (nodeId: string) => {
-    await deleteNodeAndMaintainRoute(nodeId);
-  }, [deleteNodeAndMaintainRoute]);
+  }, [currentConversation?.id, editReturnNodeId, switchNode]);
 
   const handleDeleteUserMessage = useCallback(async (item: TranscriptItem) => {
     if (!isTranscriptItemVisibleNow(item, currentConversation?.id ?? null, selectedBranchTipId)) return;
     const nodeId = getTranscriptItemNodeId(item);
     if (!nodeId || !currentConversation?.id) return;
     if (!window.confirm('确定删除这条消息及其后续分支？')) return;
-    try {
-      const conversationId = await deleteNodeAndMaintainRoute(nodeId);
-      if (conversationId) await refreshVisibleTranscriptSnapshot(conversationId);
-    } catch (error) {
-      reportFrontendRouteError(error);
-    }
-  }, [currentConversation?.id, deleteNodeAndMaintainRoute, refreshVisibleTranscriptSnapshot, selectedBranchTipId]);
+    await deleteNode(nodeId);
+    await refreshVisibleTranscriptSnapshot(currentConversation.id);
+  }, [currentConversation?.id, deleteNode, refreshVisibleTranscriptSnapshot, selectedBranchTipId]);
 
   // Legacy static coverage still keys off the historical marker:
   // const handleApprovePlan = useCallback(async () => {
@@ -3089,125 +2954,8 @@ export default function ChatPage() {
   }, [pendingApprovalCount, scrollToBottom]);
 
   useEffect(() => {
-    const token = routeMountTokenRef.current!;
-    let mounted = true;
-
-    const applyRestoredRoute = async (
-      route: FrontendRoute,
-      result: RouteRestoreResult,
-      ownerToken: ConnectionEpochToken,
-    ) => {
-      connectionEpochRuntime.assertCurrent(ownerToken);
-      setSelectedTaskNotificationId(null);
-      useNavigationStore.getState().setChatViewMode('chat');
-
-      if (route.kind === 'profile') {
-        await useConversationStore.getState().clearCurrentConversation(ownerToken);
-        connectionEpochRuntime.assertCurrent(ownerToken);
-        setSelectedSideRunId(null);
-        setRightPanelView('outline');
-        return;
-      }
-
-      if (route.kind !== 'run') {
-        setSelectedSideRunId(null);
-        setRightPanelView('outline');
-        return;
-      }
-
-      const restoredRun = result.conversationId
-        ? streamManager.getConversationStates(result.conversationId)
-          .find((state) => state.runId === result.runId)
-        : null;
-      if (restoredRun && ROUTED_SIDE_RUN_KINDS.has(restoredRun.kind)) {
-        setOutlineCollapsed(false);
-        setRightPanelView('side');
-        setSelectedSideRunId(restoredRun.runId);
-        return;
-      }
-
-      setSelectedSideRunId(null);
-      setRightPanelView('outline');
-      const targetNodeId = restoredRun?.targetNodeId;
-      if (!targetNodeId) return;
-      const conversationState = useConversationStore.getState();
-      const tipNodeId = conversationState.currentNodeId
-        || conversationState.currentConversation?.current_node_id
-        || null;
-      if (result.conversationId && tipNodeId) {
-        const ready = await waitForRouteReadiness(
-          ownerToken,
-          async () => {
-            await loadTranscriptSnapshot(result.conversationId, tipNodeId);
-          },
-          {
-            timeoutMs: ROUTE_TRANSCRIPT_READY_TIMEOUT_MS,
-            cancel: () => transcriptRequestCoordinatorRef.current?.cancelActive(),
-          },
-        );
-        if (!ready) return;
-      }
-      const routeOwnerSignal = routeRestorerRef.current?.signal;
-      if (!routeOwnerSignal) throw new Error('Frontend route owner is not ready');
-      await waitForRouteRender(ownerToken, () => {
-        const element = findTranscriptAnchorElement(historyRef.current, { nodeId: targetNodeId });
-        if (!element) return false;
-        element.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        return true;
-      }, {
-        timeoutMs: ROUTE_TRANSCRIPT_RENDER_TIMEOUT_MS,
-        signals: [connectionEpochRuntime.signalFor(ownerToken), routeOwnerSignal],
-      });
-    };
-
-    const restorer = new BoundRouteRestorer({
-      boundProfileId: profileId,
-      selectConversation: async (id, ownerToken) => {
-        await useConversationStore.getState().selectConversation(id, ownerToken);
-        return useConversationStore.getState().currentConversation?.id === id;
-      },
-      switchNode: async (id, ownerToken) => {
-        await useConversationStore.getState().switchNode(id, ownerToken);
-        const state = useConversationStore.getState();
-        return state.currentNodeId === id && state.currentConversation?.current_node_id === id;
-      },
-      getRun: (id) => runsApi.get(id),
-      getEvents: (id, fromEvent) => runsApi.events(id, fromEvent),
-      restoreAndAttachRun: (run, events, ownerToken) => {
-        streamManager.restoreAndAttachRun(run, events, ownerToken);
-      },
-      applyRestoredRoute,
-    }, token);
-    routeRestorerRef.current = restorer;
-    const initialRoute = restorer.submit(
-      () => readFrontendRouteLocation(window.location),
-      {
-        prepare: async (ownerToken) => {
-          await useConversationStore.getState().loadConversations(ownerToken);
-          connectionEpochRuntime.assertCurrent(ownerToken);
-        },
-      },
-    );
-    const unbindPopstate = bindBoundFrontendPopstate(
-      window,
-      profileId,
-      restorer,
-      reportFrontendRouteError,
-      (route) => navigateBoundFrontend(route, 'replace'),
-    );
-
-    void initialRoute.catch((error) => {
-      if (mounted) reportFrontendRouteError(error);
-    });
-
-    return () => {
-      mounted = false;
-      unbindPopstate();
-      restorer.dispose();
-      transcriptRequestCoordinatorRef.current?.cancelActive();
-      if (routeRestorerRef.current === restorer) routeRestorerRef.current = null;
-    };
-  }, [loadTranscriptSnapshot]);
+    loadConversations();
+  }, []);
 
   useEffect(() => {
     const updateLocalStreamingIds = () => {
@@ -3337,24 +3085,7 @@ export default function ChatPage() {
       const group = allProjectGroups.find((item) => item.path === selected.workspace?.cwd);
       if (group) setSelectedProjectId(group.id);
     }
-    await submitBoundRoute(
-      { kind: 'conversation', profileId, conversationId: id },
-      'push',
-    ).catch(reportFrontendRouteError);
-  };
-
-  const handleDeleteConversation = async (id: string) => {
-    await runBoundRouteIntent(async (token) => {
-      const wasCurrent = useConversationStore.getState().currentConversation?.id === id;
-      await useConversationStore.getState().deleteConversation(id, token);
-      connectionEpochRuntime.assertCurrent(token);
-      if (wasCurrent && !useConversationStore.getState().currentConversation) {
-        setSelectedSideRunId(null);
-        setSelectedTaskNotificationId(null);
-        setRightPanelView('outline');
-        navigateBoundFrontend({ kind: 'profile', profileId }, 'replace');
-      }
-    }).catch(reportFrontendRouteError);
+    await selectConversation(id);
   };
 
   useLayoutEffect(() => {
@@ -3424,15 +3155,9 @@ export default function ChatPage() {
   };
 
   const handleFilesPicked = async (files: File[]) => {
-    let token: ConnectionEpochToken;
-    try {
-      token = captureConnectionEpoch();
-    } catch {
-      return;
-    }
     let convId = currentConversation?.id;
     if (!convId) {
-      const newConv = await createConversationAndNavigate({
+      const newConv = await createConversation({
         title: files[0]?.name?.slice(0, 20) || 'New',
         workspace: workspaceForCreateRequest(),
         multi_agent_mode: newConversationMultiAgentMode,
@@ -3441,59 +3166,32 @@ export default function ChatPage() {
       convId = newConv.id;
     }
     for (const file of files) {
-      const uploadMutation = importAssetMutationOwner.begin(convId, file.name);
+      const mutation = importAssetMutationOwner.begin(convId, file.name);
       try {
         const res = await importAssetMutationQueue.run(
           convId,
           file.name,
-          async () => {
-            if (!connectionEpochRuntime.isCurrent(token)) return null;
-            return conversationApi.uploadImport(convId, file);
-          },
+          () => conversationApi.uploadImport(convId, file),
         );
-        if (!res) continue;
-        if (!connectionEpochRuntime.isCurrent(token)) return;
-        if (useConversationStore.getState().currentConversation?.id !== convId) {
-          continue;
-        }
-        const mutation = importAssetMutationOwner.claim(
-          uploadMutation,
-          convId,
-          res.filename,
-        );
-        if (!mutation) continue;
+        const claimed = importAssetMutationOwner.claim(mutation, convId, res.filename);
+        if (!claimed || !importAssetMutationOwner.owns(claimed)) continue;
+        if (useConversationStore.getState().currentConversation?.id !== convId) continue;
         if (res.kind === 'image') {
-          importAssetPreviewCache.installFile(convId, res.filename, file, token);
-          commitForConnectionEpoch(token, () => {
-            if (!importAssetMutationOwner.owns(mutation)
-                || useConversationStore.getState().currentConversation?.id !== convId) return;
-            setAttachedImageRefs(prev => prev.some(ref => ref.filename === res.filename)
-              ? prev
-              : [...prev, { filename: res.filename, mime_type: res.mime_type ?? file.type }]);
-          });
+          importAssetPreviewCache.installFile(convId, res.filename, file);
+          setAttachedImageRefs(prev => prev.some(ref => ref.filename === res.filename)
+            ? prev
+            : [...prev, { filename: res.filename, mime_type: res.mime_type ?? file.type }]);
         } else {
-          commitForConnectionEpoch(token, () => {
-            if (!importAssetMutationOwner.owns(mutation)
-                || useConversationStore.getState().currentConversation?.id !== convId) return;
-            setAttachedFiles(prev => prev.includes(res.filename) ? prev : [...prev, res.filename]);
-          });
+          setAttachedFiles(prev => prev.includes(res.filename) ? prev : [...prev, res.filename]);
         }
-      } catch (err: unknown) {
-        if (connectionEpochRuntime.isCurrent(token)) {
-          console.error('Upload failed:', getApiErrorMessage(err, '文件上传失败'));
-        }
+      } catch (err: any) {
+        console.error('Upload failed:', err?.response?.data?.detail || err.message);
       }
     }
   };
 
   const handleRemoveFile = async (filename: string) => {
     if (!currentConversation) return;
-    let token: ConnectionEpochToken;
-    try {
-      token = captureConnectionEpoch();
-    } catch {
-      return;
-    }
     const conversationId = currentConversation.id;
     const mutation = importAssetMutationOwner.begin(conversationId, filename);
     importAssetPreviewCache.remove(conversationId, filename);
@@ -3504,44 +3202,30 @@ export default function ChatPage() {
         await importAssetMutationQueue.run(
           conversationId,
           filename,
-          async () => {
-            if (!connectionEpochRuntime.isCurrent(token)) return;
-            await conversationApi.deleteImport(conversationId, filename);
-          },
+          () => conversationApi.deleteImport(conversationId, filename),
         );
       }
-    } catch {
-      // Keep the local attachment removal responsive if remote deletion fails.
-    }
-    commitForConnectionEpoch(token, () => {
-      if (!importAssetMutationOwner.owns(mutation)
-          || useConversationStore.getState().currentConversation?.id !== conversationId) return;
-      setAttachedFiles(prev => prev.filter(f => f !== filename));
-      setAttachedImageRefs(prev => prev.filter(ref => ref.filename !== filename));
-      setEditProtectedAttachmentNames(prev => prev.filter(name => name !== filename));
-    });
+    } catch (_) {}
+    if (!importAssetMutationOwner.owns(mutation)
+        || useConversationStore.getState().currentConversation?.id !== conversationId) return;
+    setAttachedFiles(prev => prev.filter(f => f !== filename));
+    setAttachedImageRefs(prev => prev.filter(ref => ref.filename !== filename));
+    setEditProtectedAttachmentNames(prev => prev.filter(name => name !== filename));
   };
 
   const getImportAssetPreviewUrl = (filename: string, conversationId = currentConversation?.id) => {
-    if (!conversationId) return null;
-    return importAssetPreviewCache.peek(conversationId, filename);
+    if (!conversationId) return '';
+    return importAssetPreviewCache.peek(conversationId, filename) ?? '';
   };
 
   const handlePreviewImage = async (filename: string) => {
     const conversationId = currentConversation?.id;
     if (!conversationId) return;
-    let token: ConnectionEpochToken | null = null;
-    try {
-      token = captureConnectionEpoch();
-      const url = getImportAssetPreviewUrl(filename, conversationId)
-        ?? await importAssetPreviewCache.load(conversationId, filename, token);
-      if (!url) return;
-      commitForConnectionEpoch(token, () => setPreviewImage({ name: filename, url }));
-    } catch (error: unknown) {
-      if (token && connectionEpochRuntime.isCurrent(token)) {
-        console.error('Preview failed:', getApiErrorMessage(error, '图片预览失败'));
-      }
-    }
+    const url = getImportAssetPreviewUrl(filename, conversationId)
+      || await importAssetPreviewCache.load(conversationId, filename);
+    if (!url) return;
+    if (useConversationStore.getState().currentConversation?.id !== conversationId) return;
+    setPreviewImage({ name: filename, url });
   };
 
   const handleSend = async (
@@ -3614,7 +3298,7 @@ export default function ChatPage() {
     }
 
     if (!conversationId) {
-      const newConv = await createConversationAndNavigate({
+      const newConv = await createConversation({
         title: val.slice(0, 20),
         prompt_id: promptId || undefined,
         prompt_mode: promptId ? promptMode : undefined,
@@ -3821,7 +3505,7 @@ export default function ChatPage() {
           className="app-run-action-button"
           onClick={(event) => {
             event.stopPropagation();
-            if (selectedSideRunId === draft.run.runId) closeSideRun();
+            if (selectedSideRunId === draft.run.runId) setSelectedSideRunId(null);
             if (currentConversation?.id) hideSideRun(currentConversation.id, draft.run.runId);
             streamManager.cleanupRun(draft.run.runId);
           }}
@@ -4223,7 +3907,7 @@ export default function ChatPage() {
                   type="button"
                   className="flex min-w-0 items-center gap-2 rounded-lg border px-2.5 py-2 text-left transition-colors"
                   style={{ borderColor: 'var(--border)', background: 'transparent', color: 'var(--fg-secondary)' }}
-                  onClick={() => openSideRun(step.run.runId)}
+                  onClick={() => setSelectedSideRunId(step.run.runId)}
                 >
                   <span className="min-w-0 flex-1 truncate text-sm">{getSideRunTitle(step.run)}</span>
                   <span className="text-xs" style={{ color: getSideRunStatusColor(step.run) }}>{getSideRunStatusText(step.run)}</span>
@@ -4372,7 +4056,7 @@ export default function ChatPage() {
                                       <Pencil className="h-4 w-4 mr-2" />
                                       重命名
                                     </DropdownMenuItem>
-                                    <DropdownMenuItem onClick={() => { void handleDeleteConversation(c.id); }}>
+                                    <DropdownMenuItem onClick={() => deleteConversation(c.id)}>
                                       <X className="h-4 w-4 mr-2" />
                                       删除对话
                                     </DropdownMenuItem>
@@ -4597,10 +4281,7 @@ export default function ChatPage() {
         {/* Tree view */}
         {chatViewMode === 'tree' && (
           <div className="flex-1 overflow-hidden">
-            <TreeView
-              onSelectNode={handleSelectTreeNode}
-              onDeleteNode={handleDeleteTreeNode}
-            />
+            <TreeView />
           </div>
         )}
       </section>
@@ -4735,8 +4416,8 @@ export default function ChatPage() {
                         const nextRunId = parentRun && SIDE_RUN_KINDS.has(parentRun.kind)
                           ? parentRun.runId
                           : null;
-                        if (nextRunId) openSideRun(nextRunId);
-                        else closeSideRun();
+                        setSelectedSideRunId(nextRunId);
+                        if (!nextRunId) setSelectedTaskNotificationId(null);
                       }}
                     >
                       <ArrowLeft className="h-3.5 w-3.5" />
@@ -4777,11 +4458,11 @@ export default function ChatPage() {
                           role="button"
                           tabIndex={0}
                           className="app-run-list-row p-0 text-left"
-                          onClick={() => openSideRun(item.run.runId)}
+                          onClick={() => setSelectedSideRunId(item.run.runId)}
                           onKeyDown={(event) => {
                             if (event.key !== 'Enter' && event.key !== ' ') return;
                             event.preventDefault();
-                            openSideRun(item.run.runId);
+                            setSelectedSideRunId(item.run.runId);
                           }}
                         >
                           <div className="flex items-center gap-2 px-3 py-2">

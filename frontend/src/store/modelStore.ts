@@ -3,13 +3,6 @@ import { devtools } from 'zustand/middleware';
 import type { ConfigData, ConfigUpdateRequest, ModelMetadata } from '../types/model';
 import { modelApi } from '../api/model';
 import { configApi } from '../api/config';
-import {
-  StaleConnectionEpochError,
-  captureConnectionEpoch,
-  commitForConnectionEpoch as commitForConnectionEpochStrict,
-  connectionEpochRuntime,
-  type ConnectionEpochToken,
-} from '../runtime/connectionEpoch';
 
 interface ModelState {
   providers: string[];
@@ -38,12 +31,12 @@ interface ModelState {
 }
 
 interface ModelActions {
-  loadProviders: (token?: ConnectionEpochToken) => Promise<void>;
-  loadModels: (provider: string, token?: ConnectionEpochToken) => Promise<void>;
+  loadProviders: () => Promise<void>;
+  loadModels: (provider: string) => Promise<void>;
   /** 加载指定 provider 的模型元数据（已缓存则跳过） */
-  loadMetadata: (provider: string, token?: ConnectionEpochToken) => Promise<void>;
-  loadConfig: (options?: { force?: boolean }, token?: ConnectionEpochToken) => Promise<void>;
-  updateConfig: (config: ConfigUpdateRequest, token?: ConnectionEpochToken) => Promise<void>;
+  loadMetadata: (provider: string) => Promise<void>;
+  loadConfig: (options?: { force?: boolean }) => Promise<void>;
+  updateConfig: (config: ConfigUpdateRequest) => Promise<void>;
   /** 设置临时提供商（对话框内预览） */
   setPendingProvider: (provider: string) => void;
   /** 设置临时模型（对话框内预览） */
@@ -72,10 +65,9 @@ interface ModelActions {
     modelId: string | null | undefined,
     reasoningEffort?: string | null,
     thinkingEnabled?: boolean | null,
-    token?: ConnectionEpochToken,
   ) => Promise<void>;
   /** 重置为默认提供商的默认模型（新建对话时调用） */
-  resetToDefault: (token?: ConnectionEpochToken) => Promise<void>;
+  resetToDefault: () => Promise<void>;
   clearError: () => void;
 }
 
@@ -105,43 +97,8 @@ export function selectVisibleDefaultModel(
 
 const CONFIG_REFRESH_TTL_MS = 30_000;
 let configLoadPromise: Promise<void> | null = null;
-let configLoadToken: ConnectionEpochToken | null = null;
 let lastConfigLoadedAt = 0;
 let configLoadGeneration = 0;
-
-function resolveEpochToken(token?: ConnectionEpochToken): ConnectionEpochToken {
-  if (token) {
-    connectionEpochRuntime.assertCurrent(token);
-    return token;
-  }
-  return captureConnectionEpoch();
-}
-
-function sameEpochToken(left: ConnectionEpochToken | null, right: ConnectionEpochToken): boolean {
-  return Boolean(left
-    && left.generation === right.generation
-    && left.profileId === right.profileId
-    && left.serverInstanceId === right.serverInstanceId
-    && left.connectionEpoch === right.connectionEpoch
-    && left.connectionLeaseId === right.connectionLeaseId);
-}
-
-function isStaleEpoch(error: unknown, token: ConnectionEpochToken | null): boolean {
-  return !token
-    || error instanceof StaleConnectionEpochError
-    || !connectionEpochRuntime.isCurrent(token);
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function commitForConnectionEpoch(
-  token: ConnectionEpochToken | null,
-  commit: () => void,
-): boolean {
-  return token ? commitForConnectionEpochStrict(token, commit) : false;
-}
 
 export const useModelStore = create<ModelState & ModelActions>()(
   devtools((set, get) => ({
@@ -160,51 +117,39 @@ export const useModelStore = create<ModelState & ModelActions>()(
     loading: false,
     error: null,
 
-    loadProviders: async (ownerToken) => {
-      let token: ConnectionEpochToken | null = null;
+    loadProviders: async () => {
+      set({ loading: true, error: null });
       try {
-        token = resolveEpochToken(ownerToken);
-        set({ loading: true, error: null });
         const providerList = await modelApi.getProviders();
-        commitForConnectionEpoch(token, () => set({ providers: providerList }));
-      } catch (err: unknown) {
-        if (isStaleEpoch(err, token)) return;
-        commitForConnectionEpoch(token, () => set({ error: errorMessage(err) }));
+        set({ providers: providerList });
+      } catch (err: any) {
+        set({ error: err.message });
       } finally {
-        if (token) commitForConnectionEpoch(token, () => set({ loading: false }));
+        set({ loading: false });
       }
     },
 
-    loadModels: async (provider: string, ownerToken?: ConnectionEpochToken) => {
-      let token: ConnectionEpochToken | null = null;
-      try {
-        token = resolveEpochToken(ownerToken);
-        // 聊天侧模型列表使用「设置」里已策划的配置（config.provider[provider].models），
-        // 不做实时 /v1/models 拉取。否则聚合型网关（如 ustc）的 /v1/models 会返回整张
-        // 目录（含 claude-* 等其它供应商的模型名），覆盖用户策划的列表，造成串台。
-        // 实时拉取仅保留在「设置」页的「从 API 获取」按钮（直接调用 modelApi.list）。
-        const cfg = get().config;
-        const configured = cfg?.provider?.[provider]?.models || [];
-        commitForConnectionEpoch(token, () => set((state) => ({
-          models: { ...state.models, [provider]: configured },
-        })));
-      } catch (error) {
-        if (!isStaleEpoch(error, token)) throw error;
-      }
+    loadModels: async (provider: string) => {
+      // 聊天侧模型列表使用「设置」里已策划的配置（config.provider[provider].models），
+      // 不做实时 /v1/models 拉取。否则聚合型网关（如 ustc）的 /v1/models 会返回整张
+      // 目录（含 claude-* 等其它供应商的模型名），覆盖用户策划的列表，造成串台。
+      // 实时拉取仅保留在「设置」页的「从 API 获取」按钮（直接调用 modelApi.list）。
+      const cfg = get().config;
+      const configured = cfg?.provider?.[provider]?.models || [];
+      set((state) => ({
+        models: { ...state.models, [provider]: configured },
+      }));
     },
 
-    loadMetadata: async (provider: string, ownerToken?: ConnectionEpochToken) => {
-      let token: ConnectionEpochToken | null = null;
+    loadMetadata: async (provider: string) => {
+      if (get().modelMetadata[provider]) return; // 已缓存
       try {
-        token = resolveEpochToken(ownerToken);
-        if (get().modelMetadata[provider]) return; // 已缓存
         const meta = await modelApi.metadata(provider);
-        commitForConnectionEpoch(token, () => set((state) => ({
+        set((state) => ({
           modelMetadata: { ...state.modelMetadata, [provider]: meta },
-        })));
-      } catch (err: unknown) {
-        if (isStaleEpoch(err, token)) return;
-        commitForConnectionEpoch(token, () => set({ error: errorMessage(err) }));
+        }));
+      } catch (err: any) {
+        set({ error: err.message });
       }
     },
 
@@ -213,78 +158,59 @@ export const useModelStore = create<ModelState & ModelActions>()(
       return get().modelMetadata[provider]?.[model];
     },
 
-    loadConfig: async (options = {}, ownerToken) => {
-      let token: ConnectionEpochToken | null = null;
-      try {
-        token = resolveEpochToken(ownerToken);
-        const force = options.force === true;
-        const now = Date.now();
+    loadConfig: async (options = {}) => {
+      const force = options.force === true;
+      const now = Date.now();
 
-        if (!force && configLoadPromise && sameEpochToken(configLoadToken, token)) {
-          return configLoadPromise;
-        }
-
-        if (!force && get().config && now - lastConfigLoadedAt < CONFIG_REFRESH_TTL_MS) {
-          return;
-        }
-
-        const generation = ++configLoadGeneration;
-        set({ loading: true, error: null });
-
-        let promise!: Promise<void>;
-        promise = (async () => {
-          try {
-            const nextConfig = await configApi.get();
-            connectionEpochRuntime.assertCurrent(token!);
-            if (generation !== configLoadGeneration) return;
-
-            const needInit = !get().currentProvider;
-            commitForConnectionEpoch(token!, () => {
-              lastConfigLoadedAt = Date.now();
-              set({ config: nextConfig });
-            });
-            // 首次加载时初始化默认模型
-            if (needInit) {
-              await get().resetToDefault(token!);
-              connectionEpochRuntime.assertCurrent(token!);
-            }
-          } catch (err: unknown) {
-            if (isStaleEpoch(err, token)) return;
-            if (generation === configLoadGeneration) {
-              commitForConnectionEpoch(token!, () => set({ error: errorMessage(err) }));
-            }
-          } finally {
-            if (configLoadPromise === promise) {
-              configLoadPromise = null;
-              configLoadToken = null;
-              commitForConnectionEpoch(token!, () => set({ loading: false }));
-            }
-          }
-        })();
-
-        configLoadToken = token;
-        configLoadPromise = promise;
-        return promise;
-      } catch (error) {
-        if (isStaleEpoch(error, token)) return;
-        throw error;
+      if (!force && configLoadPromise) {
+        return configLoadPromise;
       }
+
+      if (!force && get().config && now - lastConfigLoadedAt < CONFIG_REFRESH_TTL_MS) {
+        return;
+      }
+
+      const generation = ++configLoadGeneration;
+      set({ loading: true, error: null });
+
+      let promise!: Promise<void>;
+      promise = (async () => {
+        try {
+          const config = await configApi.get();
+          if (generation !== configLoadGeneration) return;
+
+          lastConfigLoadedAt = Date.now();
+          const needInit = !get().currentProvider;
+          set({ config });
+          // 首次加载时初始化默认模型
+          if (needInit) {
+            await get().resetToDefault();
+          }
+        } catch (err: any) {
+          if (generation === configLoadGeneration) {
+            set({ error: err.message });
+          }
+        } finally {
+          if (configLoadPromise === promise) {
+            configLoadPromise = null;
+            set({ loading: false });
+          }
+        }
+      })();
+
+      configLoadPromise = promise;
+      return promise;
     },
 
-    updateConfig: async (configUpdate, ownerToken) => {
-      let token: ConnectionEpochToken | null = null;
+    updateConfig: async (configUpdate) => {
+      set({ loading: true, error: null });
       try {
-        token = resolveEpochToken(ownerToken);
-        set({ loading: true, error: null });
         await configApi.update(configUpdate);
-        connectionEpochRuntime.assertCurrent(token);
-        await get().loadConfig({ force: true }, token);
-        connectionEpochRuntime.assertCurrent(token);
-      } catch (err: unknown) {
-        if (isStaleEpoch(err, token)) return;
-        commitForConnectionEpoch(token, () => set({ error: errorMessage(err) }));
+        await get().loadConfig({ force: true });
+      } catch (err: any) {
+        set({ error: err.message });
       } finally {
-        if (token) commitForConnectionEpoch(token, () => set({ loading: false }));
+        set({ loading: false });
       }
     },
 
@@ -334,99 +260,73 @@ export const useModelStore = create<ModelState & ModelActions>()(
       });
     },
 
-    syncFromConversation: async (
-      providerId,
-      modelId,
-      reasoningEffort,
-      thinkingEnabled,
-      ownerToken,
-    ) => {
-      let token: ConnectionEpochToken | null = null;
-      try {
-        token = resolveEpochToken(ownerToken);
-        const { config, models: modelsMap, loadModels: loadM, loadMetadata: loadMeta } = get();
-        if (!config) return;
+    syncFromConversation: async (providerId, modelId, reasoningEffort, thinkingEnabled) => {
+      const { config, models: modelsMap, loadModels: loadM, loadMetadata: loadMeta } = get();
+      if (!config) return;
 
-        const defaultProvider = config.default_provider || null;
-        const pId = providerId || defaultProvider;
+      const defaultProvider = config.default_provider || null;
+      const pId = providerId || defaultProvider;
 
-        // 如果有 provider，确保其模型列表与元数据已加载
-        if (pId && !modelsMap[pId]) {
-          await loadM(pId, token);
-          connectionEpochRuntime.assertCurrent(token);
-        }
-        if (pId) {
-          await loadMeta(pId, token);
-          connectionEpochRuntime.assertCurrent(token);
-        }
-
-        // 重新读取（loadModels 可能已更新 store）
-        const updatedModels = get().models;
-        const providerModels = pId ? (updatedModels[pId] || []) : [];
-        const hiddenModels = pId ? (config.provider?.[pId]?.hidden_models || []) : [];
-        const visibleModels = providerModels.filter(m => !hiddenModels.includes(m));
-
-        // 确定模型：会话保存值 > 全局 default_model > 第一个可见模型。
-        const mId = modelId && visibleModels.includes(modelId)
-          ? modelId
-          : selectVisibleDefaultModel(config.default_model, visibleModels);
-
-        // 推理设置：对话保存值优先；缺省回退到所选模型元数据的默认。
-        const meta = get().getMetadata(pId, mId);
-        const defs = defaultsFromMeta(meta);
-        commitForConnectionEpoch(token, () => set({
-          currentProvider: pId,
-          currentModel: mId,
-          currentReasoningEffort: reasoningEffort !== undefined && reasoningEffort !== null ? reasoningEffort : defs.effort,
-          currentThinkingEnabled: thinkingEnabled !== undefined && thinkingEnabled !== null ? thinkingEnabled : defs.thinking,
-        }));
-      } catch (error) {
-        if (!isStaleEpoch(error, token)) {
-          commitForConnectionEpoch(token!, () => set({ error: errorMessage(error) }));
-        }
+      // 如果有 provider，确保其模型列表与元数据已加载
+      if (pId && !modelsMap[pId]) {
+        await loadM(pId);
       }
+      if (pId) {
+        await loadMeta(pId);
+      }
+
+      // 重新读取（loadModels 可能已更新 store）
+      const updatedModels = get().models;
+      const providerModels = pId ? (updatedModels[pId] || []) : [];
+      const hiddenModels = pId ? (config.provider?.[pId]?.hidden_models || []) : [];
+      const visibleModels = providerModels.filter(m => !hiddenModels.includes(m));
+
+      // 确定模型：会话保存值 > 全局 default_model > 第一个可见模型。
+      const mId = modelId && visibleModels.includes(modelId)
+        ? modelId
+        : selectVisibleDefaultModel(config.default_model, visibleModels);
+
+      // 推理设置：对话保存值优先；缺省回退到所选模型元数据的默认。
+      const meta = get().getMetadata(pId, mId);
+      const defs = defaultsFromMeta(meta);
+      set({
+        currentProvider: pId,
+        currentModel: mId,
+        currentReasoningEffort: reasoningEffort !== undefined && reasoningEffort !== null ? reasoningEffort : defs.effort,
+        currentThinkingEnabled: thinkingEnabled !== undefined && thinkingEnabled !== null ? thinkingEnabled : defs.thinking,
+      });
     },
 
-    resetToDefault: async (ownerToken) => {
-      let token: ConnectionEpochToken | null = null;
-      try {
-        token = resolveEpochToken(ownerToken);
-        const { config, loadModels: loadM, loadMetadata: loadMeta } = get();
-        if (!config) return;
+    resetToDefault: async () => {
+      const { config, loadModels: loadM, loadMetadata: loadMeta } = get();
+      if (!config) return;
 
-        const pId = config.default_provider || null;
-        if (pId) {
-          const modelsMap = get().models;
-          if (!modelsMap[pId]) {
-            await loadM(pId, token);
-            connectionEpochRuntime.assertCurrent(token);
-          }
-          await loadMeta(pId, token);
-          connectionEpochRuntime.assertCurrent(token);
-          const updatedModels = get().models;
-          const providerModels = updatedModels[pId] || [];
-          const hiddenModels = config.provider?.[pId]?.hidden_models || [];
-          const visibleModels = providerModels.filter(m => !hiddenModels.includes(m));
-          const mId = selectVisibleDefaultModel(config.default_model, visibleModels);
-          const defs = defaultsFromMeta(get().getMetadata(pId, mId));
-          commitForConnectionEpoch(token, () => set({
-            currentProvider: pId,
-            currentModel: mId,
-            currentReasoningEffort: defs.effort,
-            currentThinkingEnabled: defs.thinking,
-          }));
-        } else {
-          commitForConnectionEpoch(token, () => set({
-            currentProvider: null,
-            currentModel: null,
-            currentReasoningEffort: null,
-            currentThinkingEnabled: null,
-          }));
+      const pId = config.default_provider || null;
+      if (pId) {
+        const modelsMap = get().models;
+        if (!modelsMap[pId]) {
+          await loadM(pId);
         }
-      } catch (error) {
-        if (!isStaleEpoch(error, token)) {
-          commitForConnectionEpoch(token!, () => set({ error: errorMessage(error) }));
-        }
+        await loadMeta(pId);
+        const updatedModels = get().models;
+        const providerModels = updatedModels[pId] || [];
+        const hiddenModels = config.provider?.[pId]?.hidden_models || [];
+        const visibleModels = providerModels.filter(m => !hiddenModels.includes(m));
+        const mId = selectVisibleDefaultModel(config.default_model, visibleModels);
+        const defs = defaultsFromMeta(get().getMetadata(pId, mId));
+        set({
+          currentProvider: pId,
+          currentModel: mId,
+          currentReasoningEffort: defs.effort,
+          currentThinkingEnabled: defs.thinking,
+        });
+      } else {
+        set({
+          currentProvider: null,
+          currentModel: null,
+          currentReasoningEffort: null,
+          currentThinkingEnabled: null,
+        });
       }
     },
 

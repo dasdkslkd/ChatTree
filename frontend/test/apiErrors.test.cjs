@@ -102,62 +102,18 @@ function testMalformedModernEnvelopesAreRejected() {
   }), null);
 }
 
-function testLegacyActiveRunConflict() {
-  const legacy = normalizeApiError(axiosError({
-    status: 409,
-    data: {
-      detail: {
-        message: 'blocked',
-        active_run_ids: ['run_old'],
-      },
-    },
-    headers: { 'x-request-id': 'req_old' },
-  }));
-
-  assert.equal(legacy.code, 'active_runs_present');
-  assert.equal(legacy.message, 'blocked');
-  assert.equal(legacy.requestId, 'req_old');
-  assert.deepEqual(legacy.details.active_run_ids, ['run_old']);
-}
-
-function testLegacyCodeIsNeverDerivedFromMessageText() {
-  const legacy = normalizeApiError(axiosError({
-    status: 409,
-    data: {
-      detail: {
-        message: 'active_runs_present 该分支仍有运行中的任务',
-        active_run_ids: [],
-      },
-    },
-  }));
-
-  assert.equal(legacy.code, 'http_error');
-}
-
-function testLegacyStringDetailAndHeader() {
-  const legacy = normalizeApiError(axiosError({
-    status: 404,
-    data: { detail: 'not found' },
-    headers: { 'X-Request-ID': 'req_legacy_404' },
-  }));
-
-  assert.equal(legacy.code, 'http_error');
-  assert.equal(legacy.message, 'not found');
-  assert.equal(legacy.requestId, 'req_legacy_404');
-}
-
-function testLegacyServerErrorIsSanitized() {
-  const legacy = normalizeApiError(axiosError({
-    status: 500,
-    data: { detail: 'provider-secret' },
-    headers: { 'x-request-id': 'req_500' },
-  }));
-
-  assert.equal(legacy.status, 500);
-  assert.equal(legacy.code, 'internal_error');
-  assert.equal(legacy.retryable, false);
-  assert.equal(legacy.requestId, 'req_500');
-  assert.equal(legacy.message.includes('provider-secret'), false);
+function testLegacyEnvelopesAreRejected() {
+  const responses = [
+    { status: 409, data: { detail: { message: 'blocked' } } },
+    { status: 404, data: { detail: 'not found' } },
+    { status: 500, data: { detail: 'provider-secret' } },
+  ];
+  for (const response of responses) {
+    const normalized = normalizeApiError(axiosError(response));
+    assert.equal(normalized.code, 'unexpected_response');
+    assert.equal(normalized.status, response.status);
+    assert.equal(normalized.message.includes('provider-secret'), false);
+  }
 }
 
 function testTimeoutNetworkAndMalformedResponses() {
@@ -193,10 +149,7 @@ function testCancellationPreservesIdentity() {
 function main() {
   testModernEnvelope();
   testMalformedModernEnvelopesAreRejected();
-  testLegacyActiveRunConflict();
-  testLegacyCodeIsNeverDerivedFromMessageText();
-  testLegacyStringDetailAndHeader();
-  testLegacyServerErrorIsSanitized();
+  testLegacyEnvelopesAreRejected();
   testTimeoutNetworkAndMalformedResponses();
   testCancellationPreservesIdentity();
   console.log('api error tests passed');

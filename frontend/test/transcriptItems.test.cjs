@@ -594,9 +594,9 @@ function testUserMessageEditAndDeleteActionsAreWired() {
   assert.match(mainPage, /const attachmentRefs = getEditableUserMessageAttachmentRefs\(item,\s*messages\)/);
   assert.match(mainPage, /setAttachedFiles\(attachmentRefs\.importFiles\)/);
   assert.match(mainPage, /setAttachedImageRefs\(attachmentRefs\.imageRefs\)/);
-  assert.match(mainPage, /await submitBoundRoute\(\{[\s\S]*nodeId: parentNodeId,[\s\S]*\}, 'replace'\)/);
+  assert.match(mainPage, /await switchNode\(parentNodeId\)/);
   assert.match(mainPage, /const handleCancelEdit = useCallback\(async \(\) => \{/);
-  assert.match(mainPage, /await submitBoundRoute\(\{[\s\S]*nodeId: returnNodeId,[\s\S]*\}, 'replace'\)/);
+  assert.match(mainPage, /await switchNode\(returnNodeId\)/);
   assert.match(mainPage, /isEditing=\{Boolean\(editTargetNodeId\)\}/);
   assert.match(mainPage, /onCancelEdit=\{handleCancelEdit\}/);
   assert.match(chatInput, /isEditing\?: boolean/);
@@ -605,7 +605,7 @@ function testUserMessageEditAndDeleteActionsAreWired() {
   assert.match(mainPage, /tool_permission_mode: toolPermissionMode \?\? \(editTargetNodeId \? editToolPermissionMode \?\? undefined : undefined\)/);
   assert.match(mainPage, /const isProtectedEditAttachment = editProtectedAttachmentNames\.includes\(filename\)/);
   assert.match(mainPage, /const handleDeleteUserMessage = useCallback\(async \(item: TranscriptItem\)/);
-  assert.match(mainPage, /deleteNodeAndMaintainRoute\(nodeId\)/);
+  assert.match(mainPage, /deleteNode\(nodeId\)/);
   assert.match(mainPage, /onEditUserMessage=\{handleEditUserMessage\}/);
   assert.match(mainPage, /onDeleteUserMessage=\{handleDeleteUserMessage\}/);
 }

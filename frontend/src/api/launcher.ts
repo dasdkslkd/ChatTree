@@ -1,4 +1,4 @@
-import type { FrontendBootstrap } from '../runtime/frontendBootstrap';
+import type { ProfileContext } from '../runtime/profileContext';
 import { createApiClient } from './client';
 
 export type LauncherProfileStatus = {
@@ -21,14 +21,39 @@ export type LauncherApi = Readonly<{
     profileId: string,
     signal?: AbortSignal,
   ): Promise<LauncherProfileStatus>;
+  stopLocalServer(
+    profileId: string,
+    expectedServerInstanceId: string,
+    timeoutSeconds?: number,
+  ): Promise<LauncherProfileStatus>;
+  restartLocalServer(
+    profileId: string,
+    expectedServerInstanceId: string,
+    timeoutSeconds?: number,
+  ): Promise<LauncherProfileStatus>;
 }>;
 
 export function createLauncherApi(
-  bootstrap: FrontendBootstrap,
+  profile: ProfileContext,
   pageHref: string,
 ): LauncherApi {
-  const origin = new URL(bootstrap.apiBase, pageHref).origin;
+  const origin = new URL(profile.apiBase, pageHref).origin;
   const client = createApiClient(`${origin}/client/v1`, null);
+  const lifecycleRequest = async (
+    operation: 'stop' | 'restart',
+    profileId: string,
+    expectedServerInstanceId: string,
+    timeoutSeconds = 30,
+  ): Promise<LauncherProfileStatus> => {
+    const response = await client.post<LauncherProfileStatus>(
+      `/profiles/${encodeURIComponent(profileId)}/server/${operation}`,
+      {
+        expected_server_instance_id: expectedServerInstanceId,
+        timeout_seconds: timeoutSeconds,
+      },
+    );
+    return response.data;
+  };
   return {
     async getProfileStatus(profileId, signal) {
       const response = await client.get<LauncherProfileStatus>(
@@ -36,6 +61,22 @@ export function createLauncherApi(
         { signal, timeout: 5000 },
       );
       return response.data;
+    },
+    stopLocalServer(profileId, expectedServerInstanceId, timeoutSeconds) {
+      return lifecycleRequest(
+        'stop',
+        profileId,
+        expectedServerInstanceId,
+        timeoutSeconds,
+      );
+    },
+    restartLocalServer(profileId, expectedServerInstanceId, timeoutSeconds) {
+      return lifecycleRequest(
+        'restart',
+        profileId,
+        expectedServerInstanceId,
+        timeoutSeconds,
+      );
     },
   };
 }

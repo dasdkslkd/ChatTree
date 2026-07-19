@@ -17,22 +17,14 @@ require.extensions['.ts'] = function loadTs(module, filename) {
   module._compile(output, filename);
 };
 
-const bootstrapModule = path.join(__dirname, '../src/runtime/frontendBootstrap.ts');
 const clientModule = path.join(__dirname, '../src/api/client.ts');
-const plansModule = path.join(__dirname, '../src/services/plans.ts');
-
-globalThis.window = {
-  location: {
-    href: 'http://127.0.0.1:5173/s/local',
-    pathname: '/s/local',
-  },
+require.cache[require.resolve(clientModule)] = {
+  id: clientModule,
+  filename: clientModule,
+  loaded: true,
+  exports: { apiClient: {} },
 };
-delete require.cache[require.resolve(bootstrapModule)];
-delete require.cache[require.resolve(clientModule)];
-delete require.cache[require.resolve(plansModule)];
-require(bootstrapModule).initializeFrontendBootstrap();
-
-const { createPlansService } = require(plansModule);
+const { createPlansService } = require(path.join(__dirname, '../src/services/plans.ts'));
 
 function fakeClient() {
   const calls = [];

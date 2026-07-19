@@ -1,9 +1,3 @@
-import {
-  connectionEpochRuntime,
-  type ConnectionEpochRuntime,
-  type ConnectionEpochToken,
-} from '../runtime/connectionEpoch';
-
 export type ConversationSyncInclude =
   | 'messages'
   | 'branches'
@@ -57,13 +51,7 @@ type PendingSync = {
 type ConversationState = {
   running: boolean;
   pending: PendingSync | null;
-  epochToken: ConnectionEpochToken;
 };
-
-export type ConversationSyncEpochSource = Pick<
-  ConnectionEpochRuntime,
-  'capture' | 'isCurrent' | 'signalFor'
->;
 
 const DEFAULT_INCLUDE: ConversationSyncInclude[] = ['messages'];
 
@@ -115,19 +103,22 @@ function mergeRequest(pending: PendingSync, request: ConversationSyncRequest): v
   }
 }
 
+async function runBestEffort(operation: () => Promise<unknown>): Promise<boolean> {
+  try {
+    await operation();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export class ConversationSyncCoordinator {
   private operations: ConversationSyncOperations | null;
 
   private readonly states = new Map<string, ConversationState>();
 
-  private readonly epochSource: ConversationSyncEpochSource;
-
-  constructor(
-    operations: ConversationSyncOperations | null = null,
-    epochSource: ConversationSyncEpochSource = connectionEpochRuntime,
-  ) {
+  constructor(operations: ConversationSyncOperations | null = null) {
     this.operations = operations;
-    this.epochSource = epochSource;
   }
 
   setOperations(operations: ConversationSyncOperations): void {
@@ -141,17 +132,8 @@ export class ConversationSyncCoordinator {
 
     let state = this.states.get(conversationId);
     if (!state) {
-      let epochToken: ConnectionEpochToken;
-      try {
-        epochToken = this.epochSource.capture();
-      } catch {
-        return Promise.resolve({ messagesConfirmed: false });
-      }
-      state = { running: false, pending: null, epochToken };
+      state = { running: false, pending: null };
       this.states.set(conversationId, state);
-    }
-    if (!this.epochSource.isCurrent(state.epochToken)) {
-      return Promise.resolve({ messagesConfirmed: false });
     }
     if (!state.pending) state.pending = createPending();
     mergeRequest(state.pending, request);
@@ -169,111 +151,63 @@ export class ConversationSyncCoordinator {
 
   private async drain(conversationId: string, state: ConversationState): Promise<void> {
     try {
-      while (state.pending && this.epochSource.isCurrent(state.epochToken)) {
+      while (state.pending) {
         const pending = state.pending;
         state.pending = null;
-        const result = await this.runPending(conversationId, pending, state.epochToken);
-        const delivered = this.epochSource.isCurrent(state.epochToken)
-          ? result
-          : { messagesConfirmed: false };
-        for (const waiter of pending.waiters) waiter.resolve(delivered);
+        const result = await this.runPending(conversationId, pending);
+        for (const waiter of pending.waiters) waiter.resolve(result);
       }
     } finally {
       state.running = false;
-      if (state.pending && this.epochSource.isCurrent(state.epochToken)) {
+      if (state.pending) {
         state.running = true;
         void Promise.resolve().then(() => this.drain(conversationId, state));
       } else {
-        if (state.pending) {
-          for (const waiter of state.pending.waiters) {
-            waiter.resolve({ messagesConfirmed: false });
-          }
-          state.pending = null;
-        }
-        if (this.states.get(conversationId) === state) {
-          this.states.delete(conversationId);
-        }
+        this.states.delete(conversationId);
       }
     }
   }
 
-  private async runPending(
-    conversationId: string,
-    pending: PendingSync,
-    epochToken: ConnectionEpochToken,
-  ): Promise<ConversationSyncResult> {
+  private async runPending(conversationId: string, pending: PendingSync): Promise<ConversationSyncResult> {
     const operations = this.operations;
-    if (!operations || !this.epochSource.isCurrent(epochToken)) {
-      return { messagesConfirmed: false };
-    }
+    if (!operations) return { messagesConfirmed: false };
 
     let messagesConfirmed = true;
     if (pending.include.has('messages')) {
       const requests = pending.messageRequests.length > 0 ? pending.messageRequests : [{}];
       for (const request of requests) {
-        if (!this.epochSource.isCurrent(epochToken)) return { messagesConfirmed: false };
         let ok = false;
         try {
           ok = await operations.refreshMessages(conversationId, request);
         } catch {
           ok = false;
         }
-        if (!this.epochSource.isCurrent(epochToken)) return { messagesConfirmed: false };
         if (!ok) messagesConfirmed = false;
       }
     }
 
     if (pending.include.has('tree')) {
-      if (!await this.runBestEffort(epochToken, () => operations.loadTree(conversationId))) {
-        if (!this.epochSource.isCurrent(epochToken)) return { messagesConfirmed: false };
-      }
+      await runBestEffort(() => operations.loadTree(conversationId));
     }
     if (pending.include.has('branches')) {
-      if (!await this.runBestEffort(epochToken, () => operations.refreshBranches(conversationId))) {
-        if (!this.epochSource.isCurrent(epochToken)) return { messagesConfirmed: false };
-      }
+      await runBestEffort(() => operations.refreshBranches(conversationId));
     }
     if (pending.include.has('transcript')) {
-      if (!await this.runBestEffort(epochToken, () => operations.refreshTranscript(conversationId))) {
-        if (!this.epochSource.isCurrent(epochToken)) return { messagesConfirmed: false };
-      }
+      await runBestEffort(() => operations.refreshTranscript(conversationId));
     }
     if (pending.include.has('conversations')) {
-      if (!await this.runBestEffort(epochToken, () => operations.loadConversations())) {
-        if (!this.epochSource.isCurrent(epochToken)) return { messagesConfirmed: false };
-      }
+      await runBestEffort(() => operations.loadConversations());
     }
     if (pending.include.has('taskState')) {
-      if (!await this.runBestEffort(epochToken, () => operations.refreshTaskState(conversationId))) {
-        if (!this.epochSource.isCurrent(epochToken)) return { messagesConfirmed: false };
-      }
+      await runBestEffort(() => operations.refreshTaskState(conversationId));
     }
     if (pending.include.has('plan')) {
-      if (!await this.runBestEffort(epochToken, () => operations.refreshActivePlan(conversationId))) {
-        if (!this.epochSource.isCurrent(epochToken)) return { messagesConfirmed: false };
-      }
+      await runBestEffort(() => operations.refreshActivePlan(conversationId));
     }
     if (pending.include.has('sideRuns')) {
-      if (!await this.runBestEffort(epochToken, () => operations.syncSideRuns(conversationId))) {
-        if (!this.epochSource.isCurrent(epochToken)) return { messagesConfirmed: false };
-      }
+      await runBestEffort(() => operations.syncSideRuns(conversationId));
     }
 
-    return {
-      messagesConfirmed: this.epochSource.isCurrent(epochToken) && messagesConfirmed,
-    };
-  }
-
-  private async runBestEffort(
-    epochToken: ConnectionEpochToken,
-    operation: () => Promise<unknown>,
-  ): Promise<boolean> {
-    if (!this.epochSource.isCurrent(epochToken)) return false;
-    try {
-      await operation();
-      return this.epochSource.isCurrent(epochToken);
-    } catch {
-      return false;
-    }
+    return { messagesConfirmed };
   }
 }

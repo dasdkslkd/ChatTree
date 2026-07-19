@@ -9,24 +9,38 @@ import {
 import { createApiClient } from '../api/client';
 import { createLauncherApi } from '../api/launcher';
 import { createServerApi } from '../api/server';
-import { createInitialBindingState, reduceBindingState, type BindingState } from './bindingState';
+import {
+  createInitialBindingState,
+  reduceBindingState,
+  type BindingState,
+} from './bindingState';
 import { probeBoundServerContext } from './boundServer';
-import { BoundServerProbeOwner } from './boundServerProbeOwner';
-import type { BoundServerContext } from './connectionIdentity';
-import type { FrontendBootstrap } from './frontendBootstrap';
+import {
+  isFatalBoundServerError,
+  type BoundServerContext,
+} from './connectionIdentity';
+import type { ProfileContext } from './profileContext';
 
 const BoundServerStateContext = createContext<BindingState | null>(null);
-const defaultReloadCurrentPage = () => window.location.reload();
+const RETRY_DELAYS_MS = [500, 1000, 2000, 5000] as const;
+
+function wait(delay: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(resolve, delay);
+    signal.addEventListener('abort', () => {
+      window.clearTimeout(timer);
+      reject(signal.reason);
+    }, { once: true });
+  });
+}
 
 export function BoundServerProvider({
-  bootstrap,
+  profile,
   onInitialContext,
-  reloadCurrentPage = defaultReloadCurrentPage,
   children,
 }: PropsWithChildren<{
-  bootstrap: FrontendBootstrap;
+  profile: ProfileContext;
   onInitialContext?(context: BoundServerContext): void;
-  reloadCurrentPage?(): void;
 }>) {
   const [state, dispatch] = useReducer(
     reduceBindingState,
@@ -35,25 +49,42 @@ export function BoundServerProvider({
   );
 
   useEffect(() => {
-    const launcher = createLauncherApi(bootstrap, window.location.href);
-    const server = createServerApi(createApiClient(bootstrap.apiBase, null));
-    const owner = new BoundServerProbeOwner({
-      probe: (signal) => probeBoundServerContext({
-        getStatus: (requestSignal) => launcher.getProfileStatus(
-          bootstrap.profileId,
-          requestSignal,
-        ),
-        getHealth: server.health,
-        getHandshake: server.handshake,
-      }, bootstrap, signal),
-      dispatch,
-      onInitialContext,
-      reloadCurrentPage,
-      scheduler: window,
-    });
-    owner.start();
-    return () => owner.dispose();
-  }, [bootstrap, onInitialContext, reloadCurrentPage]);
+    const controller = new AbortController();
+    const launcher = createLauncherApi(profile, window.location.href);
+    const server = createServerApi(createApiClient(profile.apiBase, null));
+    void (async () => {
+      let retry = 0;
+      while (!controller.signal.aborted) {
+        try {
+          const context = await probeBoundServerContext({
+            getStatus: (signal) => launcher.getProfileStatus(
+              profile.profileId,
+              signal,
+            ),
+            getHandshake: server.handshake,
+          }, profile, controller.signal);
+          onInitialContext?.(context);
+          dispatch({ type: 'probe_ready', context });
+          return;
+        } catch (error) {
+          if (controller.signal.aborted) return;
+          if (isFatalBoundServerError(error)) {
+            dispatch({ type: 'fatal_error', error });
+            return;
+          }
+          dispatch({ type: 'probe_failed', error });
+          const delay = RETRY_DELAYS_MS[Math.min(retry, RETRY_DELAYS_MS.length - 1)];
+          retry += 1;
+          try {
+            await wait(delay, controller.signal);
+          } catch {
+            return;
+          }
+        }
+      }
+    })();
+    return () => controller.abort();
+  }, [profile, onInitialContext]);
 
   return (
     <BoundServerStateContext.Provider value={state}>
@@ -65,8 +96,6 @@ export function BoundServerProvider({
 // eslint-disable-next-line react-refresh/only-export-components
 export function useBoundServer(): BindingState {
   const state = useContext(BoundServerStateContext);
-  if (!state) {
-    throw new Error('useBoundServer must be used inside BoundServerProvider');
-  }
+  if (!state) throw new Error('useBoundServer must be used inside BoundServerProvider');
   return state;
 }

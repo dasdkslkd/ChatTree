@@ -1,18 +1,12 @@
-import type { ConnectionEpochRuntime, ConnectionEpochToken } from './connectionEpoch';
-
 export type ImportAssetBlobFetcher = (
   conversationId: string,
   filename: string,
-  token: ConnectionEpochToken,
   signal?: AbortSignal,
 ) => Promise<Blob>;
-
-type PreviewEpochSource = Pick<ConnectionEpochRuntime, 'isCurrent'>;
 
 type ObjectUrlApi = Pick<typeof URL, 'createObjectURL' | 'revokeObjectURL'>;
 
 type PreviewEntry = {
-  token: ConnectionEpochToken;
   controller: AbortController | null;
   promise: Promise<string | null> | null;
   url: string | null;
@@ -83,64 +77,42 @@ export class ImportAssetMutationQueue {
   }
 }
 
-function sameToken(left: ConnectionEpochToken, right: ConnectionEpochToken): boolean {
-  return left.profileId === right.profileId
-    && left.serverInstanceId === right.serverInstanceId
-    && left.connectionEpoch === right.connectionEpoch
-    && left.connectionLeaseId === right.connectionLeaseId
-    && left.generation === right.generation;
-}
-
 export class ImportAssetPreviewCache {
   private readonly entries = new Map<string, PreviewEntry>();
   private readonly listeners = new Set<() => void>();
   private readonly fetchBlob: ImportAssetBlobFetcher;
-  private readonly epochSource: PreviewEpochSource;
   private readonly objectUrls: ObjectUrlApi;
 
   constructor(
     fetchBlob: ImportAssetBlobFetcher,
-    epochSource: PreviewEpochSource,
     objectUrls: ObjectUrlApi = URL,
   ) {
     this.fetchBlob = fetchBlob;
-    this.epochSource = epochSource;
     this.objectUrls = objectUrls;
   }
 
   peek(conversationId: string, filename: string): string | null {
-    const entry = this.entries.get(assetKey(conversationId, filename));
-    if (!entry || !this.epochSource.isCurrent(entry.token)) return null;
-    return entry.url;
+    return this.entries.get(assetKey(conversationId, filename))?.url ?? null;
   }
 
-  load(
-    conversationId: string,
-    filename: string,
-    token: ConnectionEpochToken,
-  ): Promise<string | null> {
-    if (!this.epochSource.isCurrent(token)) return Promise.resolve(null);
-
+  load(conversationId: string, filename: string): Promise<string | null> {
     const key = assetKey(conversationId, filename);
     const existing = this.entries.get(key);
-    if (existing && sameToken(existing.token, token)) {
-      if (existing.url) return Promise.resolve(existing.url);
-      if (existing.promise) return existing.promise;
-    }
+    if (existing?.url) return Promise.resolve(existing.url);
+    if (existing?.promise) return existing.promise;
     if (existing) this.releaseEntry(key, existing, true);
 
     const controller = new AbortController();
     const entry: PreviewEntry = {
-      token,
       controller,
       promise: null,
       url: null,
     };
-    const promise = this.fetchBlob(conversationId, filename, token, controller.signal)
+    const promise = this.fetchBlob(conversationId, filename, controller.signal)
       .then((blob) => {
-        if (this.entries.get(key) !== entry || !this.epochSource.isCurrent(token)) return null;
+        if (this.entries.get(key) !== entry) return null;
         const url = this.objectUrls.createObjectURL(blob);
-        if (this.entries.get(key) !== entry || !this.epochSource.isCurrent(token)) {
+        if (this.entries.get(key) !== entry) {
           this.objectUrls.revokeObjectURL(url);
           return null;
         }
@@ -153,9 +125,7 @@ export class ImportAssetPreviewCache {
       .catch((error: unknown) => {
         const stillOwned = this.entries.get(key) === entry;
         if (stillOwned) this.entries.delete(key);
-        if (!stillOwned || entry.controller?.signal.aborted || !this.epochSource.isCurrent(token)) {
-          return null;
-        }
+        if (!stillOwned || entry.controller?.signal.aborted) return null;
         throw error;
       });
 
@@ -164,24 +134,13 @@ export class ImportAssetPreviewCache {
     return promise;
   }
 
-  installFile(
-    conversationId: string,
-    filename: string,
-    file: File,
-    token: ConnectionEpochToken,
-  ): string | null {
-    if (!this.epochSource.isCurrent(token)) return null;
+  installFile(conversationId: string, filename: string, file: File): string {
     const key = assetKey(conversationId, filename);
     const existing = this.entries.get(key);
     if (existing) this.releaseEntry(key, existing, false);
 
     const url = this.objectUrls.createObjectURL(file);
-    if (!this.epochSource.isCurrent(token)) {
-      this.objectUrls.revokeObjectURL(url);
-      return null;
-    }
     this.entries.set(key, {
-      token,
       controller: null,
       promise: null,
       url,

@@ -10,32 +10,36 @@ require.extensions['.ts'] = function loadTs(module, filename) {
       module: ts.ModuleKind.CommonJS,
       target: ts.ScriptTarget.ES2022,
       esModuleInterop: true,
-      importsNotUsedAsValues: ts.ImportsNotUsedAsValues.Remove,
     },
-    fileName: filename,
   }).outputText;
   module._compile(output, filename);
 };
 
-const clientModule = path.join(__dirname, '../src/api/client.ts');
-const epochModule = path.join(__dirname, '../src/runtime/connectionEpoch.ts');
-const taskStateModule = path.join(__dirname, '../src/api/taskState.ts');
+const clientPath = path.join(__dirname, '../src/api/client.ts');
+const taskStatePath = path.join(__dirname, '../src/api/taskState.ts');
+const requests = [];
+let getHandler;
+let postHandler;
 
-const CONTEXT_A = Object.freeze({
-  profileId: 'local',
-  apiBase: '/p/local/api/v1',
-  serverInstanceId: '11111111-1111-4111-8111-111111111111',
-  connectionEpoch: 1,
-  connectionLeaseId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
-});
+require.cache[require.resolve(clientPath)] = {
+  id: clientPath,
+  filename: clientPath,
+  loaded: true,
+  exports: {
+    apiClient: {
+      get(url, options) {
+        requests.push({ method: 'GET', url, options });
+        return getHandler(url, options);
+      },
+      post(url, data) {
+        requests.push({ method: 'POST', url, data });
+        return postHandler(url, data);
+      },
+    },
+  },
+};
 
-function deferred() {
-  let resolve;
-  const promise = new Promise((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
-}
+const { taskStateApi, storeTaskState } = require(taskStatePath);
 
 function snapshot(version, overrides = {}) {
   return {
@@ -48,165 +52,79 @@ function snapshot(version, overrides = {}) {
   };
 }
 
-let getHandler;
-let postHandler;
-let requests;
-
-require.cache[require.resolve(clientModule)] = {
-  id: clientModule,
-  filename: clientModule,
-  loaded: true,
-  exports: {
-    apiClient: {
-      get: (url, options) => {
-        requests.push({ method: 'GET', url, options });
-        return getHandler(url, options);
-      },
-      post: (url, data) => {
-        requests.push({ method: 'POST', url, data });
-        return postHandler(url, data);
-      },
-    },
-  },
-};
-
-function loadFreshApi() {
-  requests = [];
-  getHandler = async () => ({ status: 200, data: snapshot('default'), headers: {} });
-  postHandler = async () => ({ status: 200, data: snapshot('default'), headers: {} });
-  delete require.cache[require.resolve(taskStateModule)];
-  delete require.cache[require.resolve(epochModule)];
-  const { connectionEpochRuntime, StaleConnectionEpochError } = require(epochModule);
-  connectionEpochRuntime.install(CONTEXT_A);
-  const taskState = require(taskStateModule);
-  return { ...taskState, connectionEpochRuntime, StaleConnectionEpochError };
-}
-
-async function testFetchReusesCurrentCacheOn304() {
-  const { taskStateApi, storeTaskState } = loadFreshApi();
-  const cached = snapshot('v1');
-  storeTaskState('conv-1', cached, '"v1"');
+async function testFetchUsesEtagAndReusesCachedSnapshotOn304() {
+  requests.length = 0;
+  taskStateApi.clear('conv/1');
+  const cached = snapshot('v1', { conversation_id: 'conv/1' });
+  storeTaskState('conv/1', cached, '"v1"');
   getHandler = async () => ({ status: 304, data: null, headers: {} });
 
-  const result = await taskStateApi.fetch('conv-1');
+  const result = await taskStateApi.fetch('conv/1');
 
   assert.equal(result, cached);
-  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, '/conversations/conv%2F1/task-state');
   assert.equal(requests[0].options.headers['If-None-Match'], '"v1"');
+  assert.equal(requests[0].options.validateStatus(304), true);
 }
 
-async function testClearedCacheIsNotReintroducedByDelayed304() {
-  const { taskStateApi, storeTaskState } = loadFreshApi();
-  storeTaskState('conv-1', snapshot('v1'), '"v1"');
-  const pending = deferred();
-  getHandler = () => pending.promise;
-
-  const fetch = taskStateApi.fetch('conv-1');
-  taskStateApi.clear('conv-1');
-  pending.resolve({ status: 304, data: null, headers: {} });
-  await assert.rejects(fetch, /cache changed/i);
-
-  getHandler = async () => ({ status: 200, data: snapshot('v2'), headers: { etag: '"v2"' } });
-  await taskStateApi.fetch('conv-1');
-  assert.equal(requests[1].options.headers, undefined);
-}
-
-async function testBindAndDeletePopulateEtagCache() {
-  const { taskStateApi } = loadFreshApi();
-  postHandler = async (url) => {
-    const version = url.endsWith('/bind') ? 'v-bind' : 'v-delete';
-    return { status: 200, data: snapshot(version), headers: { etag: `"${version}"` } };
-  };
-  getHandler = async () => ({ status: 304, data: null, headers: {} });
-
-  await taskStateApi.bind('conv-1', 'notification-1', 'node-1');
-  const afterBind = await taskStateApi.fetch('conv-1');
-  assert.equal(afterBind.version, 'v-bind');
-  assert.equal(requests[1].options.headers['If-None-Match'], '"v-bind"');
-
-  await taskStateApi.delete('conv-1', 'notification-1');
-  const afterDelete = await taskStateApi.fetch('conv-1');
-  assert.equal(afterDelete.version, 'v-delete');
-  assert.equal(requests[3].options.headers['If-None-Match'], '"v-delete"');
-}
-
-async function testAllDelayedOperationsRejectAfterInvalidation() {
-  const {
-    taskStateApi,
-    connectionEpochRuntime,
-    StaleConnectionEpochError,
-  } = loadFreshApi();
-  const pendingFetch = deferred();
-  const pendingBind = deferred();
-  const pendingDelete = deferred();
-  getHandler = () => pendingFetch.promise;
-  postHandler = (url) => (
-    url.endsWith('/bind') ? pendingBind.promise : pendingDelete.promise
-  );
-
-  const operations = [
-    taskStateApi.fetch('conv-1'),
-    taskStateApi.bind('conv-1', 'notification-1', 'node-1'),
-    taskStateApi.delete('conv-1', 'notification-1'),
-  ];
-  connectionEpochRuntime.invalidate(connectionEpochRuntime.capture());
-  pendingFetch.resolve({ status: 200, data: snapshot('stale-fetch'), headers: { etag: '"stale"' } });
-  pendingBind.resolve({ status: 200, data: snapshot('stale-bind'), headers: { etag: '"stale"' } });
-  pendingDelete.resolve({ status: 200, data: snapshot('stale-delete'), headers: { etag: '"stale"' } });
-
-  for (const operation of operations) {
-    await assert.rejects(operation, StaleConnectionEpochError);
-  }
-  await assert.rejects(() => taskStateApi.fetch('conv-1'), StaleConnectionEpochError);
-  assert.equal(requests.length, 3);
-}
-
-async function testHeaderGetterInvalidationClosesPostResponseWindow() {
-  const {
-    taskStateApi,
-    connectionEpochRuntime,
-    StaleConnectionEpochError,
-  } = loadFreshApi();
+async function testFreshFetchNormalizesAndStoresResponseEtag() {
+  requests.length = 0;
+  taskStateApi.clear('conv-2');
   getHandler = async () => ({
     status: 200,
-    data: snapshot('must-not-store'),
-    get headers() {
-      connectionEpochRuntime.invalidate(connectionEpochRuntime.capture());
-      return { etag: '"must-not-store"' };
-    },
+    data: { flags: { running: 1 }, notifications: null },
+    headers: { etag: '"v2"' },
   });
 
-  await assert.rejects(() => taskStateApi.fetch('conv-1'), StaleConnectionEpochError);
+  const result = await taskStateApi.fetch('conv-2');
+  assert.deepEqual(result, {
+    conversation_id: 'conv-2',
+    task: null,
+    notifications: [],
+    flags: { running: true, delivering: false, needsFollowup: false },
+    version: '',
+  });
+
+  getHandler = async () => ({ status: 304, data: null, headers: {} });
+  assert.equal(await taskStateApi.fetch('conv-2'), result);
 }
 
-async function test304StatusGetterInvalidationPreventsReuse() {
-  const {
-    taskStateApi,
-    storeTaskState,
-    connectionEpochRuntime,
-    StaleConnectionEpochError,
-  } = loadFreshApi();
-  storeTaskState('conv-1', snapshot('cached'), '"cached"');
-  getHandler = async () => ({
-    get status() {
-      connectionEpochRuntime.invalidate(connectionEpochRuntime.capture());
-      return 304;
-    },
-    data: null,
-    headers: {},
+async function testBindAndDeleteUseExplicitMutationRoutesAndCacheResult() {
+  requests.length = 0;
+  postHandler = async (url) => ({
+    status: 200,
+    data: snapshot(url.endsWith('/bind') ? 'bound' : 'deleted'),
+    headers: { etag: url.endsWith('/bind') ? '"bound"' : '"deleted"' },
   });
 
-  await assert.rejects(() => taskStateApi.fetch('conv-1'), StaleConnectionEpochError);
+  assert.equal(
+    (await taskStateApi.bind('conv-1', 'notification/1', 'node-1', {
+      trigger: false,
+    })).version,
+    'bound',
+  );
+  assert.deepEqual(requests[0], {
+    method: 'POST',
+    url: '/task-notifications/notification%2F1/bind',
+    data: { delivery_node_id: 'node-1', trigger: false },
+  });
+
+  assert.equal(
+    (await taskStateApi.delete('conv-1', 'notification/1')).version,
+    'deleted',
+  );
+  assert.deepEqual(requests[1], {
+    method: 'POST',
+    url: '/task-notifications/notification%2F1/delete',
+    data: {},
+  });
 }
 
 (async () => {
-  await testFetchReusesCurrentCacheOn304();
-  await testClearedCacheIsNotReintroducedByDelayed304();
-  await testBindAndDeletePopulateEtagCache();
-  await testAllDelayedOperationsRejectAfterInvalidation();
-  await testHeaderGetterInvalidationClosesPostResponseWindow();
-  await test304StatusGetterInvalidationPreventsReuse();
-  console.log('task state API tests passed');
+  await testFetchUsesEtagAndReusesCachedSnapshotOn304();
+  await testFreshFetchNormalizesAndStoresResponseEtag();
+  await testBindAndDeleteUseExplicitMutationRoutesAndCacheResult();
+  console.log('taskStateApi tests passed');
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;

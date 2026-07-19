@@ -53,55 +53,9 @@ function createOperations(calls, overrides = {}) {
   };
 }
 
-function createEpochSource() {
-  const token = Object.freeze({
-    profileId: 'profile-a',
-    serverInstanceId: '11111111-1111-4111-8111-111111111111',
-    connectionEpoch: 1,
-    connectionLeaseId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
-    generation: 1,
-  });
-  const controller = new AbortController();
-  let current = true;
-  let captures = 0;
-  return {
-    token,
-    source: {
-      capture() {
-        captures += 1;
-        return token;
-      },
-      isCurrent(candidate) {
-        return current && candidate === token;
-      },
-      signalFor(candidate) {
-        return current && candidate === token ? controller.signal : AbortSignal.abort();
-      },
-    },
-    invalidate() {
-      current = false;
-      controller.abort();
-    },
-    get captures() {
-      return captures;
-    },
-  };
-}
-
-function deferred() {
-  let resolve;
-  const promise = new Promise((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
-}
-
 async function testCoalescesSameTickRequests() {
   const calls = [];
-  const coordinator = new ConversationSyncCoordinator(
-    createOperations(calls),
-    createEpochSource().source,
-  );
+  const coordinator = new ConversationSyncCoordinator(createOperations(calls));
   const first = coordinator.schedule('conv-1', {
     reason: 'first',
     include: ['messages', 'branches', 'transcript'],
@@ -128,10 +82,7 @@ async function testCoalescesSameTickRequests() {
 
 async function testSpecificMessageRequestSuppressesGenericDuplicate() {
   const calls = [];
-  const coordinator = new ConversationSyncCoordinator(
-    createOperations(calls),
-    createEpochSource().source,
-  );
+  const coordinator = new ConversationSyncCoordinator(createOperations(calls));
   await Promise.all([
     coordinator.schedule('conv-1', {
       include: ['messages'],
@@ -162,7 +113,7 @@ async function testSchedulesNextRoundWhileRunning() {
       await messagesBlocked;
       return true;
     },
-  }), createEpochSource().source);
+  }));
   const first = coordinator.schedule('conv-1', { include: ['messages'] });
   await new Promise((resolve) => setTimeout(resolve, 0));
   const second = coordinator.schedule('conv-1', { include: ['transcript'] });
@@ -171,62 +122,10 @@ async function testSchedulesNextRoundWhileRunning() {
   assert.deepEqual(calls, ['messages', 'transcript']);
 }
 
-async function testInvalidatedOwnershipSettlesWaitersWithoutLaterOperationsOrFutureCapture() {
-  const calls = [];
-  const blocked = deferred();
-  const epoch = createEpochSource();
-  const coordinator = new ConversationSyncCoordinator(createOperations(calls, {
-    refreshMessages: async () => {
-      calls.push('messages');
-      await blocked.promise;
-      return true;
-    },
-  }), epoch.source);
-
-  const first = coordinator.schedule('conv-1', {
-    include: ['messages', 'branches', 'transcript'],
-  });
-  await new Promise((resolve) => setImmediate(resolve));
-  epoch.invalidate();
-  const second = coordinator.schedule('conv-1', {
-    include: ['tree', 'sideRuns'],
-  });
-  blocked.resolve();
-
-  assert.deepEqual(await Promise.all([first, second]), [
-    { messagesConfirmed: false },
-    { messagesConfirmed: false },
-  ]);
-  assert.deepEqual(calls, ['messages']);
-  assert.equal(epoch.captures, 1);
-}
-
-async function testWaiterResultIsRecheckedAfterRunPendingSettles() {
-  const epoch = createEpochSource();
-  let checks = 0;
-  const originalIsCurrent = epoch.source.isCurrent;
-  epoch.source.isCurrent = (candidate) => {
-    checks += 1;
-    const current = originalIsCurrent(candidate);
-    if (checks === 6) queueMicrotask(() => epoch.invalidate());
-    return current;
-  };
-  const coordinator = new ConversationSyncCoordinator(
-    createOperations([]),
-    epoch.source,
-  );
-
-  const result = await coordinator.schedule('conv-1', { include: ['messages'] });
-  assert.ok(checks >= 6, 'test must invalidate after runPending finalizes its result');
-  assert.deepEqual(result, { messagesConfirmed: false });
-}
-
 (async () => {
   await testCoalescesSameTickRequests();
   await testSpecificMessageRequestSuppressesGenericDuplicate();
   await testSchedulesNextRoundWhileRunning();
-  await testInvalidatedOwnershipSettlesWaitersWithoutLaterOperationsOrFutureCapture();
-  await testWaiterResultIsRecheckedAfterRunPendingSettles();
   console.log('conversation sync coordinator tests passed');
 })().catch((error) => {
   console.error(error);

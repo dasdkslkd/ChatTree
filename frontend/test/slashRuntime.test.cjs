@@ -246,84 +246,30 @@ function testObservedCancelledCommandDoesNotRenderAsDraftState() {
   })), false);
 }
 
-async function testRegistryRefreshCannotCommitAfterEpochInvalidation() {
-  const slashApiModule = path.join(__dirname, '../src/api/slash.ts');
-  const epochModule = path.join(__dirname, '../src/runtime/connectionEpoch.ts');
-  const registryModule = path.join(__dirname, '../src/services/slashRegistry.ts');
-  let resolveRefresh;
-  let calls = 0;
-  const pending = new Promise((resolve) => {
-    resolveRefresh = resolve;
-  });
-  require.cache[require.resolve(slashApiModule)] = {
-    id: slashApiModule,
-    filename: slashApiModule,
-    loaded: true,
-    exports: {
-      slashApi: {
-        listCommands: () => {
-          calls += 1;
-          return pending;
-        },
-      },
-    },
-  };
-  delete require.cache[require.resolve(epochModule)];
-  delete require.cache[require.resolve(registryModule)];
-  const { connectionEpochRuntime } = require(epochModule);
-  connectionEpochRuntime.install({
-    profileId: 'local',
-    apiBase: '/p/local/api/v1',
-    serverInstanceId: '11111111-1111-4111-8111-111111111111',
-    connectionEpoch: 1,
-    connectionLeaseId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
-  });
-  const { slashRegistry } = require(registryModule);
-  const before = slashRegistry.list();
-  const first = slashRegistry.refresh();
-  const second = slashRegistry.refresh();
-  assert.equal(calls, 1);
+testNonBlockingSlashDoesNotQueueBehindMainChat();
+testBlockingSlashStillQueuesBehindMainChat();
+testPlainMessageQueuesBehindMainChat();
+testSlashCompletionActivatesOnlyAtFirstCharacter();
+testSlashCompletionFiltersByNameAndAlias();
+testSlashCompletionLimitsCandidates();
+testSlashCompletionStopsAfterCommandArgsBegin();
+testSlashCompletionAppliesCanonicalCommandAndPreservesArgs();
+testForkWorkflowErrorRunsRenderAsDrafts();
+testForkWorkflowPendingSlashRunsRenderAsDrafts();
+testRunningSubagentWithoutContentRendersAsDraft();
+testForegroundManagedRunCommandDoesNotRenderAsDraft();
+testAutoBackgroundedRunCommandRendersAsDraft();
+testExplicitBackgroundCommandRendersAsDraft();
+testForkWorkflowPendingApprovalRunsRenderAsDrafts();
+testBtwSideQuestionRunsRenderAsDrafts();
+testDirectResponseRunsRenderAsDrafts();
+testSidePanelRunLabelsUseSlashNames();
+testUnknownBackgroundRunWithoutTranscriptStateDoesNotRenderAsDraft();
+testCompletedBackgroundWorkflowWithoutTranscriptStateDoesNotRenderAsDraft();
+testRunningWorkflowWithoutEventsRendersAsDraft();
+testWorkflowEventsRenderAsDraftState();
+testObservedCompletedCommandDoesNotRenderAsDraftState();
+testObservedFailedCommandDoesNotRenderAsDraftState();
+testObservedCancelledCommandDoesNotRenderAsDraftState();
 
-  connectionEpochRuntime.invalidate(connectionEpochRuntime.capture());
-  resolveRefresh([command({ name: 'stale-command' })]);
-  assert.equal(await first, before);
-  assert.equal(await second, before);
-  assert.equal(slashRegistry.list(), before);
-  assert.equal(slashRegistry.list().some((item) => item.name === 'stale-command'), false);
-
-  assert.equal(await slashRegistry.refresh(), before);
-  assert.equal(calls, 1);
-}
-
-(async () => {
-  testNonBlockingSlashDoesNotQueueBehindMainChat();
-  testBlockingSlashStillQueuesBehindMainChat();
-  testPlainMessageQueuesBehindMainChat();
-  testSlashCompletionActivatesOnlyAtFirstCharacter();
-  testSlashCompletionFiltersByNameAndAlias();
-  testSlashCompletionLimitsCandidates();
-  testSlashCompletionStopsAfterCommandArgsBegin();
-  testSlashCompletionAppliesCanonicalCommandAndPreservesArgs();
-  testForkWorkflowErrorRunsRenderAsDrafts();
-  testForkWorkflowPendingSlashRunsRenderAsDrafts();
-  testRunningSubagentWithoutContentRendersAsDraft();
-  testForegroundManagedRunCommandDoesNotRenderAsDraft();
-  testAutoBackgroundedRunCommandRendersAsDraft();
-  testExplicitBackgroundCommandRendersAsDraft();
-  testForkWorkflowPendingApprovalRunsRenderAsDrafts();
-  testBtwSideQuestionRunsRenderAsDrafts();
-  testDirectResponseRunsRenderAsDrafts();
-  testSidePanelRunLabelsUseSlashNames();
-  testUnknownBackgroundRunWithoutTranscriptStateDoesNotRenderAsDraft();
-  testCompletedBackgroundWorkflowWithoutTranscriptStateDoesNotRenderAsDraft();
-  testRunningWorkflowWithoutEventsRendersAsDraft();
-  testWorkflowEventsRenderAsDraftState();
-  testObservedCompletedCommandDoesNotRenderAsDraftState();
-  testObservedFailedCommandDoesNotRenderAsDraftState();
-  testObservedCancelledCommandDoesNotRenderAsDraftState();
-  await testRegistryRefreshCannotCommitAfterEpochInvalidation();
-  console.log('slashRuntime tests passed');
-})().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+console.log('slashRuntime tests passed');

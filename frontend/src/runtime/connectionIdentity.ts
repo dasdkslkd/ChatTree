@@ -1,6 +1,6 @@
 const CANONICAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-export const EXPECTED_PROTOCOL_VERSION = 1;
+export const MIN_PROTOCOL_VERSION = 1;
 
 export class BoundServerNotReadyError extends Error {
   constructor(message: string) {
@@ -30,6 +30,25 @@ export class BoundServerProtocolError extends Error {
   }
 }
 
+export class BoundServerStatusError extends Error {
+  readonly code: string;
+  readonly retryable: boolean;
+  readonly details?: Record<string, unknown>;
+
+  constructor(
+    code: string,
+    message: string,
+    retryable: boolean,
+    details?: Record<string, unknown>,
+  ) {
+    super(message);
+    this.name = 'BoundServerStatusError';
+    this.code = code;
+    this.retryable = retryable;
+    this.details = details;
+  }
+}
+
 export type BoundServerContext = Readonly<{
   profileId: string;
   serverInstanceId: string;
@@ -55,5 +74,6 @@ export function isCanonicalUuid(value: unknown): value is string {
 
 export function isFatalBoundServerError(error: unknown): boolean {
   return error instanceof BoundServerIdentityError
-    || error instanceof BoundServerProtocolError;
+    || error instanceof BoundServerProtocolError
+    || (error instanceof BoundServerStatusError && !error.retryable);
 }

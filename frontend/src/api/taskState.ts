@@ -1,10 +1,5 @@
 import { apiClient } from './client';
 import type { ActiveTaskRecord } from '../types/task';
-import {
-  captureConnectionEpoch,
-  connectionEpochRuntime,
-  type ConnectionEpochToken,
-} from '../runtime/connectionEpoch';
 
 export interface TaskNotificationRecord {
   id: string;
@@ -43,14 +38,6 @@ type TaskStateCacheEntry = {
 
 const taskStateCache = new Map<string, TaskStateCacheEntry>();
 
-function resolveEpochToken(token?: ConnectionEpochToken): ConnectionEpochToken {
-  if (token) {
-    connectionEpochRuntime.assertCurrent(token);
-    return token;
-  }
-  return captureConnectionEpoch();
-}
-
 function normalizeTaskState(data: unknown, conversationId: string): TaskStateSnapshot {
   const candidate = data && typeof data === 'object' ? data as Partial<TaskStateSnapshot> : {};
   return {
@@ -68,36 +55,7 @@ function normalizeTaskState(data: unknown, conversationId: string): TaskStateSna
   };
 }
 
-function readCachedTaskState(
-  conversationId: string,
-  token: ConnectionEpochToken,
-): TaskStateCacheEntry | undefined {
-  connectionEpochRuntime.assertCurrent(token);
-  const cached = taskStateCache.get(conversationId);
-  connectionEpochRuntime.assertCurrent(token);
-  return cached;
-}
-
-function responseEtag(
-  headers: unknown,
-  token: ConnectionEpochToken,
-): string | undefined {
-  connectionEpochRuntime.assertCurrent(token);
-  const candidate = headers && typeof headers === 'object'
-    ? (headers as { etag?: unknown }).etag
-    : undefined;
-  connectionEpochRuntime.assertCurrent(token);
-  return typeof candidate === 'string' ? candidate : undefined;
-}
-
-export function storeTaskState(
-  conversationId: string,
-  state: TaskStateSnapshot,
-  etag?: string,
-  ownerToken?: ConnectionEpochToken,
-): TaskStateSnapshot {
-  const token = resolveEpochToken(ownerToken);
-  connectionEpochRuntime.assertCurrent(token);
+export function storeTaskState(conversationId: string, state: TaskStateSnapshot, etag?: string): TaskStateSnapshot {
   const cacheEtag = etag || (state.version ? `"${state.version}"` : '');
   if (cacheEtag) {
     taskStateCache.set(conversationId, { etag: cacheEtag, data: state });
@@ -108,30 +66,16 @@ export function storeTaskState(
 }
 
 export const taskStateApi = {
-  fetch: async (conversationId: string, ownerToken?: ConnectionEpochToken): Promise<TaskStateSnapshot> => {
-    const token = resolveEpochToken(ownerToken);
-    const cached = readCachedTaskState(conversationId, token);
+  fetch: async (conversationId: string): Promise<TaskStateSnapshot> => {
+    const cached = taskStateCache.get(conversationId);
     const response = await apiClient.get(`/conversations/${encodeURIComponent(conversationId)}/task-state`, {
       headers: cached?.etag ? { 'If-None-Match': cached.etag } : undefined,
       validateStatus: (status) => (status >= 200 && status < 300) || status === 304,
     });
-    connectionEpochRuntime.assertCurrent(token);
-    const status = response.status;
-    connectionEpochRuntime.assertCurrent(token);
-    if (status === 304) {
-      const latestCached = readCachedTaskState(conversationId, token);
-      if (!latestCached) {
-        throw new Error('Task state cache changed before a 304 response completed');
-      }
-      connectionEpochRuntime.assertCurrent(token);
-      return latestCached.data;
-    }
-    const responseData = response.data;
-    connectionEpochRuntime.assertCurrent(token);
-    const state = normalizeTaskState(responseData, conversationId);
-    connectionEpochRuntime.assertCurrent(token);
-    const etag = responseEtag(response.headers, token);
-    return storeTaskState(conversationId, state, etag, token);
+    if (response.status === 304 && cached) return cached.data;
+    const state = normalizeTaskState(response.data, conversationId);
+    const etag = response.headers?.etag;
+    return storeTaskState(conversationId, state, typeof etag === 'string' ? etag : undefined);
   },
 
   bind: async (
@@ -139,36 +83,21 @@ export const taskStateApi = {
     notificationId: string,
     deliveryNodeId: string,
     options: { trigger?: boolean } = {},
-    ownerToken?: ConnectionEpochToken,
   ): Promise<TaskStateSnapshot> => {
-    const token = resolveEpochToken(ownerToken);
     const response = await apiClient.post(`/task-notifications/${encodeURIComponent(notificationId)}/bind`, {
       delivery_node_id: deliveryNodeId,
       trigger: options.trigger ?? true,
     });
-    connectionEpochRuntime.assertCurrent(token);
-    const responseData = response.data;
-    connectionEpochRuntime.assertCurrent(token);
-    const state = normalizeTaskState(responseData, conversationId);
-    connectionEpochRuntime.assertCurrent(token);
-    const etag = responseEtag(response.headers, token);
-    return storeTaskState(state.conversation_id, state, etag, token);
+    const state = normalizeTaskState(response.data, conversationId);
+    const etag = response.headers?.etag;
+    return storeTaskState(state.conversation_id, state, typeof etag === 'string' ? etag : undefined);
   },
 
-  delete: async (
-    conversationId: string,
-    notificationId: string,
-    ownerToken?: ConnectionEpochToken,
-  ): Promise<TaskStateSnapshot> => {
-    const token = resolveEpochToken(ownerToken);
+  delete: async (conversationId: string, notificationId: string): Promise<TaskStateSnapshot> => {
     const response = await apiClient.post(`/task-notifications/${encodeURIComponent(notificationId)}/delete`, {});
-    connectionEpochRuntime.assertCurrent(token);
-    const responseData = response.data;
-    connectionEpochRuntime.assertCurrent(token);
-    const state = normalizeTaskState(responseData, conversationId);
-    connectionEpochRuntime.assertCurrent(token);
-    const etag = responseEtag(response.headers, token);
-    return storeTaskState(state.conversation_id, state, etag, token);
+    const state = normalizeTaskState(response.data, conversationId);
+    const etag = response.headers?.etag;
+    return storeTaskState(state.conversation_id, state, typeof etag === 'string' ? etag : undefined);
   },
 
   clear: (conversationId: string): void => {

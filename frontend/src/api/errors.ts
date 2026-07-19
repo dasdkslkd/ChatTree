@@ -2,7 +2,6 @@ import axios from 'axios';
 
 
 const REQUEST_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
-const GENERIC_SERVER_ERROR = '服务暂时不可用，请稍后重试';
 const GENERIC_UNEXPECTED_RESPONSE = '服务器返回了无法识别的响应';
 
 type ChatTreeApiErrorOptions = {
@@ -83,26 +82,6 @@ function validRequestId(value: unknown): value is string {
   return typeof value === 'string' && REQUEST_ID_RE.test(value);
 }
 
-function headerValue(headers: unknown, name: string): string | undefined {
-  if (headers === null || typeof headers !== 'object') return undefined;
-  const get = (headers as { get?: unknown }).get;
-  if (typeof get === 'function') {
-    const value = get.call(headers, name);
-    return typeof value === 'string' ? value : undefined;
-  }
-  for (const [key, value] of Object.entries(headers)) {
-    if (key.toLowerCase() === name.toLowerCase() && typeof value === 'string') {
-      return value;
-    }
-  }
-  return undefined;
-}
-
-function responseRequestId(headers: unknown): string | undefined {
-  const value = headerValue(headers, 'x-request-id');
-  return validRequestId(value) ? value : undefined;
-}
-
 function unexpectedResponse(status: number | undefined, cause: unknown) {
   return new ChatTreeApiError(GENERIC_UNEXPECTED_RESPONSE, {
     status,
@@ -110,6 +89,13 @@ function unexpectedResponse(status: number | undefined, cause: unknown) {
     retryable: false,
     cause,
   });
+}
+
+export function unexpectedApiResponse(
+  status: number | undefined,
+  cause: unknown,
+): ChatTreeApiError {
+  return unexpectedResponse(status, cause);
 }
 
 export function parseModernErrorEnvelope(
@@ -166,75 +152,52 @@ function normalizeModernEnvelope(
   });
 }
 
-function isLegacyActiveRunConflict(
-  status: number,
-  detail: Record<string, unknown>,
-): boolean {
-  return status === 409
-    && isJsonObject(detail)
-    && Array.isArray(detail.active_run_ids)
-    && detail.active_run_ids.length > 0
-    && detail.active_run_ids.every(
-      (runId) => typeof runId === 'string' && runId.length > 0,
-    );
+export async function apiErrorFromResponse(
+  response: Response,
+): Promise<ChatTreeApiError> {
+  let data: unknown;
+  try {
+    data = await response.json();
+  } catch (cause) {
+    return unexpectedResponse(response.status, cause);
+  }
+  return normalizeModernEnvelope(response.status, data, response)
+    ?? unexpectedResponse(response.status, response);
 }
 
-function normalizeLegacy4xx(
-  status: number,
-  data: unknown,
-  headers: unknown,
-  cause: unknown,
-): ChatTreeApiError | undefined {
-  if (!isRecord(data) || !Object.prototype.hasOwnProperty.call(data, 'detail')) {
-    return undefined;
-  }
-  const detail = data.detail;
-  const requestId = responseRequestId(headers);
-  if (typeof detail === 'string' && detail.length > 0) {
-    return new ChatTreeApiError(detail, {
-      status,
-      code: 'http_error',
-      retryable: false,
-      requestId,
-      cause,
-    });
-  }
+export async function requireSuccessfulResponse(
+  response: Response,
+): Promise<Response> {
+  if (!response.ok) throw await apiErrorFromResponse(response);
+  return response;
+}
+
+function isAbortError(error: unknown): boolean {
+  return (
+    typeof DOMException !== 'undefined'
+    && error instanceof DOMException
+    && error.name === 'AbortError'
+  ) || (
+    error instanceof Error
+    && error.name === 'AbortError'
+  );
+}
+
+export function normalizeFetchError(
+  error: unknown,
+  signal?: AbortSignal,
+): unknown {
   if (
-    !isJsonObject(detail)
-    || typeof detail.message !== 'string'
-    || detail.message.length === 0
+    error instanceof ChatTreeApiError
+    || signal?.aborted
+    || isAbortError(error)
   ) {
-    return undefined;
+    return error;
   }
-
-  return new ChatTreeApiError(detail.message, {
-    status,
-    code: isLegacyActiveRunConflict(status, detail)
-      ? 'active_runs_present'
-      : 'http_error',
-    retryable: isLegacyActiveRunConflict(status, detail),
-    requestId,
-    details: detail,
-    cause,
-  });
-}
-
-function normalizeLegacy5xx(
-  status: number,
-  data: unknown,
-  headers: unknown,
-  cause: unknown,
-): ChatTreeApiError | undefined {
-  if (!isRecord(data) || !Object.prototype.hasOwnProperty.call(data, 'detail')) {
-    return undefined;
-  }
-  const unavailable = status === 502 || status === 503 || status === 504;
-  return new ChatTreeApiError(GENERIC_SERVER_ERROR, {
-    status,
-    code: unavailable ? 'service_unavailable' : 'internal_error',
-    retryable: unavailable,
-    requestId: responseRequestId(headers),
-    cause,
+  return new ChatTreeApiError('无法连接到服务器', {
+    code: 'network_error',
+    retryable: true,
+    cause: error,
   });
 }
 
@@ -256,17 +219,9 @@ export function normalizeApiError(error: unknown): unknown {
     });
   }
 
-  const { status, data, headers } = error.response;
+  const { status, data } = error.response;
   const modern = normalizeModernEnvelope(status, data, error);
   if (modern) return modern;
-  if (status >= 500 && status <= 599) {
-    const legacy = normalizeLegacy5xx(status, data, headers, error);
-    if (legacy) return legacy;
-  }
-  if (status >= 400 && status <= 499) {
-    const legacy = normalizeLegacy4xx(status, data, headers, error);
-    if (legacy) return legacy;
-  }
   return unexpectedResponse(status, error);
 }
 

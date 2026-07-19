@@ -10,18 +10,10 @@ import { slashRegistry } from './slashRegistry';
 import { isSideRunKind } from '../utils/sideRunSync';
 import { flushPerfEvents } from '../perf/client';
 import { perfNow, recordMark, recordSpan } from '../perf/marks';
-import {
-  composeConnectionAbortSignal,
-  connectionEpochRuntime,
-  StaleConnectionEpochError,
-  type ConnectionEpochRuntime,
-  type ConnectionEpochToken,
-} from '../runtime/connectionEpoch';
 
 export const STREAM_DURATION_UPDATE_MS = 1000;
 
 export interface StreamState {
-  epochToken: ConnectionEpochToken;
   runId: string;
   status: 'idle' | 'streaming' | 'waiting_approval' | 'stopping' | 'completed' | 'error' | 'stopped';
   content: string;
@@ -112,30 +104,6 @@ export interface ResumeStreamOptions {
   anchorUntilTargetLands?: boolean;
 }
 
-export type StreamEpochSource = Pick<
-  ConnectionEpochRuntime,
-  'capture' | 'isCurrent' | 'signalFor'
->;
-
-type RunAlias = {
-  runId: string;
-  epochToken: ConnectionEpochToken;
-};
-
-type ManagedRunSubscription = {
-  epochToken: ConnectionEpochToken;
-  controller: AbortController;
-  task: Promise<void>;
-};
-
-const TERMINAL_RUN_STATUSES = new Set([
-  'completed',
-  'failed',
-  'cancelled',
-  'interrupted',
-  'stopped',
-]);
-
 function mergeToolCalls(existing: any[], incoming: any[]): any[] {
   const merged = incoming.length > 0
     ? existing.filter((toolCall) => !toolCall?.pending)
@@ -199,21 +167,6 @@ function findToolRoundIndex(toolInteractions: any[], roundId: string | null): nu
   ));
 }
 
-function isProvisionalToolInteraction(interaction: any): boolean {
-  if (!interaction || typeof interaction !== 'object') return false;
-  const hasRound = Boolean(
-    normalizeToolRoundId(interaction.tool_round_id)
-    || normalizeToolRoundId(interaction.assistant?.tool_round_id)
-    || typeof interaction.tool_round === 'number'
-    || typeof interaction.assistant?.tool_round === 'number',
-  );
-  return !hasRound
-    && Array.isArray(interaction.assistant?.tool_calls)
-    && interaction.assistant.tool_calls.length === 0
-    && Array.isArray(interaction.tools)
-    && interaction.tools.length === 0;
-}
-
 function createToolRoundInteraction(
   toolCalls: any[],
   content: string,
@@ -249,13 +202,7 @@ function appendToolCalls(
   const normalizedCalls = toolCalls.map((toolCall) => withToolRound(toolCall, roundId, round));
   const next = [...toolInteractions];
   const roundIndex = findToolRoundIndex(next, roundId);
-  const tail = next.at(-1);
-  const provisionalTailIndex = replaceSnapshot
-    && roundIndex < 0
-    && isProvisionalToolInteraction(tail)
-    ? next.length - 1
-    : -1;
-  const index = roundIndex >= 0 ? roundIndex : provisionalTailIndex;
+  const index = roundIndex >= 0 ? roundIndex : -1;
   if (index >= 0) {
     const last = next[index];
     const existingCalls = Array.isArray(last?.assistant?.tool_calls) ? last.assistant.tool_calls : [];
@@ -345,22 +292,16 @@ function appendToolResultDelta(toolInteractions: any[], toolCall: any, roundId: 
   const targetId = toolCall.tool_call_id || toolCall.id;
   const delta = typeof toolCall.content_delta === 'string' ? toolCall.content_delta : '';
   if (!targetId || !delta) return appendToolProgress(toolInteractions, toolCall, roundId, round);
-  const roundIndex = findToolRoundIndex(toolInteractions, roundId);
-  const candidateTools = roundIndex >= 0
-    ? toolInteractions[roundIndex]?.tools
-    : toolInteractions.flatMap((interaction) => Array.isArray(interaction.tools) ? interaction.tools : []);
-  const current = Array.isArray(candidateTools)
-    ? candidateTools.find((tool) => tool?.tool_call_id === targetId)
+  const current = toolInteractions.length > 0
+    ? toolInteractions.flatMap((interaction) => Array.isArray(interaction.tools) ? interaction.tools : [])
+        .find((tool) => tool?.tool_call_id === targetId)
     : null;
-  const previousDelta = typeof current?.content_delta === 'string' ? current.content_delta : '';
-  const contentDelta = `${previousDelta}${delta}`;
   return appendToolResult(toolInteractions, {
     role: 'tool',
     tool_call_id: targetId,
     name: toolCall.name || toolCall.function?.name,
     status: toolCall.status || 'running',
-    content: contentDelta,
-    content_delta: contentDelta,
+    content: `${current?.content || ''}${delta}`,
   }, roundId, round);
 }
 
@@ -400,10 +341,9 @@ function summarizeToolInteractions(toolInteractions: any[]): string {
 }
 
 function appendProcessContent(toolInteractions: any[], content: string): any[] {
-  const next = [...toolInteractions];
-  if (!isProvisionalToolInteraction(next.at(-1))) {
-    next.push(createToolRoundInteraction([], '', '', null, null));
-  }
+  const next = toolInteractions.length > 0
+    ? [...toolInteractions]
+    : [{ assistant: { role: 'assistant', content: '', tool_calls: [] }, tools: [], reasoning: null }];
   const index = next.length - 1;
   const interaction = next[index];
   next[index] = {
@@ -435,59 +375,13 @@ function mergeApproval(
   };
 }
 
-function removeApproval(
-  pendingApprovals: Record<string, ToolApprovalPayload>,
-  approval: ToolApprovalPayload | undefined,
-): Record<string, ToolApprovalPayload> {
-  if (!approval?.id || !pendingApprovals[approval.id]) return pendingApprovals;
-  const next = { ...pendingApprovals };
-  delete next[approval.id];
-  return next;
-}
-
-function isTerminalRunStatus(status: unknown): boolean {
-  return typeof status === 'string' && TERMINAL_RUN_STATUSES.has(status);
-}
-
-function isTerminalStreamStatus(status: StreamState['status']): boolean {
-  return status === 'completed' || status === 'error' || status === 'stopped';
-}
-
-function runEventIndex(event: RunEventPayload): number | null {
-  return typeof event.event_index === 'number' && Number.isFinite(event.event_index)
-    ? Math.trunc(event.event_index)
-    : null;
-}
-
-function orderRunEvents(events: RunEventPayload[]): RunEventPayload[] {
-  return events
-    .map((event, position) => ({ event, position, index: runEventIndex(event) }))
-    .sort((left, right) => {
-      if (left.index === null && right.index === null) return left.position - right.position;
-      if (left.index === null) return 1;
-      if (right.index === null) return -1;
-      return left.index - right.index || left.position - right.position;
-    })
-    .map(({ event }) => event);
-}
-
-function nextRunEventCursor(record: RunRecord, events: RunEventPayload[]): number {
-  const recordEventCount = Number.isFinite(record.event_count)
-    ? Math.max(0, Math.trunc(record.event_count))
-    : 0;
-  return events.reduce((cursor, event) => {
-    const index = runEventIndex(event);
-    return index === null ? cursor : Math.max(cursor, index + 1);
-  }, recordEventCount);
-}
-
 function mapRunStatus(status: unknown): 'streaming' | 'waiting_approval' | 'stopping' | 'completed' | 'error' | 'stopped' | null {
-  if (status === 'queued' || status === 'running' || status === 'content' || status === 'start') return 'streaming';
+  if (status === 'running' || status === 'content' || status === 'start') return 'streaming';
   if (status === 'waiting_approval') return 'waiting_approval';
   if (status === 'stopping') return 'stopping';
   if (status === 'complete' || status === 'completed') return 'completed';
   if (status === 'error' || status === 'failed') return 'error';
-  if (status === 'stopped' || status === 'cancelled' || status === 'interrupted') return 'stopped';
+  if (status === 'stopped' || status === 'cancelled') return 'stopped';
   return null;
 }
 
@@ -496,32 +390,8 @@ function mapRunRecordStatus(status: unknown): StreamState['status'] {
   if (status === 'stopping') return 'stopping';
   if (status === 'completed') return 'completed';
   if (status === 'failed') return 'error';
-  if (status === 'cancelled' || status === 'interrupted' || status === 'stopped') return 'stopped';
+  if (status === 'cancelled') return 'stopped';
   return 'streaming';
-}
-
-function transitionRunStatus(
-  current: StreamState['status'],
-  mapped: ReturnType<typeof mapRunStatus>,
-): StreamState['status'] {
-  if (mapped === 'completed'
-      || mapped === 'stopped'
-      || mapped === 'error'
-      || mapped === 'waiting_approval'
-      || mapped === 'stopping') return mapped;
-  if (mapped === 'streaming' && current === 'waiting_approval') return 'streaming';
-  return current;
-}
-
-function restoredSnapshotStatus(
-  record: RunRecord,
-  events: RunEventPayload[],
-): StreamState['status'] {
-  let status = mapRunRecordStatus(record.status);
-  for (const event of orderRunEvents(events)) {
-    status = transitionRunStatus(status, mapRunStatus(event.status));
-  }
-  return isTerminalRunStatus(record.status) ? mapRunRecordStatus(record.status) : status;
 }
 
 function createCommandState(): CommandRunState {
@@ -645,150 +515,9 @@ export class StreamManager {
   private listeners = new Set<StatusListener>();
   private finishListeners = new Set<FinishListener>();
   private durationTimers = new Map<string, number>();
-  private pendingNotifyHandles = new Map<string, {
-    handle: number;
-    kind: 'animationFrame' | 'timeout';
-    epochToken: ConnectionEpochToken;
-  }>();
-  private runAliases = new Map<string, RunAlias>();
-  private managedSubscriptionTasks = new Map<string, ManagedRunSubscription>();
+  private pendingNotifyHandles = new Map<string, { handle: number; kind: 'animationFrame' | 'timeout' }>();
+  private runAliases = new Map<string, string>();
   private tempSeq = 0;
-  private readonly epochSource: StreamEpochSource;
-
-  constructor(
-    epochSource: StreamEpochSource = connectionEpochRuntime,
-  ) {
-    this.epochSource = epochSource;
-  }
-
-  private tokensMatch(
-    left: ConnectionEpochToken,
-    right: ConnectionEpochToken,
-  ): boolean {
-    return left.profileId === right.profileId
-      && left.serverInstanceId === right.serverInstanceId
-      && left.connectionEpoch === right.connectionEpoch
-      && left.connectionLeaseId === right.connectionLeaseId
-      && left.generation === right.generation;
-  }
-
-  private assertEpochCurrent(epochToken: ConnectionEpochToken): void {
-    if (!this.epochSource.isCurrent(epochToken)) throw new StaleConnectionEpochError();
-  }
-
-  private ownsState(
-    state: StreamState | undefined,
-    epochToken: ConnectionEpochToken,
-  ): state is StreamState {
-    return Boolean(
-      state
-      && this.tokensMatch(state.epochToken, epochToken),
-    );
-  }
-
-  private ownsCurrentState(
-    state: StreamState | undefined,
-    epochToken: ConnectionEpochToken,
-  ): state is StreamState {
-    return this.ownsState(state, epochToken)
-      && this.epochSource.isCurrent(epochToken);
-  }
-
-  private deleteOwnedAliasChain(
-    rootRunId: string,
-    epochToken: ConnectionEpochToken,
-  ): void {
-    let current = rootRunId;
-    const seen = new Set<string>();
-    while (!seen.has(current)) {
-      seen.add(current);
-      const alias = this.runAliases.get(current);
-      if (!alias || !this.tokensMatch(alias.epochToken, epochToken)) return;
-      if (this.runAliases.get(current) === alias) this.runAliases.delete(current);
-      current = alias.runId;
-    }
-  }
-
-  private resolveRunIdForToken(
-    runId: string,
-    epochToken: ConnectionEpochToken,
-  ): string {
-    let current = runId;
-    const seen = new Set<string>();
-    while (!seen.has(current)) {
-      seen.add(current);
-      const alias = this.runAliases.get(current);
-      if (!alias || !this.tokensMatch(alias.epochToken, epochToken)) break;
-      current = alias.runId;
-    }
-    return current;
-  }
-
-  private deleteAliasesEndingAt(
-    runId: string,
-    epochToken: ConnectionEpochToken,
-  ): void {
-    const ownedAliases = [...this.runAliases.entries()]
-      .filter(([, alias]) => this.tokensMatch(alias.epochToken, epochToken))
-      .filter(([source]) => this.resolveRunIdForToken(source, epochToken) === runId)
-      .map(([source]) => source);
-    for (const source of ownedAliases) this.runAliases.delete(source);
-  }
-
-  private removeManagedSubscriptionsForRun(
-    runId: string,
-    epochToken?: ConnectionEpochToken,
-    controller?: AbortController | null,
-  ): void {
-    for (const [key, subscription] of this.managedSubscriptionTasks.entries()) {
-      if (epochToken && !this.tokensMatch(subscription.epochToken, epochToken)) continue;
-      if (controller !== undefined && subscription.controller !== controller) continue;
-      const resolvedKey = this.resolveRunIdForToken(key, subscription.epochToken);
-      if (key !== runId && resolvedKey !== runId) continue;
-      subscription.controller.abort();
-      if (this.managedSubscriptionTasks.get(key) === subscription) {
-        this.managedSubscriptionTasks.delete(key);
-      }
-    }
-  }
-
-  private cleanupOwnedState(
-    runId: string,
-    epochToken: ConnectionEpochToken,
-    controller: AbortController | null,
-    aliasRootRunId: string,
-  ): boolean {
-    this.deleteOwnedAliasChain(aliasRootRunId, epochToken);
-    const state = this.streams.get(runId);
-    if (!this.ownsState(state, epochToken)
-        || state.abortController !== controller) return false;
-
-    this.removeManagedSubscriptionsForRun(runId, epochToken, controller);
-    this.deleteAliasesEndingAt(runId, epochToken);
-    const timer = this.durationTimers.get(runId);
-    if (timer !== undefined) window.clearInterval(timer);
-    this.durationTimers.delete(runId);
-    state.abortController?.abort();
-    this.streams.delete(runId);
-    const set = this.runsByConversation.get(state.conversationId);
-    set?.delete(runId);
-    if (set && set.size === 0) this.runsByConversation.delete(state.conversationId);
-    const snapshot = this.conversationSnapshots.get(state.conversationId);
-    if (snapshot?.states.some((cached) => (
-      cached.runId === runId
-      && this.ownsState(cached, epochToken)
-      && cached.abortController === controller
-    ))) {
-      this.conversationSnapshots.delete(state.conversationId);
-    }
-    const pending = this.pendingNotifyHandles.get(state.conversationId);
-    if (pending
-        && this.tokensMatch(pending.epochToken, epochToken)
-        && !this.epochSource.isCurrent(epochToken)) {
-      this.clearPendingNotify(state.conversationId);
-    }
-    return true;
-  }
 
   getState(conversationId: string): Readonly<StreamState> | undefined {
     const states = this.getConversationStates(conversationId)
@@ -804,9 +533,7 @@ export class StreamManager {
     const ids = this.runsByConversation.get(conversationId);
     const states = ids ? [...ids]
       .map((id) => this.streams.get(id))
-      .filter((state): state is StreamState => (
-        Boolean(state && this.epochSource.isCurrent(state.epochToken))
-      )) : [];
+      .filter((state): state is StreamState => Boolean(state)) : [];
     const signature = states.map((state) => [
       state.runId,
       state.kind,
@@ -833,20 +560,12 @@ export class StreamManager {
     ].join(':')).join('|');
     const cached = this.conversationSnapshots.get(conversationId);
     if (cached?.signature === signature) return cached.states;
-    if (states.length > 0) {
-      this.conversationSnapshots.set(conversationId, { signature, states });
-    } else {
-      this.conversationSnapshots.delete(conversationId);
-    }
+    this.conversationSnapshots.set(conversationId, { signature, states });
     return states;
   }
 
   isStreaming(conversationId?: string): boolean {
-    const states = conversationId
-      ? this.getConversationStates(conversationId)
-      : [...this.streams.values()].filter((state) => (
-          this.epochSource.isCurrent(state.epochToken)
-        ));
+    const states = conversationId ? this.getConversationStates(conversationId) : [...this.streams.values()];
     return states.some((state) => state.status === 'streaming' || state.status === 'waiting_approval' || state.status === 'stopping');
   }
 
@@ -854,9 +573,7 @@ export class StreamManager {
     const ids: string[] = [];
     for (const [conversationId, runIds] of this.runsByConversation.entries()) {
       if ([...runIds].some((runId) => {
-        const state = this.streams.get(runId);
-        if (!state || !this.epochSource.isCurrent(state.epochToken)) return false;
-        const status = state.status;
+        const status = this.streams.get(runId)?.status;
         return status === 'streaming' || status === 'waiting_approval' || status === 'stopping';
       })) {
         ids.push(conversationId);
@@ -876,12 +593,10 @@ export class StreamManager {
   }
 
   hasRun(runId: string): boolean {
-    const state = this.streams.get(this.resolveRunId(runId));
-    return Boolean(state && this.epochSource.isCurrent(state.epochToken));
+    return this.streams.has(this.resolveRunId(runId));
   }
 
-  private emitNotify(conversationId: string, epochToken: ConnectionEpochToken) {
-    if (!this.epochSource.isCurrent(epochToken)) return;
+  private emitNotify(conversationId: string) {
     const started = perfNow();
     this.listeners.forEach((listener) => listener(conversationId));
     recordSpan('stream_manager.emit_notify', started, {
@@ -901,12 +616,7 @@ export class StreamManager {
     this.pendingNotifyHandles.delete(conversationId);
   }
 
-  private notify(
-    conversationId: string,
-    epochToken: ConnectionEpochToken,
-    immediate = false,
-  ) {
-    if (!this.epochSource.isCurrent(epochToken)) return;
+  private notify(conversationId: string, immediate = false) {
     recordMark('stream_manager.notify', {
       conversation_id: conversationId,
       immediate,
@@ -914,66 +624,41 @@ export class StreamManager {
     });
     if (immediate) {
       this.clearPendingNotify(conversationId);
-      this.emitNotify(conversationId, epochToken);
+      this.emitNotify(conversationId);
       return;
     }
-    const existing = this.pendingNotifyHandles.get(conversationId);
-    if (existing && this.epochSource.isCurrent(existing.epochToken)) return;
-    if (existing) this.clearPendingNotify(conversationId);
+    if (this.pendingNotifyHandles.has(conversationId)) return;
     if (typeof window.requestAnimationFrame === 'function') {
-      const pending = {
-        handle: 0,
-        kind: 'animationFrame' as const,
-        epochToken,
-      };
-      pending.handle = window.requestAnimationFrame(() => {
-        if (this.pendingNotifyHandles.get(conversationId) !== pending) return;
+      const handle = window.requestAnimationFrame(() => {
         this.pendingNotifyHandles.delete(conversationId);
-        this.emitNotify(conversationId, epochToken);
+        this.emitNotify(conversationId);
       });
-      this.pendingNotifyHandles.set(conversationId, pending);
+      this.pendingNotifyHandles.set(conversationId, { handle, kind: 'animationFrame' });
       return;
     }
-    const pending = {
-      handle: 0,
-      kind: 'timeout' as const,
-      epochToken,
-    };
-    pending.handle = window.setTimeout(() => {
-      if (this.pendingNotifyHandles.get(conversationId) !== pending) return;
+    const handle = window.setTimeout(() => {
       this.pendingNotifyHandles.delete(conversationId);
-      this.emitNotify(conversationId, epochToken);
+      this.emitNotify(conversationId);
     }, 50);
-    this.pendingNotifyHandles.set(conversationId, pending);
+    this.pendingNotifyHandles.set(conversationId, { handle, kind: 'timeout' });
   }
 
-  private notifyFinish(info: FinishInfo, epochToken: ConnectionEpochToken) {
-    if (!this.epochSource.isCurrent(epochToken)) return;
+  private notifyFinish(info: FinishInfo) {
     this.finishListeners.forEach((listener) => listener(info));
   }
 
-  private addToConversation(
-    conversationId: string,
-    runId: string,
-    epochToken: ConnectionEpochToken,
-  ) {
-    if (!this.epochSource.isCurrent(epochToken)) return;
+  private addToConversation(conversationId: string, runId: string) {
     const set = this.runsByConversation.get(conversationId) ?? new Set<string>();
     set.add(runId);
     this.runsByConversation.set(conversationId, set);
   }
 
-  private replaceRunId(
-    oldRunId: string,
-    newRunId: string,
-    epochToken: ConnectionEpochToken,
-  ) {
+  private replaceRunId(oldRunId: string, newRunId: string) {
     if (oldRunId === newRunId || !this.streams.has(oldRunId) || this.streams.has(newRunId)) return oldRunId;
     const state = this.streams.get(oldRunId)!;
-    if (!this.ownsCurrentState(state, epochToken)) return oldRunId;
     this.streams.delete(oldRunId);
     this.streams.set(newRunId, { ...state, runId: newRunId });
-    this.runAliases.set(oldRunId, { runId: newRunId, epochToken });
+    this.runAliases.set(oldRunId, newRunId);
     const set = this.runsByConversation.get(state.conversationId);
     if (set) {
       set.delete(oldRunId);
@@ -990,11 +675,9 @@ export class StreamManager {
   resolveRunId(runId: string): string {
     let current = runId;
     const seen = new Set<string>();
-    while (!seen.has(current)) {
+    while (this.runAliases.has(current) && !seen.has(current)) {
       seen.add(current);
-      const alias = this.runAliases.get(current);
-      if (!alias || !this.epochSource.isCurrent(alias.epochToken)) break;
-      current = alias.runId;
+      current = this.runAliases.get(current)!;
     }
     return current;
   }
@@ -1002,26 +685,19 @@ export class StreamManager {
   areRunsInactive(runIds: string[]): boolean {
     return runIds.every((runId) => {
       const resolved = this.resolveRunId(runId);
-      const state = this.streams.get(resolved);
-      const status = state && this.epochSource.isCurrent(state.epochToken)
-        ? state.status
-        : undefined;
+      const status = this.streams.get(resolved)?.status;
       return status !== 'streaming' && status !== 'waiting_approval' && status !== 'stopping';
     });
   }
 
-  private applyChunk(
-    runId: string,
-    chunk: any,
-    epochToken: ConnectionEpochToken,
-  ): string {
+  private applyChunk(runId: string, chunk: any): string {
     let state = this.streams.get(runId);
-    if (!this.ownsCurrentState(state, epochToken)) return runId;
+    if (!state) return runId;
     const incomingRunId = chunk.run_id || chunk.runId;
     if (incomingRunId && incomingRunId !== runId) {
-      runId = this.replaceRunId(runId, incomingRunId, epochToken);
+      runId = this.replaceRunId(runId, incomingRunId);
       state = this.streams.get(runId);
-      if (!this.ownsCurrentState(state, epochToken)) return runId;
+      if (!state) return runId;
     }
 
     let next: StreamState = { ...state };
@@ -1158,25 +834,32 @@ export class StreamManager {
     } else if (chunk.event_type === 'tool_approval_request') {
       next.pendingApprovals = mergeApproval(next.pendingApprovals, chunk.approval, 'pending');
     } else if (chunk.event_type === 'tool_approval_result') {
-      next.pendingApprovals = removeApproval(next.pendingApprovals, chunk.approval);
+      next.pendingApprovals = mergeApproval(next.pendingApprovals, chunk.approval);
     }
     if (chunk.tokens_used) next.tokensUsed = chunk.tokens_used;
     const mappedStatus = mapRunStatus(chunk.status);
-    next.status = transitionRunStatus(next.status, mappedStatus);
-    if (mappedStatus === 'error') {
-      next.errorMessage = typeof chunk.error === 'string' ? chunk.error : next.errorMessage;
-    }
-    if (mappedStatus === 'completed'
-        || mappedStatus === 'stopped'
-        || mappedStatus === 'error'
-        || mappedStatus === 'waiting_approval'
-        || mappedStatus === 'stopping') {
+    if (mappedStatus === 'completed') {
+      next.status = 'completed';
       next.reasoningActive = false;
+    } else if (mappedStatus === 'stopped') {
+      next.status = 'stopped';
+      next.reasoningActive = false;
+    } else if (mappedStatus === 'error') {
+      next.status = 'error';
+      next.errorMessage = typeof chunk.error === 'string' ? chunk.error : next.errorMessage;
+      next.reasoningActive = false;
+    } else if (mappedStatus === 'waiting_approval') {
+      next.status = 'waiting_approval';
+      next.reasoningActive = false;
+    } else if (mappedStatus === 'stopping') {
+      next.status = 'stopping';
+      next.reasoningActive = false;
+    } else if (mappedStatus === 'streaming' && next.status === 'waiting_approval') {
+      next.status = 'streaming';
     }
     this.streams.set(runId, next);
     this.notify(
       next.conversationId,
-      epochToken,
       next.status === 'completed'
         || next.status === 'stopped'
         || next.status === 'error'
@@ -1188,7 +871,6 @@ export class StreamManager {
 
   private createState(
     runId: string,
-    epochToken: ConnectionEpochToken,
     conversationId: string,
     controller: AbortController,
     pendingUserMessage: string | null,
@@ -1197,7 +879,6 @@ export class StreamManager {
     anchorNodeId?: string | null,
   ): StreamState {
     return {
-      epochToken,
       runId,
       status: 'streaming',
       content: '',
@@ -1230,18 +911,12 @@ export class StreamManager {
     };
   }
 
-  private restoreRunSnapshot(
-    record: RunRecord,
-    events: RunEventPayload[],
-    epochToken: ConnectionEpochToken,
-  ): string {
-    const initialRunId = record.run_id;
-    let runId = initialRunId;
+  restoreRunFromEvents(record: RunRecord, events: RunEventPayload[]): void {
+    const runId = record.run_id;
     const createdAt = Number.isFinite(record.created_at) ? record.created_at * 1000 : Date.now();
     const finishedAt = typeof record.finished_at === 'number' ? record.finished_at * 1000 : null;
     const duration = finishedAt !== null ? Math.max(0, finishedAt - createdAt) : 0;
     const initialState: StreamState = {
-      epochToken,
       runId,
       status: mapRunRecordStatus(record.status),
       content: '',
@@ -1272,37 +947,25 @@ export class StreamManager {
       eventCount: 0,
       createdAt,
     };
-    let installed = false;
-    try {
-      this.assertEpochCurrent(epochToken);
-      this.streams.set(runId, initialState);
-      installed = true;
-      this.assertEpochCurrent(epochToken);
-      this.addToConversation(record.conversation_id, runId, epochToken);
-      this.assertEpochCurrent(epochToken);
-      for (const event of orderRunEvents(events)) {
-        this.assertEpochCurrent(epochToken);
-        runId = this.applyChunk(runId, event, epochToken);
-        this.assertEpochCurrent(epochToken);
+    this.streams.set(runId, initialState);
+    this.addToConversation(record.conversation_id, runId);
+    const orderedEvents = [...events].sort((a, b) => (a.event_index ?? 0) - (b.event_index ?? 0));
+    for (const event of orderedEvents) {
+      if (event.event_type === 'tool_approval_request' || event.event_type === 'tool_approval_result') {
+        continue;
       }
-      const restored = this.streams.get(runId);
-      if (!this.ownsState(restored, epochToken)) throw new StaleConnectionEpochError();
-      const replayIsTerminal = isTerminalStreamStatus(restored.status);
-      const pendingApprovals = isTerminalRunStatus(record.status) || replayIsTerminal
-        ? {}
-        : Object.fromEntries(Object.entries(restored.pendingApprovals)
-            .filter(([, approval]) => approval.status === 'pending'));
-      const finalState: StreamState = {
+      this.applyChunk(runId, event);
+    }
+    const restored = this.streams.get(runId);
+    if (restored) {
+      this.streams.set(runId, {
         ...restored,
-        status: isTerminalRunStatus(record.status)
-          ? mapRunRecordStatus(record.status)
-          : restored.status,
-        eventCount: nextRunEventCursor(record, events),
+        status: mapRunRecordStatus(record.status),
+        eventCount: Math.max(restored.eventCount, record.event_count ?? restored.eventCount),
         duration: restored.duration || duration,
         errorMessage: restored.errorMessage ?? (typeof record.metadata?.error === 'string' ? record.metadata.error : null),
         abortController: null,
         reasoningActive: false,
-        pendingApprovals,
         createdByRunId: record.created_by_run_id ?? restored.createdByRunId ?? null,
         cancellationParentRunId: record.cancellation_parent_run_id ?? restored.cancellationParentRunId ?? null,
         summary: record.summary || restored.summary || '',
@@ -1310,118 +973,9 @@ export class StreamManager {
           ...(record.metadata || {}),
           ...(restored.metadata || {}),
         },
-      };
-      this.assertEpochCurrent(epochToken);
-      this.streams.set(runId, finalState);
-      this.assertEpochCurrent(epochToken);
-      this.notify(record.conversation_id, epochToken, true);
-      this.assertEpochCurrent(epochToken);
-      return runId;
-    } catch (error) {
-      if (installed) this.cleanupOwnedState(runId, epochToken, null, initialRunId);
-      throw error;
-    }
-  }
-
-  restoreRunFromEvents(record: RunRecord, events: RunEventPayload[]): void {
-    const epochToken = this.epochSource.capture();
-    try {
-      this.restoreRunSnapshot(record, events, epochToken);
-    } catch (error) {
-      if (!(error instanceof StaleConnectionEpochError)) throw error;
-    }
-  }
-
-  restoreAndAttachRun(
-    record: RunRecord,
-    events: RunEventPayload[],
-    epochToken: ConnectionEpochToken,
-  ): void {
-    this.assertEpochCurrent(epochToken);
-    const subscriptionKey = record.run_id;
-    let managed = this.managedSubscriptionTasks.get(subscriptionKey);
-    if (managed && !this.tokensMatch(managed.epochToken, epochToken)) {
-      managed.controller.abort();
-      if (this.managedSubscriptionTasks.get(subscriptionKey) === managed) {
-        this.managedSubscriptionTasks.delete(subscriptionKey);
-      }
-      managed = undefined;
-    }
-
-    const activeRunId = this.resolveRunIdForToken(subscriptionKey, epochToken);
-    const candidate = this.streams.get(activeRunId);
-    const activeState = this.ownsCurrentState(candidate, epochToken) ? candidate : null;
-    const activeController = activeState?.abortController
-      && !activeState.abortController.signal.aborted
-      && (this.durationTimers.has(activeRunId)
-        || managed?.controller === activeState.abortController)
-      ? activeState.abortController
-      : null;
-    if (managed && managed.controller !== activeController) {
-      managed.controller.abort();
-      if (this.managedSubscriptionTasks.get(subscriptionKey) === managed) {
-        this.managedSubscriptionTasks.delete(subscriptionKey);
-      }
-      managed = undefined;
-    }
-
-    if (activeController) {
-      const snapshotIsTerminal = isTerminalStreamStatus(restoredSnapshotStatus(record, events));
-      if (!snapshotIsTerminal) return;
-      this.removeManagedSubscriptionsForRun(activeRunId, epochToken, activeController);
-      this.cleanupOwnedState(activeRunId, epochToken, activeController, subscriptionKey);
-    }
-
-    const runId = this.restoreRunSnapshot(record, events, epochToken);
-    if (isTerminalRunStatus(record.status)) return;
-
-    const controller = new AbortController();
-    let controllerInstalled = false;
-    try {
-      this.assertEpochCurrent(epochToken);
-      const restored = this.streams.get(runId);
-      if (!this.ownsState(restored, epochToken)) throw new StaleConnectionEpochError();
-      const attachedState: StreamState = {
-        ...restored,
-        abortController: controller,
-      };
-      this.streams.set(runId, attachedState);
-      controllerInstalled = true;
-      this.assertEpochCurrent(epochToken);
-      this.notify(attachedState.conversationId, epochToken, true);
-      this.assertEpochCurrent(epochToken);
-
-      const fromEvent = nextRunEventCursor(record, events);
-      const signal = composeConnectionAbortSignal(
-        controller.signal,
-        this.epochSource.signalFor(epochToken),
-      );
-      const task = this.consume(runId, epochToken, controller, () => runsApi.attach(
-        subscriptionKey,
-        { token: epochToken, fromEvent, signal },
-      )).finally(() => {
-        if (this.managedSubscriptionTasks.get(subscriptionKey)?.task === task) {
-          this.managedSubscriptionTasks.delete(subscriptionKey);
-        }
       });
-      const subscription: ManagedRunSubscription = {
-        epochToken,
-        controller,
-        task,
-      };
-      this.managedSubscriptionTasks.set(subscriptionKey, subscription);
-      this.assertEpochCurrent(epochToken);
-    } catch (error) {
-      controller.abort();
-      this.removeManagedSubscriptionsForRun(runId, epochToken, controller);
-      this.cleanupOwnedState(
-        runId,
-        epochToken,
-        controllerInstalled ? controller : null,
-        record.run_id,
-      );
-      throw error;
     }
+    this.notify(record.conversation_id, true);
   }
 
   async startStream(
@@ -1431,12 +985,10 @@ export class StreamManager {
     requestNodeId?: string,
     anchorNodeId?: string | null,
   ): Promise<void> {
-    const epochToken = this.epochSource.capture();
     let runId = `client_${Date.now()}_${this.tempSeq++}`;
     const abortController = new AbortController();
     const state = this.createState(
       runId,
-      epochToken,
       conversationId,
       abortController,
       pendingUserMessage,
@@ -1445,23 +997,18 @@ export class StreamManager {
       anchorNodeId ?? requestNodeId ?? null,
     );
     state.taskContextMode = normalizeTaskContextMode(request.task_context_mode);
-    if (!this.epochSource.isCurrent(epochToken)) return;
     this.streams.set(runId, state);
-    this.addToConversation(conversationId, runId, epochToken);
-    this.notify(conversationId, epochToken, true);
+    this.addToConversation(conversationId, runId);
+    this.notify(conversationId, true);
     const payload = {
       ...request,
       parent_node_id: requestNodeId ?? request.parent_node_id ?? null,
       focus_new_node: request.focus_new_node ?? true,
     };
-    const signal = composeConnectionAbortSignal(
-      abortController.signal,
-      this.epochSource.signalFor(epochToken),
-    );
-    await this.consume(runId, epochToken, abortController, () => messageApi.stream(
+    await this.consume(runId, () => messageApi.stream(
       conversationId,
       payload,
-      { token: epochToken, nodeId: requestNodeId, signal },
+      { nodeId: requestNodeId, signal: abortController.signal },
     ));
   }
 
@@ -1471,13 +1018,11 @@ export class StreamManager {
     request: PlanActionStreamRequest = {},
     anchorNodeId?: string | null,
   ): Promise<void> {
-    const epochToken = this.epochSource.capture();
     const runId = `client_${Date.now()}_${this.tempSeq++}`;
     const abortController = new AbortController();
     const payload = { ...request, node_id: anchorNodeId ?? request.node_id ?? null };
     const state = this.createState(
       runId,
-      epochToken,
       conversationId,
       abortController,
       null,
@@ -1487,19 +1032,14 @@ export class StreamManager {
     );
     state.metadata = { origin: 'plan_approval', plan_id: planId };
     state.anchorUntilTargetLands = true;
-    if (!this.epochSource.isCurrent(epochToken)) return;
     this.streams.set(runId, state);
-    this.addToConversation(conversationId, runId, epochToken);
-    this.notify(conversationId, epochToken, true);
-    const signal = composeConnectionAbortSignal(
-      abortController.signal,
-      this.epochSource.signalFor(epochToken),
-    );
-    await this.consume(runId, epochToken, abortController, () => messageApi.streamPlanApproval(
+    this.addToConversation(conversationId, runId);
+    this.notify(conversationId, true);
+    await this.consume(runId, () => messageApi.streamPlanApproval(
       conversationId,
       planId,
       payload,
-      { token: epochToken, signal },
+      { signal: abortController.signal },
     ));
   }
 
@@ -1510,7 +1050,6 @@ export class StreamManager {
     request: PlanActionStreamRequest = {},
     anchorNodeId?: string | null,
   ): Promise<void> {
-    const epochToken = this.epochSource.capture();
     const runId = `client_${Date.now()}_${this.tempSeq++}`;
     const abortController = new AbortController();
     const payload: PlanAnswerStreamRequest = {
@@ -1520,7 +1059,6 @@ export class StreamManager {
     };
     const state = this.createState(
       runId,
-      epochToken,
       conversationId,
       abortController,
       null,
@@ -1530,19 +1068,14 @@ export class StreamManager {
     );
     state.metadata = { origin: 'plan_question_answer', plan_id: planId };
     state.anchorUntilTargetLands = true;
-    if (!this.epochSource.isCurrent(epochToken)) return;
     this.streams.set(runId, state);
-    this.addToConversation(conversationId, runId, epochToken);
-    this.notify(conversationId, epochToken, true);
-    const signal = composeConnectionAbortSignal(
-      abortController.signal,
-      this.epochSource.signalFor(epochToken),
-    );
-    await this.consume(runId, epochToken, abortController, () => messageApi.streamPlanAnswer(
+    this.addToConversation(conversationId, runId);
+    this.notify(conversationId, true);
+    await this.consume(runId, () => messageApi.streamPlanAnswer(
       conversationId,
       planId,
       payload,
-      { token: epochToken, signal },
+      { signal: abortController.signal },
     ));
   }
 
@@ -1552,7 +1085,6 @@ export class StreamManager {
     request: PlanRejectStreamRequest,
     anchorNodeId?: string | null,
   ): Promise<void> {
-    const epochToken = this.epochSource.capture();
     const runId = `client_${Date.now()}_${this.tempSeq++}`;
     const abortController = new AbortController();
     const payload: PlanRejectStreamRequest = {
@@ -1561,7 +1093,6 @@ export class StreamManager {
     };
     const state = this.createState(
       runId,
-      epochToken,
       conversationId,
       abortController,
       null,
@@ -1571,19 +1102,14 @@ export class StreamManager {
     );
     state.metadata = { origin: 'plan_reject', plan_id: planId };
     state.anchorUntilTargetLands = true;
-    if (!this.epochSource.isCurrent(epochToken)) return;
     this.streams.set(runId, state);
-    this.addToConversation(conversationId, runId, epochToken);
-    this.notify(conversationId, epochToken, true);
-    const signal = composeConnectionAbortSignal(
-      abortController.signal,
-      this.epochSource.signalFor(epochToken),
-    );
-    await this.consume(runId, epochToken, abortController, () => messageApi.streamPlanReject(
+    this.addToConversation(conversationId, runId);
+    this.notify(conversationId, true);
+    await this.consume(runId, () => messageApi.streamPlanReject(
       conversationId,
       planId,
       payload,
-      { token: epochToken, signal },
+      { signal: abortController.signal },
     ));
   }
 
@@ -1596,17 +1122,14 @@ export class StreamManager {
     kind = 'chat',
     options: ResumeStreamOptions = {},
   ): Promise<void> {
-    const epochToken = this.epochSource.capture();
     const existing = this.getConversationStates(conversationId)
-      .find((state) => this.ownsCurrentState(state, epochToken)
-        && ((runId && state.runId === runId) || (nodeId && state.targetNodeId === nodeId)));
+      .find((state) => (runId && state.runId === runId) || (nodeId && state.targetNodeId === nodeId));
     if (existing?.status === 'streaming' || existing?.status === 'waiting_approval') return;
     if (!runId && !nodeId) return;
     const resolvedRunId = runId || `attach_${nodeId}`;
     const abortController = new AbortController();
     const state = this.createState(
       resolvedRunId,
-      epochToken,
       conversationId,
       abortController,
       null,
@@ -1615,27 +1138,20 @@ export class StreamManager {
       anchorNodeId,
     );
     state.anchorUntilTargetLands = options.anchorUntilTargetLands ?? false;
-    if (!this.epochSource.isCurrent(epochToken)) return;
     this.streams.set(resolvedRunId, state);
-    this.addToConversation(conversationId, resolvedRunId, epochToken);
-    this.notify(conversationId, epochToken, true);
-    const signal = composeConnectionAbortSignal(
-      abortController.signal,
-      this.epochSource.signalFor(epochToken),
-    );
-    await this.consume(resolvedRunId, epochToken, abortController, () => runId
-      ? runsApi.attach(runId, { token: epochToken, fromEvent, signal })
+    this.addToConversation(conversationId, resolvedRunId);
+    this.notify(conversationId, true);
+    await this.consume(resolvedRunId, () => runId
+      ? runsApi.attach(runId, { fromEvent, signal: abortController.signal })
       : messageApi.attachStream(
           conversationId,
           nodeId as string,
-          { token: epochToken, fromEvent, signal },
+          { fromEvent, signal: abortController.signal },
         ));
   }
 
   private async consume(
     initialRunId: string,
-    epochToken: ConnectionEpochToken,
-    controller: AbortController,
     openStream: () => AsyncGenerator<any, void>,
   ): Promise<void> {
     let runId = initialRunId;
@@ -1644,25 +1160,17 @@ export class StreamManager {
     const start = Date.now();
     const timer = window.setInterval(() => {
       const state = this.streams.get(runId);
-      if (this.ownsCurrentState(state, epochToken)
-          && state.abortController === controller
-          && state.status === 'streaming') {
+      if (state?.status === 'streaming') {
         this.streams.set(runId, { ...state, duration: Date.now() - start });
-        this.notify(state.conversationId, epochToken);
+        this.notify(state.conversationId);
       }
     }, STREAM_DURATION_UPDATE_MS);
-    if (this.epochSource.isCurrent(epochToken)) {
-      this.durationTimers.set(runId, timer);
-    }
+    this.durationTimers.set(runId, timer);
 
     try {
       for await (const chunk of openStream()) {
-        if (!this.epochSource.isCurrent(epochToken)) break;
-        const ownedState = this.streams.get(runId);
-        if (!this.ownsCurrentState(ownedState, epochToken)
-            || ownedState.abortController !== controller) break;
         const applyStarted = perfNow();
-        runId = this.applyChunk(runId, chunk, epochToken);
+        runId = this.applyChunk(runId, chunk);
         recordSpan('stream_manager.apply_chunk', applyStarted, {
           run_id: runId,
           status: chunk?.status,
@@ -1674,42 +1182,26 @@ export class StreamManager {
         if (mappedStatus === 'error') finishStatus = 'error';
         else if (mappedStatus === 'stopped') finishStatus = 'stopped';
         else if (mappedStatus === 'completed') finishStatus = 'completed';
-        if (!this.ownsCurrentState(state, epochToken)
-            || state.abortController !== controller
-            || state.abortController.signal.aborted) break;
+        if (!state || state.abortController?.signal.aborted) break;
       }
       drained = true;
     } catch (err) {
       finishStatus = err instanceof Error && err.name === 'AbortError' ? 'stopped' : 'error';
       const state = this.streams.get(runId);
-      if (this.ownsCurrentState(state, epochToken)
-          && state.abortController === controller
-          && !isTerminalStreamStatus(state.status)) {
+      if (state) {
         this.streams.set(runId, {
           ...state,
           status: finishStatus === 'error' ? 'error' : 'stopped',
           errorMessage: finishStatus === 'error' && err instanceof Error ? err.message : state.errorMessage,
           reasoningActive: false,
         });
-        this.notify(state.conversationId, epochToken, true);
+        this.notify(state.conversationId, true);
       }
     } finally {
-      window.clearInterval(timer);
-      if (this.durationTimers.get(runId) === timer) {
-        this.durationTimers.delete(runId);
-      }
+      clearInterval(timer);
+      this.durationTimers.delete(runId);
       const state = this.streams.get(runId);
-      const ownsCurrent = this.ownsCurrentState(state, epochToken)
-        && state.abortController === controller;
-      if (!ownsCurrent) controller.abort();
-      if (!this.epochSource.isCurrent(epochToken)) {
-        this.cleanupOwnedState(
-          runId,
-          epochToken,
-          controller,
-          initialRunId,
-        );
-      } else if (ownsCurrent) {
+      if (state) {
         const finalStatus = state.status === 'streaming'
           ? finishStatus
           : state.status === 'stopping'
@@ -1722,7 +1214,7 @@ export class StreamManager {
           reasoningActive: false,
         };
         this.streams.set(runId, finalState);
-        this.notify(finalState.conversationId, epochToken, true);
+        this.notify(finalState.conversationId, true);
         this.notifyFinish({
           conversationId: finalState.conversationId,
           runId,
@@ -1731,7 +1223,7 @@ export class StreamManager {
           nodeId: finalState.nodeId,
           targetNodeId: finalState.targetNodeId,
           controller: finalState.abortController!,
-        }, epochToken);
+        });
         void flushPerfEvents();
       }
     }
@@ -1740,17 +1232,8 @@ export class StreamManager {
   async stopRun(runId: string): Promise<void> {
     const state = this.streams.get(runId);
     if (!state || (state.status !== 'streaming' && state.status !== 'waiting_approval' && state.status !== 'stopping')) return;
-    if (!this.epochSource.isCurrent(state.epochToken)) {
-      this.cleanupOwnedState(
-        runId,
-        state.epochToken,
-        state.abortController,
-        runId,
-      );
-      return;
-    }
     this.streams.set(runId, { ...state, status: 'stopping', reasoningActive: false });
-    this.notify(state.conversationId, state.epochToken, true);
+    this.notify(state.conversationId, true);
     const stopRequest = !runId.startsWith('client_') && !runId.startsWith('attach_')
       ? runsApi.stop(runId)
       : state.targetNodeId
@@ -1773,42 +1256,28 @@ export class StreamManager {
     for (const state of this.getConversationStates(conversationId)) {
       this.cleanupRun(state.runId);
     }
+    this.notify(conversationId);
   }
 
   cleanupRun(runId: string): void {
     const state = this.streams.get(runId);
-    if (!state) {
-      this.removeManagedSubscriptionsForRun(runId);
-      return;
-    }
-    this.removeManagedSubscriptionsForRun(runId, state.epochToken);
+    if (!state) return;
     const timer = this.durationTimers.get(runId);
-    if (timer !== undefined) window.clearInterval(timer);
+    if (timer !== undefined) clearInterval(timer);
     this.durationTimers.delete(runId);
     state.abortController?.abort();
-    this.deleteAliasesEndingAt(runId, state.epochToken);
     this.streams.delete(runId);
     const set = this.runsByConversation.get(state.conversationId);
     set?.delete(runId);
     if (set && set.size === 0) this.runsByConversation.delete(state.conversationId);
     this.conversationSnapshots.delete(state.conversationId);
-    const pending = this.pendingNotifyHandles.get(state.conversationId);
-    if (pending
-        && this.tokensMatch(pending.epochToken, state.epochToken)
-        && !this.epochSource.isCurrent(state.epochToken)) {
-      this.clearPendingNotify(state.conversationId);
-    }
-    this.notify(state.conversationId, state.epochToken, true);
+    this.notify(state.conversationId, true);
   }
 
   archiveRun(runId: string): StreamState | null {
     const resolvedRunId = this.resolveRunId(runId);
     const state = this.streams.get(resolvedRunId);
     if (!state) return null;
-    if (!this.epochSource.isCurrent(state.epochToken)) {
-      this.cleanupRun(resolvedRunId);
-      return null;
-    }
     const archived: StreamState = {
       ...state,
       runId: resolvedRunId,
@@ -1829,13 +1298,10 @@ export class StreamManager {
   }
 
   resetAll(): void {
-    for (const subscription of this.managedSubscriptionTasks.values()) {
-      subscription.controller.abort();
-    }
     for (const state of this.streams.values()) {
       state.abortController?.abort();
     }
-    for (const timer of this.durationTimers.values()) window.clearInterval(timer);
+    for (const timer of this.durationTimers.values()) clearInterval(timer);
     for (const conversationId of this.pendingNotifyHandles.keys()) {
       this.clearPendingNotify(conversationId);
     }
@@ -1843,7 +1309,6 @@ export class StreamManager {
     this.runsByConversation.clear();
     this.conversationSnapshots.clear();
     this.runAliases.clear();
-    this.managedSubscriptionTasks.clear();
     this.listeners.clear();
     this.finishListeners.clear();
     this.durationTimers.clear();

@@ -3,24 +3,14 @@ import {
   taskStateApi,
   type TaskStateSnapshot,
 } from '../api/taskState';
-import {
-  StaleConnectionEpochError,
-  connectionEpochRuntime,
-  type ConnectionEpochRuntime,
-  type ConnectionEpochToken,
-} from '../runtime/connectionEpoch';
 
 const TASK_STATE_REFRESH_BACKOFF_MS = [1000, 2000, 4000, 8000, 10000] as const;
 
 type TaskStateListener = (state: TaskStateSnapshot) => void;
 
 type TaskStateApiLike = {
-  fetch: (conversationId: string, token?: ConnectionEpochToken) => Promise<TaskStateSnapshot>;
+  fetch: (conversationId: string) => Promise<TaskStateSnapshot>;
 };
-
-type TaskStateEpochSource = Pick<ConnectionEpochRuntime, 'capture' | 'isCurrent'>;
-
-type StoreTaskState = typeof storeTaskState;
 
 type TaskStateEntry = {
   state: TaskStateSnapshot | null;
@@ -29,7 +19,6 @@ type TaskStateEntry = {
   dirty: boolean;
   timer: ReturnType<typeof setTimeout> | null;
   attempt: number;
-  ownerToken: ConnectionEpochToken | null;
 };
 
 function shouldContinueRefreshing(state: TaskStateSnapshot): boolean {
@@ -41,18 +30,8 @@ export class TaskStateCoordinator {
 
   private readonly api: TaskStateApiLike;
 
-  private readonly epochSource: TaskStateEpochSource;
-
-  private readonly storeState: StoreTaskState;
-
-  constructor(
-    api: TaskStateApiLike = taskStateApi,
-    epochSource: TaskStateEpochSource = connectionEpochRuntime,
-    storeState: StoreTaskState = storeTaskState,
-  ) {
+  constructor(api: TaskStateApiLike = taskStateApi) {
     this.api = api;
-    this.epochSource = epochSource;
-    this.storeState = storeState;
   }
 
   subscribe(conversationId: string, listener: TaskStateListener): () => void {
@@ -69,66 +48,43 @@ export class TaskStateCoordinator {
     };
   }
 
-  async refresh(
-    conversationId: string,
-    ownerToken?: ConnectionEpochToken,
-  ): Promise<TaskStateSnapshot> {
-    const token = this.resolveToken(ownerToken);
+  async refresh(conversationId: string): Promise<TaskStateSnapshot> {
     const entry = this.ensureEntry(conversationId);
     if (entry.inFlight) {
-      this.assertCurrent(token);
       entry.dirty = true;
       return entry.inFlight;
     }
 
     this.clearTimer(entry);
-    entry.ownerToken = token;
-    entry.inFlight = this.drainRefresh(conversationId, entry, token);
-    const ownedFlight = entry.inFlight;
+    entry.inFlight = this.drainRefresh(conversationId, entry);
     try {
-      return await ownedFlight;
+      return await entry.inFlight;
     } finally {
-      if (entry.inFlight === ownedFlight) {
-        entry.inFlight = null;
-        if (entry.dirty) {
-          this.refreshInBackground(conversationId, token);
-        } else {
-          this.scheduleNext(conversationId, entry, token);
-        }
+      entry.inFlight = null;
+      if (entry.dirty) {
+        void this.refresh(conversationId);
+      } else {
+        this.scheduleNext(conversationId, entry);
       }
     }
   }
 
-  async invalidate(
-    conversationId: string,
-    ownerToken?: ConnectionEpochToken,
-  ): Promise<TaskStateSnapshot> {
-    const token = this.resolveToken(ownerToken);
+  async invalidate(conversationId: string): Promise<TaskStateSnapshot> {
     const entry = this.ensureEntry(conversationId);
-    this.assertCurrent(token);
     entry.dirty = true;
     entry.attempt = 0;
     this.clearTimer(entry);
-    return this.refresh(conversationId, token);
+    return this.refresh(conversationId);
   }
 
-  apply(
-    conversationId: string,
-    state: TaskStateSnapshot,
-    ownerToken?: ConnectionEpochToken,
-  ): void {
-    const token = this.resolveToken(ownerToken);
-    this.assertCurrent(token);
-    this.storeState(conversationId, state, undefined, token);
-    this.assertCurrent(token);
+  apply(conversationId: string, state: TaskStateSnapshot): void {
+    storeTaskState(conversationId, state);
     const entry = this.ensureEntry(conversationId);
     entry.state = state;
     entry.dirty = false;
     entry.attempt = 0;
-    entry.ownerToken = token;
-    this.notify(entry, state, token);
-    this.assertCurrent(token);
-    this.scheduleNext(conversationId, entry, token);
+    this.notify(entry, state);
+    this.scheduleNext(conversationId, entry);
   }
 
   clear(conversationId: string): void {
@@ -139,31 +95,19 @@ export class TaskStateCoordinator {
     taskStateApi.clear(conversationId);
   }
 
-  private async drainRefresh(
-    conversationId: string,
-    entry: TaskStateEntry,
-    token: ConnectionEpochToken,
-  ): Promise<TaskStateSnapshot> {
+  private async drainRefresh(conversationId: string, entry: TaskStateEntry): Promise<TaskStateSnapshot> {
     let latest: TaskStateSnapshot | null = null;
     do {
-      this.assertCurrent(token);
       entry.dirty = false;
-      latest = await this.api.fetch(conversationId, token);
-      this.assertCurrent(token);
-      if (entry.ownerToken !== token) throw new StaleConnectionEpochError();
+      latest = await this.api.fetch(conversationId);
       entry.state = latest;
-      this.notify(entry, latest, token);
+      this.notify(entry, latest);
     } while (entry.dirty);
     return latest;
   }
 
-  private scheduleNext(
-    conversationId: string,
-    entry: TaskStateEntry,
-    token: ConnectionEpochToken,
-  ): void {
+  private scheduleNext(conversationId: string, entry: TaskStateEntry): void {
     this.clearTimer(entry);
-    if (!this.epochSource.isCurrent(token) || entry.ownerToken !== token) return;
     if (!entry.state || !shouldContinueRefreshing(entry.state) || entry.listeners.size === 0) {
       entry.attempt = 0;
       return;
@@ -172,19 +116,12 @@ export class TaskStateCoordinator {
     entry.attempt += 1;
     entry.timer = setTimeout(() => {
       entry.timer = null;
-      this.refreshInBackground(conversationId, token);
+      void this.refresh(conversationId);
     }, delay);
   }
 
-  private notify(
-    entry: TaskStateEntry,
-    state: TaskStateSnapshot,
-    token: ConnectionEpochToken,
-  ): void {
-    for (const listener of entry.listeners) {
-      this.assertCurrent(token);
-      listener(state);
-    }
+  private notify(entry: TaskStateEntry, state: TaskStateSnapshot): void {
+    for (const listener of entry.listeners) listener(state);
   }
 
   private ensureEntry(conversationId: string): TaskStateEntry {
@@ -197,7 +134,6 @@ export class TaskStateCoordinator {
         dirty: false,
         timer: null,
         attempt: 0,
-        ownerToken: null,
       };
       this.entries.set(conversationId, entry);
     }
@@ -208,22 +144,6 @@ export class TaskStateCoordinator {
     if (entry.timer === null) return;
     clearTimeout(entry.timer);
     entry.timer = null;
-  }
-
-  private resolveToken(ownerToken?: ConnectionEpochToken): ConnectionEpochToken {
-    const token = ownerToken ?? this.epochSource.capture();
-    this.assertCurrent(token);
-    return token;
-  }
-
-  private assertCurrent(token: ConnectionEpochToken): void {
-    if (!this.epochSource.isCurrent(token)) throw new StaleConnectionEpochError();
-  }
-
-  private refreshInBackground(conversationId: string, token: ConnectionEpochToken): void {
-    void this.refresh(conversationId, token).catch(() => {
-      // Polling is best-effort; stale and transport failures must not reject globally.
-    });
   }
 }
 

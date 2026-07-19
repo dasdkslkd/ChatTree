@@ -1,14 +1,14 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
-import { initializeFrontendBootstrap } from './runtime/frontendBootstrap'
+import { initializeProfileContext } from './runtime/profileContext'
 
 async function startFrontend(): Promise<void> {
   const root = createRoot(document.getElementById('root')!)
   try {
-    const bootstrap = initializeFrontendBootstrap()
+    const profile = initializeProfileContext()
     const { default: App } = await import('./App')
-    root.render(<StrictMode><App bootstrap={bootstrap} /></StrictMode>)
+    root.render(<StrictMode><App profile={profile} /></StrictMode>)
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Frontend binding failed'
     root.render(<main role="alert" className="startup-error">{message}</main>)

@@ -1,124 +1,97 @@
 import {
   composeConnectionAbortSignal,
-  connectionEpochRuntime,
-  StaleConnectionEpochError,
-  type ConnectionEpochRuntime,
-  type ConnectionEpochToken,
-} from '../runtime/connectionEpoch';
+  connectionScopeRuntime,
+  StaleConnectionScopeError,
+  type ConnectionScope,
+  type ConnectionScopeRuntime,
+} from '../runtime/connectionScope';
 import { serverApiUrl } from './client';
 import {
   CONNECTION_LEASE_HEADER,
   readConnectionLeaseHeader,
 } from './connectionLeaseHeader';
-import { parseModernErrorEnvelope } from './errors';
+import {
+  normalizeFetchError,
+  parseModernErrorEnvelope,
+  requireSuccessfulResponse,
+} from './errors';
 
 export type LeaseFetchConnectionRuntime = Pick<
-  ConnectionEpochRuntime,
-  'capture' | 'isCurrent' | 'signalFor' | 'invalidate'
+  ConnectionScopeRuntime,
+  'current' | 'isActive' | 'invalidate'
 >;
 
 async function cancelResponseBody(response: Response): Promise<void> {
   try {
     await response.body?.cancel();
   } catch {
-    // The transport may already have closed or cancelled the body.
+    // The transport may already have closed the body.
   }
 }
 
 async function rejectStaleResponse(
   runtime: LeaseFetchConnectionRuntime,
-  token: ConnectionEpochToken,
+  scope: ConnectionScope,
   response?: Response,
 ): Promise<never> {
-  runtime.invalidate(token);
+  runtime.invalidate(scope);
   if (response) await cancelResponseBody(response);
-  throw new StaleConnectionEpochError();
-}
-
-function requestHeaders(input: RequestInfo | URL, init: RequestInit): Headers {
-  const inherited = typeof Request !== 'undefined' && input instanceof Request
-    ? input.headers
-    : undefined;
-  const headers = new Headers(init.headers ?? inherited);
-  headers.delete(CONNECTION_LEASE_HEADER);
-  return headers;
-}
-
-function requestSignal(
-  input: RequestInfo | URL,
-  init: RequestInit,
-): AbortSignal | null | undefined {
-  if (init.signal !== undefined) return init.signal;
-  return typeof Request !== 'undefined' && input instanceof Request
-    ? input.signal
-    : undefined;
+  throw new StaleConnectionScopeError();
 }
 
 function requestUrl(input: RequestInfo | URL): RequestInfo | URL {
-  if (typeof input === 'string' && input.startsWith('/')) {
-    return serverApiUrl(input);
-  }
-  return input;
+  return typeof input === 'string' && input.startsWith('/')
+    ? serverApiUrl(input)
+    : input;
 }
 
 export async function leaseGuardedFetch(
   input: RequestInfo | URL,
   init: RequestInit = {},
-  token?: ConnectionEpochToken,
-  runtime: LeaseFetchConnectionRuntime = connectionEpochRuntime,
+  runtime: LeaseFetchConnectionRuntime = connectionScopeRuntime,
 ): Promise<Response> {
-  const owner = token ?? runtime.capture();
-  if (!runtime.isCurrent(owner)) throw new StaleConnectionEpochError();
-
-  const headers = requestHeaders(input, init);
-  headers.set(CONNECTION_LEASE_HEADER, owner.connectionLeaseId);
-  const callerSignal = requestSignal(input, init);
+  const scope = runtime.current();
+  const inherited = typeof Request !== 'undefined' && input instanceof Request
+    ? input.headers
+    : undefined;
+  const headers = new Headers(init.headers ?? inherited);
+  headers.delete(CONNECTION_LEASE_HEADER);
+  headers.set(CONNECTION_LEASE_HEADER, scope.leaseId);
+  const inheritedSignal = typeof Request !== 'undefined' && input instanceof Request
+    ? input.signal
+    : undefined;
   const signal = composeConnectionAbortSignal(
-    callerSignal,
-    runtime.signalFor(owner),
+    init.signal ?? inheritedSignal,
+    scope.signal,
   );
 
   let response: Response;
   try {
-    response = await fetch(requestUrl(input), {
-      ...init,
-      headers,
-      signal,
-    });
+    response = await fetch(requestUrl(input), { ...init, headers, signal });
   } catch (error) {
-    if (!runtime.isCurrent(owner)) throw new StaleConnectionEpochError();
-    throw error;
+    if (!runtime.isActive(scope)) throw new StaleConnectionScopeError();
+    throw normalizeFetchError(error, signal);
   }
-
-  if (!runtime.isCurrent(owner)) {
-    return rejectStaleResponse(runtime, owner, response);
+  if (!runtime.isActive(scope)) return rejectStaleResponse(runtime, scope, response);
+  if (readConnectionLeaseHeader(response.headers) !== scope.leaseId) {
+    return rejectStaleResponse(runtime, scope, response);
   }
-  if (readConnectionLeaseHeader(response.headers) !== owner.connectionLeaseId) {
-    return rejectStaleResponse(runtime, owner, response);
-  }
-
   if (response.status === 409) {
-    let envelope: ReturnType<typeof parseModernErrorEnvelope> = null;
     try {
-      const data = await response.clone().json();
-      envelope = parseModernErrorEnvelope(response.status, data);
-    } catch (error) {
-      if (!runtime.isCurrent(owner)) {
-        return rejectStaleResponse(runtime, owner, response);
+      const envelope = parseModernErrorEnvelope(
+        response.status,
+        await response.clone().json(),
+      );
+      if (envelope?.code === 'stale_connection_epoch') {
+        return rejectStaleResponse(runtime, scope, response);
       }
-      if (callerSignal?.aborted) {
+    } catch (error) {
+      if (!runtime.isActive(scope)) return rejectStaleResponse(runtime, scope, response);
+      if (signal.aborted) {
         await cancelResponseBody(response);
         throw error;
       }
-      // A non-JSON 409 remains an ordinary response when the owner is current.
-    }
-    if (!runtime.isCurrent(owner)) {
-      return rejectStaleResponse(runtime, owner, response);
-    }
-    if (envelope?.code === 'stale_connection_epoch') {
-      return rejectStaleResponse(runtime, owner, response);
     }
   }
-
-  return response;
+  return requireSuccessfulResponse(response);
 }
