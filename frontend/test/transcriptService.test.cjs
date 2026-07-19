@@ -17,7 +17,24 @@ require.extensions['.ts'] = function loadTs(module, filename) {
   module._compile(output, filename);
 };
 
-const { createTranscriptService } = require(path.join(__dirname, '../src/services/transcript.ts'));
+const clientModule = path.join(__dirname, '../src/api/client.ts');
+const transcriptModule = path.join(__dirname, '../src/services/transcript.ts');
+
+require.cache[require.resolve(clientModule)] = {
+  id: clientModule,
+  filename: clientModule,
+  loaded: true,
+  exports: {
+    apiClient: {
+      get: async () => {
+        throw new Error('unexpected default client call');
+      },
+    },
+  },
+};
+delete require.cache[require.resolve(transcriptModule)];
+
+const { createTranscriptService } = require(transcriptModule);
 
 function fakeClient(responseData) {
   const calls = [];
@@ -32,33 +49,50 @@ function fakeClient(responseData) {
   };
 }
 
-async function testFetchTranscriptCallsTranscriptRouteAndReturnsItems() {
-  const expectedItems = [{ id: 'item-1', type: 'user_message', preview: 'hello' }];
-  const { client, calls } = fakeClient({ items: expectedItems });
+async function testFetchBranchSnapshotEncodesBothIdsAndForwardsSignal() {
+  const expectedSnapshot = {
+    conversation_id: 'conv/1',
+    tip_node_id: 'node/1',
+    revision: 7,
+    items: [{ id: 'item-1', type: 'user_message', preview: 'hello' }],
+  };
+  const { client, calls } = fakeClient(expectedSnapshot);
   const service = createTranscriptService(client);
+  const controller = new AbortController();
 
-  const items = await service.fetchTranscript('conv/1', 'node-1');
+  const snapshot = await service.fetchBranchSnapshot('conv/1', 'node/1', controller.signal);
 
-  assert.deepEqual(items, expectedItems);
+  assert.deepEqual(snapshot, expectedSnapshot);
   assert.deepEqual(calls[0], {
     method: 'get',
-    url: '/conversations/conv%2F1/transcript',
-    config: { params: { node_id: 'node-1' } },
+    url: '/conversations/conv%2F1/branches/node%2F1/transcript',
+    config: { signal: controller.signal },
   });
 }
 
-async function testFetchTranscriptDefaultsMissingItemsToEmptyArray() {
-  const { client } = fakeClient({});
+async function testFetchBranchSnapshotReturnsCompleteResponseWithoutSignal() {
+  const expectedSnapshot = {
+    conversation_id: 'conv-1',
+    tip_node_id: 'node-1',
+    revision: 0,
+    items: [],
+  };
+  const { client, calls } = fakeClient(expectedSnapshot);
   const service = createTranscriptService(client);
 
-  const items = await service.fetchTranscript('conv-1');
+  const snapshot = await service.fetchBranchSnapshot('conv-1', 'node-1');
 
-  assert.deepEqual(items, []);
+  assert.deepEqual(snapshot, expectedSnapshot);
+  assert.deepEqual(calls[0], {
+    method: 'get',
+    url: '/conversations/conv-1/branches/node-1/transcript',
+    config: undefined,
+  });
 }
 
 async function main() {
-  await testFetchTranscriptCallsTranscriptRouteAndReturnsItems();
-  await testFetchTranscriptDefaultsMissingItemsToEmptyArray();
+  await testFetchBranchSnapshotEncodesBothIdsAndForwardsSignal();
+  await testFetchBranchSnapshotReturnsCompleteResponseWithoutSignal();
   console.log('transcriptService tests passed');
 }
 

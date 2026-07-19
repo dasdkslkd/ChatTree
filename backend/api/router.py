@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from backend.api.errors import ErrorEnvelope
 from backend.api.routes import (
     agents,
     capabilities,
@@ -48,6 +49,9 @@ def _build_business_router() -> APIRouter:
         router.include_router(child_router, tags=tags)
     return router
 
-api_v1_router = APIRouter(prefix="/api/v1")
+api_v1_router = APIRouter(
+    prefix="/api/v1",
+    responses={422: {"model": ErrorEnvelope}},
+)
 api_v1_router.include_router(server_routes.router, tags=["Server"])
 api_v1_router.include_router(_build_business_router())

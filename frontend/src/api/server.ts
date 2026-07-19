@@ -1,13 +1,15 @@
-import { apiClient } from './client';
+import type { AxiosInstance } from 'axios';
 
-export const EXPECTED_PROTOCOL_VERSION = 1;
+import {
+  BoundServerLeaseChangedError,
+  isCanonicalUuid,
+} from '../runtime/connectionIdentity';
+import {
+  CONNECTION_LEASE_HEADER,
+  requireMatchingConnectionLeaseHeader,
+} from './connectionLeaseHeader';
+
 const SERVER_PROBE_TIMEOUT_MS = 5000;
-
-export type HealthResponse = {
-  status: 'ok';
-  server_instance_id: string;
-  time: number;
-};
 
 export type HandshakeResponse = {
   server_instance_id: string;
@@ -18,34 +20,41 @@ export type HandshakeResponse = {
   provider_configured: boolean;
 };
 
-async function getHealth(signal?: AbortSignal): Promise<HealthResponse> {
-  const response = await apiClient.get<HealthResponse>('/health', {
-    signal,
-    timeout: SERVER_PROBE_TIMEOUT_MS,
-  });
-  return response.data;
-}
+export type LeaseGuarded<T> = Readonly<{
+  data: T;
+  connectionLeaseId: string;
+}>;
 
-async function getHandshake(signal?: AbortSignal): Promise<HandshakeResponse> {
-  const response = await apiClient.get<HandshakeResponse>('/handshake', {
-    signal,
-    timeout: SERVER_PROBE_TIMEOUT_MS,
-  });
-  return response.data;
-}
+export type ServerApi = Readonly<{
+  handshake(
+    expectedLeaseId: string,
+    signal?: AbortSignal,
+  ): Promise<LeaseGuarded<HandshakeResponse>>;
+}>;
 
-async function assertCompatible(signal?: AbortSignal): Promise<HandshakeResponse> {
-  const handshake = await getHandshake(signal);
-  if (handshake.protocol_version !== EXPECTED_PROTOCOL_VERSION) {
-    throw new Error(
-      `Unsupported ChatTree protocol version: ${handshake.protocol_version}`,
+export function createServerApi(client: AxiosInstance): ServerApi {
+  async function getGuarded<T>(
+    path: string,
+    expectedLeaseId: string,
+    signal?: AbortSignal,
+  ): Promise<LeaseGuarded<T>> {
+    if (!isCanonicalUuid(expectedLeaseId)) {
+      throw new BoundServerLeaseChangedError('Expected connection lease is invalid');
+    }
+    const response = await client.get<T>(path, {
+      signal,
+      timeout: SERVER_PROBE_TIMEOUT_MS,
+      headers: { [CONNECTION_LEASE_HEADER]: expectedLeaseId },
+    });
+    const connectionLeaseId = requireMatchingConnectionLeaseHeader(
+      response.headers,
+      expectedLeaseId,
     );
+    return { data: response.data, connectionLeaseId };
   }
-  return handshake;
-}
 
-export const serverApi = {
-  health: getHealth,
-  handshake: getHandshake,
-  assertCompatible,
-};
+  const handshake = (expectedLeaseId: string, signal?: AbortSignal) => (
+    getGuarded<HandshakeResponse>('/handshake', expectedLeaseId, signal)
+  );
+  return { handshake };
+}

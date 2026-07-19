@@ -54,6 +54,41 @@ def test_initialize_creates_database_tables(tmp_path: Path):
     assert schema_version == CURRENT_SCHEMA_VERSION
 
 
+def test_fresh_runs_schema_has_canonical_idempotency_constraints(tmp_path: Path):
+    persistence = SQLitePersistence(tmp_path)
+    persistence.initialize()
+
+    with persistence.connect() as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}
+        indexes = {
+            row["name"]: (bool(row["unique"]), bool(row["partial"]))
+            for row in conn.execute("PRAGMA index_list(runs)")
+        }
+        table_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'runs'"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO conversations (id, title, created_at, updated_at) "
+            "VALUES ('conv-idem', 'Idempotency', 1, 1)"
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO runs (
+                  id, conversation_id, kind, status, summary, event_count,
+                  created_at, updated_at, idempotency_key
+                ) VALUES ('run-invalid', 'conv-idem', 'chat', 'running', '', 0,
+                          1, 1, 'op_invalid')
+                """
+            )
+
+    assert {"idempotency_key", "request_fingerprint"} <= columns
+    assert indexes["idx_runs_idempotency_key"] == (True, True)
+    assert "CHECK" in table_sql.upper()
+    assert "idempotency_key IS NULL" in table_sql
+    assert "request_fingerprint IS NULL" in table_sql
+
+
 def test_initialize_applies_wal_and_foreign_keys(tmp_path: Path):
     persistence = SQLitePersistence(tmp_path)
     persistence.initialize()

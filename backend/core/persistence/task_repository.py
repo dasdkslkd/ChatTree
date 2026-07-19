@@ -5,6 +5,8 @@ import uuid
 from time import time
 from typing import Any, Iterable
 
+from backend.core.tasks.errors import ActiveTaskVersionConflictError
+
 from .blob_store import BlobStore
 from .content import store_text_content
 from .database import SQLitePersistence
@@ -229,7 +231,10 @@ class SQLiteTaskRepository:
         )
         expected_revision = int(binding.get("base_revision", -1))
         if expected_revision != int(task["revision"]):
-            raise RuntimeError("active task revision changed")
+            raise ActiveTaskVersionConflictError(
+                str(task["generation_id"]),
+                int(task["revision"]),
+            )
         step_row = conn.execute(
             """
             SELECT status
@@ -490,9 +495,15 @@ class SQLiteTaskRepository:
             raise KeyError(conversation_id)
         data = dict(task)
         if expected_generation and data["generation_id"] != expected_generation:
-            raise RuntimeError("active task generation changed")
+            raise ActiveTaskVersionConflictError(
+                str(data["generation_id"]),
+                int(data["revision"]),
+            )
         if expected_revision is not None and int(data["revision"]) != expected_revision:
-            raise RuntimeError("active task revision changed")
+            raise ActiveTaskVersionConflictError(
+                str(data["generation_id"]),
+                int(data["revision"]),
+            )
         return data
 
     def _ensure_no_active_binding(self, conn: sqlite3.Connection, conversation_id: str) -> None:

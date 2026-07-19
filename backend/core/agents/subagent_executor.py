@@ -4,7 +4,8 @@ import asyncio
 import json
 import logging
 from contextlib import suppress
-from typing import Any, Dict, Optional
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable, Dict, Mapping, Optional
 
 from backend.core.capabilities.registry import CapabilityRegistry
 from backend.core.chat.chat_manager import ChatManager
@@ -15,7 +16,18 @@ from backend.core.projects import filter_capability_registry_for_workspace
 from backend.core.prompts import PromptBuilder, PromptBuildRequest
 from backend.core.prompts.catalog import load_prompt_template
 from backend.core.prompts.types import RuntimePromptContext
-from backend.core.runs import RunKind, RunManager, RunStatus
+from backend.core.runs import (
+    RunIdempotency,
+    RunKind,
+    RunManager,
+    ProducerRegistry,
+    RunRecord,
+    RunStartCoordinator,
+    RunStartResult,
+    RunStartSpec,
+    RunStartValidationError,
+    RunStatus,
+)
 from backend.core.tools.exposure import ToolExposureContext
 from backend.core.tools.security.permissions import normalize_permission_mode
 from backend.core.tools.task_tools import filter_task_tools_for_context
@@ -29,6 +41,16 @@ DEFAULT_MAX_TOOL_ROUNDS = 500
 DEFAULT_MAX_TURNS = 1000
 
 
+@dataclass(frozen=True)
+class _PreparedSubagentStart:
+    agent_name: str
+    workspace: Optional[Dict[str, Any]]
+    context_mode: str
+    delivery_policy: str
+    summary: str
+    metadata: Dict[str, Any]
+
+
 class SubagentExecutor:
     def __init__(
         self,
@@ -37,13 +59,18 @@ class SubagentExecutor:
         run_manager: RunManager,
         capability_registry: CapabilityRegistry,
         mailbox: Any = None,
+        run_start_coordinator: RunStartCoordinator | None = None,
+        producer_registry: ProducerRegistry | None = None,
     ) -> None:
         self.chat_manager = chat_manager
         self.run_manager = run_manager
         self.capability_registry = capability_registry
         self.mailbox = mailbox
+        self.run_start_coordinator = run_start_coordinator
+        self.producer_registry = producer_registry or ProducerRegistry.for_run_manager(
+            run_manager
+        )
         self._controllers: dict[str, StreamController] = {}
-        self._tasks: dict[str, asyncio.Task] = {}
 
     async def start(
         self,
@@ -63,39 +90,278 @@ class SubagentExecutor:
         delivery_policy: str = "auto",
         context_mode: str = "fresh",
         task_binding: Optional[Dict[str, Any]] = None,
+        runtime_metadata: Mapping[str, Any] | None = None,
     ) -> Dict[str, Any]:
-        delivery_policy = AgentDeliveryPolicy(str(delivery_policy or "auto")).value
-        scope_workspace = self._scope_workspace(conversation_id, workspace)
-        agent = self._scoped_registry(scope_workspace).get_agent(agent_name)
-        if agent is None:
-            raise KeyError(agent_name)
-        self._validate_schema(agent.input_schema, input_data, "input_schema")
-
-        summary = f"{agent.name}: {str(input_data)[:80]}"
+        prepared = self._prepare_start(
+                conversation_id=conversation_id,
+                agent_name=agent_name,
+                input_data=input_data,
+                provider_id=provider_id,
+                model_id=model_id,
+                permission_mode=permission_mode,
+                workspace=workspace,
+                delegated_task=delegated_task,
+                original_slash_input=original_slash_input,
+                delivery_policy=delivery_policy,
+                context_mode=context_mode,
+                runtime_metadata=runtime_metadata,
+            )
         run = await self.run_manager.create_run(
+                conversation_id=conversation_id,
+                kind=RunKind.SUBAGENT,
+                anchor_node_id=parent_node_id,
+                created_by_run_id=created_by_run_id,
+                cancellation_parent_run_id=cancellation_parent_run_id,
+                summary=prepared.summary,
+                metadata=prepared.metadata,
+                task_binding=task_binding,
+            )
+        try:
+            self._schedule_existing_locked(
+                run=run,
+                conversation_id=conversation_id,
+                agent_name=prepared.agent_name,
+                input_data=input_data,
+                parent_node_id=parent_node_id,
+                created_by_run_id=created_by_run_id,
+                cancellation_parent_run_id=cancellation_parent_run_id,
+                provider_id=provider_id,
+                model_id=model_id,
+                permission_mode=permission_mode,
+                workspace=prepared.workspace,
+                context_mode=prepared.context_mode,
+            )
+        except BaseException:
+            try:
+                await self.producer_registry.terminalize(
+                    run.run_id,
+                    RunStatus.INTERRUPTED,
+                    "producer scheduling failed",
+                )
+            except BaseException:
+                logger.exception(
+                    "failed to terminalize unscheduled subagent run %s",
+                    run.run_id,
+                )
+            raise
+        return run.to_dict()
+
+    async def start_idempotent(
+        self,
+        *,
+        conversation_id: str,
+        agent_name: str,
+        input_data: Any,
+        idempotency: RunIdempotency,
+        request_id: str,
+        parent_node_id: Optional[str] = None,
+        created_by_run_id: Optional[str] = None,
+        cancellation_parent_run_id: Optional[str] = None,
+        provider_id: Optional[str] = None,
+        model_id: Optional[str] = None,
+        permission_mode: Optional[str] = None,
+        workspace: Optional[Dict[str, Any]] = None,
+        delegated_task: Any = None,
+        original_slash_input: Optional[str] = None,
+        delivery_policy: str = "auto",
+        context_mode: str = "fresh",
+        task_binding: Optional[Dict[str, Any]] = None,
+        winner_anchor_factory: Callable[[RunRecord], Awaitable[str | None]] | None = None,
+        runtime_metadata: Mapping[str, Any] | None = None,
+    ) -> RunStartResult:
+        coordinator = self.run_start_coordinator
+        if coordinator is not None:
+            replay = await coordinator.replay_existing(idempotency)
+            if replay is not None:
+                return replay
+        try:
+            prepared = self._prepare_start(
+                conversation_id=conversation_id,
+                agent_name=agent_name,
+                input_data=input_data,
+                provider_id=provider_id,
+                model_id=model_id,
+                permission_mode=permission_mode,
+                workspace=workspace,
+                delegated_task=delegated_task,
+                original_slash_input=original_slash_input,
+                delivery_policy=delivery_policy,
+                context_mode=context_mode,
+                runtime_metadata=runtime_metadata,
+            )
+        except Exception:
+            if coordinator is not None:
+                replay = await coordinator.replay_existing(idempotency)
+                if replay is not None:
+                    return replay
+            raise
+        if coordinator is None:
+            raise RuntimeError("run start coordinator is not configured")
+
+        spec = RunStartSpec(
             conversation_id=conversation_id,
             kind=RunKind.SUBAGENT,
             anchor_node_id=parent_node_id,
             created_by_run_id=created_by_run_id,
             cancellation_parent_run_id=cancellation_parent_run_id,
-            summary=summary,
-            metadata={
-                "agent_name": agent.name,
-                "provider_id": provider_id or agent.provider_id,
-                "model_id": model_id or agent.model_id or agent.model,
-                "permission_mode": permission_mode or agent.permission_mode,
-                "delegated_task": delegated_task if delegated_task is not None else input_data,
-                "original_slash_input": original_slash_input,
-                "delivery_policy": delivery_policy,
-                "context_mode": context_mode if context_mode in {"fresh", "fork"} else "fresh",
-            },
+            summary=prepared.summary,
+            metadata=prepared.metadata,
             task_binding=task_binding,
+            idempotency=idempotency,
+            request_id=request_id,
         )
+
+        async def bootstrap(run: RunRecord) -> asyncio.Task[Any]:
+            scheduled_run = run
+            effective_parent_node_id = run.anchor_node_id
+            if winner_anchor_factory is not None:
+                winner_anchor_node_id = await winner_anchor_factory(run)
+                if (
+                    winner_anchor_node_id is not None
+                    and winner_anchor_node_id != run.anchor_node_id
+                ):
+                    scheduled_run = await self.run_manager.bind_anchor_node(
+                        run.run_id,
+                        winner_anchor_node_id,
+                    )
+                    effective_parent_node_id = winner_anchor_node_id
+            return await self.schedule_existing(
+                run=scheduled_run,
+                conversation_id=conversation_id,
+                agent_name=prepared.agent_name,
+                input_data=input_data,
+                parent_node_id=effective_parent_node_id,
+                created_by_run_id=created_by_run_id,
+                cancellation_parent_run_id=cancellation_parent_run_id,
+                provider_id=provider_id,
+                model_id=model_id,
+                permission_mode=permission_mode,
+                workspace=prepared.workspace,
+                context_mode=prepared.context_mode,
+            )
+
+        return await coordinator.start(spec, bootstrap)
+
+    def _prepare_start(
+        self,
+        *,
+        conversation_id: str,
+        agent_name: str,
+        input_data: Any,
+        provider_id: Optional[str],
+        model_id: Optional[str],
+        permission_mode: Optional[str],
+        workspace: Optional[Dict[str, Any]],
+        delegated_task: Any,
+        original_slash_input: Optional[str],
+        delivery_policy: str,
+        context_mode: str,
+        runtime_metadata: Mapping[str, Any] | None,
+    ) -> _PreparedSubagentStart:
+        normalized_delivery = AgentDeliveryPolicy(
+            str(delivery_policy or "auto")
+        ).value
+        normalized_context = context_mode if context_mode in {"fresh", "fork"} else "fresh"
         try:
-            await self._register_task_notification(run.run_id, agent_name=agent.name)
-        except Exception:
-            logger.exception("Failed to register subagent notification for %s", run.run_id)
-        task = asyncio.create_task(self._produce(
+            scope_workspace = self._scope_workspace(conversation_id, workspace)
+            agent = self._scoped_registry(scope_workspace).get_agent(agent_name)
+        except ValueError as exc:
+            raise RunStartValidationError(str(exc)) from exc
+        if agent is None:
+            raise KeyError(agent_name)
+        try:
+            self._validate_schema(agent.input_schema, input_data, "input_schema")
+        except ValueError as exc:
+            raise RunStartValidationError(str(exc)) from exc
+
+        metadata = {
+            "agent_name": agent.name,
+            "provider_id": provider_id or agent.provider_id,
+            "model_id": model_id or agent.model_id or agent.model,
+            "permission_mode": permission_mode or agent.permission_mode,
+            "delegated_task": delegated_task if delegated_task is not None else input_data,
+            "original_slash_input": original_slash_input,
+            "delivery_policy": normalized_delivery,
+            "context_mode": normalized_context,
+        }
+        if runtime_metadata is not None:
+            metadata.update(dict(runtime_metadata))
+        return _PreparedSubagentStart(
+            agent_name=agent.name,
+            workspace=scope_workspace,
+            context_mode=normalized_context,
+            delivery_policy=normalized_delivery,
+            summary=f"{agent.name}: {self._render_input_summary(input_data, limit=80)}",
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _render_input_summary(input_data: Any, *, limit: int) -> str:
+        if isinstance(input_data, str):
+            rendered = input_data
+        else:
+            try:
+                rendered = json.dumps(
+                    input_data,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+            except (TypeError, ValueError) as exc:
+                raise RunStartValidationError(
+                    "agent input must contain finite JSON values"
+                ) from exc
+        return rendered[:limit]
+
+    async def schedule_existing(
+        self,
+        *,
+        run: RunRecord,
+        conversation_id: str,
+        agent_name: str,
+        input_data: Any,
+        parent_node_id: Optional[str],
+        created_by_run_id: Optional[str],
+        cancellation_parent_run_id: Optional[str],
+        provider_id: Optional[str],
+        model_id: Optional[str],
+        permission_mode: Optional[str],
+        workspace: Optional[Dict[str, Any]],
+        context_mode: str,
+    ) -> asyncio.Task[Any]:
+        return self._schedule_existing_locked(
+                run=run,
+                conversation_id=conversation_id,
+                agent_name=agent_name,
+                input_data=input_data,
+                parent_node_id=parent_node_id,
+                created_by_run_id=created_by_run_id,
+                cancellation_parent_run_id=cancellation_parent_run_id,
+                provider_id=provider_id,
+                model_id=model_id,
+                permission_mode=permission_mode,
+                workspace=workspace,
+                context_mode=context_mode,
+            )
+
+    def _schedule_existing_locked(
+        self,
+        *,
+        run: RunRecord,
+        conversation_id: str,
+        agent_name: str,
+        input_data: Any,
+        parent_node_id: Optional[str],
+        created_by_run_id: Optional[str],
+        cancellation_parent_run_id: Optional[str],
+        provider_id: Optional[str],
+        model_id: Optional[str],
+        permission_mode: Optional[str],
+        workspace: Optional[Dict[str, Any]],
+        context_mode: str,
+    ) -> asyncio.Task[Any]:
+        producer_coro = self._produce(
             run_id=run.run_id,
             conversation_id=conversation_id,
             agent_name=agent_name,
@@ -106,11 +372,31 @@ class SubagentExecutor:
             provider_id=provider_id,
             model_id=model_id,
             permission_mode=permission_mode,
-            workspace=scope_workspace,
+            workspace=workspace,
             context_mode=context_mode,
-        ))
-        self._tasks[run.run_id] = task
-        return run.to_dict()
+        )
+        task = self.producer_registry.create(
+            run.run_id,
+            producer_coro,
+            name=f"subagent-producer:{run.run_id}",
+        )
+
+        notification_coro = self._register_task_notification(
+            run.run_id,
+            agent_name=agent_name,
+        )
+        try:
+            self.producer_registry.create_background(
+                notification_coro,
+                name=f"subagent-notification:{run.run_id}",
+            )
+        except Exception:
+            notification_coro.close()
+            logger.exception(
+                "Failed to schedule subagent notification for %s",
+                run.run_id,
+            )
+        return task
 
     async def _register_task_notification(self, run_id: str, *, agent_name: str) -> None:
         run = self.run_manager.get_run(run_id)
@@ -141,17 +427,21 @@ class SubagentExecutor:
         )
 
     async def stop(self, run_id: str) -> bool:
-        await self.run_manager.request_stop(run_id)
+        failures: list[BaseException] = []
+        try:
+            await self.run_manager.request_stop(run_id)
+        except BaseException as exc:
+            failures.append(exc)
         controller = self._controllers.get(run_id)
         if controller:
-            await controller.stop()
-        task = self._tasks.get(run_id)
-        if task and not task.done():
-            task.cancel()
-            return True
-        if controller:
-            return True
-        return False
+            try:
+                await controller.stop()
+            except BaseException as exc:
+                failures.append(exc)
+        stopped = self.producer_registry.cancel(run_id) or controller is not None
+        if failures:
+            raise failures[0]
+        return stopped
 
     async def _produce(
         self,
@@ -242,24 +532,23 @@ class SubagentExecutor:
             await self.run_manager.append_event(run_id, notification_payload)
         finally:
             self._controllers.pop(run_id, None)
-            self._tasks.pop(run_id, None)
             await self.run_manager.finish_run(run_id, final_status, final_error)
             if notification_payload and final_status in {
-                RunStatus.COMPLETED,
-                RunStatus.FAILED,
-                RunStatus.CANCELLED,
-            }:
+                    RunStatus.COMPLETED,
+                    RunStatus.FAILED,
+                    RunStatus.CANCELLED,
+                }:
                 source_status = {
-                    RunStatus.COMPLETED: "completed",
-                    RunStatus.FAILED: "failed",
-                    RunStatus.CANCELLED: "cancelled",
+                        RunStatus.COMPLETED: "completed",
+                        RunStatus.FAILED: "failed",
+                        RunStatus.CANCELLED: "cancelled",
                 }[final_status]
                 try:
                     await self._publish_task_notification(
-                        run_id,
-                        source_status,
-                        notification_payload.get("content") or notification_payload.get("error") or "",
-                        event_payload=notification_payload,
+                            run_id,
+                            source_status,
+                            notification_payload.get("content") or notification_payload.get("error") or "",
+                            event_payload=notification_payload,
                     )
                 except Exception:
                     logger.exception("Failed to publish subagent notification for %s", run_id)
@@ -446,7 +735,10 @@ class SubagentExecutor:
                             "agent_name": agent_name,
                             "delivery_policy": run_metadata.get("delivery_policy"),
                             "task_context_mode": "detached",
-                            "task_summary": str(input_data)[:160],
+                            "task_summary": self._render_input_summary(
+                                input_data,
+                                limit=160,
+                            ),
                             "suppress_task_notification": agent_name == "workflow-worker"
                             or run_metadata.get("delivery_policy") == "silent",
                         },

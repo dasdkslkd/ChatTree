@@ -6,9 +6,20 @@ import type {
   MultiAgentMode,
 } from '../types/conversation';
 import { conversationApi, type TreeData } from '../api/conversation';
+import { ChatTreeApiError } from '../api/errors';
 import type { Message } from '../types/message';
 import { messageApi } from '../api/message';
 import { useModelStore } from './modelStore';
+import { getProfileContext } from '../runtime/profileContext';
+import {
+  CONVERSATION_STORAGE_KEY,
+  profileStorageKey,
+} from '../runtime/profileStorage';
+
+const conversationStorageKey = profileStorageKey(
+  getProfileContext().profileId,
+  CONVERSATION_STORAGE_KEY,
+);
 
 interface ConversationState {
   conversations: Conversation[];
@@ -30,6 +41,13 @@ interface ConversationActions {
   selectConversation: (id: string) => Promise<void>;
   deleteConversation: (id: string) => Promise<void>;
   updateConversationTitle: (id: string, title: string) => Promise<void>;
+  updateConversationModel: (
+    id: string,
+    modelId: string,
+    providerId: string,
+    reasoningEffort?: string | null,
+    thinkingEnabled?: boolean | null,
+  ) => Promise<boolean>;
   updateMultiAgentMode: (id: string, mode: MultiAgentMode) => Promise<void>;
   clearCurrentConversation: () => void;
   switchNode: (nodeId: string) => Promise<void>;
@@ -44,12 +62,10 @@ interface ConversationActions {
   patchAssistantMessageFromStream: (conversationId: string, message: Message, pendingUserContent?: string | null) => boolean;
 }
 
-function isActiveRunDeleteConflict(err: any): boolean {
-  const detail = err?.response?.data?.detail;
-  return err?.response?.status === 409
-    && detail != null
-    && Array.isArray(detail.active_run_ids)
-    && detail.active_run_ids.length > 0;
+function isActiveRunDeleteConflict(err: unknown): boolean {
+  return err instanceof ChatTreeApiError
+    && err.status === 409
+    && err.code === 'active_runs_present';
 }
 
 async function deleteNodeAllowingActiveRuns(conversationId: string, nodeId: string) {
@@ -116,10 +132,22 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
                   ms.currentReasoningEffort,
                   ms.currentThinkingEnabled,
                 );
-                conversation.model_id = ms.currentModel;
-                conversation.provider_id = ms.currentProvider;
-                conversation.reasoning_effort = ms.currentReasoningEffort;
-                conversation.thinking_enabled = ms.currentThinkingEnabled;
+                const updatedConversation = {
+                  ...conversation,
+                  model_id: ms.currentModel,
+                  provider_id: ms.currentProvider,
+                  reasoning_effort: ms.currentReasoningEffort,
+                  thinking_enabled: ms.currentThinkingEnabled,
+                };
+                set((state) => ({
+                  conversations: state.conversations.map((item) => (
+                    item.id === conversation.id ? { ...item, ...updatedConversation } : item
+                  )),
+                  currentConversation: state.currentConversation?.id === conversation.id
+                    ? { ...state.currentConversation, ...updatedConversation }
+                    : state.currentConversation,
+                }));
+                return updatedConversation;
               } catch (_) {
                 // 持久化失败不阻断创建；store 选择仍保留，显示不会串
               }
@@ -204,6 +232,45 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
           } catch (err: any) {
             set({ error: err.message });
           }
+        },
+
+        updateConversationModel: async (
+          id,
+          modelId,
+          providerId,
+          reasoningEffort,
+          thinkingEnabled,
+        ) => {
+          await conversationApi.updateModel(
+            id,
+            modelId,
+            providerId,
+            reasoningEffort,
+            thinkingEnabled,
+          );
+          set((state) => ({
+            conversations: state.conversations.map((conversation) => (
+              conversation.id === id
+                ? {
+                  ...conversation,
+                  model_id: modelId,
+                  provider_id: providerId,
+                  reasoning_effort: reasoningEffort,
+                  thinking_enabled: thinkingEnabled,
+                }
+                : conversation
+            )),
+            currentConversation: state.currentConversation?.id === id
+              ? {
+                ...state.currentConversation,
+                model_id: modelId,
+                provider_id: providerId,
+                reasoning_effort: reasoningEffort,
+                thinking_enabled: thinkingEnabled,
+              }
+              : state.currentConversation,
+          }));
+          return true;
         },
 
         updateMultiAgentMode: async (id, mode) => {
@@ -460,7 +527,7 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
 
       }),
       {
-        name: 'conversation-storage',
+        name: conversationStorageKey,
         partialize: (state) => ({ conversations: state.conversations }),
         onRehydrateStorage: () => (state) => {
           if (state) state.currentConversation = null;

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
 
 SCHEMA_V1_SQL = """
@@ -387,5 +387,47 @@ CREATE INDEX IF NOT EXISTS idx_transcript_conversation_visibility
   ON transcript_items(conversation_id, visibility, local_order);
 """
 
-# Keep the public current-schema name separate from the immutable v1 migration DDL.
-SCHEMA_SQL = SCHEMA_V1_SQL
+# Keep the historical migration input immutable while deriving the canonical schema.
+_RUNS_V1_COLUMNS_TAIL = """  finished_at INTEGER,
+  UNIQUE(conversation_id, id),"""
+_RUNS_V2_COLUMNS_TAIL = """  finished_at INTEGER,
+  idempotency_key TEXT,
+  request_fingerprint TEXT,
+  UNIQUE(conversation_id, id),"""
+_RUNS_V1_TAIL = """  FOREIGN KEY (conversation_id, target_node_id)
+    REFERENCES nodes(conversation_id, id)
+);"""
+_RUNS_V2_TAIL = """  FOREIGN KEY (conversation_id, target_node_id)
+    REFERENCES nodes(conversation_id, id),
+  CHECK (
+    (idempotency_key IS NULL AND request_fingerprint IS NULL)
+    OR
+    (idempotency_key IS NOT NULL AND request_fingerprint IS NOT NULL)
+  )
+);"""
+_RUNS_FIRST_INDEX_V1 = """CREATE INDEX IF NOT EXISTS idx_runs_conversation_status
+  ON runs(conversation_id, status, updated_at);"""
+_RUNS_FIRST_INDEX_V2 = """CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_idempotency_key
+  ON runs(idempotency_key)
+  WHERE idempotency_key IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_runs_conversation_status
+  ON runs(conversation_id, status, updated_at);"""
+
+if SCHEMA_V1_SQL.count(_RUNS_V1_COLUMNS_TAIL) != 1:
+    raise RuntimeError("SCHEMA_V1_SQL runs columns changed unexpectedly")
+if SCHEMA_V1_SQL.count(_RUNS_V1_TAIL) != 1:
+    raise RuntimeError("SCHEMA_V1_SQL runs definition changed unexpectedly")
+if SCHEMA_V1_SQL.count(_RUNS_FIRST_INDEX_V1) != 1:
+    raise RuntimeError("SCHEMA_V1_SQL runs indexes changed unexpectedly")
+
+SCHEMA_SQL = SCHEMA_V1_SQL.replace(
+    _RUNS_V1_COLUMNS_TAIL,
+    _RUNS_V2_COLUMNS_TAIL,
+).replace(
+    _RUNS_V1_TAIL,
+    _RUNS_V2_TAIL,
+).replace(
+    _RUNS_FIRST_INDEX_V1,
+    _RUNS_FIRST_INDEX_V2,
+)

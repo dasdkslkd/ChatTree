@@ -70,13 +70,16 @@ import {
   PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, ArrowLeft, Bell,
 } from 'lucide-react';
 import { conversationApi } from '../api/conversation';
-import { serverApiUrl } from '../api/client';
 import { configApi } from '../api/config';
 import { messageApi, type ToolResultSlice } from '../api/message';
 import { runsApi } from '../api/runs';
 import { taskStateApi, type TaskNotificationRecord, type TaskStateSnapshot } from '../api/taskState';
 import { plansService } from '../services/plans';
 import { transcriptService } from '../services/transcript';
+import {
+  createTranscriptRequestCoordinator,
+  type TranscriptRequestCoordinator,
+} from '../services/transcriptRequestCoordinator';
 import { taskStateCoordinator } from '../services/taskStateCoordinator';
 import {
   ConversationSyncCoordinator,
@@ -105,6 +108,19 @@ import type { ProjectCapabilityConfig } from '../types/model';
 import { useConversationStore } from '../store/conversationStore';
 import { useModelStore } from '../store/modelStore';
 import { useNavigationStore } from '../store/navigationStore';
+import { getProfileContext } from '../runtime/profileContext';
+import {
+  ImportAssetMutationOwner,
+  ImportAssetMutationQueue,
+  ImportAssetPreviewCache,
+} from '../runtime/importAssetPreview';
+import {
+  LEFT_SIDEBAR_STORAGE_KEY,
+  MANUAL_PROJECTS_STORAGE_KEY,
+  PROJECT_ORDER_STORAGE_KEY,
+  RIGHT_PANEL_STORAGE_KEY,
+  profileStorageKey,
+} from '../runtime/profileStorage';
 import { useRunManager } from '../hooks/useRunManager';
 import { streamManager, type StreamState } from '../services/streamManager';
 import { slashRegistry } from '../services/slashRegistry';
@@ -177,9 +193,7 @@ import {
 } from '../utils/projectGroups';
 import {
   LEFT_SIDEBAR_WIDTH,
-  LEFT_SIDEBAR_WIDTH_STORAGE_KEY,
   RIGHT_PANEL_WIDTH,
-  RIGHT_PANEL_WIDTH_STORAGE_KEY,
   getKeyboardResizedSidebarWidth,
   getPointerResizedSidebarWidth,
   readStoredSidebarWidth,
@@ -195,8 +209,11 @@ import {
 import { createTaskPanelItem } from '../utils/activeTask';
 
 const MarkdownContent = lazy(() => import('../components/MarkdownContent'));
-const MANUAL_PROJECTS_STORAGE_KEY = 'chattree.manualProjectWorkspaces';
-const PROJECT_ORDER_STORAGE_KEY = 'chattree.projectOrder';
+const PROFILE_ID = getProfileContext().profileId;
+const PROFILE_MANUAL_PROJECTS_STORAGE_KEY = profileStorageKey(PROFILE_ID, MANUAL_PROJECTS_STORAGE_KEY);
+const PROFILE_PROJECT_ORDER_STORAGE_KEY = profileStorageKey(PROFILE_ID, PROJECT_ORDER_STORAGE_KEY);
+const PROFILE_LEFT_SIDEBAR_STORAGE_KEY = profileStorageKey(PROFILE_ID, LEFT_SIDEBAR_STORAGE_KEY);
+const PROFILE_RIGHT_PANEL_STORAGE_KEY = profileStorageKey(PROFILE_ID, RIGHT_PANEL_STORAGE_KEY);
 const PLAN_MODE_TOOL_NAMES = new Set(['plan', 'enter_plan_mode', 'update_plan', 'exit_plan_mode', 'ask_user_question']);
 const TASK_TOOL_NAMES = new Set(['create_task', 'set_task_step', 'cancel_task']);
 const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled', 'interrupted', 'stopped']);
@@ -213,26 +230,11 @@ function getBrowserStorage(): Storage | null {
   return typeof window === 'undefined' ? null : window.localStorage;
 }
 
-function getTranscriptRequestKey(conversationId: string, nodeId?: string | null): string {
-  return `${conversationId}:${nodeId || ''}`;
-}
-
 function getCurrentVisibleTranscriptTip(): { conversationId: string; tipNodeId: string } | null {
   const state = useConversationStore.getState();
   const conversationId = state.currentConversation?.id;
   const tipNodeId = state.currentNodeId || state.currentConversation?.current_node_id || null;
   return conversationId && tipNodeId ? { conversationId, tipNodeId } : null;
-}
-
-function getCurrentVisibleTranscriptKey(): string | null {
-  const visible = getCurrentVisibleTranscriptTip();
-  return visible ? getTranscriptRequestKey(visible.conversationId, visible.tipNodeId) : null;
-}
-
-function isAbortError(error: unknown): boolean {
-  if (!error || typeof error !== 'object') return false;
-  const candidate = error as { name?: string; code?: string };
-  return candidate.name === 'AbortError' || candidate.code === 'ERR_CANCELED';
 }
 
 function getToolCallName(toolCall: unknown): string | null {
@@ -278,11 +280,6 @@ function getTaskToolSignal(runs: StreamState[]): string {
 function getTranscriptItemNodeId(item: TranscriptItem): string | null {
   return item.node_id || item.anchor_node_id || null;
 }
-
-type TranscriptSnapshotRequest = {
-  controller: AbortController;
-  promise: Promise<void>;
-};
 
 type TranscriptScrollTarget = {
   messageId?: string | null;
@@ -400,7 +397,7 @@ SyntaxHighlighter.registerLanguage('yaml', yaml);
 
 function loadManualProjectWorkspaces(): WorkspaceContext[] {
   try {
-    const raw = window.localStorage.getItem(MANUAL_PROJECTS_STORAGE_KEY);
+    const raw = window.localStorage.getItem(PROFILE_MANUAL_PROJECTS_STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -413,12 +410,12 @@ function loadManualProjectWorkspaces(): WorkspaceContext[] {
 }
 
 function saveManualProjectWorkspaces(workspaces: WorkspaceContext[]) {
-  window.localStorage.setItem(MANUAL_PROJECTS_STORAGE_KEY, JSON.stringify(workspaces));
+  window.localStorage.setItem(PROFILE_MANUAL_PROJECTS_STORAGE_KEY, JSON.stringify(workspaces));
 }
 
 function loadProjectOrder(): string[] {
   try {
-    const raw = window.localStorage.getItem(PROJECT_ORDER_STORAGE_KEY);
+    const raw = window.localStorage.getItem(PROFILE_PROJECT_ORDER_STORAGE_KEY);
     const parsed = raw ? JSON.parse(raw) : [];
     return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
   } catch (_) {
@@ -427,7 +424,7 @@ function loadProjectOrder(): string[] {
 }
 
 function saveProjectOrder(order: string[]) {
-  window.localStorage.setItem(PROJECT_ORDER_STORAGE_KEY, JSON.stringify(order));
+  window.localStorage.setItem(PROFILE_PROJECT_ORDER_STORAGE_KEY, JSON.stringify(order));
 }
 
 function mergeManualProjectWorkspace(workspaces: WorkspaceContext[], workspace: WorkspaceContext): WorkspaceContext[] {
@@ -1115,10 +1112,10 @@ export default function ChatPage() {
   const [rightPanelView, setRightPanelView] = useState<'outline' | 'side' | 'tasks'>('outline');
   const [selectedSideRunId, setSelectedSideRunId] = useState<string | null>(null);
   const [leftSidebarWidth, setLeftSidebarWidth] = useState(() =>
-    readStoredSidebarWidth(getBrowserStorage(), LEFT_SIDEBAR_WIDTH_STORAGE_KEY, LEFT_SIDEBAR_WIDTH),
+    readStoredSidebarWidth(getBrowserStorage(), PROFILE_LEFT_SIDEBAR_STORAGE_KEY, LEFT_SIDEBAR_WIDTH),
   );
   const [rightPanelWidth, setRightPanelWidth] = useState(() =>
-    readStoredSidebarWidth(getBrowserStorage(), RIGHT_PANEL_WIDTH_STORAGE_KEY, RIGHT_PANEL_WIDTH),
+    readStoredSidebarWidth(getBrowserStorage(), PROFILE_RIGHT_PANEL_STORAGE_KEY, RIGHT_PANEL_WIDTH),
   );
   const [resizingSidebar, setResizingSidebar] = useState<SidebarResizeSide | null>(null);
   const [scrollPositions, setScrollPositions] = useState<Record<string, number>>({});
@@ -1164,6 +1161,24 @@ export default function ChatPage() {
   const [projectFolderLabel, setProjectFolderLabel] = useState('');
   const [projectFolderError, setProjectFolderError] = useState('');
   const [projectFolderSubmitting, setProjectFolderSubmitting] = useState(false);
+  const [, refreshImportPreviews] = useState(0);
+  const importAssetPreviewCacheRef = useRef<ImportAssetPreviewCache | null>(null);
+  const importAssetMutationOwnerRef = useRef<ImportAssetMutationOwner | null>(null);
+  const importAssetMutationQueueRef = useRef<ImportAssetMutationQueue | null>(null);
+  if (!importAssetPreviewCacheRef.current) {
+    importAssetPreviewCacheRef.current = new ImportAssetPreviewCache(
+      conversationApi.fetchImportBlob,
+    );
+  }
+  if (!importAssetMutationOwnerRef.current) {
+    importAssetMutationOwnerRef.current = new ImportAssetMutationOwner();
+  }
+  if (!importAssetMutationQueueRef.current) {
+    importAssetMutationQueueRef.current = new ImportAssetMutationQueue();
+  }
+  const importAssetPreviewCache = importAssetPreviewCacheRef.current;
+  const importAssetMutationOwner = importAssetMutationOwnerRef.current;
+  const importAssetMutationQueue = importAssetMutationQueueRef.current;
   const scrollTimeoutRef = useRef<number | null>(null);
   const historyRef = useRef<HTMLDivElement>(null);
   const conversationSearchInputRef = useRef<HTMLInputElement>(null);
@@ -1176,7 +1191,27 @@ export default function ChatPage() {
   const programmaticScrollRef = useRef(false);
   const queuedMessagesRef = useRef<QueuedMessage[]>([]);
   const toolPermissionDraftRef = useRef<ToolPermissionDraft>(toolPermissionDraft);
-  const transcriptRequestsRef = useRef<Map<string, TranscriptSnapshotRequest>>(new Map());
+  const transcriptRequestCoordinatorRef = useRef<TranscriptRequestCoordinator | null>(null);
+  if (!transcriptRequestCoordinatorRef.current) {
+    transcriptRequestCoordinatorRef.current = createTranscriptRequestCoordinator({
+      fetchSnapshot: transcriptService.fetchBranchSnapshot,
+      getVisibleTarget: getCurrentVisibleTranscriptTip,
+      onLoadingChange: setTranscriptLoading,
+      onSnapshot: (snapshot) => setTranscriptItems(
+        normalizeTranscriptItems(snapshot.items || []),
+      ),
+      onErrorChange: (error) => setTranscriptError(
+        error ? '对话 transcript 刷新失败，已保留当前内容' : null,
+      ),
+    });
+  }
+
+  useEffect(
+    () => importAssetPreviewCache.subscribe(
+      () => refreshImportPreviews((revision) => revision + 1),
+    ),
+    [importAssetPreviewCache],
+  );
 
   const beginSidebarResize = useCallback((
     event: ReactPointerEvent<HTMLDivElement>,
@@ -1189,14 +1224,14 @@ export default function ChatPage() {
           side,
           startClientX: event.clientX,
           startWidth: leftSidebarWidth,
-          storageKey: LEFT_SIDEBAR_WIDTH_STORAGE_KEY,
+          storageKey: PROFILE_LEFT_SIDEBAR_STORAGE_KEY,
           config: LEFT_SIDEBAR_WIDTH,
         }
       : {
           side,
           startClientX: event.clientX,
           startWidth: rightPanelWidth,
-          storageKey: RIGHT_PANEL_WIDTH_STORAGE_KEY,
+          storageKey: PROFILE_RIGHT_PANEL_STORAGE_KEY,
           config: RIGHT_PANEL_WIDTH,
         };
 
@@ -1218,7 +1253,7 @@ export default function ChatPage() {
       const nextWidth = getKeyboardResizedSidebarWidth(side, event.key, leftSidebarWidth, LEFT_SIDEBAR_WIDTH);
       setLeftSidebarWidth(writeStoredSidebarWidth(
         getBrowserStorage(),
-        LEFT_SIDEBAR_WIDTH_STORAGE_KEY,
+        PROFILE_LEFT_SIDEBAR_STORAGE_KEY,
         nextWidth,
         LEFT_SIDEBAR_WIDTH,
       ));
@@ -1228,7 +1263,7 @@ export default function ChatPage() {
     const nextWidth = getKeyboardResizedSidebarWidth(side, event.key, rightPanelWidth, RIGHT_PANEL_WIDTH);
     setRightPanelWidth(writeStoredSidebarWidth(
       getBrowserStorage(),
-      RIGHT_PANEL_WIDTH_STORAGE_KEY,
+      PROFILE_RIGHT_PANEL_STORAGE_KEY,
       nextWidth,
       RIGHT_PANEL_WIDTH,
     ));
@@ -1339,6 +1374,22 @@ export default function ChatPage() {
     clearCurrentConversation, updateConversationTitle, refreshMessages, refreshBranches, patchAssistantMessageFromStream,
   } = useConversationStore();
 
+  useEffect(() => {
+    setPreviewImage(null);
+    return () => {
+      importAssetMutationOwner.clear();
+      importAssetPreviewCache.clear();
+    };
+  }, [currentConversation?.id, importAssetMutationOwner, importAssetPreviewCache]);
+
+  useEffect(() => {
+    const conversationId = currentConversation?.id;
+    if (!conversationId) return;
+    for (const { filename } of attachedImageRefs) {
+      void importAssetPreviewCache.load(conversationId, filename).catch(() => {});
+    }
+  }, [attachedImageRefs, currentConversation?.id, importAssetPreviewCache]);
+
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
   const [renameConversationId, setRenameConversationId] = useState<string | null>(null);
   const [renameTitle, setRenameTitle] = useState('');
@@ -1405,62 +1456,16 @@ export default function ChatPage() {
     tipNodeId?: string | null,
   ) => {
     if (!conversationId || !tipNodeId) {
+      transcriptRequestCoordinatorRef.current?.cancelActive();
       setTranscriptItems([]);
       setTranscriptError(null);
       setTranscriptLoading(false);
       return;
     }
-
-    const requestKey = getTranscriptRequestKey(conversationId, tipNodeId);
-    const existing = transcriptRequestsRef.current.get(requestKey);
-    if (existing) {
-      if (requestKey === getCurrentVisibleTranscriptKey()) {
-        setTranscriptLoading(true);
-      }
-      return existing.promise;
-    }
-
-    for (const [key, request] of transcriptRequestsRef.current) {
-      if (key !== requestKey) {
-        request.controller.abort();
-        transcriptRequestsRef.current.delete(key);
-      }
-    }
-
-    const controller = new AbortController();
-    const isCurrentVisibleRequest = () => requestKey === getCurrentVisibleTranscriptKey();
-    if (isCurrentVisibleRequest()) {
-      setTranscriptLoading(true);
-      setTranscriptError(null);
-    }
-
-    const promise = transcriptService.fetchBranchSnapshot(conversationId, tipNodeId, controller.signal)
-      .then((snapshot) => {
-        if (controller.signal.aborted) return;
-        if (transcriptRequestsRef.current.get(requestKey)?.controller !== controller) return;
-        if (!isCurrentVisibleRequest()) return;
-        if (snapshot.conversation_id !== conversationId || snapshot.tip_node_id !== tipNodeId) return;
-        setTranscriptItems(normalizeTranscriptItems(snapshot.items || []));
-        setTranscriptError(null);
-      })
-      .catch((error) => {
-        if (controller.signal.aborted || isAbortError(error)) return;
-        if (transcriptRequestsRef.current.get(requestKey)?.controller !== controller) return;
-        if (isCurrentVisibleRequest()) {
-          setTranscriptError('对话 transcript 刷新失败，已保留当前内容');
-        }
-      })
-      .finally(() => {
-        if (transcriptRequestsRef.current.get(requestKey)?.controller === controller) {
-          transcriptRequestsRef.current.delete(requestKey);
-          if (isCurrentVisibleRequest()) {
-            setTranscriptLoading(false);
-          }
-        }
-      });
-
-    transcriptRequestsRef.current.set(requestKey, { controller, promise });
-    return promise;
+    return transcriptRequestCoordinatorRef.current?.request({
+      conversationId,
+      tipNodeId,
+    });
   }, []);
   const refreshVisibleTranscriptSnapshot = useCallback(async (conversationId?: string | null) => {
     const visible = getCurrentVisibleTranscriptTip();
@@ -1990,12 +1995,10 @@ export default function ChatPage() {
     void loadTranscriptSnapshot(conversationId, selectedBranchTipId);
   }, [currentConversation?.id, loadTranscriptSnapshot, selectedBranchTipId]);
 
-  useEffect(() => () => {
-    for (const request of transcriptRequestsRef.current.values()) {
-      request.controller.abort();
-    }
-    transcriptRequestsRef.current.clear();
-  }, []);
+  useEffect(
+    () => () => transcriptRequestCoordinatorRef.current?.cancelActive(),
+    [],
+  );
 
   useEffect(() => {
     if (selectedSideRunId && !selectedSideRunItem) {
@@ -3163,9 +3166,18 @@ export default function ChatPage() {
       convId = newConv.id;
     }
     for (const file of files) {
+      const mutation = importAssetMutationOwner.begin(convId, file.name);
       try {
-        const res = await conversationApi.uploadImport(convId, file);
+        const res = await importAssetMutationQueue.run(
+          convId,
+          file.name,
+          () => conversationApi.uploadImport(convId, file),
+        );
+        const claimed = importAssetMutationOwner.claim(mutation, convId, res.filename);
+        if (!claimed || !importAssetMutationOwner.owns(claimed)) continue;
+        if (useConversationStore.getState().currentConversation?.id !== convId) continue;
         if (res.kind === 'image') {
+          importAssetPreviewCache.installFile(convId, res.filename, file);
           setAttachedImageRefs(prev => prev.some(ref => ref.filename === res.filename)
             ? prev
             : [...prev, { filename: res.filename, mime_type: res.mime_type ?? file.type }]);
@@ -3180,26 +3192,39 @@ export default function ChatPage() {
 
   const handleRemoveFile = async (filename: string) => {
     if (!currentConversation) return;
+    const conversationId = currentConversation.id;
+    const mutation = importAssetMutationOwner.begin(conversationId, filename);
+    importAssetPreviewCache.remove(conversationId, filename);
     const isReferencedByHistory = messages.some((message) => messageReferencesAttachment(message, filename));
     const isProtectedEditAttachment = editProtectedAttachmentNames.includes(filename);
     try {
       if (!isReferencedByHistory && !isProtectedEditAttachment) {
-        await conversationApi.deleteImport(currentConversation.id, filename);
+        await importAssetMutationQueue.run(
+          conversationId,
+          filename,
+          () => conversationApi.deleteImport(conversationId, filename),
+        );
       }
     } catch (_) {}
+    if (!importAssetMutationOwner.owns(mutation)
+        || useConversationStore.getState().currentConversation?.id !== conversationId) return;
     setAttachedFiles(prev => prev.filter(f => f !== filename));
     setAttachedImageRefs(prev => prev.filter(ref => ref.filename !== filename));
     setEditProtectedAttachmentNames(prev => prev.filter(name => name !== filename));
   };
 
-  const getImportAssetUrl = (filename: string, conversationId = currentConversation?.id) => {
+  const getImportAssetPreviewUrl = (filename: string, conversationId = currentConversation?.id) => {
     if (!conversationId) return '';
-    return serverApiUrl(`/conversations/${conversationId}/imports/${encodeURIComponent(filename)}`);
+    return importAssetPreviewCache.peek(conversationId, filename) ?? '';
   };
 
-  const handlePreviewImage = (filename: string) => {
-    const url = getImportAssetUrl(filename);
+  const handlePreviewImage = async (filename: string) => {
+    const conversationId = currentConversation?.id;
+    if (!conversationId) return;
+    const url = getImportAssetPreviewUrl(filename, conversationId)
+      || await importAssetPreviewCache.load(conversationId, filename);
     if (!url) return;
+    if (useConversationStore.getState().currentConversation?.id !== conversationId) return;
     setPreviewImage({ name: filename, url });
   };
 
@@ -4164,7 +4189,7 @@ export default function ChatPage() {
                     attachedFiles={attachedFiles}
                     attachedImages={attachedImageRefs.map(ref => ({
                       filename: ref.filename,
-                      url: getImportAssetUrl(ref.filename),
+                      url: getImportAssetPreviewUrl(ref.filename),
                     }))}
                     onFilesPicked={handleFilesPicked}
                     onRemoveFile={handleRemoveFile}
@@ -4232,7 +4257,7 @@ export default function ChatPage() {
                   attachedFiles={attachedFiles}
                   attachedImages={attachedImageRefs.map(ref => ({
                     filename: ref.filename,
-                    url: getImportAssetUrl(ref.filename),
+                    url: getImportAssetPreviewUrl(ref.filename),
                   }))}
                   onFilesPicked={handleFilesPicked}
                   onRemoveFile={handleRemoveFile}

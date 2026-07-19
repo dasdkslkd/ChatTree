@@ -41,7 +41,7 @@ function testCollectsPendingApprovalsFromMainDetachedAndChildRuns() {
         approval_chat: {
           id: 'approval_chat',
           status: 'pending',
-          tool_name: 'read_file',
+          tool_name: 'read',
           arguments_preview: '{"path":"frontend/src/pages/MainPage.tsx"}',
         },
       },
@@ -54,7 +54,7 @@ function testCollectsPendingApprovalsFromMainDetachedAndChildRuns() {
         approval_workflow: {
           id: 'approval_workflow',
           status: 'pending',
-          tool_name: 'run_command',
+          tool_name: 'shell',
           arguments_preview: '{"command":"npm run build"}',
         },
       },
@@ -64,11 +64,11 @@ function testCollectsPendingApprovalsFromMainDetachedAndChildRuns() {
       kind: 'subagent',
       pendingUserMessage: '/fork inspect approvals',
       pendingApprovals: {
-        approval_done: { id: 'approval_done', status: 'approved', tool_name: 'read_file' },
+        approval_done: { id: 'approval_done', status: 'approved', tool_name: 'read' },
         approval_fork: {
           id: 'approval_fork',
           status: 'pending',
-          tool_name: 'run_command',
+          tool_name: 'shell',
           arguments_preview: '{"command":"node frontend/test/slashRuntime.test.cjs"}',
         },
       },
@@ -80,8 +80,8 @@ function testCollectsPendingApprovalsFromMainDetachedAndChildRuns() {
         approval_child: {
           id: 'approval_child',
           status: 'pending',
-          tool_name: 'write_file',
-          arguments_preview: '{"path":"tmp/out.txt","content":"ok"}',
+          tool_name: 'edit',
+          arguments_preview: '{"path":"tmp/out.txt","operation":"create","content":"ok"}',
         },
       },
     }),
@@ -95,6 +95,7 @@ function testCollectsPendingApprovalsFromMainDetachedAndChildRuns() {
   ]);
   assert.equal(prompts[1].runLabel, 'workflow');
   assert.equal(prompts[0].sourceLabel, '主对话');
+  assert.equal(prompts[0].toolSummary, '读取 frontend/src/pages/MainPage.tsx');
   assert.equal(prompts[1].sourceLabel, 'Workflow');
   assert.equal(prompts[1].sourceSummary, '/workflow release-check');
   assert.equal(prompts[1].toolSummary, '运行 npm run build');
@@ -102,6 +103,7 @@ function testCollectsPendingApprovalsFromMainDetachedAndChildRuns() {
   assert.equal(prompts[2].sourceLabel, 'Subagent');
   assert.equal(prompts[3].sourceLabel, 'Workflow 子任务');
   assert.equal(prompts[3].sourceSummary, 'workflow_step · run-child');
+  assert.equal(prompts[3].toolSummary, '写入 tmp/out.txt · 2 字符');
 }
 
 function testDeduplicatesApprovalsWhenRunsAppearInMultipleSurfaces() {
@@ -113,7 +115,7 @@ function testDeduplicatesApprovalsWhenRunsAppearInMultipleSurfaces() {
       approval_shared: {
         id: 'approval_shared',
         status: 'pending',
-        tool_name: 'run_command',
+        tool_name: 'shell',
         arguments_preview: '{"command":"echo shared"}',
       },
     },
@@ -129,7 +131,7 @@ function testDeduplicatesApprovalsWhenRunsAppearInMultipleSurfaces() {
         approval_shared: {
           id: 'approval_shared',
           status: 'pending',
-          tool_name: 'read_file',
+          tool_name: 'read',
         },
       },
     }),
@@ -150,7 +152,7 @@ function testFiltersToServerConfirmedPendingApprovals() {
         stale_approval: {
           id: 'stale_approval',
           status: 'pending',
-          tool_name: 'run_command',
+          tool_name: 'shell',
         },
       },
     }),
@@ -161,7 +163,7 @@ function testFiltersToServerConfirmedPendingApprovals() {
         live_approval: {
           id: 'live_approval',
           status: 'pending',
-          tool_name: 'run_command',
+          tool_name: 'shell',
         },
       },
     }),
@@ -170,8 +172,32 @@ function testFiltersToServerConfirmedPendingApprovals() {
   assert.deepEqual(prompts.map((item) => item.approval.id), ['live_approval']);
 }
 
+function testUsesUnknownToolFallbackWithoutLosingSourceContext() {
+  const prompts = collectPendingToolApprovalPrompts([
+    run({
+      runId: 'run-unknown',
+      kind: 'side_question',
+      pendingUserMessage: '/ask inspect custom tool',
+      pendingApprovals: {
+        approval_unknown: {
+          id: 'approval_unknown',
+          status: 'pending',
+          tool_name: 'custom_probe',
+          arguments_preview: '{"opaque":true}',
+        },
+      },
+    }),
+  ]);
+
+  assert.equal(prompts.length, 1);
+  assert.equal(prompts[0].sourceLabel, '侧边提问');
+  assert.equal(prompts[0].sourceSummary, '/ask inspect custom tool');
+  assert.equal(prompts[0].toolSummary, '调用 custom_probe');
+}
+
 testCollectsPendingApprovalsFromMainDetachedAndChildRuns();
 testDeduplicatesApprovalsWhenRunsAppearInMultipleSurfaces();
 testFiltersToServerConfirmedPendingApprovals();
+testUsesUnknownToolFallbackWithoutLosingSourceContext();
 
 console.log('toolApprovals tests passed');

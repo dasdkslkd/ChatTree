@@ -1,18 +1,26 @@
 from __future__ import annotations
 
-from typing import Any, AsyncIterator, Dict, Optional
+import asyncio
+import logging
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from backend.api.dependencies import get_chat_manager, get_plan_ledger, get_run_manager
+from backend.api.dependencies import (
+    get_chat_manager,
+    get_plan_ledger,
+    get_producer_registry,
+    get_run_manager,
+)
 from backend.api.routes.messages import _subscribe_sse, build_stream_chunk_data
 from backend.core.chat.chat_manager import ChatManager
 from backend.core.plans import PlanLedger, PlanNotFoundError, PlanStatus
-from backend.core.runs import RunKind, RunManager, RunStatus
+from backend.core.runs import ProducerRegistry, RunKind, RunManager, RunStatus
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class ApprovePlanRequest(BaseModel):
@@ -191,7 +199,7 @@ async def answer_plan_question(
     return {**plan.to_dict(), "next_permission_mode": "plan"}
 
 
-async def _plan_action_stream(
+async def _start_plan_action(
     *,
     conversation_id: str,
     plan_id: str,
@@ -200,9 +208,10 @@ async def _plan_action_stream(
     message_subtype: str,
     chat_manager: ChatManager,
     run_manager: RunManager,
+    producer_registry: ProducerRegistry,
     plan_ledger: PlanLedger,
     tool_call_id: str,
-) -> AsyncIterator[str]:
+) -> str:
     is_approval = message_subtype == "plan_approval_response"
     is_rejection = message_subtype == "plan_rejection_response"
     current_plan = await plan_ledger.get_active_or_awaiting(conversation_id)
@@ -299,6 +308,10 @@ async def _plan_action_stream(
                     final_error = chunk_data.get("error")
                 elif chunk_data.get("status") == "stopped":
                     final_status = RunStatus.CANCELLED
+        except asyncio.CancelledError:
+            final_status = RunStatus.CANCELLED
+            final_error = "plan continuation producer cancelled"
+            raise
         except Exception as exc:
             final_status = RunStatus.FAILED
             final_error = str(exc)
@@ -314,10 +327,38 @@ async def _plan_action_stream(
         finally:
             await run_manager.finish_run(run.run_id, final_status, final_error)
 
-    import asyncio
-    asyncio.create_task(produce())
-    async for event in _subscribe_sse(run_manager, run.run_id, 0):
-        yield event
+    try:
+        producer_registry.create(
+            run.run_id,
+            produce(),
+            name=f"plan-continuation:{run.run_id}",
+        )
+    except BaseException as exc:
+        try:
+            await producer_registry.terminalize(
+                run.run_id,
+                RunStatus.INTERRUPTED,
+                f"plan continuation scheduling failed: {exc}",
+            )
+        except BaseException:
+            logger.exception(
+                "failed to terminalize unscheduled plan continuation %s",
+                run.run_id,
+            )
+        raise
+    return run.run_id
+
+
+def _attach_plan_run(run_manager: RunManager, run_id: str) -> StreamingResponse:
+    return StreamingResponse(
+        _subscribe_sse(run_manager, run_id, 0),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/conversations/{conversation_id}/plans/{plan_id}/approve/stream")
@@ -328,6 +369,7 @@ async def approve_plan_stream(
     request: Optional[PlanActionStreamRequest] = Body(None),
     chat_manager: ChatManager = Depends(get_chat_manager),
     run_manager: RunManager = Depends(get_run_manager),
+    producer_registry: ProducerRegistry = Depends(get_producer_registry),
     plan_ledger: PlanLedger = Depends(get_plan_ledger),
 ):
     await _restore_plan_snapshot_if_available(request_context, conversation_id)
@@ -340,25 +382,19 @@ async def approve_plan_stream(
         tool_call_attr="exit_tool_call_id",
         missing_detail="plan has no exit_plan_mode tool_call_id",
     )
-    return StreamingResponse(
-        _plan_action_stream(
-            conversation_id=conversation_id,
-            plan_id=plan_id,
-            request=stream_request,
-            content="Plan approved.",
-            message_subtype="plan_approval_response",
-            chat_manager=chat_manager,
-            run_manager=run_manager,
-            plan_ledger=plan_ledger,
-            tool_call_id=tool_call_id,
-        ),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+    run_id = await _start_plan_action(
+        conversation_id=conversation_id,
+        plan_id=plan_id,
+        request=stream_request,
+        content="Plan approved.",
+        message_subtype="plan_approval_response",
+        chat_manager=chat_manager,
+        run_manager=run_manager,
+        producer_registry=producer_registry,
+        plan_ledger=plan_ledger,
+        tool_call_id=tool_call_id,
     )
+    return _attach_plan_run(run_manager, run_id)
 
 
 @router.post("/conversations/{conversation_id}/plans/{plan_id}/reject/stream")
@@ -369,6 +405,7 @@ async def reject_plan_stream(
     request: Optional[PlanRejectStreamRequest] = Body(None),
     chat_manager: ChatManager = Depends(get_chat_manager),
     run_manager: RunManager = Depends(get_run_manager),
+    producer_registry: ProducerRegistry = Depends(get_producer_registry),
     plan_ledger: PlanLedger = Depends(get_plan_ledger),
 ):
     await _restore_plan_snapshot_if_available(request_context, conversation_id)
@@ -382,25 +419,19 @@ async def reject_plan_stream(
         missing_detail="plan has no exit_plan_mode tool_call_id",
     )
     feedback = stream_request.feedback or ""
-    return StreamingResponse(
-        _plan_action_stream(
-            conversation_id=conversation_id,
-            plan_id=plan_id,
-            request=stream_request,
-            content=feedback,
-            message_subtype="plan_rejection_response",
-            chat_manager=chat_manager,
-            run_manager=run_manager,
-            plan_ledger=plan_ledger,
-            tool_call_id=tool_call_id,
-        ),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+    run_id = await _start_plan_action(
+        conversation_id=conversation_id,
+        plan_id=plan_id,
+        request=stream_request,
+        content=feedback,
+        message_subtype="plan_rejection_response",
+        chat_manager=chat_manager,
+        run_manager=run_manager,
+        producer_registry=producer_registry,
+        plan_ledger=plan_ledger,
+        tool_call_id=tool_call_id,
     )
+    return _attach_plan_run(run_manager, run_id)
 
 
 @router.post("/conversations/{conversation_id}/plans/{plan_id}/answer/stream")
@@ -411,6 +442,7 @@ async def answer_plan_question_stream(
     request: PlanAnswerStreamRequest,
     chat_manager: ChatManager = Depends(get_chat_manager),
     run_manager: RunManager = Depends(get_run_manager),
+    producer_registry: ProducerRegistry = Depends(get_producer_registry),
     plan_ledger: PlanLedger = Depends(get_plan_ledger),
 ):
     await _restore_plan_snapshot_if_available(request_context, conversation_id)
@@ -422,22 +454,16 @@ async def answer_plan_question_stream(
         tool_call_attr="question_tool_call_id",
         missing_detail="plan has no ask_user_question tool_call_id",
     )
-    return StreamingResponse(
-        _plan_action_stream(
-            conversation_id=conversation_id,
-            plan_id=plan_id,
-            request=request,
-            content=request.answer,
-            message_subtype="plan_question_response",
-            chat_manager=chat_manager,
-            run_manager=run_manager,
-            plan_ledger=plan_ledger,
-            tool_call_id=tool_call_id,
-        ),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+    run_id = await _start_plan_action(
+        conversation_id=conversation_id,
+        plan_id=plan_id,
+        request=request,
+        content=request.answer,
+        message_subtype="plan_question_response",
+        chat_manager=chat_manager,
+        run_manager=run_manager,
+        producer_registry=producer_registry,
+        plan_ledger=plan_ledger,
+        tool_call_id=tool_call_id,
     )
+    return _attach_plan_run(run_manager, run_id)

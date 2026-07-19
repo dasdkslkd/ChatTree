@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import os
+import threading
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -15,6 +16,11 @@ if sys.platform == "win32":
 
 # ---------- 导入路由 ----------
 from backend.api.router import api_v1_router
+from backend.api.errors import (
+    RequestBoundaryMiddleware,
+    error_response,
+    install_error_handlers,
+)
 
 # ---------- 导入核心 ----------
 from backend.core.chat.chat_manager import ChatManager
@@ -25,7 +31,7 @@ from backend.core.capabilities.bootstrap import (
 from backend.core.model.model_manager import ModelManager
 from backend.core.config.config import Config, cfg
 from backend.core.agents import AgentMailbox, AgentRuntime, SubagentExecutor
-from backend.core.runs import RunManager
+from backend.core.runs import ProducerRegistry, RunManager, RunStartCoordinator
 from backend.core.plans import PlanLedger
 from backend.core.persistence import (
     ChatRepository,
@@ -52,22 +58,19 @@ from backend.core.tools.tool_manager import ToolManager
 from backend.core.storage.tool_result_storage import ToolResultStorage
 from backend.core.command_runtime import CommandExecutor
 from backend.core.perf import configure_profiler, get_profiler, load_perf_config
-from backend.core.server import SERVER_VERSION, ServerHomeLock, ServerIdentityStore
+from backend.core.server import (
+    SERVER_VERSION,
+    MutationAdmission,
+    MutationAdmissionClosed,
+    ServerHomeLock,
+    ServerIdentityStore,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_SERVER_PORT = 8001
+SERVER_ALLOWED_ORIGINS = ("http://localhost:5173",)
+SERVER_ALLOWED_ORIGIN_PATTERN = r"http://(localhost|127\.0\.0\.1):\d+"
 logger = logging.getLogger(__name__)
-
-
-def uvicorn_reload_options() -> dict:
-    """限制开发热重载范围，避免工具工作区文件变化重启后端。"""
-    return {
-        "reload_dirs": [str(PROJECT_ROOT / "backend")],
-        "reload_includes": ["*.py"],
-        "reload_excludes": [
-            "**/__pycache__/**",
-        ],
-    }
 
 
 def uvicorn_server_options(
@@ -89,24 +92,42 @@ def uvicorn_server_options(
 
 
 def run_server(environ: Mapping[str, str] | None = None) -> None:
-    uvicorn.run(
-        "main:app",
-        reload=True,
-        workers=1,
-        **uvicorn_reload_options(),
-        **uvicorn_server_options(environ),
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app,
+            workers=1,
+            **uvicorn_server_options(environ),
+        )
     )
+    request_shutdown = lambda: setattr(server, "should_exit", True)
+    app.state.request_shutdown = request_shutdown
+    try:
+        server.run()
+    finally:
+        if getattr(app.state, "request_shutdown", None) is request_shutdown:
+            app.state.request_shutdown = None
+        if getattr(app.state, "server_home_lock", None) is not None:
+            _hold_process_for_retained_home_lock()
+
+
+def _hold_process_for_retained_home_lock() -> None:
+    logger.critical(
+        "Server cleanup is incomplete; retaining the process and Home lock"
+    )
+    threading.Event().wait()
 
 
 app = FastAPI(
     title="AI 对话树后端",
     version=SERVER_VERSION,
 )
+app.state.mutation_admission = MutationAdmission()
+app.state.request_shutdown = None
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
-    allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",
+    allow_origins=SERVER_ALLOWED_ORIGINS,
+    allow_origin_regex=SERVER_ALLOWED_ORIGIN_PATTERN,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -131,18 +152,89 @@ async def performance_middleware(request: Request, call_next):
     )
     return response
 
+
+@app.middleware("http")
+async def mutation_admission_middleware(request: Request, call_next):
+    if (
+        request.method not in {"POST", "PUT", "PATCH", "DELETE"}
+        or request.url.path == "/api/v1/server/shutdown"
+    ):
+        return await call_next(request)
+    admission = getattr(request.app.state, "mutation_admission", None)
+    if not isinstance(admission, MutationAdmission):
+        return await call_next(request)
+    try:
+        async with admission.admit():
+            return await call_next(request)
+    except MutationAdmissionClosed:
+        return error_response(
+            request,
+            status_code=503,
+            code="server_shutting_down",
+            message="Server is shutting down",
+            retryable=True,
+        )
+
+
+install_error_handlers(app)
+app.add_middleware(
+    RequestBoundaryMiddleware,
+    allowed_origins=SERVER_ALLOWED_ORIGINS,
+    allowed_origin_pattern=SERVER_ALLOWED_ORIGIN_PATTERN,
+)
+
 # ---------- 挂载管理器 ----------
+def _drain_report_error(
+    state_name: str,
+    report: object,
+) -> RuntimeError | None:
+    if report is None:
+        return None
+    if state_name in {
+        "run_start_coordinator",
+        "producer_registry",
+        "command_executor",
+    }:
+        exhausted = bool(report)
+    else:
+        exhausted = False
+    if not exhausted:
+        return None
+    return RuntimeError(f"{state_name} drain incomplete: {report!r}")
+
+
 async def _close_server_resources() -> list[BaseException]:
     errors: list[BaseException] = []
-    for state_name in ("run_manager", "tool_manager"):
+    for state_name in (
+        "run_start_coordinator",
+        "command_executor",
+        "producer_registry",
+        "run_manager",
+        "tool_manager",
+    ):
+        if state_name == "command_executor":
+            registry = getattr(app.state, "producer_registry", None)
+            begin_close = getattr(registry, "begin_close", None)
+            if callable(begin_close):
+                try:
+                    begin_close()
+                except BaseException as exc:
+                    errors.append(exc)
+                    break
         resource = getattr(app.state, state_name, None)
         if resource is None:
+            setattr(app.state, state_name, None)
             continue
         try:
-            await resource.close()
+            report = await resource.close()
+            drain_error = _drain_report_error(state_name, report)
+            if drain_error is not None:
+                errors.append(drain_error)
+                break
         except BaseException as exc:
             errors.append(exc)
-        finally:
+            break
+        else:
             if getattr(app.state, state_name, None) is resource:
                 setattr(app.state, state_name, None)
     return errors
@@ -190,11 +282,16 @@ async def _initialize_server() -> None:
     approval_manager = ApprovalManager()
     run_manager = RunManager(repository=run_repository)
     app.state.run_manager = run_manager
+    producer_registry = ProducerRegistry.for_run_manager(run_manager)
+    app.state.producer_registry = producer_registry
+    run_start_coordinator = RunStartCoordinator(run_manager, producer_registry)
+    app.state.run_start_coordinator = run_start_coordinator
     plan_ledger = PlanLedger(repository=plan_repository)
     task_service = ActiveTaskService(repository=task_repository)
     run_manager.task_service = task_service
     task_service.run_manager = run_manager
     command_executor = CommandExecutor(run_manager, task_service=task_service)
+    app.state.command_executor = command_executor
     tool_manager.command_executor = command_executor
     agent_mailbox = AgentMailbox()
     run_manager.agent_mailbox = agent_mailbox
@@ -223,11 +320,15 @@ async def _initialize_server() -> None:
         run_manager=run_manager,
         capability_registry=capability_registry,
         mailbox=agent_mailbox,
+        run_start_coordinator=run_start_coordinator,
+        producer_registry=producer_registry,
     )
     workflow_manager = WorkflowManager(
         run_manager=run_manager,
         subagent_executor=subagent_executor,
         mailbox=agent_mailbox,
+        run_start_coordinator=run_start_coordinator,
+        producer_registry=producer_registry,
     )
     agent_runtime = AgentRuntime(
         run_manager=run_manager,
@@ -242,6 +343,7 @@ async def _initialize_server() -> None:
         repository=task_notification_repository,
         run_manager=run_manager,
         chat_manager=chat_manager,
+        producer_registry=producer_registry,
     )
     run_manager.notification_service = task_notification_service
     run_manager.add_finish_listener(task_notification_service.handle_run_finished)
@@ -272,6 +374,8 @@ async def _initialize_server() -> None:
     app.state.tool_manager = tool_manager
     app.state.approval_manager = approval_manager
     app.state.run_manager = run_manager
+    app.state.producer_registry = producer_registry
+    app.state.run_start_coordinator = run_start_coordinator
     app.state.plan_ledger = plan_ledger
     app.state.task_service = task_service
     app.state.command_executor = command_executor
@@ -289,14 +393,21 @@ async def startup_event() -> None:
     home_lock = ServerHomeLock()
     home_lock.acquire()
     app.state.server_home_lock = home_lock
+    app.state.mutation_admission = MutationAdmission()
+    app.state.run_start_coordinator = None
+    app.state.producer_registry = None
+    app.state.command_executor = None
+    app.state.workflow_manager = None
+    app.state.subagent_executor = None
     app.state.run_manager = None
     app.state.tool_manager = None
     try:
         await _initialize_server()
     except BaseException:
-        try:
-            _log_cleanup_errors(await _close_server_resources())
-        finally:
+        cleanup_errors = await _close_server_resources()
+        if cleanup_errors:
+            _log_cleanup_errors(cleanup_errors)
+        else:
             home_lock.release()
             if getattr(app.state, "server_home_lock", None) is home_lock:
                 app.state.server_home_lock = None
@@ -305,18 +416,15 @@ async def startup_event() -> None:
 
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
-    cleanup_errors: list[BaseException] = []
-    try:
-        cleanup_errors = await _close_server_resources()
-    finally:
-        home_lock = getattr(app.state, "server_home_lock", None)
-        if home_lock:
-            home_lock.release()
-            if getattr(app.state, "server_home_lock", None) is home_lock:
-                app.state.server_home_lock = None
+    cleanup_errors = await _close_server_resources()
     if cleanup_errors:
-        _log_cleanup_errors(cleanup_errors[1:])
+        _log_cleanup_errors(cleanup_errors)
         raise cleanup_errors[0]
+    home_lock = getattr(app.state, "server_home_lock", None)
+    if home_lock:
+        home_lock.release()
+        if getattr(app.state, "server_home_lock", None) is home_lock:
+            app.state.server_home_lock = None
 
 # ---------- 注册路由 ----------
 app.include_router(api_v1_router)

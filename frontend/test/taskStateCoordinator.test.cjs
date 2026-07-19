@@ -17,6 +17,16 @@ require.extensions['.ts'] = function loadTs(module, filename) {
   module._compile(output, filename);
 };
 
+const taskStateModule = path.join(__dirname, '../src/api/taskState.ts');
+require.cache[require.resolve(taskStateModule)] = {
+  id: taskStateModule,
+  filename: taskStateModule,
+  loaded: true,
+  exports: {
+    taskStateApi: {},
+    storeTaskState: (_conversationId, state) => state,
+  },
+};
 const {
   TaskStateCoordinator,
 } = require(path.join(__dirname, '../src/services/taskStateCoordinator.ts'));

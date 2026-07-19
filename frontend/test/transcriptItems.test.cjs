@@ -418,25 +418,6 @@ function testPlanQuestionIsRenderedAndAnsweredFromTranscriptItem() {
   assert.match(planCard, /onAnswerPlanQuestion\?\.\(item,\s*answer\)/);
 }
 
-function testTranscriptRefreshUsesPerConversationRequestGuardsAndVisibleErrors() {
-  const source = fs.readFileSync(path.join(__dirname, '../src/pages/MainPage.tsx'), 'utf8');
-
-  assert.doesNotMatch(source, /transcriptRequestSeqRef/);
-  assert.match(source, /transcriptRequestTokensRef/);
-  assert.match(source, /getTranscriptRequestKey/);
-  assert.match(source, /setTranscriptError/);
-  assert.match(source, /transcriptError=\{transcriptError\}/);
-}
-
-function testTranscriptRefreshGuardsCurrentVisibleNodeBeforeWriting() {
-  const source = fs.readFileSync(path.join(__dirname, '../src/pages/MainPage.tsx'), 'utf8');
-
-  assert.match(source, /currentVisibleTranscriptKeyRef/);
-  assert.match(source, /getTranscriptRequestKey\(currentConversation\.id,\s*selectedBranchTipId\)/);
-  assert.match(source, /const isCurrentVisibleRequest = \(\) => requestKey === currentVisibleTranscriptKeyRef\.current/);
-  assert.match(source, /if \(!isCurrentVisibleRequest\(\)\) return;\s*setTranscriptItems\(normalizeTranscriptItems\(items\)\)/);
-}
-
 function testPlanActionsUseTranscriptItemPlanIdInsteadOfActivePlanFallback() {
   const source = fs.readFileSync(path.join(__dirname, '../src/pages/MainPage.tsx'), 'utf8');
 
@@ -550,7 +531,10 @@ function testAssistantProcessUsesToolResultOnToolCallTimelineBlocks() {
 function testStreamStateContentStaysFinalAnswerOnly() {
   const streamManager = fs.readFileSync(path.join(__dirname, '../src/services/streamManager.ts'), 'utf8');
   assert.match(streamManager, /if \(chunk\.content && !isAggregateResultEvent\(chunk\) && !isCommandEvent\(chunk\)\) \{\s*next\.content \+= chunk\.content;\s*next\.reasoningActive = false;\s*\}/);
-  assert.match(streamManager, /next\.toolInteractions = appendToolCalls\(next\.toolInteractions, toolCalls, next\.content, next\.reasoning\);/);
+  assert.match(
+    streamManager,
+    /chunk\.event_type === 'tool_calls_committed'[\s\S]*?appendToolCalls\(\s*next\.toolInteractions,\s*toolCalls,\s*next\.content,\s*next\.reasoning,\s*toolRoundId,\s*toolRound,\s*true,\s*\)/,
+  );
   assert.match(streamManager, /if \(toolCalls\.length > 0\) \{\s*next\.content = '';\s*next\.reasoning = '';\s*next\.reasoningActive = false;\s*\}/);
 }
 
@@ -644,8 +628,6 @@ testMainPageOutlineJumpsToTranscriptAnchors();
 testMainPageUsesLiveTranscriptOverlayWithSharedProcessRendering();
 testPlanActionsAreRealCallbacks();
 testPlanQuestionIsRenderedAndAnsweredFromTranscriptItem();
-testTranscriptRefreshUsesPerConversationRequestGuardsAndVisibleErrors();
-testTranscriptRefreshGuardsCurrentVisibleNodeBeforeWriting();
 testPlanActionsUseTranscriptItemPlanIdInsteadOfActivePlanFallback();
 testPlanQuestionAnswerUsesTranscriptItemPlanIdInsteadOfActivePlanFallback();
 testTranscriptFallbackAndCopySurfacesAreVisible();

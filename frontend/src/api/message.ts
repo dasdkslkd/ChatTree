@@ -1,4 +1,4 @@
-import { apiClient, serverApiUrl } from './client';
+import { apiClient } from './client';
 import type {
   Message,
   SendMessageRequest,
@@ -8,6 +8,15 @@ import type {
   ToolApprovalScope,
 } from '../types/message';
 import { perfNow, recordMark, recordSpan } from '../perf/marks';
+import { leaseGuardedFetch } from './leaseFetch';
+import { runsApi } from './runs';
+import type { RunStartResponse } from './runs';
+import {
+  apiErrorFromResponse,
+  ChatTreeApiError,
+  normalizeFetchError,
+  unexpectedApiResponse,
+} from './errors';
 
 export type ToolResultSlice = {
   tool_result_id: string;
@@ -55,24 +64,58 @@ export interface ActiveStreamInfo {
   updated_at: number;
 }
 
+export type MessageStreamOptions = {
+  signal?: AbortSignal;
+  nodeId?: string;
+  idempotencyKey?: string;
+};
+
+export type MessageAttachStreamOptions = {
+  signal?: AbortSignal;
+  fromEvent?: number;
+};
+
+export type PlanStreamOptions = {
+  signal?: AbortSignal;
+};
+
+export type MessageRunStartResponse = RunStartResponse;
+
+async function acquireSseReader(
+  response: Response,
+): Promise<ReadableStreamDefaultReader<Uint8Array>> {
+  try {
+    if (!response.ok) {
+      throw await apiErrorFromResponse(response);
+    }
+    const reader = response.body?.getReader();
+    if (!reader) {
+      throw unexpectedApiResponse(
+        response.status,
+        new Error('Response body is not readable'),
+      );
+    }
+    return reader;
+  } catch (error) {
+    try {
+      await response.body?.cancel();
+    } catch {
+      // The transport may already have closed or cancelled the body.
+    }
+    throw normalizeFetchError(error);
+  }
+}
+
 async function* parseSseResponse(
   response: Response,
   perfAttrs: Record<string, unknown> = {},
 ): AsyncGenerator<StreamChunk, void> {
-  if (!response.ok) {
-    throw new Error(`HTTP error! status: ${response.status}`);
-  }
-
+  const reader = await acquireSseReader(response);
   recordMark('stream.response_headers', {
     ...perfAttrs,
     status: response.status,
   });
-  const reader = response.body?.getReader();
   const decoder = new TextDecoder();
-
-  if (!reader) {
-    throw new Error('Response body is not readable');
-  }
 
   let buffer = '';
   let firstChunk = true;
@@ -81,13 +124,22 @@ async function* parseSseResponse(
   try {
     while (true) {
       const readStarted = perfNow();
-      const { done, value } = await reader.read();
+      let readResult: ReadableStreamReadResult<Uint8Array>;
+      try {
+        readResult = await reader.read();
+      } catch (error) {
+        throw normalizeFetchError(error);
+      }
+      const { done, value } = readResult;
       recordSpan('stream.reader_read', readStarted, {
         ...perfAttrs,
         done,
         bytes: value?.byteLength ?? 0,
       });
-      if (done) break;
+      if (done) {
+        buffer += decoder.decode();
+        break;
+      }
       if (firstChunk) {
         recordMark('stream.first_bytes', {
           ...perfAttrs,
@@ -105,8 +157,8 @@ async function* parseSseResponse(
         const trimmed = part.trim();
         if (!trimmed) continue;
 
-        if (trimmed.startsWith('data: ')) {
-          const jsonData = trimmed.slice(6);
+        if (trimmed.startsWith('data:')) {
+          const jsonData = trimmed.slice(5).trimStart();
           if (jsonData === '[DONE]') {
             recordMark('stream.done', { ...perfAttrs, event_count: eventCount });
             return;
@@ -125,7 +177,7 @@ async function* parseSseResponse(
             yield parsed;
           } catch (e) {
             recordMark('stream.parse_error', { ...perfAttrs });
-            console.error('Failed to parse stream chunk:', e, jsonData);
+            throw unexpectedApiResponse(response.status, e);
           }
         }
       }
@@ -133,63 +185,94 @@ async function* parseSseResponse(
 
     if (buffer.trim()) {
       const trimmed = buffer.trim();
-      if (trimmed.startsWith('data: ')) {
-        const jsonData = trimmed.slice(6);
-        if (jsonData !== '[DONE]') {
-          try {
-            const parseStarted = perfNow();
-            const parsed: StreamChunk = JSON.parse(jsonData);
-            eventCount += 1;
-            recordSpan('stream.parse_event', parseStarted, {
-              ...perfAttrs,
-              event_type: (parsed as any).event_type,
-              status: (parsed as any).status,
-              run_id: (parsed as any).run_id,
-              event_index: (parsed as any).event_index,
-            });
-            yield parsed;
-          } catch (e) {
-            recordMark('stream.parse_error', { ...perfAttrs, final_buffer: true });
-            console.error('Failed to parse final stream chunk:', e, jsonData);
-          }
+      if (trimmed.startsWith('data:')) {
+        const jsonData = trimmed.slice(5).trimStart();
+        if (jsonData === '[DONE]') {
+          recordMark('stream.done', { ...perfAttrs, event_count: eventCount });
+          return;
+        }
+        try {
+          const parseStarted = perfNow();
+          const parsed: StreamChunk = JSON.parse(jsonData);
+          eventCount += 1;
+          recordSpan('stream.parse_event', parseStarted, {
+            ...perfAttrs,
+            event_type: (parsed as any).event_type,
+            status: (parsed as any).status,
+            run_id: (parsed as any).run_id,
+            event_index: (parsed as any).event_index,
+          });
+          yield parsed;
+        } catch (e) {
+          recordMark('stream.parse_error', { ...perfAttrs, final_buffer: true });
+          throw unexpectedApiResponse(response.status, e);
         }
       }
     }
+    throw unexpectedApiResponse(
+      response.status,
+      new Error('SSE stream ended before data:[DONE]'),
+    );
   } finally {
     try {
       await reader.cancel();
-    } catch (_) {
-      // reader 可能已关闭，忽略
+    } catch {
+      // The reader may already be closed or cancelled.
     }
   }
 }
 
 export const messageApi = {
-  // 流式发送消息
+  startRun: async (
+    conversationId: string,
+    data: SendMessageRequest,
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ): Promise<MessageRunStartResponse> => {
+    const response = await apiClient.post<MessageRunStartResponse>(
+      `/conversations/${encodeURIComponent(conversationId)}/messages/runs`,
+      data,
+      {
+        headers: { 'Idempotency-Key': idempotencyKey },
+        signal,
+      },
+    );
+    return response.data;
+  },
+
+  // Start is idempotent; attach is a separate replayable GET.
   stream: async function* (
     conversationId: string,
     data: SendMessageRequest,
-    nodeId?: string,
-    signal?: AbortSignal
+    options: MessageStreamOptions,
   ): AsyncGenerator<StreamChunk, void> {
+    const { nodeId, signal } = options;
+    const idempotencyKey = options.idempotencyKey ?? (
+      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `message-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    );
+    const payload = {
+      ...data,
+      parent_node_id: nodeId ?? data.parent_node_id,
+      focus_new_node: data.focus_new_node ?? true,
+    };
     const started = perfNow();
-    const response = await fetch(serverApiUrl(`/conversations/${conversationId}/messages/stream`), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ ...data, parent_node_id: nodeId ?? data.parent_node_id, focus_new_node: data.focus_new_node ?? true }),
-      signal,
-    });
+    let start: MessageRunStartResponse;
+    try {
+      start = await messageApi.startRun(conversationId, payload, idempotencyKey, signal);
+    } catch (error) {
+      if (!(error instanceof ChatTreeApiError) || !error.retryable || signal?.aborted) {
+        throw error;
+      }
+      start = await messageApi.startRun(conversationId, payload, idempotencyKey, signal);
+    }
     recordSpan('stream.fetch', started, {
       conversation_id: conversationId,
-      route: 'messages.stream',
+      run_id: start.run_id,
+      route: 'messages.start',
     });
-
-    yield* parseSseResponse(response, {
-      conversation_id: conversationId,
-      route: 'messages.stream',
-    });
+    yield* runsApi.attach(start.run_id, { signal });
   },
 
   getActiveStreams: async (conversationId: string): Promise<ActiveStreamInfo[]> => {
@@ -205,12 +288,13 @@ export const messageApi = {
   attachStream: async function* (
     conversationId: string,
     nodeId: string,
-    fromEvent = 0,
-    signal?: AbortSignal,
+    options: MessageAttachStreamOptions,
   ): AsyncGenerator<StreamChunk, void> {
+    const { signal } = options;
+    const fromEvent = options.fromEvent ?? 0;
     const started = perfNow();
-    const response = await fetch(
-      serverApiUrl(`/conversations/${conversationId}/messages/${nodeId}/stream/attach?from_event=${fromEvent}`),
+    const response = await leaseGuardedFetch(
+      `/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(nodeId)}/stream/attach?from_event=${fromEvent}`,
       { signal },
     );
     recordSpan('stream.fetch', started, {
@@ -231,11 +315,12 @@ export const messageApi = {
     conversationId: string,
     planId: string,
     data: PlanActionStreamRequest,
-    signal?: AbortSignal,
+    options: PlanStreamOptions,
   ): AsyncGenerator<StreamChunk, void> {
+    const { signal } = options;
     const started = perfNow();
-    const response = await fetch(
-      serverApiUrl(`/conversations/${encodeURIComponent(conversationId)}/plans/${encodeURIComponent(planId)}/approve/stream`),
+    const response = await leaseGuardedFetch(
+      `/conversations/${encodeURIComponent(conversationId)}/plans/${encodeURIComponent(planId)}/approve/stream`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -251,11 +336,12 @@ export const messageApi = {
     conversationId: string,
     planId: string,
     data: PlanAnswerStreamRequest,
-    signal?: AbortSignal,
+    options: PlanStreamOptions,
   ): AsyncGenerator<StreamChunk, void> {
+    const { signal } = options;
     const started = perfNow();
-    const response = await fetch(
-      serverApiUrl(`/conversations/${encodeURIComponent(conversationId)}/plans/${encodeURIComponent(planId)}/answer/stream`),
+    const response = await leaseGuardedFetch(
+      `/conversations/${encodeURIComponent(conversationId)}/plans/${encodeURIComponent(planId)}/answer/stream`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -271,11 +357,12 @@ export const messageApi = {
     conversationId: string,
     planId: string,
     data: PlanRejectStreamRequest,
-    signal?: AbortSignal,
+    options: PlanStreamOptions,
   ): AsyncGenerator<StreamChunk, void> {
+    const { signal } = options;
     const started = perfNow();
-    const response = await fetch(
-      serverApiUrl(`/conversations/${encodeURIComponent(conversationId)}/plans/${encodeURIComponent(planId)}/reject/stream`),
+    const response = await leaseGuardedFetch(
+      `/conversations/${encodeURIComponent(conversationId)}/plans/${encodeURIComponent(planId)}/reject/stream`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

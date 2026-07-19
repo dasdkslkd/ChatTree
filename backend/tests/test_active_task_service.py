@@ -12,6 +12,7 @@ from backend.core.runs import RunKind, RunManager, RunStatus
 from backend.core.tasks import (
     ActiveTaskConflictError,
     ActiveTaskService,
+    ActiveTaskVersionConflictError,
     TaskContextDisabledError,
     TaskStepStatus,
 )
@@ -265,7 +266,7 @@ async def _stale_generation_cannot_mutate_replacement_task_case():
         steps=[{"title": "Keep"}],
     )
 
-    with pytest.raises(ActiveTaskConflictError):
+    with pytest.raises(ActiveTaskVersionConflictError) as conflict:
         await service.set_step_result(
             conversation_id="conv-1",
             step=1,
@@ -274,6 +275,8 @@ async def _stale_generation_cannot_mutate_replacement_task_case():
             expected_generation=first.generation_id,
         )
 
+    assert conflict.value.current_generation_id == second.generation_id
+    assert conflict.value.current_revision == second.revision
     assert await service.get_active_task("conv-1") == second
 
 
@@ -312,7 +315,7 @@ async def _run_binding_rejects_unseen_or_stale_task_versions_case():
         expected_revision=task.revision,
     )
     assert updated.task is not None
-    with pytest.raises(ActiveTaskConflictError):
+    with pytest.raises(ActiveTaskVersionConflictError) as conflict:
         await service.prepare_run_binding(
             conversation_id="conv-1",
             step=1,
@@ -320,6 +323,9 @@ async def _run_binding_rejects_unseen_or_stale_task_versions_case():
             expected_generation=task.generation_id,
             expected_revision=task.revision,
         )
+
+    assert conflict.value.current_generation_id == updated.task.generation_id
+    assert conflict.value.current_revision == updated.task.revision
 
 
 async def _bound_run_completion_is_atomic_and_final_step_deletes_task_case(tmp_path):

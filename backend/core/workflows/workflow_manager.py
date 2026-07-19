@@ -3,16 +3,61 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Dict, Optional
 
 from backend.core.agents import SubagentExecutor
 from backend.core.agents.types import AgentDeliveryPolicy
-from backend.core.runs import RunKind, RunManager, RunStatus
-from .js_runner import WorkflowJsRunner
+from backend.core.runs import (
+    ProducerRegistry,
+    RunIdempotency,
+    RunKind,
+    RunManager,
+    RunRecord,
+    RunStartCoordinator,
+    RunStartResult,
+    RunStartSpec,
+    RunStartValidationError,
+    RunStatus,
+)
+from .js_runner import WorkflowJsRunner, WorkflowScriptError
 from .runtime_bridge import WorkflowRuntimeBridge
 
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_WORKFLOW_BUDGET = {
+    "max_seconds": 600,
+    "max_host_calls": 200,
+    "max_parallel": 8,
+}
+_MAX_WORKFLOW_BUDGET_VALUE = 2_147_483_647
+
+
+def normalize_workflow_budget(
+    budget: Mapping[str, Any] | None,
+) -> Dict[str, Any]:
+    if budget is None:
+        supplied: Dict[str, Any] = {}
+    elif isinstance(budget, Mapping):
+        supplied = dict(budget)
+    else:
+        raise RunStartValidationError("budget must be an object")
+
+    for field in _DEFAULT_WORKFLOW_BUDGET:
+        if field not in supplied:
+            continue
+        value = supplied[field]
+        if (
+            type(value) is not int
+            or value < 1
+            or value > _MAX_WORKFLOW_BUDGET_VALUE
+        ):
+            raise RunStartValidationError(
+                f"budget.{field} must be an integer between 1 and 2147483647"
+            )
+
+    return {**_DEFAULT_WORKFLOW_BUDGET, **supplied}
 
 
 class WorkflowManager:
@@ -24,13 +69,18 @@ class WorkflowManager:
         runner: Optional[WorkflowJsRunner] = None,
         mailbox: Any = None,
         agent_runtime: Any = None,
+        run_start_coordinator: RunStartCoordinator | None = None,
+        producer_registry: ProducerRegistry | None = None,
     ) -> None:
         self.run_manager = run_manager
         self.subagent_executor = subagent_executor
         self.runner = runner or WorkflowJsRunner()
         self.mailbox = mailbox
         self.agent_runtime = agent_runtime
-        self._tasks: dict[str, asyncio.Task] = {}
+        self.run_start_coordinator = run_start_coordinator
+        self.producer_registry = producer_registry or ProducerRegistry.for_run_manager(
+            run_manager
+        )
 
     def validate(self, script: str) -> Dict[str, Any]:
         self.runner.validate_script(script)
@@ -52,48 +102,230 @@ class WorkflowManager:
         delivery_policy: str = "auto",
         task_binding: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        self.runner.validate_script(script)
-        delivery_policy = AgentDeliveryPolicy(str(delivery_policy or "auto")).value
-        budget = {
-            "max_seconds": 600,
-            "max_host_calls": 200,
-            "max_parallel": 8,
-            **(budget or {}),
-        }
+        normalized_args, normalized_budget, metadata = self._prepare_start(
+                script=script,
+                args=args,
+                budget=budget,
+                permission_mode=permission_mode,
+                delegated_task=delegated_task,
+                original_slash_input=original_slash_input,
+                delivery_policy=delivery_policy,
+            )
         run = await self.run_manager.create_run(
+                conversation_id=conversation_id,
+                kind=RunKind.WORKFLOW,
+                anchor_node_id=parent_node_id,
+                created_by_run_id=created_by_run_id,
+                cancellation_parent_run_id=cancellation_parent_run_id,
+                summary="Dynamic workflow",
+                metadata=metadata,
+                task_binding=task_binding,
+            )
+        try:
+            self._schedule_existing_locked(
+                run=run,
+                conversation_id=conversation_id,
+                script=script,
+                args=normalized_args,
+                parent_node_id=parent_node_id,
+                created_by_run_id=created_by_run_id,
+                cancellation_parent_run_id=cancellation_parent_run_id,
+                budget=normalized_budget,
+                permission_mode=permission_mode,
+            )
+        except BaseException:
+            try:
+                await self.producer_registry.terminalize(
+                    run.run_id,
+                    RunStatus.INTERRUPTED,
+                    "producer scheduling failed",
+                )
+            except BaseException:
+                logger.exception(
+                    "failed to terminalize unscheduled workflow run %s",
+                    run.run_id,
+                )
+            raise
+        return run.to_dict()
+
+    async def start_idempotent(
+        self,
+        *,
+        conversation_id: str,
+        script: str,
+        args: Optional[Dict[str, Any]] = None,
+        parent_node_id: Optional[str] = None,
+        created_by_run_id: Optional[str] = None,
+        cancellation_parent_run_id: Optional[str] = None,
+        budget: Optional[Dict[str, Any]] = None,
+        permission_mode: Optional[str] = None,
+        delegated_task: Any = None,
+        original_slash_input: Optional[str] = None,
+        delivery_policy: str = "auto",
+        task_binding: Optional[Dict[str, Any]] = None,
+        idempotency: RunIdempotency,
+        request_id: str,
+        winner_anchor_factory: Callable[
+            [RunRecord], Awaitable[str | None]
+        ] | None = None,
+    ) -> RunStartResult:
+        coordinator = self.run_start_coordinator
+        if coordinator is not None:
+            replay = await coordinator.replay_existing(idempotency)
+            if replay is not None:
+                return replay
+        try:
+            normalized_args, normalized_budget, metadata = self._prepare_start(
+                script=script,
+                args=args,
+                budget=budget,
+                permission_mode=permission_mode,
+                delegated_task=delegated_task,
+                original_slash_input=original_slash_input,
+                delivery_policy=delivery_policy,
+            )
+        except Exception:
+            if coordinator is not None:
+                replay = await coordinator.replay_existing(idempotency)
+                if replay is not None:
+                    return replay
+            raise
+        if coordinator is None:
+            raise RuntimeError("run start coordinator is not configured")
+        spec = RunStartSpec(
             conversation_id=conversation_id,
             kind=RunKind.WORKFLOW,
             anchor_node_id=parent_node_id,
             created_by_run_id=created_by_run_id,
             cancellation_parent_run_id=cancellation_parent_run_id,
             summary="Dynamic workflow",
-            metadata={
-                "args": args or {},
-                "budget": budget,
-                "permission_mode": permission_mode,
-                "delegated_task": delegated_task if delegated_task is not None else script,
-                "original_slash_input": original_slash_input,
-                "delivery_policy": delivery_policy,
-            },
+            metadata=metadata,
             task_binding=task_binding,
+            idempotency=idempotency,
+            request_id=request_id,
         )
+
+        async def bootstrap(run: RunRecord) -> asyncio.Task[Any]:
+            effective_run = run
+            if winner_anchor_factory is not None:
+                winner_anchor = await winner_anchor_factory(run)
+                if winner_anchor is not None and winner_anchor != run.anchor_node_id:
+                    effective_run = await self.run_manager.bind_anchor_node(
+                        run.run_id,
+                        winner_anchor,
+                    )
+            return await self.schedule_existing(
+                run=effective_run,
+                conversation_id=conversation_id,
+                script=script,
+                args=normalized_args,
+                parent_node_id=effective_run.anchor_node_id,
+                created_by_run_id=created_by_run_id,
+                cancellation_parent_run_id=cancellation_parent_run_id,
+                budget=normalized_budget,
+                permission_mode=permission_mode,
+            )
+
+        return await coordinator.start(spec, bootstrap)
+
+    def _prepare_start(
+        self,
+        *,
+        script: str,
+        args: Optional[Dict[str, Any]],
+        budget: Optional[Dict[str, Any]],
+        permission_mode: Optional[str],
+        delegated_task: Any,
+        original_slash_input: Optional[str],
+        delivery_policy: str,
+    ) -> tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
         try:
-            await self._register_task_notification(run.run_id)
-        except Exception:
-            logger.exception("Failed to register workflow notification for %s", run.run_id)
-        task = asyncio.create_task(self._produce(
-            run_id=run.run_id,
+            self.runner.validate_script(script)
+        except WorkflowScriptError as exc:
+            raise RunStartValidationError(str(exc)) from exc
+        normalized_args = dict(args or {})
+        normalized_budget = normalize_workflow_budget(budget)
+        normalized_delivery_policy = AgentDeliveryPolicy(
+            str(delivery_policy or "auto")
+        ).value
+        metadata = {
+            "args": normalized_args,
+            "budget": normalized_budget,
+            "permission_mode": permission_mode,
+            "delegated_task": delegated_task if delegated_task is not None else script,
+            "original_slash_input": original_slash_input,
+            "delivery_policy": normalized_delivery_policy,
+        }
+        return normalized_args, normalized_budget, metadata
+
+    async def schedule_existing(
+        self,
+        *,
+        run: RunRecord,
+        conversation_id: str,
+        script: str,
+        args: Dict[str, Any],
+        parent_node_id: Optional[str],
+        created_by_run_id: Optional[str],
+        cancellation_parent_run_id: Optional[str],
+        budget: Dict[str, Any],
+        permission_mode: Optional[str] = None,
+    ) -> asyncio.Task[Any]:
+        return self._schedule_existing_locked(
+            run=run,
             conversation_id=conversation_id,
             script=script,
-            args=args or {},
+            args=args,
             parent_node_id=parent_node_id,
             created_by_run_id=created_by_run_id,
             cancellation_parent_run_id=cancellation_parent_run_id,
             budget=budget,
             permission_mode=permission_mode,
-        ))
-        self._tasks[run.run_id] = task
-        return run.to_dict()
+        )
+
+    def _schedule_existing_locked(
+        self,
+        *,
+        run: RunRecord,
+        conversation_id: str,
+        script: str,
+        args: Dict[str, Any],
+        parent_node_id: Optional[str],
+        created_by_run_id: Optional[str],
+        cancellation_parent_run_id: Optional[str],
+        budget: Dict[str, Any],
+        permission_mode: Optional[str] = None,
+    ) -> asyncio.Task[Any]:
+        producer_coro = self._produce(
+            run_id=run.run_id,
+            conversation_id=conversation_id,
+            script=script,
+            args=args,
+            parent_node_id=parent_node_id,
+            created_by_run_id=created_by_run_id,
+            cancellation_parent_run_id=cancellation_parent_run_id,
+            budget=budget,
+            permission_mode=permission_mode,
+        )
+        task = self.producer_registry.create(
+            run.run_id,
+            producer_coro,
+            name=f"workflow-producer:{run.run_id}",
+        )
+
+        notification_coro = self._register_task_notification(run.run_id)
+        try:
+            self.producer_registry.create_background(
+                notification_coro,
+                name=f"workflow-notification:{run.run_id}",
+            )
+        except Exception:
+            notification_coro.close()
+            logger.exception(
+                "Failed to schedule workflow notification for %s",
+                run.run_id,
+            )
+        return task
 
     async def _register_task_notification(self, run_id: str) -> None:
         run = self.run_manager.get_run(run_id)
@@ -115,15 +347,35 @@ class WorkflowManager:
         )
 
     async def stop(self, run_id: str) -> bool:
-        requested = await self.run_manager.request_stop(run_id)
-        for child in self.run_manager.list_active_cancellation_children(cancellation_parent_run_id=run_id):
-            if child.get("kind") in {RunKind.SUBAGENT.value, RunKind.WORKFLOW_STEP.value}:
+        failures: list[BaseException] = []
+        requested = False
+        try:
+            requested = await self.run_manager.request_stop(run_id)
+        except BaseException as exc:
+            failures.append(exc)
+        try:
+            children = self.run_manager.list_active_cancellation_children(
+                cancellation_parent_run_id=run_id
+            )
+        except BaseException as exc:
+            failures.append(exc)
+            children = self.run_manager.list_cached_active_cancellation_children(
+                cancellation_parent_run_id=run_id
+            )
+        for child in children:
+            if child.get("kind") not in {
+                RunKind.SUBAGENT.value,
+                RunKind.WORKFLOW_STEP.value,
+            }:
+                continue
+            try:
                 await self.subagent_executor.stop(str(child["run_id"]))
-        task = self._tasks.get(run_id)
-        if task and not task.done():
-            task.cancel()
-            return True
-        return requested
+            except BaseException as exc:
+                failures.append(exc)
+        stopped = self.producer_registry.cancel(run_id) or requested
+        if failures:
+            raise failures[0]
+        return stopped
 
     async def _produce(
         self,
@@ -196,7 +448,6 @@ class WorkflowManager:
             }
             await self.run_manager.append_event(run_id, notification_payload)
         finally:
-            self._tasks.pop(run_id, None)
             await self.run_manager.finish_run(run_id, final_status, final_error)
             if notification_payload and final_status in {
                 RunStatus.COMPLETED,

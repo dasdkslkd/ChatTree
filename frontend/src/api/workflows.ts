@@ -1,5 +1,5 @@
 import { apiClient } from './client';
-import type { RunRecord } from '../types/run';
+import type { RunStartResponse } from './runs';
 
 export interface StartWorkflowRequest {
   script: string;
@@ -16,8 +16,20 @@ export const workflowsApi = {
     return response.data;
   },
 
-  startRun: async (conversationId: string, request: StartWorkflowRequest): Promise<RunRecord> => {
-    const response = await apiClient.post(`/conversations/${conversationId}/workflows/runs`, request);
+  startRun: async (
+    conversationId: string,
+    request: StartWorkflowRequest,
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ): Promise<RunStartResponse> => {
+    const response = await apiClient.post<RunStartResponse>(
+      `/conversations/${encodeURIComponent(conversationId)}/workflows/runs`,
+      request,
+      {
+        headers: { 'Idempotency-Key': idempotencyKey },
+        signal,
+      },
+    );
     return response.data;
   },
 

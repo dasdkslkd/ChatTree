@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Mapping
+from uuid import UUID, uuid4
 
 
 ProfileKind = Literal["local"]
@@ -52,6 +53,17 @@ def _required_string(value: Any, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field_name} must be a non-empty string")
     return value
+
+
+def _required_canonical_uuid(value: Any, field_name: str) -> str:
+    normalized = _required_string(value, field_name)
+    try:
+        canonical = str(UUID(normalized))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be a canonical UUID") from exc
+    if canonical != normalized:
+        raise ValueError(f"{field_name} must be a canonical UUID")
+    return normalized
 
 
 @dataclass(frozen=True)
@@ -179,22 +191,28 @@ class ConnectionErrorInfo:
 @dataclass(frozen=True)
 class EndpointLease:
     endpoint: str
+    profile_id: str
+    server_instance_id: str
     connection_epoch: int
-    invalidated: asyncio.Event | None = None
+    connection_lease_id: str
+    invalidated: asyncio.Event
 
     def __post_init__(self) -> None:
         _required_string(self.endpoint, "endpoint")
+        _required_string(self.profile_id, "profile_id")
+        _required_string(self.server_instance_id, "server_instance_id")
         if (
             isinstance(self.connection_epoch, bool)
             or not isinstance(self.connection_epoch, int)
             or self.connection_epoch <= 0
         ):
             raise ValueError("connection_epoch must be a positive integer")
-        if self.invalidated is not None and not isinstance(
-            self.invalidated,
-            asyncio.Event,
-        ):
-            raise ValueError("invalidated must be an asyncio.Event or None")
+        _required_canonical_uuid(
+            self.connection_lease_id,
+            "connection_lease_id",
+        )
+        if not isinstance(self.invalidated, asyncio.Event):
+            raise ValueError("invalidated must be an asyncio.Event")
 
 
 @dataclass
@@ -203,6 +221,7 @@ class ServerSession:
     status: ConnectionStatus = "disconnected"
     phase: str | None = None
     connection_epoch: int = 0
+    connection_lease_id: str = field(default_factory=lambda: str(uuid4()))
     server_instance_id: str | None = None
     error: ConnectionErrorInfo | None = None
 
@@ -218,6 +237,10 @@ class ServerSession:
             or self.connection_epoch < 0
         ):
             raise ValueError("connection_epoch must be a non-negative integer")
+        _required_canonical_uuid(
+            self.connection_lease_id,
+            "connection_lease_id",
+        )
         if self.server_instance_id is not None:
             _required_string(self.server_instance_id, "server_instance_id")
         if self.error is not None and not isinstance(self.error, ConnectionErrorInfo):
@@ -229,6 +252,7 @@ class ServerSession:
             "status": self.status,
             "phase": self.phase,
             "connection_epoch": self.connection_epoch,
+            "connection_lease_id": self.connection_lease_id,
             "server_instance_id": self.server_instance_id,
             "error": self.error.to_dict() if self.error is not None else None,
         }

@@ -17,6 +17,13 @@ require.extensions['.ts'] = function loadTs(module, filename) {
   module._compile(output, filename);
 };
 
+const clientModule = path.join(__dirname, '../src/api/client.ts');
+require.cache[require.resolve(clientModule)] = {
+  id: clientModule,
+  filename: clientModule,
+  loaded: true,
+  exports: { apiClient: {} },
+};
 const { createPlansService } = require(path.join(__dirname, '../src/services/plans.ts'));
 
 function fakeClient() {

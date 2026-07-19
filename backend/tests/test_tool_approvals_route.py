@@ -1,12 +1,15 @@
 ﻿from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from backend.api.errors import RequestBoundaryMiddleware, install_error_handlers
 from backend.api.routes import tool_approvals
 from backend.core.tools.security.approval import ApprovalManager, ApprovalRequest
 
 
 def _client_for(manager: ApprovalManager) -> TestClient:
     app = FastAPI()
+    install_error_handlers(app)
+    app.add_middleware(RequestBoundaryMiddleware)
     app.state.approval_manager = manager
     app.include_router(tool_approvals.router)
     return TestClient(app)
@@ -59,4 +62,12 @@ def test_decide_stale_tool_approval_returns_gone():
     )
 
     assert response.status_code == 410
-    assert response.json()["detail"] == "审批请求已失效"
+    assert response.json()["error"]["code"] == "approval_expired"
+    assert response.json()["error"]["message"] == "审批请求已失效"
+    assert response.json()["error"]["retryable"] is False
+    assert response.json()["error"]["details"] == {
+        "approval_id": "missing",
+    }
+    assert response.headers["X-Request-ID"] == response.json()["error"][
+        "request_id"
+    ]

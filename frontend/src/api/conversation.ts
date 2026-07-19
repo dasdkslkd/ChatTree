@@ -1,4 +1,6 @@
 import { apiClient } from './client';
+import { leaseGuardedFetch } from './leaseFetch';
+import { requireSuccessfulResponse } from './errors';
 import type { Conversation, ConversationCreateRequest, MultiAgentMode, WorkspaceContext } from '../types/conversation';
 import type { NodeUsage, UsageInfo } from '../types/message';
 
@@ -168,6 +170,19 @@ export const conversationApi = {
       headers: { 'Content-Type': 'multipart/form-data' },
     });
     return response.data;
+  },
+
+  fetchImportBlob: async (
+    conversationId: string,
+    filename: string,
+    signal?: AbortSignal,
+  ): Promise<Blob> => {
+    const response = await leaseGuardedFetch(
+      `/conversations/${conversationId}/imports/${encodeURIComponent(filename)}`,
+      { signal },
+    );
+    await requireSuccessfulResponse(response);
+    return response.blob();
   },
 
   // �г������ļ�

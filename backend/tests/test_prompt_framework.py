@@ -8,11 +8,12 @@ from unittest.mock import patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from backend.api.dependencies import get_chat_manager, get_run_manager, get_subagent_executor, get_workflow_manager
 from backend.api.routes import messages as messages_route
 from backend.api.routes import runs as runs_route
-from backend.api.routes.messages import SendMessageRequest, detached_stream_event_generator
+from backend.api.routes.messages import SendMessageRequest
 from backend.core.agents.mailbox import AgentMailbox
 from backend.core.agents.runtime import AgentRuntime
 from backend.core.agents.subagent_executor import SubagentExecutor
@@ -37,7 +38,13 @@ from backend.core.prompts.catalog import (
 )
 from backend.core.prompts.types import PromptBuildRequest
 from backend.core.notifications import TaskNotificationService
-from backend.core.runs import RunKind, RunManager, RunStatus
+from backend.core.runs import (
+    RunKind,
+    RunManager,
+    RunRecord,
+    RunStartResult,
+    RunStatus,
+)
 from backend.core.runs.journal import RunJournal
 from backend.core.storage.tool_result_storage import ToolResultStorage
 from backend.core.tools.agent_tools import StartSubagentTool, StartWorkflowTool
@@ -86,6 +93,56 @@ def install_notification_service(run_manager: RunManager) -> MemoryNotificationR
         run_manager=run_manager,
     )
     return repository
+
+
+def _run_start_request() -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/v1/conversations/conversation-1/messages/runs",
+            "headers": [],
+            "query_string": b"",
+            "server": ("test", 80),
+            "client": ("test", 123),
+            "scheme": "http",
+            "root_path": "",
+            "http_version": "1.1",
+            "state": {"request_id": "request-slash-test"},
+        }
+    )
+
+
+async def _produce_message_events(request, chat_manager, run_manager):
+    slash_result = SlashCommandDispatcher().dispatch(request.content)
+    run = await run_manager.create_run(
+        conversation_id="conversation-1",
+        kind=RunKind(str(slash_result.run_kind or RunKind.CHAT.value)),
+        anchor_node_id=request.parent_node_id,
+        summary=request.content[:80],
+        metadata=messages_route._message_run_metadata(request, slash_result),
+    )
+    if slash_result.kind.value == "direct_response":
+        await messages_route._produce_direct_response(
+            run=run,
+            conversation_id="conversation-1",
+            request=request,
+            slash_result=slash_result,
+            chat_manager=chat_manager,
+            run_manager=run_manager,
+        )
+    else:
+        await messages_route._produce_chat_run(
+            run=run,
+            conversation_id="conversation-1",
+            request=request,
+            chat_manager=chat_manager,
+            run_manager=run_manager,
+        )
+    return [
+        event
+        async for event in messages_route._subscribe_sse(run_manager, run.run_id)
+    ]
 
 
 class PromptCatalogTests(unittest.TestCase):
@@ -1434,37 +1491,45 @@ class SlashRuntimeDispatchTests(unittest.IsolatedAsyncioTestCase):
         class FakeSubagentExecutor:
             def __init__(self):
                 self.kwargs = None
+                self.anchor_node_id = None
 
-            async def start(self, **kwargs):
+            async def start_idempotent(self, **kwargs):
                 self.kwargs = kwargs
-                return {"run_id": "subagent-1"}
-
-        class FakeRunManager:
-            async def subscribe(self, run_id, from_event):
-                yield {"status": "complete", "run_id": run_id}
+                run = RunRecord(
+                    run_id="subagent-1",
+                    conversation_id="conversation-1",
+                    kind=RunKind.SUBAGENT,
+                    status=RunStatus.RUNNING,
+                )
+                self.anchor_node_id = await kwargs["winner_anchor_factory"](run)
+                return RunStartResult(run=run, created=True)
 
         subagent = FakeSubagentExecutor()
         chat = FakeChatManager()
-        events = await self._collect_events(detached_stream_event_generator(
-            "conversation-1",
-            SendMessageRequest(
+        response = await messages_route.start_message_run(
+            conversation_id="conversation-1",
+            body=SendMessageRequest(
                 content="/fork inspect prompts",
                 parent_node_id="node-1",
                 tool_permission_mode="modify_only",
             ),
-            chat,
-            FakeRunManager(),
-            subagent,
-            None,
-        ))
+            http_request=_run_start_request(),
+            idempotency_key="fork-slash-test",
+            chat_manager=chat,
+            run_manager=RunManager(),
+            coordinator=object(),
+            subagent_executor=subagent,
+            workflow_manager=object(),
+        )
         self.assertEqual(chat.anchor_kwargs["content"], "/fork inspect prompts")
         self.assertEqual(chat.anchor_kwargs["parent_node_id"], "node-1")
         self.assertEqual(chat.anchor_kwargs["tool_permission_mode"], "modify_only")
         self.assertEqual(subagent.kwargs["agent_name"], "implementer")
         self.assertEqual(subagent.kwargs["input_data"], "inspect prompts")
-        self.assertEqual(subagent.kwargs["parent_node_id"], "slash-node-1")
+        self.assertEqual(subagent.kwargs["parent_node_id"], "node-1")
+        self.assertEqual(subagent.anchor_node_id, "slash-node-1")
         self.assertEqual(subagent.kwargs["permission_mode"], "modify_only")
-        self.assertTrue(events[-1].strip().endswith("[DONE]"))
+        self.assertEqual(response.status_code, 202)
 
     async def test_workflow_slash_starts_workflow_run_without_chat_run(self):
         class FakeChatManager:
@@ -1481,35 +1546,43 @@ class SlashRuntimeDispatchTests(unittest.IsolatedAsyncioTestCase):
         class FakeWorkflowManager:
             def __init__(self):
                 self.kwargs = None
+                self.anchor_node_id = None
 
-            async def start(self, **kwargs):
+            async def start_idempotent(self, **kwargs):
                 self.kwargs = kwargs
-                return {"run_id": "workflow-1"}
-
-        class FakeRunManager:
-            async def subscribe(self, run_id, from_event):
-                yield {"status": "complete", "run_id": run_id}
+                run = RunRecord(
+                    run_id="workflow-1",
+                    conversation_id="conversation-1",
+                    kind=RunKind.WORKFLOW,
+                    status=RunStatus.RUNNING,
+                )
+                self.anchor_node_id = await kwargs["winner_anchor_factory"](run)
+                return RunStartResult(run=run, created=True)
 
         workflow = FakeWorkflowManager()
         chat = FakeChatManager()
-        events = await self._collect_events(detached_stream_event_generator(
-            "conversation-1",
-            SendMessageRequest(
+        response = await messages_route.start_message_run(
+            conversation_id="conversation-1",
+            body=SendMessageRequest(
                 content="/workflow return 1",
                 parent_node_id="node-1",
                 tool_permission_mode="ask_always",
             ),
-            chat,
-            FakeRunManager(),
-            None,
-            workflow,
-        ))
+            http_request=_run_start_request(),
+            idempotency_key="workflow-slash-test",
+            chat_manager=chat,
+            run_manager=RunManager(),
+            coordinator=object(),
+            subagent_executor=object(),
+            workflow_manager=workflow,
+        )
         self.assertEqual(chat.anchor_kwargs["content"], "/workflow return 1")
         self.assertEqual(chat.anchor_kwargs["parent_node_id"], "node-1")
         self.assertEqual(workflow.kwargs["script"], "return 1")
-        self.assertEqual(workflow.kwargs["parent_node_id"], "slash-node-1")
+        self.assertEqual(workflow.kwargs["parent_node_id"], "node-1")
+        self.assertEqual(workflow.anchor_node_id, "slash-node-1")
         self.assertEqual(workflow.kwargs["permission_mode"], "ask_always")
-        self.assertTrue(events[-1].strip().endswith("[DONE]"))
+        self.assertEqual(response.status_code, 202)
 
     async def test_btw_slash_runs_as_side_question_chat_run(self):
         class FakeChatManager:
@@ -1528,14 +1601,11 @@ class SlashRuntimeDispatchTests(unittest.IsolatedAsyncioTestCase):
 
         chat = FakeChatManager()
         run_manager = RunManager()
-        events = await self._collect_events(detached_stream_event_generator(
-            "conversation-1",
+        events = await _produce_message_events(
             SendMessageRequest(content="/btw summarize context", parent_node_id="node-1"),
             chat,
             run_manager,
-            None,
-            None,
-        ))
+        )
         runs = run_manager.list_runs("conversation-1")
         self.assertEqual(len(runs), 1)
         self.assertEqual(runs[0]["kind"], "side_question")
@@ -1551,14 +1621,11 @@ class SlashRuntimeDispatchTests(unittest.IsolatedAsyncioTestCase):
                 raise AssertionError("chat stream should not be used for /status")
 
         run_manager = RunManager()
-        events = await self._collect_events(detached_stream_event_generator(
-            "conversation-1",
+        events = await _produce_message_events(
             SendMessageRequest(content="/status", parent_node_id="node-1"),
             FakeChatManager(),
             run_manager,
-            None,
-            None,
-        ))
+        )
         runs = run_manager.list_runs("conversation-1")
         self.assertEqual(len(runs), 1)
         self.assertEqual(runs[0]["kind"], "direct_response")
@@ -2271,22 +2338,16 @@ class TaskNotificationTests(unittest.IsolatedAsyncioTestCase):
 
         run_manager = RunManager()
         notifications = install_notification_service(run_manager)
-        await SlashRuntimeDispatchTests()._collect_events(detached_stream_event_generator(
-            "conversation-1",
+        await _produce_message_events(
             SendMessageRequest(content="/btw summarize context", parent_node_id="node-1"),
             FakeChatManager(),
             run_manager,
-            None,
-            None,
-        ))
-        await SlashRuntimeDispatchTests()._collect_events(detached_stream_event_generator(
-            "conversation-1",
+        )
+        await _produce_message_events(
             SendMessageRequest(content="/status", parent_node_id="node-1"),
             FakeChatManager(),
             run_manager,
-            None,
-            None,
-        ))
+        )
 
         self.assertEqual(notifications.list_for_conversation("conversation-1"), [])
 
@@ -2821,15 +2882,25 @@ class RuntimePolicyTests(unittest.TestCase):
                 anchor_node_id="node-1",
                 summary="reviewer: inspect",
             )
-            task = asyncio.create_task(asyncio.sleep(60))
-            executor._tasks[run.run_id] = task
+            task = executor.producer_registry.create(
+                run.run_id,
+                asyncio.sleep(60),
+                name=f"test-producer:{run.run_id}",
+            )
 
             stopped = await executor.stop(run.run_id)
-            await asyncio.sleep(0)
+            await asyncio.gather(task, return_exceptions=True)
+            for _ in range(10):
+                if run_manager.get_run(run.run_id)["status"] == RunStatus.CANCELLED.value:
+                    break
+                await asyncio.sleep(0)
 
             self.assertTrue(stopped)
             self.assertTrue(task.cancelled())
-            self.assertEqual(run_manager.get_run(run.run_id)["status"], RunStatus.STOPPING.value)
+            self.assertEqual(
+                run_manager.get_run(run.run_id)["status"],
+                RunStatus.CANCELLED.value,
+            )
 
         asyncio.run(run_case())
 

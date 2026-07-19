@@ -30,7 +30,48 @@ function testRightPanelUsesOneWidthAcrossViews() {
   assert.doesNotMatch(mainPage, /rightPanelView === 'side'\s*\?\s*rightSidePanelWidth\s*:\s*rightOutlinePanelWidth/);
   assert.doesNotMatch(mainPage, /rightOutlinePanelWidth|rightSidePanelWidth/);
   assert.match(mainPage, /rightPanelWidth/);
-  assert.match(mainPage, /RIGHT_PANEL_WIDTH_STORAGE_KEY/);
+  assert.match(mainPage, /PROFILE_RIGHT_PANEL_STORAGE_KEY/);
+}
+
+function testEveryMainPagePersistenceKeyIsProfileScoped() {
+  assert.match(mainPage, /const PROFILE_ID = getProfileContext\(\)\.profileId;/);
+  for (const key of [
+    'MANUAL_PROJECTS_STORAGE_KEY',
+    'PROJECT_ORDER_STORAGE_KEY',
+    'LEFT_SIDEBAR_STORAGE_KEY',
+    'RIGHT_PANEL_STORAGE_KEY',
+  ]) {
+    assert.match(
+      mainPage,
+      new RegExp(`profileStorageKey\\(PROFILE_ID, ${key}\\)`),
+      `${key} must be scoped by the immutable route Profile`,
+    );
+  }
+  for (const key of [
+    'PROFILE_MANUAL_PROJECTS_STORAGE_KEY',
+    'PROFILE_PROJECT_ORDER_STORAGE_KEY',
+  ]) {
+    assert.match(mainPage, new RegExp(`localStorage\\.getItem\\(${key}\\)`));
+    assert.match(mainPage, new RegExp(`localStorage\\.setItem\\(${key},`));
+  }
+  for (const key of [
+    'PROFILE_LEFT_SIDEBAR_STORAGE_KEY',
+    'PROFILE_RIGHT_PANEL_STORAGE_KEY',
+  ]) {
+    assert.match(
+      mainPage,
+      new RegExp(`readStoredSidebarWidth\\(getBrowserStorage\\(\\),\\s*${key},`),
+    );
+    assert.match(mainPage, new RegExp(`storageKey:\\s*${key}`));
+    assert.match(
+      mainPage,
+      new RegExp(`writeStoredSidebarWidth\\(\\s*getBrowserStorage\\(\\),\\s*${key},`),
+    );
+  }
+  assert.doesNotMatch(
+    mainPage,
+    /(?:getItem|setItem)\((?:MANUAL_PROJECTS_STORAGE_KEY|PROJECT_ORDER_STORAGE_KEY)/,
+  );
 }
 
 function main() {
@@ -38,6 +79,7 @@ function main() {
   testResizeHandlesHaveDedicatedStyles();
   testVisibleResizeRuleSpansFullPanelHeight();
   testRightPanelUsesOneWidthAcrossViews();
+  testEveryMainPagePersistenceKeyIsProfileScoped();
   console.log('sidebarResizeIntegration tests passed');
 }
 

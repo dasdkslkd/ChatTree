@@ -21,6 +21,10 @@ FINISHED_STATUS_VALUES = {status.value for status in FINISHED_RUN_STATUSES}
 logger = logging.getLogger(__name__)
 
 
+class CommandExecutorClosingError(RuntimeError):
+    pass
+
+
 def _decode_bytes(value: bytes) -> str:
     if not value:
         return ""
@@ -67,6 +71,11 @@ class CommandExecutor:
         self._stdout_tail: Dict[str, Deque[str]] = {}
         self._stderr_tail: Dict[str, Deque[str]] = {}
         self._lock = asyncio.Lock()
+        self._admission_lock = asyncio.Lock()
+        self._closing = False
+        self._close_task: asyncio.Task[tuple[str, ...]] | None = None
+        self._undrained_run_ids: set[str] = set()
+        self._inflight_start_run_id: str | None = None
 
     async def start(
         self,
@@ -85,6 +94,47 @@ class CommandExecutor:
         task_generation_id: Optional[str] = None,
         task_revision: Optional[int] = None,
     ) -> Dict[str, Any]:
+        async with self._admission_lock:
+            self._inflight_start_run_id = None
+            try:
+                return await self._start_admitted(
+                    conversation_id=conversation_id,
+                    command=command,
+                    cwd=cwd,
+                    anchor_node_id=anchor_node_id,
+                    created_by_run_id=created_by_run_id,
+                    cancellation_parent_run_id=cancellation_parent_run_id,
+                    summary=summary,
+                    timeout_seconds=timeout_seconds,
+                    metadata=metadata,
+                    step=step,
+                    task_context_mode=task_context_mode,
+                    task_generation_id=task_generation_id,
+                    task_revision=task_revision,
+                )
+            finally:
+                self._inflight_start_run_id = None
+
+    async def _start_admitted(
+        self,
+        *,
+        conversation_id: str,
+        command: str,
+        cwd: str | os.PathLike[str],
+        anchor_node_id: Optional[str] = None,
+        created_by_run_id: Optional[str] = None,
+        cancellation_parent_run_id: Optional[str] = None,
+        summary: str = "",
+        timeout_seconds: Optional[int] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        step: Optional[int] = None,
+        task_context_mode: str = "attached",
+        task_generation_id: Optional[str] = None,
+        task_revision: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        async with self._lock:
+            if self._closing:
+                raise CommandExecutorClosingError("command executor is closing")
         cwd_path = str(Path(cwd).expanduser().resolve())
         run_metadata = dict(metadata or {})
         task_binding = None
@@ -117,34 +167,70 @@ class CommandExecutor:
             },
             task_binding=task_binding,
         )
-        service = getattr(self.run_manager, "notification_service", None)
-        if service is not None and not self._suppresses_task_notification(run.to_dict()):
-            try:
-                await service.register_run_notification(
-                    run_id=run.run_id,
-                    summary=summary or command[:80] or "Command running",
-                    payload={
-                        "command_run_id": run.run_id,
-                        "command": command,
-                        "cwd": cwd_path,
-                    },
+        self._inflight_start_run_id = run.run_id
+        producer = None
+        producer_registered = False
+        try:
+            service = getattr(self.run_manager, "notification_service", None)
+            if (
+                service is not None
+                and not self._suppresses_task_notification(run.to_dict())
+            ):
+                try:
+                    await service.register_run_notification(
+                        run_id=run.run_id,
+                        summary=summary or command[:80] or "Command running",
+                        payload={
+                            "command_run_id": run.run_id,
+                            "command": command,
+                            "cwd": cwd_path,
+                        },
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to register command notification for %s",
+                        run.run_id,
+                    )
+            self._stdout_tail[run.run_id] = deque()
+            self._stderr_tail[run.run_id] = deque()
+            producer = self._run_process(
+                run_id=run.run_id,
+                conversation_id=conversation_id,
+                command=command,
+                cwd=cwd_path,
+                shell_snapshot=shell_snapshot,
+                timeout_seconds=timeout_seconds,
+                anchor_node_id=anchor_node_id,
+            )
+            async with self._lock:
+                if self._closing:
+                    raise CommandExecutorClosingError("command executor is closing")
+                task = asyncio.create_task(
+                    producer,
+                    name=f"command-producer:{run.run_id}",
                 )
-            except Exception:
-                logger.exception("Failed to register command notification for %s", run.run_id)
-        self._stdout_tail[run.run_id] = deque()
-        self._stderr_tail[run.run_id] = deque()
-        task = asyncio.create_task(self._run_process(
-            run_id=run.run_id,
-            conversation_id=conversation_id,
-            command=command,
-            cwd=cwd_path,
-            shell_snapshot=shell_snapshot,
-            timeout_seconds=timeout_seconds,
-            anchor_node_id=anchor_node_id,
-        ))
-        async with self._lock:
-            self._tasks[run.run_id] = task
-        return run.to_dict()
+                self._tasks[run.run_id] = task
+                task.add_done_callback(
+                    lambda completed, current_run_id=run.run_id: (
+                        self._command_task_done(current_run_id, completed)
+                    )
+                )
+                producer_registered = True
+            return run.to_dict()
+        except BaseException:
+            if not producer_registered and producer is not None:
+                producer.close()
+            try:
+                await asyncio.shield(self.run_manager.finish_run(
+                    run.run_id,
+                    RunStatus.INTERRUPTED,
+                    "command start interrupted before producer registration",
+                ))
+            except BaseException:
+                if not self._is_durably_terminal(run.run_id):
+                    self._undrained_run_ids.add(run.run_id)
+                raise
+            raise
 
     async def wait(self, run_id: str, timeout: Optional[float] = None) -> None:
         if self.run_manager.get_run(run_id) is None:
@@ -232,14 +318,226 @@ class CommandExecutor:
 
     async def stop(self, run_id: str) -> bool:
         run = self.run_manager.get_run(run_id)
-        if not run or run.get("status") in {RunStatus.COMPLETED.value, RunStatus.FAILED.value, RunStatus.CANCELLED.value}:
-            return False
-        await self.run_manager.request_stop(run_id)
         process = self._processes.get(run_id)
+        task_active = run_id in self._tasks
+        if (
+            process is None
+            and not task_active
+            and (
+                not run
+                or run.get("status")
+                in {
+                    RunStatus.COMPLETED.value,
+                    RunStatus.FAILED.value,
+                    RunStatus.CANCELLED.value,
+                }
+            )
+        ):
+            return False
+        persistence_error: BaseException | None = None
+        try:
+            await self.run_manager.request_stop(run_id)
+        except BaseException as exc:
+            persistence_error = exc
         if process is None:
-            return run_id in self._tasks
-        await self._kill_process_tree(process)
-        return True
+            stopped = task_active
+        else:
+            await self._kill_process_tree(process)
+            stopped = True
+        if persistence_error is not None:
+            raise persistence_error
+        return stopped
+
+    async def close(self, timeout: float = 5.0) -> tuple[str, ...]:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, float(timeout))
+        async with self._lock:
+            self._closing = True
+            close_task = self._close_task
+        if close_task is not None:
+            return await asyncio.shield(close_task)
+
+        acquired = False
+        remaining = deadline - loop.time()
+        if not self._admission_lock.locked():
+            await self._admission_lock.acquire()
+            acquired = True
+        elif remaining > 0:
+            try:
+                await asyncio.wait_for(
+                    self._admission_lock.acquire(),
+                    timeout=remaining,
+                )
+                acquired = True
+            except asyncio.TimeoutError:
+                pass
+        if not acquired:
+            unresolved = (
+                self._inflight_start_run_id or "command-start-in-flight",
+            )
+            async with self._lock:
+                if self._close_task is None:
+                    self._close_task = asyncio.create_task(
+                        self._return_close_report(unresolved),
+                        name="command-executor-close",
+                    )
+                close_task = self._close_task
+            return await asyncio.shield(close_task)
+
+        try:
+            async with self._lock:
+                if self._close_task is None:
+                    tasks = dict(self._tasks)
+                    run_ids = tuple(sorted(
+                        set(tasks)
+                        | set(self._processes)
+                        | self._undrained_run_ids
+                    ))
+                    self._close_task = asyncio.create_task(
+                        self._close_once(
+                            run_ids,
+                            tasks,
+                            max(0.0, deadline - loop.time()),
+                        ),
+                        name="command-executor-close",
+                    )
+                close_task = self._close_task
+        finally:
+            self._admission_lock.release()
+        return await asyncio.shield(close_task)
+
+    @staticmethod
+    async def _return_close_report(
+        report: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        return report
+
+    async def _close_once(
+        self,
+        run_ids: tuple[str, ...],
+        tasks: Dict[str, asyncio.Task[None]],
+        timeout: float,
+    ) -> tuple[str, ...]:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, float(timeout))
+        stop_tasks = {
+            run_id: asyncio.create_task(
+                self._request_stop_for_close(run_id),
+                name=f"command-close-stop:{run_id}",
+            )
+            for run_id in run_ids
+        }
+        kill_tasks: dict[str, asyncio.Task[None]] = {}
+
+        while True:
+            for run_id, kill_task in list(kill_tasks.items()):
+                if kill_task.done():
+                    kill_tasks.pop(run_id, None)
+            for run_id in run_ids:
+                process = self._processes.get(run_id)
+                if (
+                    process is not None
+                    and process.returncode is None
+                    and run_id not in kill_tasks
+                ):
+                    kill_tasks[run_id] = asyncio.create_task(
+                        self._kill_for_close(run_id, process),
+                        name=f"command-close-kill:{run_id}",
+                    )
+
+            unresolved: set[str] = set()
+            for run_id in run_ids:
+                command_task = tasks.get(run_id)
+                process = self._processes.get(run_id)
+                if process is not None and process.returncode is not None:
+                    if self._processes.get(run_id) is process:
+                        self._processes.pop(run_id, None)
+                    process = None
+                kill_task = kill_tasks.get(run_id)
+                durably_terminal = self._is_durably_terminal(run_id)
+                if durably_terminal and process is None:
+                    self._undrained_run_ids.discard(run_id)
+                if (
+                    (command_task is not None and not command_task.done())
+                    or not stop_tasks[run_id].done()
+                    or (process is not None and process.returncode is None)
+                    or (kill_task is not None and not kill_task.done())
+                    or not durably_terminal
+                ):
+                    unresolved.add(run_id)
+            if not unresolved:
+                return ()
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return tuple(sorted(unresolved))
+            pending = [
+                task
+                for task in [
+                    *(tasks.get(run_id) for run_id in unresolved),
+                    *(stop_tasks.get(run_id) for run_id in unresolved),
+                    *(kill_tasks.get(run_id) for run_id in unresolved),
+                ]
+                if task is not None and not task.done()
+            ]
+            if pending:
+                await asyncio.wait(
+                    pending,
+                    timeout=min(0.05, remaining),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            else:
+                await asyncio.sleep(min(0.01, remaining))
+
+    async def _request_stop_for_close(self, run_id: str) -> None:
+        try:
+            await self.run_manager.request_stop(run_id)
+        except BaseException as exc:
+            logger.error(
+                "Failed to persist command stop during close for %s",
+                run_id,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+
+    async def _kill_for_close(self, run_id: str, process: Any) -> None:
+        try:
+            await self._kill_process_tree(process)
+        except BaseException as exc:
+            logger.error(
+                "Failed to kill command process during close for %s",
+                run_id,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+
+    def _command_task_done(
+        self,
+        run_id: str,
+        task: asyncio.Task[None],
+    ) -> None:
+        process = self._processes.get(run_id)
+        physically_drained = process is None or process.returncode is not None
+        if self._is_durably_terminal(run_id) and physically_drained:
+            self._undrained_run_ids.discard(run_id)
+        else:
+            self._undrained_run_ids.add(run_id)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.error(
+                "Command producer failed: %s",
+                task.get_name(),
+                exc_info=(type(error), error, error.__traceback__),
+            )
+
+    def _is_durably_terminal(self, run_id: str) -> bool:
+        try:
+            run = self.run_manager.repository.get_run(run_id)
+        except Exception:
+            return False
+        return bool(
+            run is not None
+            and str(run.get("status") or "") in FINISHED_STATUS_VALUES
+        )
 
     async def _run_process(
         self,
@@ -258,6 +556,7 @@ class CommandExecutor:
         started_at = time()
         completion_handled_by_fallback = False
         argv = self.shell_profile.command_argv(command)
+        process: asyncio.subprocess.Process | None = None
         try:
             try:
                 process = await asyncio.create_subprocess_exec(
@@ -295,6 +594,7 @@ class CommandExecutor:
                 "shell_id": self.shell_profile.id,
                 "pid": process.pid,
             })
+            await self.run_manager.flush_run_events(run_id)
             if await self.run_manager.is_stop_requested(run_id):
                 await self._kill_process_tree(process)
             readers = [
@@ -306,6 +606,11 @@ class CommandExecutor:
                     exit_code = await asyncio.wait_for(process.wait(), timeout=timeout_seconds)
                 else:
                     exit_code = await process.wait()
+            except asyncio.CancelledError:
+                final_status = RunStatus.CANCELLED
+                error = "command producer cancelled"
+                await self._kill_process_tree(process)
+                raise
             except asyncio.TimeoutError:
                 final_status = RunStatus.FAILED
                 error = f"command timed out after {timeout_seconds} seconds"
@@ -332,37 +637,64 @@ class CommandExecutor:
                 "shell": shell_snapshot,
                 "shell_id": self.shell_profile.id,
             })
+        except asyncio.CancelledError:
+            final_status = RunStatus.CANCELLED
+            error = "command producer cancelled"
+            raise
         except Exception as exc:
             final_status = RunStatus.FAILED
             error = f"{type(exc).__name__}: {exc} while starting Command {command!r} in {cwd}"
-            await self.run_manager.append_event(run_id, {
-                "event_type": "command_error",
-                "status": "error",
-                "content": "",
-                "error": error,
-                "command": command,
-                "cwd": cwd,
-                "shell": shell_snapshot,
-                "shell_id": self.shell_profile.id,
-            })
+            try:
+                await self.run_manager.append_event(run_id, {
+                    "event_type": "command_error",
+                    "status": "error",
+                    "content": "",
+                    "error": error,
+                    "command": command,
+                    "cwd": cwd,
+                    "shell": shell_snapshot,
+                    "shell_id": self.shell_profile.id,
+                })
+            except Exception:
+                # finish_run owns recovery when this run's event writer failed.
+                pass
         finally:
-            await self.run_manager.finish_run(run_id, final_status, error)
-            if not completion_handled_by_fallback:
+            owned_process = self._processes.get(run_id, process)
+            if owned_process is not None and owned_process.returncode is None:
                 try:
-                    await self._enqueue_completion(
-                        run_id=run_id,
-                        conversation_id=conversation_id,
-                        anchor_node_id=anchor_node_id,
-                        command=command,
-                        cwd=cwd,
-                        exit_code=exit_code,
-                        final_status=final_status,
-                        error=error,
-                    )
+                    await self._kill_process_tree(owned_process)
                 except Exception:
-                    logger.exception("Failed to publish command notification for %s", run_id)
-            self._processes.pop(run_id, None)
-            self._tasks.pop(run_id, None)
+                    logger.exception(
+                        "Failed to kill command process during cleanup for %s",
+                        run_id,
+                    )
+            if owned_process is not None and owned_process.returncode is None:
+                self._undrained_run_ids.add(run_id)
+            try:
+                try:
+                    await self.run_manager.finish_run(run_id, final_status, error)
+                except BaseException:
+                    if not self._is_durably_terminal(run_id):
+                        self._undrained_run_ids.add(run_id)
+                    raise
+                if not completion_handled_by_fallback:
+                    try:
+                        await self._enqueue_completion(
+                            run_id=run_id,
+                            conversation_id=conversation_id,
+                            anchor_node_id=anchor_node_id,
+                            command=command,
+                            cwd=cwd,
+                            exit_code=exit_code,
+                            final_status=final_status,
+                            error=error,
+                        )
+                    except Exception:
+                        logger.exception("Failed to publish command notification for %s", run_id)
+            finally:
+                if owned_process is None or owned_process.returncode is not None:
+                    self._processes.pop(run_id, None)
+                self._tasks.pop(run_id, None)
 
     async def _read_stream(
         self,
@@ -398,8 +730,8 @@ class CommandExecutor:
         anchor_node_id: Optional[str],
     ) -> None:
         argv = self.shell_profile.command_argv(command)
-        process = await asyncio.to_thread(
-            subprocess.Popen,
+        # Popen and handle registration must be one non-cancellable handoff.
+        process = subprocess.Popen(
             argv,
             cwd=cwd,
             env=_command_env(),
@@ -420,6 +752,7 @@ class CommandExecutor:
             "pid": process.pid,
             "backend": "popen",
         })
+        await self.run_manager.flush_run_events(run_id)
         if await self.run_manager.is_stop_requested(run_id):
             await self._kill_process_tree(process)
         readers = [
@@ -435,6 +768,11 @@ class CommandExecutor:
                     exit_code = await asyncio.to_thread(process.wait, timeout=timeout_seconds)
                 else:
                     exit_code = await asyncio.to_thread(process.wait)
+            except asyncio.CancelledError:
+                final_status = RunStatus.CANCELLED
+                error = "command producer cancelled"
+                await self._kill_process_tree(process)
+                raise
             except subprocess.TimeoutExpired:
                 final_status = RunStatus.FAILED
                 error = f"command timed out after {timeout_seconds} seconds"

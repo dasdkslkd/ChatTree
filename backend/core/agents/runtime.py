@@ -3,16 +3,24 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 from backend.core.capabilities.registry import CapabilityRegistry
-from backend.core.runs import FINISHED_RUN_STATUSES, RunKind, RunManager
+from backend.core.runs import (
+    FINISHED_RUN_STATUSES,
+    RunIdempotency,
+    RunKind,
+    RunManager,
+    RunRecord,
+    RunStartResult,
+    RunStartValidationError,
+)
 from backend.core.tasks import ActiveTaskService
 from backend.core.tools.security.permissions import normalize_permission_mode
 
 from .mailbox import AgentMailbox
 from .subagent_executor import SubagentExecutor
-from .types import AgentSource
+from .types import AgentDeliveryPolicy, AgentSource
 
 
 FINISHED_AGENT_STATUS_VALUES = {status.value for status in FINISHED_RUN_STATUSES}
@@ -61,45 +69,46 @@ class AgentRuntime:
         task = (task or "").strip()
         if not task:
             raise ValueError("task is required")
-        task_binding = None
-        if step is not None:
-            if self.task_service is None:
-                raise RuntimeError("task service is not configured")
-            task_binding = await self.task_service.prepare_run_binding(
-                conversation_id=source.conversation_id,
-                step=step,
-                context_mode=task_context_mode,
-                expected_generation=task_generation_id,
-                expected_revision=task_revision,
-            )
+        task_binding = await self._prepare_task_binding(
+            source=source,
+            step=step,
+            task_context_mode=task_context_mode,
+            task_generation_id=task_generation_id,
+            task_revision=task_revision,
+        )
+        normalized_context = self._normalize_context_mode(context_mode)
+        normalized_delivery = AgentDeliveryPolicy(
+            str(delivery_policy or "auto")
+        ).value
+        source_run_id = self._normalize_optional_id(source.run_id)
+        lineage_run_id = created_by_run_id or source_run_id
+        runtime_metadata = self._agent_runtime_metadata(
+            source=source,
+            source_run_id=source_run_id,
+            agent_name=agent_name,
+            task_text=task,
+            context_mode=normalized_context,
+            delivery_policy=normalized_delivery,
+        )
         run = await self.subagent_executor.start(
             conversation_id=source.conversation_id,
             agent_name=agent_name,
             input_data=task,
             parent_node_id=source.anchor_node_id,
-            created_by_run_id=created_by_run_id or source.run_id,
+            created_by_run_id=lineage_run_id,
             cancellation_parent_run_id=cancellation_parent_run_id,
-            context_mode=context_mode,
+            context_mode=normalized_context,
             provider_id=provider_id,
             model_id=model_id,
             permission_mode=normalize_permission_mode(permission_mode),
             workspace=workspace,
             delegated_task=task,
             original_slash_input=None,
-            delivery_policy=delivery_policy,
+            delivery_policy=normalized_delivery,
             task_binding=task_binding,
+            runtime_metadata=runtime_metadata,
         )
         run_id = str(run.get("run_id") or "")
-        metadata = dict(run.get("metadata") or {})
-        metadata.update({
-            "agent_name": agent_name,
-            "task": task,
-            "context_mode": context_mode,
-            "delivery_policy": delivery_policy,
-            "root_run_id": source.root_run_id or source.run_id,
-            "source_run_id": source.run_id,
-        })
-        await self.run_manager.update_metadata(run_id, metadata)
         return {
             "run_id": run_id,
             "kind": run.get("kind", RunKind.SUBAGENT.value),
@@ -107,9 +116,160 @@ class AgentRuntime:
             "agent_name": agent_name,
             "task": task,
             "step": step,
+            "context_mode": normalized_context,
+            "delivery_policy": normalized_delivery,
+            "message": "Agent spawned.",
+        }
+
+    async def spawn_agent_idempotent(
+        self,
+        *,
+        source: AgentSource,
+        agent_name: str,
+        input_data: Any,
+        idempotency: RunIdempotency,
+        request_id: str,
+        context_mode: str = "fresh",
+        delivery_policy: str = "auto",
+        created_by_run_id: Optional[str] = None,
+        cancellation_parent_run_id: Optional[str] = None,
+        provider_id: Optional[str] = None,
+        model_id: Optional[str] = None,
+        permission_mode: Optional[str] = None,
+        workspace: Optional[Dict[str, Any]] = None,
+        step: Optional[int] = None,
+        task_context_mode: str = "attached",
+        task_generation_id: Optional[str] = None,
+        task_revision: Optional[int] = None,
+        winner_anchor_factory: Callable[[RunRecord], Awaitable[str | None]] | None = None,
+    ) -> RunStartResult:
+        normalized_agent_name = (
+            (agent_name or "implementer").strip() or "implementer"
+        )
+        if isinstance(input_data, str) and not input_data.strip():
+            raise RunStartValidationError("input is required")
+        task_text = self._render_task_text(input_data)
+        coordinator = self.subagent_executor.run_start_coordinator
+        if coordinator is not None:
+            replay = await coordinator.replay_existing(idempotency)
+            if replay is not None:
+                return replay
+        try:
+            task_binding = await self._prepare_task_binding(
+                source=source,
+                step=step,
+                task_context_mode=task_context_mode,
+                task_generation_id=task_generation_id,
+                task_revision=task_revision,
+            )
+        except Exception:
+            if coordinator is not None:
+                replay = await coordinator.replay_existing(idempotency)
+                if replay is not None:
+                    return replay
+            raise
+        normalized_context = self._normalize_context_mode(context_mode)
+        normalized_delivery = AgentDeliveryPolicy(
+            str(delivery_policy or "auto")
+        ).value
+        source_run_id = self._normalize_optional_id(source.run_id)
+        lineage_run_id = created_by_run_id or source_run_id
+        runtime_metadata = self._agent_runtime_metadata(
+            source=source,
+            source_run_id=source_run_id,
+            agent_name=normalized_agent_name,
+            task_text=task_text,
+            context_mode=normalized_context,
+            delivery_policy=normalized_delivery,
+        )
+        return await self.subagent_executor.start_idempotent(
+            conversation_id=source.conversation_id,
+            agent_name=normalized_agent_name,
+            input_data=input_data,
+            parent_node_id=source.anchor_node_id,
+            created_by_run_id=lineage_run_id,
+            cancellation_parent_run_id=cancellation_parent_run_id,
+            provider_id=provider_id,
+            model_id=model_id,
+            permission_mode=normalize_permission_mode(permission_mode),
+            workspace=workspace,
+            delegated_task=input_data,
+            original_slash_input=None,
+            delivery_policy=normalized_delivery,
+            context_mode=normalized_context,
+            task_binding=task_binding,
+            idempotency=idempotency,
+            request_id=request_id,
+            winner_anchor_factory=winner_anchor_factory,
+            runtime_metadata=runtime_metadata,
+        )
+
+    async def _prepare_task_binding(
+        self,
+        *,
+        source: AgentSource,
+        step: Optional[int],
+        task_context_mode: str,
+        task_generation_id: Optional[str],
+        task_revision: Optional[int],
+    ) -> Optional[Dict[str, Any]]:
+        if step is None:
+            return None
+        if self.task_service is None:
+            raise RuntimeError("task service is not configured")
+        return await self.task_service.prepare_run_binding(
+            conversation_id=source.conversation_id,
+            step=step,
+            context_mode=task_context_mode,
+            expected_generation=task_generation_id,
+            expected_revision=task_revision,
+        )
+
+    @staticmethod
+    def _normalize_optional_id(value: Any) -> Optional[str]:
+        normalized = str(value or "").strip()
+        return normalized or None
+
+    @staticmethod
+    def _normalize_context_mode(value: Any) -> str:
+        normalized = str(value or "fresh")
+        return normalized if normalized in {"fresh", "fork"} else "fresh"
+
+    @staticmethod
+    def _render_task_text(input_data: Any) -> str:
+        if isinstance(input_data, str):
+            return input_data.strip()
+        try:
+            return json.dumps(
+                input_data,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        except (TypeError, ValueError) as exc:
+            raise RunStartValidationError(
+                "agent input must contain finite JSON values"
+            ) from exc
+
+    def _agent_runtime_metadata(
+        self,
+        *,
+        source: AgentSource,
+        source_run_id: Optional[str],
+        agent_name: str,
+        task_text: str,
+        context_mode: str,
+        delivery_policy: str,
+    ) -> Dict[str, Any]:
+        return {
+            "agent_name": agent_name,
+            "task": task_text,
             "context_mode": context_mode,
             "delivery_policy": delivery_policy,
-            "message": "Agent spawned.",
+            "root_run_id": self._normalize_optional_id(source.root_run_id)
+            or source_run_id,
+            "source_run_id": source_run_id,
         }
 
     async def start_workflow(

@@ -1005,7 +1005,11 @@ export class StreamManager {
       parent_node_id: requestNodeId ?? request.parent_node_id ?? null,
       focus_new_node: request.focus_new_node ?? true,
     };
-    await this.consume(runId, () => messageApi.stream(conversationId, payload, requestNodeId, abortController.signal));
+    await this.consume(runId, () => messageApi.stream(
+      conversationId,
+      payload,
+      { nodeId: requestNodeId, signal: abortController.signal },
+    ));
   }
 
   async startPlanApprovalStream(
@@ -1031,7 +1035,12 @@ export class StreamManager {
     this.streams.set(runId, state);
     this.addToConversation(conversationId, runId);
     this.notify(conversationId, true);
-    await this.consume(runId, () => messageApi.streamPlanApproval(conversationId, planId, payload, abortController.signal));
+    await this.consume(runId, () => messageApi.streamPlanApproval(
+      conversationId,
+      planId,
+      payload,
+      { signal: abortController.signal },
+    ));
   }
 
   async startPlanAnswerStream(
@@ -1062,7 +1071,12 @@ export class StreamManager {
     this.streams.set(runId, state);
     this.addToConversation(conversationId, runId);
     this.notify(conversationId, true);
-    await this.consume(runId, () => messageApi.streamPlanAnswer(conversationId, planId, payload, abortController.signal));
+    await this.consume(runId, () => messageApi.streamPlanAnswer(
+      conversationId,
+      planId,
+      payload,
+      { signal: abortController.signal },
+    ));
   }
 
   async startPlanRejectStream(
@@ -1091,7 +1105,12 @@ export class StreamManager {
     this.streams.set(runId, state);
     this.addToConversation(conversationId, runId);
     this.notify(conversationId, true);
-    await this.consume(runId, () => messageApi.streamPlanReject(conversationId, planId, payload, abortController.signal));
+    await this.consume(runId, () => messageApi.streamPlanReject(
+      conversationId,
+      planId,
+      payload,
+      { signal: abortController.signal },
+    ));
   }
 
   async resumeStream(
@@ -1123,8 +1142,12 @@ export class StreamManager {
     this.addToConversation(conversationId, resolvedRunId);
     this.notify(conversationId, true);
     await this.consume(resolvedRunId, () => runId
-      ? runsApi.attach(runId, fromEvent, abortController.signal)
-      : messageApi.attachStream(conversationId, nodeId as string, fromEvent, abortController.signal));
+      ? runsApi.attach(runId, { fromEvent, signal: abortController.signal })
+      : messageApi.attachStream(
+          conversationId,
+          nodeId as string,
+          { fromEvent, signal: abortController.signal },
+        ));
   }
 
   private async consume(

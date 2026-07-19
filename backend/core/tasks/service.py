@@ -6,6 +6,12 @@ from dataclasses import replace
 from time import time
 from typing import Any, Iterable, Optional
 
+from .errors import (
+    ActiveTaskConflictError,
+    ActiveTaskNotFoundError,
+    ActiveTaskVersionConflictError,
+    TaskContextDisabledError,
+)
 from .types import (
     ActiveTask,
     ActiveTaskStep,
@@ -18,22 +24,6 @@ from .types import (
     normalize_context_mode,
     normalize_step_status,
 )
-
-
-class ActiveTaskError(Exception):
-    pass
-
-
-class ActiveTaskNotFoundError(ActiveTaskError):
-    pass
-
-
-class ActiveTaskConflictError(ActiveTaskError):
-    pass
-
-
-class TaskContextDisabledError(ActiveTaskError):
-    pass
 
 
 class ActiveTaskService:
@@ -149,6 +139,8 @@ class ActiveTaskService:
                 )
             except KeyError as exc:
                 raise ActiveTaskNotFoundError(str(exc)) from exc
+            except ActiveTaskVersionConflictError:
+                raise
             except RuntimeError as exc:
                 raise ActiveTaskConflictError(str(exc)) from exc
             task_row = result.get("task")
@@ -241,9 +233,15 @@ class ActiveTaskService:
         if task is None:
             raise ActiveTaskNotFoundError(conversation_id)
         if expected_generation and task.generation_id != expected_generation:
-            raise ActiveTaskConflictError("active task generation changed")
+            raise ActiveTaskVersionConflictError(
+                task.generation_id,
+                task.revision,
+            )
         if expected_revision is not None and task.revision != expected_revision:
-            raise ActiveTaskConflictError("active task revision changed")
+            raise ActiveTaskVersionConflictError(
+                task.generation_id,
+                task.revision,
+            )
         cancellation_generation = expected_generation or task.generation_id
         cancellation_revision = task.revision if expected_revision is None else expected_revision
         active_run_id = task.active_run_id
@@ -256,6 +254,8 @@ class ActiveTaskService:
                 ))
             except KeyError as exc:
                 raise ActiveTaskNotFoundError(str(exc)) from exc
+            except ActiveTaskVersionConflictError:
+                raise
             except RuntimeError as exc:
                 raise ActiveTaskConflictError(str(exc)) from exc
         else:
@@ -290,9 +290,15 @@ class ActiveTaskService:
         if task is None:
             raise ActiveTaskNotFoundError(conversation_id)
         if task.generation_id != expected_generation:
-            raise ActiveTaskConflictError("active task generation changed")
+            raise ActiveTaskVersionConflictError(
+                task.generation_id,
+                task.revision,
+            )
         if task.revision != expected_revision:
-            raise ActiveTaskConflictError("active task revision changed")
+            raise ActiveTaskVersionConflictError(
+                task.generation_id,
+                task.revision,
+            )
         if task.active_run_id:
             raise ActiveTaskConflictError("active task already has a running step")
         if step_number > len(task.steps):
@@ -443,9 +449,15 @@ class ActiveTaskService:
         if task is None:
             raise ActiveTaskNotFoundError(conversation_id)
         if expected_generation and task.generation_id != expected_generation:
-            raise ActiveTaskConflictError("active task generation changed")
+            raise ActiveTaskVersionConflictError(
+                task.generation_id,
+                task.revision,
+            )
         if expected_revision is not None and task.revision != expected_revision:
-            raise ActiveTaskConflictError("active task revision changed")
+            raise ActiveTaskVersionConflictError(
+                task.generation_id,
+                task.revision,
+            )
         return task
 
     def _step_number(self, value: Any) -> int:

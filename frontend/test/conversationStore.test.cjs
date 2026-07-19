@@ -21,6 +21,10 @@ const conversationApiModule = path.join(__dirname, '../src/api/conversation.ts')
 const messageApiModule = path.join(__dirname, '../src/api/message.ts');
 const modelStoreModule = path.join(__dirname, '../src/store/modelStore.ts');
 const storeModule = path.join(__dirname, '../src/store/conversationStore.ts');
+const { ChatTreeApiError } = require('../src/api/errors.ts');
+require('../src/runtime/profileContext.ts').initializeProfileContext(
+  'http://127.0.0.1:18100/s/local',
+);
 
 const storage = new Map();
 global.localStorage = {
@@ -195,12 +199,13 @@ async function testDeleteNodeRetriesForceWhenActiveRunBlocksDeletion() {
   deleteNodeHandler = async () => {
     attempts += 1;
     if (attempts === 1) {
-      const error = new Error('Conflict');
-      error.response = {
+      throw new ChatTreeApiError('Active runs are present', {
         status: 409,
-        data: { detail: { message: 'active run', active_run_ids: ['run-1'] } },
-      };
-      throw error;
+        code: 'active_runs_present',
+        retryable: false,
+        requestId: 'delete-tree',
+        details: { active_run_ids: ['run-1'] },
+      });
     }
     return {
       deleted_node_id: 'node-2',

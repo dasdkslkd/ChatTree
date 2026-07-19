@@ -89,6 +89,42 @@ def get_run_manager(request: Request):
         raise HTTPException(status_code=500, detail=f"依赖注入错误: {str(e)}")
 
 
+def get_run_start_coordinator(request: Request):
+    """获取运行启动协调器。"""
+    try:
+        coordinator = getattr(request.app.state, "run_start_coordinator", None)
+        if coordinator is None:
+            logger.error("❌ run_start_coordinator 未在 app.state 中初始化")
+            raise HTTPException(status_code=500, detail="运行启动协调器未初始化")
+        return coordinator
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            f"❌ 获取 run_start_coordinator 失败: {e}",
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail=f"依赖注入错误: {str(e)}")
+
+
+def get_producer_registry(request: Request):
+    """获取唯一的 producer/background task owner。"""
+    try:
+        registry = getattr(request.app.state, "producer_registry", None)
+        if registry is None:
+            logger.error("❌ producer_registry 未在 app.state 中初始化")
+            raise HTTPException(status_code=500, detail="ProducerRegistry 未初始化")
+        return registry
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            f"❌ 获取 producer_registry 失败: {e}",
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail=f"依赖注入错误: {str(e)}")
+
+
 def get_task_service(request: Request):
     """获取全局活动任务服务。"""
     try:

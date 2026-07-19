@@ -17,7 +17,7 @@ from backend.core.persistence.repository import ChatRepository
 from backend.core.persistence.run_repository import SQLiteRunRepository
 from backend.core.persistence.transcript import TranscriptProjection
 from backend.core.plans import PlanLedger
-from backend.core.runs import RunManager, RunStatus
+from backend.core.runs import RunKind, RunManager, RunStatus
 from backend.core.notifications import format_task_notification_content
 from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
@@ -28,7 +28,7 @@ from backend.core.tools.security.approval import ApprovalManager
 from backend.core.tools.security.logical_sandbox import LogicalSandbox
 from backend.core.tools.security.permissions import PermissionEngine
 from backend.api.routes.conversations import to_transcript_item_dto
-from backend.api.routes.messages import SendMessageRequest, start_detached_chat_run
+from backend.api.routes.messages import SendMessageRequest, _produce_chat_run
 from test_chat_manager_prompt_slash import (
     CapturingProvider,
     CapturingModelManager,
@@ -410,22 +410,30 @@ def test_detached_chat_run_finishes_durable_lifecycle_once(tmp_path: Path):
     run_manager = RunManager(repository=run_repository)
 
     async def scenario():
-        run = await start_detached_chat_run(
-            conversation.metadata["id"],
-            SendMessageRequest(
-                content="hello lifecycle",
-                parent_node_id=conversation.current_node_id,
-                model_id="fake-model",
-            ),
-            manager,
-            run_manager,
+        request = SendMessageRequest(
+            content="hello lifecycle",
+            parent_node_id=conversation.current_node_id,
+            model_id="fake-model",
+        )
+        run = await run_manager.create_run(
+            conversation_id=conversation.metadata["id"],
+            kind=RunKind.CHAT,
+            anchor_node_id=conversation.current_node_id,
+            summary=request.content,
+        )
+        await _produce_chat_run(
+            run=run,
+            conversation_id=conversation.metadata["id"],
+            request=request,
+            chat_manager=manager,
+            run_manager=run_manager,
         )
         await run_manager.wait_for_terminal_result(
-            run["run_id"],
+            run.run_id,
             result_event_types=set(),
             timeout=5,
         )
-        return run["run_id"]
+        return run.run_id
 
     run_id = asyncio.run(scenario())
     finished = run_repository.get_run(run_id)

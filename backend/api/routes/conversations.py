@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 
 from backend.api.dependencies import get_chat_manager, get_config_manager, get_run_manager, get_transcript_projection
+from backend.api.errors import ApiError, ErrorEnvelope
 from backend.core.chat.chat_manager import ChatManager
 from backend.core.config.config import Config, cfg
 from backend.core.persistence.transcript import TranscriptProjection
@@ -533,7 +534,10 @@ async def prune_summary(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/conversations/{conversation_id}/nodes/{node_id}")
+@router.delete(
+    "/conversations/{conversation_id}/nodes/{node_id}",
+    responses={409: {"model": ErrorEnvelope}},
+)
 async def delete_node(
     conversation_id: str,
     node_id: str,
@@ -550,14 +554,23 @@ async def delete_node(
             conversation_id=conversation_id,
             target_node_ids=conv.get_descendant_node_ids(node_id),
         )
-        if active_runs and not force:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "message": "该分支仍有运行中的任务，请先停止后再删除",
-                    "active_run_ids": [run["run_id"] for run in active_runs],
-                },
-            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if active_runs and not force:
+        raise ApiError(
+            409,
+            "active_runs_present",
+            "该分支仍有运行中的任务，请先停止后再删除",
+            True,
+            details={
+                "active_run_ids": [str(run["run_id"]) for run in active_runs]
+            },
+        )
+
+    try:
         if active_runs and force:
             for run in active_runs:
                 await run_manager.request_stop(str(run["run_id"]))

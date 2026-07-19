@@ -145,6 +145,16 @@ function chunk(overrides) {
   };
 }
 
+require('../src/runtime/profileContext.ts').initializeProfileContext(
+  'http://127.0.0.1:18100/s/local',
+);
+require('../src/runtime/connectionScope.ts').connectionScopeRuntime.install({
+  profileId: 'local',
+  apiBase: '/p/local/api/v1',
+  serverInstanceId: '11111111-1111-4111-8111-111111111111',
+  connectionEpoch: 1,
+  connectionLeaseId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+});
 const { StreamManager, STREAM_DURATION_UPDATE_MS } = require(path.join(__dirname, '../src/services/streamManager.ts'));
 const { messageApi } = require(path.join(__dirname, '../src/api/message.ts'));
 const { runsApi } = require(path.join(__dirname, '../src/api/runs.ts'));
@@ -205,7 +215,10 @@ async function testFlushesBufferedTextIntoSingleToolCall() {
     const running = manager.startStream('conv-1', { content: 'hello' });
 
     await controlled.push(chunk({ event_type: 'text', content }));
-    await controlled.push(chunk({ event_type: 'tool_call', tool_call: toolCall }));
+    await controlled.push(chunk({
+      event_type: 'tool_calls_committed',
+      tool_calls: [toolCall],
+    }));
 
     try {
       const state = manager.getState('conv-1');
@@ -240,7 +253,7 @@ async function testMergesToolResultIntoExistingInteraction() {
     };
     const running = manager.startStream('conv-1', { content: 'hello' });
 
-    await controlled.push(chunk({ event_type: 'tool_call', tool_calls: [toolCall] }));
+    await controlled.push(chunk({ event_type: 'tool_calls_committed', tool_calls: [toolCall] }));
     await controlled.push(chunk({ event_type: 'tool_result', tool_call: toolResult }));
 
     try {
@@ -269,7 +282,7 @@ async function testToolProgressUpdatesRunningToolInPlace() {
     };
     const running = manager.startStream('conv-1', { content: 'hello' });
 
-    await controlled.push(chunk({ event_type: 'tool_call', tool_calls: [toolCall] }));
+    await controlled.push(chunk({ event_type: 'tool_calls_committed', tool_calls: [toolCall] }));
     await controlled.push(chunk({
       event_type: 'tool_progress',
       tool_call: {
@@ -306,7 +319,7 @@ async function testToolResultDeltaAppendsOutputInPlace() {
     };
     const running = manager.startStream('conv-1', { content: 'hello' });
 
-    await controlled.push(chunk({ event_type: 'tool_call', tool_calls: [toolCall] }));
+    await controlled.push(chunk({ event_type: 'tool_calls_committed', tool_calls: [toolCall] }));
     await controlled.push(chunk({
       event_type: 'tool_result_delta',
       tool_call: { id: 'call-1', tool_call_id: 'call-1', name: 'run_command', content_delta: 'hel' },
@@ -340,7 +353,7 @@ async function testToolCallErrorUpdatesToolInPlace() {
     };
     const running = manager.startStream('conv-1', { content: 'hello' });
 
-    await controlled.push(chunk({ event_type: 'tool_call', tool_calls: [toolCall] }));
+    await controlled.push(chunk({ event_type: 'tool_calls_committed', tool_calls: [toolCall] }));
     await controlled.push(chunk({
       event_type: 'tool_call_error',
       tool_call: {
@@ -389,8 +402,7 @@ async function testProcessContentStaysWithCurrentToolInteraction() {
     }));
     const running = manager.startStream('conv-1', { content: 'hello' });
 
-    await controlled.push(chunk({ event_type: 'tool_call_start' }));
-    await controlled.push(chunk({ event_type: 'tool_call', tool_calls: toolCalls }));
+    await controlled.push(chunk({ event_type: 'tool_calls_committed', tool_calls: toolCalls }));
     await controlled.push(chunk({ event_type: 'process_content', content: '\n\n' }));
     await controlled.push(chunk({ event_type: 'tool_result', tool_call: results[0] }));
     await controlled.push(chunk({ event_type: 'tool_result', tool_call: results[1] }));
@@ -417,7 +429,10 @@ async function testToolCallStartFlushesBufferedTextBeforeToolCallCompletes() {
     const running = manager.startStream('conv-1', { content: 'hello' });
 
     await controlled.push(chunk({ event_type: 'text', content }));
-    await controlled.push(chunk({ event_type: 'tool_call_start' }));
+    await controlled.push(chunk({
+      event_type: 'tool_call_start',
+      tool_call: { id: 'call-start', pending: true },
+    }));
 
     try {
       const state = manager.getState('conv-1');
@@ -439,7 +454,10 @@ async function testToolCallStartCreatesRunningPlaceholder() {
     const running = manager.startStream('conv-1', { content: 'hello' });
 
     await controlled.push(chunk({ event_type: 'text', content }));
-    await controlled.push(chunk({ event_type: 'tool_call_start' }));
+    await controlled.push(chunk({
+      event_type: 'tool_call_start',
+      tool_call: { id: 'call-start', pending: true },
+    }));
 
     try {
       const state = manager.getState('conv-1');
@@ -466,9 +484,8 @@ async function testToolCallDeltaUpdatesRunningPlaceholder() {
     };
     const running = manager.startStream('conv-1', { content: 'hello' });
 
-    await controlled.push(chunk({ event_type: 'tool_call_start' }));
     await controlled.push(chunk({
-      event_type: 'tool_call',
+      event_type: 'tool_call_start',
       tool_call: { tool_calls: [partialToolCall] },
       tool_calls: [partialToolCall],
     }));
@@ -526,7 +543,8 @@ async function testRequestNodeAndUiAnchorAreIndependent() {
 
     await tick();
     let state = manager.getConversationStates('conv-1')[0];
-    assert.equal(streamArgs[2], undefined);
+    assert.equal(streamArgs[2].nodeId, undefined);
+    assert.equal(streamArgs[2].signal instanceof AbortSignal, true);
     assert.equal(state.anchorNodeId, 'node-current');
     assert.equal(state.nodeId, null);
     assert.equal(state.targetNodeId, null);

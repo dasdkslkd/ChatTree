@@ -14,6 +14,9 @@ PROTOCOL_FEATURES = (
     "tools",
     "tool_approvals",
     "multi_agent",
+    "error_envelope_v1",
+    "idempotent_run_start_v1",
+    "cooperative_shutdown_v1",
 )
 
 

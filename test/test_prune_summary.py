@@ -12,11 +12,44 @@ from backend.core.chat.conversation import Conversation
 from backend.core.chat.node import NodeManager
 from backend.core.chat.prune_summary import build_prune_packets
 from backend.core.config.types import Message, Role
-from backend.core.runs import RunManager
+from backend.core.runs import RunKind, RunManager
 from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
 from backend.core.slash import SlashCommandDispatcher, SlashDispatchKind
-from backend.api.routes.messages import SendMessageRequest, detached_stream_event_generator
+from backend.api.routes.messages import (
+    SendMessageRequest,
+    _parse_prune_summary_args,
+    _produce_prune_summary,
+    _subscribe_sse,
+)
+
+
+async def _prune_summary_stream(conversation_id, request, chat_manager):
+    run_manager = RunManager()
+    slash_result = SlashCommandDispatcher().dispatch(request.content)
+    target_node_id, _ = _parse_prune_summary_args(
+        slash_result.args,
+        request.parent_node_id,
+    )
+    run = await run_manager.create_run(
+        conversation_id=conversation_id,
+        kind=RunKind.DIRECT_RESPONSE,
+        anchor_node_id=target_node_id or request.parent_node_id,
+        summary=request.content[:80],
+    )
+    producer = asyncio.create_task(
+        _produce_prune_summary(
+            run=run,
+            conversation_id=conversation_id,
+            request=request,
+            slash_result=slash_result,
+            chat_manager=chat_manager,
+            run_manager=run_manager,
+        )
+    )
+    async for event in _subscribe_sse(run_manager, run.run_id, from_event=1):
+        yield event
+    await producer
 
 
 class PruneProvider:
@@ -277,13 +310,10 @@ def test_prune_summary_slash_runtime_calls_special_handler():
     async def collect():
         manager = FakeChatManager()
         events = []
-        async for event in detached_stream_event_generator(
+        async for event in _prune_summary_stream(
             "conv-1",
             SendMessageRequest(content="/prune-summary node:target focus storage", parent_node_id="parent-1"),
             manager,
-            RunManager(),
-            None,
-            None,
         ):
             events.append(event)
         return manager, events
@@ -312,13 +342,10 @@ def test_prune_summary_slash_stream_yields_start_before_summary_finishes():
             }
 
     async def collect():
-        generator = detached_stream_event_generator(
+        generator = _prune_summary_stream(
             "conv-1",
             SendMessageRequest(content="/prune-summary node:target", parent_node_id="parent-1"),
             SlowFakeChatManager(),
-            RunManager(),
-            None,
-            None,
         )
         start = time.perf_counter()
         first_event = await generator.__anext__()

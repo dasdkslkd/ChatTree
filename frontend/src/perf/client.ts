@@ -1,5 +1,5 @@
 import type { FrontendPerfEvent, PerfConfig } from './types';
-import { serverApiUrl } from '../api/client';
+import { leaseGuardedFetch } from '../api/leaseFetch';
 
 const DEFAULT_CONFIG: PerfConfig = {
   enabled: false,
@@ -102,11 +102,10 @@ export async function loadPerfConfig(): Promise<PerfConfig> {
     const controller = typeof AbortController === 'function' ? new AbortController() : null;
     const timeout = controller ? globalThis.setTimeout(() => controller.abort(), 2000) : null;
     try {
-      const response = await fetch(serverApiUrl('/perf/config'), {
+      const response = await leaseGuardedFetch('/perf/config', {
         method: 'GET',
         signal: controller?.signal,
       });
-      if (!response.ok) throw new Error(`perf config ${response.status}`);
       const data = await response.json();
       config = {
         ...DEFAULT_CONFIG,
@@ -165,7 +164,7 @@ export async function flushPerfEvents(): Promise<void> {
   flushing = true;
   const batch = queue.splice(0, batchLimit());
   try {
-    await fetch(serverApiUrl('/perf/events'), {
+    await leaseGuardedFetch('/perf/events', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ events: batch }),
@@ -185,28 +184,19 @@ export async function flushPerfEvents(): Promise<void> {
 export function flushPerfEventsSync(): boolean {
   if (!isPerfEnabled() || queue.length === 0) return false;
   clearScheduledFlush();
-  const nav = typeof navigator !== 'undefined' ? navigator : null;
   const pending = queue;
   queue = [];
   while (pending.length > 0) {
     const batch = pending.splice(0, batchLimit());
     const body = JSON.stringify({ events: batch });
-    if (nav && typeof nav.sendBeacon === 'function') {
-      try {
-        const ok = nav.sendBeacon(serverApiUrl('/perf/events'), new Blob([body], { type: 'application/json' }));
-        if (ok) continue;
-      } catch {
-        // Fall through to fetch keepalive.
-      }
-    }
     if (hasFetch()) {
       try {
-        void fetch(serverApiUrl('/perf/events'), {
+        void leaseGuardedFetch('/perf/events', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body,
           keepalive: true,
-        });
+        }).catch(() => {});
         continue;
       } catch {
         // Telemetry must not disturb app teardown.

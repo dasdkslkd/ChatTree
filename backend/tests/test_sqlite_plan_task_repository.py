@@ -11,7 +11,9 @@ from backend.core.persistence.database import SQLitePersistence
 from backend.core.persistence.content import INLINE_TEXT_LIMIT
 from backend.core.persistence.plan_repository import SQLitePlanRepository
 from backend.core.persistence.repository import ChatRepository
+from backend.core.persistence.task_repository import SQLiteTaskRepository
 from backend.core.plans import PlanContextInjection, PlanLedger, PlanSession, PlanStatus
+from backend.core.tasks import ActiveTaskVersionConflictError
 
 
 def run(coro):
@@ -339,3 +341,68 @@ async def _plan_ledger_repository_active_approve_reject_context_case(tmp_path):
 
 def test_plan_ledger_repository_active_approve_reject_context(tmp_path):
     run(_plan_ledger_repository_active_approve_reject_context_case(tmp_path))
+
+
+def test_task_repository_version_conflicts_report_actual_current_version(tmp_path):
+    persistence = SQLitePersistence(tmp_path)
+    persistence.initialize()
+    chat = ChatRepository(persistence)
+    conversation_id = chat.create_conversation(title="Versioned tasks")
+    repository = SQLiteTaskRepository(persistence)
+    first = repository.create_task(
+        conversation_id,
+        title="First",
+        detail="",
+        steps=[{"title": "Step", "detail": ""}],
+    )
+    updated = repository.set_step_result(
+        conversation_id,
+        step=1,
+        status="blocked",
+        evidence_summary="retry",
+        evidence_run_id=None,
+        expected_generation=first["generation_id"],
+        expected_revision=first["revision"],
+    )["task"]
+
+    with pytest.raises(ActiveTaskVersionConflictError) as revision_conflict:
+        repository.set_step_result(
+            conversation_id,
+            step=1,
+            status="blocked",
+            evidence_summary="stale revision",
+            evidence_run_id=None,
+            expected_generation=first["generation_id"],
+            expected_revision=first["revision"],
+        )
+
+    assert revision_conflict.value.current_generation_id == updated["generation_id"]
+    assert revision_conflict.value.current_revision == updated["revision"]
+
+    repository.cancel_task(
+        conversation_id,
+        expected_generation=updated["generation_id"],
+        expected_revision=updated["revision"],
+    )
+    replacement = repository.create_task(
+        conversation_id,
+        title="Replacement",
+        detail="",
+        steps=[{"title": "Keep", "detail": ""}],
+    )
+
+    with pytest.raises(ActiveTaskVersionConflictError) as generation_conflict:
+        repository.set_step_result(
+            conversation_id,
+            step=1,
+            status="completed",
+            evidence_summary="late result",
+            evidence_run_id=None,
+            expected_generation=first["generation_id"],
+            expected_revision=first["revision"],
+        )
+
+    assert generation_conflict.value.current_generation_id == replacement[
+        "generation_id"
+    ]
+    assert generation_conflict.value.current_revision == replacement["revision"]
