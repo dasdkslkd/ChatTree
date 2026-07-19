@@ -38,6 +38,27 @@ def test_serve_rejects_invalid_port(port):
     assert exc_info.value.code == 2
 
 
+@pytest.mark.parametrize("port", ["0", "auto"])
+def test_start_accepts_auto_port(port, tmp_path, monkeypatch, capsys):
+    captured = {}
+
+    class FakePopen:
+        def __init__(self, command, **kwargs):
+            captured["command"] = command
+            captured["kwargs"] = kwargs
+            self.pid = 12346
+
+    monkeypatch.setattr(server_cli, "_allocate_loopback_port", lambda host: 18019)
+    monkeypatch.setattr(server_cli.subprocess, "Popen", FakePopen)
+
+    result = server_cli.main(["start", "--home", str(tmp_path), "--port", port])
+
+    assert result == 0
+    assert captured["command"][captured["command"].index("--port") + 1] == "18019"
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["port"] == 18019
+
+
 def test_serve_sets_home_before_importing_main(tmp_path, monkeypatch):
     captured = {}
 
@@ -156,6 +177,135 @@ def test_start_reuses_running_server_without_spawning(tmp_path, monkeypatch, cap
     assert payload["home"] == str(tmp_path.resolve())
     assert payload["port"] == 18012
     assert payload["server_instance_id"] == "server-1"
+
+
+def test_start_auto_reuses_locked_home_owner_port(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    def fail_popen(*args, **kwargs):
+        raise AssertionError("start must not spawn when locked owner is ready")
+
+    lock_path = tmp_path / ".server.lock"
+    lock_path.write_bytes(
+        b"\0"
+        + json.dumps(
+            {
+                "pid": 12345,
+                "host": "127.0.0.1",
+                "port": 18020,
+                "started_at": 1,
+            }
+        ).encode("utf-8")
+    )
+
+    monkeypatch.setattr(
+        server_cli,
+        "_locked_home_owner",
+        lambda home: {
+            "pid": 12345,
+            "host": "127.0.0.1",
+            "port": 18020,
+            "started_at": 1,
+        },
+    )
+    monkeypatch.setattr(
+        server_cli,
+        "_probe_handshake",
+        lambda host, port: {
+            "server_instance_id": "server-2",
+            "protocol_version": 1,
+        },
+    )
+    monkeypatch.setattr(server_cli.subprocess, "Popen", fail_popen)
+
+    result = server_cli.main(["start", "--home", str(tmp_path), "--port", "auto"])
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "already_running"
+    assert payload["pid"] == 12345
+    assert payload["port"] == 18020
+    assert payload["server_instance_id"] == "server-2"
+
+
+def test_start_reuses_legacy_locked_home_with_requested_port(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    def fail_popen(*args, **kwargs):
+        raise AssertionError("start must not spawn when legacy owner is ready")
+
+    monkeypatch.setattr(
+        server_cli,
+        "_locked_home_owner",
+        lambda home: {
+            "pid": 12345,
+            "hostname": "dev-host",
+            "started_at": 1,
+        },
+    )
+
+    probes = []
+
+    def fake_probe(host, port):
+        probes.append((host, port))
+        return {
+            "server_instance_id": "server-legacy",
+            "protocol_version": 1,
+        }
+
+    monkeypatch.setattr(server_cli, "_probe_handshake", fake_probe)
+    monkeypatch.setattr(server_cli.subprocess, "Popen", fail_popen)
+
+    result = server_cli.main(
+        [
+            "start",
+            "--home",
+            str(tmp_path),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "18021",
+        ]
+    )
+
+    assert result == 0
+    assert probes == [("127.0.0.1", 18021)]
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "already_running"
+    assert payload["pid"] == 12345
+    assert payload["host"] == "127.0.0.1"
+    assert payload["port"] == 18021
+    assert payload["server_instance_id"] == "server-legacy"
+
+
+def test_start_auto_rejects_legacy_locked_home_without_owner_port(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    def fail_popen(*args, **kwargs):
+        raise AssertionError("start must not spawn when home is locked")
+
+    monkeypatch.setattr(
+        server_cli,
+        "_locked_home_owner",
+        lambda home: {
+            "pid": 12345,
+            "hostname": "dev-host",
+            "started_at": 1,
+        },
+    )
+    monkeypatch.setattr(server_cli, "_probe_handshake", lambda host, port: None)
+    monkeypatch.setattr(server_cli.subprocess, "Popen", fail_popen)
+
+    result = server_cli.main(["start", "--home", str(tmp_path), "--port", "auto"])
+
+    assert result == 1
+    assert "already in use" in capsys.readouterr().err
 
 
 def test_start_returns_nonzero_when_spawn_fails(tmp_path, monkeypatch, capsys):

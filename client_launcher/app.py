@@ -17,7 +17,7 @@ from client_launcher.http_errors import (
     launcher_error_response,
 )
 from client_launcher.local_server import LocalServerConnector
-from client_launcher.models import LauncherError, LocalTarget, ServerProfile
+from client_launcher.models import LauncherError, LocalTarget, ServerProfile, ServerSession, ssh_profile_id
 from client_launcher.profiles import ProfileStore
 from client_launcher.proxy import (
     CONNECTION_LEASE_HEADER,
@@ -29,6 +29,8 @@ from client_launcher.settings import (
     PROFILES_FILENAME,
     LauncherSettings,
 )
+from client_launcher.ssh_config import SshConfigStore
+from client_launcher.ssh_connector import SshServerConnector
 
 
 class _LauncherApp(FastAPI):
@@ -88,11 +90,16 @@ class ServerLifecycleRequest(StrictRequestModel):
     timeout_seconds: int = Field(default=30, ge=1, le=600)
 
 
+class SshConfigUpdateRequest(StrictRequestModel):
+    text: str
+
+
 def create_app(
     *,
     settings: LauncherSettings | None = None,
     profiles: ProfileStore | None = None,
     connector: Any | None = None,
+    ssh_config: SshConfigStore | None = None,
     proxy_client: httpx.AsyncClient | None = None,
 ) -> FastAPI:
     resolved_settings = settings or LauncherSettings.from_env()
@@ -100,8 +107,12 @@ def create_app(
         resolved_settings.client_home / PROFILES_FILENAME,
         default_server_port=resolved_settings.default_local_server_port,
     )
-    local_connector = connector or LocalServerConnector(resolved_settings)
+    local_connector = connector or {
+        "local": LocalServerConnector(resolved_settings),
+        "ssh": SshServerConnector(resolved_settings),
+    }
     sessions = SessionManager(profile_store, local_connector)
+    ssh_config_store = ssh_config or SshConfigStore()
     owns_proxy_client = proxy_client is None
     upstream_client = proxy_client or httpx.AsyncClient(
         trust_env=False,
@@ -170,7 +181,11 @@ def create_app(
 
     @app.get("/client/v1/profiles")
     async def list_profiles() -> list[dict[str, Any]]:
-        return [profile.to_dict() for profile in profile_store.list()]
+        return [
+            profile.to_dict()
+            for profile in profile_store.list()
+            if profile.kind == "local"
+        ]
 
     @app.post("/client/v1/profiles", status_code=201)
     async def create_profile(body: CreateProfileRequest) -> dict[str, Any]:
@@ -201,6 +216,13 @@ def create_app(
         body: UpdateProfileRequest,
     ) -> dict[str, Any]:
         current = profile_store.get(profile_id)
+        if current.kind != "local":
+            raise LauncherError(
+                "profile_update_unsupported",
+                "Only local profiles can be edited through the profile API",
+                False,
+                409,
+            )
         local = None
         if body.server_home is not None or body.server_port is not None:
             try:
@@ -229,6 +251,13 @@ def create_app(
 
     @app.delete("/client/v1/profiles/{profile_id}", status_code=204)
     async def delete_profile(profile_id: str) -> Response:
+        if profile_store.get(profile_id).kind != "local":
+            raise LauncherError(
+                "profile_delete_unsupported",
+                "SSH profiles are managed from SSH Hosts",
+                False,
+                409,
+            )
         await sessions.delete_profile(profile_id)
         return Response(status_code=204)
 
@@ -285,6 +314,83 @@ def create_app(
     @app.get("/client/v1/profiles/{profile_id}/status")
     async def profile_status(profile_id: str) -> dict[str, Any]:
         return sessions.status(profile_id).to_dict()
+
+    @app.get("/client/v1/ssh/config")
+    async def get_ssh_config() -> dict[str, Any]:
+        return ssh_config_store.read().to_dict()
+
+    @app.put("/client/v1/ssh/config")
+    async def put_ssh_config(body: SshConfigUpdateRequest) -> dict[str, Any]:
+        return ssh_config_store.write(body.text).to_dict()
+
+    @app.get("/client/v1/ssh/hosts")
+    async def list_ssh_hosts() -> dict[str, Any]:
+        snapshot = ssh_config_store.read()
+        return {
+            "path": snapshot.path,
+            "hosts": list(snapshot.hosts),
+            "warnings": list(snapshot.warnings),
+        }
+
+    def require_config_host(host_alias: str) -> str:
+        snapshot = ssh_config_store.read()
+        if host_alias not in snapshot.hosts:
+            raise LauncherError(
+                "ssh_host_not_found",
+                f"SSH Host alias is not present in {snapshot.path}: {host_alias}",
+                False,
+                404,
+            )
+        return host_alias
+
+    @app.post("/client/v1/ssh/hosts/{host_alias}/connect")
+    async def connect_ssh_host(
+        host_alias: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        require_config_host(host_alias)
+        profile = profile_store.ensure_ssh_profile(host_alias)
+        session = await sessions.connect(
+            profile.id,
+            request_id=request.state.request_id,
+        )
+        return {
+            "profile_id": profile.id,
+            "host_alias": host_alias,
+            "session": session.to_dict(),
+        }
+
+    @app.post("/client/v1/ssh/hosts/{host_alias}/disconnect")
+    async def disconnect_ssh_host(host_alias: str) -> dict[str, Any]:
+        require_config_host(host_alias)
+        profile_id = ssh_profile_id(host_alias)
+        try:
+            session = await sessions.disconnect(profile_id)
+        except LauncherError as exc:
+            if exc.code != "profile_not_found":
+                raise
+            session = ServerSession(profile_id=profile_id)
+        return {
+            "profile_id": profile_id,
+            "host_alias": host_alias,
+            "session": session.to_dict(),
+        }
+
+    @app.get("/client/v1/ssh/hosts/{host_alias}/status")
+    async def ssh_host_status(host_alias: str) -> dict[str, Any]:
+        require_config_host(host_alias)
+        profile_id = ssh_profile_id(host_alias)
+        try:
+            session = sessions.status(profile_id)
+        except LauncherError as exc:
+            if exc.code != "profile_not_found":
+                raise
+            session = ServerSession(profile_id=profile_id)
+        return {
+            "profile_id": profile_id,
+            "host_alias": host_alias,
+            "session": session.to_dict(),
+        }
 
     app.include_router(
         create_proxy_router(

@@ -13,6 +13,8 @@ from client_launcher.models import (
     LocalTarget,
     ServerProfile,
     ServerSession,
+    SshTarget,
+    ssh_profile_id,
 )
 from client_launcher.profiles import ProfileStore
 from client_launcher.settings import (
@@ -363,6 +365,74 @@ def test_binding_and_rebinding_reject_instance_owned_by_another_profile(
         store.rebind("other", "server-a")
     assert rebind_error.value.code == "server_instance_already_bound"
     assert store.get("other").bound_server_instance_id == "server-b"
+
+
+def test_ensure_ssh_profile_uses_stable_alias_id_and_reuses_existing_profile(
+    tmp_path: Path,
+):
+    store = ProfileStore(
+        tmp_path / "profiles.json",
+        default_server_home=tmp_path / "default",
+    )
+
+    created = store.ensure_ssh_profile("gpu-box")
+    reused = store.ensure_ssh_profile("gpu-box")
+
+    assert created == reused
+    assert created.id == ssh_profile_id("gpu-box")
+    assert created.kind == "ssh"
+    assert created.ssh == SshTarget(config_host="gpu-box")
+    assert created.local is None
+    assert created.auto_connect is False
+
+
+def test_v2_ssh_profiles_load_from_disk(tmp_path: Path):
+    path = tmp_path / "profiles.json"
+    local = _profile(DEFAULT_LOCAL_PROFILE_ID, tmp_path / "default")
+    ssh = ServerProfile(
+        id=ssh_profile_id("gpu-box"),
+        label="SSH: gpu-box",
+        kind="ssh",
+        auto_connect=False,
+        bound_server_instance_id=None,
+        ssh=SshTarget(config_host="gpu-box"),
+    )
+    _write_document(path, [local.to_dict(), ssh.to_dict()], version=2)
+
+    store = ProfileStore(path, default_server_home=tmp_path / "default")
+
+    assert store.get(ssh.id) == ssh
+
+
+def test_duplicate_ssh_host_in_persisted_file_fails_closed(tmp_path: Path):
+    path = tmp_path / "profiles.json"
+    local = _profile(DEFAULT_LOCAL_PROFILE_ID, tmp_path / "default")
+    first = ServerProfile(
+        id="ssh:first",
+        label="SSH one",
+        kind="ssh",
+        auto_connect=False,
+        bound_server_instance_id=None,
+        ssh=SshTarget(config_host="gpu-box"),
+    )
+    second = ServerProfile(
+        id="ssh:second",
+        label="SSH two",
+        kind="ssh",
+        auto_connect=False,
+        bound_server_instance_id=None,
+        ssh=SshTarget(config_host="gpu-box"),
+    )
+    _write_document(
+        path,
+        [local.to_dict(), first.to_dict(), second.to_dict()],
+        version=2,
+    )
+
+    with pytest.raises(LauncherError) as exc_info:
+        ProfileStore(path, default_server_home=tmp_path / "default")
+
+    assert exc_info.value.code == "ssh_host_duplicate"
 
 
 @pytest.mark.parametrize(

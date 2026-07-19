@@ -36,6 +36,7 @@ class FakeConnector:
         self.release = asyncio.Event()
         self.ignore_cancellation = False
         self.shutdown_calls: list[tuple[str, str, str | None]] = []
+        self.disconnect_calls: list[str] = []
         self.shutdown_error: BaseException | None = None
         self.wait_stopped_calls: list[tuple[str, object, float]] = []
         self.wait_stopped_error: BaseException | None = None
@@ -64,13 +65,20 @@ class FakeConnector:
             if not self.ignore_cancellation:
                 raise
         return ConnectedServer(
-            endpoint=f"http://127.0.0.1:{profile.local.server_port}",
+            endpoint=(
+                f"http://127.0.0.1:{profile.local.server_port}"
+                if profile.local is not None
+                else "http://127.0.0.1:19081"
+            ),
             server_instance_id=self.instance_id,
             handshake={
                 "server_instance_id": self.instance_id,
                 "protocol_version": 1,
             },
         )
+
+    async def disconnect(self, profile):
+        self.disconnect_calls.append(profile.id)
 
     async def request_shutdown(
         self,
@@ -423,6 +431,29 @@ async def _delete_profile_serializes_against_connect_case(tmp_path):
 
 def test_delete_profile_serializes_against_connect(tmp_path):
     asyncio.run(_delete_profile_serializes_against_connect_case(tmp_path))
+
+
+async def _ssh_duplicate_instance_connect_disconnects_tunnel_case(tmp_path):
+    store = _store(tmp_path)
+    ssh_profile = store.ensure_ssh_profile("gpu-box")
+    connector = FakeConnector(SERVER_A)
+    connector.release.set()
+    manager = SessionManager(store, {"local": connector, "ssh": connector})
+
+    await manager.connect("local")
+
+    with pytest.raises(LauncherError) as exc_info:
+        await manager.connect(ssh_profile.id)
+
+    assert exc_info.value.code == "server_instance_already_bound"
+    assert connector.disconnect_calls == [ssh_profile.id]
+    with pytest.raises(LauncherError) as profile_error:
+        store.get(ssh_profile.id)
+    assert profile_error.value.code == "profile_not_found"
+
+
+def test_ssh_duplicate_instance_connect_disconnects_tunnel(tmp_path):
+    asyncio.run(_ssh_duplicate_instance_connect_disconnects_tunnel_case(tmp_path))
 
 
 async def _identity_change_requires_explicit_rebind_case(tmp_path):

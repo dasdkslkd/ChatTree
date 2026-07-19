@@ -10,7 +10,7 @@ from typing import Any, Iterable
 from backend.core.persistence.home import resolve_chattree_home
 from backend.core.storage.atomic import atomic_write_json
 
-from .models import LauncherError, LocalTarget, ServerProfile
+from .models import LauncherError, LocalTarget, ServerProfile, SshTarget, ssh_profile_id
 from .settings import (
     DEFAULT_LOCAL_PROFILE_ID,
     DEFAULT_LOCAL_SERVER_PORT,
@@ -79,6 +79,46 @@ class ProfileStore:
             self._replace_profiles(profiles)
             return profile
 
+    def ensure_ssh_profile(self, config_host: str) -> ServerProfile:
+        try:
+            target = SshTarget(config_host=config_host)
+        except ValueError as exc:
+            raise LauncherError(
+                "ssh_host_invalid",
+                str(exc),
+                False,
+                422,
+            ) from exc
+        profile_id = ssh_profile_id(target.config_host)
+        with self._lock:
+            try:
+                existing = self._get(profile_id)
+            except LauncherError as exc:
+                if exc.code != "profile_not_found":
+                    raise
+            else:
+                if existing.kind != "ssh" or existing.ssh != target:
+                    raise LauncherError(
+                        "profile_id_duplicate",
+                        f"Profile id is already in use: {profile_id}",
+                        False,
+                        409,
+                    )
+                return existing
+
+            profile = ServerProfile(
+                id=profile_id,
+                label=f"SSH: {target.config_host}",
+                kind="ssh",
+                auto_connect=False,
+                bound_server_instance_id=None,
+                ssh=target,
+            )
+            profiles = (*self._profiles, profile)
+            self._validate_profiles(profiles)
+            self._replace_profiles(profiles)
+            return profile
+
     def update(
         self,
         profile_id: str,
@@ -101,6 +141,7 @@ class ProfileStore:
                     ),
                     bound_server_instance_id=current.bound_server_instance_id,
                     local=current.local if local is None else local,
+                    ssh=current.ssh,
                 )
             except ValueError as exc:
                 raise LauncherError(
@@ -189,6 +230,7 @@ class ProfileStore:
             auto_connect=current.auto_connect,
             bound_server_instance_id=server_instance_id,
             local=current.local,
+            ssh=current.ssh,
         )
         profiles = self._with_replacement(current.id, updated)
         self._validate_profiles(profiles)
@@ -274,7 +316,7 @@ class ProfileStore:
         if (
             isinstance(version, bool)
             or not isinstance(version, int)
-            or version != PROFILES_SCHEMA_VERSION
+            or version not in {1, PROFILES_SCHEMA_VERSION}
         ):
             raise LauncherError(
                 "profiles_version_unsupported",
@@ -307,6 +349,7 @@ class ProfileStore:
         profile_ids: set[str] = set()
         home_keys: set[str] = set()
         local_ports: set[int] = set()
+        ssh_hosts: set[str] = set()
         instance_ids: set[str] = set()
         has_default = False
         for profile in profiles:
@@ -320,25 +363,42 @@ class ProfileStore:
             profile_ids.add(profile.id)
             has_default = has_default or profile.id == DEFAULT_LOCAL_PROFILE_ID
 
-            home_key = os.path.normcase(os.path.normpath(profile.local.server_home))
-            if home_key in home_keys:
-                raise LauncherError(
-                    "profile_home_duplicate",
-                    f"Multiple profiles use Server home: {profile.local.server_home}",
-                    False,
-                    409,
+            if profile.kind == "local":
+                assert profile.local is not None
+                home_key = os.path.normcase(
+                    os.path.normpath(profile.local.server_home)
                 )
-            home_keys.add(home_key)
+                if home_key in home_keys:
+                    raise LauncherError(
+                        "profile_home_duplicate",
+                        (
+                            "Multiple profiles use Server home: "
+                            f"{profile.local.server_home}"
+                        ),
+                        False,
+                        409,
+                    )
+                home_keys.add(home_key)
 
-            local_port = profile.local.server_port
-            if local_port in local_ports:
-                raise LauncherError(
-                    "profile_port_duplicate",
-                    f"Multiple profiles use local Server port: {local_port}",
-                    False,
-                    409,
-                )
-            local_ports.add(local_port)
+                local_port = profile.local.server_port
+                if local_port in local_ports:
+                    raise LauncherError(
+                        "profile_port_duplicate",
+                        f"Multiple profiles use local Server port: {local_port}",
+                        False,
+                        409,
+                    )
+                local_ports.add(local_port)
+            else:
+                assert profile.ssh is not None
+                if profile.ssh.config_host in ssh_hosts:
+                    raise LauncherError(
+                        "ssh_host_duplicate",
+                        f"Multiple profiles use SSH Host: {profile.ssh.config_host}",
+                        False,
+                        409,
+                    )
+                ssh_hosts.add(profile.ssh.config_host)
 
             instance_id = profile.bound_server_instance_id
             if instance_id is not None:

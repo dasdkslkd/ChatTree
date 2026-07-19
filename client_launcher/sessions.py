@@ -268,12 +268,18 @@ class SessionManager:
 
     async def _disconnect_profile_locked(self, profile_id: str) -> ServerSession:
         task: asyncio.Task[ServerSession] | None
+        profile: ServerProfile
         async with self._guard:
-            self.profiles.get(profile_id)
+            profile = self.profiles.get(profile_id)
             snapshot, task = self._disconnect_locked(profile_id)
 
         if task is not None:
             await asyncio.gather(task, return_exceptions=True)
+        disconnect = getattr(self._connector_for(profile), "disconnect", None)
+        if disconnect is not None:
+            result = disconnect(profile)
+            if asyncio.iscoroutine(result):
+                await result
         return snapshot
 
     async def stop(
@@ -351,10 +357,11 @@ class SessionManager:
                     },
                 )
 
-        endpoint, server_home = self.connector.shutdown_target(profile)
+        connector = self._connector_for(profile)
+        endpoint, server_home = connector.shutdown_target(profile)
         pending_cancellation: asyncio.CancelledError | None = None
         try:
-            endpoint, server_home = await self.connector.request_shutdown(
+            endpoint, server_home = await connector.request_shutdown(
                 profile,
                 expected_server_instance_id,
                 request_id=request_id,
@@ -411,7 +418,8 @@ class SessionManager:
                 snapshot, task = replace(current), None
         if task is not None:
             await asyncio.gather(task, return_exceptions=True)
-        await self.connector.wait_stopped(
+        connector = self._connector_for(self.profiles.get(profile_id))
+        await connector.wait_stopped(
             endpoint,
             server_home,
             timeout=timeout,
@@ -436,7 +444,7 @@ class SessionManager:
                     auto_connect=auto_connect,
                     local=local,
                 )
-                if updated.local != current.local:
+                if current.kind == "local" and updated.local != current.local:
                     _, task = self._disconnect_locked(profile_id)
 
             if task is not None:
@@ -488,7 +496,18 @@ class SessionManager:
         profile_ids.update(self._connect_tasks)
         for profile_id in profile_ids:
             await self.disconnect(profile_id)
-        await self.connector.close()
+        connectors = (
+            self.connector.values()
+            if isinstance(self.connector, Mapping)
+            else (self.connector,)
+        )
+        seen: set[int] = set()
+        for connector in connectors:
+            marker = id(connector)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            await connector.close()
 
     async def _run_connect(
         self,
@@ -509,7 +528,8 @@ class SessionManager:
                 session.phase = phase
 
         try:
-            connected = await self.connector.connect(
+            connector = self._connector_for(profile)
+            connected = await connector.connect(
                 profile,
                 set_phase,
                 request_id=request_id,
@@ -583,6 +603,11 @@ class SessionManager:
         except asyncio.CancelledError:
             raise
         except BaseException as exc:
+            disconnect = getattr(self._connector_for(profile), "disconnect", None)
+            if disconnect is not None:
+                result = disconnect(profile)
+                if asyncio.iscoroutine(result):
+                    await result
             error = self._launcher_error(exc)
             async with self._guard:
                 if self._attempt_generation.get(profile_id) == generation:
@@ -633,6 +658,19 @@ class SessionManager:
 
     def _profile_lifecycle_lock(self, profile_id: str) -> asyncio.Lock:
         return self._lifecycle_locks.setdefault(profile_id, asyncio.Lock())
+
+    def _connector_for(self, profile: ServerProfile) -> Any:
+        if isinstance(self.connector, Mapping):
+            try:
+                return self.connector[profile.kind]
+            except KeyError as exc:
+                raise LauncherError(
+                    "connector_unavailable",
+                    f"No connector is configured for Profile kind: {profile.kind}",
+                    retryable=False,
+                    status_code=500,
+                ) from exc
+        return self.connector
 
     def _background_done(self, task: asyncio.Task[object]) -> None:
         self._background_tasks.discard(task)

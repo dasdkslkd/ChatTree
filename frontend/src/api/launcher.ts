@@ -16,6 +16,25 @@ export type LauncherProfileStatus = {
   } | null;
 };
 
+export type SshConfigSnapshot = {
+  path: string;
+  text: string;
+  hosts: string[];
+  warnings: string[];
+};
+
+export type SshHostsResponse = {
+  path: string;
+  hosts: string[];
+  warnings: string[];
+};
+
+export type SshHostSessionResponse = {
+  profile_id: string;
+  host_alias: string;
+  session: LauncherProfileStatus;
+};
+
 export type LauncherApi = Readonly<{
   getProfileStatus(
     profileId: string,
@@ -31,6 +50,15 @@ export type LauncherApi = Readonly<{
     expectedServerInstanceId: string,
     timeoutSeconds?: number,
   ): Promise<LauncherProfileStatus>;
+  getSshConfig(signal?: AbortSignal): Promise<SshConfigSnapshot>;
+  saveSshConfig(text: string): Promise<SshConfigSnapshot>;
+  listSshHosts(signal?: AbortSignal): Promise<SshHostsResponse>;
+  connectSshHost(hostAlias: string): Promise<SshHostSessionResponse>;
+  disconnectSshHost(hostAlias: string): Promise<SshHostSessionResponse>;
+  getSshHostStatus(
+    hostAlias: string,
+    signal?: AbortSignal,
+  ): Promise<SshHostSessionResponse>;
 }>;
 
 export function createLauncherApi(
@@ -77,6 +105,48 @@ export function createLauncherApi(
         expectedServerInstanceId,
         timeoutSeconds,
       );
+    },
+    async getSshConfig(signal) {
+      const response = await client.get<SshConfigSnapshot>(
+        '/ssh/config',
+        { signal, timeout: 5000 },
+      );
+      return response.data;
+    },
+    async saveSshConfig(text) {
+      const response = await client.put<SshConfigSnapshot>(
+        '/ssh/config',
+        { text },
+      );
+      return response.data;
+    },
+    async listSshHosts(signal) {
+      const response = await client.get<SshHostsResponse>(
+        '/ssh/hosts',
+        { signal, timeout: 5000 },
+      );
+      return response.data;
+    },
+    async connectSshHost(hostAlias) {
+      const response = await client.post<SshHostSessionResponse>(
+        `/ssh/hosts/${encodeURIComponent(hostAlias)}/connect`,
+        {},
+      );
+      return response.data;
+    },
+    async disconnectSshHost(hostAlias) {
+      const response = await client.post<SshHostSessionResponse>(
+        `/ssh/hosts/${encodeURIComponent(hostAlias)}/disconnect`,
+        {},
+      );
+      return response.data;
+    },
+    async getSshHostStatus(hostAlias, signal) {
+      const response = await client.get<SshHostSessionResponse>(
+        `/ssh/hosts/${encodeURIComponent(hostAlias)}/status`,
+        { signal, timeout: 5000 },
+      );
+      return response.data;
     },
   };
 }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -8,7 +9,7 @@ from typing import Any, Literal, Mapping
 from uuid import UUID, uuid4
 
 
-ProfileKind = Literal["local"]
+ProfileKind = Literal["local", "ssh"]
 ConnectionStatus = Literal["disconnected", "connecting", "ready", "error"]
 
 
@@ -101,19 +102,65 @@ class LocalTarget:
 
 
 @dataclass(frozen=True)
+class SshTarget:
+    config_host: str
+    remote_server_port: int = 0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "config_host",
+            _required_string(self.config_host, "config_host"),
+        )
+        if (
+            isinstance(self.remote_server_port, bool)
+            or not isinstance(self.remote_server_port, int)
+            or not 0 <= self.remote_server_port <= 65535
+        ):
+            raise ValueError("remote_server_port must be an integer from 0 to 65535")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "config_host": self.config_host,
+            "remote_server_port": self.remote_server_port,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> SshTarget:
+        if not isinstance(value, Mapping):
+            raise ValueError("ssh target must be an object")
+        _require_exact_keys(
+            value,
+            {"config_host", "remote_server_port"},
+            "ssh target",
+        )
+        return cls(
+            config_host=value["config_host"],
+            remote_server_port=value["remote_server_port"],
+        )
+
+
+def ssh_profile_id(config_host: str) -> str:
+    host = _required_string(config_host, "config_host")
+    encoded = base64.urlsafe_b64encode(host.encode("utf-8")).decode("ascii")
+    return f"ssh:{encoded.rstrip('=')}"
+
+
+@dataclass(frozen=True)
 class ServerProfile:
     id: str
     label: str
     kind: ProfileKind
     auto_connect: bool
     bound_server_instance_id: str | None
-    local: LocalTarget
+    local: LocalTarget | None = None
+    ssh: SshTarget | None = None
 
     def __post_init__(self) -> None:
         _required_string(self.id, "profile id")
         _required_string(self.label, "profile label")
-        if self.kind != "local":
-            raise ValueError("profile kind must be 'local'")
+        if self.kind not in {"local", "ssh"}:
+            raise ValueError("profile kind must be 'local' or 'ssh'")
         if not isinstance(self.auto_connect, bool):
             raise ValueError("auto_connect must be a boolean")
         if self.bound_server_instance_id is not None:
@@ -121,42 +168,52 @@ class ServerProfile:
                 self.bound_server_instance_id,
                 "bound_server_instance_id",
             )
-        if not isinstance(self.local, LocalTarget):
-            raise ValueError("local must be a LocalTarget")
+        if self.kind == "local":
+            if not isinstance(self.local, LocalTarget) or self.ssh is not None:
+                raise ValueError("local profile must have local and no ssh target")
+        elif not isinstance(self.ssh, SshTarget) or self.local is not None:
+            raise ValueError("ssh profile must have ssh and no local target")
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "id": self.id,
             "label": self.label,
             "kind": self.kind,
             "auto_connect": self.auto_connect,
             "bound_server_instance_id": self.bound_server_instance_id,
-            "local": self.local.to_dict(),
         }
+        if self.kind == "local":
+            assert self.local is not None
+            payload["local"] = self.local.to_dict()
+        else:
+            assert self.ssh is not None
+            payload["ssh"] = self.ssh.to_dict()
+        return payload
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> ServerProfile:
         if not isinstance(value, Mapping):
             raise ValueError("profile must be an object")
-        _require_exact_keys(
-            value,
-            {
-                "id",
-                "label",
-                "kind",
-                "auto_connect",
-                "bound_server_instance_id",
-                "local",
-            },
-            "profile",
-        )
+        common = {"id", "label", "kind", "auto_connect", "bound_server_instance_id"}
+        kind = value.get("kind")
+        if kind == "local":
+            _require_exact_keys(value, {*common, "local"}, "profile")
+            local = LocalTarget.from_dict(value["local"])
+            ssh = None
+        elif kind == "ssh":
+            _require_exact_keys(value, {*common, "ssh"}, "profile")
+            local = None
+            ssh = SshTarget.from_dict(value["ssh"])
+        else:
+            raise ValueError("profile kind must be 'local' or 'ssh'")
         return cls(
             id=value["id"],
             label=value["label"],
-            kind=value["kind"],
+            kind=kind,
             auto_connect=value["auto_connect"],
             bound_server_instance_id=value["bound_server_instance_id"],
-            local=LocalTarget.from_dict(value["local"]),
+            local=local,
+            ssh=ssh,
         )
 
 

@@ -103,11 +103,16 @@ def run_server(
     host: str | None = None,
     port: int | None = None,
 ) -> None:
+    options = uvicorn_server_options(environ, host=host, port=port)
+    previous_host = os.environ.get("CHATTREE_SERVER_HOST")
+    previous_port = os.environ.get("CHATTREE_SERVER_PORT")
+    os.environ["CHATTREE_SERVER_HOST"] = str(options["host"])
+    os.environ["CHATTREE_SERVER_PORT"] = str(options["port"])
     server = uvicorn.Server(
         uvicorn.Config(
             app,
             workers=1,
-            **uvicorn_server_options(environ, host=host, port=port),
+            **options,
         )
     )
     request_shutdown = lambda: setattr(server, "should_exit", True)
@@ -115,6 +120,14 @@ def run_server(
     try:
         server.run()
     finally:
+        if previous_host is None:
+            os.environ.pop("CHATTREE_SERVER_HOST", None)
+        else:
+            os.environ["CHATTREE_SERVER_HOST"] = previous_host
+        if previous_port is None:
+            os.environ.pop("CHATTREE_SERVER_PORT", None)
+        else:
+            os.environ["CHATTREE_SERVER_PORT"] = previous_port
         if getattr(app.state, "request_shutdown", None) is request_shutdown:
             app.state.request_shutdown = None
         if getattr(app.state, "server_home_lock", None) is not None:

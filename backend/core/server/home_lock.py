@@ -167,6 +167,15 @@ class ServerHomeLock:
             "hostname": socket.gethostname(),
             "started_at": int(time.time()),
         }
+        host = os.environ.get("CHATTREE_SERVER_HOST")
+        port = os.environ.get("CHATTREE_SERVER_PORT")
+        if host:
+            owner["host"] = host
+        if port:
+            try:
+                owner["port"] = int(port)
+            except ValueError:
+                owner["port"] = port
         payload = json.dumps(owner, ensure_ascii=False, sort_keys=True).encode("utf-8")
         handle.seek(1)
         handle.truncate()
