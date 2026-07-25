@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping, TypedDict
 
+from .tools.code_tools import default_code_workspace
 from .tools.security.logical_sandbox import DEFAULT_PROTECTED_PATHS
 
 
@@ -24,7 +25,7 @@ def normalize_workspace(raw: Mapping[str, Any] | None, default: Mapping[str, Any
         if roots_value:
             cwd_value = list(roots_value)[0]
         else:
-            cwd_value = Path.cwd()
+            cwd_value = default_code_workspace()
 
     cwd = Path(str(cwd_value)).expanduser().resolve()
     roots = roots_value or [str(cwd)]
@@ -43,7 +44,7 @@ def normalize_workspace(raw: Mapping[str, Any] | None, default: Mapping[str, Any
     }
 
 
-def build_default_workspace(config: Mapping[str, Any] | None = None, default_cwd: str | Path | None = None) -> WorkspaceContext:
+def build_default_workspace(config: Mapping[str, Any] | None = None) -> WorkspaceContext:
     """从全局配置构造旧会话和未指定请求使用的默认 workspace。"""
     config = config or {}
     tools = config.get("tools", {}) if isinstance(config, Mapping) else {}
@@ -61,7 +62,7 @@ def build_default_workspace(config: Mapping[str, Any] | None = None, default_cwd
 
     roots = code_config.get("workspace_roots") or sandbox.get("workspace_roots")
     protected = code_config.get("protected_paths") or sandbox.get("protected_paths") or DEFAULT_PROTECTED_PATHS
-    cwd = roots[0] if roots else (default_cwd or Path.cwd())
+    cwd = roots[0] if roots else default_code_workspace()
     return normalize_workspace({
         "cwd": str(cwd),
         "workspace_roots": roots or [str(cwd)],
