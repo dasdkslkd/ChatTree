@@ -101,23 +101,26 @@ def parse_refer_prompt_args(args: str) -> Dict[str, Any]:
     return {"selectors": selectors, "prompt": prompt}
 
 
-def _is_compact_boundary_node(node: Dict[str, Any]) -> bool:
-    system_message = node.get("system_message") or {}
-    return (
-        _role_value(system_message.get("role")) == Role.SYSTEM.value
-        and system_message.get("subtype") == "compact_boundary"
-    )
+def _is_compact_boundary_node(
+    node: Dict[str, Any],
+    compact_metadata_by_node: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> bool:
+    return str(node.get("id") or "") in (compact_metadata_by_node or {})
 
 
-def _find_prune_summary(conversation: Any, summary_id: str) -> Optional[Dict[str, Any]]:
-    for node in (conversation.nodes or {}).values():
-        for summary in node.get("context_summaries") or []:
-            if isinstance(summary, dict) and str(summary.get("id") or "") == summary_id:
-                return summary
-    return None
+def _find_prune_summary(
+    prune_summaries_by_id: Optional[Dict[str, Dict[str, Any]]],
+    summary_id: str,
+) -> Optional[Dict[str, Any]]:
+    return (prune_summaries_by_id or {}).get(str(summary_id))
 
 
-def resolve_refer_targets(conversation: Any, selectors: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+def resolve_refer_targets(
+    conversation: Any,
+    selectors: List[Dict[str, str]],
+    compact_metadata_by_node: Optional[Dict[str, Dict[str, Any]]] = None,
+    prune_summaries_by_id: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
     targets: List[Dict[str, Any]] = []
     seen_keys: set[str] = set()
 
@@ -139,12 +142,12 @@ def resolve_refer_targets(conversation: Any, selectors: List[Dict[str, str]]) ->
             add_target({"key": f"node:{value}", "kind": "node", "selector": raw, "node_ids": [value]})
         elif kind == "compact":
             node = conversation.nodes.get(value)
-            if not node or not _is_compact_boundary_node(node):
+            if not node or not _is_compact_boundary_node(node, compact_metadata_by_node):
                 raise ReferContextError(f"compact selector not found: {raw}")
             add_target({"key": f"compact:{value}", "kind": "compact", "selector": raw, "node_ids": [value]})
         elif kind == "before":
             node = conversation.nodes.get(value)
-            if not node or not _is_compact_boundary_node(node):
+            if not node or not _is_compact_boundary_node(node, compact_metadata_by_node):
                 raise ReferContextError(f"compact selector not found: {raw}")
             chain = conversation.get_node_chain(value)
             node_ids = [
@@ -156,12 +159,12 @@ def resolve_refer_targets(conversation: Any, selectors: List[Dict[str, str]]) ->
                 raise ReferContextError(f"compact selector has no pre-compact nodes: {raw}")
             add_target({"key": f"before:{value}", "kind": "before", "selector": raw, "node_ids": node_ids})
         elif kind == "prune":
-            summary = _find_prune_summary(conversation, value)
+            summary = _find_prune_summary(prune_summaries_by_id, value)
             if not summary:
                 raise ReferContextError(f"prune selector not found: {raw}")
             add_target({"key": f"prune:{value}", "kind": "prune", "selector": raw, "summary": summary})
         elif kind == "truncated":
-            summary = _find_prune_summary(conversation, value)
+            summary = _find_prune_summary(prune_summaries_by_id, value)
             if not summary:
                 raise ReferContextError(f"prune selector not found: {raw}")
             node_ids = [str(node_id) for node_id in (summary.get("truncated_node_ids") or [])]
@@ -189,10 +192,6 @@ def _message_section(label: str, message: Optional[Dict[str, Any]], max_chars: i
         lines.append(f"subtype: {message.get('subtype')}")
     if content.strip():
         lines.append(content)
-    if message.get("tool_calls"):
-        tool_calls, calls_truncated = _json_preview(message.get("tool_calls"), 3_000)
-        truncated = truncated or calls_truncated
-        lines.extend(["tool_calls:", tool_calls])
     return lines, truncated
 
 
@@ -206,6 +205,13 @@ def _tool_message_sections(messages: List[Dict[str, Any]]) -> tuple[List[str], b
             else message.get("content") or "",
             REFER_MAX_TOOL_CHARS,
         )
+        loaded_content = None
+        try:
+            loaded_content = json.loads(content)
+        except (TypeError, json.JSONDecodeError):
+            loaded_content = None
+        if isinstance(loaded_content, dict) and isinstance(loaded_content.get("preview"), str):
+            content, content_truncated = _clip(loaded_content["preview"], REFER_MAX_TOOL_CHARS)
         truncated = truncated or content_truncated
         lines.append(f"[Tool result {index}]")
         if message.get("name"):
@@ -217,8 +223,15 @@ def _tool_message_sections(messages: List[Dict[str, Any]]) -> tuple[List[str], b
     return lines, truncated
 
 
-def _node_packet(conversation: Any, node_id: str) -> Dict[str, Any]:
+def _node_packet(
+    conversation: Any,
+    node_id: str,
+    messages_by_node: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    tool_context_by_node: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    compact_metadata_by_node: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     node = conversation.nodes[node_id]
+    node_messages = (messages_by_node or {}).get(node_id) or []
     truncated = False
     lines = [
         f"Node: {node_id}",
@@ -226,39 +239,48 @@ def _node_packet(conversation: Any, node_id: str) -> Dict[str, Any]:
         f"Children: {', '.join(str(item) for item in (node.get('children_ids') or [])) or '(none)'}",
         f"Timestamp: {node.get('timestamp')}",
     ]
-    if _is_compact_boundary_node(node):
+    if _is_compact_boundary_node(node, compact_metadata_by_node):
         lines.append("Type: compact boundary")
-        compact_meta, meta_truncated = _json_preview((node.get("system_message") or {}).get("compact_metadata") or {})
+        compact_meta, meta_truncated = _json_preview((compact_metadata_by_node or {}).get(node_id) or {})
         truncated = truncated or meta_truncated
         lines.extend(["Compact metadata:", compact_meta])
 
-    user_lines, user_truncated = _message_section("User", node.get("user_message"), REFER_MAX_CONTENT_CHARS)
+    user_message = next(
+        (
+            message for message in node_messages
+            if _role_value(message.get("role")) == Role.USER.value
+            and not message.get("is_hidden_from_transcript")
+            and message.get("subtype") not in {"compact_summary", "prune_summary"}
+        ),
+        None,
+    )
+    assistant_message = next(
+        (
+            message for message in reversed(node_messages)
+            if _role_value(message.get("role")) == Role.ASSISTANT.value
+            and message.get("subtype") in {None, "", "assistant_answer"}
+            and not message.get("is_hidden_from_transcript")
+        ),
+        None,
+    )
+    compact_summary = next(
+        (message for message in node_messages if message.get("subtype") == "compact_summary"),
+        None,
+    )
+    user_lines, user_truncated = _message_section("User", user_message, REFER_MAX_CONTENT_CHARS)
     assistant_lines, assistant_truncated = _message_section(
         "Assistant",
-        node.get("assistant_message"),
+        assistant_message,
         REFER_MAX_CONTENT_CHARS,
     )
     truncated = truncated or user_truncated or assistant_truncated
     lines.extend(user_lines)
-    assistant = node.get("assistant_message") or {}
-    interactions = assistant.get("tool_interactions") or []
-    if interactions:
-        for index, interaction in enumerate(interactions, start=1):
-            lines.append(f"[Tool interaction {index}]")
-            interaction_assistant, ia_truncated = _message_section(
-                "Assistant tool call",
-                interaction.get("assistant"),
-                REFER_MAX_CONTENT_CHARS,
-            )
-            truncated = truncated or ia_truncated
-            lines.extend(interaction_assistant)
-            tool_lines, tool_truncated = _tool_message_sections(interaction.get("tools") or [])
-            truncated = truncated or tool_truncated
-            lines.extend(tool_lines)
-    else:
-        tool_lines, tool_truncated = _tool_message_sections(node.get("tool_messages") or [])
-        truncated = truncated or tool_truncated
-        lines.extend(tool_lines)
+    compact_lines, compact_truncated = _message_section("Compact summary", compact_summary, REFER_MAX_CONTENT_CHARS)
+    truncated = truncated or compact_truncated
+    lines.extend(compact_lines)
+    tool_lines, tool_truncated = _tool_message_sections((tool_context_by_node or {}).get(node_id) or [])
+    truncated = truncated or tool_truncated
+    lines.extend(tool_lines)
     lines.extend(assistant_lines)
     return {
         "kind": "node",
@@ -288,8 +310,20 @@ def _prune_packet(summary: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def build_refer_bundle(conversation: Any, selectors: List[Dict[str, str]]) -> Dict[str, Any]:
-    targets = resolve_refer_targets(conversation, selectors)
+def build_refer_bundle(
+    conversation: Any,
+    selectors: List[Dict[str, str]],
+    messages_by_node: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    tool_context_by_node: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    compact_metadata_by_node: Optional[Dict[str, Dict[str, Any]]] = None,
+    prune_summaries_by_id: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    targets = resolve_refer_targets(
+        conversation,
+        selectors,
+        compact_metadata_by_node,
+        prune_summaries_by_id,
+    )
     sources: List[Dict[str, Any]] = []
     source_node_ids: List[str] = []
     truncated_sources: List[str] = []
@@ -305,7 +339,13 @@ def build_refer_bundle(conversation: Any, selectors: List[Dict[str, str]]) -> Di
                     continue
                 seen_nodes.add(node_id)
                 source_node_ids.append(node_id)
-                packets.append(_node_packet(conversation, node_id))
+                packets.append(_node_packet(
+                    conversation,
+                    node_id,
+                    messages_by_node,
+                    tool_context_by_node,
+                    compact_metadata_by_node,
+                ))
         if any(packet.get("truncated") for packet in packets):
             truncated_sources.append(target["selector"])
         if packets:

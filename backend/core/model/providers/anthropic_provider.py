@@ -10,6 +10,7 @@ from ...config.types import Message, StreamChunk, StreamStatus, StreamController
 from .retry import RetryPolicy, RetryableHTTPError, classify_retry_error, run_with_retries, sleep_before_retry
 from .sse import iter_decoded_sse_lines
 from .multimodal import to_anthropic_content
+from .stream_queue import StreamStopped, get_queue_item_or_stop
 
 _SENTINEL = object()  # 队列结束标记
 
@@ -174,13 +175,6 @@ class AnthropicProvider(BaseProvider):
         total_tokens = 0
         usage_info = None
         try:
-            yield StreamChunk(
-                status=StreamStatus.START, content=None,
-                node_id=stream_controller.node_id if stream_controller else None,
-                conversation_id=stream_controller.conversation_id if stream_controller else None,
-                error=None, tokens_used=0,
-            )
-
             system_text, api_messages = self._convert_messages(messages)
             body = self._build_body(model, api_messages, system_text, max_tokens or 4096, temperature, stream=True,
                                     reasoning_effort=reasoning_effort, thinking_enabled=thinking_enabled,
@@ -198,7 +192,7 @@ class AnthropicProvider(BaseProvider):
                 loop.run_in_executor(None, self._stream_to_queue, body, queue, loop)
                 try:
                     while True:
-                        item = await queue.get()
+                        item = await get_queue_item_or_stop(queue, stream_controller)
                         if item is _SENTINEL:
                             break
                         if isinstance(item, Exception):
@@ -303,7 +297,11 @@ class AnthropicProvider(BaseProvider):
                             if tool_call and tool_call.get("function", {}).get("name"):
                                 if not tool_call["function"]["arguments"]:
                                     tool_call["function"]["arguments"] = "{}"
-                                tool_calls = [tool_call]
+                                tool_calls = [
+                                    dict(call)
+                                    for _, call in sorted(tool_blocks.items(), key=lambda item: item[0])
+                                    if call.get("function", {}).get("name")
+                                ]
                                 attempt_had_output = True
                                 yield StreamChunk(
                                     status=StreamStatus.CONTENT, content=None,
@@ -320,7 +318,23 @@ class AnthropicProvider(BaseProvider):
                                 usage_info = usage_from_anthropic(usage)
                                 total_tokens = usage_total(usage_info, total_tokens)
                     break
+                except StreamStopped:
+                    yield StreamChunk(
+                        status=StreamStatus.STOPPED, content=None,
+                        node_id=stream_controller.node_id if stream_controller else None,
+                        conversation_id=stream_controller.conversation_id if stream_controller else None,
+                        error="用户手动终止", tokens_used=total_tokens,
+                    )
+                    return
                 except Exception as exc:
+                    if stream_controller and await stream_controller.is_stopped():
+                        yield StreamChunk(
+                            status=StreamStatus.STOPPED, content=None,
+                            node_id=stream_controller.node_id,
+                            conversation_id=stream_controller.conversation_id,
+                            error="用户手动终止", tokens_used=total_tokens,
+                        )
+                        return
                     decision = classify_retry_error(exc, stream_policy)
                     if (
                         attempt_had_output

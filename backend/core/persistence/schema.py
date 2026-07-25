@@ -4,7 +4,7 @@ from __future__ import annotations
 CURRENT_SCHEMA_VERSION = 2
 
 
-SCHEMA_V1_SQL = """
+SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS server_metadata (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,
@@ -133,6 +133,7 @@ CREATE TABLE IF NOT EXISTS tool_results (
   metadata_json TEXT,
   created_at INTEGER NOT NULL,
   UNIQUE(conversation_id, id),
+  UNIQUE(conversation_id, tool_call_id),
   FOREIGN KEY (conversation_id, node_id) REFERENCES nodes(conversation_id, id),
   FOREIGN KEY (conversation_id, run_id) REFERENCES runs(conversation_id, id),
   FOREIGN KEY (conversation_id, tool_call_id)
@@ -162,6 +163,8 @@ CREATE TABLE IF NOT EXISTS runs (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   finished_at INTEGER,
+  idempotency_key TEXT,
+  request_fingerprint TEXT,
   UNIQUE(conversation_id, id),
   FOREIGN KEY (conversation_id, created_by_run_id)
     REFERENCES runs(conversation_id, id),
@@ -170,7 +173,12 @@ CREATE TABLE IF NOT EXISTS runs (
   FOREIGN KEY (conversation_id, anchor_node_id)
     REFERENCES nodes(conversation_id, id),
   FOREIGN KEY (conversation_id, target_node_id)
-    REFERENCES nodes(conversation_id, id)
+    REFERENCES nodes(conversation_id, id),
+  CHECK (
+    (idempotency_key IS NULL AND request_fingerprint IS NULL)
+    OR
+    (idempotency_key IS NOT NULL AND request_fingerprint IS NOT NULL)
+  )
 );
 
 CREATE TABLE IF NOT EXISTS run_events (
@@ -185,6 +193,10 @@ CREATE TABLE IF NOT EXISTS run_events (
   UNIQUE(run_id, event_index),
   FOREIGN KEY (conversation_id, run_id) REFERENCES runs(conversation_id, id)
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_idempotency_key
+  ON runs(idempotency_key)
+  WHERE idempotency_key IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_runs_conversation_status
   ON runs(conversation_id, status, updated_at);
@@ -204,25 +216,13 @@ CREATE TABLE IF NOT EXISTS plans (
   conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   status TEXT NOT NULL,
   entered_node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL,
-  submitted_node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL,
   entered_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
-  submitted_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
   approved_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
-  exit_tool_call_id TEXT,
   question_tool_call_id TEXT,
-  blocking_run_id TEXT,
-  proposal_id TEXT,
-  proposal_revision INTEGER NOT NULL DEFAULT 0,
-  proposal_status TEXT,
+  exit_tool_call_id TEXT,
+  blocking_node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL,
+  blocking_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
   previous_permission_mode TEXT NOT NULL DEFAULT 'modify_only',
-  plan_inline TEXT,
-  plan_blob_id TEXT REFERENCES blobs(id),
-  plan_preview TEXT NOT NULL DEFAULT '',
-  plan_artifact_path TEXT,
-  plan_revision INTEGER NOT NULL DEFAULT 0,
-  plan_updated_at INTEGER,
-  question_json TEXT,
-  feedback_json TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   approved_at INTEGER,
@@ -230,49 +230,18 @@ CREATE TABLE IF NOT EXISTS plans (
   UNIQUE(conversation_id, id),
   FOREIGN KEY (conversation_id, entered_node_id)
     REFERENCES nodes(conversation_id, id),
-  FOREIGN KEY (conversation_id, submitted_node_id)
-    REFERENCES nodes(conversation_id, id),
   FOREIGN KEY (conversation_id, entered_run_id)
     REFERENCES runs(conversation_id, id),
-  FOREIGN KEY (conversation_id, submitted_run_id)
-    REFERENCES runs(conversation_id, id),
   FOREIGN KEY (conversation_id, approved_run_id)
+    REFERENCES runs(conversation_id, id),
+  FOREIGN KEY (conversation_id, blocking_node_id)
+    REFERENCES nodes(conversation_id, id),
+  FOREIGN KEY (conversation_id, blocking_run_id)
     REFERENCES runs(conversation_id, id)
-);
-
-CREATE TABLE IF NOT EXISTS plan_proposals (
-  proposal_id TEXT PRIMARY KEY,
-  plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
-  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-  revision INTEGER NOT NULL,
-  plan TEXT NOT NULL,
-  status TEXT NOT NULL,
-  tool_call_id TEXT,
-  run_id TEXT,
-  node_id TEXT,
-  created_at INTEGER,
-  resolved_at INTEGER,
-  feedback TEXT,
-  UNIQUE(plan_id, revision),
-  FOREIGN KEY (conversation_id, plan_id) REFERENCES plans(conversation_id, id)
-);
-
-CREATE TABLE IF NOT EXISTS plan_events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
-  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-  event_type TEXT NOT NULL,
-  payload_json TEXT,
-  created_at INTEGER NOT NULL,
-  FOREIGN KEY (conversation_id, plan_id) REFERENCES plans(conversation_id, id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_plans_conversation_status
   ON plans(conversation_id, status, updated_at);
-CREATE INDEX IF NOT EXISTS idx_plan_events_plan
-  ON plan_events(plan_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_plan_proposals_plan
-  ON plan_proposals(plan_id, revision);
 
 CREATE TABLE IF NOT EXISTS active_tasks (
   conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
@@ -324,110 +293,35 @@ CREATE TABLE IF NOT EXISTS task_notifications (
   id TEXT PRIMARY KEY,
   conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   source_run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-  source_run_kind TEXT NOT NULL,
-  status TEXT NOT NULL,
-  delivery_node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL,
-  bound_at INTEGER,
-  bound_by TEXT,
+  source_run_kind TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL CHECK (
+    status IN (
+      'unbound',
+      'bound',
+      'delivering',
+      'delivered',
+      'delivery_failed',
+      'delivery_cancelled'
+    )
+  ),
   summary TEXT NOT NULL DEFAULT '',
   content TEXT NOT NULL DEFAULT '',
-  payload_json TEXT,
-  delivered_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
-  delivered_node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL,
+  delivery_node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL,
+  delivery_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
-  UNIQUE(conversation_id, source_run_id),
+  UNIQUE(conversation_id, id),
   FOREIGN KEY (conversation_id, source_run_id)
     REFERENCES runs(conversation_id, id),
   FOREIGN KEY (conversation_id, delivery_node_id)
     REFERENCES nodes(conversation_id, id),
-  FOREIGN KEY (conversation_id, delivered_run_id)
-    REFERENCES runs(conversation_id, id),
-  FOREIGN KEY (conversation_id, delivered_node_id)
-    REFERENCES nodes(conversation_id, id)
+  FOREIGN KEY (conversation_id, delivery_run_id)
+    REFERENCES runs(conversation_id, id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_task_notifications_conversation_status
   ON task_notifications(conversation_id, status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_task_notifications_delivery_node
-  ON task_notifications(delivery_node_id, status);
+  ON task_notifications(delivery_node_id, updated_at);
 
-CREATE TABLE IF NOT EXISTS transcript_items (
-  id TEXT PRIMARY KEY,
-  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-  node_id TEXT REFERENCES nodes(id) ON DELETE CASCADE,
-  anchor_node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL,
-  run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
-  plan_id TEXT REFERENCES plans(id) ON DELETE SET NULL,
-  message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
-  item_type TEXT NOT NULL,
-  local_order INTEGER NOT NULL,
-  visibility TEXT NOT NULL DEFAULT 'main',
-  status TEXT,
-  summary TEXT NOT NULL DEFAULT '',
-  preview TEXT NOT NULL DEFAULT '',
-  props_json TEXT,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
-  UNIQUE(conversation_id, id),
-  FOREIGN KEY (conversation_id, node_id) REFERENCES nodes(conversation_id, id),
-  FOREIGN KEY (conversation_id, anchor_node_id)
-    REFERENCES nodes(conversation_id, id),
-  FOREIGN KEY (conversation_id, run_id) REFERENCES runs(conversation_id, id),
-  FOREIGN KEY (conversation_id, plan_id) REFERENCES plans(conversation_id, id),
-  FOREIGN KEY (conversation_id, message_id)
-    REFERENCES messages(conversation_id, id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_transcript_conversation_node_order
-  ON transcript_items(conversation_id, node_id, local_order);
-CREATE INDEX IF NOT EXISTS idx_transcript_conversation_anchor_order
-  ON transcript_items(conversation_id, anchor_node_id, local_order);
-CREATE INDEX IF NOT EXISTS idx_transcript_conversation_visibility
-  ON transcript_items(conversation_id, visibility, local_order);
 """
-
-# Keep the historical migration input immutable while deriving the canonical schema.
-_RUNS_V1_COLUMNS_TAIL = """  finished_at INTEGER,
-  UNIQUE(conversation_id, id),"""
-_RUNS_V2_COLUMNS_TAIL = """  finished_at INTEGER,
-  idempotency_key TEXT,
-  request_fingerprint TEXT,
-  UNIQUE(conversation_id, id),"""
-_RUNS_V1_TAIL = """  FOREIGN KEY (conversation_id, target_node_id)
-    REFERENCES nodes(conversation_id, id)
-);"""
-_RUNS_V2_TAIL = """  FOREIGN KEY (conversation_id, target_node_id)
-    REFERENCES nodes(conversation_id, id),
-  CHECK (
-    (idempotency_key IS NULL AND request_fingerprint IS NULL)
-    OR
-    (idempotency_key IS NOT NULL AND request_fingerprint IS NOT NULL)
-  )
-);"""
-_RUNS_FIRST_INDEX_V1 = """CREATE INDEX IF NOT EXISTS idx_runs_conversation_status
-  ON runs(conversation_id, status, updated_at);"""
-_RUNS_FIRST_INDEX_V2 = """CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_idempotency_key
-  ON runs(idempotency_key)
-  WHERE idempotency_key IS NOT NULL;
-
-CREATE INDEX IF NOT EXISTS idx_runs_conversation_status
-  ON runs(conversation_id, status, updated_at);"""
-
-if SCHEMA_V1_SQL.count(_RUNS_V1_COLUMNS_TAIL) != 1:
-    raise RuntimeError("SCHEMA_V1_SQL runs columns changed unexpectedly")
-if SCHEMA_V1_SQL.count(_RUNS_V1_TAIL) != 1:
-    raise RuntimeError("SCHEMA_V1_SQL runs definition changed unexpectedly")
-if SCHEMA_V1_SQL.count(_RUNS_FIRST_INDEX_V1) != 1:
-    raise RuntimeError("SCHEMA_V1_SQL runs indexes changed unexpectedly")
-
-SCHEMA_SQL = SCHEMA_V1_SQL.replace(
-    _RUNS_V1_COLUMNS_TAIL,
-    _RUNS_V2_COLUMNS_TAIL,
-).replace(
-    _RUNS_V1_TAIL,
-    _RUNS_V2_TAIL,
-).replace(
-    _RUNS_FIRST_INDEX_V1,
-    _RUNS_FIRST_INDEX_V2,
-)

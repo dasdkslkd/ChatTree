@@ -31,18 +31,34 @@ def make_tool_call(name="web_search", arguments=None):
     }
 
 
-class FakeToolResultStore:
+def _assistant_messages(manager, conversation_id, node_id):
+    return [
+        message
+        for message in manager._canonical_messages_by_node(conversation_id, [node_id]).get(node_id, [])
+        if message.get("role") == Role.ASSISTANT
+    ]
+
+
+class FakeChatRepository:
     def __init__(self):
         self.saved = []
+        self.calls = []
+        self.persistence = None
 
-    def save_result(self, **kwargs):
+    def tool_call_exists(self, conversation_id, tool_call_id):
+        return any(call.get("tool_call_id") == tool_call_id for call in self.calls)
+
+    def add_tool_call(self, *args, **kwargs):
+        self.calls.append(kwargs)
+        return kwargs.get("tool_call_id")
+
+    def add_tool_result(self, *args, **kwargs):
         self.saved.append(kwargs)
-        return {"id": "result-1"}
+        return "result-1"
 
 
 class FakeToolManager:
     def __init__(self):
-        self.tool_result_store = FakeToolResultStore()
         self.calls = []
 
     def capabilities_for(self, name, workspace=None):
@@ -513,11 +529,13 @@ def test_build_stream_chunk_data_preserves_tool_approval_request():
 async def _execute_tool_calls_uses_orchestrator_and_keeps_events_separate():
     tool_manager = FakeToolManager()
     orchestrator = FakeOrchestrator()
+    repository = FakeChatRepository()
     chat_manager = ChatManager(
         model_manager=None,
         storage=None,
         prompts=None,
         tool_manager=tool_manager,
+        chat_repository=repository,
     )
     chat_manager.tool_orchestrator = orchestrator
     events = []
@@ -554,7 +572,7 @@ async def _execute_tool_calls_uses_orchestrator_and_keeps_events_separate():
     assert tool_messages[0]["raw_content"] == "raw orchestrator result"
     assert tool_messages[0]["model_visible_content"] == tool_messages[0]["content"]
     assert tool_messages[0]["tool_result_id"] == "result-1"
-    assert tool_manager.tool_result_store.saved[0]["content"] == "raw orchestrator result"
+    assert repository.saved[0]["output"] == "raw orchestrator result"
 
 
 def test_execute_tool_calls_uses_orchestrator_and_keeps_events_separate():
@@ -599,7 +617,7 @@ def test_closing_stream_cancels_pending_tool_execution(tmp_path):
     asyncio.run(_closing_stream_cancels_pending_tool_execution(tmp_path))
 
 
-async def _stream_persists_tool_approval_events_on_assistant_node(tmp_path):
+async def _stream_emits_tool_approval_events_without_persisting_them_on_assistant_node(tmp_path):
     chat_manager = ChatManager(
         FakeModelManager(provider=ApprovalPersistenceProvider()),
         ChatStorage(storage_dir=str(tmp_path / "conversations")),
@@ -630,56 +648,12 @@ async def _stream_persists_tool_approval_events_on_assistant_node(tmp_path):
     saved = chat_manager.get_conversation(conversation.metadata["id"])
     assert saved is not None
     node_id = streamed_approval_events[0]["node_id"]
-    assistant_message = saved.nodes[node_id]["assistant_message"]
-    assert assistant_message is not None
-    round_id = streamed_approval_events[0]["tool_round_id"]
-    assert assistant_message["approval_events"] == [
-        {
-            "event_type": "tool_approval_request",
-            "tool_round": 1,
-            "tool_round_id": round_id,
-            "approval": {
-                "id": "approval-42",
-                "status": "pending",
-                "grant_scope": "once",
-                "tool_name": "filesystem__write_file",
-                "tool_call_id": "call-1",
-                "conversation_id": conversation.metadata["id"],
-                "node_id": node_id,
-            },
-        },
-        {
-            "event_type": "tool_approval_result",
-            "tool_round": 1,
-            "tool_round_id": round_id,
-            "approval": {
-                "id": "approval-42",
-                "status": "approved",
-                "grant_scope": "once",
-                "tool_name": "filesystem__write_file",
-                "tool_call_id": "call-1",
-                "conversation_id": conversation.metadata["id"],
-                "node_id": node_id,
-            },
-        },
-        {
-            "event_type": "tool_approval_reused",
-            "tool_round": 1,
-            "tool_round_id": round_id,
-            "approval": {
-                "conversation_id": conversation.metadata["id"],
-                "node_id": node_id,
-                "tool_call_id": "call-1",
-                "tool_name": "filesystem__write_file",
-                "grant_scope": "session",
-                "reason": "Session approval grant reused.",
-            },
-        },
-    ]
+    assistant_message = _assistant_messages(chat_manager, conversation.metadata["id"], node_id)[-1]
+    assert "approval_events" not in assistant_message
 
 
-def test_stream_persists_tool_approval_events_on_assistant_node(tmp_path):
-    asyncio.run(_stream_persists_tool_approval_events_on_assistant_node(tmp_path))
+def test_stream_emits_tool_approval_events_without_persisting_them_on_assistant_node(tmp_path):
+    asyncio.run(_stream_emits_tool_approval_events_without_persisting_them_on_assistant_node(tmp_path))
 
 
 async def _stream_updates_metadata_updated_at_after_tool_completion(tmp_path, monkeypatch):
@@ -711,8 +685,7 @@ async def _stream_updates_metadata_updated_at_after_tool_completion(tmp_path, mo
     tool_event = next(chunk for chunk in chunks if chunk.get("event_type") == "tool_approval_result")
     saved = chat_manager.get_conversation(conversation.metadata["id"])
     assert saved is not None
-    assistant_message = saved.nodes[tool_event["node_id"]]["assistant_message"]
-    assert assistant_message is not None
+    assistant_message = _assistant_messages(chat_manager, conversation.metadata["id"], tool_event["node_id"])[-1]
     assert saved.metadata["updated_at"] >= assistant_message["timestamp"]
 
 
@@ -748,8 +721,7 @@ async def _stream_updates_metadata_updated_at_after_plain_assistant_completion(t
     content_chunk = next(chunk for chunk in chunks if chunk.get("content") == "plain response")
     saved = chat_manager.get_conversation(conversation.metadata["id"])
     assert saved is not None
-    assistant_message = saved.nodes[content_chunk["node_id"]]["assistant_message"]
-    assert assistant_message is not None
+    assistant_message = _assistant_messages(chat_manager, conversation.metadata["id"], content_chunk["node_id"])[-1]
     assert saved.metadata["updated_at"] >= assistant_message["timestamp"]
 
 
@@ -793,13 +765,9 @@ async def _stream_commits_parallel_tool_round_once(tmp_path):
 
     saved = chat_manager.get_conversation(conversation.metadata["id"])
     assert saved is not None
-    assistant_message = saved.nodes[committed["node_id"]]["assistant_message"]
-    assert assistant_message is not None
-    interactions = assistant_message["tool_interactions"]
-    assert len(interactions) == 1
-    assert interactions[0]["tool_round_id"] == committed["tool_round_id"]
-    assert len(interactions[0]["assistant"]["tool_calls"]) == 8
-    assert len(interactions[0]["tools"]) == 8
+    assistant_message = _assistant_messages(chat_manager, conversation.metadata["id"], committed["node_id"])[-1]
+    assert "tool_calls" not in assistant_message
+    assert "tool_results" not in assistant_message
 
 
 def test_stream_commits_parallel_tool_round_once(tmp_path):
@@ -862,11 +830,6 @@ async def _stop_stream_cancels_pending_approval_and_stream_finishes(tmp_path):
         await stream.aclose()
 
     assert approval_manager.get(approval_id) is None
-    assert any(
-        chunk.get("event_type") == "tool_approval_result"
-        and chunk.get("approval", {}).get("status") == "cancelled"
-        for chunk in tail
-    )
     assert any(chunk.get("status") == StreamStatus.STOPPED for chunk in tail)
 
 

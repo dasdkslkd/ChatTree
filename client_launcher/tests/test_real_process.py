@@ -245,6 +245,9 @@ def test_real_process_protocol_idempotency_restart_and_stop(tmp_path: Path) -> N
             "CHATTREE_CLIENT_PORT": str(launcher_port),
             "CHATTREE_LOCAL_SERVER_PORT": str(server_port),
             "CHATTREE_SERVER_PYTHON": sys.executable,
+            "CHATTREE_SERVER_BINARY": subprocess.list2cmdline(
+                [sys.executable, "-m", "backend.server_cli"]
+            ),
             "CHATTREE_CLIENT_CONNECT_TIMEOUT_SECONDS": "0.5",
             "CHATTREE_CLIENT_START_TIMEOUT_SECONDS": "30",
             "CHATTREE_CLIENT_POLL_INTERVAL_SECONDS": "0.05",
@@ -377,7 +380,18 @@ def test_real_process_protocol_idempotency_restart_and_stop(tmp_path: Path) -> N
         second_env["CHATTREE_SERVER_PORT"] = str(second_server_port)
         with second_server_log.open("wb") as output:
             second_server = subprocess.Popen(
-                [sys.executable, "-m", "main"],
+                [
+                    sys.executable,
+                    "-m",
+                    "backend.server_cli",
+                    "serve",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(second_server_port),
+                    "--home",
+                    str(server_home),
+                ],
                 cwd=PROJECT_ROOT,
                 env=second_env,
                 stdin=subprocess.DEVNULL,

@@ -8,8 +8,9 @@ from ...core.agents import AgentMailbox, AgentRuntime
 from ...core.config.config import Config, cfg
 from ...core.model.model_manager import ModelManager
 from ...core.projects import normalize_projects_config
-from ...core.persistence import SQLitePlanRepository, SQLiteTaskRepository
+from ...core.persistence import SQLitePersistence, SQLitePlanRepository, SQLiteTaskRepository
 from ...core.plans import PlanLedger
+from ...core.notifications import TaskNotificationService
 from ...core.tasks import ActiveTaskService
 from ...core.tools.orchestrator import ToolOrchestrator
 from ...core.tools.agent_tools import register_agent_management_tools
@@ -94,17 +95,30 @@ def _sync_runtime_managers(app, config_data: Dict[str, Any], model_manager, tool
     if plan_ledger is None:
         plan_repository = getattr(app.state, 'plan_repository', None)
         persistence = getattr(app.state, 'persistence', None)
-        if plan_repository is None and persistence is not None:
+        if persistence is None:
+            config_manager = getattr(app.state, 'config_manager', None)
+            config_path = getattr(config_manager, 'config_path', None)
+            home = Path(config_path).parent if config_path else None
+            persistence = SQLitePersistence(home)
+            persistence.initialize()
+            app.state.persistence = persistence
+        if plan_repository is None:
             plan_repository = SQLitePlanRepository(persistence)
             app.state.plan_repository = plan_repository
         plan_ledger = PlanLedger(repository=plan_repository)
         app.state.plan_ledger = plan_ledger
     task_service = getattr(app.state, 'task_service', None)
+    task_notification_service = getattr(app.state, 'task_notification_service', None)
     if task_service is None:
         persistence = getattr(app.state, 'persistence', None)
         task_repository = SQLiteTaskRepository(persistence) if persistence is not None else None
         task_service = ActiveTaskService(repository=task_repository)
         app.state.task_service = task_service
+    if task_notification_service is None:
+        persistence = getattr(app.state, 'persistence', None)
+        if persistence is not None:
+            task_notification_service = TaskNotificationService(persistence)
+            app.state.task_notification_service = task_notification_service
     if run_manager is not None:
         run_manager.task_service = task_service
         task_service.run_manager = run_manager
@@ -122,8 +136,6 @@ def _sync_runtime_managers(app, config_data: Dict[str, Any], model_manager, tool
     if agent_mailbox is None:
         agent_mailbox = AgentMailbox()
         app.state.agent_mailbox = agent_mailbox
-    if run_manager is not None:
-        run_manager.agent_mailbox = agent_mailbox
     if subagent_executor is not None:
         subagent_executor.chat_manager = chat_manager
         subagent_executor.capability_registry = capability_registry

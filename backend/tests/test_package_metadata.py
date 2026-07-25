@@ -47,6 +47,15 @@ def test_project_dependencies_match_backend_requirements():
     assert dependencies == _requirements()
 
 
+def test_build_extra_declares_pyinstaller():
+    extras = _read_pyproject()["project"]["optional-dependencies"]
+
+    assert extras["build"] == [
+        "pyinstaller==6.13.0",
+        "pyinstaller-hooks-contrib==2025.4",
+    ]
+
+
 def test_package_data_declares_required_non_python_assets():
     package_data = _read_pyproject()["tool"]["setuptools"]["package-data"]
 

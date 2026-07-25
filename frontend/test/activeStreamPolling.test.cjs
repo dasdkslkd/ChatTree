@@ -21,7 +21,6 @@ const {
   ACTIVE_STREAM_IDLE_POLL_MS,
   ACTIVE_STREAM_VISIBLE_POLL_MS,
   getActiveStreamPollingDelay,
-  shouldProbeBackendScheduledFollowup,
 } = require(path.join(__dirname, '../src/utils/activeStreamPolling.ts'));
 
 function testUsesFastPollingWhenStreamsAreActive() {
@@ -36,30 +35,10 @@ function testPausesPollingWhenDocumentIsHidden() {
   assert.equal(getActiveStreamPollingDelay({ activeStreamCount: 2, documentHidden: true }), null);
 }
 
-function testOnlyCompletedStreamsProbeForScheduledFollowup() {
-  assert.equal(
-    shouldProbeBackendScheduledFollowup({ finishStatus: 'completed', hasQueuedFollowup: false }),
-    true,
-  );
-  assert.equal(
-    shouldProbeBackendScheduledFollowup({ finishStatus: 'stopped', hasQueuedFollowup: false }),
-    false,
-  );
-  assert.equal(
-    shouldProbeBackendScheduledFollowup({ finishStatus: 'error', hasQueuedFollowup: false }),
-    false,
-  );
-  assert.equal(
-    shouldProbeBackendScheduledFollowup({ finishStatus: 'completed', hasQueuedFollowup: true }),
-    false,
-  );
-}
-
 function main() {
   testUsesFastPollingWhenStreamsAreActive();
   testUsesSlowPollingWhenIdle();
   testPausesPollingWhenDocumentIsHidden();
-  testOnlyCompletedStreamsProbeForScheduledFollowup();
   console.log('activeStreamPolling tests passed');
 }
 

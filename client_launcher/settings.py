@@ -82,10 +82,11 @@ class LauncherSettings:
     client_home: Path
     project_root: Path
     server_python: str
+    server_binary: str = "chattree-server"
     host: str = "127.0.0.1"
     port: int = DEFAULT_LAUNCHER_PORT
     default_local_server_port: int = DEFAULT_LOCAL_SERVER_PORT
-    connect_timeout_seconds: float = 2.0
+    connect_timeout_seconds: float = 5.0
     start_timeout_seconds: float = 30.0
     poll_interval_seconds: float = 0.2
     max_request_body_bytes: int = 64 * 1024 * 1024
@@ -121,6 +122,7 @@ class LauncherSettings:
             client_home=resolve_client_home(environ=values),
             project_root=root,
             server_python=values.get("CHATTREE_SERVER_PYTHON", sys.executable),
+            server_binary=values.get("CHATTREE_SERVER_BINARY") or "chattree-server",
             host="127.0.0.1",
             port=_integer_setting(
                 values,
@@ -139,7 +141,7 @@ class LauncherSettings:
             connect_timeout_seconds=_float_setting(
                 values,
                 "CHATTREE_CLIENT_CONNECT_TIMEOUT_SECONDS",
-                2.0,
+                5.0,
                 maximum=MAX_CONNECT_TIMEOUT_SECONDS,
             ),
             start_timeout_seconds=_float_setting(

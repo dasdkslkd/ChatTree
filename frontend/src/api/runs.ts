@@ -1,6 +1,6 @@
 import { apiClient } from './client';
-import type { StreamChunk } from '../types/message';
-import type { RunEventPayload, RunRecord } from '../types/run';
+import type { TranscriptPatch } from '../types/transcript';
+import type { RunRecord } from '../types/run';
 import { perfNow, recordMark, recordSpan } from '../perf/marks';
 import { leaseGuardedFetch } from './leaseFetch';
 import {
@@ -17,7 +17,6 @@ export type RunStartResponse = {
 
 export type RunAttachOptions = {
   signal?: AbortSignal;
-  fromEvent?: number;
 };
 
 async function acquireSseReader(
@@ -48,7 +47,7 @@ async function acquireSseReader(
 async function* parseSseResponse(
   response: Response,
   perfAttrs: Record<string, unknown> = {},
-): AsyncGenerator<StreamChunk, void> {
+): AsyncGenerator<TranscriptPatch, void> {
   const reader = await acquireSseReader(response);
   recordMark('stream.response_headers', { ...perfAttrs, status: response.status });
   const decoder = new TextDecoder();
@@ -86,7 +85,7 @@ async function* parseSseResponse(
           return;
         }
         const parseStarted = perfNow();
-        let parsed: StreamChunk;
+        let parsed: TranscriptPatch;
         try {
           parsed = JSON.parse(data);
         } catch (error) {
@@ -95,10 +94,9 @@ async function* parseSseResponse(
         eventCount += 1;
         recordSpan('stream.parse_event', parseStarted, {
           ...perfAttrs,
-          event_type: parsed?.event_type,
-          status: parsed?.status,
-          run_id: parsed?.run_id,
-          event_index: parsed?.event_index,
+          event_type: parsed?.type,
+          revision: parsed?.revision,
+          operation_count: parsed?.operations?.length ?? 0,
         });
         yield parsed;
       }
@@ -112,7 +110,7 @@ async function* parseSseResponse(
         return;
       }
       try {
-        const parsed: StreamChunk = JSON.parse(data);
+        const parsed = JSON.parse(data) as TranscriptPatch;
         eventCount += 1;
         yield parsed;
       } catch (error) {
@@ -129,6 +127,22 @@ async function* parseSseResponse(
     } catch {
       // The reader may already be closed or cancelled.
     }
+  }
+}
+
+async function* parseTranscriptPatchSseResponse(
+  response: Response,
+  perfAttrs: Record<string, unknown> = {},
+): AsyncGenerator<TranscriptPatch, void> {
+  for await (const chunk of parseSseResponse(response, perfAttrs)) {
+    const payload = chunk as { type?: unknown };
+    if (payload?.type !== 'transcript_patch') {
+      throw unexpectedApiResponse(
+        response.status,
+        new Error('Run attach stream returned a non transcript_patch event'),
+      );
+    }
+    yield chunk as unknown as TranscriptPatch;
   }
 }
 
@@ -151,16 +165,15 @@ export const runsApi = {
   attach: async function* (
     runId: string,
     options: RunAttachOptions,
-  ): AsyncGenerator<StreamChunk, void> {
+  ): AsyncGenerator<TranscriptPatch, void> {
     const { signal } = options;
-    const fromEvent = options.fromEvent ?? 0;
     const started = perfNow();
     const response = await leaseGuardedFetch(
-      `/runs/${encodeURIComponent(runId)}/attach?from_event=${fromEvent}`,
+      `/runs/${encodeURIComponent(runId)}/events`,
       { signal },
     );
-    recordSpan('stream.fetch', started, { run_id: runId, from_event: fromEvent, route: 'runs.attach' });
-    yield* parseSseResponse(response, { run_id: runId, from_event: fromEvent, route: 'runs.attach' });
+    recordSpan('stream.fetch', started, { run_id: runId, route: 'runs.events' });
+    yield* parseTranscriptPatchSseResponse(response, { run_id: runId, route: 'runs.events' });
   },
 
   stop: async (runId: string): Promise<void> => {
@@ -172,8 +185,4 @@ export const runsApi = {
     return response.data;
   },
 
-  events: async (runId: string, fromEvent = 0): Promise<RunEventPayload[]> => {
-    const response = await apiClient.get(`/runs/${encodeURIComponent(runId)}/events`, { params: { from_event: fromEvent } });
-    return response.data;
-  },
 };

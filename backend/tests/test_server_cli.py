@@ -150,6 +150,36 @@ def test_start_spawns_detached_serve_with_log_and_json(tmp_path, monkeypatch, ca
     assert payload["log_path"] == str(tmp_path / "logs" / "server.log")
 
 
+def test_start_uses_frozen_executable_for_detached_serve(
+    tmp_path,
+    monkeypatch,
+):
+    captured = {}
+
+    class FakePopen:
+        def __init__(self, command, **kwargs):
+            captured["command"] = command
+            captured["kwargs"] = kwargs
+            self.pid = 12345
+
+    monkeypatch.setattr(server_cli.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(server_cli.sys, "executable", "chattree-server.exe")
+    monkeypatch.setattr(server_cli.subprocess, "Popen", FakePopen)
+
+    result = server_cli.main(["start", "--home", str(tmp_path), "--port", "18011"])
+
+    assert result == 0
+    assert captured["command"][:6] == [
+        "chattree-server.exe",
+        "serve",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "18011",
+    ]
+    assert captured["kwargs"]["env"]["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
+
+
 def test_start_reuses_running_server_without_spawning(tmp_path, monkeypatch, capsys):
     def fail_popen(*args, **kwargs):
         raise AssertionError("start must not spawn when handshake is ready")

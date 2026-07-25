@@ -49,6 +49,18 @@ class FakeProcess:
         self.exit_code = -9
 
 
+class FakeTimeoutProcess(FakeProcess):
+    def __init__(self) -> None:
+        super().__init__(None)
+
+    def communicate(self, timeout=None):
+        raise subprocess.TimeoutExpired("ssh", timeout)
+
+    def wait(self, timeout=None):
+        self.exit_code = 0
+        return 0
+
+
 def _settings(tmp_path: Path) -> LauncherSettings:
     return LauncherSettings(
         client_home=tmp_path / "client",
@@ -84,6 +96,8 @@ def test_connect_starts_remote_server_then_tunnel_to_reported_port(
             assert kwargs["stdin"] is subprocess.DEVNULL
             if "-N" in argv:
                 process = FakeProcess(None)
+            elif "--version" in argv:
+                process = FakeProcess(0, output="chattree-server 0.1.0\n")
             else:
                 process = FakeProcess(
                     0,
@@ -126,13 +140,19 @@ def test_connect_starts_remote_server_then_tunnel_to_reported_port(
             "ssh",
             "gpu-box",
             "chattree-server",
+            "--version",
+        ]
+        assert calls[1] == [
+            "ssh",
+            "gpu-box",
+            "chattree-server",
             "start",
             "--host",
             "127.0.0.1",
             "--port",
             "0",
         ]
-        assert calls[1] == [
+        assert calls[2] == [
             "ssh",
             "-o",
             "ExitOnForwardFailure=yes",
@@ -141,7 +161,7 @@ def test_connect_starts_remote_server_then_tunnel_to_reported_port(
             "127.0.0.1:19081:127.0.0.1:18082",
             "gpu-box",
         ]
-        assert processes[1].terminated is True
+        assert processes[2].terminated is True
 
     asyncio.run(scenario())
 
@@ -154,6 +174,8 @@ def test_already_running_remote_start_output_is_accepted(tmp_path: Path):
             calls.append(list(argv))
             if "-N" in argv:
                 return FakeProcess(None)
+            if "--version" in argv:
+                return FakeProcess(0, output="chattree-server 0.1.0\n")
             return FakeProcess(
                 0,
                 output=(
@@ -185,9 +207,9 @@ def test_already_running_remote_start_output_is_accepted(tmp_path: Path):
         await connector.connect(_profile(), None)
         await connector.close()
 
-        assert len(calls) == 2
-        assert calls[0][-2:] == ["--port", "0"]
-        assert calls[1][5] == "127.0.0.1:19082:127.0.0.1:18083"
+        assert len(calls) == 3
+        assert calls[1][-2:] == ["--port", "0"]
+        assert calls[2][5] == "127.0.0.1:19082:127.0.0.1:18083"
 
     asyncio.run(scenario())
 
@@ -198,6 +220,8 @@ def test_remote_start_rejects_non_ipv4_loopback_host(tmp_path: Path):
 
         def popen(argv, **_kwargs):
             calls.append(list(argv))
+            if "--version" in argv:
+                return FakeProcess(0, output="chattree-server 0.1.0\n")
             return FakeProcess(
                 0,
                 output='{"status":"already_running","host":"::1","port":18083}\n',
@@ -215,7 +239,7 @@ def test_remote_start_rejects_non_ipv4_loopback_host(tmp_path: Path):
 
         assert exc_info.value.code == "remote_start_unsupported_host"
         assert exc_info.value.status_code == 502
-        assert len(calls) == 1
+        assert len(calls) == 2
 
     asyncio.run(scenario())
 
@@ -225,6 +249,8 @@ def test_tunnel_exit_maps_to_typed_launcher_error(tmp_path: Path):
         def popen(argv, **_kwargs):
             if "-N" in argv:
                 return FakeProcess(255, output="channel 1: open failed")
+            if "--version" in argv:
+                return FakeProcess(0, output="chattree-server 0.1.0\n")
             return FakeProcess(
                 0,
                 output='{"status":"started","host":"127.0.0.1","port":18084}\n',
@@ -261,6 +287,8 @@ def test_transient_channel_open_failure_waits_for_remote_server(
             calls.append(list(argv))
             if "-N" in argv:
                 return FakeProcess(None)
+            if "--version" in argv:
+                return FakeProcess(0, output="chattree-server 0.1.0\n")
             return FakeProcess(
                 0,
                 output='{"status":"started","host":"127.0.0.1","port":18085}\n',
@@ -298,14 +326,16 @@ def test_transient_channel_open_failure_waits_for_remote_server(
 
         assert connected.server_instance_id == SERVER_A
         assert attempts == 2
-        assert calls[1][5] == "127.0.0.1:19085:127.0.0.1:18085"
+        assert calls[2][5] == "127.0.0.1:19085:127.0.0.1:18085"
 
     asyncio.run(scenario())
 
 
 def test_remote_start_invalid_json_is_typed_error(tmp_path: Path):
     async def scenario() -> None:
-        def popen(_argv, **_kwargs):
+        def popen(argv, **_kwargs):
+            if "--version" in argv:
+                return FakeProcess(0, output="chattree-server 0.1.0\n")
             return FakeProcess(0, output="not json\n")
 
         connector = SshServerConnector(
@@ -320,6 +350,140 @@ def test_remote_start_invalid_json_is_typed_error(tmp_path: Path):
 
         assert exc_info.value.code == "remote_start_invalid_json"
         assert exc_info.value.status_code == 502
+
+    asyncio.run(scenario())
+
+
+def test_remote_version_mismatch_stops_before_remote_start(tmp_path: Path):
+    async def scenario() -> None:
+        calls: list[list[str]] = []
+
+        def popen(argv, **_kwargs):
+            calls.append(list(argv))
+            return FakeProcess(0, output="chattree-server 0.0.1\n")
+
+        connector = SshServerConnector(
+            _settings(tmp_path),
+            popen_factory=popen,
+            allocate_port=lambda: 19084,
+        )
+
+        with pytest.raises(LauncherError) as exc_info:
+            await connector.connect(_profile(), None)
+        await connector.close()
+
+        assert exc_info.value.code == "remote_server_version_incompatible"
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.details == {
+            "required_server_version": "0.1.0",
+            "observed_server_version": "0.0.1",
+        }
+        assert calls == [["ssh", "gpu-box", "chattree-server", "--version"]]
+
+    asyncio.run(scenario())
+
+
+def test_remote_handshake_version_mismatch_is_typed_error(tmp_path: Path):
+    async def scenario() -> None:
+        def popen(argv, **_kwargs):
+            if "-N" in argv:
+                return FakeProcess(None)
+            if "--version" in argv:
+                return FakeProcess(0, output="chattree-server 0.1.0\n")
+            return FakeProcess(
+                0,
+                output='{"status":"started","host":"127.0.0.1","port":18086}\n',
+            )
+
+        async def upstream(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "server_instance_id": SERVER_A,
+                    "protocol_version": 1,
+                    "server_version": "0.0.1",
+                    "platform": "linux",
+                    "features": [],
+                    "provider_configured": True,
+                },
+            )
+
+        connector = SshServerConnector(
+            _settings(tmp_path),
+            transport=httpx.MockTransport(upstream),
+            popen_factory=popen,
+            allocate_port=lambda: 19086,
+        )
+
+        with pytest.raises(LauncherError) as exc_info:
+            await connector.connect(_profile(), None)
+        await connector.close()
+
+        assert exc_info.value.code == "ssh_server_version_mismatch"
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.details == {
+            "minimum_server_version": "0.1.0",
+            "observed_server_version": "0.0.1",
+        }
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("version_output", "exit_code", "expected_code"),
+    [
+        ("not a version\n", 0, "remote_server_version_invalid"),
+        ("fatal\n", 17, "remote_server_version_failed"),
+    ],
+)
+def test_remote_version_probe_failures_stop_before_remote_start(
+    tmp_path: Path,
+    version_output: str,
+    exit_code: int,
+    expected_code: str,
+):
+    async def scenario() -> None:
+        calls: list[list[str]] = []
+
+        def popen(argv, **_kwargs):
+            calls.append(list(argv))
+            return FakeProcess(exit_code, output=version_output)
+
+        connector = SshServerConnector(
+            _settings(tmp_path),
+            popen_factory=popen,
+            allocate_port=lambda: 19087,
+        )
+
+        with pytest.raises(LauncherError) as exc_info:
+            await connector.connect(_profile(), None)
+        await connector.close()
+
+        assert exc_info.value.code == expected_code
+        assert calls == [["ssh", "gpu-box", "chattree-server", "--version"]]
+
+    asyncio.run(scenario())
+
+
+def test_remote_version_timeout_is_typed_error(tmp_path: Path):
+    async def scenario() -> None:
+        def popen(argv, **_kwargs):
+            if "--version" in argv:
+                return FakeTimeoutProcess()
+            raise AssertionError("timed out remote version probe must not start")
+
+        connector = SshServerConnector(
+            _settings(tmp_path),
+            popen_factory=popen,
+            allocate_port=lambda: 19088,
+        )
+
+        with pytest.raises(LauncherError) as exc_info:
+            await connector.connect(_profile(), None)
+        await connector.close()
+
+        assert exc_info.value.code == "remote_server_version_timeout"
+        assert exc_info.value.status_code == 504
 
     asyncio.run(scenario())
 

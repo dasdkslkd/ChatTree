@@ -13,8 +13,8 @@ export function createTranscriptService(client: TranscriptApiClient) {
       signal?: AbortSignal,
     ): Promise<TranscriptSnapshot> {
       const response = await client.get(
-        `/conversations/${encodeURIComponent(conversationId)}/branches/${encodeURIComponent(tipNodeId)}/transcript`,
-        signal ? { signal } : undefined,
+        `/conversations/${encodeURIComponent(conversationId)}/transcript`,
+        { ...(signal ? { signal } : {}), params: { node_id: tipNodeId } },
       );
       return response.data;
     },

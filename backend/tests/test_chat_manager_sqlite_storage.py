@@ -1,10 +1,9 @@
-﻿import asyncio
+import asyncio
 import json
-import sqlite3
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
-
 import sys
 
 sys.path.insert(0, ".")
@@ -15,787 +14,419 @@ from backend.core.config.types import Message, Role, StreamChunk, StreamControll
 from backend.core.persistence.database import SQLitePersistence
 from backend.core.persistence.repository import ChatRepository
 from backend.core.persistence.run_repository import SQLiteRunRepository
-from backend.core.persistence.transcript import TranscriptProjection
-from backend.core.plans import PlanLedger
-from backend.core.runs import RunKind, RunManager, RunStatus
-from backend.core.notifications import format_task_notification_content
 from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
-from backend.core.storage.tool_result_storage import ToolResultStorage
-from backend.core.tools.orchestrator import ToolOrchestrator
 from backend.core.tools.security.capabilities import ToolCapability
-from backend.core.tools.security.approval import ApprovalManager
-from backend.core.tools.security.logical_sandbox import LogicalSandbox
-from backend.core.tools.security.permissions import PermissionEngine
-from backend.api.routes.conversations import to_transcript_item_dto
-from backend.api.routes.messages import SendMessageRequest, _produce_chat_run
-from test_chat_manager_prompt_slash import (
-    CapturingProvider,
-    CapturingModelManager,
-    PlanFinalWithoutExitProvider,
-    PlanModeToolManager,
-    collect_chunks,
-)
-
-
-class TextThenExitPlanProvider:
-    def __init__(self):
-        self.calls = []
-
-    async def generate_response_stream(self, model, messages, stream_controller=None, **kwargs):
-        self.calls.append({"messages": list(messages), "kwargs": kwargs})
-        node_id = stream_controller.node_id
-        conversation_id = stream_controller.conversation_id
-        yield StreamChunk(
-            status=StreamStatus.CONTENT,
-            content="这是正文里不应该成为最终回复的计划摘要。\n",
-            node_id=node_id,
-            conversation_id=conversation_id,
-            tokens_used=1,
-        )
-        yield StreamChunk(
-            status=StreamStatus.CONTENT,
-            content="它只能进入已处理折叠区。\n",
-            node_id=node_id,
-            conversation_id=conversation_id,
-            tokens_used=1,
-        )
-        yield StreamChunk(
-            status=StreamStatus.CONTENT,
-            content="",
-            node_id=node_id,
-            conversation_id=conversation_id,
-            tokens_used=1,
-            tool_calls=[{
-                "id": "call_update_plan_test",
-                "type": "function",
-                "function": {
-                    "name": "update_plan",
-                    "arguments": json.dumps({
-                        "mode": "replace",
-                        "content": "## Canonical Plan\n\n1. Only this appears in the plan card.",
-                    }, ensure_ascii=False),
-                },
-            }, {
-                "id": "call_exit_plan_test",
-                "type": "function",
-                "function": {
-                    "name": "exit_plan_mode",
-                    "arguments": "{}",
-                },
-            }],
-        )
-        yield StreamChunk(
-            status=StreamStatus.COMPLETE,
-            content="",
-            node_id=node_id,
-            conversation_id=conversation_id,
-            tokens_used=3,
-        )
-
-
-class EnterPlanModeProvider:
-    def __init__(self):
-        self.calls = []
-
-    async def generate_response_stream(self, model, messages, stream_controller=None, **kwargs):
-        self.calls.append({"messages": list(messages), "kwargs": kwargs})
-        node_id = stream_controller.node_id
-        conversation_id = stream_controller.conversation_id
-        yield StreamChunk(
-            status=StreamStatus.CONTENT,
-            content="",
-            node_id=node_id,
-            conversation_id=conversation_id,
-            tokens_used=1,
-            tool_calls=[{
-                "id": "call_enter_plan_test",
-                "type": "function",
-                "function": {
-                    "name": "enter_plan_mode",
-                    "arguments": "{}",
-                },
-            }],
-        )
-        yield StreamChunk(
-            status=StreamStatus.COMPLETE,
-            content="",
-            node_id=node_id,
-            conversation_id=conversation_id,
-            tokens_used=1,
-        )
-
-
-class ToolThenFinalAnswerProvider:
-    def __init__(self):
-        self.calls = []
-
-    async def generate_response_stream(self, model, messages, stream_controller=None, **kwargs):
-        self.calls.append({"messages": list(messages), "kwargs": kwargs})
-        node_id = stream_controller.node_id
-        conversation_id = stream_controller.conversation_id
-        if len(self.calls) == 1:
-            yield StreamChunk(
-                status=StreamStatus.CONTENT,
-                content="我先检查一下环境。\n",
-                node_id=node_id,
-                conversation_id=conversation_id,
-                tokens_used=1,
-            )
-            yield StreamChunk(
-                status=StreamStatus.CONTENT,
-                content="",
-                node_id=node_id,
-                conversation_id=conversation_id,
-                tokens_used=1,
-                tool_calls=[{
-                    "id": "call_large_tool",
-                    "type": "function",
-                    "function": {"name": "large_tool", "arguments": "{\"value\":\"small\"}"},
-                }],
-            )
-        else:
-            yield StreamChunk(
-                status=StreamStatus.CONTENT,
-                content="最终总结只应该是这一段。",
-                node_id=node_id,
-                conversation_id=conversation_id,
-                tokens_used=1,
-            )
-        yield StreamChunk(
-            status=StreamStatus.COMPLETE,
-            content="",
-            node_id=node_id,
-            conversation_id=conversation_id,
-            tokens_used=3,
-        )
+from backend.core.transcript import TranscriptAssembler
+from test_chat_manager_prompt_slash import CapturingModelManager, collect_chunks
 
 
 def _make_manager(tmp_path: Path):
     persistence = SQLitePersistence(tmp_path / "sqlite")
     persistence.initialize()
     repository = ChatRepository(persistence)
-    projection = TranscriptProjection(persistence)
-    model_manager = CapturingModelManager()
-    try:
-        manager = ChatManager(
-            model_manager,
-            ChatStorage(str(tmp_path / "conversations")),
-            PromptStorage(str(tmp_path / "prompts")),
-            chat_repository=repository,
-            transcript_projection=projection,
+    manager = ChatManager(
+        CapturingModelManager(),
+        ChatStorage(str(tmp_path / "conversations")),
+        PromptStorage(str(tmp_path / "prompts")),
+        chat_repository=repository,
+    )
+    return manager, repository, persistence
+
+
+def _items(persistence: SQLitePersistence, conversation_id: str, node_id: str):
+    return TranscriptAssembler(persistence).snapshot(conversation_id, node_id)["items"]
+
+
+async def _drain_stream(stream, chunks: list[dict]):
+    async for chunk in stream:
+        chunks.append(dict(chunk))
+
+
+class FailingUserMessageRepository(ChatRepository):
+    def add_message(self, conversation_id, node_id, role, content, subtype=None, **kwargs):
+        if str(role) == "user":
+            raise RuntimeError("user canonical write failed")
+        return super().add_message(
+            conversation_id,
+            node_id,
+            role,
+            content,
+            subtype=subtype,
+            **kwargs,
         )
-    except TypeError:
-        manager = ChatManager(
-            model_manager,
-            ChatStorage(str(tmp_path / "conversations")),
-            PromptStorage(str(tmp_path / "prompts")),
+
+
+class FailingAssistantMessageRepository(ChatRepository):
+    def add_message(self, conversation_id, node_id, role, content, subtype=None, **kwargs):
+        if subtype == "assistant_answer":
+            raise RuntimeError("assistant canonical write failed")
+        return super().add_message(
+            conversation_id,
+            node_id,
+            role,
+            content,
+            subtype=subtype,
+            **kwargs,
         )
-        manager.chat_repository = repository
-        manager.transcript_projection = projection
-    return manager, repository, projection
+
+
+class StaticProvider:
+    def __init__(self, *, content: str, reasoning: str = ""):
+        self.content = content
+        self.reasoning = reasoning
+
+    async def generate_response_stream(
+        self,
+        model,
+        messages,
+        stream_controller: StreamController = None,
+        **kwargs,
+    ):
+        if self.reasoning:
+            yield StreamChunk(
+                status=StreamStatus.CONTENT,
+                content=None,
+                reasoning=self.reasoning,
+                node_id=stream_controller.node_id,
+                conversation_id=stream_controller.conversation_id,
+                error=None,
+                tokens_used=1,
+            )
+        yield StreamChunk(
+            status=StreamStatus.CONTENT,
+            content=self.content,
+            node_id=stream_controller.node_id,
+            conversation_id=stream_controller.conversation_id,
+            error=None,
+            tokens_used=1,
+        )
+        yield StreamChunk(
+            status=StreamStatus.COMPLETE,
+            content=None,
+            node_id=stream_controller.node_id,
+            conversation_id=stream_controller.conversation_id,
+            error=None,
+            tokens_used=1,
+        )
+
+
+class CompactingProvider:
+    def generate_response(self, model, messages, **kwargs):
+        return "Summary:\ncanonical compact facts", 7
 
 
 def test_create_empty_conversation_writes_sqlite_conversation(tmp_path: Path):
-    manager, repository, projection = _make_manager(tmp_path)
+    manager, repository, _persistence = _make_manager(tmp_path)
 
     conversation = manager.create_conversation("empty sqlite")
 
     stored = repository.get_conversation(conversation.metadata["id"])
     assert stored["title"] == "empty sqlite"
-    assert projection.list_for_branch(conversation.metadata["id"], None) == []
 
 
-def test_delete_conversation_removes_sqlite_transcript_projection(tmp_path: Path):
-    manager, _repository, projection = _make_manager(tmp_path)
-    conversation = manager.create_conversation("delete sqlite")
-    chunks = asyncio.run(
-        collect_chunks(
-            manager.send_message_stream(
-                conversation.metadata["id"],
-                "to delete",
-                model_id="fake-model",
-                parent_node_id=conversation.current_node_id,
-            )
-        )
-    )
-    assert chunks[-1]["status"] == "complete"
-    reloaded = manager.get_conversation(conversation.metadata["id"])
-    assert projection.list_for_branch(conversation.metadata["id"], reloaded.current_node_id)
-
-    manager.delete_conversation(conversation.metadata["id"])
-
-    try:
-        projection.list_for_branch(conversation.metadata["id"], reloaded.current_node_id)
-    except KeyError:
-        pass
-    else:
-        raise AssertionError("deleted conversation transcript should not remain")
-
-
-def test_delete_node_removes_sqlite_branch_items(tmp_path: Path):
-    manager, _repository, projection = _make_manager(tmp_path)
-    conversation = manager.create_conversation("delete node")
-    chunks = asyncio.run(
-        collect_chunks(
-            manager.send_message_stream(
-                conversation.metadata["id"],
-                "delete node content",
-                model_id="fake-model",
-                parent_node_id=conversation.current_node_id,
-            )
-        )
-    )
-    assert chunks[-1]["status"] == "complete"
-    reloaded = manager.get_conversation(conversation.metadata["id"])
-    node_id = reloaded.current_node_id
-    assert projection.list_for_branch(conversation.metadata["id"], node_id)
-
-    result = asyncio.run(manager.delete_node(conversation.metadata["id"], node_id))
-
-    assert result["deleted_node_id"] == node_id
-    try:
-        projection.list_for_branch(conversation.metadata["id"], node_id)
-    except KeyError:
-        pass
-    else:
-        raise AssertionError("deleted node transcript should not remain")
-
-
-def test_send_message_stream_writes_transcript_projection(tmp_path: Path):
-    manager, _repository, projection = _make_manager(tmp_path)
+def test_send_message_stream_writes_canonical_rows_for_transcript_assembler(tmp_path: Path):
+    manager, _repository, persistence = _make_manager(tmp_path)
     conversation = manager.create_conversation("sqlite transcript")
 
-    chunks = asyncio.run(
-        collect_chunks(
-            manager.send_message_stream(
-                conversation.metadata["id"],
-                "hello sqlite",
-                model_id="fake-model",
-                parent_node_id=conversation.current_node_id,
-            )
-        )
-    )
+    chunks = asyncio.run(collect_chunks(manager.send_message_stream(
+        conversation.metadata["id"],
+        "hello sqlite",
+        model_id="fake-model",
+        parent_node_id=conversation.current_node_id,
+    )))
 
     assert chunks[-1]["status"] == "complete"
     reloaded = manager.get_conversation(conversation.metadata["id"])
-    try:
-        items = projection.list_for_branch(
-            conversation.metadata["id"],
-            reloaded.current_node_id,
-        )
-    except KeyError:
-        items = []
-
-    assert [item["item_type"] for item in items] == [
-        "user_message",
-        "assistant_answer",
+    assert [(item["type"], item.get("content")) for item in _items(
+        persistence,
+        conversation.metadata["id"],
+        reloaded.current_node_id,
+    )] == [
+        ("user_message", "hello sqlite"),
+        ("assistant_answer", "ok"),
     ]
-    assert [item["preview"] for item in items] == ["hello sqlite", "ok"]
 
 
-def test_task_notification_turn_writes_notify_transcript_item(tmp_path: Path):
-    manager, _repository, projection = _make_manager(tmp_path)
-    conversation = manager.create_conversation("notify transcript")
-    parent_node_id = conversation.current_node_id
-    content = format_task_notification_content({
-        "summary": "Command completed",
-        "source_run_id": "run-1",
-        "source_run_kind": "command",
-        "content": "{\"stdout_tail\":\"ok\"}",
-        "payload": {
-            "source_status": "completed",
-        },
+def test_user_canonical_write_failure_aborts_stream(tmp_path: Path):
+    persistence = SQLitePersistence(tmp_path / "sqlite")
+    persistence.initialize()
+    repository = FailingUserMessageRepository(persistence)
+    manager = ChatManager(
+        CapturingModelManager(),
+        ChatStorage(str(tmp_path / "conversations")),
+        PromptStorage(str(tmp_path / "prompts")),
+        chat_repository=repository,
+    )
+    conversation = manager.create_conversation("sqlite user failure")
+    chunks: list[dict] = []
+
+    with pytest.raises(RuntimeError, match="user canonical write failed"):
+        asyncio.run(_drain_stream(manager.send_message_stream(
+            conversation.metadata["id"],
+            "will fail",
+            model_id="fake-model",
+            parent_node_id=conversation.current_node_id,
+        ), chunks))
+
+    assert chunks == []
+
+
+def test_assistant_canonical_write_failure_is_not_swallowed(tmp_path: Path):
+    persistence = SQLitePersistence(tmp_path / "sqlite")
+    persistence.initialize()
+    repository = FailingAssistantMessageRepository(persistence)
+    manager = ChatManager(
+        CapturingModelManager(),
+        ChatStorage(str(tmp_path / "conversations")),
+        PromptStorage(str(tmp_path / "prompts")),
+        chat_repository=repository,
+    )
+    conversation = manager.create_conversation("sqlite assistant failure")
+    chunks: list[dict] = []
+
+    with pytest.raises(RuntimeError, match="assistant canonical write failed"):
+        asyncio.run(_drain_stream(manager.send_message_stream(
+            conversation.metadata["id"],
+            "will fail late",
+            model_id="fake-model",
+            parent_node_id=conversation.current_node_id,
+        ), chunks))
+
+    assert not any(chunk.get("status") == StreamStatus.COMPLETE for chunk in chunks)
+    assert manager._active_controllers == {}
+
+
+def test_append_to_existing_node_updates_existing_sqlite_assistant_rows(tmp_path: Path):
+    manager, repository, _persistence = _make_manager(tmp_path)
+    manager.model_manager.provider = StaticProvider(content="first", reasoning="think-1")
+    conversation = manager.create_conversation("sqlite continuation")
+
+    first_chunks = asyncio.run(collect_chunks(manager.send_message_stream(
+        conversation.metadata["id"],
+        "start",
+        model_id="fake-model",
+        parent_node_id=conversation.current_node_id,
+    )))
+    node_id = first_chunks[0]["node_id"]
+    manager.model_manager.provider = StaticProvider(content="+second", reasoning="+think-2")
+
+    continuation_chunks = asyncio.run(collect_chunks(manager.send_message_stream(
+        conversation.metadata["id"],
+        "",
+        model_id="fake-model",
+        parent_node_id=node_id,
+        suppress_user_message=True,
+        append_to_existing_node=True,
+    )))
+
+    assert continuation_chunks[-1]["status"] == "complete"
+    with repository.persistence.connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, subtype, content_inline
+            FROM messages
+            WHERE conversation_id = ? AND node_id = ? AND role = 'assistant'
+            ORDER BY subtype, id
+            """,
+            (conversation.metadata["id"], node_id),
+        ).fetchall()
+
+    by_subtype = {}
+    for row in rows:
+        by_subtype.setdefault(row["subtype"], []).append(row)
+    assert [row["content_inline"] for row in by_subtype["assistant_answer"]] == ["first+second"]
+    assert [row["content_inline"] for row in by_subtype["assistant_process_reasoning"]] == ["think-1+think-2"]
+
+
+def test_continuation_merge_keeps_process_without_json_tool_history(tmp_path: Path):
+    manager, _repository, _persistence = _make_manager(tmp_path)
+    existing = Message({
+        "id": "assistant",
+        "role": Role.ASSISTANT,
+        "content": "old",
+        "process_parts": [
+            {"type": "reasoning", "content": "old reasoning", "order": 0},
+            {"type": "content", "content": "old content", "order": 1},
+        ],
+        "timestamp": 1,
+    })
+    continuation = Message({
+        "id": "assistant-new",
+        "role": Role.ASSISTANT,
+        "content": "new",
+        "process_parts": [
+            {"type": "reasoning", "content": "new reasoning", "order": 0},
+            {"type": "content", "content": "new content", "order": 1},
+        ],
+        "timestamp": 2,
     })
 
-    chunks = asyncio.run(
-        collect_chunks(
-            manager.send_message_stream(
-                conversation.metadata["id"],
-                content,
-                model_id="fake-model",
-                parent_node_id=parent_node_id,
-                message_subtype="task_notification",
-            )
-        )
-    )
+    merged = manager._merge_existing_node_assistant_continuation(existing, continuation)
 
-    assert chunks[-1]["status"] == "complete"
-    reloaded = manager.get_conversation(conversation.metadata["id"])
-    items = projection.list_for_branch(conversation.metadata["id"], reloaded.current_node_id)
-
-    assert [item["item_type"] for item in items] == [
-        "task_notification",
-        "assistant_answer",
-    ]
-    notify_item = items[0]
-    assert notify_item["status"] == "completed"
-    assert notify_item["summary"] == "Command completed"
-    assert notify_item["preview"] == "Command completed"
+    assert [part["order"] for part in merged["process_parts"]] == [0, 1, 2, 3]
+    assert [part["order"] for part in continuation["process_parts"]] == [2, 3]
+    assert "tool_calls" not in merged
+    assert "tool_results" not in merged
 
 
-def test_send_message_stream_updates_run_draft_item(tmp_path: Path):
-    manager, _repository, projection = _make_manager(tmp_path)
-    conversation = manager.create_conversation("sqlite run draft")
-    run_repository = SQLiteRunRepository(projection.persistence)
-    run_id = run_repository.create_run(
-        conversation.metadata["id"],
-        kind="chat",
-        anchor_node_id=conversation.current_node_id,
-        summary="hello run",
-    )
-
-    chunks = asyncio.run(
-        collect_chunks(
-            manager.send_message_stream(
-                conversation.metadata["id"],
-                "hello run",
-                model_id="fake-model",
-                run_id=run_id,
-                parent_node_id=conversation.current_node_id,
-            )
-        )
-    )
-
-    assert chunks[-1]["status"] == "complete"
-    reloaded = manager.get_conversation(conversation.metadata["id"])
-    items = projection.list_for_branch(
-        conversation.metadata["id"],
-        reloaded.current_node_id,
-    )
-
-    run_items = [item for item in items if item["item_type"] == "run_draft"]
-    assert len(run_items) == 1
-    assert run_items[0]["run_id"] == run_id
-    assert run_items[0]["status"] == "completed"
-    assert run_items[0]["preview"] == "ok"
-
-    running = run_repository.get_run(run_id)
-    assert running["status"] == "running"
-    assert running["summary"] == "hello run"
-    assert running["finished_at"] is None
-    assert not any(
-        event["payload"].get("type") == "run_finished"
-        for event in run_repository.read_events(run_id)
-    )
-
-    run_manager = RunManager(repository=run_repository)
-    asyncio.run(run_manager.finish_run(run_id, RunStatus.COMPLETED))
-    finished = run_repository.get_run(run_id)
-    assert finished["status"] == "completed"
-    assert finished["summary"] == "hello run"
-    assert finished["finished_at"] is not None
-    assert sum(
-        event["payload"].get("type") == "run_finished"
-        for event in run_repository.read_events(run_id)
-    ) == 1
-
-
-def test_run_draft_requires_an_existing_run(tmp_path: Path):
-    manager, _repository, projection = _make_manager(tmp_path)
-    conversation = manager.create_conversation("missing run")
-
-    with pytest.raises(sqlite3.IntegrityError):
-        projection.upsert_run_draft(
-            conversation.metadata["id"],
-            conversation.current_node_id,
-            run_id="missing-run",
-        )
-
-
-def test_detached_chat_run_finishes_durable_lifecycle_once(tmp_path: Path):
-    manager, _repository, projection = _make_manager(tmp_path)
-    conversation = manager.create_conversation("durable lifecycle")
-    run_repository = SQLiteRunRepository(projection.persistence)
-    run_manager = RunManager(repository=run_repository)
-
-    async def scenario():
-        request = SendMessageRequest(
-            content="hello lifecycle",
-            parent_node_id=conversation.current_node_id,
-            model_id="fake-model",
-        )
-        run = await run_manager.create_run(
-            conversation_id=conversation.metadata["id"],
-            kind=RunKind.CHAT,
-            anchor_node_id=conversation.current_node_id,
-            summary=request.content,
-        )
-        await _produce_chat_run(
-            run=run,
-            conversation_id=conversation.metadata["id"],
-            request=request,
-            chat_manager=manager,
-            run_manager=run_manager,
-        )
-        await run_manager.wait_for_terminal_result(
-            run.run_id,
-            result_event_types=set(),
-            timeout=5,
-        )
-        return run.run_id
-
-    run_id = asyncio.run(scenario())
-    finished = run_repository.get_run(run_id)
-    assert finished["status"] == "completed"
-    assert finished["summary"] == "hello lifecycle"
-    assert finished["finished_at"] is not None
-    events = run_repository.read_events(run_id)
-    assert sum(event["payload"].get("type") == "run_finished" for event in events) == 1
-    assert events[-1]["payload"]["type"] == "run_finished"
-
-
-def test_plan_control_turn_writes_process_timeline_without_answer(tmp_path: Path):
-    manager, _repository, projection = _make_manager(tmp_path)
-    plan_ledger = PlanLedger()
-    tool_manager = PlanModeToolManager(plan_ledger)
-    manager.plan_ledger = plan_ledger
-    manager.tool_manager = tool_manager
-    manager.tool_orchestrator = ToolOrchestrator(
-        tool_manager=tool_manager,
-        permission_engine=PermissionEngine.default(),
-        approval_manager=ApprovalManager(),
-        logical_sandbox=LogicalSandbox.for_config({}, tmp_path),
-    )
-    manager.model_manager.provider = PlanFinalWithoutExitProvider()
-    conversation = manager.create_conversation("sqlite plan")
-    asyncio.run(
-        plan_ledger.enter_plan_mode(
-            conversation_id=conversation.metadata["id"],
-            previous_permission_mode="modify_only",
-        )
-    )
-
-    chunks = asyncio.run(
-        collect_chunks(
-            manager.send_message_stream(
-                conversation.metadata["id"],
-                "写计划",
-                model_id="fake-model",
-                parent_node_id=conversation.current_node_id,
-            )
-        )
-    )
-
-    assert chunks[-1]["status"] == "complete"
-    reloaded = manager.get_conversation(conversation.metadata["id"])
-    items = projection.list_for_branch(
-        conversation.metadata["id"],
-        reloaded.current_node_id,
-    )
-    item_types = [item["item_type"] for item in items]
-    assert "user_message" in item_types
-    assert "assistant_process" in item_types
-    assert "plan_card" not in item_types
-    assert "assistant_answer" not in item_types
-    process_item = next(item for item in items if item["item_type"] == "assistant_process")
-    dto = to_transcript_item_dto(process_item)
-    assert dto["props"]["tool_interactions"]
-    assert "reasoning" in dto["props"]
-    exit_block = next(
-        block
-        for block in dto["props"]["timeline"]
-        if block["type"] == "tool_call"
-        and block["tool_call"]["function"]["name"] == "exit_plan_mode"
-    )
-    assert exit_block["tool_result"] is not None
-
-
-def test_exit_plan_mode_treats_same_round_text_as_process_not_answer(tmp_path: Path):
-    manager, _repository, projection = _make_manager(tmp_path)
-    plan_ledger = PlanLedger()
-    tool_manager = PlanModeToolManager(plan_ledger)
-    manager.plan_ledger = plan_ledger
-    manager.tool_manager = tool_manager
-    manager.tool_orchestrator = ToolOrchestrator(
-        tool_manager=tool_manager,
-        permission_engine=PermissionEngine.default(),
-        approval_manager=ApprovalManager(),
-        logical_sandbox=LogicalSandbox.for_config({}, tmp_path),
-    )
-    manager.model_manager.provider = TextThenExitPlanProvider()
-    conversation = manager.create_conversation("blocking exit plan")
-    run_id = SQLiteRunRepository(projection.persistence).create_run(
-        conversation.metadata["id"],
-        kind="chat",
-        anchor_node_id=conversation.current_node_id,
-        summary="写计划",
-    )
-    asyncio.run(plan_ledger.enter_plan_mode(
-        conversation_id=conversation.metadata["id"],
-        previous_permission_mode="modify_only",
-    ))
-
-    chunks = asyncio.run(collect_chunks(manager.send_message_stream(
-        conversation.metadata["id"],
-        "写计划",
-        model_id="fake-model",
-        run_id=run_id,
-        parent_node_id=conversation.current_node_id,
-    )))
-
-    main_text = "".join(
-        str(chunk.get("content") or "")
-        for chunk in chunks
-        if chunk.get("status") == "content" and not chunk.get("event_type")
-    )
-    assert "不应该成为最终回复" not in main_text
-    assert chunks[-1]["status"] == "complete"
-
-    reloaded = manager.get_conversation(conversation.metadata["id"])
-    items = projection.list_for_branch(conversation.metadata["id"], reloaded.current_node_id)
-    assert "assistant_answer" not in [item["item_type"] for item in items]
-
-    process_item = next(item for item in items if item["item_type"] == "assistant_process")
-    dto = to_transcript_item_dto(process_item)
-    interactions = dto["props"]["tool_interactions"]
-    assert "不应该成为最终回复" in interactions[-1]["assistant"]["content"]
-
-    assert "plan_card" not in [item["item_type"] for item in items]
-    timeline = dto["props"]["timeline"]
-    assert any(
-        block["type"] == "tool_call"
-        and block["tool_call"]["function"]["name"] == "exit_plan_mode"
-        for block in timeline
-    )
-    assert not any(block.get("type") == "plan_proposal" for block in timeline)
-
-
-def test_plan_tool_permission_change_streams_immediately(tmp_path: Path):
-    manager, _repository, projection = _make_manager(tmp_path)
-    plan_ledger = PlanLedger()
-    tool_manager = PlanModeToolManager(plan_ledger)
-    manager.plan_ledger = plan_ledger
-    manager.tool_manager = tool_manager
-    manager.tool_orchestrator = ToolOrchestrator(
-        tool_manager=tool_manager,
-        permission_engine=PermissionEngine.default(),
-        approval_manager=ApprovalManager(),
-        logical_sandbox=LogicalSandbox.for_config({}, tmp_path),
-    )
-    manager.model_manager.provider = EnterPlanModeProvider()
-    conversation = manager.create_conversation("permission mode stream")
-    run_id = SQLiteRunRepository(projection.persistence).create_run(
-        conversation.metadata["id"],
-        kind="chat",
-        anchor_node_id=conversation.current_node_id,
-        summary="先进入计划模式",
-    )
-
-    chunks = asyncio.run(collect_chunks(manager.send_message_stream(
-        conversation.metadata["id"],
-        "先进入计划模式",
-        model_id="fake-model",
-        run_id=run_id,
-        parent_node_id=conversation.current_node_id,
-    )))
-
-    permission_chunks = [
-        chunk for chunk in chunks
-        if chunk.get("event_type") == "permission_mode_changed"
-    ]
-    assert permission_chunks
-    assert permission_chunks[-1]["tool_permission_mode"] == "plan"
-
-
-def test_tool_turn_uses_last_non_tool_text_as_assistant_answer(tmp_path: Path):
-    manager, _repository, projection = _make_manager(tmp_path)
-    manager.tool_manager = LargeToolManager(tmp_path)
-    manager.model_manager.provider = ToolThenFinalAnswerProvider()
-    conversation = manager.create_conversation("tool then final")
-
-    chunks = asyncio.run(collect_chunks(manager.send_message_stream(
-        conversation.metadata["id"],
-        "检查后总结",
-        model_id="fake-model",
-        parent_node_id=conversation.current_node_id,
-    )))
-
-    assert chunks[-1]["status"] == "complete"
-    reloaded = manager.get_conversation(conversation.metadata["id"])
-    items = projection.list_for_branch(conversation.metadata["id"], reloaded.current_node_id)
-    answer = next(item for item in items if item["item_type"] == "assistant_answer")
-    assert answer["preview"] == "最终总结只应该是这一段。"
-
-    process = next(item for item in items if item["item_type"] == "assistant_process")
-    dto = to_transcript_item_dto(process)
-    timeline = dto["props"]["timeline"]
-    assert timeline[0]["type"] == "content"
-    assert timeline[0]["content"] == "我先检查一下环境。\n"
-    assert timeline[1]["type"] == "tool_call"
-
-
-def test_completed_assistant_process_persists_duration(tmp_path: Path):
-    manager, _repository, projection = _make_manager(tmp_path)
-    conversation = manager.create_conversation("process duration")
+def test_continuation_sqlite_persists_only_current_run_tool_facts(tmp_path: Path):
+    manager, repository, persistence = _make_manager(tmp_path)
+    conversation = manager.create_conversation("sqlite continuation tool ownership")
     node = conversation.nodes[conversation.current_node_id]
-    run_id = SQLiteRunRepository(projection.persistence).create_run(
+    run_repository = SQLiteRunRepository(persistence)
+    old_run = run_repository.create_run(
         conversation.metadata["id"],
         kind="chat",
-        target_node_id=conversation.current_node_id,
-        summary="process duration",
+        target_node_id=node["id"],
+        summary="old",
     )
+    new_run = run_repository.create_run(
+        conversation.metadata["id"],
+        kind="chat",
+        target_node_id=node["id"],
+        summary="new",
+    )
+    old = Message({
+        "id": "assistant",
+        "role": Role.ASSISTANT,
+        "content": "old",
+        "process_parts": [
+            {"type": "reasoning", "content": "old reasoning", "order": 0},
+            {"type": "content", "content": "old content", "order": 1},
+        ],
+        "tool_calls": [
+            {"id": "call-old", "function": {"name": "old_tool", "arguments": "{}"}, "call_index": 2},
+        ],
+        "timestamp": 1,
+    })
+    manager._persist_sqlite_assistant_turn(
+        conversation=conversation,
+        node=node,
+        assistant_msg=old,
+        provider_id="fake",
+        model_id="fake-model",
+        run_id=old_run,
+        tool_messages=[],
+        tool_calls=list(old["tool_calls"] or []),
+    )
+    continuation = Message({
+        "id": "assistant-new",
+        "role": Role.ASSISTANT,
+        "content": "new",
+        "process_parts": [
+            {"type": "reasoning", "content": "new reasoning", "order": 0},
+            {"type": "content", "content": "new content", "order": 1},
+        ],
+        "tool_calls": [
+            {"id": "call-new", "function": {"name": "new_tool", "arguments": "{}"}, "call_index": 2},
+        ],
+        "timestamp": 2,
+    })
+    merged = manager._merge_existing_node_assistant_continuation(old, continuation)
+    transcript_msg = Message(deepcopy(merged))
+    transcript_msg["process_parts"] = continuation.get("process_parts")
 
     manager._persist_sqlite_assistant_turn(
         conversation=conversation,
         node=node,
-        assistant_msg=Message({
-            "id": "assistant-duration",
-            "role": Role.ASSISTANT,
-            "content": "最终回复",
-            "reasoning": "检查文件",
-            "generation_info": {
-                "duration_ms": 5_550_000,
-                "status": "completed",
-                "tokens_used": 1,
-            },
-        }),
-        provider_id="fake-provider",
+        assistant_msg=transcript_msg,
+        provider_id="fake",
         model_id="fake-model",
-        run_id=run_id,
-        generation_status="completed",
-        tool_interactions=[{
-            "assistant": {
-                "tool_calls": [{
-                    "id": "call-duration",
-                    "type": "function",
-                    "function": {"name": "read", "arguments": "{}"},
-                }],
-            },
-            "tools": [{
-                "tool_call_id": "call-duration",
-                "name": "read",
-                "content": "ok",
-            }],
-        }],
+        run_id=new_run,
         tool_messages=[],
-        tool_calls=[],
+        tool_calls=list(continuation.get("tool_calls") or []),
     )
 
-    items = projection.list_for_branch(conversation.metadata["id"], conversation.current_node_id)
-    process = next(item for item in items if item["item_type"] == "assistant_process")
-    dto = to_transcript_item_dto(process)
-    assert dto["props"]["duration"] == 5_550_000
-
-
-def test_plan_approval_stream_uses_tool_result_continuation(tmp_path: Path):
-    manager, repository, projection = _make_manager(tmp_path)
-    plan_ledger = PlanLedger()
-    tool_manager = PlanModeToolManager(plan_ledger)
-    manager.plan_ledger = plan_ledger
-    manager.tool_manager = tool_manager
-    manager.tool_orchestrator = ToolOrchestrator(
-        tool_manager=tool_manager,
-        permission_engine=PermissionEngine.default(),
-        approval_manager=ApprovalManager(),
-        logical_sandbox=LogicalSandbox.for_config({}, tmp_path),
-    )
-    manager.model_manager.provider = PlanFinalWithoutExitProvider()
-    conversation = manager.create_conversation("sqlite plan approval")
-    asyncio.run(
-        plan_ledger.enter_plan_mode(
-            conversation_id=conversation.metadata["id"],
-            previous_permission_mode="modify_only",
-        )
-    )
-    plan_chunks = asyncio.run(
-        collect_chunks(
-            manager.send_message_stream(
-                conversation.metadata["id"],
-                "写计划",
-                model_id="fake-model",
-                parent_node_id=conversation.current_node_id,
-            )
-        )
-    )
-    assert plan_chunks[-1]["status"] == "complete"
-    plan_node_id = manager.get_conversation(conversation.metadata["id"]).current_node_id
-    manager.model_manager.provider = CapturingProvider()
-    awaiting_plan = asyncio.run(plan_ledger.get_active_or_awaiting(conversation.metadata["id"]))
-    approved_plan = asyncio.run(plan_ledger.approve_plan(
-        conversation_id=conversation.metadata["id"],
-        plan_id=awaiting_plan.plan_id,
-    ))
-    implementation_run_id = SQLiteRunRepository(projection.persistence).create_run(
-        conversation.metadata["id"],
-        kind="chat",
-        anchor_node_id=plan_node_id,
-        summary="continue approved plan",
-    )
-
-    approval_chunks = asyncio.run(
-        collect_chunks(
-            manager.continue_plan_tool_result_stream(
-                conversation_id=conversation.metadata["id"],
-                plan_id=approved_plan.plan_id,
-                tool_result_content=plan_ledger.approved_tool_result_content(approved_plan),
-                tool_call_id=approved_plan.exit_tool_call_id,
-                tool_name="exit_plan_mode",
-                model_id="fake-model",
-                node_id=plan_node_id,
-                tool_permission_mode="modify_only",
-                run_id=implementation_run_id,
-            )
-        )
-    )
-
-    assert approval_chunks[-1]["status"] == "complete"
-    reloaded = manager.get_conversation(conversation.metadata["id"])
-    items = projection.list_for_branch(
-        conversation.metadata["id"],
-        reloaded.current_node_id,
-    )
-    item_types = [item["item_type"] for item in items]
-    process_items = [item for item in items if item["item_type"] == "assistant_process"]
-    assistant_index = next(
-        index
-        for index, item in enumerate(items)
-        if item["item_type"] == "assistant_answer" and item["preview"] == "ok"
-    )
-    assert "control_event" not in item_types
-    assert "plan_card" not in item_types
-    assert not any(
-        item["item_type"] == "run_draft"
-        and item["run_id"] == implementation_run_id
-        and item["visibility"] == "main"
-        for item in items
-    )
-    assert len(process_items) == 1
-    process_index = item_types.index("assistant_process")
-    assert process_index < assistant_index
-    assert reloaded.nodes[reloaded.current_node_id]["tool_permission_mode"] == "modify_only"
     with repository.persistence.connect() as conn:
-        hidden_user_messages = conn.execute(
+        calls = conn.execute(
             """
-            SELECT id, content_inline, subtype
-            FROM messages
+            SELECT id, run_id, call_index
+            FROM tool_calls
             WHERE conversation_id = ?
-              AND role = 'user'
-              AND hidden = 1
+            ORDER BY id
             """,
             (conversation.metadata["id"],),
         ).fetchall()
-    assert hidden_user_messages == []
-    first_prompt = "\n\n".join(
-        str(message.get("content") or "")
-        for message in manager.model_manager.provider.calls[0]["messages"]
-    )
-    assert "User has approved your plan" in first_prompt
-    assert "## Approved Plan:" in first_prompt
-    process_item = process_items[0]
-    timeline = to_transcript_item_dto(process_item)["props"]["timeline"]
-    assert any(
-        block["type"] == "tool_call"
-        and block["tool_call"]["function"]["name"] == "exit_plan_mode"
-        for block in timeline
-    )
-    continuations = to_transcript_item_dto(process_item)["props"].get("continuations")
-    assert isinstance(continuations, list)
-    assert continuations[0]["run_id"] == implementation_run_id
-    assert continuations[0]["continuation_of_node_id"] == plan_node_id
-    assert continuations[0]["tool_result_for"] == approved_plan.exit_tool_call_id
-    assert continuations[0]["marker"] == "计划已批准，开始实现"
-    assert not any(block.get("type") == "plan_proposal" for block in timeline)
+        process_rows = conn.execute(
+            """
+            SELECT id, metadata_json
+            FROM messages
+            WHERE conversation_id = ?
+              AND subtype IN ('assistant_process_reasoning', 'assistant_process_content')
+            ORDER BY id
+            """,
+            (conversation.metadata["id"],),
+        ).fetchall()
+
+    assert [(row["id"], row["run_id"], row["call_index"]) for row in calls] == [
+        ("call-new", new_run, 2),
+        ("call-old", old_run, 2),
+    ]
+    metadata_by_id = {
+        row["id"]: json.loads(row["metadata_json"])
+        for row in process_rows
+    }
+    assert metadata_by_id["assistant:reasoning:0"]["run_id"] == old_run
+    assert metadata_by_id["assistant:content:1"]["run_id"] == old_run
+    assert metadata_by_id["assistant:reasoning:2"]["run_id"] == new_run
+    assert metadata_by_id["assistant:content:3"]["run_id"] == new_run
+
+
+def test_compact_conversation_writes_canonical_compact_messages(tmp_path: Path):
+    manager, _repository, persistence = _make_manager(tmp_path)
+    manager.model_manager.provider = CompactingProvider()
+    conversation = manager.create_conversation("sqlite compact")
+    conversation.metadata["provider_id"] = "fake"
+    conversation.metadata["model_id"] = "fake-model"
+    parent_id = conversation.current_node_id
+    manager._save(conversation)
+
+    result = asyncio.run(manager.compact_conversation(conversation.metadata["id"]))
+    items = _items(persistence, conversation.metadata["id"], result["node_id"])
+
+    assert [item["type"] for item in items] == ["compact"]
+    assert items[0]["content"] == "Summary:\ncanonical compact facts"
+    assert items[0]["trigger"] == "manual"
+    assert items[0]["messages_to_keep"] == 1
+    with persistence.connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT role, subtype, content_inline
+            FROM messages
+            WHERE conversation_id = ? AND node_id = ?
+            ORDER BY subtype
+            """,
+            (conversation.metadata["id"], result["node_id"]),
+        ).fetchall()
+    assert [(row["role"], row["subtype"], row["content_inline"]) for row in rows] == [
+        ("system", "compact_boundary", "Conversation compacted"),
+        ("assistant", "compact_summary", "Summary:\ncanonical compact facts"),
+    ]
+    assert manager.get_conversation(conversation.metadata["id"]).nodes[result["node_id"]]["parent_id"] == parent_id
+
+
+def test_delete_conversation_removes_canonical_transcript_source_rows(tmp_path: Path):
+    manager, _repository, persistence = _make_manager(tmp_path)
+    conversation = manager.create_conversation("delete sqlite")
+    chunks = asyncio.run(collect_chunks(manager.send_message_stream(
+        conversation.metadata["id"],
+        "to delete",
+        model_id="fake-model",
+        parent_node_id=conversation.current_node_id,
+    )))
+    assert chunks[-1]["status"] == "complete"
+    reloaded = manager.get_conversation(conversation.metadata["id"])
+    assert _items(persistence, conversation.metadata["id"], reloaded.current_node_id)
+
+    manager.delete_conversation(conversation.metadata["id"])
+
+    try:
+        TranscriptAssembler(persistence).snapshot(conversation.metadata["id"], reloaded.current_node_id)
+    except KeyError:
+        pass
+    else:
+        raise AssertionError("deleted conversation canonical transcript rows should not remain")
 
 
 class ToolCallingProvider:
@@ -818,16 +449,14 @@ class ToolCallingProvider:
                 conversation_id=stream_controller.conversation_id,
                 error=None,
                 tokens_used=1,
-                tool_calls=[
-                    {
-                        "id": "call_large_tool",
-                        "type": "function",
-                        "function": {
-                            "name": "large_tool",
-                            "arguments": "{\"value\":\"large\"}",
-                        },
-                    }
-                ],
+                tool_calls=[{
+                    "id": "call_large_tool",
+                    "type": "function",
+                    "function": {
+                        "name": "large_tool",
+                        "arguments": "{\"value\":\"large\"}",
+                    },
+                }],
             )
         else:
             yield StreamChunk(
@@ -845,37 +474,314 @@ class ToolCallingProvider:
             conversation_id=stream_controller.conversation_id,
             error=None,
             tokens_used=1,
-            usage_info={
-                "input_tokens": 1,
-                "output_tokens": 0,
-                "total_tokens": 1,
-                "source": "test",
-                "raw": {},
-            },
+        )
+
+
+class PreambleToolCallingProvider:
+    def __init__(self):
+        self.calls = 0
+
+    async def generate_response_stream(
+        self,
+        model,
+        messages,
+        stream_controller: StreamController = None,
+        **kwargs,
+    ):
+        self.calls += 1
+        if self.calls == 1:
+            yield StreamChunk(
+                status=StreamStatus.CONTENT,
+                content="I will inspect first. ",
+                node_id=stream_controller.node_id,
+                conversation_id=stream_controller.conversation_id,
+                error=None,
+                tokens_used=1,
+            )
+            yield StreamChunk(
+                status=StreamStatus.CONTENT,
+                content=None,
+                node_id=stream_controller.node_id,
+                conversation_id=stream_controller.conversation_id,
+                error=None,
+                tokens_used=0,
+                tool_calls=[{
+                    "id": "call_large_tool",
+                    "type": "function",
+                    "function": {
+                        "name": "large_tool",
+                        "arguments": "{}",
+                    },
+                }],
+            )
+        else:
+            yield StreamChunk(
+                status=StreamStatus.CONTENT,
+                content="done",
+                node_id=stream_controller.node_id,
+                conversation_id=stream_controller.conversation_id,
+                error=None,
+                tokens_used=1,
+            )
+        yield StreamChunk(
+            status=StreamStatus.COMPLETE,
+            content=None,
+            node_id=stream_controller.node_id,
+            conversation_id=stream_controller.conversation_id,
+            error=None,
+            tokens_used=1,
         )
 
 
 class LargeToolManager:
     def __init__(self, tmp_path: Path):
-        self.tool_result_store = ToolResultStorage(str(tmp_path / "tool-results"))
+        pass
 
     def get_openai_tools(self, include_disabled=False):
-        return [
-            {
-                "type": "function",
-                "function": {
-                    "name": "large_tool",
-                    "description": "Return a large result",
-                    "parameters": {"type": "object", "properties": {}},
-                },
-            }
-        ]
+        return [{
+            "type": "function",
+            "function": {
+                "name": "large_tool",
+                "description": "Return a large result",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }]
 
     def capabilities_for(self, name, workspace=None):
         return {ToolCapability.READ_ONLY, ToolCapability.PARALLEL_SAFE}
 
     async def execute_tool(self, name, arguments, workspace=None, runtime_context=None):
         return "x" * 5000
+
+
+class FailingToolManager(LargeToolManager):
+    async def execute_tool(self, name, arguments, workspace=None, runtime_context=None):
+        raise RuntimeError("tool exploded")
+
+
+class SlowToolManager(LargeToolManager):
+    async def execute_tool(self, name, arguments, workspace=None, runtime_context=None):
+        await asyncio.sleep(5)
+        return "late"
+
+
+def test_tool_results_are_written_once_with_run_id_and_transcript_process(tmp_path: Path):
+    manager, repository, persistence = _make_manager(tmp_path)
+    tool_manager = LargeToolManager(tmp_path)
+    manager.tool_manager = tool_manager
+    manager.model_manager.provider = ToolCallingProvider()
+    conversation = manager.create_conversation("sqlite tools")
+    run_id = SQLiteRunRepository(persistence).create_run(
+        conversation.metadata["id"],
+        kind="chat",
+        target_node_id=conversation.current_node_id,
+        summary="large tool",
+    )
+
+    chunks = asyncio.run(collect_chunks(manager.send_message_stream(
+        conversation.metadata["id"],
+        "run tool",
+        model_id="fake-model",
+        parent_node_id=conversation.current_node_id,
+        run_id=run_id,
+    )))
+
+    assert chunks[-1]["status"] == "complete"
+    reloaded = manager.get_conversation(conversation.metadata["id"])
+    items = _items(persistence, conversation.metadata["id"], reloaded.current_node_id)
+    assert [item["type"] for item in items] == [
+        "user_message",
+        "assistant_process",
+        "assistant_answer",
+    ]
+    process = next(item for item in items if item["type"] == "assistant_process")
+    assert process["blocks"][0]["tool_name"] == "large_tool"
+    assert process["blocks"][0]["result_preview"] == "x" * 4096
+    with repository.persistence.connect() as conn:
+        row = conn.execute(
+            """
+            SELECT output_preview, output_blob_id, output_size, metadata_json, run_id
+            FROM tool_results
+            WHERE conversation_id = ?
+            """,
+            (conversation.metadata["id"],),
+        ).fetchone()
+    assert row["output_preview"] == "x" * 4096
+    assert row["output_blob_id"]
+    assert row["output_size"] == 5000
+    assert row["run_id"] == run_id
+    metadata = json.loads(row["metadata_json"])
+    assert metadata["tool_name"] == "large_tool"
+    assert metadata["tool_result_id"]
+    assert "model_visible_content" not in metadata
+
+
+def test_committed_tool_call_persists_when_tool_execution_fails(tmp_path: Path):
+    manager, repository, _persistence = _make_manager(tmp_path)
+    manager.tool_manager = FailingToolManager(tmp_path)
+    manager.model_manager.provider = ToolCallingProvider()
+    conversation = manager.create_conversation("sqlite failed tool")
+
+    chunks = asyncio.run(collect_chunks(manager.send_message_stream(
+        conversation.metadata["id"],
+        "run failing tool",
+        model_id="fake-model",
+        parent_node_id=conversation.current_node_id,
+    )))
+
+    assert any(chunk.get("status") == StreamStatus.ERROR for chunk in chunks)
+    with repository.persistence.connect() as conn:
+        call = conn.execute(
+            """
+            SELECT id, name, status
+            FROM tool_calls
+            WHERE conversation_id = ?
+            """,
+            (conversation.metadata["id"],),
+        ).fetchone()
+        result_count = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM tool_results
+            WHERE conversation_id = ?
+            """,
+            (conversation.metadata["id"],),
+        ).fetchone()["count"]
+    assert dict(call) == {
+        "id": "call_large_tool",
+        "name": "large_tool",
+        "status": "error",
+    }
+    assert result_count == 0
+
+
+def test_committed_tool_call_persists_when_stream_stops_during_tool(tmp_path: Path):
+    manager, repository, _persistence = _make_manager(tmp_path)
+    manager.tool_manager = SlowToolManager(tmp_path)
+    manager.model_manager.provider = ToolCallingProvider()
+    conversation = manager.create_conversation("sqlite stopped tool")
+    chunks: list[dict] = []
+
+    async def scenario():
+        async for chunk in manager.send_message_stream(
+            conversation.metadata["id"],
+            "run slow tool",
+            model_id="fake-model",
+            parent_node_id=conversation.current_node_id,
+        ):
+            chunks.append(dict(chunk))
+            if chunk.get("event_type") == "tool_calls_committed":
+                await manager.stop_stream(chunk["node_id"])
+
+    asyncio.run(scenario())
+
+    assert any(chunk.get("status") == StreamStatus.STOPPED for chunk in chunks)
+    with repository.persistence.connect() as conn:
+        call = conn.execute(
+            """
+            SELECT id, name, status
+            FROM tool_calls
+            WHERE conversation_id = ?
+            """,
+            (conversation.metadata["id"],),
+        ).fetchone()
+        result_count = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM tool_results
+            WHERE conversation_id = ?
+            """,
+            (conversation.metadata["id"],),
+        ).fetchone()["count"]
+    assert dict(call) == {
+        "id": "call_large_tool",
+        "name": "large_tool",
+        "status": "stopped",
+    }
+    assert result_count == 0
+
+
+def test_committed_tool_call_persists_when_client_closes_stream(tmp_path: Path):
+    manager, repository, _persistence = _make_manager(tmp_path)
+    manager.tool_manager = SlowToolManager(tmp_path)
+    manager.model_manager.provider = ToolCallingProvider()
+    conversation = manager.create_conversation("sqlite closed tool")
+
+    async def scenario():
+        stream = manager.send_message_stream(
+            conversation.metadata["id"],
+            "run slow tool then close",
+            model_id="fake-model",
+            parent_node_id=conversation.current_node_id,
+        )
+        try:
+            while True:
+                chunk = await anext(stream)
+                if chunk.get("event_type") == "tool_calls_committed":
+                    await stream.aclose()
+                    return
+        finally:
+            await stream.aclose()
+
+    asyncio.run(scenario())
+
+    with repository.persistence.connect() as conn:
+        call = conn.execute(
+            """
+            SELECT id, name, status
+            FROM tool_calls
+            WHERE conversation_id = ?
+            """,
+            (conversation.metadata["id"],),
+        ).fetchone()
+        result_count = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM tool_results
+            WHERE conversation_id = ?
+            """,
+            (conversation.metadata["id"],),
+        ).fetchone()["count"]
+    assert dict(call) == {
+        "id": "call_large_tool",
+        "name": "large_tool",
+        "status": "error",
+    }
+    assert result_count == 0
+
+
+def test_tool_preamble_content_persists_as_process_content(tmp_path: Path):
+    manager, repository, _persistence = _make_manager(tmp_path)
+    tool_manager = LargeToolManager(tmp_path)
+    manager.tool_manager = tool_manager
+    manager.model_manager.provider = PreambleToolCallingProvider()
+    conversation = manager.create_conversation("sqlite tool preamble")
+
+    chunks = asyncio.run(collect_chunks(manager.send_message_stream(
+        conversation.metadata["id"],
+        "run tool with preamble",
+        model_id="fake-model",
+        parent_node_id=conversation.current_node_id,
+    )))
+
+    assert any(chunk.get("content") == "I will inspect first. " for chunk in chunks)
+    assert chunks[-1]["status"] == "complete"
+    reloaded = manager.get_conversation(conversation.metadata["id"])
+    assert "assistant_message" not in reloaded.nodes[reloaded.current_node_id]
+
+    with repository.persistence.connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT subtype, content_inline
+            FROM messages
+            WHERE conversation_id = ? AND node_id = ?
+            ORDER BY created_at, id
+            """,
+            (conversation.metadata["id"], reloaded.current_node_id),
+        ).fetchall()
+    by_subtype = {row["subtype"]: row["content_inline"] for row in rows}
+    assert by_subtype["assistant_process_content"] == "I will inspect first. "
+    assert by_subtype["assistant_answer"] == "done"
 
 
 class TwoToolCallingProvider:
@@ -890,34 +796,7 @@ class TwoToolCallingProvider:
         **kwargs,
     ):
         self.calls.append({"messages": list(messages), "kwargs": kwargs})
-        if len(self.calls) == 1:
-            yield StreamChunk(
-                status=StreamStatus.CONTENT,
-                content="",
-                node_id=stream_controller.node_id,
-                conversation_id=stream_controller.conversation_id,
-                error=None,
-                tokens_used=1,
-                tool_calls=[
-                    {
-                        "id": "call_first",
-                        "type": "function",
-                        "function": {
-                            "name": "first_tool",
-                            "arguments": "{\"a\":1}",
-                        },
-                    },
-                    {
-                        "id": "call_second",
-                        "type": "function",
-                        "function": {
-                            "name": "second_tool",
-                            "arguments": "{\"b\":2}",
-                        },
-                    },
-                ],
-            )
-        else:
+        if len(self.calls) > 1:
             yield StreamChunk(
                 status=StreamStatus.CONTENT,
                 content="done",
@@ -926,6 +805,27 @@ class TwoToolCallingProvider:
                 error=None,
                 tokens_used=1,
             )
+            yield StreamChunk(
+                status=StreamStatus.COMPLETE,
+                content=None,
+                node_id=stream_controller.node_id,
+                conversation_id=stream_controller.conversation_id,
+                error=None,
+                tokens_used=1,
+            )
+            return
+        yield StreamChunk(
+            status=StreamStatus.CONTENT,
+            content="",
+            node_id=stream_controller.node_id,
+            conversation_id=stream_controller.conversation_id,
+            error=None,
+            tokens_used=1,
+            tool_calls=[
+                {"id": "call_first", "type": "function", "function": {"name": "first_tool", "arguments": "{\"a\":1}"}},
+                {"id": "call_second", "type": "function", "function": {"name": "second_tool", "arguments": "{\"b\":2}"}},
+            ],
+        )
         yield StreamChunk(
             status=StreamStatus.COMPLETE,
             content=None,
@@ -933,19 +833,11 @@ class TwoToolCallingProvider:
             conversation_id=stream_controller.conversation_id,
             error=None,
             tokens_used=1,
-            usage_info={
-                "input_tokens": 1,
-                "output_tokens": 0,
-                "total_tokens": 1,
-                "source": "test",
-                "raw": {},
-            },
         )
 
 
 class TwoToolManager:
     def __init__(self, tmp_path: Path):
-        self.tool_result_store = ToolResultStorage(str(tmp_path / "tool-results"))
         self.runtime_contexts = []
 
     def get_openai_tools(self, include_disabled=False):
@@ -969,68 +861,112 @@ class TwoToolManager:
         return json.dumps({"tool": name, "arguments": arguments}, sort_keys=True)
 
 
-def test_tool_results_are_copied_to_sqlite_blobs(tmp_path: Path):
-    manager, repository, projection = _make_manager(tmp_path)
-    tool_manager = LargeToolManager(tmp_path)
-    manager.tool_manager = tool_manager
-    tool_manager.tool_result_store.sqlite_repository = repository
-    manager.model_manager.provider = ToolCallingProvider()
-    conversation = manager.create_conversation("sqlite tools")
+class InterleavedToolCallingProvider:
+    def __init__(self):
+        self.calls = 0
 
-    chunks = asyncio.run(
-        collect_chunks(
-            manager.send_message_stream(
-                conversation.metadata["id"],
-                "run tool",
-                model_id="fake-model",
-                parent_node_id=conversation.current_node_id,
+    async def generate_response_stream(
+        self,
+        model,
+        messages,
+        stream_controller: StreamController = None,
+        **kwargs,
+    ):
+        self.calls += 1
+        if self.calls == 1:
+            yield StreamChunk(
+                status=StreamStatus.CONTENT,
+                content=None,
+                reasoning="reasoning one",
+                node_id=stream_controller.node_id,
+                conversation_id=stream_controller.conversation_id,
+                error=None,
+                tokens_used=1,
             )
+            yield StreamChunk(
+                status=StreamStatus.CONTENT,
+                content="preamble one",
+                node_id=stream_controller.node_id,
+                conversation_id=stream_controller.conversation_id,
+                error=None,
+                tokens_used=1,
+            )
+            yield StreamChunk(
+                status=StreamStatus.CONTENT,
+                content=None,
+                node_id=stream_controller.node_id,
+                conversation_id=stream_controller.conversation_id,
+                error=None,
+                tokens_used=1,
+                tool_calls=[{
+                    "id": "call_first",
+                    "type": "function",
+                    "function": {"name": "first_tool", "arguments": "{}"},
+                }],
+            )
+        elif self.calls == 2:
+            yield StreamChunk(
+                status=StreamStatus.CONTENT,
+                content=None,
+                reasoning="reasoning two",
+                node_id=stream_controller.node_id,
+                conversation_id=stream_controller.conversation_id,
+                error=None,
+                tokens_used=1,
+            )
+            yield StreamChunk(
+                status=StreamStatus.CONTENT,
+                content="preamble two",
+                node_id=stream_controller.node_id,
+                conversation_id=stream_controller.conversation_id,
+                error=None,
+                tokens_used=1,
+            )
+            yield StreamChunk(
+                status=StreamStatus.CONTENT,
+                content=None,
+                node_id=stream_controller.node_id,
+                conversation_id=stream_controller.conversation_id,
+                error=None,
+                tokens_used=1,
+                tool_calls=[{
+                    "id": "call_second",
+                    "type": "function",
+                    "function": {"name": "second_tool", "arguments": "{}"},
+                }],
+            )
+        else:
+            yield StreamChunk(
+                status=StreamStatus.CONTENT,
+                content="done",
+                node_id=stream_controller.node_id,
+                conversation_id=stream_controller.conversation_id,
+                error=None,
+                tokens_used=1,
+            )
+        yield StreamChunk(
+            status=StreamStatus.COMPLETE,
+            content=None,
+            node_id=stream_controller.node_id,
+            conversation_id=stream_controller.conversation_id,
+            error=None,
+            tokens_used=1,
         )
-    )
-
-    assert chunks[-1]["status"] == "complete"
-    reloaded = manager.get_conversation(conversation.metadata["id"])
-    items = projection.list_for_branch(
-        conversation.metadata["id"],
-        reloaded.current_node_id,
-    )
-    assert [item["item_type"] for item in items] == [
-        "user_message",
-        "assistant_process",
-        "assistant_answer",
-    ]
-    with repository.persistence.connect() as conn:
-        row = conn.execute(
-            """
-            SELECT output_preview, output_blob_id, output_size
-            FROM tool_results
-            WHERE conversation_id = ?
-            """,
-            (conversation.metadata["id"],),
-        ).fetchone()
-    assert row["output_preview"] == "x" * 4096
-    assert row["output_blob_id"]
-    assert row["output_size"] == 5000
 
 
 def test_tool_result_persistence_preserves_tool_call_arguments_and_index(tmp_path: Path):
-    manager, repository, _projection = _make_manager(tmp_path)
+    manager, repository, _persistence = _make_manager(tmp_path)
     tool_manager = TwoToolManager(tmp_path)
     manager.tool_manager = tool_manager
-    tool_manager.tool_result_store.sqlite_repository = repository
     manager.model_manager.provider = TwoToolCallingProvider()
     conversation = manager.create_conversation("sqlite two tools")
 
-    chunks = asyncio.run(
-        collect_chunks(
-            manager.send_message_stream(
-                conversation.metadata["id"],
-                "run two tools",
-                model_id="fake-model",
-                parent_node_id=conversation.current_node_id,
-            )
-        )
-    )
+    chunks = asyncio.run(collect_chunks(manager.send_message_stream(
+        conversation.metadata["id"],
+        "run two tools",
+        model_id="fake-model",
+        parent_node_id=conversation.current_node_id,
+    )))
 
     assert chunks[-1]["status"] == "complete"
     with repository.persistence.connect() as conn:
@@ -1063,46 +999,109 @@ def test_tool_result_persistence_preserves_tool_call_arguments_and_index(tmp_pat
     ]
 
 
-def test_tool_runtime_context_uses_parent_branch_anchor(tmp_path: Path):
-    manager, _repository, _projection = _make_manager(tmp_path)
-    conversation = manager.create_conversation("tool anchor")
+def test_tool_history_is_sqlite_canonical_not_node_json(tmp_path: Path):
+    manager, repository, _persistence = _make_manager(tmp_path)
+    manager.tool_manager = LargeToolManager(tmp_path)
+    provider = ToolCallingProvider()
+    manager.model_manager.provider = provider
+    conversation = manager.create_conversation("canonical tool context")
 
-    first_chunks = asyncio.run(
-        collect_chunks(
-            manager.send_message_stream(
-                conversation.metadata["id"],
-                "first turn",
-                model_id="fake-model",
-                parent_node_id=conversation.current_node_id,
-            )
-        )
-    )
-    parent_node_id = first_chunks[0]["node_id"]
+    first_chunks = asyncio.run(collect_chunks(manager.send_message_stream(
+        conversation.metadata["id"],
+        "run tool",
+        model_id="fake-model",
+        parent_node_id=conversation.current_node_id,
+    )))
 
+    assert first_chunks[-1]["status"] == "complete"
+    first_node = manager.get_conversation(conversation.metadata["id"]).nodes[first_chunks[-1]["node_id"]]
+    assert "assistant_message" not in first_node
+    assert "tool_messages" not in first_node
+
+    second_chunks = asyncio.run(collect_chunks(manager.send_message_stream(
+        conversation.metadata["id"],
+        "use prior result",
+        model_id="fake-model",
+        parent_node_id=first_node["id"],
+    )))
+
+    assert second_chunks[-1]["status"] == "complete"
+    second_prompt = provider.calls[-1]["messages"]
+    tool_call_messages = [
+        message
+        for message in second_prompt
+        if message.get("role") == "assistant" and message.get("tool_calls")
+    ]
+    tool_result_messages = [
+        message
+        for message in second_prompt
+        if message.get("role") == "tool" and message.get("tool_call_id") == "call_large_tool"
+    ]
+    final_answers = [
+        message
+        for message in second_prompt
+        if message.get("role") == "assistant" and message.get("content") == "done"
+    ]
+    assert tool_call_messages[0]["tool_calls"][0]["id"] == "call_large_tool"
+    assert tool_call_messages[0]["tool_calls"][0]["function"]["arguments"] == "{\"value\":\"large\"}"
+    assert len(tool_result_messages) == 1
+    assert "tool_result_id" in tool_result_messages[0]["content"]
+    assert final_answers and all("tool_calls" not in message for message in final_answers)
+    with repository.persistence.connect() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM tool_calls WHERE conversation_id = ?",
+            (conversation.metadata["id"],),
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM tool_results WHERE conversation_id = ? AND tool_call_id = ?",
+            (conversation.metadata["id"], "call_large_tool"),
+        ).fetchone()[0] == 1
+
+
+def test_tool_round_process_segments_keep_stream_order_in_sqlite_transcript(tmp_path: Path):
+    manager, repository, persistence = _make_manager(tmp_path)
     tool_manager = TwoToolManager(tmp_path)
     manager.tool_manager = tool_manager
-    manager.model_manager.provider = TwoToolCallingProvider()
+    manager.model_manager.provider = InterleavedToolCallingProvider()
+    conversation = manager.create_conversation("sqlite interleaved process")
 
-    second_chunks = asyncio.run(
-        collect_chunks(
-            manager.send_message_stream(
-                conversation.metadata["id"],
-                "run two tools",
-                model_id="fake-model",
-                parent_node_id=first_chunks[-1]["node_id"],
-            )
-        )
-    )
-    second_node_id = second_chunks[0]["node_id"]
+    chunks = asyncio.run(collect_chunks(manager.send_message_stream(
+        conversation.metadata["id"],
+        "run interleaved tools",
+        model_id="fake-model",
+        parent_node_id=conversation.current_node_id,
+    )))
 
-    assert parent_node_id != second_node_id
-    assert tool_manager.runtime_contexts
-    assert {context["anchor_node_id"] for context in tool_manager.runtime_contexts} == {parent_node_id}
-    assert {context["node_id"] for context in tool_manager.runtime_contexts} == {second_node_id}
+    assert chunks[-1]["status"] == "complete"
+    reloaded = manager.get_conversation(conversation.metadata["id"])
+    items = _items(persistence, conversation.metadata["id"], reloaded.current_node_id)
+    process = next(item for item in items if item["type"] == "assistant_process")
+    assert [(block["type"], block.get("content"), block.get("tool_call_id")) for block in process["blocks"]] == [
+        ("reasoning", "reasoning one", None),
+        ("content", "preamble one", None),
+        ("tool_call", None, "call_first"),
+        ("reasoning", "reasoning two", None),
+        ("content", "preamble two", None),
+        ("tool_call", None, "call_second"),
+    ]
+    with repository.persistence.connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, call_index
+            FROM tool_calls
+            WHERE conversation_id = ?
+            ORDER BY call_index
+            """,
+            (conversation.metadata["id"],),
+        ).fetchall()
+    assert [(row["id"], row["call_index"]) for row in rows] == [
+        ("call_first", 2),
+        ("call_second", 5),
+    ]
 
 
 def test_task_context_mode_is_stored_per_node_and_inherited_by_children(tmp_path: Path):
-    manager, repository, _projection = _make_manager(tmp_path)
+    manager, repository, _persistence = _make_manager(tmp_path)
     conversation = manager.create_conversation("task context branches")
     root_id = conversation.current_node_id
 

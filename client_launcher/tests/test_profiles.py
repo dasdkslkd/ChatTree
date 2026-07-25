@@ -79,6 +79,7 @@ def test_launcher_settings_from_env_has_local_defaults_and_typed_overrides(
     monkeypatch.setenv("CHATTREE_CLIENT_PORT", "18000")
     monkeypatch.setenv("CHATTREE_LOCAL_SERVER_PORT", "18001")
     monkeypatch.setenv("CHATTREE_SERVER_PYTHON", str(tmp_path / "python"))
+    monkeypatch.setenv("CHATTREE_SERVER_BINARY", str(tmp_path / "chattree-server"))
     monkeypatch.setenv("CHATTREE_CLIENT_CONNECT_TIMEOUT_SECONDS", "1.5")
     monkeypatch.setenv("CHATTREE_CLIENT_ALLOWED_ORIGINS", "http://one.test, http://two.test")
 
@@ -87,6 +88,7 @@ def test_launcher_settings_from_env_has_local_defaults_and_typed_overrides(
     assert settings.client_home == (tmp_path / "client").resolve()
     assert settings.project_root == (tmp_path / "project").resolve()
     assert settings.server_python == str(tmp_path / "python")
+    assert settings.server_binary == str(tmp_path / "chattree-server")
     assert settings.host == "127.0.0.1"
     assert settings.port == 18000
     assert settings.default_local_server_port == 18001
@@ -98,13 +100,21 @@ def test_launcher_settings_from_env_has_local_defaults_and_typed_overrides(
     assert settings.allowed_origins == ("http://one.test", "http://two.test")
 
     monkeypatch.delenv("CHATTREE_SERVER_PYTHON")
+    monkeypatch.delenv("CHATTREE_SERVER_BINARY")
     monkeypatch.delenv("CHATTREE_CLIENT_ALLOWED_ORIGINS")
     defaults = LauncherSettings.from_env(project_root=tmp_path)
     assert defaults.server_python == sys.executable
+    assert defaults.server_binary == "chattree-server"
     assert defaults.allowed_origins == (
         "http://localhost:5173",
         "http://127.0.0.1:5173",
     )
+
+    empty_binary_default = LauncherSettings.from_env(
+        project_root=tmp_path,
+        environ={"CHATTREE_SERVER_BINARY": ""},
+    )
+    assert empty_binary_default.server_binary == "chattree-server"
 
 
 @pytest.mark.parametrize(

@@ -10,10 +10,3 @@ export function getActiveStreamPollingDelay(options: {
     ? ACTIVE_STREAM_VISIBLE_POLL_MS
     : ACTIVE_STREAM_IDLE_POLL_MS;
 }
-
-export function shouldProbeBackendScheduledFollowup(options: {
-  finishStatus: 'completed' | 'error' | 'stopped';
-  hasQueuedFollowup: boolean;
-}): boolean {
-  return options.finishStatus === 'completed' && !options.hasQueuedFollowup;
-}

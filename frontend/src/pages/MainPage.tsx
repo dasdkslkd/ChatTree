@@ -67,14 +67,12 @@ import {
 import {
   Plus, X, MoreHorizontal, ChevronRight, Square,
   Copy, Check, Pencil, Loader2, Network, MessageSquare, FileText, Download, FolderOpen, FolderPlus, Search, Settings,
-  PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, ArrowLeft, Bell,
+  PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, ArrowLeft,
 } from 'lucide-react';
 import { conversationApi } from '../api/conversation';
 import { configApi } from '../api/config';
-import { messageApi, type ToolResultSlice } from '../api/message';
-import { runsApi } from '../api/runs';
-import { taskStateApi, type TaskNotificationRecord, type TaskStateSnapshot } from '../api/taskState';
-import { plansService } from '../services/plans';
+import { messageApi } from '../api/message';
+import type { TaskStateSnapshot } from '../api/taskState';
 import { transcriptService } from '../services/transcript';
 import {
   createTranscriptRequestCoordinator,
@@ -83,26 +81,16 @@ import {
 import { taskStateCoordinator } from '../services/taskStateCoordinator';
 import {
   ConversationSyncCoordinator,
-  type ConversationSyncInclude,
   type ConversationSyncRequest,
   type ConversationSyncResult,
 } from '../services/conversationSyncCoordinator';
-import {
-  ACTIVE_STREAM_RECOVERY_FOLLOWUP_ATTEMPTS,
-  ACTIVE_STREAM_RECOVERY_INTERVAL_MS,
-  ActiveStreamRecoveryCoordinator,
-  getActiveStreamRecoveryAttemptLimit,
-} from '../services/activeStreamRecoveryCoordinator';
 import type {
-  Message,
   SendMessageRequest,
-  ToolApprovalPayload,
   ToolPermissionMode,
   TaskContextMode,
 } from '../types/message';
-import type { PlanSession } from '../types/plan';
 import type { ActiveTaskRecord } from '../types/task';
-import type { TranscriptItem } from '../types/transcript';
+import type { PlanApprovalItem, PlanQuestionItem, ToolApprovalItem, TranscriptItem, UserMessageItem } from '../types/transcript';
 import type { MultiAgentMode, WorkspaceContext } from '../types/conversation';
 import type { ProjectCapabilityConfig } from '../types/model';
 import { useConversationStore } from '../store/conversationStore';
@@ -130,7 +118,6 @@ import {
   isDetachedRunView,
   isRunBlockingSelectedBranch,
   isRunVisibleInSelectedTranscript,
-  isRunVisibleInMainTranscript,
   shouldPatchRunIntoMainConversation,
 } from '../utils/runVisibility';
 import { resolveSendNodeId, resolveSlashStreamNodeId } from '../utils/sendTarget';
@@ -142,16 +129,7 @@ import {
 } from '../utils/sideRunGrouping';
 import {
   SIDE_RUN_KINDS,
-  getVisibleSideRunRecords,
-  isCommandRunStatus,
 } from '../utils/sideRunSync';
-import { collectSideRunNotifications } from '../utils/sideRunNotifications';
-import {
-  createTaskNotificationTranscriptItem,
-  hasTaskNotificationTranscriptItem,
-  isTaskNotificationMessage,
-  shouldExportMessage,
-} from '../utils/taskNotificationVisibility';
 import {
   createToolPermissionDraft,
   getConfiguredDefaultToolPermissionMode,
@@ -159,27 +137,7 @@ import {
   type ToolPermissionDraft,
 } from '../utils/toolPermissionDraft';
 import {
-  collectPendingToolApprovalPrompts,
-  type ToolApprovalDecisionHandler,
-} from '../utils/toolApprovals';
-import {
-  extractToolResultEnvelope,
-  formatToolArguments,
-  formatToolOutput,
-  isToolResultError,
-  summarizeToolCall,
-  type ToolResultEnvelope,
-} from '../utils/toolDisplay';
-import {
-  formatProcessedDuration,
-  getAssistantFoldedContentBlocks,
-  getStreamingTimelineFoldState,
-  type StreamingTimelineFoldState,
-} from '../utils/assistantTimelineFolding';
-import { createLiveAssistantTranscriptItems } from '../utils/assistantTimeline';
-import {
   getActiveStreamPollingDelay,
-  shouldProbeBackendScheduledFollowup,
 } from '../utils/activeStreamPolling';
 import { ChatInput } from '../components/ChatInput';
 import { TranscriptList } from '../components/transcript/TranscriptList';
@@ -202,9 +160,10 @@ import {
   type SidebarWidthConfig,
 } from '../utils/sidebarResize';
 import {
-  mergeLiveRunTranscriptItems,
+  applyTranscriptPatch,
   normalizeTranscriptItems,
-  type LiveRunTranscriptOverlay,
+  stateFromTranscriptSnapshot,
+  type TranscriptState,
 } from '../utils/transcriptItems';
 import { createTaskPanelItem } from '../utils/activeTask';
 
@@ -214,10 +173,6 @@ const PROFILE_MANUAL_PROJECTS_STORAGE_KEY = profileStorageKey(PROFILE_ID, MANUAL
 const PROFILE_PROJECT_ORDER_STORAGE_KEY = profileStorageKey(PROFILE_ID, PROJECT_ORDER_STORAGE_KEY);
 const PROFILE_LEFT_SIDEBAR_STORAGE_KEY = profileStorageKey(PROFILE_ID, LEFT_SIDEBAR_STORAGE_KEY);
 const PROFILE_RIGHT_PANEL_STORAGE_KEY = profileStorageKey(PROFILE_ID, RIGHT_PANEL_STORAGE_KEY);
-const PLAN_MODE_TOOL_NAMES = new Set(['plan', 'enter_plan_mode', 'update_plan', 'exit_plan_mode', 'ask_user_question']);
-const TASK_TOOL_NAMES = new Set(['create_task', 'set_task_step', 'cancel_task']);
-const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled', 'interrupted', 'stopped']);
-
 type SidebarResizeSession = {
   side: SidebarResizeSide;
   startClientX: number;
@@ -237,48 +192,8 @@ function getCurrentVisibleTranscriptTip(): { conversationId: string; tipNodeId: 
   return conversationId && tipNodeId ? { conversationId, tipNodeId } : null;
 }
 
-function getToolCallName(toolCall: unknown): string | null {
-  if (!toolCall || typeof toolCall !== 'object') return null;
-  const candidate = toolCall as {
-    function?: { name?: unknown } | null;
-    name?: unknown;
-  };
-  const name = candidate.function?.name ?? candidate.name;
-  return typeof name === 'string' && name ? name : null;
-}
-
-function collectTaskToolEntries(toolInteractions: unknown[]): string[] {
-  const entries: string[] = [];
-  for (const interaction of toolInteractions) {
-    if (!interaction || typeof interaction !== 'object') continue;
-    const candidate = interaction as {
-      assistant?: { tool_calls?: unknown[] } | null;
-      tools?: unknown[];
-    };
-    for (const toolCall of candidate.assistant?.tool_calls || []) {
-      const name = getToolCallName(toolCall);
-      if (name && TASK_TOOL_NAMES.has(name)) entries.push(`call:${name}`);
-    }
-    for (const toolResult of candidate.tools || []) {
-      const name = getToolCallName(toolResult);
-      if (name && TASK_TOOL_NAMES.has(name)) entries.push(`result:${name}`);
-    }
-  }
-  return entries;
-}
-
-function getTaskToolSignal(runs: StreamState[]): string {
-  return runs
-    .map((run) => {
-      const entries = collectTaskToolEntries(run.toolInteractions || []);
-      return entries.length > 0 ? `${run.conversationId}:${run.runId}:${entries.join(',')}` : '';
-    })
-    .filter(Boolean)
-    .join('|');
-}
-
 function getTranscriptItemNodeId(item: TranscriptItem): string | null {
-  return item.node_id || item.anchor_node_id || null;
+  return item.node_id || null;
 }
 
 type TranscriptScrollTarget = {
@@ -307,38 +222,28 @@ function findTranscriptAnchorElement(
     : document.getElementById(`message-${target.legacyIndex}`);
 }
 
-function getEditableUserMessageParentNodeId(item: TranscriptItem, messages: Message[]): string | null {
-  const nodeId = getTranscriptItemNodeId(item);
-  if (!nodeId) return null;
-  const messageParentNodeId = messages.find((message) =>
-    message.node_id === nodeId && message.role === 'user'
-  )?.parent_node_id;
-  if (messageParentNodeId) return messageParentNodeId;
-  const propsParentNodeId = item.props?.parent_node_id;
-  return typeof propsParentNodeId === 'string' && propsParentNodeId ? propsParentNodeId : null;
+function getTranscriptItemMessageId(item: TranscriptItem): string | null {
+  return 'message_id' in item ? item.message_id : null;
 }
 
 function getEditableUserMessageAttachmentRefs(
-  item: TranscriptItem,
-  messages: Message[],
+  item: UserMessageItem,
 ): {
   importFiles: string[];
   imageRefs: Array<{ filename: string; mime_type?: string }>;
 } {
-  const nodeId = getTranscriptItemNodeId(item);
-  const message = nodeId
-    ? messages.find((candidate) => candidate.node_id === nodeId && candidate.role === 'user')
-    : null;
   return {
-    importFiles: (message?.import_files ?? []).map((file) => file.filename).filter(Boolean),
-    imageRefs: (message?.image_refs ?? []).filter((file) => Boolean(file.filename)),
+    importFiles: (item.import_files ?? []).map((file) => file.filename).filter(Boolean),
+    imageRefs: (item.image_refs ?? [])
+      .filter((file) => Boolean(file.filename))
+      .map((file) => ({ filename: file.filename, mime_type: file.mime_type ?? undefined })),
   };
 }
 
-function messageReferencesAttachment(message: Message, filename: string): boolean {
+function userMessageItemReferencesAttachment(item: UserMessageItem, filename: string): boolean {
   return Boolean(
-    message.import_files?.some((file) => file.filename === filename)
-    || message.image_refs?.some((file) => file.filename === filename)
+    item.import_files?.some((file) => file.filename === filename)
+    || item.image_refs?.some((file) => file.filename === filename)
   );
 }
 
@@ -586,205 +491,17 @@ function ThinkingBlock({ reasoning, streaming }: { reasoning: string; streaming?
   );
 }
 
-type ToolCallLike = {
-  id?: string;
-  name?: string;
-  arguments?: unknown;
-  args?: unknown;
-  input?: unknown;
-  function?: {
-    name?: string;
-    arguments?: unknown;
-  };
-};
-
-type ToolMessageLike = {
-  name?: string;
-  content?: unknown;
-  output?: unknown;
-  result?: unknown;
-  error?: unknown;
-  tool_call_id?: string;
-};
-
-type ToolRenderItem = {
-  key: string;
-  name: string;
-  summary: string;
-  argsText: string;
-  outputText: string;
-  status: 'done' | 'error' | 'running';
-  resultEnvelope: ToolResultEnvelope | null;
-};
-
-const TOOL_DISPLAY_LIMIT = 100;
-
-function limitToolDisplayText(text: string): string {
-  if (text.length <= TOOL_DISPLAY_LIMIT) return text;
-  return `${text.slice(0, TOOL_DISPLAY_LIMIT - 3)}...`;
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
-}
-
-function getToolName(toolCall: ToolCallLike | null, toolMessage?: ToolMessageLike | null): string {
-  return toolCall?.function?.name || toolCall?.name || toolMessage?.name || 'tool';
-}
-
-function getToolRawArgs(toolCall: ToolCallLike | null): unknown {
-  return toolCall?.function?.arguments ?? toolCall?.arguments ?? toolCall?.args ?? toolCall?.input;
-}
-
-function getToolArgs(toolCall: ToolCallLike | null): string {
-  if (!toolCall) return '';
-  return formatToolArguments(getToolRawArgs(toolCall));
-}
-
-function getToolOutput(toolMessage?: ToolMessageLike | null): string {
-  return formatToolOutput(toolMessage);
-}
-
-function isToolError(toolMessage?: ToolMessageLike | null): boolean {
-  return isToolResultError(toolMessage);
-}
-
-function makeToolItem(
-  toolCall: ToolCallLike | null,
-  toolMessage: ToolMessageLike | null,
-  fallbackKey: string,
-): ToolRenderItem {
-  const name = getToolName(toolCall, toolMessage);
-  const rawArgs = getToolRawArgs(toolCall);
-  const argsText = getToolArgs(toolCall);
-  const outputText = limitToolDisplayText(getToolOutput(toolMessage));
-  const summary = limitToolDisplayText(
-    toolCall ? summarizeToolCall(name, rawArgs) : outputText || '工具结果',
-  );
-  const resultEnvelope = extractToolResultEnvelope(toolMessage);
-  return {
-    key: toolCall?.id || toolMessage?.tool_call_id || fallbackKey,
-    name,
-    summary,
-    argsText,
-    outputText,
-    status: toolMessage ? (isToolError(toolMessage) ? 'error' : 'done') : 'running',
-    resultEnvelope,
-  };
-}
-
-function findToolMessage(toolMessages: ToolMessageLike[], toolCall: ToolCallLike, index: number): ToolMessageLike | null {
-  if (toolCall.id) {
-    const matched = toolMessages.find((message) => message.tool_call_id === toolCall.id);
-    if (matched) return matched;
-  }
-  return toolMessages[index] ?? null;
-}
-
-function getInteractionToolItems(interaction: unknown, interactionIndex: number): ToolRenderItem[] {
-  const record = asRecord(interaction);
-  const assistant = asRecord(record?.assistant);
-  const toolCalls = Array.isArray(assistant?.tool_calls) ? assistant.tool_calls as ToolCallLike[] : [];
-  const toolMessages = Array.isArray(record?.tools) ? record.tools as ToolMessageLike[] : [];
-  const items: ToolRenderItem[] = [];
-
-  toolCalls.forEach((toolCall, callIndex) => {
-    items.push(makeToolItem(
-      toolCall,
-      findToolMessage(toolMessages, toolCall, callIndex),
-      `interaction-${interactionIndex}-${callIndex}`,
-    ));
-  });
-
-  if (toolCalls.length === 0) {
-    toolMessages.forEach((toolMessage, toolIndex) => {
-      items.push(makeToolItem(null, toolMessage, `interaction-${interactionIndex}-tool-${toolIndex}`));
-    });
-  }
-
-  return items;
-}
-
-function getAssistantToolItems(message: {
-  tool_interactions?: unknown[];
-  tool_calls?: unknown[];
-  tool_results?: unknown[];
-}): ToolRenderItem[] {
-  const items: ToolRenderItem[] = [];
-
-  if (Array.isArray(message.tool_interactions)) {
-    message.tool_interactions.forEach((interaction, interactionIndex) => {
-      items.push(...getInteractionToolItems(interaction, interactionIndex));
-    });
-  }
-
-  if (items.length > 0) return items;
-
-  const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls as ToolCallLike[] : [];
-  const toolResults = Array.isArray(message.tool_results) ? message.tool_results as ToolMessageLike[] : [];
-  toolCalls.forEach((toolCall, callIndex) => {
-    items.push(makeToolItem(
-      toolCall,
-      findToolMessage(toolResults, toolCall, callIndex),
-      `call-${callIndex}`,
-    ));
-  });
-  return items;
-}
-
-type AssistantTimelineBlock =
-  | { type: 'reasoning'; key: string; reasoning: string }
-  | { type: 'content'; key: string; content: string }
-  | { type: 'tools'; key: string; items: ToolRenderItem[] };
-
 type SideRunDraft = {
   run: StreamState;
   showPendingBubble: boolean;
   showStreamBlock: boolean;
-  timeline: AssistantTimelineBlock[];
-  streamingFoldState: StreamingTimelineFoldState<AssistantTimelineBlock>;
-  activeReasoningIndex: number;
-  activeReasoningKey: string | null;
 };
 
-function createSideRunDraft(run: StreamState): SideRunDraft {
-  const timeline = getSideRunAssistantTimeline({
-    content: run.content,
-    reasoning: run.reasoning,
-    tool_interactions: run.toolInteractions,
-  });
-  const streamingFoldedContentBlocks = getAssistantFoldedContentBlocks({
-    content: run.content,
-    reasoning: run.reasoning,
-    tool_interactions: run.toolInteractions,
-  });
-  const streamingFoldState = getStreamingTimelineFoldState(
-    timeline,
-    streamingFoldedContentBlocks.map((block) => block.key),
-    { allowProcessOnly: true },
-  );
-  let activeReasoningIndex = -1;
-  let activeReasoningKey: string | null = null;
-  if (run.status === 'streaming') {
-    for (let i = timeline.length - 1; i >= 0; i -= 1) {
-      if (timeline[i].type === 'reasoning') {
-        const hasLaterBlock = timeline.slice(i + 1).some((block) => block.type !== 'reasoning');
-        activeReasoningIndex = run.reasoningActive || !hasLaterBlock ? i : -1;
-        activeReasoningKey = activeReasoningIndex >= 0 ? timeline[activeReasoningIndex].key : null;
-        break;
-      }
-    }
-  }
+function buildSidePanelDraft(run: StreamState): SideRunDraft {
   return {
     run,
     showPendingBubble: !!run.pendingUserMessage,
     showStreamBlock: run.status !== 'idle',
-    timeline,
-    streamingFoldState,
-    activeReasoningIndex,
-    activeReasoningKey,
   };
 }
 
@@ -805,49 +522,6 @@ function createQueuedMessageId(): string {
   return `queued-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-function getStreamGenerationStatus(status: StreamState['status']): 'completed' | 'error' | 'stopped' {
-  if (status === 'error') return 'error';
-  if (status === 'stopped') return 'stopped';
-  return 'completed';
-}
-
-function createAssistantMessageFromStream(run: StreamState): Message | null {
-  if (!shouldPatchRunIntoMainConversation(run)) return null;
-  const nodeId = run.targetNodeId || run.nodeId;
-  if (!nodeId) return null;
-  const status = getStreamGenerationStatus(run.status);
-  return {
-    id: `stream-${run.runId}-${nodeId}`,
-    role: 'assistant',
-    content: run.content,
-    node_id: nodeId,
-    parent_node_id: run.anchorNodeId || undefined,
-    timestamp: Date.now() / 1000,
-    tokens_used: run.tokensUsed || undefined,
-    generation_info: {
-      duration_ms: run.duration,
-      status,
-      error_message: run.errorMessage,
-      tokens_used: run.tokensUsed || undefined,
-    },
-    reasoning: run.reasoning || undefined,
-    tool_interactions: run.toolInteractions.length > 0 ? run.toolInteractions : undefined,
-  };
-}
-
-function scheduleIdleTask(task: () => void, timeout = 1200): () => void {
-  const win = window as typeof window & {
-    requestIdleCallback?: (callback: () => void, options?: { timeout?: number }) => number;
-    cancelIdleCallback?: (handle: number) => void;
-  };
-  if (typeof win.requestIdleCallback === 'function') {
-    const handle = win.requestIdleCallback(task, { timeout });
-    return () => win.cancelIdleCallback?.(handle);
-  }
-  const handle = window.setTimeout(task, Math.min(timeout, 600));
-  return () => window.clearTimeout(handle);
-}
-
 function normalizeToolPermissionMode(value: unknown): ToolPermissionMode | undefined {
   return value === 'auto_approve' || value === 'modify_only' || value === 'ask_always' || value === 'plan'
     ? value
@@ -855,14 +529,14 @@ function normalizeToolPermissionMode(value: unknown): ToolPermissionMode | undef
 }
 
 function getBranchToolPermissionMode(
-  messages: Array<{ node_id?: string | null; tool_permission_mode?: ToolPermissionMode | null }>,
+  items: TranscriptItem[],
   nodeId: string | null,
 ): ToolPermissionMode | undefined {
   if (!nodeId) return undefined;
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message.node_id === nodeId) {
-      const mode = normalizeToolPermissionMode(message.tool_permission_mode);
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item.type === 'user_message' && item.node_id === nodeId) {
+      const mode = normalizeToolPermissionMode(item.tool_permission_mode);
       if (mode) return mode;
     }
   }
@@ -874,234 +548,18 @@ function normalizeTaskContextMode(value: unknown): TaskContextMode | undefined {
 }
 
 function getBranchTaskContextMode(
-  messages: Array<{ node_id?: string | null; task_context_mode?: TaskContextMode | null }>,
+  items: TranscriptItem[],
   nodeId: string | null,
 ): TaskContextMode | undefined {
   if (!nodeId) return undefined;
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message.node_id === nodeId) {
-      const mode = normalizeTaskContextMode(message.task_context_mode);
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item.type === 'user_message' && item.node_id === nodeId) {
+      const mode = normalizeTaskContextMode(item.task_context_mode);
       if (mode) return mode;
     }
   }
   return undefined;
-}
-
-function stripChronologicalPrefix(raw: unknown, snippets: string[]): string {
-  if (typeof raw !== 'string' || raw.length === 0) return '';
-  let remaining = raw;
-  for (const snippet of snippets) {
-    if (snippet && remaining.startsWith(snippet)) {
-      remaining = remaining.slice(snippet.length);
-    }
-  }
-  return remaining;
-}
-
-function getSideRunAssistantTimeline(message: {
-  content?: unknown;
-  reasoning?: unknown;
-  tool_interactions?: unknown[];
-  tool_calls?: unknown[];
-  tool_results?: unknown[];
-}): AssistantTimelineBlock[] {
-  const blocks: AssistantTimelineBlock[] = [];
-  const interactions = Array.isArray(message.tool_interactions) ? message.tool_interactions : [];
-
-  if (interactions.length > 0) {
-    const interactionReasoning: string[] = [];
-    const interactionContent: string[] = [];
-
-    interactions.forEach((interaction, interactionIndex) => {
-      const record = asRecord(interaction);
-      const assistant = asRecord(record?.assistant);
-      const reasoning = typeof record?.reasoning === 'string' ? record.reasoning : '';
-      const content = typeof assistant?.content === 'string' ? assistant.content : '';
-      const toolItems = getInteractionToolItems(interaction, interactionIndex);
-
-      if (reasoning) {
-        interactionReasoning.push(reasoning);
-        blocks.push({ type: 'reasoning', key: `reasoning-${interactionIndex}`, reasoning });
-      }
-      if (content.trim()) {
-        interactionContent.push(content);
-        blocks.push({ type: 'content', key: `content-${interactionIndex}`, content });
-      }
-      if (toolItems.length > 0) {
-        blocks.push({ type: 'tools', key: `tools-${interactionIndex}`, items: toolItems });
-      }
-    });
-
-    const finalReasoning = stripChronologicalPrefix(message.reasoning, interactionReasoning);
-    const finalContent = stripChronologicalPrefix(message.content, interactionContent);
-    if (finalReasoning.trim()) {
-      blocks.push({ type: 'reasoning', key: 'reasoning-final', reasoning: finalReasoning });
-    }
-    if (finalContent.trim()) {
-      blocks.push({ type: 'content', key: 'content-final', content: finalContent });
-    }
-    return blocks;
-  }
-
-  const reasoning = typeof message.reasoning === 'string' ? message.reasoning : '';
-  const content = typeof message.content === 'string' ? message.content : '';
-  const toolItems = getAssistantToolItems(message);
-  if (reasoning) blocks.push({ type: 'reasoning', key: 'reasoning', reasoning });
-  if (toolItems.length > 0) blocks.push({ type: 'tools', key: 'tools', items: toolItems });
-  if (content.trim()) blocks.push({ type: 'content', key: 'content', content });
-  return blocks;
-}
-
-function createLiveRunTranscriptItems(run: StreamState): TranscriptItem[] {
-  return createLiveAssistantTranscriptItems(run);
-}
-
-function ToolCallCard({ item }: { item: ToolRenderItem }) {
-  const [expanded, setExpanded] = useState(false);
-  const [fullResult, setFullResult] = useState<ToolResultSlice | null>(null);
-  const [loadingFullResult, setLoadingFullResult] = useState(false);
-  const [fullResultError, setFullResultError] = useState<string | null>(null);
-  const fullResultText = fullResult ? formatToolOutput({ content: fullResult.content }) : '';
-  const outputText = fullResult ? fullResultText : item.outputText;
-  const canLoadFullResult = Boolean(item.resultEnvelope?.toolResultId && !fullResult);
-  const resultStatus = fullResult
-    ? fullResult.has_more
-      ? `已读取 ${fullResult.content.length}/${fullResult.total_chars} 字，已截断/可继续读取`
-      : `已读取完整结果（${fullResult.total_chars} 字）`
-    : item.resultEnvelope?.truncated
-      ? '预览已截断'
-      : null;
-
-  const handleLoadFullResult = async () => {
-    const toolResultId = item.resultEnvelope?.toolResultId;
-    if (!toolResultId || loadingFullResult) return;
-    setLoadingFullResult(true);
-    setFullResultError(null);
-    try {
-      const result = await messageApi.getToolResult(toolResultId, 0, 16000);
-      setFullResult(result);
-    } catch (error) {
-      console.error('Failed to load tool result:', error);
-      setFullResultError('读取完整结果失败');
-    } finally {
-      setLoadingFullResult(false);
-    }
-  };
-
-  return (
-    <div className={cn('tool-call', expanded && 'expanded')}>
-      <button
-        type="button"
-        className="tc-header"
-        aria-expanded={expanded}
-        onClick={() => setExpanded((value) => !value)}
-      >
-        <span className="tc-name">{item.name}</span>
-        <span className="tc-summary">{item.summary}</span>
-        <span className="tc-status" aria-label={item.status === 'done' ? '工具调用完成' : item.status === 'error' ? '工具调用失败' : '工具调用中'}>
-          {item.status === 'done' && <Check className="h-3 w-3" style={{ color: 'var(--icon-accent)' }} />}
-          {item.status === 'error' && <X className="h-3 w-3" style={{ color: 'var(--destructive, #ef4444)' }} />}
-          {item.status === 'running' && <span className="pulsing-dot" />}
-        </span>
-        <ChevronRight className="tc-chevron" />
-      </button>
-      <div className="tc-body">
-        {item.argsText && <pre className="tc-cmd custom-scrollbar">{item.argsText}</pre>}
-        {outputText && <pre className="tc-output custom-scrollbar">{outputText}</pre>}
-        {(canLoadFullResult || resultStatus || fullResultError) && (
-          <div className="tool-approval-actions">
-            {canLoadFullResult && (
-              <Button
-                type="button"
-                size="xs"
-                variant="secondary"
-                disabled={loadingFullResult}
-                onClick={handleLoadFullResult}
-              >
-                {loadingFullResult ? (
-                  <><Loader2 className="h-3 w-3 animate-spin" /> 读取中</>
-                ) : (
-                  '读取完整结果'
-                )}
-              </Button>
-            )}
-            {resultStatus && (
-              <span className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>{resultStatus}</span>
-            )}
-            {fullResultError && (
-              <span className="text-xs text-destructive">{fullResultError}</span>
-            )}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function ToolCallGroup({ items }: { items: ToolRenderItem[] }) {
-  const [collapsed, setCollapsed] = useState(false);
-  if (items.length === 0) return null;
-  if (items.length === 1) return <ToolCallCard item={items[0]} />;
-  return (
-    <div className={cn('tool-group', collapsed && 'collapsed')}>
-      <button
-        type="button"
-        className="tool-group-header"
-        aria-expanded={!collapsed}
-        onClick={() => setCollapsed((value) => !value)}
-      >
-        <ChevronRight className="tg-chevron" />
-        <span>工具调用</span>
-        <span className="tg-count">{items.length} 个</span>
-      </button>
-      <div className="tool-group-body">
-        {items.map((item) => <ToolCallCard key={item.key} item={item} />)}
-      </div>
-    </div>
-  );
-}
-
-function AnimatedProcessedBlocks({
-  expanded,
-  blocks,
-  renderBlock,
-}: {
-  expanded: boolean;
-  blocks: AssistantTimelineBlock[];
-  renderBlock: (block: AssistantTimelineBlock) => React.ReactNode;
-}) {
-  const [rendered, setRendered] = useState(expanded);
-  const [visible, setVisible] = useState(false);
-
-  useEffect(() => {
-    let frame = 0;
-    let timer = 0;
-    if (expanded) {
-      setRendered(true);
-      frame = window.requestAnimationFrame(() => setVisible(true));
-    } else {
-      setVisible(false);
-      timer = window.setTimeout(() => setRendered(false), 180);
-    }
-    return () => {
-      if (frame) window.cancelAnimationFrame(frame);
-      if (timer) window.clearTimeout(timer);
-    };
-  }, [expanded]);
-
-  if (!rendered) return null;
-
-  return (
-    <div
-      className={cn('processed-blocks-shell', visible && 'expanded')}
-      aria-hidden={!visible}
-    >
-      <div className="processed-blocks-inner">
-        {blocks.map(renderBlock)}
-      </div>
-    </div>
-  );
 }
 
 /* ---------- Component ---------- */
@@ -1130,17 +588,16 @@ export default function ChatPage() {
   const [attachedImageRefs, setAttachedImageRefs] = useState<Array<{ filename: string; mime_type?: string }>>([]);
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([]);
   const [hiddenSideRunIdsByConversation, setHiddenSideRunIdsByConversation] = useState<Record<string, string[]>>({});
-  const [taskNotifications, setTaskNotifications] = useState<TaskNotificationRecord[]>([]);
   const [activeTask, setActiveTask] = useState<ActiveTaskRecord | null>(null);
   const [taskContextMode, setTaskContextMode] = useState<TaskContextMode>('attached');
-  const [selectedTaskNotificationId, setSelectedTaskNotificationId] = useState<string | null>(null);
   const [transcriptItems, setTranscriptItems] = useState<TranscriptItem[]>([]);
   const [transcriptLoading, setTranscriptLoading] = useState(false);
   const [transcriptError, setTranscriptError] = useState<string | null>(null);
+  const [planActionPending, setPlanActionPending] = useState<string | null>(null);
+  const [planError, setPlanError] = useState<string | null>(null);
+  const [toolApprovalPending, setToolApprovalPending] = useState<string | null>(null);
+  const [toolApprovalError, setToolApprovalError] = useState<string | null>(null);
   const [, setCopiedTranscriptRunId] = useState<string | null>(null);
-  const handledSideRunNotificationsRef = useRef<Set<string>>(new Set());
-  const sideRunSyncPromisesRef = useRef<Map<string, Promise<void>>>(new Map());
-  const restoredSideRunEventsRef = useRef<Set<string>>(new Set());
   const [toolPermissionDraft, setToolPermissionDraftState] = useState<ToolPermissionDraft>(() => createToolPermissionDraft());
   const [newConversationMultiAgentMode, setNewConversationMultiAgentMode] = useState<MultiAgentMode>('explicit_request_only');
   const [previewImage, setPreviewImage] = useState<{ name: string; url: string } | null>(null);
@@ -1192,14 +649,22 @@ export default function ChatPage() {
   const queuedMessagesRef = useRef<QueuedMessage[]>([]);
   const toolPermissionDraftRef = useRef<ToolPermissionDraft>(toolPermissionDraft);
   const transcriptRequestCoordinatorRef = useRef<TranscriptRequestCoordinator | null>(null);
+  const transcriptStateRef = useRef<TranscriptState>({
+    conversationId: null,
+    nodeId: null,
+    revision: 0,
+    items: [],
+  });
   if (!transcriptRequestCoordinatorRef.current) {
     transcriptRequestCoordinatorRef.current = createTranscriptRequestCoordinator({
       fetchSnapshot: transcriptService.fetchBranchSnapshot,
       getVisibleTarget: getCurrentVisibleTranscriptTip,
       onLoadingChange: setTranscriptLoading,
-      onSnapshot: (snapshot) => setTranscriptItems(
-        normalizeTranscriptItems(snapshot.items || []),
-      ),
+      onSnapshot: (snapshot) => {
+        const next = stateFromTranscriptSnapshot(snapshot);
+        transcriptStateRef.current = next;
+        setTranscriptItems(normalizeTranscriptItems(next.items));
+      },
       onErrorChange: (error) => setTranscriptError(
         error ? '对话 transcript 刷新失败，已保留当前内容' : null,
       ),
@@ -1368,10 +833,10 @@ export default function ChatPage() {
   }, [isAtBottom]);
 
   const {
-    conversations, currentConversation, messages,
+    conversations, currentConversation,
     currentNodeId, pendingScrollNodeId, clearPendingScroll,
     createConversation, selectConversation, deleteConversation, deleteNode, switchNode, loadConversations, loadTree,
-    clearCurrentConversation, updateConversationTitle, refreshMessages, refreshBranches, patchAssistantMessageFromStream,
+    clearCurrentConversation, updateConversationTitle, refreshMessages, refreshBranches,
   } = useConversationStore();
 
   useEffect(() => {
@@ -1438,11 +903,6 @@ export default function ChatPage() {
   };
 
   const activeRunStates = useRunManager(currentConversation?.id ?? null);
-  const [serverPendingToolApprovals, setServerPendingToolApprovals] = useState<ToolApprovalPayload[]>([]);
-  const [activePlan, setActivePlan] = useState<PlanSession | null>(null);
-  const [planActionPending, setPlanActionPending] = useState<'approve' | 'reject' | 'answer' | null>(null);
-  const [planRejectFeedback, setPlanRejectFeedback] = useState('');
-  const [planError, setPlanError] = useState<string | null>(null);
   const currentConversationIdRef = useRef<string | null>(null);
   currentConversationIdRef.current = currentConversation?.id ?? null;
   const conversationSyncCoordinatorRef = useRef<ConversationSyncCoordinator | null>(null);
@@ -1450,13 +910,13 @@ export default function ChatPage() {
     conversationId: string,
     request: ConversationSyncRequest,
   ) => Promise<ConversationSyncResult>>(async () => ({ messagesConfirmed: false }));
-  const activeStreamRecoveryCoordinatorRef = useRef<ActiveStreamRecoveryCoordinator | null>(null);
   const loadTranscriptSnapshot = useCallback(async (
     conversationId: string | null | undefined,
     tipNodeId?: string | null,
   ) => {
     if (!conversationId || !tipNodeId) {
       transcriptRequestCoordinatorRef.current?.cancelActive();
+      transcriptStateRef.current = { conversationId: null, nodeId: null, revision: 0, items: [] };
       setTranscriptItems([]);
       setTranscriptError(null);
       setTranscriptLoading(false);
@@ -1481,20 +941,6 @@ export default function ChatPage() {
     () => activeRunStates.filter((run) => !hiddenSideRunIds.has(run.runId)),
     [activeRunStates, hiddenSideRunIds],
   );
-  const visibleTaskNotifications = useMemo(
-    () => taskNotifications.filter((item) => ['unbound', 'bound', 'delivering', 'delivery_failed', 'delivery_cancelled'].includes(item.status)),
-    [taskNotifications],
-  );
-  const deliveringTaskNotificationByRunId = useMemo(() => {
-    const byRunId = new Map<string, TaskNotificationRecord>();
-    for (const notification of taskNotifications) {
-      if (notification.status === 'delivering' && notification.delivered_run_id) {
-        byRunId.set(notification.delivered_run_id, notification);
-      }
-    }
-    return byRunId;
-  }, [taskNotifications]);
-
   const hideSideRun = useCallback((conversationId: string, runId: string) => {
     setHiddenSideRunIdsByConversation((current) => {
       const existing = current[conversationId] ?? [];
@@ -1505,48 +951,16 @@ export default function ChatPage() {
       };
     });
   }, []);
-  const showSideRun = useCallback((conversationId: string, runId: string) => {
-    setHiddenSideRunIdsByConversation((current) => {
-      const existing = current[conversationId] ?? [];
-      if (!existing.includes(runId)) return current;
-      return {
-        ...current,
-        [conversationId]: existing.filter((id) => id !== runId),
-      };
-    });
-  }, []);
-  const attachDeliveringTaskNotifications = useCallback((
-    conversationId: string,
-    notifications: TaskNotificationRecord[],
-  ) => {
-    for (const notification of notifications) {
-      if (notification.status !== 'delivering' || !notification.delivered_run_id) continue;
-      if (streamManager.hasRun(notification.delivered_run_id)) continue;
-      void streamManager.resumeStream(
-        conversationId,
-        notification.delivered_node_id ?? null,
-        notification.delivered_run_id,
-        0,
-        notification.delivery_node_id ?? null,
-        'chat',
-        { anchorUntilTargetLands: true },
-      );
-    }
-  }, []);
-
   const applyTaskStateSnapshot = useCallback((
     conversationId: string,
     state: TaskStateSnapshot,
   ) => {
     if (conversationId !== currentConversationIdRef.current) return;
-    setTaskNotifications(state.notifications);
     setActiveTask(state.task);
-    attachDeliveringTaskNotifications(conversationId, state.notifications);
-  }, [attachDeliveringTaskNotifications]);
+  }, []);
 
   const refreshTaskState = useCallback(async (conversationId: string | null | undefined) => {
     if (!conversationId) {
-      setTaskNotifications([]);
       setActiveTask(null);
       return null;
     }
@@ -1560,26 +974,12 @@ export default function ChatPage() {
     }
   }, [applyTaskStateSnapshot]);
 
-  const invalidateTaskState = useCallback(async (conversationId: string | null | undefined) => {
-    if (!conversationId) return null;
-    try {
-      const state = await taskStateCoordinator.invalidate(conversationId);
-      applyTaskStateSnapshot(conversationId, state);
-      return state;
-    } catch (error) {
-      console.error('刷新 TaskState 失败:', error);
-      return null;
-    }
-  }, [applyTaskStateSnapshot]);
-
   useEffect(() => {
     const conversationId = currentConversation?.id;
     if (!conversationId) {
-      setTaskNotifications([]);
       setActiveTask(null);
       return;
     }
-    setTaskNotifications([]);
     setActiveTask(null);
     const unsubscribe = taskStateCoordinator.subscribe(conversationId, (state) => {
       applyTaskStateSnapshot(conversationId, state);
@@ -1589,11 +989,6 @@ export default function ChatPage() {
     });
     return unsubscribe;
   }, [applyTaskStateSnapshot, currentConversation?.id]);
-  useEffect(() => {
-    const conversationId = currentConversation?.id;
-    if (!conversationId) return;
-    attachDeliveringTaskNotifications(conversationId, taskNotifications);
-  }, [attachDeliveringTaskNotifications, currentConversation?.id, taskNotifications]);
   useEffect(() => {
     void slashRegistry.refresh().catch(() => {});
   }, []);
@@ -1609,27 +1004,6 @@ export default function ChatPage() {
     },
     [],
   );
-  const refreshActivePlan = useCallback(async (conversationId: string | null | undefined) => {
-    if (!conversationId) {
-      if (!currentConversationIdRef.current) setActivePlan(null);
-      return;
-    }
-    if (conversationId !== currentConversationIdRef.current) return;
-    try {
-      const plan = await plansService.fetchActive(conversationId);
-      if (conversationId !== currentConversationIdRef.current) return;
-      setActivePlan(plan);
-      setPlanError(null);
-    } catch (_) {
-      if (conversationId === currentConversationIdRef.current) setActivePlan(null);
-    }
-  }, []);
-  useEffect(() => {
-    setActivePlan(null);
-    setPlanActionPending(null);
-    setPlanError(null);
-    setPlanRejectFeedback('');
-  }, [currentConversation?.id]);
   const [localStreamingConversationCounts, setLocalStreamingConversationCounts] = useState<Map<string, number>>(() => new Map());
   const [backendActiveStreamConversationCounts, setBackendActiveStreamConversationCounts] = useState<Map<string, number>>(() => new Map());
   const activeStreamConversationCounts = useMemo(() => {
@@ -1642,29 +1016,17 @@ export default function ChatPage() {
   const projectGroupRefs = useRef(new Map<string, HTMLDivElement>());
   const projectFlipFirstRef = useRef<Map<string, number> | null>(null);
 
-  // 结构性去重：一旦本轮流式产生的节点已出现在真实消息里（refreshMessages 注入），
-  // 就隐藏对应的乐观叠加层，无论 cleanup 何时执行。这样真实消息与乐观叠加层
-  // 永远不会同时渲染同一轮，杜绝“重复两轮”。
-  // 注意：后端在流式 START 时就已创建节点并保存 user 消息，但 assistant 消息要到
-  // 结束才保存。因此必须按角色分别判断——否则中途重新进入正在流式的对话会
-  // 把 user 消息拉回 messages，误判“整轮已落地”而把正在生成的助手块也隐藏掉。
   const currentBranchNodeIds = useMemo(
-    () => new Set(messages.map((message) => message.node_id).filter(Boolean)),
-    [messages],
+    () => new Set(transcriptItems.flatMap((item) => {
+      const nodeId = getTranscriptItemNodeId(item);
+      return nodeId ? [nodeId] : [];
+    })),
+    [transcriptItems],
   );
   const selectedBranchTipId = currentNodeId || currentConversation?.current_node_id || null;
-  const liveSelectedBranchTipId = useMemo(() => {
-    const liveMainRun = activeRunStates
-      .filter((run) => run.kind === 'chat')
-      .filter((run) => run.status === 'streaming' || run.status === 'waiting_approval' || run.status === 'stopping')
-      .filter((run) => isRunVisibleInSelectedTranscript(run, selectedBranchTipId, currentBranchNodeIds))
-      .filter((run) => run.targetNodeId || run.nodeId)
-      .sort((a, b) => b.createdAt - a.createdAt)[0];
-    return liveMainRun?.targetNodeId || liveMainRun?.nodeId || selectedBranchTipId;
-  }, [activeRunStates, currentBranchNodeIds, selectedBranchTipId]);
   const currentBranchToolPermissionMode = useMemo(
-    () => getBranchToolPermissionMode(messages, selectedBranchTipId),
-    [messages, selectedBranchTipId],
+    () => getBranchToolPermissionMode(transcriptItems, selectedBranchTipId),
+    [transcriptItems, selectedBranchTipId],
   );
   const liveBranchToolPermissionMode = useMemo(() => {
     const runs = activeRunStates
@@ -1674,8 +1036,8 @@ export default function ChatPage() {
     return normalizeToolPermissionMode(runs[0]?.toolPermissionMode);
   }, [activeRunStates, currentBranchNodeIds, selectedBranchTipId]);
   const currentBranchTaskContextMode = useMemo(
-    () => getBranchTaskContextMode(messages, selectedBranchTipId),
-    [messages, selectedBranchTipId],
+    () => getBranchTaskContextMode(transcriptItems, selectedBranchTipId),
+    [transcriptItems, selectedBranchTipId],
   );
   const liveBranchTaskContextMode = useMemo(() => {
     const runs = activeRunStates
@@ -1684,25 +1046,6 @@ export default function ChatPage() {
       .sort((a, b) => b.createdAt - a.createdAt);
     return normalizeTaskContextMode(runs[0]?.taskContextMode);
   }, [activeRunStates, currentBranchNodeIds, selectedBranchTipId]);
-  const activePlanToolSignal = useMemo(() => activeRunStates
-    .map((run) => {
-      const toolNames: string[] = [];
-      for (const interaction of run.toolInteractions || []) {
-        for (const call of interaction?.assistant?.tool_calls || []) {
-          const name = call?.function?.name;
-          if (PLAN_MODE_TOOL_NAMES.has(name)) toolNames.push(name);
-        }
-        for (const tool of interaction?.tools || []) {
-          const name = tool?.name;
-          if (PLAN_MODE_TOOL_NAMES.has(name)) toolNames.push(name);
-        }
-      }
-      return toolNames.length > 0 ? `${run.runId}:${run.eventCount}:${toolNames.join(',')}` : '';
-    })
-    .filter(Boolean)
-    .join('|'), [activeRunStates]);
-  const activeTaskToolSignal = useMemo(() => getTaskToolSignal(activeRunStates), [activeRunStates]);
-
   useEffect(() => {
     const next = syncToolPermissionDraftFromBranch(
       toolPermissionDraftRef.current,
@@ -1718,12 +1061,6 @@ export default function ChatPage() {
   }, [currentBranchTaskContextMode, liveBranchTaskContextMode, currentConversation?.id]);
 
   useEffect(() => {
-    const conversationId = currentConversation?.id;
-    if (!conversationId || !activePlanToolSignal) return;
-    void refreshActivePlan(conversationId);
-  }, [activePlanToolSignal, currentConversation?.id, refreshActivePlan]);
-
-  useEffect(() => {
     if (currentConversation || toolPermissionDraftRef.current.explicit) return;
     const current = toolPermissionDraftRef.current;
     if (current.mode !== defaultToolPermissionMode) {
@@ -1731,29 +1068,11 @@ export default function ChatPage() {
     }
   }, [currentConversation, defaultToolPermissionMode, updateToolPermissionDraft]);
 
-  useEffect(() => {
-    const conversationId = currentConversation?.id;
-    if (!conversationId || !activeTaskToolSignal) return;
-    void invalidateTaskState(conversationId);
-  }, [activeTaskToolSignal, currentConversation?.id, invalidateTaskState]);
-
-  useEffect(() => {
-    const activeKeys = new Set<string>();
-    for (const run of activeRunStates) {
-      for (const notification of collectSideRunNotifications(run.toolInteractions, run.sideRunNotifications)) {
-        activeKeys.add(`${run.conversationId}:${notification.runId}`);
-      }
-    }
-    for (const key of handledSideRunNotificationsRef.current) {
-      if (!activeKeys.has(key)) handledSideRunNotificationsRef.current.delete(key);
-    }
-  }, [activeRunStates]);
-
   const sideRunDrafts = useMemo(() => sidePanelRunStates
     .filter((run) => shouldRenderRunDraft(run))
     .map((run) => {
       if (!isDetachedRunView(run, selectedBranchTipId, currentBranchNodeIds)) return null;
-      return createSideRunDraft(run);
+      return buildSidePanelDraft(run);
     })
     .filter((draft): draft is SideRunDraft => Boolean(draft))
     .filter((draft) => draft.showPendingBubble || draft.showStreamBlock),
@@ -1765,8 +1084,8 @@ export default function ChatPage() {
     [sideRunDrafts],
   );
   const sideRunTopLevelCount = useMemo(
-    () => sideRunGroups.reduce((total, group) => total + group.runs.length, 0) + visibleTaskNotifications.length,
-    [sideRunGroups, visibleTaskNotifications.length],
+    () => sideRunGroups.reduce((total, group) => total + group.runs.length, 0),
+    [sideRunGroups],
   );
   const selectedSideRunItem = useMemo((): SideRunGroupItem<SideRunDraft> | null => {
     if (!selectedSideRunId) return null;
@@ -1786,12 +1105,12 @@ export default function ChatPage() {
     const selectedRun = sidePanelRunStates.find((run) => run.runId === selectedSideRunId)
       || activeRunStates.find((run) => run.runId === selectedSideRunId);
     if (selectedRun && SIDE_RUN_KINDS.has(selectedRun.kind) && shouldRenderRunDraft(selectedRun)) {
-      const draft = createSideRunDraft(selectedRun);
+      const draft = buildSidePanelDraft(selectedRun);
       const steps = activeRunStates
         .filter((run) => run.createdByRunId === selectedRun.runId)
         .filter((run) => SIDE_RUN_KINDS.has(run.kind))
         .filter((run) => shouldRenderRunDraft(run))
-        .map(createSideRunDraft)
+        .map(buildSidePanelDraft)
         .sort((a, b) => (a.run.createdAt || 0) - (b.run.createdAt || 0));
       return {
         draft,
@@ -1821,175 +1140,29 @@ export default function ChatPage() {
       run.status,
       run.content.length,
       run.reasoning.length,
-      run.toolInteractions.length,
-      Object.keys(run.pendingApprovals).length,
       run.pendingUserMessage?.length ?? 0,
     ].join(':')).join('|'),
     [activeRunStates, currentBranchNodeIds, selectedBranchTipId],
   );
   const taskPanelItem = useMemo(() => createTaskPanelItem(activeTask), [activeTask]);
   const taskPanelOpenCount = taskPanelItem ? 1 : 0;
-  const currentBranchHasPendingUserMessage = useMemo(
-    () => activeRunStates.some((run) =>
-      shouldRenderRunDraft(run)
-      && Boolean(run.pendingUserMessage)
-      && isRunBlockingSelectedBranch(run, selectedBranchTipId, currentBranchNodeIds)
-    ),
-    [activeRunStates, currentBranchNodeIds, selectedBranchTipId],
-  );
-  const liveMainTranscriptRunOverlays = useMemo<LiveRunTranscriptOverlay[]>(
-    () => activeRunStates
-      .filter((run) => run.status !== 'completed')
-      .filter((run) => shouldRenderRunDraft(run))
-      .filter((run) => isRunVisibleInMainTranscript(run, selectedBranchTipId, currentBranchNodeIds))
-      .map((run) => {
-        const items: TranscriptItem[] = [];
-        const notification = deliveringTaskNotificationByRunId.get(run.runId);
-        const targetNodeId = run.targetNodeId || run.nodeId || null;
-        if (
-          notification
-          && !hasTaskNotificationTranscriptItem(transcriptItems, notification, targetNodeId)
-        ) {
-          items.push(createTaskNotificationTranscriptItem(notification, {
-            runId: run.runId,
-            nodeId: targetNodeId,
-          }));
-        }
-        items.push(...createLiveRunTranscriptItems(run));
-        return {
-          runId: run.runId,
-          nodeId: run.nodeId,
-          targetNodeId: run.targetNodeId,
-          anchorNodeId: run.anchorNodeId,
-          items,
-        };
-      })
-      .filter((overlay) => overlay.items.length > 0),
-    [activeRunStates, currentBranchNodeIds, deliveringTaskNotificationByRunId, selectedBranchTipId, transcriptItems],
-  );
-  const displayTranscriptItems = useMemo(() => {
-    const merged = mergeLiveRunTranscriptItems(transcriptItems, liveMainTranscriptRunOverlays);
-    const planText = typeof activePlan?.plan === 'string' ? activePlan.plan : '';
-    if (activePlan?.status !== 'awaiting_approval' || !planText.trim()) return merged;
-    const planRecord = activePlan as PlanSession & {
-      submitted_node_id?: string | null;
-      entered_node_id?: string | null;
-      proposal_id?: string | null;
-      proposal_revision?: number | null;
-    };
-    const activePlanId = activePlan.plan_id || activePlan.id || '';
-    if (!activePlanId) return merged;
-    const nodeId = planRecord.submitted_node_id || planRecord.entered_node_id || null;
-    const card: TranscriptItem = {
-      id: `active-plan-${activePlanId}`,
-      type: 'plan_card',
-      conversation_id: activePlan.conversation_id || currentConversation?.id || null,
-      node_id: nodeId,
-      plan_id: activePlanId,
-      status: 'awaiting_approval',
-      preview: planText,
-      visibility: 'main',
-      props: {
-        plan: planText,
-        status: 'awaiting_approval',
-        proposal_id: planRecord.proposal_id || null,
-        revision: planRecord.proposal_revision || null,
-      },
-    };
-    let insertionIndex = 0;
-    if (nodeId) {
-      for (let index = merged.length - 1; index >= 0; index -= 1) {
-        if (merged[index].node_id === nodeId || merged[index].anchor_node_id === nodeId) {
-          insertionIndex = index + 1;
-          break;
-        }
-      }
-    }
-    if (insertionIndex > 0) {
-      return [
-        ...merged.slice(0, insertionIndex),
-        card,
-        ...merged.slice(insertionIndex),
-      ];
-    }
-    return [...merged, card];
-  }, [activePlan, currentConversation?.id, liveMainTranscriptRunOverlays, transcriptItems]);
-  const approvalPromptRunStates = sidePanelRunStates;
-  const approvalPromptRunSignal = useMemo(
-    () => approvalPromptRunStates.map((run) => [
-      run.runId,
-      Object.values(run.pendingApprovals || {})
-        .map((approval) => `${approval?.id || ''}:${approval?.status || ''}`)
-        .join(','),
-    ].join(':')).join('|'),
-    [approvalPromptRunStates],
-  );
-  const refreshPendingToolApprovals = useCallback(async (conversationId: string | null | undefined) => {
-    if (!conversationId) {
-      setServerPendingToolApprovals([]);
-      return;
-    }
-    try {
-      const approvals = await messageApi.getPendingApprovals(conversationId);
-      if (conversationId === currentConversationIdRef.current) {
-        setServerPendingToolApprovals(approvals);
-      }
-    } catch (_) {
-      if (conversationId === currentConversationIdRef.current) {
-        setServerPendingToolApprovals([]);
-      }
-    }
-  }, []);
-  const shouldRefreshPendingToolApprovals = useMemo(() => {
-    if (!currentConversation?.id) return false;
-    if (serverPendingToolApprovals.length > 0) return true;
-    if (approvalPromptRunStates.some((run) => run.status === 'waiting_approval')) return true;
-    if (approvalPromptRunStates.some((run) =>
-      Object.values(run.pendingApprovals || {}).some((approval) => approval?.status === 'pending')
-    )) return true;
-    const effectiveMode = liveBranchToolPermissionMode ?? currentBranchToolPermissionMode ?? defaultToolPermissionMode;
-    return effectiveMode !== 'auto_approve';
-  }, [
-    approvalPromptRunStates,
-    currentBranchToolPermissionMode,
-    currentConversation?.id,
-    defaultToolPermissionMode,
-    liveBranchToolPermissionMode,
-    serverPendingToolApprovals.length,
-  ]);
-  useEffect(() => {
-    if (!currentConversation?.id) {
-      setServerPendingToolApprovals([]);
-      return;
-    }
-    if (!shouldRefreshPendingToolApprovals) {
-      if (serverPendingToolApprovals.length > 0) setServerPendingToolApprovals([]);
-      return;
-    }
-    void refreshPendingToolApprovals(currentConversation.id);
-  }, [
-    approvalPromptRunSignal,
-    currentConversation?.id,
-    refreshPendingToolApprovals,
-    serverPendingToolApprovals.length,
-    shouldRefreshPendingToolApprovals,
-  ]);
-  const activePendingApprovalIds = useMemo(
-    () => new Set(serverPendingToolApprovals.map((approval) => approval.id).filter(Boolean)),
-    [serverPendingToolApprovals],
-  );
-  const pendingToolApprovalPrompts = useMemo(
-    () => collectPendingToolApprovalPrompts(approvalPromptRunStates, activePendingApprovalIds),
-    [activePendingApprovalIds, approvalPromptRunStates],
-  );
-  const pendingApprovalCount = pendingToolApprovalPrompts.length;
+  const currentBranchHasPendingUserMessage = false;
+  const displayTranscriptItems = transcriptItems;
 
   useEffect(() => {
     const conversationId = currentConversation?.id;
     if (!conversationId || !selectedBranchTipId) {
+      transcriptStateRef.current = { conversationId: null, nodeId: null, revision: 0, items: [] };
       setTranscriptItems([]);
       setTranscriptError(null);
       setTranscriptLoading(false);
+      return;
+    }
+    const transcriptState = transcriptStateRef.current;
+    if (
+      transcriptState.conversationId === conversationId
+      && transcriptState.nodeId === selectedBranchTipId
+    ) {
       return;
     }
     void loadTranscriptSnapshot(conversationId, selectedBranchTipId);
@@ -2005,12 +1178,6 @@ export default function ChatPage() {
       setSelectedSideRunId(null);
     }
   }, [selectedSideRunId, selectedSideRunItem]);
-
-  useEffect(() => {
-    if (selectedTaskNotificationId && !visibleTaskNotifications.some((item) => item.id === selectedTaskNotificationId)) {
-      setSelectedTaskNotificationId(null);
-    }
-  }, [selectedTaskNotificationId, visibleTaskNotifications]);
 
   const visibleQueuedMessages = useMemo(
     () => queuedMessages
@@ -2375,88 +1542,6 @@ export default function ChatPage() {
     updateQueuedMessages((messages) => messages.filter((message) => message.id !== id));
   }, [updateQueuedMessages]);
 
-  if (!activeStreamRecoveryCoordinatorRef.current) {
-    activeStreamRecoveryCoordinatorRef.current = new ActiveStreamRecoveryCoordinator();
-  }
-  activeStreamRecoveryCoordinatorRef.current.setHandlers({
-    getActiveStreams: messageApi.getActiveStreams,
-    isAttachable: (item) =>
-      Boolean(!item.done
-      && (item.node_id || item.run_id)
-      && !(item.run_id && item.kind && SIDE_RUN_KINDS.has(item.kind) && hiddenSideRunIds.has(item.run_id))),
-    prepareAttach: async (conversationId, active, reason) => {
-      if (!active.node_id) return;
-      await scheduleConversationSyncRef.current(conversationId, {
-        reason: reason.includes('backend-followup')
-          ? 'backend-followup-attachable'
-          : 'active-stream-recovery',
-        include: ['messages', 'branches'],
-        awaitNodeId: active.node_id,
-        awaitRole: 'user',
-        messageRetries: 0,
-      });
-    },
-    resumeStream: (conversationId, active) => {
-      void streamManager.resumeStream(
-        conversationId,
-        active.node_id ?? null,
-        active.run_id ?? undefined,
-        0,
-        active.anchor_node_id ?? null,
-        active.kind ?? 'chat',
-      );
-    },
-  });
-
-  const syncBackendScheduledFollowup = useCallback(async (conversationId: string) => {
-    await activeStreamRecoveryCoordinatorRef.current?.probeConversation(conversationId, {
-      reason: 'backend-followup',
-      attempts: ACTIVE_STREAM_RECOVERY_FOLLOWUP_ATTEMPTS,
-      intervalMs: ACTIVE_STREAM_RECOVERY_INTERVAL_MS,
-    });
-  }, []);
-
-  const syncSelectedConversationSideRuns = useCallback(async (conversationId: string) => {
-    const existing = sideRunSyncPromisesRef.current.get(conversationId);
-    if (existing) return existing;
-    const syncPromise = (async () => {
-      const runs = await runsApi.listConversation(conversationId);
-      const sideRuns = getVisibleSideRunRecords(runs, hiddenSideRunIds);
-      for (const run of sideRuns) {
-        if (streamManager.hasRun(run.run_id)) continue;
-        if (!isCommandRunStatus(run.status)) {
-          void streamManager.resumeStream(
-            conversationId,
-            run.target_node_id ?? null,
-            run.run_id,
-            0,
-            run.anchor_node_id ?? null,
-            run.kind,
-          );
-          continue;
-        }
-        if (restoredSideRunEventsRef.current.has(run.run_id)) continue;
-        restoredSideRunEventsRef.current.add(run.run_id);
-        try {
-          const events = await runsApi.events(run.run_id, 0);
-          if (hiddenSideRunIds.has(run.run_id)) continue;
-          streamManager.restoreRunFromEvents(run, events);
-        } catch (error) {
-          restoredSideRunEventsRef.current.delete(run.run_id);
-          throw error;
-        }
-      }
-    })();
-    sideRunSyncPromisesRef.current.set(conversationId, syncPromise);
-    try {
-      await syncPromise;
-    } finally {
-      if (sideRunSyncPromisesRef.current.get(conversationId) === syncPromise) {
-        sideRunSyncPromisesRef.current.delete(conversationId);
-      }
-    }
-  }, [hiddenSideRunIds]);
-
   if (!conversationSyncCoordinatorRef.current) {
     conversationSyncCoordinatorRef.current = new ConversationSyncCoordinator();
   }
@@ -2467,8 +1552,6 @@ export default function ChatPage() {
     loadConversations,
     loadTree,
     refreshTaskState,
-    refreshActivePlan,
-    syncSideRuns: syncSelectedConversationSideRuns,
   });
   const scheduleConversationSync = useCallback((
     conversationId: string,
@@ -2480,132 +1563,45 @@ export default function ChatPage() {
   scheduleConversationSyncRef.current = scheduleConversationSync;
 
   useEffect(() => {
-    for (const run of activeRunStates) {
-      const notifications = collectSideRunNotifications(run.toolInteractions, run.sideRunNotifications);
-      if (notifications.length === 0) continue;
-      const unseen = notifications.filter((notification) => {
-        const key = `${run.conversationId}:${notification.runId}`;
-        if (handledSideRunNotificationsRef.current.has(key)) return false;
-        return !hiddenSideRunIds.has(notification.runId);
-      });
-      if (unseen.length > 0) {
-        void syncSelectedConversationSideRuns(run.conversationId).then(() => {
-          for (const notification of unseen) {
-            handledSideRunNotificationsRef.current.add(`${run.conversationId}:${notification.runId}`);
+    return streamManager.onTranscriptPatch((patch, sourceRun) => {
+      const visible = getCurrentVisibleTranscriptTip();
+      if (!visible || visible.conversationId !== patch.conversation_id) return;
+      if (!shouldPatchRunIntoMainConversation(sourceRun) && sourceRun.kind !== 'plan_action') return;
+      if (visible.tipNodeId !== patch.node_id) {
+        useConversationStore.getState().setCurrentNodeIdLocal(patch.node_id);
+        void (async () => {
+          await loadTranscriptSnapshot(patch.conversation_id, patch.node_id);
+          const current = getCurrentVisibleTranscriptTip();
+          if (!current || current.conversationId !== patch.conversation_id || current.tipNodeId !== patch.node_id) return;
+          const result = applyTranscriptPatch(transcriptStateRef.current, patch);
+          if (result.status !== 'ignored') {
+            transcriptStateRef.current = result.state;
+            setTranscriptItems(result.state.items);
           }
+          if (result.status === 'snapshot_needed') {
+            void scheduleConversationSync(patch.conversation_id, {
+              reason: 'transcript-patch-calibration',
+              include: ['transcript'],
+              messageRetries: 0,
+            });
+          }
+        })();
+        return;
+      }
+      const result = applyTranscriptPatch(transcriptStateRef.current, patch);
+      if (result.status !== 'ignored') {
+        transcriptStateRef.current = result.state;
+        setTranscriptItems(result.state.items);
+      }
+      if (result.status === 'snapshot_needed') {
+        void scheduleConversationSync(patch.conversation_id, {
+          reason: 'transcript-patch-calibration',
+          include: ['transcript'],
+          messageRetries: 0,
         });
       }
-    }
-  }, [activeRunStates, hiddenSideRunIds, syncSelectedConversationSideRuns]);
-
-  const handleToolApprovalDecision = useCallback<ToolApprovalDecisionHandler>(async (
-    approvalId,
-    decision,
-    scope,
-    runId,
-  ) => {
-    const run = activeRunStates.find((item) => item.runId === runId);
-    const conversationId = run?.conversationId ?? currentConversation?.id ?? null;
-    try {
-      await messageApi.decideApproval(approvalId, decision, scope);
-    } finally {
-      await refreshPendingToolApprovals(conversationId);
-    }
-    if (!conversationId) return;
-    void streamManager.resumeStream(
-      conversationId,
-      run?.targetNodeId ?? run?.nodeId ?? null,
-      runId,
-      run?.eventCount ?? 0,
-      run?.anchorNodeId ?? null,
-      run?.kind ?? 'chat',
-    );
-    await scheduleConversationSync(conversationId, {
-      reason: 'tool-approval-decision',
-      include: ['messages', 'branches', 'transcript'],
-      messageRetries: 0,
     });
-  }, [activeRunStates, currentConversation?.id, refreshPendingToolApprovals, scheduleConversationSync]);
-
-  const handleBindTaskNotification = useCallback(async (notificationId: string) => {
-    const conversationId = currentConversation?.id;
-    const deliveryNodeId = liveSelectedBranchTipId || currentConversation?.current_node_id || null;
-    if (!conversationId || !deliveryNodeId) return;
-    const state = await taskStateApi.bind(conversationId, notificationId, deliveryNodeId, { trigger: true });
-    taskStateCoordinator.apply(conversationId, state);
-    applyTaskStateSnapshot(conversationId, state);
-    const notification = state.notifications.find((item) => item.id === notificationId) ?? null;
-    if (notification?.delivered_run_id) {
-      void streamManager.resumeStream(
-        conversationId,
-        notification.delivered_node_id ?? null,
-        notification.delivered_run_id,
-        0,
-        notification.delivery_node_id ?? deliveryNodeId,
-        'chat',
-        { anchorUntilTargetLands: true },
-      );
-    } else if (state.flags.delivering) {
-      void invalidateTaskState(conversationId);
-    }
-    if (notification?.status === 'delivered' && notification.delivered_node_id) {
-      await scheduleConversationSync(conversationId, {
-        reason: 'task-notification-delivered',
-        include: ['messages', 'branches', 'transcript', 'conversations'],
-        awaitNodeId: notification.delivered_node_id,
-        messageRetries: 6,
-      });
-    }
-  }, [
-    applyTaskStateSnapshot,
-    currentConversation?.current_node_id,
-    currentConversation?.id,
-    invalidateTaskState,
-    scheduleConversationSync,
-    liveSelectedBranchTipId,
-  ]);
-
-  const handleDeleteTaskNotification = useCallback(async (notificationId: string) => {
-    const conversationId = currentConversation?.id;
-    if (selectedTaskNotificationId === notificationId) setSelectedTaskNotificationId(null);
-    if (!conversationId) return;
-    const state = await taskStateApi.delete(conversationId, notificationId);
-    taskStateCoordinator.apply(conversationId, state);
-    applyTaskStateSnapshot(conversationId, state);
-  }, [applyTaskStateSnapshot, currentConversation?.id, selectedTaskNotificationId]);
-
-  const handleInspectTaskNotification = useCallback(async (notification: TaskNotificationRecord) => {
-    const conversationId = currentConversation?.id;
-    if (!conversationId || notification.conversation_id !== conversationId) return;
-    const runId = notification.source_run_id;
-    if (!runId) return;
-    setSelectedTaskNotificationId(notification.id);
-    showSideRun(conversationId, runId);
-    setOutlineCollapsed(false);
-    setRightPanelView('side');
-    const existing = streamManager.getConversationStates(conversationId).find((run) => run.runId === runId);
-    if (existing) {
-      setSelectedSideRunId(runId);
-      return;
-    }
-    const runs = await runsApi.listConversation(conversationId);
-    const run = runs.find((item) => item.run_id === runId);
-    if (!run) return;
-    if (TERMINAL_RUN_STATUSES.has(run.status)) {
-      const events = await runsApi.events(runId, 0);
-      streamManager.restoreRunFromEvents(run, events);
-    } else {
-      void streamManager.resumeStream(
-        conversationId,
-        run.target_node_id ?? null,
-        run.run_id,
-        0,
-        run.anchor_node_id ?? null,
-        run.kind,
-      );
-    }
-    setSelectedSideRunId(runId);
-  }, [currentConversation?.id, showSideRun]);
+  }, [loadTranscriptSnapshot, scheduleConversationSync]);
 
   const handleCopyTranscriptItem = useCallback(async (_item: TranscriptItem, text: string) => {
     try {
@@ -2617,12 +1613,117 @@ export default function ChatPage() {
     }
   }, []);
 
-  const handleEditUserMessage = useCallback(async (item: TranscriptItem, text: string) => {
+  const runPlanActionStream = useCallback(async (
+    action: 'answer' | 'approve' | 'reject',
+    item: PlanApprovalItem | PlanQuestionItem,
+    openStream: (conversationId: string, signal: AbortSignal) => AsyncGenerator<unknown, void>,
+  ) => {
+    const conversationId = item.conversation_id || currentConversation?.id;
+    if (!conversationId || !item.node_id || !item.plan_id) {
+      setPlanError('计划动作缺少必要上下文，无法继续。');
+      return;
+    }
+    setPlanActionPending(action);
+    setPlanError(null);
+    try {
+      await streamManager.startPlanActionStream(
+        conversationId,
+        item.node_id,
+        action,
+        (signal) => openStream(conversationId, signal) as AsyncGenerator<any, void>,
+      );
+    } catch (error) {
+      void scheduleConversationSync(conversationId, {
+        reason: 'plan-action-failed-calibration',
+        include: ['transcript'],
+        messageRetries: 0,
+      });
+      setPlanError(error instanceof Error ? error.message : '计划动作执行失败');
+    } finally {
+      setPlanActionPending(null);
+    }
+  }, [currentConversation?.id, scheduleConversationSync]);
+
+  const handleApprovePlan = useCallback(async (item: PlanApprovalItem) => {
+    await runPlanActionStream(
+      'approve',
+      item,
+      (conversationId, signal) => messageApi.approvePlan(conversationId, item.plan_id, { signal }),
+    );
+  }, [runPlanActionStream]);
+
+  const handleRejectPlan = useCallback(async (item: PlanApprovalItem) => {
+    await runPlanActionStream(
+      'reject',
+      item,
+      (conversationId, signal) => messageApi.rejectPlan(conversationId, item.plan_id, '', { signal }),
+    );
+  }, [runPlanActionStream]);
+
+  const handleAnswerPlanQuestion = useCallback(async (item: PlanQuestionItem, answer: string) => {
+    await runPlanActionStream(
+      'answer',
+      item,
+      (conversationId, signal) => messageApi.answerPlanQuestion(conversationId, item.plan_id, answer, { signal }),
+    );
+  }, [runPlanActionStream]);
+
+  const runToolApprovalAction = useCallback(async (
+    action: 'approve' | 'reject',
+    item: ToolApprovalItem,
+  ) => {
+    const conversationId = item.conversation_id || currentConversation?.id;
+    if (!conversationId || !item.node_id) {
+      setToolApprovalError('工具审批缺少会话或节点信息，无法继续。');
+      return;
+    }
+    if (!item.tool_call_id) {
+      setToolApprovalError('工具审批缺少 tool_call_id，无法继续。');
+      return;
+    }
+    if (!item.run_id) {
+      setToolApprovalError('工具审批缺少 run_id，无法接收后续流。');
+      return;
+    }
+    setToolApprovalPending(`${item.id}:${action}`);
+    setToolApprovalError(null);
+    try {
+      if (action === 'approve') {
+        await messageApi.approveTool(conversationId, item.tool_call_id, item.node_id);
+      } else {
+        await messageApi.rejectTool(conversationId, item.tool_call_id, item.node_id);
+      }
+      void streamManager.resumeStream(
+        conversationId,
+        item.node_id,
+        item.run_id,
+        item.node_id,
+        'chat',
+        { anchorUntilTargetLands: false },
+      ).catch((error) => {
+        setToolApprovalError(error instanceof Error ? error.message : '工具审批后接收流失败');
+      });
+    } catch (error) {
+      setToolApprovalError(error instanceof Error ? error.message : '工具审批失败');
+    } finally {
+      setToolApprovalPending(null);
+    }
+  }, [currentConversation?.id]);
+
+  const handleApproveTool = useCallback(async (item: ToolApprovalItem) => {
+    await runToolApprovalAction('approve', item);
+  }, [runToolApprovalAction]);
+
+  const handleRejectTool = useCallback(async (item: ToolApprovalItem) => {
+    await runToolApprovalAction('reject', item);
+  }, [runToolApprovalAction]);
+
+  const handleEditUserMessage = useCallback(async (item: UserMessageItem, text: string) => {
     if (!isTranscriptItemOnCurrentBranch(item, currentConversation?.id ?? null, currentBranchNodeIds)) return;
-    const parentNodeId = getEditableUserMessageParentNodeId(item, messages);
+    const parentNodeId = item.parent_node_id;
     if (!parentNodeId) return;
     const inheritedToolPermissionMode = liveBranchToolPermissionMode ?? currentBranchToolPermissionMode ?? null;
-    const attachmentRefs = getEditableUserMessageAttachmentRefs(item, messages);
+    const attachmentRefs = getEditableUserMessageAttachmentRefs(item);
     const protectedAttachmentNames = [
       ...attachmentRefs.importFiles,
       ...attachmentRefs.imageRefs.map((file) => file.filename),
@@ -2640,7 +1741,6 @@ export default function ChatPage() {
     currentBranchToolPermissionMode,
     currentConversation?.id,
     liveBranchToolPermissionMode,
-    messages,
     selectedBranchTipId,
     switchNode,
   ]);
@@ -2660,7 +1760,7 @@ export default function ChatPage() {
     }
   }, [currentConversation?.id, editReturnNodeId, switchNode]);
 
-  const handleDeleteUserMessage = useCallback(async (item: TranscriptItem) => {
+  const handleDeleteUserMessage = useCallback(async (item: UserMessageItem) => {
     if (!isTranscriptItemVisibleNow(item, currentConversation?.id ?? null, selectedBranchTipId)) return;
     const nodeId = getTranscriptItemNodeId(item);
     if (!nodeId || !currentConversation?.id) return;
@@ -2668,134 +1768,6 @@ export default function ChatPage() {
     await deleteNode(nodeId);
     await refreshVisibleTranscriptSnapshot(currentConversation.id);
   }, [currentConversation?.id, deleteNode, refreshVisibleTranscriptSnapshot, selectedBranchTipId]);
-
-  // Legacy static coverage still keys off the historical marker:
-  // const handleApprovePlan = useCallback(async () => {
-  const handleApprovePlan = useCallback(async (item: TranscriptItem) => {
-    if (!isTranscriptItemVisibleNow(item, currentConversation?.id ?? null, selectedBranchTipId)) return;
-    const conversationId = item.conversation_id || currentConversation?.id;
-    const planId = item.plan_id || '';
-    const actionNodeId = getTranscriptItemNodeId(item) || selectedBranchTipId;
-    if (!conversationId) return;
-    if (!planId) return;
-    setPlanActionPending('approve');
-    setPlanError(null);
-    try {
-      setActivePlan((current) => {
-        if (!current) return current;
-        const currentPlanId = current.plan_id || current.id || '';
-        return currentPlanId === planId ? null : current;
-      });
-      const { currentReasoningEffort, currentThinkingEnabled } = useModelStore.getState();
-      setShouldAutoScroll(true);
-      await streamManager.startPlanApprovalStream(
-        conversationId,
-        planId,
-        {
-          reasoning_effort: currentReasoningEffort,
-          thinking_enabled: currentThinkingEnabled,
-        },
-        actionNodeId,
-      );
-      await scheduleConversationSync(conversationId, {
-        reason: 'plan-approved',
-        include: ['plan', 'transcript'],
-      });
-    } catch (error) {
-      console.error('Failed to approve plan:', error);
-      setPlanError('批准失败，请稍后重试');
-    } finally {
-      setPlanActionPending(null);
-    }
-  }, [currentConversation?.id, scheduleConversationSync, selectedBranchTipId]);
-
-  const handleRejectPlan = useCallback(async (item: TranscriptItem) => {
-    if (!isTranscriptItemVisibleNow(item, currentConversation?.id ?? null, selectedBranchTipId)) return;
-    const feedback = planRejectFeedback.trim() || '请修改计划。';
-    const conversationId = item.conversation_id || currentConversation?.id;
-    const planId = item.plan_id || '';
-    const actionNodeId = getTranscriptItemNodeId(item) || selectedBranchTipId;
-    if (!conversationId) return;
-    if (!planId) return;
-    setPlanActionPending('reject');
-    setPlanError(null);
-    try {
-      setActivePlan((current) => {
-        if (!current) return current;
-        const currentPlanId = current.plan_id || current.id || '';
-        return currentPlanId === planId ? null : current;
-      });
-      const { currentReasoningEffort, currentThinkingEnabled } = useModelStore.getState();
-      setShouldAutoScroll(true);
-      setPlanRejectFeedback('');
-      await streamManager.startPlanRejectStream(
-        conversationId,
-        planId,
-        {
-          feedback,
-          reasoning_effort: currentReasoningEffort,
-          thinking_enabled: currentThinkingEnabled,
-        },
-        actionNodeId,
-      );
-      await scheduleConversationSync(conversationId, {
-        reason: 'plan-rejected',
-        include: ['plan', 'transcript'],
-      });
-    } catch (error) {
-      console.error('Failed to reject plan:', error);
-      setPlanError('提交修改意见失败，请稍后重试');
-    } finally {
-      setPlanActionPending(null);
-    }
-  }, [currentConversation?.id, planRejectFeedback, scheduleConversationSync, selectedBranchTipId]);
-
-  const handleAnswerPlanQuestion = useCallback(async (item: TranscriptItem, answerOverride?: string) => {
-    if (!isTranscriptItemVisibleNow(item, currentConversation?.id ?? null, selectedBranchTipId)) return;
-    const answer = (answerOverride ?? '').trim();
-    if (!answer) return;
-    const conversationId = item.conversation_id || currentConversation?.id;
-    const planId = item.plan_id || '';
-    const actionNodeId = getTranscriptItemNodeId(item) || selectedBranchTipId;
-    if (!conversationId) return;
-    if (!planId) return;
-    setPlanActionPending('answer');
-    setPlanError(null);
-    try {
-      setActivePlan((current) => {
-        if (!current) return current;
-        const currentPlanId = current.plan_id || current.id || '';
-        return currentPlanId === planId
-          ? { ...current, status: 'active', question: { ...(current.question || {}), answer } }
-          : current;
-      });
-      const { currentReasoningEffort, currentThinkingEnabled } = useModelStore.getState();
-      setShouldAutoScroll(true);
-      void streamManager.startPlanAnswerStream(
-        conversationId,
-        planId,
-        answer,
-        {
-          reasoning_effort: currentReasoningEffort,
-          thinking_enabled: currentThinkingEnabled,
-        },
-        actionNodeId,
-      ).then(async () => {
-        await scheduleConversationSync(conversationId, {
-          reason: 'plan-question-answered',
-          include: ['plan', 'transcript'],
-        });
-      }).catch((error) => {
-        console.error('Failed to answer plan question:', error);
-        setPlanError('提交回答失败，请稍后重试');
-      });
-    } catch (error) {
-      console.error('Failed to answer plan question:', error);
-      setPlanError('提交回答失败，请稍后重试');
-    } finally {
-      setPlanActionPending(null);
-    }
-  }, [currentConversation?.id, scheduleConversationSync, selectedBranchTipId]);
 
   const handleStopStreaming = useCallback(() => {
     if (currentConversation?.id) {
@@ -2824,112 +1796,54 @@ export default function ChatPage() {
         });
         await scheduleConversationSync(conversationId, {
           reason: 'stop-streaming',
-          include: ['messages', 'branches', 'transcript', 'taskState'],
-          messageRetries: 1,
+          include: ['taskState'],
         });
       }
     })();
   }, [currentBranchStoppableRunIds, currentConversation?.id, scheduleConversationSync, selectedBranchTipId, updateQueuedMessages]);
 
   // 全局注册一次：任意对话的流结束（completed/error/stopped）时，
-  // 从后端刷新真实消息，再清理 StreamManager 中该对话的临时状态。
+  // 按 transcript patch 完成状态清理 StreamManager 中该对话的临时状态。
   // 不依赖当前查看的是哪个对话，因此切走的对话流完成也能正确落地。
   useEffect(() => {
-    const unsubscribe = streamManager.onFinish(async ({ conversationId: finishedId, runId, status, drained, nodeId, targetNodeId, controller }) => {
+    const unsubscribe = streamManager.onFinish(async ({ conversationId: finishedId, runId, drained, nodeId, targetNodeId, controller }) => {
       const finishedRun = streamManager.getConversationStates(finishedId).find((state) => state.runId === runId);
       const shouldPatchMainConversation = finishedRun ? shouldPatchRunIntoMainConversation(finishedRun) : true;
-      const streamMessage = shouldPatchMainConversation && finishedRun ? createAssistantMessageFromStream(finishedRun) : null;
-      const patchedAssistant = streamMessage
-        ? patchAssistantMessageFromStream(finishedId, streamMessage, finishedRun?.pendingUserMessage)
-        : false;
-      const awaitNodeId = shouldPatchMainConversation
-        ? targetNodeId ?? nodeId ?? streamMessage?.node_id ?? undefined
-        : undefined;
-      const hasQueuedFollowup = queuedMessagesRef.current.some((message) =>
-        message.conversationId === finishedId
-        && message.content.trim()
-      );
       void scheduleConversationSync(finishedId, {
         reason: 'stream-finished-task-state',
         include: ['taskState'],
       });
+      const needsTranscriptCalibration = shouldPatchMainConversation && !drained;
 
       if (!shouldPatchMainConversation || (!targetNodeId && !nodeId)) {
         if (!finishedRun || !shouldRenderRunDraft(finishedRun)) {
           streamManager.cleanupIfController(finishedId, controller, runId);
         }
-        const include: ConversationSyncInclude[] = ['conversations', 'transcript', 'plan', 'sideRuns'];
-        if (finishedId === currentConversationIdRef.current) include.push('tree');
+        const include = finishedId === currentConversationIdRef.current
+          ? ['conversations', 'tree'] as const
+          : ['conversations'] as const;
         await scheduleConversationSync(finishedId, {
           reason: 'stream-finished-non-main',
-          include,
+          include: [...include],
         });
-        const sentQueued = await sendNextQueuedMessage(finishedId);
-        if (shouldProbeBackendScheduledFollowup({ finishStatus: status, hasQueuedFollowup: sentQueued })) {
-          void syncBackendScheduledFollowup(finishedId);
-        }
+        await sendNextQueuedMessage(finishedId);
         return;
       }
 
-      if (patchedAssistant && !hasQueuedFollowup) {
-        streamManager.cleanupIfController(finishedId, controller, runId);
-        scheduleIdleTask(() => {
-          void (async () => {
-            await scheduleConversationSync(finishedId, {
-              reason: 'stream-finished-patched-idle',
-              include: ['messages', 'branches', 'transcript', 'conversations', 'plan', 'sideRuns'],
-              awaitNodeId,
-              messageRetries: drained ? 0 : 6,
-            });
-            if (shouldProbeBackendScheduledFollowup({ finishStatus: status, hasQueuedFollowup: false })) {
-              void syncBackendScheduledFollowup(finishedId);
-            }
-          })();
+      if (needsTranscriptCalibration) {
+        await scheduleConversationSync(finishedId, {
+          reason: 'stream-attach-calibration',
+          include: ['transcript'],
+          messageRetries: 0,
         });
-        return;
       }
-
-      // 完成判据：等待本轮节点(nodeId)的 assistant 消息落盘，而非“消息数 +1”。
-      // 对多消息轮次（未来工具轮次）同样稳健。nodeId 为空（停得太早还没拿到）时
-      // refreshMessages 退化为单次拉取。
-      // drained=true：后端在 [DONE] 前已保存，一次即可拿到最终结果。
-      // drained=false（硬 abort）：保存由连接断开触发，与刷新竞态，需轮询重试，
-      //   期间保留乐观气泡，避免“用户消息瞬间消失”。
-      const { messagesConfirmed: confirmed } = await scheduleConversationSync(finishedId, {
-        reason: 'stream-finished-main',
-        include: ['messages', 'branches', 'transcript', 'conversations', 'plan', 'sideRuns'],
-        awaitNodeId,
-        messageRetries: drained ? 0 : 6,
-      });
-      // 仅当确认真实消息已落地，才清理临时流状态（移除乐观气泡）。
-      // 身份校验：若 await 期间用户对同一对话发起了新流，controller 已被替换则跳过。
-      if (drained || confirmed) {
-        streamManager.cleanupIfController(finishedId, controller, runId);
-      } else {
-        // 硬 abort 且后端保存超过重试预算：保留乐观气泡，延后再确认一次，
-        // 成功后再清理，彻底避免用户消息闪失。
-        setTimeout(async () => {
-          await scheduleConversationSync(finishedId, {
-            reason: 'stream-finished-main-fallback',
-            include: ['messages', 'branches', 'transcript'],
-            awaitNodeId,
-            messageRetries: 6,
-          });
-          // 无论是否确认，这是最后兜底：清理临时状态，避免气泡永久残留。
-          streamManager.cleanupIfController(finishedId, controller, runId);
-        }, 800);
-      }
-      const sentQueued = await sendNextQueuedMessage(finishedId);
-      if (shouldProbeBackendScheduledFollowup({ finishStatus: status, hasQueuedFollowup: sentQueued })) {
-        void syncBackendScheduledFollowup(finishedId);
-      }
+      streamManager.cleanupIfController(finishedId, controller, runId);
+      await sendNextQueuedMessage(finishedId);
     });
     return unsubscribe;
   }, [
-    patchAssistantMessageFromStream,
     scheduleConversationSync,
     sendNextQueuedMessage,
-    syncBackendScheduledFollowup,
   ]);
 
   const shouldAutoScrollRef = useRef(shouldAutoScroll);
@@ -2946,12 +1860,6 @@ export default function ChatPage() {
       requestAnimationFrame(() => scrollToBottom(false));
     }
   }, [currentBranchHasPendingUserMessage, scrollToBottom]);
-
-  useEffect(() => {
-    if (pendingApprovalCount > 0) {
-      requestAnimationFrame(() => scrollToBottom(false));
-    }
-  }, [pendingApprovalCount, scrollToBottom]);
 
   useEffect(() => {
     loadConversations();
@@ -3005,6 +1913,21 @@ export default function ChatPage() {
         for (const item of activeStreams) {
           if (!item.conversation_id) continue;
           counts.set(item.conversation_id, (counts.get(item.conversation_id) ?? 0) + 1);
+          if (
+            item.done
+            || item.conversation_id !== currentConversationIdRef.current
+            || item.kind !== 'chat'
+            || (!item.run_id && !item.target_node_id && !item.node_id)
+          ) {
+            continue;
+          }
+          void streamManager.resumeStream(
+            item.conversation_id,
+            item.target_node_id ?? item.node_id,
+            item.run_id ?? undefined,
+            item.anchor_node_id ?? null,
+            item.kind ?? 'chat',
+          ).catch(() => {});
         }
         setBackendActiveStreamConversationCounts(counts);
         scheduleNextSync(activeStreams.filter((item) => !item.done).length);
@@ -3030,42 +1953,6 @@ export default function ChatPage() {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, []);
-
-  const currentBackendActiveStreamHintCount = currentConversation?.id
-    ? backendActiveStreamConversationCounts.get(currentConversation.id) ?? 0
-    : 0;
-
-  useEffect(() => {
-    const conversationId = currentConversation?.id;
-    if (!conversationId) {
-      return;
-    }
-
-    void activeStreamRecoveryCoordinatorRef.current?.probeConversation(conversationId, {
-      reason: 'active-stream-recovery',
-      attempts: getActiveStreamRecoveryAttemptLimit({
-        activeStreamHintCount: currentBackendActiveStreamHintCount,
-      }),
-      intervalMs: ACTIVE_STREAM_RECOVERY_INTERVAL_MS,
-    });
-  }, [currentBackendActiveStreamHintCount, currentConversation?.id, hiddenSideRunIds]);
-
-  useEffect(() => {
-    const conversationId = currentConversation?.id;
-    if (!conversationId) return;
-    void syncSelectedConversationSideRuns(conversationId).catch(() => {
-      // Side run history is best-effort UI state; active stream recovery above still handles live runs.
-    });
-  }, [currentConversation?.id, syncSelectedConversationSideRuns]);
-
-  useEffect(() => {
-    const conversationId = currentConversation?.id;
-    if (!conversationId) {
-      setActivePlan(null);
-      return;
-    }
-    void refreshActivePlan(conversationId);
-  }, [currentConversation?.id, refreshActivePlan]);
 
   const handleSelectConversation = async (id: string) => {
     if (currentConversation && historyRef.current) {
@@ -3099,12 +1986,12 @@ export default function ChatPage() {
       pendingScrollId.current = null;
       setShouldAutoScroll(true);
     }
-  }, [currentConversation, messages, scrollPositions]);
+  }, [currentConversation, transcriptItems, scrollPositions]);
 
   // 从树视图双击跳转：等待消息渲染后滚动到目标节点
   useEffect(() => {
     if (!pendingScrollNodeId || chatViewMode !== 'chat') return;
-    const idx = messages.findIndex((m) => m.node_id === pendingScrollNodeId);
+    const idx = transcriptItems.findIndex((item) => getTranscriptItemNodeId(item) === pendingScrollNodeId);
     if (idx === -1) return;
     const tryScroll = () => {
       const el = findTranscriptAnchorElement(historyRef.current, {
@@ -3119,18 +2006,19 @@ export default function ChatPage() {
       }
     };
     requestAnimationFrame(tryScroll);
-  }, [pendingScrollNodeId, messages, chatViewMode, clearPendingScroll]);
+  }, [pendingScrollNodeId, transcriptItems, chatViewMode, clearPendingScroll]);
 
   const handleExportMarkdown = () => {
-    if (!messages.length || !currentConversation) return;
+    if (!transcriptItems.length || !currentConversation) return;
     const title = currentConversation.title || '未命名对话';
     const lines: string[] = [];
     lines.push(`# ${title}`);
     lines.push('');
-    for (const m of messages.filter(shouldExportMessage)) {
-      const displayContent = m.role === 'user' ? getUserDisplayContent(m) : m.content;
-      const importFiles = m.role === 'user' ? getUserAttachmentNames(m) : [];
-      const roleLabel = m.role === 'user' ? '**User**' : '**Assistant**';
+    for (const item of transcriptItems) {
+      if (item.type !== 'user_message' && item.type !== 'assistant_answer') continue;
+      const displayContent = item.type === 'user_message' ? getUserDisplayContent(item) : item.content;
+      const importFiles = item.type === 'user_message' ? getUserAttachmentNames(item) : [];
+      const roleLabel = item.type === 'user_message' ? '**User**' : '**Assistant**';
       lines.push(`### ${roleLabel}`);
       lines.push('');
       for (const filename of importFiles) {
@@ -3195,7 +2083,9 @@ export default function ChatPage() {
     const conversationId = currentConversation.id;
     const mutation = importAssetMutationOwner.begin(conversationId, filename);
     importAssetPreviewCache.remove(conversationId, filename);
-    const isReferencedByHistory = messages.some((message) => messageReferencesAttachment(message, filename));
+    const isReferencedByHistory = transcriptItems.some((item) =>
+      item.type === 'user_message' && userMessageItemReferencesAttachment(item, filename)
+    );
     const isProtectedEditAttachment = editProtectedAttachmentNames.includes(filename);
     try {
       if (!isReferencedByHistory && !isProtectedEditAttachment) {
@@ -3360,7 +2250,7 @@ export default function ChatPage() {
     return { fileNames, cleanContent };
   };
 
-  const getUserImportFileNames = (message: typeof messages[0]): string[] => {
+  const getUserImportFileNames = (message: UserMessageItem): string[] => {
     const structured = (message.import_files ?? [])
       .map((file) => file.filename)
       .filter(Boolean);
@@ -3368,28 +2258,26 @@ export default function ChatPage() {
     return parseFileMention(message.content)?.fileNames ?? [];
   };
 
-  const getUserImageRefs = (message: typeof messages[0]): Array<{ filename: string; mime_type?: string }> => {
+  const getUserImageRefs = (message: UserMessageItem): Array<{ filename: string; mime_type?: string }> => {
     return (message.image_refs ?? [])
-      .filter((file) => Boolean(file.filename));
+      .filter((file) => Boolean(file.filename))
+      .map((file) => ({ filename: file.filename, mime_type: file.mime_type ?? undefined }));
   };
 
-  const getUserAttachmentNames = (message: typeof messages[0]): string[] => {
+  const getUserAttachmentNames = (message: UserMessageItem): string[] => {
     return [
       ...getUserImportFileNames(message),
       ...getUserImageRefs(message).map(file => file.filename),
     ];
   };
 
-  const getUserDisplayContent = (message: typeof messages[0]): string => {
+  const getUserDisplayContent = (message: UserMessageItem): string => {
     return parseFileMention(message.content)?.cleanContent ?? message.content;
   };
 
-  const isCompactSummaryMessage = (message: typeof messages[0]) =>
-    message.is_compact_summary === true;
-
-  const outline = messages
-    .map((m, index) => ({ ...m, originalIndex: index }))
-    .filter((m) => m.role === 'user' && !isCompactSummaryMessage(m) && !isTaskNotificationMessage(m))
+  const outline = transcriptItems
+    .map((item, index) => ({ ...item, originalIndex: index }))
+    .filter((item): item is UserMessageItem & { originalIndex: number } => item.type === 'user_message')
     .map((m) => {
       const clean = getUserDisplayContent(m);
       return {
@@ -3400,28 +2288,6 @@ export default function ChatPage() {
       };
     });
 
-  const renderAssistantTimelineBlock = (block: AssistantTimelineBlock) => {
-    if (block.type === 'reasoning') {
-      return <ThinkingBlock key={block.key} reasoning={block.reasoning} />;
-    }
-    if (block.type === 'tools') {
-      return <ToolCallGroup key={block.key} items={block.items} />;
-    }
-    return (
-      <div
-        key={block.key}
-        className="max-w-full w-full min-w-0 px-3 py-2 rounded-2xl leading-relaxed prose prose-sm max-w-none [&_p]:m-0 [&_p:not(:last-child)]:mb-2"
-        style={{
-          color: 'var(--fg-secondary)',
-          fontSize: 'var(--codex-chat-font-size)',
-          lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
-        }}
-      >
-        <MarkdownView content={block.content} enableMermaid />
-      </div>
-    );
-  };
-
   const renderTranscriptItem = (item: TranscriptItem, defaultItem: React.ReactNode) => {
     const nodeId = getTranscriptItemNodeId(item);
     return (
@@ -3429,7 +2295,7 @@ export default function ChatPage() {
         role="presentation"
         className="w-full"
         data-transcript-item-id={item.id}
-        data-transcript-message-id={item.message_id || undefined}
+        data-transcript-message-id={getTranscriptItemMessageId(item) || undefined}
         data-transcript-node-id={nodeId || undefined}
       >
         {defaultItem}
@@ -3627,111 +2493,6 @@ export default function ChatPage() {
     </div>
   );
 
-  const renderTaskNotificationList = () => (
-    <section className="flex flex-col gap-2">
-      <div className="px-1 text-xs font-semibold" style={{ color: 'var(--fg-tertiary)' }}>
-        通知
-      </div>
-      {visibleTaskNotifications.map((notification) => {
-        const isSelected = selectedTaskNotificationId === notification.id || selectedSideRunId === notification.source_run_id;
-        const bindDisabled = notification.status === 'delivering' || !liveSelectedBranchTipId;
-        return (
-        <div
-          key={notification.id}
-          role="button"
-          tabIndex={0}
-          aria-current={isSelected ? 'true' : undefined}
-          className={cn('app-run-list-row px-3 py-2 text-left', isSelected && 'is-active')}
-          onClick={() => {
-            void handleInspectTaskNotification(notification);
-          }}
-          onKeyDown={(event) => {
-            if (event.key !== 'Enter' && event.key !== ' ') return;
-            event.preventDefault();
-            void handleInspectTaskNotification(notification);
-          }}
-        >
-          <div className="flex min-w-0 items-start gap-2">
-            <Bell className="mt-0.5 h-3.5 w-3.5 shrink-0" style={{ color: 'var(--icon-accent)' }} />
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-sm font-semibold" style={{ color: 'var(--fg-secondary)' }}>
-                {notification.summary || `${notification.source_run_kind} ${notification.status}`}
-              </div>
-              <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs" style={{ color: 'var(--fg-tertiary)' }}>
-                <span>{notification.status}</span>
-                <span>·</span>
-                <span className="truncate">{notification.source_run_id.slice(0, 12)}</span>
-                {isSelected && (
-                  <>
-                    <span>·</span>
-                    <span>查看中</span>
-                  </>
-                )}
-              </div>
-            </div>
-            <div className="flex shrink-0 items-center gap-1">
-              <TextTooltip content="查看运行详情">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-xs"
-                  className={cn('app-run-action-button', isSelected && 'is-active')}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    void handleInspectTaskNotification(notification);
-                  }}
-                  aria-label="查看运行详情"
-                  aria-pressed={isSelected}
-                >
-                  <FileText className="h-3.5 w-3.5" />
-                </Button>
-              </TextTooltip>
-              <TextTooltip content={
-                notification.status === 'delivering'
-                  ? '通知正在投递'
-                  : bindDisabled
-                    ? '选择一个当前分支后可绑定'
-                    : '绑定到当前分支并触发'
-              }>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-xs"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    if (bindDisabled) return;
-                    void handleBindTaskNotification(notification.id);
-                  }}
-                  aria-label="绑定并触发"
-                  aria-disabled={bindDisabled}
-                  className={cn('app-run-action-button', bindDisabled && 'opacity-50')}
-                >
-                  <MessageSquare className="h-3.5 w-3.5" />
-                </Button>
-              </TextTooltip>
-              <TextTooltip content="删除">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-xs"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    void handleDeleteTaskNotification(notification.id);
-                  }}
-                  aria-label="删除通知"
-                  className="app-run-action-button"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </Button>
-              </TextTooltip>
-            </div>
-          </div>
-        </div>
-        );
-      })}
-    </section>
-  );
-
   const renderCommandRunBody = (run: StreamState) => {
     const shell = run.metadata?.shell && typeof run.metadata.shell === 'object'
       ? run.metadata.shell as Record<string, unknown>
@@ -3808,55 +2569,18 @@ export default function ChatPage() {
       {draft.run.kind === 'command' && renderCommandRunBody(draft.run)}
       {draft.showStreamBlock && draft.run.kind !== 'command' && (
         <div className="min-w-0">
-          {draft.streamingFoldState.canFoldProcess ? (
-            <>
-              <div className="processed-fold expanded">
-                <div className="processed-fold-button" aria-expanded="true">
-                  <span>{draft.run.duration > 0 ? `已处理 ${formatProcessedDuration(draft.run.duration) ?? ''}`.trim() : '已处理'}</span>
-                  <ChevronRight className="processed-fold-chevron" />
-                </div>
-              </div>
-              <AnimatedProcessedBlocks
-                expanded
-                blocks={draft.streamingFoldState.visibleBlocks}
-                renderBlock={(block) => {
-                  if (block.type === 'reasoning') {
-                    return (
-                      <ThinkingBlock
-                        key={block.key}
-                        reasoning={block.reasoning}
-                        streaming={block.key === draft.activeReasoningKey}
-                      />
-                    );
-                  }
-                  if (block.type === 'tools') {
-                    return <ToolCallGroup key={block.key} items={block.items} />;
-                  }
-                  return renderAssistantTimelineBlock(block);
-                }}
-              />
-            </>
-          ) : (
-            draft.timeline.map((block, blockIndex) => {
-              if (block.type === 'reasoning') {
-                const reasoningStillOpen = blockIndex === draft.activeReasoningIndex;
-                return <ThinkingBlock key={block.key} reasoning={block.reasoning} streaming={reasoningStillOpen} />;
-              }
-              if (block.type === 'tools') {
-                return <ToolCallGroup key={block.key} items={block.items} />;
-              }
-              return (
-                <div
-                  key={block.key}
-                  className="max-w-full min-w-0 rounded-lg px-3 py-2 text-sm leading-relaxed prose prose-sm max-w-none [&_p]:m-0"
-                  style={{ color: 'var(--fg-secondary)' }}
-                >
-                  <MarkdownView content={block.content} />
-                </div>
-              );
-            })
+          {draft.run.reasoning && (
+            <ThinkingBlock reasoning={draft.run.reasoning} streaming={draft.run.status === 'streaming' && draft.run.reasoningActive} />
           )}
-          {!draft.streamingFoldState.canFoldProcess && draft.timeline.length === 0 && draft.run.status === 'streaming' && (
+          {draft.run.content && (
+            <div
+              className="max-w-full min-w-0 rounded-lg px-3 py-2 text-sm leading-relaxed prose prose-sm max-w-none [&_p]:m-0"
+              style={{ color: 'var(--fg-secondary)' }}
+            >
+              <MarkdownView content={draft.run.content} />
+            </div>
+          )}
+          {!draft.run.reasoning && !draft.run.content && draft.run.status === 'streaming' && (
             <div className="flex items-center gap-2 px-3 py-2 text-sm" style={{ color: 'var(--fg-tertiary)' }}>
               <Loader2 className="h-4 w-4 animate-spin" style={{ color: 'var(--icon-accent)' }} />
               <span>运行中...</span>
@@ -4158,7 +2882,7 @@ export default function ChatPage() {
                 size="sm"
                 className="h-8 w-8 p-0"
                 onClick={handleExportMarkdown}
-                disabled={!messages.length}
+                disabled={!transcriptItems.length}
                 aria-label="导出为 Markdown"
               >
                 <Download className="h-4 w-4" />
@@ -4169,7 +2893,7 @@ export default function ChatPage() {
 
         {/* Chat view */}
         {chatViewMode === 'chat' && (
-          !currentConversation && messages.length === 0 ? (
+          !currentConversation && transcriptItems.length === 0 ? (
             <div className="new-chat-stage">
               <div className="new-chat-center">
                 <h1 className="new-chat-title">{`我们应该在 ${newChatProjectLabel} 中做些什么？`}</h1>
@@ -4223,14 +2947,18 @@ export default function ChatPage() {
                     items={displayTranscriptItems}
                     isLoading={transcriptLoading}
                     transcriptError={transcriptError}
-                    onApprovePlan={handleApprovePlan}
-                    onRejectPlan={handleRejectPlan}
-                    onAnswerPlanQuestion={handleAnswerPlanQuestion}
                     onCopyItem={handleCopyTranscriptItem}
                     onEditUserMessage={handleEditUserMessage}
                     onDeleteUserMessage={handleDeleteUserMessage}
+                    onApprovePlan={handleApprovePlan}
+                    onRejectPlan={handleRejectPlan}
+                    onAnswerPlanQuestion={handleAnswerPlanQuestion}
+                    onApproveTool={handleApproveTool}
+                    onRejectTool={handleRejectTool}
                     planActionPending={planActionPending}
                     planError={planError}
+                    toolApprovalPending={toolApprovalPending}
+                    toolApprovalError={toolApprovalError}
                     renderItem={renderTranscriptItem}
                   />
                   <div ref={messagesEndRef} />
@@ -4270,8 +2998,6 @@ export default function ChatPage() {
                   onToolPermissionDraftChange={updateToolPermissionDraft}
                   pendingMultiAgentMode={newConversationMultiAgentMode}
                   onPendingMultiAgentModeChange={setNewConversationMultiAgentMode}
-                  pendingToolApprovals={pendingToolApprovalPrompts}
-                  onToolApprovalDecision={handleToolApprovalDecision}
                 />
               </footer>
             </>
@@ -4417,7 +3143,6 @@ export default function ChatPage() {
                           ? parentRun.runId
                           : null;
                         setSelectedSideRunId(nextRunId);
-                        if (!nextRunId) setSelectedTaskNotificationId(null);
                       }}
                     >
                       <ArrowLeft className="h-3.5 w-3.5" />
@@ -4446,7 +3171,6 @@ export default function ChatPage() {
                       暂无运行任务。
                     </div>
                   )}
-                  {visibleTaskNotifications.length > 0 && renderTaskNotificationList()}
                   {sideRunGroups.map((group) => (
                     <section key={group.kind} className="flex flex-col gap-2">
                       <div className="px-1 text-xs font-semibold" style={{ color: 'var(--fg-tertiary)' }}>

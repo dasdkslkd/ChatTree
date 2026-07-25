@@ -45,8 +45,7 @@ function snapshot(version, overrides = {}) {
   return {
     conversation_id: 'conv-1',
     task: null,
-    notifications: [],
-    flags: { running: false, delivering: false, needsFollowup: false },
+    flags: { running: false },
     version,
     ...overrides,
   };
@@ -80,8 +79,7 @@ async function testFreshFetchNormalizesAndStoresResponseEtag() {
   assert.deepEqual(result, {
     conversation_id: 'conv-2',
     task: null,
-    notifications: [],
-    flags: { running: true, delivering: false, needsFollowup: false },
+    flags: { running: true },
     version: '',
   });
 
@@ -89,41 +87,9 @@ async function testFreshFetchNormalizesAndStoresResponseEtag() {
   assert.equal(await taskStateApi.fetch('conv-2'), result);
 }
 
-async function testBindAndDeleteUseExplicitMutationRoutesAndCacheResult() {
-  requests.length = 0;
-  postHandler = async (url) => ({
-    status: 200,
-    data: snapshot(url.endsWith('/bind') ? 'bound' : 'deleted'),
-    headers: { etag: url.endsWith('/bind') ? '"bound"' : '"deleted"' },
-  });
-
-  assert.equal(
-    (await taskStateApi.bind('conv-1', 'notification/1', 'node-1', {
-      trigger: false,
-    })).version,
-    'bound',
-  );
-  assert.deepEqual(requests[0], {
-    method: 'POST',
-    url: '/task-notifications/notification%2F1/bind',
-    data: { delivery_node_id: 'node-1', trigger: false },
-  });
-
-  assert.equal(
-    (await taskStateApi.delete('conv-1', 'notification/1')).version,
-    'deleted',
-  );
-  assert.deepEqual(requests[1], {
-    method: 'POST',
-    url: '/task-notifications/notification%2F1/delete',
-    data: {},
-  });
-}
-
 (async () => {
   await testFetchUsesEtagAndReusesCachedSnapshotOn304();
   await testFreshFetchNormalizesAndStoresResponseEtag();
-  await testBindAndDeleteUseExplicitMutationRoutesAndCacheResult();
   console.log('taskStateApi tests passed');
 })().catch((error) => {
   console.error(error);

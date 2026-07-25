@@ -39,12 +39,11 @@ from backend.core.persistence import (
     SQLitePlanRepository,
     SQLiteRunRepository,
     SQLiteTaskRepository,
-    SQLiteTaskNotificationRepository,
-    TranscriptProjection,
 )
+from backend.core.transcript import TranscriptAssembler
 from backend.core.tasks import ActiveTaskService
-from backend.core.workflows import WorkflowManager
 from backend.core.notifications import TaskNotificationService
+from backend.core.workflows import WorkflowManager
 from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
 from backend.core.tools.orchestrator import ToolOrchestrator
@@ -55,7 +54,6 @@ from backend.core.tools.security.approval import ApprovalManager
 from backend.core.tools.security.logical_sandbox import LogicalSandbox
 from backend.core.tools.security.permissions import PermissionEngine
 from backend.core.tools.tool_manager import ToolManager
-from backend.core.storage.tool_result_storage import ToolResultStorage
 from backend.core.command_runtime import CommandExecutor
 from backend.core.perf import configure_profiler, get_profiler, load_perf_config
 from backend.core.server import (
@@ -282,11 +280,10 @@ async def _initialize_server() -> None:
     server_identity_store = ServerIdentityStore(persistence)
     server_identity = server_identity_store.get_or_create()
     chat_repository = ChatRepository(persistence)
-    transcript_projection = TranscriptProjection(persistence)
+    transcript_assembler = TranscriptAssembler(persistence)
     plan_repository = SQLitePlanRepository(persistence)
     task_repository = SQLiteTaskRepository(persistence)
     run_repository = SQLiteRunRepository(persistence, task_repository=task_repository)
-    task_notification_repository = SQLiteTaskNotificationRepository(persistence)
     capability_registry = build_capability_registry(PROJECT_ROOT, config_manager.data)
     runtime_config = build_runtime_config_with_plugin_mcp(
         config_manager.data,
@@ -296,11 +293,7 @@ async def _initialize_server() -> None:
     model_manager = ModelManager()
     chat_storage = ChatStorage(str(persistence.home / "conversations"))
     prompt_storage = PromptStorage(str(persistence.home / "prompts"))
-    tool_result_store = ToolResultStorage(
-        str(persistence.home / "tool_results"),
-        sqlite_repository=chat_repository,
-    )
-    tool_manager = ToolManager(runtime_config, tool_result_store=tool_result_store)
+    tool_manager = ToolManager(runtime_config, chat_repository=chat_repository)
     app.state.tool_manager = tool_manager
     await tool_manager.init()
     approval_manager = ApprovalManager()
@@ -312,13 +305,14 @@ async def _initialize_server() -> None:
     app.state.run_start_coordinator = run_start_coordinator
     plan_ledger = PlanLedger(repository=plan_repository)
     task_service = ActiveTaskService(repository=task_repository)
+    task_notification_service = TaskNotificationService(persistence)
     run_manager.task_service = task_service
+    run_manager.add_finish_listener(task_notification_service.create_from_finished_run)
     task_service.run_manager = run_manager
     command_executor = CommandExecutor(run_manager, task_service=task_service)
     app.state.command_executor = command_executor
     tool_manager.command_executor = command_executor
     agent_mailbox = AgentMailbox()
-    run_manager.agent_mailbox = agent_mailbox
     logical_sandbox = LogicalSandbox.for_config(runtime_config, Path.cwd())
     tool_orchestrator = ToolOrchestrator(
         tool_manager=tool_manager,
@@ -334,7 +328,6 @@ async def _initialize_server() -> None:
         task_service=task_service,
         plan_ledger=plan_ledger,
         chat_repository=chat_repository,
-        transcript_projection=transcript_projection,
     )
     chat_manager.plan_ledger = plan_ledger
     chat_manager.capability_registry = capability_registry
@@ -363,14 +356,6 @@ async def _initialize_server() -> None:
         task_service=task_service,
     )
     workflow_manager.agent_runtime = agent_runtime
-    task_notification_service = TaskNotificationService(
-        repository=task_notification_repository,
-        run_manager=run_manager,
-        chat_manager=chat_manager,
-        producer_registry=producer_registry,
-    )
-    run_manager.notification_service = task_notification_service
-    run_manager.add_finish_listener(task_notification_service.handle_run_finished)
     register_agent_management_tools(
         tool_manager,
         agent_runtime=agent_runtime,
@@ -379,17 +364,15 @@ async def _initialize_server() -> None:
     )
     register_plan_tools(tool_manager, plan_ledger)
     register_task_tools(tool_manager, task_service)
-    await task_notification_service.reconcile_terminal_publications()
     app.state.persistence = persistence
     app.state.server_identity_store = server_identity_store
     app.state.server_identity = server_identity
     app.state.chat_repository = chat_repository
-    app.state.transcript_projection = transcript_projection
+    app.state.transcript_assembler = transcript_assembler
     app.state.run_repository = run_repository
     app.state.interrupted_run_ids = interrupted_run_ids
     app.state.plan_repository = plan_repository
     app.state.task_repository = task_repository
-    app.state.task_notification_repository = task_notification_repository
     app.state.config_manager = config_manager
     app.state.perf_profiler = perf_profiler
     app.state.project_root = PROJECT_ROOT
@@ -402,6 +385,7 @@ async def _initialize_server() -> None:
     app.state.run_start_coordinator = run_start_coordinator
     app.state.plan_ledger = plan_ledger
     app.state.task_service = task_service
+    app.state.task_notification_service = task_notification_service
     app.state.command_executor = command_executor
     app.state.agent_mailbox = agent_mailbox
     app.state.agent_runtime = agent_runtime
@@ -409,7 +393,6 @@ async def _initialize_server() -> None:
     app.state.chat_manager = chat_manager
     app.state.subagent_executor = subagent_executor
     app.state.workflow_manager = workflow_manager
-    app.state.task_notification_service = task_notification_service
 
 
 @app.on_event("startup")

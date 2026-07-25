@@ -31,7 +31,7 @@ function deferred() {
 function snapshot(conversationId, tipNodeId, revision = 1) {
   return {
     conversation_id: conversationId,
-    tip_node_id: tipNodeId,
+    node_id: tipNodeId,
     revision,
     items: [],
   };
@@ -111,7 +111,7 @@ async function testNewTargetAbortsOldAndOnlyLatestCanCommit() {
   await Promise.all([first, second]);
 
   assert.deepEqual(
-    state.snapshots.map((item) => item.tip_node_id),
+    state.snapshots.map((item) => item.node_id),
     ['node-2'],
   );
 }

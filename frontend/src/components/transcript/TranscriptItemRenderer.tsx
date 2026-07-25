@@ -1,14 +1,11 @@
-import { AlertCircle } from 'lucide-react';
-import type { TranscriptActionHandlers, TranscriptItem } from '../../types/transcript';
+import { AlertCircle, Loader2, RotateCw, Square } from 'lucide-react';
+import type { RunStatusItem, TranscriptActionHandlers, TranscriptItem } from '../../types/transcript';
 import { AssistantAnswerItem } from './items/AssistantAnswerItem';
 import { AssistantProcessItem } from './items/AssistantProcessItem';
-import { CompactItem } from './items/CompactItems';
-import { PlanCardItem } from './items/PlanCardItem';
-import { RunDraftItem } from './items/RunDraftItem';
-import { SideRunNotificationItem } from './items/SideRunNotificationItem';
-import { TaskNotificationItem } from './items/TaskNotificationItem';
-import { TaskProgressItem } from './items/TaskProgressItem';
-import { ToolGroupItem } from './items/ToolGroupItem';
+import { PlanApprovalCard } from './items/PlanApprovalCard';
+import { PlanQuestionCard } from './items/PlanQuestionCard';
+import { TaskNotificationCard } from './items/TaskNotificationCard';
+import { ToolApprovalCard } from './items/ToolApprovalCard';
 import { UserMessageItem } from './items/UserMessageItem';
 
 interface TranscriptItemRendererProps extends TranscriptActionHandlers {
@@ -27,7 +24,39 @@ function UnknownTranscriptItem({ item }: { item: TranscriptItem }) {
         }}
       >
         <AlertCircle className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--icon-accent)' }} />
-        <span className="min-w-0 truncate">无法显示的 transcript 项：{item.item_type || item.type || 'unknown'}</span>
+        <span className="min-w-0 truncate">无法显示的 transcript 项：{item.type || 'unknown'}</span>
+      </div>
+    </div>
+  );
+}
+
+function RunStatusTranscriptItem({ item }: { item: RunStatusItem }) {
+  const label = (() => {
+    if (item.status === 'stopping') return '正在停止';
+    if (item.status === 'stopped') return '已停止';
+    if (item.status === 'error') return '出错';
+    if (item.status === 'reconnecting') return '重新连接中';
+    return '运行中';
+  })();
+  const Icon = item.status === 'stopping'
+    ? Loader2
+    : item.status === 'error'
+      ? AlertCircle
+      : item.status === 'running' || item.status === 'reconnecting'
+        ? RotateCw
+        : Square;
+  return (
+    <div className="transcript-run-status w-full my-2 flex flex-col items-start" role="listitem">
+      <div
+        className="flex max-w-[760px] min-w-0 items-center gap-2 rounded-md px-2.5 py-1.5 text-xs"
+        style={{
+          border: '0.5px solid var(--border)',
+          background: 'var(--bg-secondary)',
+          color: item.status === 'error' ? 'var(--destructive)' : 'var(--fg-tertiary)',
+        }}
+      >
+        <Icon className={`h-3.5 w-3.5 shrink-0 ${item.status === 'running' || item.status === 'stopping' || item.status === 'reconnecting' ? 'animate-spin' : ''}`} />
+        <span className="min-w-0 truncate">{item.message || label}</span>
       </div>
     </div>
   );
@@ -38,11 +67,15 @@ export function TranscriptItemRenderer({
   onApprovePlan,
   onRejectPlan,
   onAnswerPlanQuestion,
+  onApproveTool,
+  onRejectTool,
   onCopyItem,
   onEditUserMessage,
   onDeleteUserMessage,
   planActionPending,
   planError,
+  toolApprovalPending,
+  toolApprovalError,
 }: TranscriptItemRendererProps) {
   switch (item.type) {
     case 'user_message':
@@ -57,31 +90,44 @@ export function TranscriptItemRenderer({
     case 'assistant_answer':
       return <AssistantAnswerItem item={item} onCopy={onCopyItem} />;
     case 'assistant_process':
-      return <AssistantProcessItem item={item} />;
-    case 'tool_group':
-      return <ToolGroupItem item={item} />;
-    case 'plan_card':
       return (
-        <PlanCardItem
+        <AssistantProcessItem item={item} />
+      );
+    case 'plan_question':
+      return (
+        <PlanQuestionCard
           item={item}
-          onApprovePlan={onApprovePlan}
-          onRejectPlan={onRejectPlan}
           onAnswerPlanQuestion={onAnswerPlanQuestion}
           planActionPending={planActionPending}
           planError={planError}
         />
       );
+    case 'plan_approval':
+      return (
+        <PlanApprovalCard
+          item={item}
+          onApprovePlan={onApprovePlan}
+          onRejectPlan={onRejectPlan}
+          planActionPending={planActionPending}
+          planError={planError}
+        />
+      );
+    case 'tool_approval':
+      return (
+        <ToolApprovalCard
+          item={item}
+          onApproveTool={onApproveTool}
+          onRejectTool={onRejectTool}
+          toolApprovalPending={toolApprovalPending}
+          toolApprovalError={toolApprovalError}
+        />
+      );
     case 'task_notification':
-      return <TaskNotificationItem item={item} />;
-    case 'task_progress':
-      return <TaskProgressItem item={item} />;
-    case 'run_draft':
-      return <RunDraftItem item={item} />;
-    case 'side_run_notification':
-      return <SideRunNotificationItem item={item} />;
-    case 'compact_boundary':
-    case 'compact_summary':
-      return <CompactItem item={item} />;
+      return <TaskNotificationCard item={item} />;
+    case 'compact':
+      return null;
+    case 'run_status':
+      return <RunStatusTranscriptItem item={item} />;
     default:
       return <UnknownTranscriptItem item={item} />;
   }

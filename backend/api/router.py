@@ -36,7 +36,7 @@ _BUSINESS_ROUTERS = (
     (runs.router, ["运行"]),
     (plans.router, ["计划"]),
     (tasks.router, ["任务"]),
-    (notifications.router, ["Task Notification"]),
+    (notifications.router, ["任务通知"]),
     (perf.router, ["Performance"]),
     (slash.router, ["Slash"]),
     (agents.router, ["Agent"]),

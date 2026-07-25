@@ -4,9 +4,7 @@ export type ConversationSyncInclude =
   | 'transcript'
   | 'conversations'
   | 'tree'
-  | 'taskState'
-  | 'plan'
-  | 'sideRuns';
+  | 'taskState';
 
 export type MessageRefreshOptions = {
   awaitNodeId?: string;
@@ -33,8 +31,6 @@ export type ConversationSyncOperations = {
   loadConversations: () => Promise<void>;
   loadTree: (conversationId: string) => Promise<void>;
   refreshTaskState: (conversationId: string) => Promise<unknown>;
-  refreshActivePlan: (conversationId: string) => Promise<unknown>;
-  syncSideRuns: (conversationId: string) => Promise<void>;
 };
 
 type Waiter = {
@@ -201,13 +197,6 @@ export class ConversationSyncCoordinator {
     if (pending.include.has('taskState')) {
       await runBestEffort(() => operations.refreshTaskState(conversationId));
     }
-    if (pending.include.has('plan')) {
-      await runBestEffort(() => operations.refreshActivePlan(conversationId));
-    }
-    if (pending.include.has('sideRuns')) {
-      await runBestEffort(() => operations.syncSideRuns(conversationId));
-    }
-
     return { messagesConfirmed };
   }
 }

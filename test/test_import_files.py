@@ -16,7 +16,6 @@ from starlette.datastructures import Headers, UploadFile
 from backend.api.routes.conversations import read_import_file, upload_import_file
 from backend.core.chat.chat_manager import ChatManager
 from backend.core.config.types import Message, Role
-from backend.core.chat.node import NodeManager
 from backend.core.model.providers.anthropic_provider import AnthropicProvider
 from backend.core.model.providers.gemini_provider import GeminiProvider
 from backend.core.model.providers.openai_compatible import OpenAICompatibleProvider
@@ -76,20 +75,27 @@ def test_image_references_are_injected_as_multimodal_user_content():
         conv = manager.create_conversation("image references")
         storage.save_import_file(conv.metadata["id"], "diagram.png", b"\x89PNG\r\n\x1a\n")
 
-        node = NodeManager.create_node(
-            Message({
-                "id": "user-with-image",
-                "role": Role.USER,
-                "content": "看看这张图",
-                "image_refs": [{"filename": "diagram.png", "mime_type": "image/png"}],
-                "timestamp": int(time()),
-            }),
-            conv.current_node_id,
-            "fake-model",
+        current_node_id = asyncio.run(
+            manager.create_visible_user_anchor_node(
+                conversation_id=conv.metadata["id"],
+                content="看看这张图",
+                parent_node_id=conv.current_node_id,
+                model_id="fake-model",
+                slash_metadata=None,
+            )
         )
-        conv.add_node(node, conv.current_node_id)
+        user_messages = manager._canonical_messages_by_node(conv.metadata["id"], [current_node_id])[current_node_id]
+        user_message_id = next(message["id"] for message in user_messages if message.get("role") == "user")
+        manager.chat_repository.add_message(
+            conv.metadata["id"],
+            current_node_id,
+            role="user",
+            content="看看这张图",
+            metadata={"image_refs": [{"filename": "diagram.png", "mime_type": "image/png"}]},
+            message_id=user_message_id,
+        )
 
-        messages = manager._prepare_messages_for_api_with_conversation(conv)
+        messages = manager._prepare_messages_for_api_with_conversation(manager.get_conversation(conv.metadata["id"]))
 
         assert messages[-1]["role"] == "user"
         assert messages[-1]["content"][0] == {"type": "text", "text": "看看这张图"}

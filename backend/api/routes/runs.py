@@ -2,15 +2,24 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from backend.api.dependencies import get_chat_manager, get_run_manager, get_subagent_executor, get_command_executor, get_workflow_manager
+from backend.api.dependencies import (
+    get_chat_manager,
+    get_command_executor,
+    get_run_manager,
+    get_subagent_executor,
+    get_transcript_assembler,
+    get_workflow_manager,
+)
 from backend.core.agents import SubagentExecutor
 from backend.core.chat.chat_manager import ChatManager
 from backend.core.perf import get_profiler
-from backend.core.runs import RunManager, RunNotFoundError
+from backend.core.runs import RunManager
+from backend.core.runs.types import FINISHED_RUN_STATUSES
 from backend.core.runs.public import public_run_dict
+from backend.core.transcript import TranscriptAssembler
 from backend.core.workflows import WorkflowManager
 from .run_control import stop_run_tree
 
@@ -24,17 +33,52 @@ def _format_sse_data(payload: Dict[str, Any] | str) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-async def _subscribe_sse(run_manager: RunManager, run_id: str, from_event: int = 0):
+async def _subscribe_sse(
+    run_manager: RunManager,
+    transcript_assembler: TranscriptAssembler,
+    run_id: str,
+    from_event: int = 0,
+):
     profiler = get_profiler()
     emitted = 0
     first_event = True
+    patch_session = transcript_assembler.patch_session(run_id)
+    run = run_manager.get_run(run_id)
+    finished_status_values = {status.value for status in FINISHED_RUN_STATUSES}
+    finished = bool(run and run.get("status") in finished_status_values)
+    for payload in run_manager.read_events(run_id, 0):
+        if int(payload.get("event_index") or 0) >= max(0, int(from_event or 0)):
+            break
+        patch_session.feed(payload, emit=False)
+    if finished:
+        for payload in run_manager.read_events(run_id, from_event):
+            patch = patch_session.feed(payload)
+            if patch is None:
+                continue
+            emitted += 1
+            yield _format_sse_data(patch)
+        profiler.mark("sse.done", run_id=run_id, route="runs", emitted_events=emitted)
+        yield _format_sse_data("[DONE]")
+        return
     with profiler.span("sse.subscribe", run_id=run_id, from_event=from_event, route="runs"):
         async for payload in run_manager.subscribe(run_id, from_event):
             if first_event:
                 profiler.mark("sse.first_event", run_id=run_id, route="runs")
                 first_event = False
+            patch = patch_session.feed(payload)
+            if patch is None:
+                continue
             emitted += 1
-            yield _format_sse_data(payload)
+            yield _format_sse_data(patch)
+    if first_event:
+        run = run_manager.get_run(run_id)
+        if run and run.get("status") in finished_status_values:
+            for payload in run_manager.read_events(run_id, from_event):
+                patch = patch_session.feed(payload)
+                if patch is None:
+                    continue
+                emitted += 1
+                yield _format_sse_data(patch)
     profiler.mark("sse.done", run_id=run_id, route="runs", emitted_events=emitted)
     yield _format_sse_data("[DONE]")
 
@@ -44,7 +88,16 @@ async def list_active_runs(
     conversation_id: Optional[str] = None,
     run_manager: RunManager = Depends(get_run_manager),
 ):
-    return [public_run_dict(run) for run in run_manager.list_active(conversation_id)]
+    runs = []
+    for run in run_manager.list_active(conversation_id):
+        item = public_run_dict(run)
+        run_id = item.get("run_id")
+        item["node_id"] = item.get("target_node_id")
+        item["done"] = False
+        if run_id:
+            item["stream_url"] = f"/api/v1/runs/{run_id}/events"
+        runs.append(item)
+    return runs
 
 
 @router.get("/conversations/{conversation_id}/runs", response_model=List[Dict[str, Any]])
@@ -66,16 +119,19 @@ async def get_run(
     return public_run_dict(run)
 
 
-@router.get("/runs/{run_id}/attach")
-async def attach_run(
+@router.get("/runs/{run_id}/events")
+async def stream_run_events(
+    request: Request,
     run_id: str,
     from_event: int = 0,
     run_manager: RunManager = Depends(get_run_manager),
 ):
-    if not run_manager.get_run(run_id):
+    run = run_manager.get_run(run_id)
+    if not run:
         raise HTTPException(status_code=404, detail="运行不存在")
+    transcript_assembler = get_transcript_assembler(request)
     return StreamingResponse(
-        _subscribe_sse(run_manager, run_id, from_event),
+        _subscribe_sse(run_manager, transcript_assembler, run_id, from_event),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -131,18 +187,3 @@ async def stop_conversation_runs(
             _seen=seen,
         ))
     return {"detail": "会话运行已请求停止", "run_ids": stopped}
-
-
-@router.get("/runs/{run_id}/events", response_model=List[Dict[str, Any]])
-async def get_run_events(
-    run_id: str,
-    from_event: int = 0,
-    run_manager: RunManager = Depends(get_run_manager),
-):
-    run = run_manager.get_run(run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="运行不存在")
-    try:
-        return run_manager.read_events(run_id, from_event)
-    except RunNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="运行不存在") from exc

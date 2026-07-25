@@ -1,6 +1,5 @@
 import type { SlashCommandInfo } from '../types/slash';
 import type { TreeData, TreeNode } from '../api/conversation';
-import { getTreeUserContent } from './taskNotificationVisibility';
 
 export interface SlashCompletionState {
   active: boolean;
@@ -71,6 +70,10 @@ function compactPreview(value: string | null | undefined, maxLength: number): st
 function stripFileMention(content: string): string {
   const match = content.match(/^'''USER MENTIONED FILES:\s+.*?\s+'''\n\n[\s\S]*?\n---\n\n/s);
   return match ? content.slice(match[0].length) : content;
+}
+
+function getTreeUserContent(node: Pick<TreeNode, 'user_content'>): string {
+  return node.user_content ?? '';
 }
 
 function isReferSelectorToken(token: string): boolean {
@@ -155,7 +158,7 @@ export function getReferNodeCompletionCandidates(
         modelId: node.model_id,
         isCurrent: node.id === treeData.current_node_id || node.is_current,
         isOnCurrentBranch: branchRanks.has(node.id),
-        hasPruneSummary: Boolean((node.prune_summary_count || node.context_summaries?.length || 0) > 0),
+        hasPruneSummary: false,
         timestamp: node.timestamp,
       };
     })
@@ -196,10 +199,8 @@ export interface RunDraftLike {
   pendingUserMessage?: string | null;
   content?: string | null;
   reasoning?: string | null;
-  toolInteractions?: unknown[] | null;
   workflowEvents?: unknown[] | null;
   command?: { stdout?: string | null; stderr?: string | null; events?: unknown[] | null } | null;
-  pendingApprovals?: Record<string, { status?: string | null } | null | undefined> | null;
   metadata?: Record<string, unknown> | null;
 }
 
@@ -227,11 +228,9 @@ export function shouldRenderRunDraft(run: RunDraftLike): boolean {
   if (run.pendingUserMessage) return true;
   if (run.status === 'error' || run.status === 'stopped' || run.status === 'stopping') return true;
   if (run.content || run.reasoning) return true;
-  if (Array.isArray(run.toolInteractions) && run.toolInteractions.length > 0) return true;
   if (Array.isArray(run.workflowEvents) && run.workflowEvents.length > 0) return true;
   if (run.command?.stdout || run.command?.stderr) return true;
   if (Array.isArray(run.command?.events) && run.command.events.length > 0) return true;
-  if (run.pendingApprovals && Object.values(run.pendingApprovals).some((approval) => approval?.status === 'pending')) return true;
   return false;
 }
 

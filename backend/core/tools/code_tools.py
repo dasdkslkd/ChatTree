@@ -25,6 +25,7 @@ from .base import BaseTool
 from .security.logical_sandbox import DEFAULT_PROTECTED_PATHS
 from .task_contract import task_step_parameter_schema
 from ..persistence.home import resolve_chattree_home
+from ..persistence.repository import ChatRepository
 from ..runs.types import FINISHED_RUN_STATUSES
 from ..shell_profile import ShellProfileResolver, render_command_tool_guidance
 from ..subprocess_utils import subprocess_window_kwargs
@@ -140,16 +141,6 @@ def _shell_env() -> Dict[str, str]:
     env.setdefault("PYTHONIOENCODING", "utf-8")
     env.setdefault("PYTHONUTF8", "1")
     return env
-
-
-def _should_suppress_command_notification(runtime_context: Dict[str, Any]) -> bool:
-    if runtime_context.get("suppress_task_notification") is True:
-        return True
-    if runtime_context.get("agent_name") == "workflow-worker":
-        return True
-    if runtime_context.get("delivery_policy") == "silent":
-        return True
-    return runtime_context.get("run_kind") in {"workflow", "workflow_step"}
 
 
 def _windows_python_c_args(command: str) -> Optional[List[str]]:
@@ -448,10 +439,6 @@ class ListFilesTool(_CodeTool):
 
 
 class ReadFileTool(_CodeTool):
-    def __init__(self, config: CodeToolConfig, tool_result_store: Any = None):
-        super().__init__(config)
-        self._tool_result_store = tool_result_store
-
     @property
     def name(self) -> str:
         return "read"
@@ -565,15 +552,19 @@ class ReadFileTool(_CodeTool):
         return _json({"files": files})
 
     def _read_tool_result(self, kwargs: Dict[str, Any]) -> str:
-        if self._tool_result_store is None:
-            return _error("tool_result_unavailable", "tool result storage is not configured")
+        repository = self._runtime_chat_repository(kwargs)
+        if repository is None:
+            return _error("tool_result_unavailable", "canonical tool result repository is not configured")
         tool_result_id = str(kwargs.get("tool_result_id") or kwargs.get("id") or "").strip()
         if not tool_result_id:
             return _error("invalid_path", "tool_result_id or id is required when source is tool_result")
         offset = max(0, int(kwargs.get("offset") or 0))
         requested_limit = kwargs.get("limit") or kwargs.get("max_chars_per_file") or self.config.max_read_chars
         limit = max(1, min(int(requested_limit), self.config.max_read_chars))
-        result = self._tool_result_store.read_slice(tool_result_id, offset=offset, limit=limit)
+        try:
+            result = repository.get_tool_result_slice(tool_result_id, offset=offset, limit=limit)
+        except KeyError:
+            result = None
         if result is None:
             return _error("not_found", "tool result not found", tool_result_id=tool_result_id)
         payload = {
@@ -592,6 +583,18 @@ class ReadFileTool(_CodeTool):
                 "limit": limit,
             }
         return _json(payload)
+
+    def _runtime_chat_repository(self, kwargs: Dict[str, Any]) -> ChatRepository | None:
+        context = kwargs.get("_runtime_context")
+        if not isinstance(context, dict):
+            return None
+        repository = context.get("chat_repository")
+        if isinstance(repository, ChatRepository):
+            return repository
+        persistence = context.get("persistence")
+        if persistence is not None and hasattr(persistence, "connect"):
+            return ChatRepository(persistence)
+        return None
 
 
 class SearchFilesTool(_CodeTool):
@@ -1131,7 +1134,6 @@ class RunCommandTool(_CodeTool):
                 "source_run_id": runtime_context.get("run_id"),
                 "source_run_kind": runtime_context.get("run_kind"),
                 "root_run_id": runtime_context.get("root_run_id"),
-                "suppress_task_notification": _should_suppress_command_notification(runtime_context),
             },
         )
         run_id = str(run["run_id"])

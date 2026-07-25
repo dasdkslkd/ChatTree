@@ -24,10 +24,30 @@ def _message(role, content):
 
 
 def _node(content, assistant=None):
-    node = NodeManager.create_node(_message(Role.USER, content), model_id="fake-model")
-    if assistant is not None:
-        node["assistant_message"] = _message(Role.ASSISTANT, assistant)
+    node = NodeManager.create_node(model_id="fake-model")
+    node["_test_user_content"] = content
+    node["_test_assistant_content"] = assistant
     return node
+
+
+def _messages_by_node(*nodes):
+    grouped = {}
+    for node in nodes:
+        user = node.pop("_test_user_content", None)
+        assistant = node.pop("_test_assistant_content", None)
+        messages = []
+        if user is not None:
+            messages.append({"id": f"{node['id']}:user", "role": Role.USER, "content": user, "timestamp": 1})
+        if assistant is not None:
+            messages.append({
+                "id": f"{node['id']}:assistant",
+                "role": Role.ASSISTANT,
+                "content": assistant,
+                "subtype": "assistant_answer",
+                "timestamp": 1,
+            })
+        grouped[node["id"]] = messages
+    return grouped
 
 
 def test_parse_refer_args_supports_multiple_selectors_and_inline_prompt():
@@ -52,7 +72,7 @@ def test_refer_bundle_formats_node_prune_and_truncated_sources():
     conv.add_node(first, root_id, focus=False)
     second = _node("truncated historical turn", "truncated result")
     conv.add_node(second, root_id, focus=False)
-    conv.nodes[root_id]["context_summaries"] = [{
+    prune_summary = {
         "id": "summary-1",
         "type": "prune_summary",
         "parent_node_id": root_id,
@@ -62,12 +82,17 @@ def test_refer_bundle_formats_node_prune_and_truncated_sources():
         "truncated_node_ids": [second["id"]],
         "created_at": 1,
         "status": "completed",
-    }]
+    }
 
     parsed = parse_refer_prompt_args(
         f"node:{first['id']} prune:summary-1 truncated:summary-1 inspect evidence"
     )
-    bundle = build_refer_bundle(conv, parsed["selectors"])
+    bundle = build_refer_bundle(
+        conv,
+        parsed["selectors"],
+        _messages_by_node(first, second),
+        prune_summaries_by_id={"summary-1": prune_summary},
+    )
     content, truncated = format_refer_context_message(bundle)
 
     assert truncated is False
@@ -86,14 +111,32 @@ def test_refer_bundle_supports_compact_and_before_selectors():
     conv.add_node(first, root_id)
     compact = NodeManager.create_compact_node(
         parent_id=first["id"],
-        summary="Summary:\nfolded compact facts",
         model_id="fake-model",
-        last_pre_compact_message_id=first["id"],
     )
     conv.add_node(compact, first["id"])
+    messages_by_node = _messages_by_node(first)
+    messages_by_node[compact["id"]] = [{
+        "id": f"{compact['id']}:summary",
+        "role": Role.ASSISTANT,
+        "content": "Summary:\nfolded compact facts",
+        "subtype": "compact_summary",
+        "timestamp": 1,
+    }]
+    compact_metadata_by_node = {
+        compact["id"]: {
+            "trigger": "manual",
+            "messages_to_keep": 1,
+            "last_pre_compact_message_id": first["id"],
+        }
+    }
 
     parsed = parse_refer_prompt_args(f"before:{compact['id']} compact:{compact['id']} inspect folded history")
-    bundle = build_refer_bundle(conv, parsed["selectors"])
+    bundle = build_refer_bundle(
+        conv,
+        parsed["selectors"],
+        messages_by_node,
+        compact_metadata_by_node=compact_metadata_by_node,
+    )
     content, truncated = format_refer_context_message(bundle)
 
     assert truncated is False
@@ -111,7 +154,7 @@ def test_refer_bundle_deduplicates_repeated_node_selectors():
     conv.add_node(node, root_id, focus=False)
 
     parsed = parse_refer_prompt_args(f"node:{node['id']} node:{node['id']} compare once")
-    bundle = build_refer_bundle(conv, parsed["selectors"])
+    bundle = build_refer_bundle(conv, parsed["selectors"], _messages_by_node(node))
     content, _ = format_refer_context_message(bundle)
 
     assert bundle["source_node_ids"] == [node["id"]]
@@ -141,7 +184,7 @@ def test_refer_context_total_budget_is_hard_limit(monkeypatch):
     monkeypatch.setattr(refer_context, "REFER_TOTAL_MAX_CHARS", 160)
 
     parsed = parse_refer_prompt_args(f"node:{node['id']} inspect budget")
-    bundle = build_refer_bundle(conv, parsed["selectors"])
+    bundle = build_refer_bundle(conv, parsed["selectors"], _messages_by_node(node))
     content, truncated = format_refer_context_message(bundle)
 
     assert truncated is True

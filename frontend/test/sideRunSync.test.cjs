@@ -17,66 +17,27 @@ require.extensions['.ts'] = function loadTs(module, filename) {
   module._compile(output, filename);
 };
 
-const {
-  SIDE_RUN_KINDS,
-  COMMAND_RUN_STATUSES,
-  getVisibleSideRunRecords,
-  isCommandRunStatus,
-} = require(path.join(__dirname, '../src/utils/sideRunSync.ts'));
-
-function run(overrides = {}) {
-  return {
-    run_id: overrides.run_id || 'run-default',
-    conversation_id: 'conv-1',
-    kind: overrides.kind || 'subagent',
-    status: overrides.status || 'running',
-    anchor_node_id: overrides.anchor_node_id ?? 'node-anchor',
-    target_node_id: overrides.target_node_id ?? null,
-    created_by_run_id: overrides.created_by_run_id ?? null,
-    cancellation_parent_run_id: overrides.cancellation_parent_run_id ?? null,
-    event_count: 1,
-    created_at: 10,
-    updated_at: 11,
-    metadata: overrides.metadata || {},
-  };
-}
+const sideRunSync = require(path.join(__dirname, '../src/utils/sideRunSync.ts'));
 
 function testSideRunKindSetIncludesDetachedRunTypes() {
-  assert.deepEqual([...SIDE_RUN_KINDS], ['side_question', 'subagent', 'command', 'workflow', 'workflow_step', 'direct_response']);
-  assert.deepEqual([...COMMAND_RUN_STATUSES], ['completed', 'failed', 'cancelled']);
+  assert.deepEqual(
+    [...sideRunSync.SIDE_RUN_KINDS],
+    ['side_question', 'subagent', 'command', 'workflow', 'workflow_step', 'direct_response'],
+  );
 }
 
-function testVisibleSideRunsIncludeToolSpawnedParentedSubagents() {
-  const visible = getVisibleSideRunRecords([
-    run({ run_id: 'main-chat', kind: 'chat', created_by_run_id: null }),
-    run({ run_id: 'tool-spawned-subagent', kind: 'subagent', created_by_run_id: 'run-main-chat' }),
-    run({ run_id: 'workflow-child', kind: 'subagent', created_by_run_id: 'run-workflow', metadata: { source_run_id: 'run-workflow' } }),
-    run({ run_id: 'command-child', kind: 'command', created_by_run_id: 'run-main-chat' }),
-  ], new Set());
-
-  assert.deepEqual(visible.map((item) => item.run_id), ['tool-spawned-subagent', 'workflow-child', 'command-child']);
+function testSideRunKindDetectionSupportsLiveRunUiOnly() {
+  assert.equal(sideRunSync.isSideRunKind('subagent'), true);
+  assert.equal(sideRunSync.isSideRunKind('chat'), false);
 }
 
-function testVisibleSideRunsExcludeHiddenRuns() {
-  const visible = getVisibleSideRunRecords([
-    run({ run_id: 'visible-subagent' }),
-    run({ run_id: 'hidden-subagent' }),
-  ], new Set(['hidden-subagent']));
-
-  assert.deepEqual(visible.map((item) => item.run_id), ['visible-subagent']);
-}
-
-function testCommandStatusDetectionMatchesBackendRunStatuses() {
-  assert.equal(isCommandRunStatus('running'), false);
-  assert.equal(isCommandRunStatus('waiting_approval'), false);
-  assert.equal(isCommandRunStatus('completed'), true);
-  assert.equal(isCommandRunStatus('failed'), true);
-  assert.equal(isCommandRunStatus('cancelled'), true);
+function testHistoricalRunAttachCollectorIsRemoved() {
+  assert.equal(sideRunSync.getVisibleSideRunRecords, undefined);
+  assert.equal(sideRunSync.COMMAND_RUN_STATUSES, undefined);
 }
 
 testSideRunKindSetIncludesDetachedRunTypes();
-testVisibleSideRunsIncludeToolSpawnedParentedSubagents();
-testVisibleSideRunsExcludeHiddenRuns();
-testCommandStatusDetectionMatchesBackendRunStatuses();
+testSideRunKindDetectionSupportsLiveRunUiOnly();
+testHistoricalRunAttachCollectorIsRemoved();
 
 console.log('sideRunSync tests passed');

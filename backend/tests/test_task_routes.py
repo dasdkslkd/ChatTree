@@ -3,15 +3,10 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from backend.api.dependencies import get_task_notification_service, get_task_service
+from backend.api.dependencies import get_task_service
 from backend.api.errors import RequestBoundaryMiddleware, install_error_handlers
 from backend.api.routes import tasks as tasks_route
 from backend.core.tasks import ActiveTaskService
-
-
-class EmptyNotificationService:
-    def list_for_conversation(self, conversation_id: str):
-        return []
 
 
 def client_for(service: ActiveTaskService) -> TestClient:
@@ -20,7 +15,6 @@ def client_for(service: ActiveTaskService) -> TestClient:
     app.add_middleware(RequestBoundaryMiddleware)
     app.include_router(tasks_route.router)
     app.dependency_overrides[get_task_service] = lambda: service
-    app.dependency_overrides[get_task_notification_service] = lambda: EmptyNotificationService()
     return TestClient(app)
 
 
@@ -41,7 +35,6 @@ def test_task_routes_manage_single_active_task_until_completion():
     assert "task_id" not in created.json()
     current_task = client.get("/conversations/conv-1/task-state")
     assert current_task.json()["task"]["title"] == "检查实现"
-    assert current_task.json()["notifications"] == []
     assert current_task.json()["flags"]["running"] is False
     unchanged = client.get("/conversations/conv-1/task-state", headers={"If-None-Match": current_task.headers["etag"]})
     assert unchanged.status_code == 304

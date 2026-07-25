@@ -5,7 +5,7 @@ from typing import Annotated, Any, Dict, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from backend.api.dependencies import get_agent_mailbox, get_agent_runtime, get_capability_registry, get_run_manager
+from backend.api.dependencies import get_agent_runtime, get_capability_registry, get_run_manager
 from backend.api.errors import ApiError
 from backend.api.run_start import (
     RunStartResponse,
@@ -14,7 +14,7 @@ from backend.api.run_start import (
     run_start_openapi_responses,
     run_start_response,
 )
-from backend.core.agents import AgentMailbox, AgentRuntime, AgentSource
+from backend.core.agents import AgentRuntime, AgentSource
 from backend.core.capabilities.registry import CapabilityRegistry
 from backend.core.runs import (
     RunIdempotency,
@@ -187,13 +187,3 @@ async def close_agent_run(
     agent_runtime: AgentRuntime = Depends(get_agent_runtime),
 ):
     return await agent_runtime.close_agent(run_id=run_id)
-
-
-@router.get("/conversations/{conversation_id}/agents/mailbox/pending", response_model=Dict[str, Any])
-async def list_pending_agent_mailbox_messages(
-    conversation_id: str,
-    mailbox: AgentMailbox = Depends(get_agent_mailbox),
-):
-    return {
-        "messages": await mailbox.list_pending_notifications(conversation_id),
-    }

@@ -39,9 +39,6 @@ class Conversation:
         self.current_node_id: Optional[str] = None
         self.current_provider: Optional[ModelProvider] = provider
         self.current_model: Optional[str] = model
-        # 本次会话生命周期内被显式删除的节点 id，供 storage.save 定向删除文件。
-        # 保存成功后由调用方 clear()。
-        self._deleted_node_ids: set[str] = set()
     
     def initialize_with_system_message(self, system_prompt: Optional[str] = None, force = False):
         """初始化系统消息作为根节点"""
@@ -94,7 +91,6 @@ class Conversation:
             for child_id in list(node["children_ids"]):
                 _delete_recursive(child_id)
             del self.nodes[n_id]
-            self._deleted_node_ids.add(n_id)
 
         parent_id = self.nodes[node_id].get("parent_id")
         _delete_recursive(node_id)
@@ -131,49 +127,8 @@ class Conversation:
         return self.get_node_chain(self.current_node_id)
     
     def get_message_chain_from_node(self, node_id: Optional[str] = None) -> List[Message]:
-        """
-        从节点链提取消息链，用于API调用
-        顺序: system(根) -> user -> assistant -> tools -> user -> ...
-        每条消息会附带所在节点的 node_id，方便前端定位。
-        """
-        node_chain = self.get_node_chain(node_id)
-        messages = []
-
-        def attach_node_metadata(msg: Message, node: ConversationTreeNode) -> Message:
-            msg["node_id"] = node["id"]
-            msg["parent_node_id"] = node.get("parent_id")
-            msg["branch_total_tokens"] = node.get("total_tokens", 0)
-            if node.get("branch_usage_info") is not None:
-                msg["branch_usage_info"] = node.get("branch_usage_info")
-            if node.get("usage") is not None:
-                msg["context_usage"] = node.get("usage")
-            if node.get("tool_permission_mode") is not None:
-                msg["tool_permission_mode"] = node.get("tool_permission_mode")
-            msg["task_context_mode"] = node.get("task_context_mode") or "attached"
-            return msg
-        
-        for node in node_chain:
-            # 根节点可能有system消息
-            if node["system_message"]:
-                msg = dict(node["system_message"])
-                messages.append(attach_node_metadata(msg, node))
-            
-            # 添加用户消息
-            if node["user_message"]:
-                msg = dict(node["user_message"])
-                messages.append(attach_node_metadata(msg, node))
-            
-            # 添加助手消息（如果存在）
-            if node["assistant_message"]:
-                msg = dict(node["assistant_message"])
-                messages.append(attach_node_metadata(msg, node))
-            
-            # 添加工具消息（如果有）
-            for tool_msg in node["tool_messages"]:
-                msg = dict(tool_msg)
-                messages.append(attach_node_metadata(msg, node))
-        
-        return messages
+        """旧 JSON 消息链已删除；调用方必须读取 canonical SQLite messages。"""
+        return []
     
     def get_node_tree(self, node_id: Optional[str] = None, level: int = 0) -> List[Dict[str, Any]]:
         """获取节点树形结构用于显示"""
@@ -194,15 +149,6 @@ class Conversation:
             "timestamp": node["timestamp"],
             "model_id": node["model_id"]
         }
-        
-        # 添加消息摘要
-        if node["user_message"] and not node["user_message"].get("is_hidden_from_transcript"):
-            content = node["user_message"]["content"][:50] + "..."
-            display_info["user_content"] = content
-        
-        if node["assistant_message"]:
-            content = node["assistant_message"]["content"][:50] + "..."
-            display_info["assistant_content"] = content
         
         result.append(display_info)
         
@@ -268,8 +214,6 @@ class Conversation:
             "nodes": list(self.nodes.values()),
             "current_node_id": self.current_node_id,
             "root_node_id": self.root_node_id,
-            # 仅供 storage.save 消费的定向删除列表（不持久化进 metadata）
-            "deleted_node_ids": list(self._deleted_node_ids),
         }
 
     @classmethod
@@ -337,14 +281,8 @@ class Conversation:
         node["branch_usage_info"] = branch_usage
         node["total_tokens"] = usage_total(branch_usage, total)
 
-        assistant = node.get("assistant_message") or {}
-        generation_info = assistant.get("generation_info") or {}
-        turn_usage = generation_info.get("usage_info")
-        if not turn_usage:
-            turn_usage = estimated_usage(int(generation_info.get("tokens_used") or 0))
-
         usage = node.get("usage") or {}
-        usage["turn_usage"] = usage.get("turn_usage") or turn_usage
+        usage["turn_usage"] = usage.get("turn_usage") or estimated_usage(0)
         usage["branch_usage"] = usage.get("branch_usage") or branch_usage
         usage["active_context_usage"] = usage.get("active_context_usage") or branch_usage
         usage["model_context_window"] = usage.get("model_context_window")

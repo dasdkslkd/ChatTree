@@ -17,6 +17,12 @@ dependencies = [
   "typing-extensions==4.15.0",
 ]
 
+[project.optional-dependencies]
+build = [
+  "pyinstaller==6.13.0",
+  "pyinstaller-hooks-contrib==2025.4",
+]
+
 [project.scripts]
 chattree-server = "backend.server_cli:main"
 

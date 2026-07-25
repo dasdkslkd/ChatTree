@@ -3,10 +3,7 @@ import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
 
-from backend.api.routes import runs as runs_route
 from backend.core.persistence.blob_store import BlobStore
 from backend.core.persistence.content import INLINE_TEXT_LIMIT
 from backend.core.persistence.database import SQLitePersistence
@@ -637,7 +634,6 @@ def test_run_manager_uses_optional_repository_backend(tmp_path):
 
     asyncio.run(scenario())
 
-
 def test_run_manager_publishes_events_before_background_flush(tmp_path):
     async def scenario():
         _persistence, _chat, runs, conv_id, node_id = _repositories(tmp_path)
@@ -853,37 +849,3 @@ def test_run_manager_startup_interrupts_are_visible_after_restart(tmp_path):
         assert events[-1]["status"] == "interrupted"
 
     asyncio.run(scenario())
-
-
-def test_run_events_route_reads_sqlite_repository_events(tmp_path):
-    async def scenario():
-        _persistence, _chat, runs, conv_id, node_id = _repositories(tmp_path)
-        manager = RunManager(repository=runs)
-        record = await manager.create_run(
-            conversation_id=conv_id,
-            kind="chat",
-            target_node_id=node_id,
-        )
-        await manager.append_event(record.run_id, {"status": "content", "content": "sqlite event"})
-        return manager, record.run_id
-
-    manager, run_id = asyncio.run(scenario())
-    app = FastAPI()
-    app.include_router(runs_route.router)
-    app.state.run_manager = manager
-    client = TestClient(app)
-
-    response = client.get(f"/runs/{run_id}/events", params={"from_event": 1})
-
-    assert response.status_code == 200
-    assert response.json() == [
-        {
-            "status": "content",
-            "content": "sqlite event",
-            "run_id": run_id,
-            "conversation_id": manager.get_run(run_id)["conversation_id"],
-            "kind": "chat",
-            "target_node_id": manager.get_run(run_id)["target_node_id"],
-            "event_index": 1,
-        }
-    ]

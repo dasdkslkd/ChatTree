@@ -11,7 +11,7 @@ interface TranscriptListProps extends TranscriptActionHandlers {
 }
 
 function getItemNodeKey(item: TranscriptItem): string | null {
-  return item.node_id || item.anchor_node_id || null;
+  return item.node_id || null;
 }
 
 function areSameTurnProcessAndAnswer(previous: TranscriptItem | undefined, current: TranscriptItem | undefined): boolean {
@@ -27,19 +27,13 @@ function applyProcessAnswerCompaction(items: TranscriptItem[]): TranscriptItem[]
     if (areSameTurnProcessAndAnswer(item, items[index + 1])) {
       return {
         ...item,
-        props: {
-          ...item.props,
-          compact_with_next_answer: true,
-        },
+        compact_with_next_answer: true,
       };
     }
     if (areSameTurnProcessAndAnswer(items[index - 1], item)) {
       return {
         ...item,
-        props: {
-          ...item.props,
-          compact_after_process: true,
-        },
+        compact_after_process: true,
       };
     }
     return item;
@@ -53,11 +47,15 @@ export function TranscriptList({
   onApprovePlan,
   onRejectPlan,
   onAnswerPlanQuestion,
+  onApproveTool,
+  onRejectTool,
   onCopyItem,
   onEditUserMessage,
   onDeleteUserMessage,
   planActionPending,
   planError,
+  toolApprovalPending,
+  toolApprovalError,
   renderItem,
 }: TranscriptListProps) {
   const normalizedItems = applyProcessAnswerCompaction(normalizeTranscriptItems(items));
@@ -91,11 +89,15 @@ export function TranscriptList({
             onApprovePlan={onApprovePlan}
             onRejectPlan={onRejectPlan}
             onAnswerPlanQuestion={onAnswerPlanQuestion}
+            onApproveTool={onApproveTool}
+            onRejectTool={onRejectTool}
             onCopyItem={onCopyItem}
             onEditUserMessage={onEditUserMessage}
             onDeleteUserMessage={onDeleteUserMessage}
             planActionPending={planActionPending}
             planError={planError}
+            toolApprovalPending={toolApprovalPending}
+            toolApprovalError={toolApprovalError}
           />
         );
         return (

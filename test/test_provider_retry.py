@@ -62,7 +62,7 @@ def test_openai_stream_retries_before_any_output(monkeypatch):
     provider = OpenAICompatibleProvider(_retry_config(max_stream_retries=1))
     calls = []
 
-    async def fake_iter_sse_events(path, body):
+    async def fake_iter_sse_events(path, body, **kwargs):
         calls.append(path)
         if len(calls) == 1:
             raise ProviderHTTPError(503, "busy")
@@ -82,19 +82,15 @@ def test_openai_stream_retries_before_any_output(monkeypatch):
     chunks = asyncio.run(run())
 
     assert len(calls) == 2
-    assert [chunk["status"] for chunk in chunks] == [
-        StreamStatus.START,
-        StreamStatus.CONTENT,
-        StreamStatus.COMPLETE,
-    ]
-    assert chunks[1]["content"] == "ok"
+    assert [chunk["status"] for chunk in chunks] == [StreamStatus.CONTENT, StreamStatus.COMPLETE]
+    assert chunks[0]["content"] == "ok"
 
 
 def test_openai_stream_does_not_retry_after_output(monkeypatch):
     provider = OpenAICompatibleProvider(_retry_config(max_stream_retries=1))
     calls = []
 
-    async def fake_iter_sse_events(path, body):
+    async def fake_iter_sse_events(path, body, **kwargs):
         calls.append(path)
         yield {"choices": [{"delta": {"content": "partial"}, "finish_reason": None}]}
         raise ProviderHTTPError(503, "dropped")
@@ -123,7 +119,7 @@ def test_openai_responses_stream_retries_before_any_output(monkeypatch):
     provider = OpenAICompatibleProvider(config)
     calls = []
 
-    async def fake_iter_sse_events(path, body):
+    async def fake_iter_sse_events(path, body, **kwargs):
         calls.append(path)
         if len(calls) == 1:
             raise ProviderHTTPError(503, "busy")
@@ -143,7 +139,7 @@ def test_openai_responses_stream_retries_before_any_output(monkeypatch):
     chunks = asyncio.run(run())
 
     assert len(calls) == 2
-    assert chunks[1]["content"] == "responses ok"
+    assert chunks[0]["content"] == "responses ok"
     assert chunks[-1]["status"] == StreamStatus.COMPLETE
 
 

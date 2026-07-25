@@ -60,9 +60,17 @@ require.cache[require.resolve(perfMarksPath)] = {
 
 const { ChatTreeApiError } = require('../src/api/errors.ts');
 const { runsApi } = require('../src/api/runs.ts');
-const { messageApi } = require('../src/api/message.ts');
 
 const encoder = new TextEncoder();
+
+const patchEvent = 'data: {"type":"transcript_patch","conversation_id":"conv-1","node_id":"node-1","revision":1,"operations":[]}\n\n';
+const patchPayload = {
+  type: 'transcript_patch',
+  conversation_id: 'conv-1',
+  node_id: 'node-1',
+  revision: 1,
+  operations: [],
+};
 
 function sseResponse(chunks, failure) {
   let index = 0;
@@ -105,40 +113,24 @@ function isNetworkError(error) {
 }
 
 async function testRunsOrderlyEofWithoutDoneFailsClosed() {
-  nextResponse = sseResponse(['data: {"status":"completed"}\n\n']);
+  nextResponse = sseResponse([patchEvent]);
   await assert.rejects(
     collect(runsApi.attach('run-1', {})),
     isUnexpectedResponse,
   );
 }
 
-async function testMessageOrderlyEofWithoutDoneFailsClosed() {
-  nextResponse = sseResponse(['data: {"status":"completed"}\n\n']);
-  await assert.rejects(
-    collect(messageApi.attachStream('conv-1', 'node-1', {})),
-    isUnexpectedResponse,
-  );
-}
-
 async function testRunsAcceptsFinalDoneWithoutTrailingDelimiter() {
   nextResponse = sseResponse([
-    'data: {"status":"content","content":"ok"}\n\ndata:[DONE]',
+    `${patchEvent}data:[DONE]`,
   ]);
   const events = await collect(runsApi.attach('run-2', {}));
-  assert.deepEqual(events, [{ status: 'content', content: 'ok' }]);
-}
-
-async function testMessageAcceptsFinalDoneWithoutTrailingDelimiter() {
-  nextResponse = sseResponse([
-    'data: {"status":"content","content":"ok"}\n\ndata:[DONE]',
-  ]);
-  const events = await collect(messageApi.attachStream('conv-2', 'node-2', {}));
-  assert.deepEqual(events, [{ status: 'content', content: 'ok' }]);
+  assert.deepEqual(events, [patchPayload]);
 }
 
 async function testRunsMidReadFailureRemainsNetworkError() {
   nextResponse = sseResponse(
-    ['data: {"status":"content","content":"partial"}\n\n'],
+    [patchEvent],
     new TypeError('network dropped'),
   );
   await assert.rejects(
@@ -147,24 +139,10 @@ async function testRunsMidReadFailureRemainsNetworkError() {
   );
 }
 
-async function testMessageMidReadFailureRemainsNetworkError() {
-  nextResponse = sseResponse(
-    ['data: {"status":"content","content":"partial"}\n\n'],
-    new TypeError('network dropped'),
-  );
-  await assert.rejects(
-    collect(messageApi.attachStream('conv-3', 'node-3', {})),
-    isNetworkError,
-  );
-}
-
 (async () => {
   await testRunsOrderlyEofWithoutDoneFailsClosed();
-  await testMessageOrderlyEofWithoutDoneFailsClosed();
   await testRunsAcceptsFinalDoneWithoutTrailingDelimiter();
-  await testMessageAcceptsFinalDoneWithoutTrailingDelimiter();
   await testRunsMidReadFailureRemainsNetworkError();
-  await testMessageMidReadFailureRemainsNetworkError();
   console.log('SSE EOF contract tests passed');
 })().catch((error) => {
   console.error(error);

@@ -86,7 +86,7 @@ export function createTranscriptRequestCoordinator(
         if (!canCommit(current)) return;
         if (
           snapshot.conversation_id !== current.conversationId
-          || snapshot.tip_node_id !== current.tipNodeId
+          || snapshot.node_id !== current.tipNodeId
         ) return;
         options.onSnapshot(snapshot);
         if (canCommit(current)) options.onErrorChange(null);

@@ -34,6 +34,59 @@ def test_run_manager_allows_multiple_runs_and_replays_events(tmp_path):
     asyncio.run(run())
 
 
+def test_run_manager_subscribe_does_not_recover_finished_run_history(tmp_path):
+    async def run():
+        manager = RunManager(RunJournal(tmp_path))
+        record = await manager.create_run(
+            conversation_id="conv",
+            kind=RunKind.CHAT,
+            target_node_id="node-a",
+        )
+        await manager.append_event(record.run_id, {
+            "status": "content",
+            "content": "historical",
+        })
+        await manager.finish_run(record.run_id, RunStatus.COMPLETED)
+
+        events = []
+        async for event in manager.subscribe(record.run_id, 0):
+            events.append(event)
+
+        assert events == []
+
+    asyncio.run(run())
+
+
+def test_wait_for_terminal_result_reads_finished_run_events(tmp_path):
+    async def run():
+        manager = RunManager(RunJournal(tmp_path))
+        record = await manager.create_run(
+            conversation_id="conv",
+            kind=RunKind.WORKFLOW,
+            target_node_id="node-a",
+        )
+        await manager.append_event(record.run_id, {
+            "status": "content",
+            "event_type": "workflow_result",
+            "content": "done",
+            "result": {"ok": True},
+        })
+        await manager.finish_run(record.run_id, RunStatus.COMPLETED)
+
+        result = await manager.wait_for_terminal_result(
+            record.run_id,
+            result_event_types={"workflow_result"},
+            timeout=1,
+        )
+
+        assert result["status"] == "completed"
+        assert result["message_type"] == "result"
+        assert result["content"] == "done"
+        assert result["result"] == {"ok": True}
+
+    asyncio.run(run())
+
+
 def test_run_manager_rejects_two_writers_for_same_target(tmp_path):
     async def run():
         manager = RunManager(RunJournal(tmp_path))
@@ -89,6 +142,25 @@ def test_run_manager_wait_for_terminal_result_returns_terminal_result(tmp_path):
         assert result["message_type"] == "result"
         assert result["event_type"] == "subagent_result"
         assert result["content"] == "OK"
+
+    asyncio.run(run())
+
+
+def test_run_manager_subscriber_registered_before_waiting_receives_terminal_event(tmp_path):
+    async def run():
+        manager = RunManager(RunJournal(tmp_path))
+        record = await manager.create_run(conversation_id="conv", kind=RunKind.CHAT)
+        from_event = manager.get_run(record.run_id)["event_count"]
+        subscription = manager.subscribe(record.run_id, from_event)
+        next_event = asyncio.create_task(anext(subscription))
+
+        await asyncio.sleep(0)
+        await manager.finish_run(record.run_id, RunStatus.COMPLETED)
+        payload = await asyncio.wait_for(next_event, timeout=1)
+        await subscription.aclose()
+
+        assert payload["type"] == "run_finished"
+        assert payload["status"] == RunStatus.COMPLETED.value
 
     asyncio.run(run())
 

@@ -33,7 +33,7 @@ from .security.capabilities import (
 from .tool_arguments import normalize_tool_arguments
 from .tool_filter import ToolFilter
 from .web_search import FetchUrlTool, WebSearchTool, WebTool
-from ..storage.tool_result_storage import ToolResultStorage
+from ..persistence.repository import ChatRepository
 from ..projects import allowed_project_names
 from ..utils.logger import setup_logger
 
@@ -66,14 +66,27 @@ def _tool_exception_error(tool_name: str, exc: Exception) -> Dict[str, str]:
     }
 
 
+def _runtime_chat_repository(kwargs: Dict[str, Any]) -> Optional[ChatRepository]:
+    context = kwargs.get("_runtime_context")
+    if not isinstance(context, dict):
+        return None
+    repository = context.get("chat_repository")
+    if isinstance(repository, ChatRepository):
+        return repository
+    persistence = context.get("persistence")
+    if persistence is not None and hasattr(persistence, "connect"):
+        return ChatRepository(persistence)
+    return None
+
+
 class ToolManager:
     """Tool manager supporting built-in tools and MCP servers."""
 
-    def __init__(self, config: Dict[str, Any], tool_result_store: Optional[ToolResultStorage] = None):
+    def __init__(self, config: Optional[Dict[str, Any]] = None, chat_repository: Optional[ChatRepository] = None):
         self._registry = ToolRegistry()
         self._tools: Dict[str, BaseTool] = self._registry._tools
-        self._config = config
-        self.tool_result_store = tool_result_store or ToolResultStorage()
+        self._config = config or {}
+        self.chat_repository = chat_repository
         self.command_executor: Any = None
         self._mcp_client: Optional[MCPClient] = None
         self._mcp_tools: Dict[str, BaseTool] = {}
@@ -81,7 +94,7 @@ class ToolManager:
         self._mcp_servers_config: Dict[str, Dict[str, Any]] = {}
         self._mcp_init_errors: Dict[str, str] = {}
         self._tool_descriptors: Dict[str, ToolDescriptor] = self._registry._descriptors
-        tools_config = config.get("tools", {})
+        tools_config = self._config.get("tools", {})
         self._enabled = tools_config.get("enabled", True)
         self._filter = ToolFilter(
             enabled=tools_config.get("enabled_tools"),
@@ -91,8 +104,8 @@ class ToolManager:
         self._code_tools_config: Dict[str, Any] = {}
         self._command_tools_config: Dict[str, Any] = {}
         if self._enabled:
-            self._register_tools(config)
-            self.register(ReadToolResultTool(self.tool_result_store, tools_config))
+            self._register_tools(self._config)
+            self.register(ReadToolResultTool(tools_config))
             self.register(ToolInventoryTool(self))
 
     def _register_tools(self, config: Dict[str, Any]):
@@ -201,7 +214,7 @@ class ToolManager:
         if include_code:
             tools.extend([
                 ListFilesTool(code_tool_config),
-                ReadFileTool(code_tool_config, self.tool_result_store),
+                ReadFileTool(code_tool_config),
                 SearchFilesTool(code_tool_config),
                 EditFileTool(code_tool_config),
                 WriteFileTool(code_tool_config),
@@ -380,10 +393,18 @@ class ToolManager:
 
             logger.info(f"Executing tool: {name} with args: {json.dumps(arguments, ensure_ascii=False)[:200]}")
             execute_arguments = dict(arguments)
-            if runtime_context is not None or event_sink is not None:
+            if (
+                runtime_context is not None
+                or event_sink is not None
+                or self.command_executor is not None
+                or self.chat_repository is not None
+            ):
                 enriched_context = dict(runtime_context or {})
                 if self.command_executor is not None:
                     enriched_context.setdefault("command_executor", self.command_executor)
+                if self.chat_repository is not None:
+                    enriched_context.setdefault("chat_repository", self.chat_repository)
+                    enriched_context.setdefault("persistence", self.chat_repository.persistence)
                 if event_sink is not None:
                     enriched_context.setdefault("tool_event_sink", event_sink)
                 execute_arguments["_runtime_context"] = enriched_context
@@ -400,7 +421,7 @@ class ToolManager:
             source_config = self._command_tools_config if name in BUILTIN_CODE_TOOL_GROUPS["shell"] else self._code_tools_config
             config = CodeToolConfig.for_workspace(source_config, workspace)
             if name == "read":
-                return ReadFileTool(config, self.tool_result_store)
+                return ReadFileTool(config)
             return BUILTIN_CODE_TOOL_CLASSES[name](config)
         return self._tools.get(name)
 
@@ -531,8 +552,7 @@ class ToolManager:
 class ReadToolResultTool(BaseTool):
     """Read a slice from a persisted full tool result."""
 
-    def __init__(self, store: ToolResultStorage, tools_config: Dict[str, Any]):
-        self._store = store
+    def __init__(self, tools_config: Dict[str, Any]):
         self._max_limit = int(tools_config.get("read_tool_result_max_chars", 16000))
 
     @property
@@ -570,13 +590,24 @@ class ReadToolResultTool(BaseTool):
         }
 
     async def execute(self, **kwargs) -> str:
+        repository = _runtime_chat_repository(kwargs)
+        if repository is None:
+            return json.dumps({
+                "error": {
+                    "type": "tool_result_unavailable",
+                    "message": "canonical tool result repository is not configured",
+                }
+            }, ensure_ascii=False)
         tool_result_id = kwargs.get("tool_result_id") or ""
         if not tool_result_id:
             return json.dumps({"error": "tool_result_id is required"}, ensure_ascii=False)
         offset = int(kwargs.get("offset") or 0)
         requested_limit = int(kwargs.get("limit") or self._max_limit)
         limit = min(max(1, requested_limit), self._max_limit)
-        result = self._store.read_slice(tool_result_id, offset=offset, limit=limit)
+        try:
+            result = repository.get_tool_result_slice(tool_result_id, offset=offset, limit=limit)
+        except KeyError:
+            result = None
         if result is None:
             return json.dumps({
                 "error": "tool result not found",

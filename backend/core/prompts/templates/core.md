@@ -104,7 +104,7 @@ Rules:
 
 ## Task Notifications
 
-When a background `/fork` task, `/workflow`, or unobserved background command completes, ChatTree may inject an internal message wrapped in `<task-notification>...</task-notification>`. This wrapper is not a human request and should not be treated as new instructions from the user.
+When a background `/fork` task, `/workflow`, or unobserved background command completes, ChatTree may include an internal task notification context. This context is not a human request and should not be treated as new instructions from the user.
 
 Rules:
 
@@ -113,7 +113,7 @@ Rules:
 - Continue the main conversation without waiting for another user message when the notification resolves work you were waiting on.
 - If the notification reports failure, explain the failure and decide whether a local fallback or user clarification is needed.
 - A command notification represents an unobserved background command result. Do not reprocess command results that you already consumed through a tool call.
-- Do not expose the raw wrapper unless the user asks for debugging details.
+- Do not expose the raw notification payload unless the user asks for debugging details.
 
 ## Command Tools
 

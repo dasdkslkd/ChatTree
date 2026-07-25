@@ -126,59 +126,6 @@ def test_stream_persists_resolved_provider_and_model_to_conversation_metadata(tm
     assert listed[0]["provider_id"] == "ustc"
 
 
-def test_list_conversations_falls_back_to_current_node_model_for_legacy_metadata(tmp_path):
-    manager = make_chat_manager(tmp_path)
-    conversation = manager.create_conversation("legacy")
-    conversation_id = conversation.metadata["id"]
-
-    asyncio.run(
-        drain(stream_from_current(manager,
-            conversation_id,
-            "hello",
-            model_id="deepseek-v4-pro",
-        ))
-    )
-
-    data = manager.storage.load(conversation_id)
-    assert data is not None
-    data["metadata"].pop("model_id", None)
-    data["metadata"].pop("provider_id", None)
-    manager.storage.save(data)
-
-    listed = manager.list_conversations()
-    assert listed[0]["model_id"] == "deepseek-v4-pro"
-    assert listed[0]["provider_id"] == "ustc"
-
-
-def test_stream_without_request_model_uses_current_node_model_for_legacy_metadata(tmp_path):
-    manager = make_chat_manager(tmp_path)
-    conversation = manager.create_conversation("legacy send")
-    conversation_id = conversation.metadata["id"]
-
-    asyncio.run(
-        drain(stream_from_current(manager,
-            conversation_id,
-            "hello",
-            model_id="deepseek-v4-pro",
-        ))
-    )
-
-    data = manager.storage.load(conversation_id)
-    assert data is not None
-    data["metadata"].pop("model_id", None)
-    data["metadata"].pop("provider_id", None)
-    manager.storage.save(data)
-
-    asyncio.run(drain(stream_from_current(manager, conversation_id, "again")))
-
-    reloaded = manager.get_conversation(conversation_id)
-    assert reloaded is not None
-    current_node = reloaded.nodes[reloaded.current_node_id]
-    assert current_node["model_id"] == "deepseek-v4-pro"
-    assert reloaded.metadata["model_id"] == "deepseek-v4-pro"
-    assert reloaded.metadata["provider_id"] == "ustc"
-
-
 def test_stream_respects_request_provider_when_model_name_is_shared(tmp_path):
     manager = make_chat_manager(tmp_path)
     conversation = manager.create_conversation("shared model")
@@ -229,9 +176,6 @@ def test_stream_persists_tool_permission_mode_per_new_leaf_node(tmp_path):
     assert reloaded is not None
     assert reloaded.nodes[first_node_id]["tool_permission_mode"] == "auto_approve"
     assert reloaded.nodes[second_node_id]["tool_permission_mode"] == "modify_only"
-    history = reloaded.get_message_chain_from_node(second_node_id)
-    user_modes = [msg.get("tool_permission_mode") for msg in history if msg.get("role") == "user"]
-    assert user_modes == ["auto_approve", "modify_only"]
 
 
 def test_stream_defaults_tool_permission_mode_to_auto_approve(tmp_path):
@@ -306,61 +250,3 @@ def test_stream_inherits_tool_permission_mode_from_parent_node(tmp_path):
     assert reloaded is not None
     assert reloaded.nodes[first_node_id]["tool_permission_mode"] == "ask_always"
     assert reloaded.nodes[second_node_id]["tool_permission_mode"] == "ask_always"
-
-
-def test_list_conversations_does_not_guess_provider_for_legacy_shared_model(tmp_path):
-    manager = make_chat_manager(tmp_path)
-    conversation = manager.create_conversation("legacy shared")
-    conversation_id = conversation.metadata["id"]
-
-    asyncio.run(
-        drain(stream_from_current(manager,
-            conversation_id,
-            "hello",
-            model_id="shared-model",
-            provider_id="second",
-        ))
-    )
-
-    data = manager.storage.load(conversation_id)
-    assert data is not None
-    data["metadata"].pop("model_id", None)
-    data["metadata"].pop("provider_id", None)
-    manager.storage.save(data)
-
-    listed = manager.list_conversations()
-    assert listed[0]["model_id"] == "shared-model"
-    assert listed[0]["provider_id"] == ""
-
-
-def test_stream_without_provider_errors_for_legacy_shared_model(tmp_path):
-    manager = make_chat_manager(tmp_path)
-    conversation = manager.create_conversation("legacy shared send")
-    conversation_id = conversation.metadata["id"]
-
-    asyncio.run(
-        drain(stream_from_current(manager,
-            conversation_id,
-            "hello",
-            model_id="shared-model",
-            provider_id="second",
-        ))
-    )
-
-    data = manager.storage.load(conversation_id)
-    assert data is not None
-    data["metadata"].pop("model_id", None)
-    data["metadata"].pop("provider_id", None)
-    manager.storage.save(data)
-
-    manager.model_manager.get_model_calls.clear()
-    chunks = asyncio.run(collect_chunks(stream_from_current(manager, conversation_id, "again")))
-
-    assert chunks[-1]["status"] == StreamStatus.ERROR
-    assert chunks[-1]["error"] == "无法找到模型 shared-model 对应的提供商"
-    assert manager.model_manager.get_model_calls == []
-
-    reloaded = manager.get_conversation(conversation_id)
-    assert reloaded is not None
-    assert reloaded.metadata.get("model_id") is None
-    assert reloaded.metadata.get("provider_id") is None

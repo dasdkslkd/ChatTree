@@ -65,15 +65,12 @@ class Message(TypedDict, total=False):
     name: Optional[str]
     tool_calls: Optional[List[Dict[str, Any]]]
     tool_call_id: Optional[str]
-    tool_results: Optional[List[Dict[str, Any]]]  # 本消息触发的工具调用结果（未来工具轮次填充）
-    tool_interactions: Optional[List[Dict[str, Any]]]  # 工具轮次序列：assistant tool_call + tool result
-    approval_events: Optional[List[Dict[str, Any]]]  # 本消息触发的工具审批请求/结果事件
+    process_content: Optional[str]  # UI-only process timeline text, not model-visible content
     reasoning: Optional[str]  # 推理/思考轨迹（未来推理模型填充）
     timestamp: Required[int]
     generation_info: Optional[GenerationInfo]  # 生成信息（仅助手消息有，可选）
     context_usage: Optional[NodeUsage]  # 所在节点的分层上下文 usage 快照
     compact_metadata: Optional[Dict[str, Any]]  # compact boundary 元数据
-    is_compact_summary: Optional[bool]  # Claude Code 风格 compact summary 标记
     is_visible_in_transcript_only: Optional[bool]  # UI/transcript 可见，语义上是恢复上下文
     import_files: Optional[List[Dict[str, Any]]]  # 用户显式引用的导入文件元数据
     image_refs: Optional[List[Dict[str, Any]]]  # 用户显式引用的图片附件元数据
@@ -81,14 +78,10 @@ class Message(TypedDict, total=False):
     task_context_mode: Optional[str]
 
 class ConversationTreeNode(TypedDict):
-    """对话树节点 - 一轮完整交互"""
+    """对话树节点。只保存树结构和 turn 级运行属性，消息事实不写入 node。"""
     id: str
     parent_id: Optional[str]
     children_ids: List[str]
-    user_message: Optional[Message]
-    assistant_message: Optional[Message]
-    tool_messages: List[Message]
-    system_message: Optional[Message]  # 仅根节点有
     timestamp: int
     model_id: Optional[str]
     tool_permission_mode: Optional[str]
@@ -97,7 +90,6 @@ class ConversationTreeNode(TypedDict):
 
     branch_usage_info: UsageInfo
     usage: NodeUsage
-    context_summaries: NotRequired[List[Dict[str, Any]]]
 
 class ConversationMetadata(TypedDict, total=False):
     """对话元数据"""
@@ -181,6 +173,7 @@ class StreamChunk(TypedDict, total=False):
     anchor_node_id: Optional[str]
     target_node_id: Optional[str]
     run_id: Optional[str]
+    assistant_message_id: Optional[str]
     event_index: Optional[int]
     conversation_id: Optional[str]
     error: Optional[str]
@@ -192,8 +185,10 @@ class StreamChunk(TypedDict, total=False):
     tool_round: Optional[int]            # 已提交工具轮次，1-based
     tool_round_id: Optional[str]         # 同一工具轮从 committed 到 result 的稳定 ID
     approval: Optional[Dict[str, Any]]   # 工具审批请求/结果载荷
+    plan_id: Optional[str]
     tool_permission_mode: Optional[str]  # 当前节点工具权限模式发生变化时随流同步
     task_context_mode: Optional[str]
+    metadata: Optional[Dict[str, Any]]
 
     usage_info: UsageInfo
 

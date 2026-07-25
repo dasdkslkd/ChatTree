@@ -9,6 +9,9 @@ from .content import store_text_content
 from .database import SQLitePersistence
 
 
+_UNSET = object()
+
+
 class ChatRepository:
     def __init__(self, persistence: SQLitePersistence) -> None:
         self.persistence = persistence
@@ -21,6 +24,9 @@ class ChatRepository:
         provider_id: str | None = None,
         model_id: str | None = None,
         workspace: dict[str, Any] | None = None,
+        reasoning_effort: str | None = None,
+        thinking_enabled: bool | None = None,
+        multi_agent_mode: str | None = None,
     ) -> str:
         conversation_id = conversation_id or str(uuid.uuid4())
         with self.persistence.connect() as conn:
@@ -31,17 +37,23 @@ class ChatRepository:
                   title,
                   provider_id,
                   model_id,
+                  reasoning_effort,
+                  thinking_enabled,
+                  multi_agent_mode,
                   workspace_json,
                   created_at,
                   updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, strftime('%s', 'now'), strftime('%s', 'now'))
+                VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 'explicit_request_only'), ?, strftime('%s', 'now'), strftime('%s', 'now'))
                 """,
                 (
                     conversation_id,
                     title,
                     provider_id,
                     model_id,
+                    reasoning_effort,
+                    None if thinking_enabled is None else int(bool(thinking_enabled)),
+                    multi_agent_mode,
                     self._json_field(workspace),
                 ),
             )
@@ -55,6 +67,9 @@ class ChatRepository:
         provider_id: str | None = None,
         model_id: str | None = None,
         workspace: dict[str, Any] | None = None,
+        reasoning_effort: str | None = None,
+        thinking_enabled: bool | None = None,
+        multi_agent_mode: str | None = None,
     ) -> str:
         with self.persistence.connect() as conn:
             conn.execute(
@@ -64,15 +79,21 @@ class ChatRepository:
                   title,
                   provider_id,
                   model_id,
+                  reasoning_effort,
+                  thinking_enabled,
+                  multi_agent_mode,
                   workspace_json,
                   created_at,
                   updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, strftime('%s', 'now'), strftime('%s', 'now'))
+                VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 'explicit_request_only'), ?, strftime('%s', 'now'), strftime('%s', 'now'))
                 ON CONFLICT(id) DO UPDATE SET
                   title = COALESCE(NULLIF(excluded.title, ''), conversations.title),
                   provider_id = COALESCE(excluded.provider_id, conversations.provider_id),
                   model_id = COALESCE(excluded.model_id, conversations.model_id),
+                  reasoning_effort = excluded.reasoning_effort,
+                  thinking_enabled = excluded.thinking_enabled,
+                  multi_agent_mode = COALESCE(excluded.multi_agent_mode, conversations.multi_agent_mode),
                   workspace_json = COALESCE(excluded.workspace_json, conversations.workspace_json),
                   updated_at = strftime('%s', 'now')
                 """,
@@ -81,6 +102,9 @@ class ChatRepository:
                     title,
                     provider_id,
                     model_id,
+                    reasoning_effort,
+                    None if thinking_enabled is None else int(bool(thinking_enabled)),
+                    multi_agent_mode,
                     self._json_field(workspace),
                 ),
             )
@@ -95,6 +119,71 @@ class ChatRepository:
         if row is None:
             raise KeyError(conversation_id)
         return dict(row)
+
+    def list_conversations(self) -> list[dict[str, Any]]:
+        with self.persistence.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                  conversations.*,
+                  COUNT(nodes.id) AS node_count
+                FROM conversations
+                LEFT JOIN nodes
+                  ON nodes.conversation_id = conversations.id
+                GROUP BY conversations.id
+                ORDER BY conversations.updated_at DESC, conversations.created_at DESC
+                """
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["workspace"] = self._json_object(item.pop("workspace_json", None))
+            item.pop("settings_json", None)
+            result.append(item)
+        return result
+
+    def update_conversation(
+        self,
+        conversation_id: str,
+        *,
+        title: Any = _UNSET,
+        provider_id: Any = _UNSET,
+        model_id: Any = _UNSET,
+        reasoning_effort: Any = _UNSET,
+        thinking_enabled: Any = _UNSET,
+        multi_agent_mode: Any = _UNSET,
+        workspace: Any = _UNSET,
+        current_node_id: Any = _UNSET,
+    ) -> bool:
+        assignments = ["updated_at = strftime('%s', 'now')"]
+        values: list[Any] = []
+        fields = {
+            "title": title,
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "reasoning_effort": reasoning_effort,
+            "thinking_enabled": (
+                _UNSET
+                if thinking_enabled is _UNSET
+                else None
+                if thinking_enabled is None
+                else int(bool(thinking_enabled))
+            ),
+            "multi_agent_mode": multi_agent_mode,
+            "workspace_json": self._json_field(workspace) if workspace is not _UNSET else _UNSET,
+            "current_node_id": current_node_id,
+        }
+        for column, value in fields.items():
+            if value is _UNSET:
+                continue
+            assignments.append(f"{column} = ?")
+            values.append(value)
+        with self.persistence.connect() as conn:
+            cursor = conn.execute(
+                f"UPDATE conversations SET {', '.join(assignments)} WHERE id = ?",
+                (*values, conversation_id),
+            )
+        return cursor.rowcount > 0
 
     def delete_conversation(self, conversation_id: str) -> bool:
         with self.persistence.connect() as conn:
@@ -126,6 +215,37 @@ class ChatRepository:
                 (conversation_id, node_id),
             ).fetchone()
             if existing is not None:
+                updates = [
+                    "updated_at = strftime('%s', 'now')",
+                    "model_id = COALESCE(?, model_id)",
+                    "provider_id = COALESCE(?, provider_id)",
+                    "tool_permission_mode = COALESCE(?, tool_permission_mode)",
+                    "task_context_mode = COALESCE(?, task_context_mode)",
+                    "turn_usage_json = COALESCE(?, turn_usage_json)",
+                    "branch_usage_json = COALESCE(?, branch_usage_json)",
+                    "active_context_usage_json = COALESCE(?, active_context_usage_json)",
+                ]
+                conn.execute(
+                    f"""
+                    UPDATE nodes
+                    SET {', '.join(updates)}
+                    WHERE conversation_id = ? AND id = ?
+                    """,
+                    (
+                        fields.pop("model_id", None),
+                        fields.pop("provider_id", None),
+                        fields.pop("tool_permission_mode", None),
+                        fields.pop("task_context_mode", None),
+                        self._json_field(fields.pop("turn_usage", None)),
+                        self._json_field(fields.pop("branch_usage", None)),
+                        self._json_field(fields.pop("active_context_usage", None)),
+                        conversation_id,
+                        node_id,
+                    ),
+                )
+                if fields:
+                    unknown = ", ".join(sorted(fields))
+                    raise TypeError(f"Unsupported node fields: {unknown}")
                 if focus:
                     conn.execute(
                         """
@@ -259,6 +379,40 @@ class ChatRepository:
 
         return node_id
 
+    def list_nodes(self, conversation_id: str) -> list[dict[str, Any]]:
+        with self.persistence.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM nodes
+                WHERE conversation_id = ?
+                ORDER BY depth, child_order, created_at, id
+                """,
+                (conversation_id,),
+            ).fetchall()
+        nodes = [dict(row) for row in rows]
+        children: dict[str, list[str]] = {str(node["id"]): [] for node in nodes}
+        for node in nodes:
+            parent_id = node.get("parent_id")
+            if parent_id in children:
+                children[str(parent_id)].append(str(node["id"]))
+        for node in nodes:
+            node["children_ids"] = children.get(str(node["id"]), [])
+            node["parent_id"] = node.get("parent_id") or "None"
+            node["timestamp"] = int(node.get("created_at") or 0)
+            branch_usage = self._json_object(node.pop("branch_usage_json", None))
+            turn_usage = self._json_object(node.pop("turn_usage_json", None))
+            active_context_usage = self._json_object(node.pop("active_context_usage_json", None))
+            node["branch_usage_info"] = branch_usage
+            node["usage"] = {
+                "turn_usage": turn_usage,
+                "branch_usage": branch_usage,
+                "active_context_usage": active_context_usage,
+                "model_context_window": None,
+            }
+            node["total_tokens"] = int((branch_usage or {}).get("total_tokens") or 0)
+        return nodes
+
     def ensure_node(
         self,
         conversation_id: str,
@@ -325,6 +479,7 @@ class ChatRepository:
         content: str,
         subtype: str | None = None,
         hidden: bool = False,
+        transcript_only: bool = False,
         metadata: dict[str, Any] | None = None,
         message_id: str | None = None,
     ) -> str:
@@ -343,10 +498,11 @@ class ChatRepository:
                   content_blob_id,
                   preview,
                   hidden,
+                  transcript_only,
                   metadata_json,
                   created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s', 'now'))
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s', 'now'))
                 ON CONFLICT(id) DO UPDATE SET
                   node_id = excluded.node_id,
                   role = excluded.role,
@@ -355,6 +511,7 @@ class ChatRepository:
                   content_blob_id = excluded.content_blob_id,
                   preview = excluded.preview,
                   hidden = excluded.hidden,
+                  transcript_only = excluded.transcript_only,
                   metadata_json = excluded.metadata_json
                 """,
                 (
@@ -367,6 +524,7 @@ class ChatRepository:
                     stored.blob_id,
                     stored.preview,
                     1 if hidden else 0,
+                    1 if transcript_only else 0,
                     self._json_field(metadata),
                 ),
             )
@@ -415,11 +573,7 @@ class ChatRepository:
                 ON CONFLICT(conversation_id, id) DO UPDATE SET
                   run_id = COALESCE(excluded.run_id, tool_calls.run_id),
                   assistant_message_id = COALESCE(excluded.assistant_message_id, tool_calls.assistant_message_id),
-                  call_index = CASE
-                    WHEN excluded.call_index = 0 AND tool_calls.call_index <> 0
-                      THEN tool_calls.call_index
-                    ELSE excluded.call_index
-                  END,
+                  call_index = excluded.call_index,
                   name = COALESCE(NULLIF(excluded.name, ''), tool_calls.name),
                   args_inline = CASE
                     WHEN COALESCE(excluded.args_inline, '') = '' AND excluded.args_blob_id IS NULL
@@ -485,8 +639,8 @@ class ChatRepository:
         result_id = tool_result_id or str(uuid.uuid4())
         value = output or ""
         preview = value[:preview_limit]
-        blob_id = None
-        if len(value) > len(preview):
+        blob_id = self._existing_tool_result_blob_id(result_id, value)
+        if blob_id is None and len(value) > len(preview):
             blob_id = BlobStore(self.persistence).put_text(value).blob_id
         with self.persistence.connect() as conn:
             node_id = self._existing_id(conn, "nodes", conversation_id, node_id)
@@ -508,7 +662,27 @@ class ChatRepository:
                   created_at
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s', 'now'))
+                ON CONFLICT(conversation_id, tool_call_id) DO UPDATE SET
+                  node_id = COALESCE(excluded.node_id, tool_results.node_id),
+                  run_id = COALESCE(excluded.run_id, tool_results.run_id),
+                  status = excluded.status,
+                  output_preview = excluded.output_preview,
+                  output_blob_id = excluded.output_blob_id,
+                  output_size = excluded.output_size,
+                  truncated = excluded.truncated,
+                  metadata_json = excluded.metadata_json
+                ON CONFLICT(conversation_id, id) DO UPDATE SET
+                  node_id = COALESCE(excluded.node_id, tool_results.node_id),
+                  run_id = COALESCE(excluded.run_id, tool_results.run_id),
+                  tool_call_id = COALESCE(excluded.tool_call_id, tool_results.tool_call_id),
+                  status = excluded.status,
+                  output_preview = excluded.output_preview,
+                  output_blob_id = excluded.output_blob_id,
+                  output_size = excluded.output_size,
+                  truncated = excluded.truncated,
+                  metadata_json = excluded.metadata_json
                 ON CONFLICT(id) DO UPDATE SET
+                  node_id = COALESCE(excluded.node_id, tool_results.node_id),
                   run_id = COALESCE(excluded.run_id, tool_results.run_id),
                   tool_call_id = COALESCE(excluded.tool_call_id, tool_results.tool_call_id),
                   status = excluded.status,
@@ -532,7 +706,68 @@ class ChatRepository:
                     self._json_field(metadata),
                 ),
             )
+            if tool_call_id:
+                row = conn.execute(
+                    """
+                    SELECT id
+                    FROM tool_results
+                    WHERE conversation_id = ? AND tool_call_id = ?
+                    """,
+                    (conversation_id, tool_call_id),
+                ).fetchone()
+                if row is not None:
+                    result_id = str(row["id"])
         return result_id
+
+    def get_tool_result_slice(
+        self,
+        tool_result_id: str,
+        *,
+        offset: int = 0,
+        limit: int = 16000,
+    ) -> dict[str, Any] | None:
+        with self.persistence.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                  tool_results.id,
+                  tool_results.output_preview,
+                  tool_results.output_blob_id,
+                  tool_results.output_size,
+                  tool_results.metadata_json,
+                  tool_calls.name AS tool_name
+                FROM tool_results
+                LEFT JOIN tool_calls
+                  ON tool_calls.conversation_id = tool_results.conversation_id
+                 AND tool_calls.id = tool_results.tool_call_id
+                WHERE tool_results.id = ?
+                """,
+                (tool_result_id,),
+            ).fetchone()
+        if row is None:
+            return None
+
+        content = row["output_preview"] or ""
+        if row["output_blob_id"]:
+            content = BlobStore(self.persistence).get_text(str(row["output_blob_id"]))
+        metadata = self._json_object(row["metadata_json"])
+        offset = max(0, int(offset or 0))
+        limit = max(1, int(limit or 16000))
+        chunk = content[offset:offset + limit]
+        next_offset = offset + len(chunk)
+        total_chars = len(content)
+        if not total_chars and row["output_size"]:
+            total_chars = int(row["output_size"])
+        return {
+            "tool_result_id": tool_result_id,
+            "tool_name": row["tool_name"] or metadata.get("tool_name"),
+            "offset": offset,
+            "limit": limit,
+            "next_offset": next_offset if next_offset < total_chars else None,
+            "total_chars": total_chars,
+            "has_more": next_offset < total_chars,
+            "content": chunk,
+        }
 
     def get_message(self, message_id: str) -> dict[str, Any]:
         with self.persistence.connect() as conn:
@@ -570,6 +805,37 @@ class ChatRepository:
         if value is None:
             return None
         return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+    def _json_object(self, value: str | None) -> dict[str, Any]:
+        if not value:
+            return {}
+        try:
+            loaded = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return loaded if isinstance(loaded, dict) else {}
+
+    def _existing_tool_result_blob_id(self, result_id: str, output: str) -> str | None:
+        with self.persistence.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT output_preview, output_blob_id, output_size
+                FROM tool_results
+                WHERE id = ?
+                """,
+                (result_id,),
+            ).fetchone()
+        if row is None or int(row["output_size"] or 0) != len(output):
+            return None
+        try:
+            existing = (
+                BlobStore(self.persistence).get_text(str(row["output_blob_id"]))
+                if row["output_blob_id"]
+                else row["output_preview"] or ""
+            )
+        except KeyError:
+            return None
+        return str(row["output_blob_id"]) if existing == output and row["output_blob_id"] else None
 
     def _existing_id(
         self,

@@ -12,6 +12,7 @@ from ...config.types import Message, StreamChunk, StreamStatus, StreamController
 from .retry import RetryPolicy, RetryableHTTPError, classify_retry_error, run_with_retries, sleep_before_retry
 from .sse import iter_decoded_sse_lines
 from .multimodal import to_gemini_parts
+from .stream_queue import StreamStopped, get_queue_item_or_stop
 
 _SENTINEL = object()
 
@@ -116,15 +117,35 @@ class GeminiProvider(BaseProvider):
         gemini_messages: List[Dict[str, Any]] = []
 
         for msg in messages:
-            role = str(msg["role"])
+            role = msg["role"].value if hasattr(msg["role"], "value") else str(msg["role"])
             content = msg.get("content") or ""
             if role == "system":
                 system_prompt += content + "\n"
                 continue
+            if role == "assistant" and msg.get("tool_calls"):
+                parts = []
+                if content:
+                    parts.extend(to_gemini_parts(content))
+                for tool_call in msg.get("tool_calls") or []:
+                    fn = tool_call.get("function") or {}
+                    try:
+                        args = json.loads(fn.get("arguments") or "{}")
+                    except json.JSONDecodeError:
+                        args = {"arguments": fn.get("arguments") or ""}
+                    parts.append({"functionCall": {"name": fn.get("name", ""), "args": args}})
+                gemini_messages.append({"role": "model", "parts": parts})
+                continue
             if role == "tool":
                 tool_name = msg.get("name") or msg.get("tool_call_id") or "tool"
-                content = f"[{tool_name}]\n{content}"
-                role = "user"
+                try:
+                    response = json.loads(content)
+                except json.JSONDecodeError:
+                    response = {"result": content}
+                gemini_messages.append({
+                    "role": "user",
+                    "parts": [{"functionResponse": {"name": tool_name, "response": response}}],
+                })
+                continue
             gemini_messages.append({
                 "role": "model" if role == "assistant" else "user",
                 "parts": to_gemini_parts(content),
@@ -176,6 +197,8 @@ class GeminiProvider(BaseProvider):
         reasoning_effort: Optional[str],
         thinking_enabled: Optional[bool],
         extra_kwargs: Dict[str, Any],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[str] = None,
     ) -> Dict[str, Any]:
         system_prompt, gemini_messages = self._convert_messages(messages)
         body: Dict[str, Any] = {
@@ -193,6 +216,18 @@ class GeminiProvider(BaseProvider):
         )
         if generation_config:
             body["generationConfig"] = generation_config
+        if tools:
+            body["tools"] = [{
+                "functionDeclarations": [
+                    self._openai_tool_to_gemini_declaration(tool)
+                    for tool in tools
+                ]
+            }]
+            mode = "ANY" if tool_choice and tool_choice != "auto" else "AUTO"
+            function_calling_config: Dict[str, Any] = {"mode": mode}
+            if tool_choice and tool_choice != "auto":
+                function_calling_config["allowedFunctionNames"] = [tool_choice]
+            body["toolConfig"] = {"functionCallingConfig": function_calling_config}
         return body
 
     def generate_response(
@@ -216,6 +251,8 @@ class GeminiProvider(BaseProvider):
             reasoning_effort=reasoning_effort,
             thinking_enabled=thinking_enabled,
             extra_kwargs=kwargs,
+            tools=tools,
+            tool_choice=tool_choice,
         )
         policy = RetryPolicy.from_config(self.config)
         result = run_with_retries(
@@ -244,15 +281,6 @@ class GeminiProvider(BaseProvider):
         usage_info = None
 
         try:
-            yield StreamChunk(
-                status=StreamStatus.START,
-                content=None,
-                node_id=stream_controller.node_id if stream_controller else None,
-                conversation_id=stream_controller.conversation_id if stream_controller else None,
-                error=None,
-                tokens_used=0,
-            )
-
             body = self._build_body(
                 messages=messages,
                 max_tokens=max_tokens,
@@ -261,17 +289,51 @@ class GeminiProvider(BaseProvider):
                 reasoning_effort=reasoning_effort,
                 thinking_enabled=thinking_enabled,
                 extra_kwargs=kwargs,
+                tools=tools,
+                tool_choice=tool_choice,
             )
 
             stream_policy = RetryPolicy.from_config(self.config, stream=True)
             retry_failures = 0
+            tool_call_started = False
             while True:
                 attempt_had_output = False
                 try:
-                    async for event in self._iter_sse_events(f"/models/{model}:streamGenerateContent", body):
+                    async for event in self._iter_sse_events(
+                        f"/models/{model}:streamGenerateContent",
+                        body,
+                        stream_controller=stream_controller,
+                    ):
                         if usage := event.get("usageMetadata"):
                             usage_info = usage_from_gemini(usage)
                             total_tokens = usage_total(usage_info, total_tokens)
+
+                        tool_calls = self._extract_tool_calls(event)
+                        if tool_calls:
+                            if not tool_call_started:
+                                tool_call_started = True
+                                attempt_had_output = True
+                                yield StreamChunk(
+                                    status=StreamStatus.CONTENT,
+                                    content=None,
+                                    node_id=stream_controller.node_id if stream_controller else None,
+                                    conversation_id=stream_controller.conversation_id if stream_controller else None,
+                                    error=None,
+                                    tokens_used=0,
+                                    event_type="tool_call_start",
+                                )
+                            attempt_had_output = True
+                            yield StreamChunk(
+                                status=StreamStatus.CONTENT,
+                                content=None,
+                                node_id=stream_controller.node_id if stream_controller else None,
+                                conversation_id=stream_controller.conversation_id if stream_controller else None,
+                                error=None,
+                                tokens_used=0,
+                                event_type="tool_call",
+                                tool_call={"tool_calls": tool_calls},
+                                tool_calls=tool_calls,
+                            )
 
                         for reasoning in self._extract_reasoning_parts(event):
                             if stream_controller and await stream_controller.is_stopped():
@@ -323,7 +385,27 @@ class GeminiProvider(BaseProvider):
                             tokens_used=token_delta,
                         )
                     break
+                except StreamStopped:
+                    yield StreamChunk(
+                        status=StreamStatus.STOPPED,
+                        content=None,
+                        node_id=stream_controller.node_id if stream_controller else None,
+                        conversation_id=stream_controller.conversation_id if stream_controller else None,
+                        error="用户手动终止",
+                        tokens_used=total_tokens,
+                    )
+                    return
                 except Exception as exc:
+                    if stream_controller and await stream_controller.is_stopped():
+                        yield StreamChunk(
+                            status=StreamStatus.STOPPED,
+                            content=None,
+                            node_id=stream_controller.node_id,
+                            conversation_id=stream_controller.conversation_id,
+                            error="用户手动终止",
+                            tokens_used=total_tokens,
+                        )
+                        return
                     decision = classify_retry_error(exc, stream_policy)
                     if (
                         attempt_had_output
@@ -371,13 +453,19 @@ class GeminiProvider(BaseProvider):
                 tokens_used=total_tokens,
             )
 
-    async def _iter_sse_events(self, path: str, body: Dict[str, Any]) -> AsyncIterator[Dict[str, Any]]:
+    async def _iter_sse_events(
+        self,
+        path: str,
+        body: Dict[str, Any],
+        *,
+        stream_controller: Optional[StreamController] = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
         queue: asyncio.Queue = asyncio.Queue()
         loop = asyncio.get_event_loop()
         loop.run_in_executor(None, self._stream_to_queue, path, body, queue, loop)
 
         while True:
-            item = await queue.get()
+            item = await get_queue_item_or_stop(queue, stream_controller)
             if item is _SENTINEL:
                 break
             if isinstance(item, Exception):
@@ -412,6 +500,36 @@ class GeminiProvider(BaseProvider):
                 if part.get("thought") and part.get("text"):
                     chunks.append(part["text"])
         return chunks
+
+    def _extract_tool_calls(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        tool_calls: List[Dict[str, Any]] = []
+        for candidate in payload.get("candidates") or []:
+            content = candidate.get("content") or {}
+            for part in content.get("parts") or []:
+                function_call = part.get("functionCall") or part.get("function_call")
+                if not isinstance(function_call, dict):
+                    continue
+                name = str(function_call.get("name") or "")
+                if not name:
+                    continue
+                args = function_call.get("args")
+                tool_calls.append({
+                    "id": str(function_call.get("id") or f"gemini_call_{len(tool_calls)}"),
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": json.dumps(args if isinstance(args, dict) else {}, ensure_ascii=False),
+                    },
+                })
+        return tool_calls
+
+    def _openai_tool_to_gemini_declaration(self, tool: Dict[str, Any]) -> Dict[str, Any]:
+        fn = tool.get("function") or {}
+        return {
+            "name": fn.get("name", ""),
+            "description": fn.get("description", ""),
+            "parameters": fn.get("parameters", {"type": "object", "properties": {}}),
+        }
 
     def _clean_payload(self, value: Any) -> Any:
         if isinstance(value, dict):

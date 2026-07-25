@@ -223,7 +223,6 @@ class RunManager:
     ) -> None:
         self.journal = journal or RunJournal()
         self.repository: RunRepository = repository or MemoryRunRepository()
-        self.notification_service: Any = None
         self.task_service: Any = None
         self._event_writer: Optional[_RunEventWriteBuffer] = (
             _RunEventWriteBuffer(self.repository)
@@ -232,7 +231,7 @@ class RunManager:
         )
         self._runs: Dict[str, RunRecord] = {}
         self._events: Dict[str, list[Dict[str, Any]]] = {}
-        self._conditions: Dict[str, asyncio.Condition] = {}
+        self._subscribers: Dict[str, set[asyncio.Event]] = {}
         self._writers_by_node: Dict[str, str] = {}
         self._stop_events: Dict[str, asyncio.Event] = {}
         self._finish_listeners: list[Callable[[Dict[str, Any]], None]] = []
@@ -366,11 +365,15 @@ class RunManager:
     def _forget_cached_run_locked(self, run_id: str) -> None:
         self._runs.pop(run_id, None)
         self._events.pop(run_id, None)
-        self._conditions.pop(run_id, None)
+        for signal in self._subscribers.pop(run_id, set()):
+            signal.set()
         self._stop_events.pop(run_id, None)
         for target_node_id, writer_run_id in list(self._writers_by_node.items()):
             if writer_run_id == run_id:
                 self._writers_by_node.pop(target_node_id, None)
+
+    def _run_subscriber_signals_locked(self, run_id: str) -> list[asyncio.Event]:
+        return list(self._subscribers.get(run_id, set()))
     def _idempotent_run_locked(
         self,
         idempotency_key: str,
@@ -562,7 +565,7 @@ class RunManager:
         except Exception:
             persisted_events = []
 
-        condition: asyncio.Condition | None = None
+        signals: list[asyncio.Event] = []
         snapshot: RunRecord | None = None
         async with self._lock:
             record = self._runs.get(run_id)
@@ -588,7 +591,7 @@ class RunManager:
                 ):
                     self._writers_by_node.pop(record.target_node_id, None)
                 snapshot = deepcopy(record)
-                condition = self._conditions.setdefault(run_id, asyncio.Condition())
+                signals = self._run_subscriber_signals_locked(run_id)
             if persisted_events:
                 self._events[run_id] = [
                     {
@@ -600,9 +603,8 @@ class RunManager:
                     for event in persisted_events
                 ]
 
-        if condition is not None:
-            async with condition:
-                condition.notify_all()
+        for signal in signals:
+            signal.set()
         if snapshot is not None:
             snapshot_dict = snapshot.to_dict()
             for listener in list(self._finish_listeners):
@@ -786,7 +788,7 @@ class RunManager:
         journal_events: list[Dict[str, Any]] = []
         journal_conversation_id: Optional[str] = None
         returned_payloads: list[Dict[str, Any]] = []
-        condition: Optional[asyncio.Condition] = None
+        signals: list[asyncio.Event] = []
         with profiler.span(
             "run.append_event" if len(payloads) == 1 else "run.append_events",
             run_id=run_id,
@@ -855,13 +857,12 @@ class RunManager:
                 if writer_events and self._event_writer is not None:
                     await self._event_writer.enqueue_many(writer_events)
                     writer_events = []
-                condition = self._conditions.setdefault(run_id, asyncio.Condition())
+                signals = self._run_subscriber_signals_locked(run_id)
         if journal_events and journal_conversation_id is not None:
             for journal_event in journal_events:
                 self.journal.append_event(journal_conversation_id, run_id, journal_event)
-        if condition is not None:
-            async with condition:
-                condition.notify_all()
+        for signal in signals:
+            signal.set()
         return returned_payloads
 
     async def subscribe(self, run_id: str, from_event: int = 0) -> AsyncIterator[Dict[str, Any]]:
@@ -869,7 +870,15 @@ class RunManager:
         index = max(0, int(from_event or 0))
         replayed = 0
         waited = 0
+        async with self._lock:
+            record = self._runs.get(run_id) or self._hydrate_run_locked(run_id)
+            if not record:
+                raise RunNotFoundError(run_id)
+            if record.status in FINISHED_RUN_STATUSES:
+                profiler.mark("run.subscribe.done", run_id=run_id, from_event=from_event, replayed=0, waited=0)
+                return
         while True:
+            signal: asyncio.Event | None = None
             with profiler.span("run.subscribe.poll", run_id=run_id, from_event=from_event):
                 async with self._lock:
                     record = self._runs.get(run_id) or self._hydrate_run_locked(run_id)
@@ -877,7 +886,6 @@ class RunManager:
                         raise RunNotFoundError(run_id)
                     self._ensure_events_loaded_locked(run_id)
                     events = self._events.setdefault(run_id, [])
-                    condition = self._conditions.setdefault(run_id, asyncio.Condition())
                     finished = record.status in FINISHED_RUN_STATUSES
                     if index < len(events):
                         event = events[index]
@@ -886,14 +894,24 @@ class RunManager:
                     elif finished:
                         break
                     else:
+                        signal = asyncio.Event()
+                        self._subscribers.setdefault(run_id, set()).add(signal)
                         payload = None
             if payload is not None:
                 replayed += 1
                 yield public_run_event(payload)
                 continue
-            async with condition:
+            if signal is not None:
                 waited += 1
-                await condition.wait()
+                try:
+                    await signal.wait()
+                finally:
+                    async with self._lock:
+                        subscribers = self._subscribers.get(run_id)
+                        if subscribers is not None:
+                            subscribers.discard(signal)
+                            if not subscribers:
+                                self._subscribers.pop(run_id, None)
         profiler.mark("run.subscribe.done", run_id=run_id, from_event=from_event, replayed=replayed, waited=waited)
 
     async def wait_for_terminal_result(
@@ -911,15 +929,43 @@ class RunManager:
             result_payload: Optional[Dict[str, Any]] = None
             error_payload: Optional[Dict[str, Any]] = None
             final_payload: Optional[Dict[str, Any]] = None
-            async for payload in self.subscribe(run_id, 0):
-                event_type = str(payload.get("event_type") or "")
-                if event_type in result_types:
-                    result_payload = payload
-                elif event_type in error_types:
-                    error_payload = payload
-                if payload.get("type") == "run_finished":
-                    final_payload = payload
+            next_index = 0
+            while final_payload is None:
+                for payload in self.read_events(run_id, next_index):
+                    event_index = payload.get("event_index")
+                    if isinstance(event_index, int):
+                        next_index = max(next_index, event_index + 1)
+                    else:
+                        next_index += 1
+                    event_type = str(payload.get("event_type") or "")
+                    if event_type in result_types:
+                        result_payload = payload
+                    elif event_type in error_types:
+                        error_payload = payload
+                    if payload.get("type") == "run_finished":
+                        final_payload = payload
+                        break
+                if final_payload is not None:
                     break
+                run = self.get_run(run_id)
+                if not run:
+                    raise RunNotFoundError(run_id)
+                if RunStatus(str(run.get("status"))) in FINISHED_RUN_STATUSES:
+                    break
+                async for payload in self.subscribe(run_id, next_index):
+                    event_index = payload.get("event_index")
+                    if isinstance(event_index, int):
+                        next_index = max(next_index, event_index + 1)
+                    else:
+                        next_index += 1
+                    event_type = str(payload.get("event_type") or "")
+                    if event_type in result_types:
+                        result_payload = payload
+                    elif event_type in error_types:
+                        error_payload = payload
+                    if payload.get("type") == "run_finished":
+                        final_payload = payload
+                        break
 
             run = self.get_run(run_id) or {}
             status = (
@@ -981,7 +1027,6 @@ class RunManager:
                         run_status = RunStatus.FAILED
                         error = "run event persistence failed"
                 event_index = record.event_count
-                condition = self._conditions.setdefault(run_id, asyncio.Condition())
                 if not self.repository.manages_task_bindings:
                     task_service = getattr(self, "task_service", None)
                     if task_service is not None:
@@ -1037,9 +1082,10 @@ class RunManager:
                     self._writers_by_node.pop(record.target_node_id, None)
                 self._events.setdefault(run_id, []).append(event)
                 snapshot = deepcopy(record)
+                signals = self._run_subscriber_signals_locked(run_id)
         snapshot_dict = snapshot.to_dict()
-        async with condition:
-            condition.notify_all()
+        for signal in signals:
+            signal.set()
         if _notify_listeners:
             for listener in list(self._finish_listeners):
                 listener(snapshot_dict)
@@ -1056,7 +1102,7 @@ class RunManager:
             record.updated_at = time()
             stop_event = self._stop_events.setdefault(run_id, asyncio.Event())
             stop_event.set()
-            condition = self._conditions.setdefault(run_id, asyncio.Condition())
+            signals: list[asyncio.Event] = []
             if self._event_writer is not None:
                 try:
                     await self._event_writer.flush_run(run_id)
@@ -1097,8 +1143,9 @@ class RunManager:
                     "created_at": persisted_events[0]["created_at"],
                 }
                 self._events.setdefault(run_id, []).append(repository_event)
-        async with condition:
-            condition.notify_all()
+            signals = self._run_subscriber_signals_locked(run_id)
+        for signal in signals:
+            signal.set()
         return True
 
     async def update_status(self, run_id: str, status: RunStatus | str) -> RunRecord:
@@ -1150,9 +1197,6 @@ class RunManager:
         if observer_run_id:
             metadata["result_observed_by_run_id"] = observer_run_id
         updated = await self.update_metadata(run_id, metadata)
-        service = getattr(self, "notification_service", None)
-        if service is not None:
-            service.mark_observed_for_run(run_id)
         return updated
 
     def stop_event(self, run_id: str) -> asyncio.Event:
@@ -1365,7 +1409,7 @@ class RunManager:
                 ),
             )
             self._runs[run_id] = record
-            self._conditions.setdefault(run_id, asyncio.Condition())
+            self._subscribers.setdefault(run_id, set())
             self._stop_events.setdefault(run_id, asyncio.Event())
         if record.target_node_id and record.status not in FINISHED_RUN_STATUSES:
             self._writers_by_node[record.target_node_id] = run_id

@@ -59,10 +59,14 @@ async def _provider_exception_streams_and_persists_real_error(tmp_path):
     assert error_chunk["error"] == "upstream quota exceeded"
     assert error_chunk["node_id"]
 
-    saved = chat_manager.get_conversation(conversation.metadata["id"])
-    assistant_message = saved.nodes[error_chunk["node_id"]]["assistant_message"]
-    assert assistant_message["generation_info"]["status"] == "error"
-    assert assistant_message["generation_info"]["error_message"] == "upstream quota exceeded"
+    messages = chat_manager._canonical_messages_by_node(
+        conversation.metadata["id"],
+        [error_chunk["node_id"]],
+    ).get(error_chunk["node_id"], [])
+    assert not [
+        message for message in messages
+        if message.get("role") == "assistant" and message.get("subtype") == "assistant_answer"
+    ]
 
 
 def test_provider_exception_streams_and_persists_real_error(tmp_path):

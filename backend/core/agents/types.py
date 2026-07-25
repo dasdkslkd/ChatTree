@@ -58,11 +58,6 @@ class AgentMailboxMessage:
     metadata: Dict[str, Any] = field(default_factory=dict)
     delivery_policy: AgentDeliveryPolicy = AgentDeliveryPolicy.AUTO
     created_at: float = field(default_factory=time)
-    notification_enqueued_at: Optional[float] = None
-    notification_delivered_at: Optional[float] = None
-    integrated_at: Optional[float] = None
-    acknowledged_at: Optional[float] = None
-
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
         data["message_type"] = self.message_type.value

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import sys
 
@@ -6,39 +7,52 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, ".")
 
-from backend.api.dependencies import get_tool_manager
 from backend.api.routes import tool_results as tool_results_route
 from backend.core.persistence.database import SQLitePersistence
 from backend.core.persistence.repository import ChatRepository
-from backend.core.storage.tool_result_storage import ToolResultStorage
-from main import app
+from backend.core.tools.code_tools import CodeToolConfig, ReadFileTool
+from backend.core.tools.tool_manager import ToolManager
 
 
-class FakeToolManager:
-    def __init__(self, tool_result_store):
-        self.tool_result_store = tool_result_store
+def _repository(tmp_path):
+    persistence = SQLitePersistence(tmp_path)
+    persistence.initialize()
+    repository = ChatRepository(persistence)
+    conversation_id = repository.create_conversation(title="Canonical tool result")
+    node_id = repository.create_node(conversation_id, parent_id=None, child_order=0)
+    call_id = repository.add_tool_call(
+        conversation_id,
+        node_id,
+        tool_call_id="call-canonical",
+        name="shell",
+        arguments={},
+    )
+    return persistence, repository, conversation_id, node_id, call_id
 
 
-def test_tool_result_storage_reads_default_slice_and_preserves_metadata(tmp_path):
-    store = ToolResultStorage(str(tmp_path))
+def _route_client(persistence, repository=None):
+    route_app = FastAPI()
+    route_app.include_router(tool_results_route.router)
+    route_app.state.persistence = persistence
+    if repository is not None:
+        route_app.state.chat_repository = repository
+    return TestClient(route_app, raise_server_exceptions=False)
 
-    record = store.save_result(
-        content="x" * 17005,
-        tool_name="shell",
-        conversation_id="conv-1",
-        node_id="node-1",
-        tool_call_id="call-1",
-        structured_metadata={"format": "text"},
-        raw_metadata={"mime_type": "text/plain"},
+
+def test_repository_reads_default_slice_from_canonical_tool_results(tmp_path):
+    _persistence, repository, conversation_id, node_id, call_id = _repository(tmp_path)
+    result_id = repository.add_tool_result(
+        conversation_id,
+        node_id,
+        tool_result_id="result-canonical",
+        tool_call_id=call_id,
+        output="x" * 17005,
+        metadata={"tool_name": "shell"},
     )
 
-    persisted = store.read_result(record["id"])
-    assert persisted["structured_metadata"] == {"format": "text"}
-    assert persisted["raw_metadata"] == {"mime_type": "text/plain"}
-
-    first_page = store.read_slice(record["id"])
+    first_page = repository.get_tool_result_slice(result_id)
     assert first_page == {
-        "tool_result_id": record["id"],
+        "tool_result_id": result_id,
         "tool_name": "shell",
         "offset": 0,
         "limit": 16000,
@@ -48,148 +62,121 @@ def test_tool_result_storage_reads_default_slice_and_preserves_metadata(tmp_path
         "content": "x" * 16000,
     }
 
-    final_page = store.read_slice(record["id"], offset=16000, limit=2000)
+    final_page = repository.get_tool_result_slice(result_id, offset=16000, limit=2000)
     assert final_page["content"] == "x" * 1005
     assert final_page["next_offset"] is None
     assert final_page["has_more"] is False
 
 
-def test_tool_result_storage_reads_legacy_records_without_new_metadata(tmp_path):
-    legacy_id = "legacy-result"
-    legacy_path = tmp_path / f"{legacy_id}.json"
-    legacy_path.write_text(
-        json.dumps(
-            {
-                "id": legacy_id,
-                "tool_name": "legacy_tool",
-                "conversation_id": "conv-legacy",
-                "node_id": "node-legacy",
-                "tool_call_id": None,
-                "content": "abcdef",
-                "created_at": 1,
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
+def test_tool_result_route_reads_only_canonical_sqlite_columns(tmp_path):
+    persistence, repository, conversation_id, node_id, call_id = _repository(tmp_path)
+    result_id = repository.add_tool_result(
+        conversation_id,
+        node_id,
+        tool_result_id="result-canonical",
+        tool_call_id=call_id,
+        output="canonical output",
     )
-
-    index_path = tmp_path / "index.json"
-    index_path.write_text(
-        json.dumps(
-            {
-                legacy_id: {
-                    "id": legacy_id,
-                    "path": str(legacy_path),
-                    "tool_name": "legacy_tool",
-                    "conversation_id": "conv-legacy",
-                    "node_id": "node-legacy",
-                    "tool_call_id": None,
-                    "created_at": 1,
-                }
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-
-    store = ToolResultStorage(str(tmp_path))
-    result = store.read_slice(legacy_id, offset=2, limit=3)
-
-    assert result["tool_result_id"] == legacy_id
-    assert result["tool_name"] == "legacy_tool"
-    assert result["content"] == "cde"
-    assert result["total_chars"] == 6
-
-
-def test_tool_result_route_reads_paginated_content_and_returns_404(tmp_path):
-    store = ToolResultStorage(str(tmp_path))
-    record = store.save_result(
-        content="0123456789" * 2000,
-        tool_name="python",
-        conversation_id="conv-2",
-        node_id="node-2",
-        tool_call_id=None,
-    )
-
-    had_tool_manager = hasattr(app.state, "tool_manager")
-    previous_tool_manager = getattr(app.state, "tool_manager", None)
-    app.state.tool_manager = FakeToolManager(store)
-    try:
-        client = TestClient(app)
-
-        response = client.get(f"/api/v1/tool-results/{record['id']}")
-        assert response.status_code == 200
-        assert response.json() == {
-            "tool_result_id": record["id"],
-            "tool_name": "python",
-            "offset": 0,
-            "limit": 16000,
-            "next_offset": 16000,
-            "total_chars": 20000,
-            "has_more": True,
-            "content": "0123456789" * 1600,
-        }
-
-        api_response = client.get(
-            f"/api/v1/tool-results/{record['id']}?offset=16000&limit=5"
+    with persistence.connect() as conn:
+        conn.execute("ALTER TABLE tool_results ADD COLUMN output_inline TEXT")
+        conn.execute(
+            "UPDATE tool_results SET output_inline = ? WHERE id = ?",
+            ("legacy output", result_id),
         )
-        assert api_response.status_code == 200
-        assert api_response.json()["content"] == "01234"
-        assert api_response.json()["next_offset"] == 16005
+    client = _route_client(persistence, repository)
 
-        missing_response = client.get("/api/v1/tool-results/missing")
-        assert missing_response.status_code == 404
-    finally:
-        if had_tool_manager:
-            app.state.tool_manager = previous_tool_manager
-        else:
-            delattr(app.state, "tool_manager")
+    response = client.get(f"/tool-results/{result_id}")
+
+    assert response.status_code == 200
+    assert response.json()["content"] == "canonical output"
 
 
-def test_tool_result_route_respects_tool_manager_dependency_override(tmp_path):
-    override_store = ToolResultStorage(str(tmp_path / "override"))
-    record = override_store.save_result(
-        content="override content",
-        tool_name="shell",
-        conversation_id="conv-override",
-        node_id="node-override",
-        tool_call_id="call-override",
+def test_tool_result_route_reads_blob_pages_and_returns_404(tmp_path):
+    persistence, repository, conversation_id, node_id, call_id = _repository(tmp_path)
+    result_id = repository.add_tool_result(
+        conversation_id,
+        node_id,
+        tool_result_id="result-blob",
+        tool_call_id=call_id,
+        output="0123456789" * 2000,
+        metadata={"tool_name": "python"},
     )
-    state_store = ToolResultStorage(str(tmp_path / "state"))
+    client = _route_client(persistence)
 
-    previous_overrides = dict(app.dependency_overrides)
-    had_tool_manager = hasattr(app.state, "tool_manager")
-    previous_tool_manager = getattr(app.state, "tool_manager", None)
-    had_persistence = hasattr(app.state, "persistence")
-    previous_persistence = getattr(app.state, "persistence", None)
-    app.state.tool_manager = FakeToolManager(state_store)
-    if had_persistence:
-        delattr(app.state, "persistence")
-    app.dependency_overrides[get_tool_manager] = lambda: FakeToolManager(override_store)
-    try:
-        client = TestClient(app)
+    response = client.get(f"/tool-results/{result_id}")
+    assert response.status_code == 200
+    assert response.json() == {
+        "tool_result_id": result_id,
+        "tool_name": "shell",
+        "offset": 0,
+        "limit": 16000,
+        "next_offset": 16000,
+        "total_chars": 20000,
+        "has_more": True,
+        "content": "0123456789" * 1600,
+    }
 
-        response = client.get(f"/api/v1/tool-results/{record['id']}")
+    api_response = client.get(f"/tool-results/{result_id}?offset=16000&limit=5")
+    assert api_response.status_code == 200
+    assert api_response.json()["content"] == "01234"
+    assert api_response.json()["next_offset"] == 16005
 
-        assert response.status_code == 200
-        assert response.json()["content"] == "override content"
-    finally:
-        app.dependency_overrides.clear()
-        app.dependency_overrides.update(previous_overrides)
-        if had_tool_manager:
-            app.state.tool_manager = previous_tool_manager
-        else:
-            delattr(app.state, "tool_manager")
-        if had_persistence:
-            app.state.persistence = previous_persistence
+    missing_response = client.get("/tool-results/missing")
+    assert missing_response.status_code == 404
+
+
+def test_read_tool_result_tool_uses_repository_and_errors_without_it(tmp_path):
+    _persistence, repository, conversation_id, node_id, call_id = _repository(tmp_path)
+    result_id = repository.add_tool_result(
+        conversation_id,
+        node_id,
+        tool_result_id="result-readable",
+        tool_call_id=call_id,
+        output="abcdef",
+    )
+    manager = ToolManager({"tools": {"builtin": {"enabled": False}}}, chat_repository=repository)
+
+    payload = json.loads(asyncio.run(manager.execute_tool("read_tool_result", {
+        "tool_result_id": result_id,
+        "offset": 2,
+        "limit": 3,
+    })))
+    assert payload == {"content": "cde", "read_more": 'read({"source":"tool_result","tool_result_id":"result-readable","offset":5})'}
+
+    missing_manager = ToolManager({"tools": {"builtin": {"enabled": False}}})
+    error = json.loads(asyncio.run(missing_manager.execute_tool("read_tool_result", {
+        "tool_result_id": result_id,
+    })))
+    assert error["error"]["type"] == "tool_result_unavailable"
+
+
+def test_read_source_tool_result_uses_runtime_repository(tmp_path):
+    _persistence, repository, conversation_id, node_id, call_id = _repository(tmp_path)
+    result_id = repository.add_tool_result(
+        conversation_id,
+        node_id,
+        tool_result_id="result-read-source",
+        tool_call_id=call_id,
+        output="abcdef",
+    )
+    tool = ReadFileTool(CodeToolConfig.from_dict({"workspace_roots": [str(tmp_path)]}))
+
+    payload = json.loads(asyncio.run(tool.execute(
+        source="tool_result",
+        tool_result_id=result_id,
+        offset=1,
+        limit=3,
+        _runtime_context={"chat_repository": repository},
+    )))
+    assert payload["content"] == "bcd"
+    assert payload["next_offset"] == 4
+
+    error = json.loads(asyncio.run(tool.execute(source="tool_result", tool_result_id=result_id)))
+    assert error["error"]["type"] == "tool_result_unavailable"
 
 
 def test_tool_result_route_returns_clear_error_for_missing_sqlite_blob(tmp_path):
-    persistence = SQLitePersistence(tmp_path)
-    persistence.initialize()
-    repository = ChatRepository(persistence)
-    conversation_id = repository.create_conversation(title="Missing blob")
-    node_id = repository.create_node(conversation_id, parent_id=None, child_order=0)
+    persistence, repository, conversation_id, node_id, _call_id = _repository(tmp_path)
     with persistence.connect() as conn:
         conn.execute(
             """
@@ -219,22 +206,6 @@ def test_tool_result_route_returns_clear_error_for_missing_sqlite_blob(tmp_path)
         )
         conn.execute(
             """
-            INSERT INTO tool_calls (
-              id,
-              conversation_id,
-              node_id,
-              call_index,
-              name,
-              status,
-              created_at,
-              updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, strftime('%s', 'now'), strftime('%s', 'now'))
-            """,
-            ("call-missing-blob", conversation_id, node_id, 0, "shell", "complete"),
-        )
-        conn.execute(
-            """
             INSERT INTO tool_results (
               id,
               conversation_id,
@@ -252,17 +223,14 @@ def test_tool_result_route_returns_clear_error_for_missing_sqlite_blob(tmp_path)
                 "tool-result-missing-blob",
                 conversation_id,
                 node_id,
-                "call-missing-blob",
+                "call-canonical",
                 "complete",
                 "preview",
                 "missing-blob-id",
                 128,
             ),
         )
-    route_app = FastAPI()
-    route_app.include_router(tool_results_route.router)
-    route_app.state.persistence = persistence
-    client = TestClient(route_app, raise_server_exceptions=False)
+    client = _route_client(persistence, repository)
 
     response = client.get("/tool-results/tool-result-missing-blob")
 

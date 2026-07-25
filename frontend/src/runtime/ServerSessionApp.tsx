@@ -6,7 +6,6 @@ import { Wifi, WifiOff } from 'lucide-react'
 import { SettingsPageView } from '../components/SettingsDialog'
 import { useNavigationStore } from '../store/navigationStore'
 import { useModelStore } from '../store/modelStore'
-import { useConversationStore } from '../store/conversationStore'
 import { flushPerfEventsSync, loadPerfConfig } from '../perf/client'
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import type { BoundServerContext } from './connectionIdentity'
@@ -28,72 +27,11 @@ type UsageInfo = {
   cache_read_input_tokens?: number;
 };
 
-type MessageWithUsage = {
-  role?: string;
-  tokens_used?: number;
-  branch_total_tokens?: number;
-  branch_usage_info?: UsageInfo | null;
-  context_usage?: {
-    turn_usage?: UsageInfo | null;
-    branch_usage?: UsageInfo | null;
-    active_context_usage?: UsageInfo | null;
-    model_context_window?: number | null;
-  } | null;
-  generation_info?: {
-    tokens_used?: number;
-    usage_info?: UsageInfo | null;
-  } | null;
-};
-
-function usageTotal(usage?: UsageInfo | null): number {
-  return usage?.total_tokens ?? ((usage?.input_tokens ?? 0) + (usage?.output_tokens ?? 0));
-}
-
 function formatTokens(value?: number | null): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return '—';
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}M`;
   if (value >= 1_000) return `${(value / 1_000).toFixed(value >= 100_000 ? 0 : 1)}K`;
   return String(value);
-}
-
-function resolveContextUsage(messages: MessageWithUsage[]): {
-  used: number;
-  usage: UsageInfo | null;
-  contextWindow: number | null;
-} {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i];
-    const activeUsage = message.context_usage?.active_context_usage ?? message.context_usage?.branch_usage ?? null;
-    const activeTotal = usageTotal(activeUsage);
-    if (activeTotal > 0) {
-      return {
-        used: activeTotal,
-        usage: activeUsage,
-        contextWindow: message.context_usage?.model_context_window ?? null,
-      };
-    }
-    const branchTotal = usageTotal(message.branch_usage_info);
-    if (branchTotal > 0) {
-      return { used: branchTotal, usage: message.branch_usage_info ?? null, contextWindow: null };
-    }
-    if ((message.branch_total_tokens ?? 0) > 0) {
-      return {
-        used: message.branch_total_tokens ?? 0,
-        usage: message.branch_usage_info ?? null,
-        contextWindow: null,
-      };
-    }
-  }
-
-  const used = messages
-    .filter((message) => message.role === 'assistant')
-    .reduce((sum, message) => {
-      return sum + usageTotal(message.generation_info?.usage_info)
-        + (message.generation_info?.usage_info
-          ? 0
-          : (message.generation_info?.tokens_used ?? message.tokens_used ?? 0));
-    }, 0);
-  return { used, usage: null, contextWindow: null };
 }
 
 export default function ServerSessionApp({
@@ -106,7 +44,6 @@ export default function ServerSessionApp({
   void binding;
   const { activePage, settingsSection, openSettings } = useNavigationStore();
   const { currentProvider, currentModel, loadMetadata, getMetadata } = useModelStore();
-  const { messages } = useConversationStore();
   const initializationOwnerRef = useRef<ServerSessionInitializationOwner | null>(null);
   const [contextHovered, setContextHovered] = useState(false);
 
@@ -152,11 +89,8 @@ export default function ServerSessionApp({
   };
 
   const metadataContextLimit = getMetadata(currentProvider, currentModel)?.context_length ?? null;
-  const contextUsage = useMemo(
-    () => resolveContextUsage(messages as MessageWithUsage[]),
-    [messages],
-  );
-  const contextLimit = metadataContextLimit ?? contextUsage.contextWindow ?? null;
+  const contextUsage = useMemo(() => ({ used: 0, usage: null as UsageInfo | null }), []);
+  const contextLimit = metadataContextLimit;
   const contextUsed = contextUsage.used;
   const contextPercent = contextLimit ? Math.min(100, Math.max(0, (contextUsed / contextLimit) * 100)) : 0;
   const contextBarColor = contextPercent >= 90

@@ -7,7 +7,6 @@ import tempfile
 sys.path.insert(0, ".")
 
 from backend.core.chat.chat_manager import ChatManager
-from backend.core.chat.conversation import Conversation
 from backend.core.chat.node import NodeManager
 from backend.core.config.types import StreamChunk, StreamController, StreamStatus
 from backend.core.storage.chat_storage import ChatStorage
@@ -76,12 +75,6 @@ async def drain(stream):
 def test_new_nodes_start_with_layered_usage():
     root = NodeManager.create_root_node()
     child = NodeManager.create_node(
-        user_message={
-            "id": "user-1",
-            "role": "user",
-            "content": "hello",
-            "timestamp": 1,
-        },
         parent_id=root["id"],
         model_id="fake-model",
     )
@@ -122,7 +115,7 @@ def test_streaming_updates_each_node_layered_usage_to_that_point():
 
         asyncio.run(run())
 
-        reloaded = Conversation.from_dict(storage.load(cid))
+        reloaded = cm.get_conversation(cid)
         chain = reloaded.get_node_chain(reloaded.current_node_id)
         non_root = [node for node in chain if node["id"] != reloaded.root_node_id]
         assert len(non_root) == 2
@@ -140,10 +133,5 @@ def test_streaming_updates_each_node_layered_usage_to_that_point():
         assert second["total_tokens"] == 18
         assert second["branch_usage_info"]["total_tokens"] == 18
 
-        messages = reloaded.get_message_chain_from_node(second["id"])
-        latest_messages = [msg for msg in messages if msg.get("node_id") == second["id"]]
-        assert latest_messages
-        for msg in latest_messages:
-            assert msg["context_usage"]["active_context_usage"]["total_tokens"] == 18
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

@@ -5,7 +5,7 @@ import { TextTooltip } from '@/components/ui/text-tooltip';
 import MarkdownContent from '../../MarkdownContent';
 import type {
   TranscriptCopyHandler,
-  TranscriptItem,
+  UserMessageItem as UserMessageTranscriptItem,
   TranscriptUserMessageActionHandler,
   TranscriptUserMessageDeleteHandler,
 } from '../../../types/transcript';
@@ -17,7 +17,7 @@ export function UserMessageItem({
   onEdit,
   onDelete,
 }: {
-  item: TranscriptItem;
+  item: UserMessageTranscriptItem;
   onCopy?: TranscriptCopyHandler;
   onEdit?: TranscriptUserMessageActionHandler;
   onDelete?: TranscriptUserMessageDeleteHandler;

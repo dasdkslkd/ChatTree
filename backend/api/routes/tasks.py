@@ -7,10 +7,9 @@ from typing import Any, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from pydantic import BaseModel, Field
 
-from backend.api.dependencies import get_task_notification_service, get_task_service
+from backend.api.dependencies import get_task_service
 from backend.api.errors import ApiError
 from backend.api.task_state import apply_task_state_etag, build_task_state
-from backend.core.notifications import TaskNotificationService
 from backend.core.tasks import (
     ActiveTaskConflictError,
     ActiveTaskNotFoundError,
@@ -83,12 +82,10 @@ async def get_task_state(
     response: Response,
     if_none_match: Optional[str] = Header(default=None, alias="If-None-Match"),
     task_service: ActiveTaskService = Depends(get_task_service),
-    notification_service: TaskNotificationService = Depends(get_task_notification_service),
 ):
     state = await build_task_state(
         conversation_id,
         task_service=task_service,
-        notification_service=notification_service,
     )
     etag = f'"{state["version"]}"'
     if if_none_match == etag:

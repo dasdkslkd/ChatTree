@@ -43,12 +43,6 @@ function createOperations(calls, overrides = {}) {
     refreshTaskState: async () => {
       calls.push('taskState');
     },
-    refreshActivePlan: async () => {
-      calls.push('plan');
-    },
-    syncSideRuns: async () => {
-      calls.push('sideRuns');
-    },
     ...overrides,
   };
 }

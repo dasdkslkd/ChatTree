@@ -2,17 +2,16 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
-import json
 import logging
 from pathlib import Path
 
-from backend.api.dependencies import get_chat_manager, get_config_manager, get_run_manager, get_transcript_projection
+from backend.api.dependencies import get_chat_manager, get_config_manager, get_run_manager, get_transcript_assembler
 from backend.api.errors import ApiError, ErrorEnvelope
 from backend.core.chat.chat_manager import ChatManager
 from backend.core.config.config import Config, cfg
-from backend.core.persistence.transcript import TranscriptProjection
 from backend.core.projects import normalize_project_path, normalize_projects_config, workspace_project_path
 from backend.core.runs import RunManager
+from backend.core.transcript import TranscriptAssembler
 from backend.core.workspace import normalize_workspace
 
 logger = logging.getLogger(__name__)
@@ -94,39 +93,6 @@ def _conversation_response(conversation) -> Dict[str, Any]:
         "workspace": conversation.metadata.get("workspace"),
         "total_tokens": conversation.metadata.get("total_tokens", {}),
     }
-
-
-def to_transcript_item_dto(item: Dict[str, Any]) -> Dict[str, Any]:
-    props_json = item.get("props_json")
-    props: Dict[str, Any] = {}
-    if props_json:
-        try:
-            loaded_props = json.loads(props_json)
-            if isinstance(loaded_props, dict):
-                props = loaded_props
-        except (TypeError, json.JSONDecodeError):
-            props = {}
-
-    message_metadata_json = item.get("message_metadata_json")
-    if item.get("item_type") == "assistant_process" and message_metadata_json:
-        try:
-            loaded_metadata = json.loads(message_metadata_json)
-            if isinstance(loaded_metadata, dict):
-                for key in ("tool_interactions", "timeline", "reasoning", "tool_calls", "tool_results"):
-                    if key in loaded_metadata and key not in props:
-                        props[key] = loaded_metadata[key]
-        except (TypeError, json.JSONDecodeError):
-            pass
-
-    dto = {
-        key: value
-        for key, value in item.items()
-        if key not in {"props_json", "message_metadata_json"}
-    }
-    dto["type"] = item.get("item_type")
-    dto["props"] = props
-    return dto
-
 
 def _workspace_from_project_path(path_value: str, label: Optional[str], create: bool) -> Dict[str, Any]:
     path_text = (path_value or "").strip()
@@ -359,22 +325,26 @@ async def delete_conversation(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/conversations/{conversation_id}/branches/{tip_node_id}/transcript")
-async def get_conversation_branch_transcript(
+@router.get("/conversations/{conversation_id}/transcript")
+async def get_conversation_transcript(
     conversation_id: str,
-    tip_node_id: str,
-    projection: TranscriptProjection = Depends(get_transcript_projection),
+    node_id: Optional[str] = None,
+    assembler: TranscriptAssembler = Depends(get_transcript_assembler),
+    run_manager: RunManager = Depends(get_run_manager),
 ):
-    """获取显式分支的后端 transcript 快照。"""
+    """获取后端 canonical transcript 快照。"""
     try:
-        items = projection.list_for_branch(conversation_id, tip_node_id)
-        revision = max((int(item.get("updated_at") or 0) for item in items), default=0)
-        return {
-            "conversation_id": conversation_id,
-            "tip_node_id": tip_node_id,
-            "revision": revision,
-            "items": [to_transcript_item_dto(item) for item in items],
-        }
+        active_streams = []
+        for run in run_manager.list_active(conversation_id):
+            run_id = str(run.get("run_id") or run.get("id") or "")
+            if not run_id or not run.get("target_node_id"):
+                continue
+            stream = assembler.stream_from_run_events(run_id, run_manager.read_events(run_id, 0))
+            stream["conversation_id"] = conversation_id
+            stream["target_node_id"] = run.get("target_node_id")
+            stream["node_id"] = run.get("target_node_id")
+            active_streams.append(stream)
+        return assembler.snapshot(conversation_id, node_id, active_streams)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Transcript branch not found") from exc
     except HTTPException:
@@ -603,22 +573,32 @@ async def get_conversation_tree(
             raise HTTPException(status_code=404, detail="对话不存在")
 
         nodes = []
+        node_ids = [str(node_id) for node_id in conv.nodes.keys()]
+        messages_by_node = chat_manager._canonical_messages_by_node(conversation_id, node_ids)
         for node_id, node in conv.nodes.items():
-            user_content = ""
-            user_subtype = None
-            if node.get("user_message"):
-                user_subtype = node["user_message"].get("subtype")
-                if user_subtype != "task_notification":
-                    user_content = node["user_message"].get("content", "")
-
-            assistant_content = ""
-            if node.get("assistant_message"):
-                assistant_content = node["assistant_message"].get("content", "")
-            context_summaries = [
-                summary for summary in (node.get("context_summaries") or [])
-                if isinstance(summary, dict) and summary.get("type") == "prune_summary"
-            ]
-            context_summaries.sort(key=lambda item: int(item.get("created_at") or 0), reverse=True)
+            node_messages = messages_by_node.get(str(node_id), [])
+            user_message = next(
+                (
+                    message for message in node_messages
+                    if message.get("role") == "user"
+                    and not message.get("is_hidden_from_transcript")
+                    and not message.get("is_visible_in_transcript_only")
+                    and message.get("subtype") not in {"compact_summary", "prune_summary"}
+                ),
+                {},
+            )
+            user_subtype = user_message.get("subtype") or None
+            user_content = str(user_message.get("content") or "")
+            assistant_message = next(
+                (
+                    message for message in reversed(node_messages)
+                    if message.get("role") == "assistant"
+                    and message.get("subtype") in {None, "", "assistant_answer"}
+                    and not message.get("is_hidden_from_transcript")
+                ),
+                {},
+            )
+            assistant_content = str(assistant_message.get("content") or "")
 
             # 处理 parent_id: 根节点的 parent_id 为 "None" 字符串，转为 null
             parent_id = node.get("parent_id")
@@ -640,8 +620,6 @@ async def get_conversation_tree(
                 "total_tokens": node.get("total_tokens", 0),
                 "branch_usage_info": node.get("branch_usage_info"),
                 "usage": node.get("usage"),
-                "context_summaries": context_summaries,
-                "prune_summary_count": len(context_summaries),
             })
 
         return {

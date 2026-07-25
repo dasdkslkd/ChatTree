@@ -12,6 +12,8 @@ from backend.core.chat.conversation import Conversation
 from backend.core.chat.node import NodeManager
 from backend.core.chat.prune_summary import build_prune_packets
 from backend.core.config.types import Message, Role
+from backend.core.persistence.database import SQLitePersistence
+from backend.core.persistence.repository import ChatRepository
 from backend.core.runs import RunKind, RunManager
 from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
@@ -20,8 +22,46 @@ from backend.api.routes.messages import (
     SendMessageRequest,
     _parse_prune_summary_args,
     _produce_prune_summary,
-    _subscribe_sse,
 )
+from backend.api.routes.runs import _subscribe_sse
+
+
+class PatchSession:
+    def __init__(self):
+        self.revision = 0
+
+    def feed(self, payload, *, emit=True):
+        if not emit:
+            return None
+        conversation_id = payload.get("conversation_id") or "conv-1"
+        node_id = payload.get("target_node_id") or payload.get("node_id") or payload.get("anchor_node_id") or "target"
+        content = payload.get("content") if isinstance(payload.get("content"), str) else ""
+        self.revision += 1
+        return {
+            "type": "transcript_patch",
+            "conversation_id": conversation_id,
+            "node_id": node_id,
+            "revision": self.revision,
+            "operations": [
+                {
+                    "op": "upsert",
+                    "item": {
+                        "type": "assistant_answer",
+                        "id": f"message:test-{self.revision}",
+                        "conversation_id": conversation_id,
+                        "node_id": node_id,
+                        "message_id": f"test-{self.revision}",
+                        "content": content,
+                        "status": "complete",
+                    },
+                }
+            ] if content else [],
+        }
+
+
+class PatchAssembler:
+    def patch_session(self, run_id, from_event=0):
+        return PatchSession()
 
 
 async def _prune_summary_stream(conversation_id, request, chat_manager):
@@ -47,7 +87,7 @@ async def _prune_summary_stream(conversation_id, request, chat_manager):
             run_manager=run_manager,
         )
     )
-    async for event in _subscribe_sse(run_manager, run.run_id, from_event=1):
+    async for event in _subscribe_sse(run_manager, PatchAssembler(), run.run_id, from_event=1):
         yield event
     await producer
 
@@ -112,9 +152,9 @@ def _message(role, content):
 
 
 def _node(content, assistant=None):
-    node = NodeManager.create_node(_message(Role.USER, content), model_id="fake-model")
-    if assistant is not None:
-        node["assistant_message"] = _message(Role.ASSISTANT, assistant)
+    node = NodeManager.create_node(model_id="fake-model")
+    node["_test_user_content"] = content
+    node["_test_assistant_content"] = assistant
     return node
 
 
@@ -122,7 +162,36 @@ def _make_manager():
     tmp = tempfile.mkdtemp(prefix="chattree_prune_")
     storage = ChatStorage(storage_dir=os.path.join(tmp, "conversations"))
     prompts = PromptStorage(storage_dir=os.path.join(tmp, "prompts"))
-    return tmp, ChatManager(PruneModelManager(), storage, prompts)
+    persistence = SQLitePersistence(os.path.join(tmp, "sqlite"))
+    persistence.initialize()
+    repository = ChatRepository(persistence)
+    return tmp, ChatManager(PruneModelManager(), storage, prompts, chat_repository=repository)
+
+
+def _pop_test_turn(node):
+    user = node.pop("_test_user_content", None)
+    assistant = node.pop("_test_assistant_content", None)
+    return user, assistant
+
+
+def _persist_test_turn(manager, conversation_id, node, user, assistant):
+    if user is not None:
+        manager.chat_repository.add_message(
+            conversation_id,
+            node["id"],
+            role=Role.USER.value,
+            content=str(user),
+            message_id=f"{node['id']}:user",
+        )
+    if assistant is not None:
+        manager.chat_repository.add_message(
+            conversation_id,
+            node["id"],
+            role=Role.ASSISTANT.value,
+            content=str(assistant),
+            subtype="assistant_answer",
+            message_id=f"{node['id']}:assistant",
+        )
 
 
 def _make_tree(manager):
@@ -135,7 +204,18 @@ def _make_tree(manager):
     child_b = _node("branch b", "result b")
     conv.add_node(child_b, parent["id"], focus=False)
     conv.switch_to_node(parent["id"])
+    turns = [(node, *_pop_test_turn(node)) for node in (parent, child_a, child_b)]
     manager._save(conv)
+    for node, _user, _assistant in turns:
+        manager._sqlite_ensure_branch(
+            conv,
+            node["id"],
+            provider_id="fake",
+            model_id="fake-model",
+            focus_node_id=parent["id"],
+        )
+    for node, user, assistant in turns:
+        _persist_test_turn(manager, conv.metadata["id"], node, user, assistant)
     return conv, parent, child_a, child_b
 
 
@@ -149,15 +229,35 @@ def test_build_prune_packets_preserves_branch_boundaries_and_compact_summary():
     conv.add_node(child, parent["id"])
     compact = NodeManager.create_compact_node(
         parent_id=child["id"],
-        summary="Summary:\nfolded history",
         model_id="fake-model",
-        last_pre_compact_message_id=child["id"],
     )
     conv.add_node(compact, child["id"])
     after = _node("after compact", "new result")
     conv.add_node(after, compact["id"])
+    messages_by_node = {}
+    for node in (parent, child, after):
+        user, assistant = _pop_test_turn(node)
+        messages_by_node[node["id"]] = [
+            {"id": f"{node['id']}:user", "role": Role.USER, "content": user, "timestamp": 1},
+            {"id": f"{node['id']}:assistant", "role": Role.ASSISTANT, "content": assistant, "subtype": "assistant_answer", "timestamp": 1},
+        ]
+    messages_by_node[compact["id"]] = [
+        {"id": f"{compact['id']}:summary", "role": Role.ASSISTANT, "content": "Summary:\nfolded history", "subtype": "compact_summary", "timestamp": 1},
+    ]
+    compact_metadata_by_node = {
+        compact["id"]: {
+            "trigger": "manual",
+            "messages_to_keep": 1,
+            "last_pre_compact_message_id": child["id"],
+        }
+    }
 
-    bundle = build_prune_packets(conv, parent["id"])
+    bundle = build_prune_packets(
+        conv,
+        parent["id"],
+        messages_by_node,
+        compact_metadata_by_node=compact_metadata_by_node,
+    )
     packets = bundle["branch_packets"]
 
     assert len(packets) == 1
@@ -176,9 +276,10 @@ def test_prune_summary_saves_parent_attachment_and_uses_clean_no_tool_call():
         conv, parent, child_a, _ = _make_tree(manager)
 
         result = asyncio.run(manager.prune_summary(conv.metadata["id"], parent["id"], custom_instructions="focus facts"))
-        reloaded = manager.get_conversation(conv.metadata["id"])
-        stored_parent = reloaded.nodes[parent["id"]]
-        summaries = stored_parent["context_summaries"]
+        summaries = manager._canonical_prune_summaries_by_node(
+            conv.metadata["id"],
+            [parent["id"]],
+        )[parent["id"]]
         provider_call = manager.model_manager.provider.calls[-1]
 
         assert result["parent_node_id"] == parent["id"]
@@ -194,6 +295,54 @@ def test_prune_summary_saves_parent_attachment_and_uses_clean_no_tool_call():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_prune_summary_packet_uses_canonical_sqlite_tool_history():
+    tmp = tempfile.mkdtemp(prefix="chattree_prune_sqlite_")
+    try:
+        persistence = SQLitePersistence(os.path.join(tmp, "sqlite"))
+        persistence.initialize()
+        repository = ChatRepository(persistence)
+        storage = ChatStorage(storage_dir=os.path.join(tmp, "conversations"))
+        prompts = PromptStorage(storage_dir=os.path.join(tmp, "prompts"))
+        manager = ChatManager(
+            PruneModelManager(),
+            storage,
+            prompts,
+            chat_repository=repository,
+        )
+        conv, parent, child_a, _ = _make_tree(manager)
+        manager._save(conv)
+        manager._sqlite_ensure_branch(
+            conv,
+            child_a["id"],
+            provider_id="fake",
+            model_id="fake-model",
+            focus_node_id=parent["id"],
+        )
+        repository.add_tool_call(
+            conv.metadata["id"],
+            child_a["id"],
+            tool_call_id="call-canonical",
+            name="shell_command",
+            arguments={"command": "pytest -q"},
+        )
+        repository.add_tool_result(
+            conv.metadata["id"],
+            child_a["id"],
+            tool_result_id="result-canonical",
+            tool_call_id="call-canonical",
+            output="canonical sqlite result",
+        )
+
+        asyncio.run(manager.prune_summary(conv.metadata["id"], parent["id"]))
+
+        packet_text = manager.model_manager.provider.calls[-1]["messages"][1]["content"]
+        assert "call-canonical" in packet_text
+        assert "shell_command" in packet_text
+        assert "canonical sqlite result" in packet_text
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_prune_summary_keeps_previous_parent_summaries():
     tmp, manager = _make_manager()
     try:
@@ -201,10 +350,12 @@ def test_prune_summary_keeps_previous_parent_summaries():
 
         first = asyncio.run(manager.prune_summary(conv.metadata["id"], parent["id"], custom_instructions="first"))
         second = asyncio.run(manager.prune_summary(conv.metadata["id"], parent["id"], custom_instructions="second"))
-        reloaded = manager.get_conversation(conv.metadata["id"])
-        summaries = reloaded.nodes[parent["id"]]["context_summaries"]
+        summaries = manager._canonical_prune_summaries_by_node(
+            conv.metadata["id"],
+            [parent["id"]],
+        )[parent["id"]]
 
-        assert [summary["id"] for summary in summaries] == [first["summary_id"], second["summary_id"]]
+        assert [summary["id"] for summary in summaries] == [second["summary_id"], first["summary_id"]]
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -216,8 +367,10 @@ def test_prune_summary_uses_branch_digests_when_packet_exceeds_budget(monkeypatc
         monkeypatch.setattr("backend.core.chat.chat_manager.PRUNE_PACKET_BUDGET_CHARS", 1)
 
         result = asyncio.run(manager.prune_summary(conv.metadata["id"], parent["id"]))
-        reloaded = manager.get_conversation(conv.metadata["id"])
-        summary = reloaded.nodes[parent["id"]]["context_summaries"][0]
+        summary = manager._canonical_prune_summaries_by_node(
+            conv.metadata["id"],
+            [parent["id"]],
+        )[parent["id"]][0]
 
         assert len(manager.model_manager.provider.calls) == 3
         assert len(summary["branch_digests"]) == 2
@@ -232,7 +385,14 @@ def test_prune_summary_sync_provider_does_not_block_event_loop():
     try:
         storage = ChatStorage(storage_dir=os.path.join(tmp, "conversations"))
         prompts = PromptStorage(storage_dir=os.path.join(tmp, "prompts"))
-        manager = ChatManager(SlowPruneModelManager(), storage, prompts)
+        persistence = SQLitePersistence(os.path.join(tmp, "sqlite"))
+        persistence.initialize()
+        manager = ChatManager(
+            SlowPruneModelManager(),
+            storage,
+            prompts,
+            chat_repository=ChatRepository(persistence),
+        )
         conv, parent, _, _ = _make_tree(manager)
 
         async def probe():
@@ -356,5 +516,5 @@ def test_prune_summary_slash_stream_yields_start_before_summary_finishes():
     elapsed, events = asyncio.run(collect())
 
     assert elapsed < 0.2
-    assert '"status": "start"' in events[0]
+    assert '"type": "transcript_patch"' in events[0]
     assert any("剪枝摘要已生成" in event for event in events)

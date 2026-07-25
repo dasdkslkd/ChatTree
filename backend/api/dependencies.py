@@ -140,12 +140,16 @@ def get_task_service(request: Request):
 
 
 def get_task_notification_service(request: Request):
-    """获取 task notification 服务。"""
+    """获取 task notification canonical service。"""
     try:
-        if not hasattr(request.app.state, 'task_notification_service'):
-            logger.error("❌ task_notification_service 未在 app.state 中初始化")
-            raise HTTPException(status_code=500, detail="TaskNotificationService 未初始化")
-        return request.app.state.task_notification_service
+        service = getattr(request.app.state, "task_notification_service", None)
+        if service is None:
+            persistence = get_persistence(request)
+            from backend.core.notifications import TaskNotificationService
+
+            service = TaskNotificationService(persistence)
+            request.app.state.task_notification_service = service
+        return service
     except HTTPException:
         raise
     except Exception as e:
@@ -181,17 +185,17 @@ def get_persistence(request: Request):
         raise HTTPException(status_code=500, detail=f"依赖注入错误: {str(e)}")
 
 
-def get_transcript_projection(request: Request):
-    """获取 TranscriptProjection。"""
+def get_transcript_assembler(request: Request):
+    """获取 TranscriptAssembler。"""
     try:
-        if not hasattr(request.app.state, 'transcript_projection'):
-            logger.error("❌ transcript_projection 未在 app.state 中初始化")
-            raise HTTPException(status_code=500, detail="TranscriptProjection 未初始化")
-        return request.app.state.transcript_projection
+        if not hasattr(request.app.state, 'transcript_assembler'):
+            logger.error("❌ transcript_assembler 未在 app.state 中初始化")
+            raise HTTPException(status_code=500, detail="TranscriptAssembler 未初始化")
+        return request.app.state.transcript_assembler
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ 获取 transcript_projection 失败: {e}", exc_info=True)
+        logger.error(f"❌ 获取 transcript_assembler 失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"依赖注入错误: {str(e)}")
 
 
@@ -220,20 +224,6 @@ def get_agent_runtime(request: Request):
         raise
     except Exception as e:
         logger.error(f"❌ 获取 agent_runtime 失败: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"依赖注入错误: {str(e)}")
-
-
-def get_agent_mailbox(request: Request):
-    """获取 Agent mailbox"""
-    try:
-        if not hasattr(request.app.state, 'agent_mailbox'):
-            logger.error("❌ agent_mailbox 未在 app.state 中初始化")
-            raise HTTPException(status_code=500, detail="Agent mailbox 未初始化")
-        return request.app.state.agent_mailbox
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ 获取 agent_mailbox 失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"依赖注入错误: {str(e)}")
 
 

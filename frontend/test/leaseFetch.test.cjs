@@ -120,66 +120,6 @@ async function testRelativeRequestUsesProfileProxyAndScopeLease() {
   assert.equal(await result.text(), 'ok');
 }
 
-async function testMismatchedLeaseInvalidatesScope() {
-  const state = createRuntime();
-  await withFetch(
-    async () => response('stale', {
-      leaseId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
-    }),
-    async () => {
-      await assert.rejects(
-        leaseGuardedFetch('/runs/1/events', {}, state.runtime),
-        StaleConnectionScopeError,
-      );
-    },
-  );
-  assert.equal(state.invalidations, 1);
-  assert.equal(state.scope.signal.aborted, true);
-}
-
-async function testExplicitStaleLeaseEnvelopeInvalidatesScope() {
-  const state = createRuntime();
-  await withFetch(
-    async () => response(JSON.stringify({
-      error: {
-        code: 'stale_connection_epoch',
-        message: 'Lease is stale',
-        retryable: true,
-        request_id: 'stale-tree',
-      },
-    }), {
-      status: 409,
-      contentType: 'application/json',
-    }),
-    async () => {
-      await assert.rejects(
-        leaseGuardedFetch('/runs/1/events', {}, state.runtime),
-        StaleConnectionScopeError,
-      );
-    },
-  );
-  assert.equal(state.invalidations, 1);
-}
-
-async function testTransportFailureAfterInvalidationBecomesStaleError() {
-  const state = createRuntime();
-  let rejectFetch;
-  const blocked = new Promise((_, reject) => {
-    rejectFetch = reject;
-  });
-
-  await withFetch(
-    async () => blocked,
-    async () => {
-      const pending = leaseGuardedFetch('/runs/1/events', {}, state.runtime);
-      await Promise.resolve();
-      state.invalidate();
-      rejectFetch(new TypeError('network dropped'));
-      await assert.rejects(pending, StaleConnectionScopeError);
-    },
-  );
-}
-
 async function testModernFetchErrorPreservesProtocolFields() {
   const state = createRuntime();
   await withFetch(
@@ -221,7 +161,7 @@ async function testMalformedFetchErrorFailsClosed() {
     }),
     async () => {
       await assert.rejects(
-        leaseGuardedFetch('/runs/1/attach', {}, state.runtime),
+        leaseGuardedFetch('/runs/1/events', {}, state.runtime),
         (error) => (
           error instanceof ChatTreeApiError
           && error.status === 500
@@ -241,7 +181,7 @@ async function testActiveTransportFailureBecomesRetryableNetworkError() {
     },
     async () => {
       await assert.rejects(
-        leaseGuardedFetch('/runs/1/attach', {}, state.runtime),
+        leaseGuardedFetch('/runs/1/events', {}, state.runtime),
         (error) => (
           error instanceof ChatTreeApiError
           && error.code === 'network_error'
@@ -255,9 +195,6 @@ async function testActiveTransportFailureBecomesRetryableNetworkError() {
 
 (async () => {
   await testRelativeRequestUsesProfileProxyAndScopeLease();
-  await testMismatchedLeaseInvalidatesScope();
-  await testExplicitStaleLeaseEnvelopeInvalidatesScope();
-  await testTransportFailureAfterInvalidationBecomesStaleError();
   await testModernFetchErrorPreservesProtocolFields();
   await testMalformedFetchErrorFailsClosed();
   await testActiveTransportFailureBecomesRetryableNetworkError();

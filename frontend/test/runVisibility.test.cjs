@@ -175,6 +175,21 @@ function testStoppedChatRunStaysVisibleFromAnchorUntilTargetLands() {
   assert.equal(isRunBlockingSelectedBranch(run, 'node-hello', new Set(['node-hello'])), false);
 }
 
+function testCompletedChatRunStaysVisibleForFinalPatchUntilTargetLands() {
+  const run = chatRun({
+    kind: 'chat',
+    status: 'completed',
+    anchorNodeId: 'node-hello',
+    nodeId: 'node-new',
+    targetNodeId: 'node-new',
+    pendingUserMessage: '刚完成的用户消息',
+  });
+
+  assert.equal(isRunVisibleInSelectedTranscript(run, 'node-hello', new Set(['node-hello'])), true);
+  assert.equal(isRunVisibleInMainTranscript(run, 'node-hello', new Set(['node-hello'])), true);
+  assert.equal(isRunBlockingSelectedBranch(run, 'node-hello', new Set(['node-hello'])), false);
+}
+
 function testControlChatRunStaysVisibleFromAnchorUntilTargetLands() {
   const run = chatRun({
     kind: 'chat',
@@ -339,6 +354,7 @@ testDirectResponseRunNeverEntersMainTranscriptEvenWithTargetNode();
 testDetachedChatRunStaysInMainTranscriptDuringPreTargetPhase();
 testPendingChatRunStaysVisibleFromAnchorUntilTargetLands();
 testStoppedChatRunStaysVisibleFromAnchorUntilTargetLands();
+testCompletedChatRunStaysVisibleForFinalPatchUntilTargetLands();
 testControlChatRunStaysVisibleFromAnchorUntilTargetLands();
 testPendingRootChatRunStaysVisibleBeforeFirstHistoryRefresh();
 testDetachedSubagentIsNotStoppedFromSelectedAnchorWithoutOwnership();

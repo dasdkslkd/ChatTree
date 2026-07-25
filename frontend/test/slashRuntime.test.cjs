@@ -58,8 +58,6 @@ function run(overrides = {}) {
     pendingUserMessage: null,
     content: '',
     reasoning: '',
-    toolInteractions: [],
-    pendingApprovals: {},
     ...overrides,
   };
 }
@@ -175,15 +173,6 @@ function testExplicitBackgroundCommandRendersAsDraft() {
   })), true);
 }
 
-function testForkWorkflowPendingApprovalRunsRenderAsDrafts() {
-  const pendingApprovals = {
-    approval_1: { id: 'approval_1', status: 'pending', tool_name: 'shell_command' },
-  };
-
-  assert.equal(shouldRenderRunDraft(run({ kind: 'subagent', pendingApprovals })), true);
-  assert.equal(shouldRenderRunDraft(run({ kind: 'workflow', pendingApprovals })), true);
-}
-
 function testBtwSideQuestionRunsRenderAsDrafts() {
   assert.equal(shouldRenderRunDraft(run({ kind: 'side_question' })), true);
 }
@@ -260,7 +249,6 @@ testRunningSubagentWithoutContentRendersAsDraft();
 testForegroundManagedRunCommandDoesNotRenderAsDraft();
 testAutoBackgroundedRunCommandRendersAsDraft();
 testExplicitBackgroundCommandRendersAsDraft();
-testForkWorkflowPendingApprovalRunsRenderAsDrafts();
 testBtwSideQuestionRunsRenderAsDrafts();
 testDirectResponseRunsRenderAsDrafts();
 testSidePanelRunLabelsUseSlashNames();

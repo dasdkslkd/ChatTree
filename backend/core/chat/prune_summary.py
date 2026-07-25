@@ -81,8 +81,6 @@ def _message_packet(message: Optional[Dict[str, Any]], max_chars: int) -> tuple[
     }
     if message.get("subtype"):
         packet["subtype"] = message.get("subtype")
-    if message.get("tool_calls"):
-        packet["tool_calls"] = message.get("tool_calls")
     if message.get("tool_call_id"):
         packet["tool_call_id"] = message.get("tool_call_id")
     if message.get("name"):
@@ -94,21 +92,60 @@ def _message_packet(message: Optional[Dict[str, Any]], max_chars: int) -> tuple[
     return packet, truncated
 
 
-def _tool_packets(tool_messages: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], bool]:
+def _tool_history_packet(history: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], bool]:
     packets: List[Dict[str, Any]] = []
-    truncated_any = False
-    for message in tool_messages or []:
-        packet, truncated = _message_packet(message, PRUNE_PACKET_MAX_TOOL_CHARS)
-        if packet:
-            packets.append(packet)
-        truncated_any = truncated_any or truncated
-    return packets, truncated_any
+    truncated = False
+    for item in history:
+        call = item.get("tool_call") if isinstance(item.get("tool_call"), dict) else {}
+        result = item.get("tool_result") if isinstance(item.get("tool_result"), dict) else {}
+        content, content_truncated = _truncate_text(
+            result.get("model_visible_content")
+            if result.get("model_visible_content") is not None
+            else result.get("content") or "",
+            PRUNE_PACKET_MAX_TOOL_CHARS,
+        )
+        truncated = truncated or content_truncated
+        packets.append({
+            "tool_call": call,
+            "tool_result": {
+                "id": result.get("id"),
+                "role": _role_value(result.get("role")),
+                "name": result.get("name"),
+                "tool_call_id": result.get("tool_call_id"),
+                "tool_result_id": result.get("tool_result_id"),
+                "content": content,
+                "timestamp": result.get("timestamp"),
+            },
+        })
+    return packets, truncated
 
 
-def _raw_turn_packet(node: Dict[str, Any]) -> tuple[Dict[str, Any], bool]:
-    user, user_truncated = _message_packet(node.get("user_message"), PRUNE_PACKET_MAX_CONTENT_CHARS)
-    assistant, assistant_truncated = _message_packet(node.get("assistant_message"), PRUNE_PACKET_MAX_CONTENT_CHARS)
-    tools, tools_truncated = _tool_packets(node.get("tool_messages") or [])
+def _raw_turn_packet(
+    node: Dict[str, Any],
+    messages: Optional[List[Dict[str, Any]]] = None,
+    tool_history: Optional[List[Dict[str, Any]]] = None,
+) -> tuple[Dict[str, Any], bool]:
+    user_message = next(
+        (
+            message for message in messages or []
+            if _role_value(message.get("role")) == Role.USER.value
+            and not message.get("is_hidden_from_transcript")
+            and message.get("subtype") not in {"compact_summary", "prune_summary"}
+        ),
+        None,
+    )
+    assistant_message = next(
+        (
+            message for message in reversed(messages or [])
+            if _role_value(message.get("role")) == Role.ASSISTANT.value
+            and message.get("subtype") in {None, "", "assistant_answer"}
+            and not message.get("is_hidden_from_transcript")
+        ),
+        None,
+    )
+    user, user_truncated = _message_packet(user_message, PRUNE_PACKET_MAX_CONTENT_CHARS)
+    assistant, assistant_truncated = _message_packet(assistant_message, PRUNE_PACKET_MAX_CONTENT_CHARS)
+    tools, tools_truncated = _tool_history_packet(tool_history or [])
     packet = {
         "node_id": node.get("id"),
         "parent_id": node.get("parent_id"),
@@ -116,30 +153,35 @@ def _raw_turn_packet(node: Dict[str, Any]) -> tuple[Dict[str, Any], bool]:
         "timestamp": node.get("timestamp"),
         "model_id": node.get("model_id"),
         "user": user,
+        "tools": tools,
         "assistant": assistant,
-        "tool_messages": tools,
     }
     return packet, user_truncated or assistant_truncated or tools_truncated
 
 
-def is_compact_boundary_node(node: Dict[str, Any]) -> bool:
-    system_message = node.get("system_message") or {}
-    return (
-        _role_value(system_message.get("role")) == Role.SYSTEM.value
-        and system_message.get("subtype") == "compact_boundary"
+def is_compact_boundary_node(node: Dict[str, Any], compact_metadata_by_node: Optional[Dict[str, Dict[str, Any]]] = None) -> bool:
+    return str(node.get("id") or "") in (compact_metadata_by_node or {})
+
+
+def _compact_segment(
+    node: Dict[str, Any],
+    messages: Optional[List[Dict[str, Any]]] = None,
+    compact_metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    summary_message = next(
+        (
+            message for message in messages or []
+            if message.get("subtype") == "compact_summary"
+        ),
+        {},
     )
-
-
-def _compact_segment(node: Dict[str, Any]) -> Dict[str, Any]:
-    summary_message = node.get("user_message") or {}
     content, truncated = _truncate_text(summary_message.get("content") or "", PRUNE_PACKET_MAX_CONTENT_CHARS)
-    system_message = node.get("system_message") or {}
     return {
         "type": "compact_summary",
         "compact_node_id": node.get("id"),
         "parent_id": node.get("parent_id"),
         "content": content,
-        "compact_metadata": system_message.get("compact_metadata") or {},
+        "compact_metadata": compact_metadata or {},
         "truncated": truncated,
     }
 
@@ -180,7 +222,13 @@ def _subtree_order(conversation: Any, start_node_id: str) -> List[str]:
     return ordered
 
 
-def build_prune_packets(conversation: Any, parent_node_id: str) -> Dict[str, Any]:
+def build_prune_packets(
+    conversation: Any,
+    parent_node_id: str,
+    messages_by_node: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    tool_history_by_node: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    compact_metadata_by_node: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     if parent_node_id not in conversation.nodes:
         raise ValueError("父节点不存在")
 
@@ -201,8 +249,13 @@ def build_prune_packets(conversation: Any, parent_node_id: str) -> Dict[str, Any
         )
     )
 
-    parent_user, parent_user_truncated = _message_packet(parent.get("user_message"), PRUNE_PACKET_MAX_CONTENT_CHARS)
-    parent_assistant, parent_assistant_truncated = _message_packet(parent.get("assistant_message"), PRUNE_PACKET_MAX_CONTENT_CHARS)
+    parent_packet, parent_truncated = _raw_turn_packet(
+        parent,
+        (messages_by_node or {}).get(parent_node_id) or [],
+        [],
+    )
+    parent_user = parent_packet.get("user")
+    parent_assistant = parent_packet.get("assistant")
     packets: List[Dict[str, Any]] = []
     covered_node_ids: List[str] = []
     compact_node_ids: List[str] = []
@@ -217,7 +270,8 @@ def build_prune_packets(conversation: Any, parent_node_id: str) -> Dict[str, Any
         for node_id in branch_node_ids:
             node = conversation.nodes[node_id]
             covered_node_ids.append(node_id)
-            if is_compact_boundary_node(node):
+            node_messages = (messages_by_node or {}).get(node_id) or []
+            if is_compact_boundary_node(node, compact_metadata_by_node):
                 folded = set(_ancestor_ids_until(conversation, node_id, parent_node_id))
                 if folded:
                     folded_node_ids.extend(node_id for node_id in folded if node_id not in folded_node_ids)
@@ -226,14 +280,22 @@ def build_prune_packets(conversation: Any, parent_node_id: str) -> Dict[str, Any
                         if turn.get("node_id") not in folded
                     ]
                 _flush_raw_segment(segments, raw_turns)
-                segment = _compact_segment(node)
+                segment = _compact_segment(
+                    node,
+                    node_messages,
+                    (compact_metadata_by_node or {}).get(node_id) or {},
+                )
                 segment["folded_node_ids"] = list(folded)
                 segments.append(segment)
                 compact_node_ids.append(node_id)
                 if segment.get("truncated"):
                     truncated_node_ids.append(node_id)
                 continue
-            turn, truncated = _raw_turn_packet(node)
+            turn, truncated = _raw_turn_packet(
+                node,
+                node_messages,
+                (tool_history_by_node or {}).get(node_id) or [],
+            )
             raw_turns.append(turn)
             if truncated:
                 truncated_node_ids.append(node_id)
@@ -253,7 +315,7 @@ def build_prune_packets(conversation: Any, parent_node_id: str) -> Dict[str, Any
             },
         })
 
-    if parent_user_truncated or parent_assistant_truncated:
+    if parent_truncated:
         coverage_notes.append("父节点 anchor 内容被截断。")
     if compact_node_ids:
         coverage_notes.append("部分分支使用已有 compact summary 作为折叠历史。")

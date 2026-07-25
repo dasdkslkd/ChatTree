@@ -52,18 +52,15 @@ def test_chat_manager_persists_workspace_and_lists_summary(tmp_path):
     assert loaded.metadata["workspace"]["label"] == "Project A"
 
     listed = manager.list_conversations()
-    assert listed == [
-        {
-            "id": conversation.metadata["id"],
-            "title": "工作区对话",
-            "updated_at": conversation.metadata["updated_at"],
-            "node_count": "1",
-            "model_id": "",
-            "provider_id": "",
-            "workspace": loaded.metadata["workspace"],
-            "current_node_id": conversation.current_node_id,
-        }
-    ]
+    assert len(listed) == 1
+    assert listed[0]["id"] == conversation.metadata["id"]
+    assert listed[0]["title"] == "工作区对话"
+    assert listed[0]["updated_at"] == conversation.metadata["updated_at"]
+    assert listed[0]["node_count"] == "1"
+    assert listed[0]["model_id"] == ""
+    assert listed[0]["provider_id"] == ""
+    assert listed[0]["workspace"] == loaded.metadata["workspace"]
+    assert listed[0]["current_node_id"] == conversation.current_node_id
 
 
 def test_old_conversation_without_workspace_gets_runtime_default(tmp_path):
@@ -83,13 +80,18 @@ def test_old_conversation_without_workspace_gets_runtime_default(tmp_path):
             "id": "root",
             "parent_id": "None",
             "children_ids": [],
-            "user_message": None,
-            "assistant_message": None,
-            "tool_messages": [],
-            "system_message": None,
             "timestamp": 1,
             "model_id": None,
+            "tool_permission_mode": None,
+            "task_context_mode": "attached",
             "total_tokens": 0,
+            "branch_usage_info": {"total_tokens": 0},
+            "usage": {
+                "turn_usage": {"total_tokens": 0},
+                "branch_usage": {"total_tokens": 0},
+                "active_context_usage": {"total_tokens": 0},
+                "model_context_window": None,
+            },
         }],
         "root_node_id": "root",
         "current_node_id": "root",

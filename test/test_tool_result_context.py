@@ -3,8 +3,6 @@ import json
 import time
 
 from backend.core.chat.chat_manager import ChatManager
-from backend.core.chat.conversation import Conversation
-from backend.core.chat.node import NodeManager
 from backend.core.config.config import cfg
 from backend.core.config.types import Message, Role
 from backend.core.tools import code_tools
@@ -12,23 +10,36 @@ from backend.core.tools.code_tools import CodeToolConfig, ListFilesTool
 from backend.core.tools.security.capabilities import ToolCapability
 
 
-class FakeToolResultStore:
+class FakeChatRepository:
     def __init__(self):
         self.saved = []
+        self.calls = []
+        self.persistence = None
 
-    def save_result(self, **kwargs):
+    def tool_call_exists(self, conversation_id, tool_call_id):
+        return any(
+            call.get("tool_call_id") == tool_call_id
+            for call in self.calls
+        )
+
+    def add_tool_call(self, *args, **kwargs):
+        self.calls.append(kwargs)
+        return kwargs.get("tool_call_id")
+
+    def add_tool_result(self, *args, **kwargs):
         self.saved.append(kwargs)
-        return {"id": f"result-{len(self.saved)}"}
+        return f"result-{len(self.saved)}"
 
 
 class FakeToolManager:
     def __init__(self, result="tool output"):
         self.result = result
-        self.tool_result_store = FakeToolResultStore()
         self.calls = []
+        self.runtime_contexts = []
 
     async def execute_tool(self, name, arguments, workspace=None, runtime_context=None):
         self.calls.append((name, arguments))
+        self.runtime_contexts.append(dict(runtime_context or {}))
         sink = runtime_context.get("tool_event_sink") if isinstance(runtime_context, dict) else None
         if callable(sink):
             sink({
@@ -45,7 +56,6 @@ class FakeToolManager:
 class DelayedToolManager:
     def __init__(self, delay=0.12):
         self.delay = delay
-        self.tool_result_store = FakeToolResultStore()
         self.calls = []
         self.started = {}
         self.finished = {}
@@ -67,6 +77,7 @@ def make_manager(tool_manager):
     manager = ChatManager.__new__(ChatManager)
     manager.tool_manager = tool_manager
     manager.tool_orchestrator = None
+    manager.chat_repository = FakeChatRepository()
     return manager
 
 
@@ -104,7 +115,36 @@ def test_command_tool_result_is_model_readable_text(monkeypatch):
     assert "boom" in content
     assert "tool_result_id: result-1" in content
     assert 'read({"source":"tool_result","tool_result_id":"result-1"' in content
-    assert manager.tool_manager.tool_result_store.saved[0]["content"] == raw_result
+    assert manager.chat_repository.saved[0]["output"] == raw_result
+    assert manager.chat_repository.calls[0]["tool_call_id"] == "call-1"
+    assert manager.chat_repository.saved[0]["tool_call_id"] == "call-1"
+
+
+def test_model_visible_tool_result_initial_persistence_binds_tool_call_id(monkeypatch):
+    monkeypatch.setitem(cfg.data, "tools", {"max_result_length": 2000})
+    manager = make_manager(FakeToolManager())
+
+    manager._build_model_visible_tool_result(
+        raw_result="bound output",
+        name="web_search",
+        conversation_id="conv-1",
+        node_id="node-1",
+        tool_call_id="call-bound",
+    )
+
+    assert manager.chat_repository.calls == [{
+        "tool_call_id": "call-bound",
+        "name": "web_search",
+        "arguments": None,
+        "status": "running",
+    }]
+    assert manager.chat_repository.saved == [{
+        "conversation_id": "conv-1",
+        "node_id": "node-1",
+        "tool_call_id": "call-bound",
+        "output": "bound output",
+        "metadata": {"tool_name": "web_search"},
+    }]
 
 
 def test_non_command_tool_result_keeps_preview_with_metadata(monkeypatch):
@@ -333,119 +373,6 @@ def test_glob_tool_sync_work_runs_off_event_loop(monkeypatch, tmp_path):
     payload = json.loads(asyncio.run(run_case()))
 
     assert payload["files"][0] == "a.txt"
-
-
-def test_prepare_messages_uses_model_visible_content_and_drops_orphan_tool_messages():
-    conversation = Conversation(title="tool history")
-    conversation.initialize_with_system_message("system prompt")
-    user_msg = Message(
-        {
-            "id": "user-1",
-            "role": Role.USER,
-            "content": "run",
-            "timestamp": 1,
-        }
-    )
-    node = NodeManager.create_node(user_msg, parent_id=conversation.current_node_id, model_id="model")
-    assistant_tool = {
-        "role": "assistant",
-        "content": "",
-        "tool_calls": [
-            {
-                "id": "call-1",
-                "type": "function",
-                "function": {"name": "shell", "arguments": "{}"},
-            }
-        ],
-    }
-    tool_msg = Message(
-        {
-            "id": "tool-1",
-            "role": Role.TOOL,
-            "content": "raw output that UI keeps",
-            "model_visible_content": "Command: pytest -q\nExit code: 0",
-            "raw_content": "raw output that UI keeps",
-            "name": "shell",
-            "tool_call_id": "call-1",
-            "timestamp": 2,
-        }
-    )
-    orphan_tool_msg = Message(
-        {
-            "id": "tool-orphan",
-            "role": Role.TOOL,
-            "content": "must not reach provider",
-            "name": "shell",
-            "tool_call_id": "missing-call",
-            "timestamp": 3,
-        }
-    )
-    assistant_final = Message(
-        {
-            "id": "assistant-1",
-            "role": Role.ASSISTANT,
-            "content": "done",
-            "timestamp": 4,
-            "tool_calls": assistant_tool["tool_calls"],
-            "tool_results": [tool_msg, orphan_tool_msg],
-            "tool_interactions": [{"assistant": assistant_tool, "tools": [tool_msg, orphan_tool_msg]}],
-        }
-    )
-    node["assistant_message"] = assistant_final
-    conversation.add_node(node, parent_id=conversation.current_node_id)
-
-    manager = ChatManager.__new__(ChatManager)
-    messages = manager._prepare_messages_for_api_with_conversation(conversation)
-
-    tool_messages = [msg for msg in messages if msg["role"] == "tool"]
-    assert len(tool_messages) == 1
-    assert tool_messages[0]["tool_call_id"] == "call-1"
-    assert tool_messages[0]["content"] == "Command: pytest -q\nExit code: 0"
-
-
-def test_prepare_messages_synthesizes_missing_tool_result():
-    conversation = Conversation(title="missing tool result")
-    conversation.initialize_with_system_message("system prompt")
-    user_msg = Message(
-        {
-            "id": "user-1",
-            "role": Role.USER,
-            "content": "run",
-            "timestamp": 1,
-        }
-    )
-    node = NodeManager.create_node(user_msg, parent_id=conversation.current_node_id, model_id="model")
-    assistant_tool = {
-        "role": "assistant",
-        "content": "",
-        "tool_calls": [
-            {
-                "id": "call-missing",
-                "type": "function",
-                "function": {"name": "shell", "arguments": "{}"},
-            }
-        ],
-    }
-    assistant_final = Message(
-        {
-            "id": "assistant-1",
-            "role": Role.ASSISTANT,
-            "content": "done",
-            "timestamp": 2,
-            "tool_calls": assistant_tool["tool_calls"],
-            "tool_interactions": [{"assistant": assistant_tool, "tools": []}],
-        }
-    )
-    node["assistant_message"] = assistant_final
-    conversation.add_node(node, parent_id=conversation.current_node_id)
-
-    manager = ChatManager.__new__(ChatManager)
-    messages = manager._prepare_messages_for_api_with_conversation(conversation)
-
-    tool_messages = [msg for msg in messages if msg["role"] == "tool"]
-    assert len(tool_messages) == 1
-    assert tool_messages[0]["tool_call_id"] == "call-missing"
-    assert "Tool result missing" in tool_messages[0]["content"]
 
 
 def test_round_result_budget_shortens_longest_model_visible_result(monkeypatch):

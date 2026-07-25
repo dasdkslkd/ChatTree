@@ -52,7 +52,7 @@ function fakeClient(responseData) {
 async function testFetchBranchSnapshotEncodesBothIdsAndForwardsSignal() {
   const expectedSnapshot = {
     conversation_id: 'conv/1',
-    tip_node_id: 'node/1',
+    node_id: 'node/1',
     revision: 7,
     items: [{ id: 'item-1', type: 'user_message', preview: 'hello' }],
   };
@@ -65,15 +65,15 @@ async function testFetchBranchSnapshotEncodesBothIdsAndForwardsSignal() {
   assert.deepEqual(snapshot, expectedSnapshot);
   assert.deepEqual(calls[0], {
     method: 'get',
-    url: '/conversations/conv%2F1/branches/node%2F1/transcript',
-    config: { signal: controller.signal },
+    url: '/conversations/conv%2F1/transcript',
+    config: { signal: controller.signal, params: { node_id: 'node/1' } },
   });
 }
 
 async function testFetchBranchSnapshotReturnsCompleteResponseWithoutSignal() {
   const expectedSnapshot = {
     conversation_id: 'conv-1',
-    tip_node_id: 'node-1',
+    node_id: 'node-1',
     revision: 0,
     items: [],
   };
@@ -85,8 +85,8 @@ async function testFetchBranchSnapshotReturnsCompleteResponseWithoutSignal() {
   assert.deepEqual(snapshot, expectedSnapshot);
   assert.deepEqual(calls[0], {
     method: 'get',
-    url: '/conversations/conv-1/branches/node-1/transcript',
-    config: undefined,
+    url: '/conversations/conv-1/transcript',
+    config: { params: { node_id: 'node-1' } },
   });
 }
 

@@ -170,26 +170,6 @@ class CommandExecutor:
         producer = None
         producer_registered = False
         try:
-            service = getattr(self.run_manager, "notification_service", None)
-            if (
-                service is not None
-                and not self._suppresses_task_notification(run.to_dict())
-            ):
-                try:
-                    await service.register_run_notification(
-                        run_id=run.run_id,
-                        summary=summary or command[:80] or "Command running",
-                        payload={
-                            "command_run_id": run.run_id,
-                            "command": command,
-                            "cwd": cwd_path,
-                        },
-                    )
-                except Exception:
-                    logger.exception(
-                        "Failed to register command notification for %s",
-                        run.run_id,
-                    )
             self._stdout_tail[run.run_id] = deque()
             self._stderr_tail[run.run_id] = deque()
             producer = self._run_process(
@@ -676,20 +656,6 @@ class CommandExecutor:
                     if not self._is_durably_terminal(run_id):
                         self._undrained_run_ids.add(run_id)
                     raise
-                if not completion_handled_by_fallback:
-                    try:
-                        await self._enqueue_completion(
-                            run_id=run_id,
-                            conversation_id=conversation_id,
-                            anchor_node_id=anchor_node_id,
-                            command=command,
-                            cwd=cwd,
-                            exit_code=exit_code,
-                            final_status=final_status,
-                            error=error,
-                        )
-                    except Exception:
-                        logger.exception("Failed to publish command notification for %s", run_id)
             finally:
                 if owned_process is None or owned_process.returncode is not None:
                     self._processes.pop(run_id, None)
@@ -803,20 +769,6 @@ class CommandExecutor:
             "backend": "popen",
         })
         await self.run_manager.finish_run(run_id, final_status, error)
-        try:
-            await self._enqueue_completion(
-                run_id=run_id,
-                conversation_id=conversation_id,
-                anchor_node_id=anchor_node_id,
-                command=command,
-                cwd=cwd,
-                exit_code=exit_code,
-                final_status=final_status,
-                error=error,
-            )
-        except Exception:
-            logger.exception("Failed to publish command notification for %s", run_id)
-
     async def _read_blocking_stream(
         self,
         run_id: str,
@@ -851,77 +803,6 @@ class CommandExecutor:
     def _tail_text(self, run_id: str, channel: str) -> str:
         target = self._stdout_tail if channel == "stdout" else self._stderr_tail
         return "".join(target.get(run_id, deque()))[-self.max_tail_chars:]
-
-    async def _enqueue_completion(
-        self,
-        *,
-        run_id: str,
-        conversation_id: str,
-        anchor_node_id: Optional[str],
-        command: str,
-        cwd: str,
-        exit_code: Optional[int],
-        final_status: RunStatus,
-        error: Optional[str],
-    ) -> None:
-        run = self.run_manager.get_run(run_id) or {}
-        if self._suppresses_task_notification(run):
-            return
-        metadata = dict(run.get("metadata") or {})
-        if metadata.get("result_observed_at"):
-            return
-        if getattr(self.run_manager, "notification_service", None) is None:
-            return
-        status_text = final_status.value
-        summary = f"Command {status_text}"
-        if exit_code is not None:
-            summary += f" (exit code {exit_code})"
-        payload = {
-            "command_run_id": run_id,
-            "status": status_text,
-            "command": command,
-            "cwd": cwd,
-            "shell": metadata.get("shell"),
-            "shell_id": metadata.get("shell_id"),
-            "platform": metadata.get("platform"),
-            "exit_code": exit_code,
-            "stdout_tail": self._tail_text(run_id, "stdout"),
-            "stderr_tail": self._tail_text(run_id, "stderr"),
-            "error": error,
-        }
-        await self.run_manager.notification_service.publish_run_notification(
-            run_id=run_id,
-            source_status=status_text,
-            summary=summary,
-            content=json_dumps(payload),
-            payload={
-                "command_run_id": run_id,
-                "exit_code": exit_code,
-            },
-        )
-
-    def _suppresses_task_notification(self, run: Dict[str, Any]) -> bool:
-        metadata = dict(run.get("metadata") or {})
-        if metadata.get("suppress_task_notification") is True:
-            return True
-        created_by_run_id = str(run.get("created_by_run_id") or "")
-        seen: set[str] = set()
-        while created_by_run_id and created_by_run_id not in seen:
-            seen.add(created_by_run_id)
-            parent = self.run_manager.get_run(created_by_run_id)
-            if not parent:
-                return False
-            parent_kind = str(parent.get("kind") or "")
-            metadata = dict(parent.get("metadata") or {})
-            if parent_kind in {RunKind.WORKFLOW.value, RunKind.WORKFLOW_STEP.value}:
-                return True
-            if parent_kind == RunKind.SUBAGENT.value and (
-                metadata.get("agent_name") == "workflow-worker"
-                or metadata.get("delivery_policy") == "silent"
-            ):
-                return True
-            created_by_run_id = str(parent.get("created_by_run_id") or "")
-        return False
 
     async def _kill_process_tree(self, process: asyncio.subprocess.Process) -> None:
         if process.returncode is not None:

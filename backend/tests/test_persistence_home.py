@@ -29,12 +29,13 @@ def test_resolve_chattree_home_uses_home_elsewhere(monkeypatch, tmp_path):
     assert home.resolve_chattree_home() == user / ".chattree"
 
 
-def test_main_wires_legacy_file_stores_under_persistence_home():
+def test_main_wires_legacy_chat_files_and_canonical_tool_results():
     main_source = Path("main.py").read_text(encoding="utf-8")
 
     assert 'ChatStorage(str(persistence.home / "conversations"))' in main_source
     assert 'PromptStorage(str(persistence.home / "prompts"))' in main_source
-    assert 'ToolResultStorage(\n        str(persistence.home / "tool_results")' in main_source
+    assert "ToolResultStorage" not in main_source
+    assert "ToolManager(runtime_config, chat_repository=chat_repository)" in main_source
     assert "run_repository.mark_unfinished_as_interrupted()" in main_source
 
 

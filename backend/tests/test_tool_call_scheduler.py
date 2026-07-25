@@ -47,8 +47,6 @@ class _FakeToolManager:
 
 
 class _ImmediateToolManager:
-    tool_result_store = None
-
     async def execute_tool(self, name, arguments, **kwargs) -> str:
         return '{"ok": true}'
 

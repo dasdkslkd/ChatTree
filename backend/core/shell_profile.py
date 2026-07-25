@@ -142,6 +142,7 @@ def _profile_for(platform_id: PlatformId, shell_id: ShellId, *, executable: Opti
                 "Use single-quoted here-strings @' ... '@ for multiline literal text.",
             ],
             preferred_examples=[
+                CommandExample("list files", "Get-ChildItem -Force"),
                 CommandExample("run tests", "npm test"),
                 CommandExample("build project", "npm run build"),
                 CommandExample("set env and run", "$env:FOO = \"bar\"; npm test"),
@@ -193,6 +194,7 @@ def _profile_for(platform_id: PlatformId, shell_id: ShellId, *, executable: Opti
             "Here-documents and POSIX redirection are valid in this shell.",
         ],
         preferred_examples=[
+            CommandExample("list files", "ls -la"),
             CommandExample("run tests", "npm test"),
             CommandExample("build project", "npm run build"),
             CommandExample("set env and run", "FOO=bar npm test"),

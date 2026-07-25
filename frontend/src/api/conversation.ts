@@ -19,8 +19,6 @@ export interface TreeNode {
   total_tokens?: number;
   branch_usage_info?: UsageInfo | null;
   usage?: NodeUsage | null;
-  context_summaries?: PruneSummaryRecord[];
-  prune_summary_count?: number;
 }
 
 export interface TreeData {

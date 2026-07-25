@@ -1,12 +1,6 @@
 import { apiClient } from './client';
-import type {
-  Message,
-  SendMessageRequest,
-  StreamChunk,
-  ToolApprovalDecision,
-  ToolApprovalPayload,
-  ToolApprovalScope,
-} from '../types/message';
+import type { SendMessageRequest } from '../types/message';
+import type { TranscriptPatch } from '../types/transcript';
 import { perfNow, recordMark, recordSpan } from '../perf/marks';
 import { leaseGuardedFetch } from './leaseFetch';
 import { runsApi } from './runs';
@@ -27,27 +21,6 @@ export type ToolResultSlice = {
   total_chars: number;
   has_more: boolean;
   content: string;
-};
-
-export type PlanActionStreamRequest = {
-  node_id?: string | null;
-  model_id?: string | null;
-  provider_id?: string | null;
-  reasoning_effort?: string | null;
-  thinking_enabled?: boolean | null;
-  tool_permission_mode?: string | null;
-};
-
-export type PlanAnswerStreamRequest = PlanActionStreamRequest & {
-  answer: string;
-};
-
-export type PlanRejectStreamRequest = PlanActionStreamRequest & {
-  feedback: string;
-};
-
-export type PendingToolApprovalsResponse = {
-  approvals: ToolApprovalPayload[];
 };
 
 export interface ActiveStreamInfo {
@@ -72,14 +45,19 @@ export type MessageStreamOptions = {
 
 export type MessageAttachStreamOptions = {
   signal?: AbortSignal;
-  fromEvent?: number;
-};
-
-export type PlanStreamOptions = {
-  signal?: AbortSignal;
 };
 
 export type MessageRunStartResponse = RunStartResponse;
+
+export type PlanActionStreamOptions = {
+  signal?: AbortSignal;
+};
+
+export type ToolApprovalDecisionResponse = {
+  tool_call_id: string;
+  status: 'approved' | 'denied' | 'expired' | 'cancelled';
+  scope: 'once' | 'session' | null;
+};
 
 async function acquireSseReader(
   response: Response,
@@ -109,7 +87,7 @@ async function acquireSseReader(
 async function* parseSseResponse(
   response: Response,
   perfAttrs: Record<string, unknown> = {},
-): AsyncGenerator<StreamChunk, void> {
+): AsyncGenerator<TranscriptPatch, void> {
   const reader = await acquireSseReader(response);
   recordMark('stream.response_headers', {
     ...perfAttrs,
@@ -165,14 +143,13 @@ async function* parseSseResponse(
           }
           try {
             const parseStarted = perfNow();
-            const parsed: StreamChunk = JSON.parse(jsonData);
+            const parsed = JSON.parse(jsonData) as TranscriptPatch;
             eventCount += 1;
             recordSpan('stream.parse_event', parseStarted, {
               ...perfAttrs,
-              event_type: (parsed as any).event_type,
-              status: (parsed as any).status,
-              run_id: (parsed as any).run_id,
-              event_index: (parsed as any).event_index,
+              event_type: parsed.type,
+              revision: parsed.revision,
+              operation_count: parsed.operations.length,
             });
             yield parsed;
           } catch (e) {
@@ -193,14 +170,13 @@ async function* parseSseResponse(
         }
         try {
           const parseStarted = perfNow();
-          const parsed: StreamChunk = JSON.parse(jsonData);
+          const parsed = JSON.parse(jsonData) as TranscriptPatch;
           eventCount += 1;
           recordSpan('stream.parse_event', parseStarted, {
             ...perfAttrs,
-            event_type: (parsed as any).event_type,
-            status: (parsed as any).status,
-            run_id: (parsed as any).run_id,
-            event_index: (parsed as any).event_index,
+            event_type: parsed.type,
+            revision: parsed.revision,
+            operation_count: parsed.operations.length,
           });
           yield parsed;
         } catch (e) {
@@ -220,6 +196,51 @@ async function* parseSseResponse(
       // The reader may already be closed or cancelled.
     }
   }
+}
+
+async function* parseTranscriptPatchSseResponse(
+  response: Response,
+  perfAttrs: Record<string, unknown> = {},
+): AsyncGenerator<TranscriptPatch, void> {
+  for await (const chunk of parseSseResponse(response, perfAttrs)) {
+    const payload = chunk as { type?: unknown };
+    if (payload?.type !== 'transcript_patch') {
+      throw unexpectedApiResponse(
+        response.status,
+        new Error('Plan action stream returned a non transcript_patch event'),
+      );
+    }
+    yield chunk as unknown as TranscriptPatch;
+  }
+}
+
+async function* postPlanActionStream(
+  conversationId: string,
+  planId: string,
+  action: 'answer' | 'approve' | 'reject',
+  body: Record<string, unknown>,
+  options: PlanActionStreamOptions = {},
+): AsyncGenerator<TranscriptPatch, void> {
+  const started = perfNow();
+  const response = await leaseGuardedFetch(
+    `/conversations/${encodeURIComponent(conversationId)}/plans/${encodeURIComponent(planId)}/${action}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: options.signal,
+    },
+  );
+  recordSpan('stream.fetch', started, {
+    conversation_id: conversationId,
+    plan_id: planId,
+    route: `plans.${action}`,
+  });
+  yield* parseTranscriptPatchSseResponse(response, {
+    conversation_id: conversationId,
+    plan_id: planId,
+    route: `plans.${action}`,
+  });
 }
 
 export const messageApi = {
@@ -245,7 +266,7 @@ export const messageApi = {
     conversationId: string,
     data: SendMessageRequest,
     options: MessageStreamOptions,
-  ): AsyncGenerator<StreamChunk, void> {
+  ): AsyncGenerator<TranscriptPatch, void> {
     const { nodeId, signal } = options;
     const idempotencyKey = options.idempotencyKey ?? (
       typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
@@ -276,12 +297,12 @@ export const messageApi = {
   },
 
   getActiveStreams: async (conversationId: string): Promise<ActiveStreamInfo[]> => {
-    const response = await apiClient.get(`/conversations/${conversationId}/messages/streams/active`);
+    const response = await apiClient.get('/runs/active', { params: { conversation_id: conversationId } });
     return response.data;
   },
 
   getAllActiveStreams: async (): Promise<ActiveStreamInfo[]> => {
-    const response = await apiClient.get('/conversations/messages/streams/active');
+    const response = await apiClient.get('/runs/active');
     return response.data;
   },
 
@@ -289,100 +310,65 @@ export const messageApi = {
     conversationId: string,
     nodeId: string,
     options: MessageAttachStreamOptions,
-  ): AsyncGenerator<StreamChunk, void> {
+  ): AsyncGenerator<TranscriptPatch, void> {
     const { signal } = options;
-    const fromEvent = options.fromEvent ?? 0;
-    const started = perfNow();
-    const response = await leaseGuardedFetch(
-      `/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(nodeId)}/stream/attach?from_event=${fromEvent}`,
-      { signal },
-    );
-    recordSpan('stream.fetch', started, {
-      conversation_id: conversationId,
-      node_id: nodeId,
-      from_event: fromEvent,
-      route: 'messages.attach',
-    });
-    yield* parseSseResponse(response, {
-      conversation_id: conversationId,
-      node_id: nodeId,
-      from_event: fromEvent,
-      route: 'messages.attach',
-    });
+    const active = await messageApi.getActiveStreams(conversationId);
+    const run = active.find((item) => item.target_node_id === nodeId || item.node_id === nodeId);
+    if (!run?.run_id) {
+      throw unexpectedApiResponse(404, new Error('No active run for node'));
+    }
+    yield* runsApi.attach(run.run_id, { signal });
   },
 
-  streamPlanApproval: async function* (
+  answerPlanQuestion: async function* (
     conversationId: string,
     planId: string,
-    data: PlanActionStreamRequest,
-    options: PlanStreamOptions,
-  ): AsyncGenerator<StreamChunk, void> {
-    const { signal } = options;
-    const started = perfNow();
-    const response = await leaseGuardedFetch(
-      `/conversations/${encodeURIComponent(conversationId)}/plans/${encodeURIComponent(planId)}/approve/stream`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data),
-        signal,
-      },
-    );
-    recordSpan('stream.fetch', started, { conversation_id: conversationId, plan_id: planId, route: 'plans.approve' });
-    yield* parseSseResponse(response, { conversation_id: conversationId, plan_id: planId, route: 'plans.approve' });
+    answer: string,
+    options: PlanActionStreamOptions = {},
+  ): AsyncGenerator<TranscriptPatch, void> {
+    yield* postPlanActionStream(conversationId, planId, 'answer', { answer }, options);
   },
 
-  streamPlanAnswer: async function* (
+  approvePlan: async function* (
     conversationId: string,
     planId: string,
-    data: PlanAnswerStreamRequest,
-    options: PlanStreamOptions,
-  ): AsyncGenerator<StreamChunk, void> {
-    const { signal } = options;
-    const started = perfNow();
-    const response = await leaseGuardedFetch(
-      `/conversations/${encodeURIComponent(conversationId)}/plans/${encodeURIComponent(planId)}/answer/stream`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data),
-        signal,
-      },
-    );
-    recordSpan('stream.fetch', started, { conversation_id: conversationId, plan_id: planId, route: 'plans.answer' });
-    yield* parseSseResponse(response, { conversation_id: conversationId, plan_id: planId, route: 'plans.answer' });
+    options: PlanActionStreamOptions = {},
+  ): AsyncGenerator<TranscriptPatch, void> {
+    yield* postPlanActionStream(conversationId, planId, 'approve', {}, options);
   },
 
-  streamPlanReject: async function* (
+  rejectPlan: async function* (
     conversationId: string,
     planId: string,
-    data: PlanRejectStreamRequest,
-    options: PlanStreamOptions,
-  ): AsyncGenerator<StreamChunk, void> {
-    const { signal } = options;
-    const started = perfNow();
-    const response = await leaseGuardedFetch(
-      `/conversations/${encodeURIComponent(conversationId)}/plans/${encodeURIComponent(planId)}/reject/stream`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data),
-        signal,
-      },
-    );
-    recordSpan('stream.fetch', started, { conversation_id: conversationId, plan_id: planId, route: 'plans.reject' });
-    yield* parseSseResponse(response, { conversation_id: conversationId, plan_id: planId, route: 'plans.reject' });
+    feedback = '',
+    options: PlanActionStreamOptions = {},
+  ): AsyncGenerator<TranscriptPatch, void> {
+    yield* postPlanActionStream(conversationId, planId, 'reject', { feedback }, options);
   },
 
-  // 获取消息历史
-  getHistory: async (conversationId: string): Promise<Message[]> => {
-    const response = await apiClient.get(`/conversations/${conversationId}/messages`);
+  approveTool: async (
+    conversationId: string,
+    toolCallId: string,
+    nodeId: string,
+    scope: 'once' | 'session' = 'once',
+  ): Promise<ToolApprovalDecisionResponse> => {
+    const response = await apiClient.post<ToolApprovalDecisionResponse>(
+      `/tool-approvals/tool-calls/${encodeURIComponent(toolCallId)}/decide`,
+      { decision: 'approve', conversation_id: conversationId, node_id: nodeId, scope },
+    );
     return response.data;
   },
 
-  // 停止流式消息生成
-  stopStream: async (conversationId: string, nodeId: string): Promise<void> => {
-    await apiClient.post(`/conversations/${conversationId}/messages/${nodeId}/stream/stop`);
+  rejectTool: async (
+    conversationId: string,
+    toolCallId: string,
+    nodeId: string,
+  ): Promise<ToolApprovalDecisionResponse> => {
+    const response = await apiClient.post<ToolApprovalDecisionResponse>(
+      `/tool-approvals/tool-calls/${encodeURIComponent(toolCallId)}/decide`,
+      { decision: 'deny', conversation_id: conversationId, node_id: nodeId, scope: 'once' },
+    );
+    return response.data;
   },
 
   // 读取持久化工具结果切片
@@ -397,25 +383,4 @@ export const messageApi = {
     return response.data;
   },
 
-  getPendingApprovals: async (
-    conversationId?: string | null,
-  ): Promise<ToolApprovalPayload[]> => {
-    const response = await apiClient.get<PendingToolApprovalsResponse>('/tool-approvals/pending', {
-      params: conversationId ? { conversation_id: conversationId } : undefined,
-    });
-    return response.data.approvals || [];
-  },
-
-  // 决定工具审批请求
-  decideApproval: async (
-    approvalId: string,
-    decision: ToolApprovalDecision,
-    scope: ToolApprovalScope = 'once',
-  ): Promise<void> => {
-    await apiClient.post(`/tool-approvals/${encodeURIComponent(approvalId)}/decide`, {
-      decision,
-      scope,
-      remember_rule: false,
-    });
-  },
 };

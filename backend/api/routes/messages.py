@@ -1,8 +1,7 @@
 # backend/api/routes/messages.py
-from typing import Annotated, Any, AsyncIterator, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import asyncio
 import json
@@ -25,14 +24,13 @@ from ..run_start import (
     run_start_openapi_responses,
     run_start_response,
 )
-from ...core.config.types import Message, StreamChunk
+from ...core.config.types import StreamChunk
 from ...core.perf import get_profiler
 from ...core.runs import (
     RunIdempotency,
     RunIdempotencyConflictError,
     RunKind,
     RunManager,
-    RunNotFoundError,
     RunRecord,
     RunReferenceConversationMismatchError,
     RunReferenceNotFoundError,
@@ -52,14 +50,6 @@ from .run_control import stop_run_tree
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
-_ACTIVE_MESSAGE_STREAM_KINDS = {
-    RunKind.CHAT.value,
-    RunKind.SIDE_QUESTION.value,
-    RunKind.DIRECT_RESPONSE.value,
-    RunKind.SUBAGENT.value,
-    RunKind.WORKFLOW.value,
-    RunKind.WORKFLOW_STEP.value,
-}
 _ANCHOR_STOP_RUN_KINDS = (
     RunKind.SIDE_QUESTION,
     RunKind.DIRECT_RESPONSE,
@@ -69,10 +59,15 @@ _ANCHOR_STOP_RUN_KINDS = (
 )
 _RUN_EVENT_BATCH_MAX_DELAY_SECONDS = 0.05
 _RUN_EVENT_BATCH_MAX_SIZE = 24
+_CHAT_TERMINAL_CHUNK_STATUSES = {"complete", "error", "stopped"}
+
+
+def _enum_value(value: Any) -> Any:
+    return getattr(value, "value", value)
 
 
 def _should_flush_run_event_immediately(payload: Dict[str, Any]) -> bool:
-    status = str(payload.get("status") or "")
+    status = str(_enum_value(payload.get("status")) or "")
     event_type = str(payload.get("event_type") or payload.get("type") or "")
     if status in {"start", "complete", "error", "stopped"}:
         return True
@@ -144,11 +139,12 @@ class SendMessageRequest(BaseModel):
 def build_stream_chunk_data(chunk: StreamChunk, conversation_id: str) -> Dict[str, Any]:
     """将内部 StreamChunk 转成 SSE JSON payload。"""
     chunk_data: Dict[str, Any] = {
-        "status": chunk.get("status", "content"),
+        "status": _enum_value(chunk.get("status", "content")),
         "content": chunk.get("content", ""),
         "node_id": chunk.get("node_id"),
         "target_node_id": chunk.get("target_node_id") or chunk.get("node_id"),
         "run_id": chunk.get("run_id"),
+        "assistant_message_id": chunk.get("assistant_message_id"),
         "event_index": chunk.get("event_index"),
         "conversation_id": chunk.get("conversation_id", conversation_id),
         "error": chunk.get("error"),
@@ -169,7 +165,10 @@ def build_stream_chunk_data(chunk: StreamChunk, conversation_id: str) -> Dict[st
         "child_status",
         "child_summary",
         "payload",
+        "plan_id",
+        "tool_permission_mode",
         "task_context_mode",
+        "metadata",
     ):
         val = chunk.get(opt_key)
         if val is not None:
@@ -179,38 +178,18 @@ def build_stream_chunk_data(chunk: StreamChunk, conversation_id: str) -> Dict[st
     return chunk_data
 
 
-def _format_sse_data(payload: Dict[str, Any] | str) -> str:
-    if payload == "[DONE]":
-        return "data: [DONE]\n\n"
-    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
-
-def _stream_error_chunk(conversation_id: str, error: str) -> Dict[str, Any]:
+def _stream_error_chunk(
+    conversation_id: str,
+    error: str,
+    node_id: str | None,
+) -> Dict[str, Any]:
     return {
         "status": "error",
         "content": "",
-        "node_id": None,
+        "node_id": node_id,
         "conversation_id": conversation_id,
         "error": error,
         "tokens_used": 0,
-    }
-
-
-def _run_to_active_stream_info(run: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "run_id": run.get("run_id"),
-        "conversation_id": run.get("conversation_id"),
-        "anchor_node_id": run.get("anchor_node_id"),
-        "node_id": run.get("target_node_id"),
-        "target_node_id": run.get("target_node_id"),
-        "created_by_run_id": run.get("created_by_run_id"),
-        "cancellation_parent_run_id": run.get("cancellation_parent_run_id"),
-        "kind": run.get("kind"),
-        "status": run.get("status"),
-        "event_count": run.get("event_count", 0),
-        "done": run.get("status") in {RunStatus.COMPLETED.value, RunStatus.FAILED.value, RunStatus.CANCELLED.value},
-        "created_at": run.get("created_at"),
-        "updated_at": run.get("updated_at"),
     }
 
 
@@ -310,71 +289,6 @@ def slim_tool_result_for_ui(tool_message: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _slim_tool_interaction_for_ui(interaction: Any) -> Any:
-    if not isinstance(interaction, dict):
-        return interaction
-    slimmed = dict(interaction)
-    tools = slimmed.get("tools")
-    if isinstance(tools, list):
-        slimmed["tools"] = [
-            slim_tool_result_for_ui(tool) if isinstance(tool, dict) else tool
-            for tool in tools
-        ]
-    return slimmed
-
-
-def slim_message_for_ui(message: Message | Dict[str, Any]) -> Message:
-    """Slim heavy nested tool payloads before sending transcript data to the UI."""
-    slimmed: Dict[str, Any] = dict(message)
-    if slimmed.get("role") == "tool":
-        return Message(slim_tool_result_for_ui(slimmed))
-
-    tool_results = slimmed.get("tool_results")
-    if isinstance(tool_results, list):
-        slimmed["tool_results"] = [
-            slim_tool_result_for_ui(tool) if isinstance(tool, dict) else tool
-            for tool in tool_results
-        ]
-
-    tool_interactions = slimmed.get("tool_interactions")
-    if isinstance(tool_interactions, list):
-        slimmed["tool_interactions"] = [
-            _slim_tool_interaction_for_ui(interaction)
-            for interaction in tool_interactions
-        ]
-
-    return Message(slimmed)
-
-
-def slim_messages_for_ui(messages: List[Message]) -> List[Message]:
-    return [
-        slim_message_for_ui(message)
-        for message in messages
-        if not message.get("is_hidden_from_transcript")
-    ]
-
-
-async def _subscribe_sse(run_manager: RunManager, run_id: str, from_event: int = 0) -> AsyncIterator[str]:
-    profiler = get_profiler()
-    emitted = 0
-    first_event = True
-    try:
-        with profiler.span("sse.subscribe", run_id=run_id, from_event=from_event, route="messages"):
-            async for payload in run_manager.subscribe(run_id, from_event):
-                if payload.get("type") == "run_finished":
-                    continue
-                if first_event:
-                    profiler.mark("sse.first_event", run_id=run_id, route="messages")
-                    first_event = False
-                emitted += 1
-                yield _format_sse_data(payload)
-    except RunNotFoundError:
-        yield _format_sse_data({"status": "error", "error": "运行不存在或已结束", "run_id": run_id})
-    finally:
-        profiler.mark("sse.done", run_id=run_id, route="messages", emitted_events=emitted)
-    yield _format_sse_data("[DONE]")
-
-
 def _message_run_metadata(request: SendMessageRequest, slash_result: Any) -> Dict[str, Any]:
     return {
         "slash_command": (
@@ -389,6 +303,45 @@ def _message_run_metadata(request: SendMessageRequest, slash_result: Any) -> Dic
         "tool_permission_mode": request.tool_permission_mode,
         "task_context_mode": request.task_context_mode,
     }
+
+
+def _persist_route_answer(
+    *,
+    chat_manager: ChatManager,
+    conversation_id: str,
+    node_id: Optional[str],
+    content: str,
+    run: RunRecord,
+    request: SendMessageRequest,
+    slash_result: Any,
+) -> None:
+    if not node_id or not content:
+        return
+    repository = getattr(chat_manager, "chat_repository", None)
+    if repository is None:
+        return
+    conversation = chat_manager.get_conversation(conversation_id)
+    ensure_branch = getattr(chat_manager, "_sqlite_ensure_branch", None)
+    if conversation is not None and ensure_branch is not None:
+        ensure_branch(
+            conversation,
+            node_id,
+            provider_id=request.provider_id,
+            model_id=request.model_id,
+            focus_node_id=getattr(conversation, "current_node_id", None),
+        )
+    repository.add_message(
+        conversation_id,
+        node_id,
+        role="assistant",
+        content=content,
+        subtype="assistant_answer",
+        metadata={
+            "run_id": run.run_id,
+            "slash_command": _slash_command_metadata(slash_result),
+        },
+        message_id=f"{run.run_id}:assistant",
+    )
 
 
 async def _produce_chat_run(
@@ -436,33 +389,26 @@ async def _produce_chat_run(
                     chunk_data["target_node_id"] = node_id
                     if await run_manager.is_stop_requested(run.run_id):
                         await chat_manager.stop_stream(node_id)
-                await event_batcher.append(chunk_data)
-                if chunk_data.get("status") == "error":
+                chunk_status = str(_enum_value(chunk_data.get("status")) or "")
+                has_stream_node = bool(chunk_data.get("node_id") or bound_node_id)
+                if (
+                    chunk_status not in _CHAT_TERMINAL_CHUNK_STATUSES
+                    or not has_stream_node
+                ):
+                    await event_batcher.append(chunk_data)
+                if chunk_status == "error":
                     final_status = RunStatus.FAILED
                     final_error = chunk_data.get("error")
-                elif chunk_data.get("status") == "stopped":
+                elif chunk_status == "stopped":
                     final_status = RunStatus.CANCELLED
     except asyncio.CancelledError:
         final_status = RunStatus.CANCELLED
         await event_batcher.flush()
-        await run_manager.append_event(
-            run.run_id,
-            {
-                "status": "stopped",
-                "content": "",
-                "node_id": bound_node_id,
-                "conversation_id": conversation_id,
-            },
-        )
     except Exception as exc:
         logger.exception("Message producer failed for conversation %s", conversation_id)
         final_status = RunStatus.FAILED
         final_error = str(exc) or exc.__class__.__name__
         await event_batcher.flush()
-        await run_manager.append_event(
-            run.run_id,
-            _stream_error_chunk(conversation_id, final_error),
-        )
     finally:
         await event_batcher.flush()
         await run_manager.finish_run(run.run_id, final_status, final_error)
@@ -488,12 +434,32 @@ async def _produce_direct_response(
                 run_manager=run_manager,
             ),
         )
+        _persist_route_answer(
+            chat_manager=chat_manager,
+            conversation_id=conversation_id,
+            node_id=request.parent_node_id,
+            content=content,
+            run=run,
+            request=request,
+            slash_result=slash_result,
+        )
         await run_manager.append_events(
             run.run_id,
             [
-                {"status": "start", "content": None, "node_id": None, "tokens_used": 0},
-                {"status": "content", "content": content, "node_id": None, "tokens_used": 0},
-                {"status": "complete", "content": None, "node_id": None, "tokens_used": 0},
+                {
+                    "status": "start",
+                    "content": None,
+                    "conversation_id": conversation_id,
+                    "node_id": request.parent_node_id,
+                    "tokens_used": 0,
+                },
+                {
+                    "status": "content",
+                    "content": content,
+                    "conversation_id": conversation_id,
+                    "node_id": request.parent_node_id,
+                    "tokens_used": 0,
+                },
             ],
         )
         await run_manager.finish_run(run.run_id, RunStatus.COMPLETED)
@@ -503,7 +469,7 @@ async def _produce_direct_response(
         error = str(exc) or exc.__class__.__name__
         await run_manager.append_event(
             run.run_id,
-            _stream_error_chunk(conversation_id, error),
+            _stream_error_chunk(conversation_id, error, request.parent_node_id),
         )
         await run_manager.finish_run(run.run_id, RunStatus.FAILED, error)
 
@@ -527,7 +493,8 @@ async def _produce_prune_summary(
             {
                 "status": "start",
                 "content": None,
-                "node_id": None,
+                "conversation_id": conversation_id,
+                "node_id": target_node_id,
                 "anchor_node_id": target_node_id or request.parent_node_id,
                 "tokens_used": 0,
             },
@@ -549,20 +516,23 @@ async def _produce_prune_summary(
             f"- 直接子分支: {result['covered_direct_child_count']}\n"
             f"\n摘要预览:\n{result.get('summary_preview') or ''}"
         )
+        _persist_route_answer(
+            chat_manager=chat_manager,
+            conversation_id=conversation_id,
+            node_id=target_node_id,
+            content=content,
+            run=run,
+            request=request,
+            slash_result=slash_result,
+        )
         await run_manager.append_events(
             run.run_id,
             [
                 {
                     "status": "content",
                     "content": content,
-                    "node_id": None,
-                    "anchor_node_id": target_node_id,
-                    "tokens_used": 0,
-                },
-                {
-                    "status": "complete",
-                    "content": None,
-                    "node_id": None,
+                    "conversation_id": conversation_id,
+                    "node_id": target_node_id,
                     "anchor_node_id": target_node_id,
                     "tokens_used": 0,
                 },
@@ -575,7 +545,11 @@ async def _produce_prune_summary(
         error = str(exc) or exc.__class__.__name__
         await run_manager.append_event(
             run.run_id,
-            _stream_error_chunk(conversation_id, error),
+            _stream_error_chunk(
+                conversation_id,
+                error,
+                target_node_id or request.parent_node_id,
+            ),
         )
         await run_manager.finish_run(run.run_id, RunStatus.FAILED, error)
 
@@ -723,139 +697,3 @@ async def start_message_run(
         RunStartValidationError,
     ) as exc:
         raise run_start_api_error(exc) from exc
-
-
-
-@router.get("/conversations/{conversation_id}/messages/streams/active", response_model=List[Dict[str, Any]])
-async def get_active_streams(
-    conversation_id: str,
-    run_manager: RunManager = Depends(get_run_manager),
-):
-    """获取当前对话仍在生成中的可重连流。"""
-    return [
-        _run_to_active_stream_info(run)
-        for run in run_manager.list_active(conversation_id)
-        if run.get("kind") in _ACTIVE_MESSAGE_STREAM_KINDS
-    ]
-
-
-@router.get("/conversations/messages/streams/active", response_model=List[Dict[str, Any]])
-async def get_all_active_streams(
-    run_manager: RunManager = Depends(get_run_manager),
-):
-    """获取所有仍在生成中的可重连流。"""
-    return [
-        _run_to_active_stream_info(run)
-        for run in run_manager.list_active()
-        if run.get("kind") in _ACTIVE_MESSAGE_STREAM_KINDS
-    ]
-
-
-@router.get("/conversations/{conversation_id}/messages/{node_id}/stream/attach")
-async def attach_stream_message(
-    conversation_id: str,
-    node_id: str,
-    from_event: int = 0,
-    run_manager: RunManager = Depends(get_run_manager),
-):
-    """重新订阅仍在运行的流式消息。"""
-    run = run_manager.find_active_by_target(
-        conversation_id=conversation_id,
-        target_node_id=node_id,
-        kind=RunKind.CHAT,
-    )
-    if not run:
-        raise HTTPException(status_code=404, detail="流式消息不存在或已结束")
-
-    return StreamingResponse(
-        _subscribe_sse(run_manager, str(run["run_id"]), from_event),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no"
-        }
-    )
-    
-@router.post("/conversations/{conversation_id}/messages/{node_id}/stream/stop")
-async def stop_stream_message(
-    conversation_id: str,
-    node_id: str,
-    chat_manager: ChatManager = Depends(get_chat_manager),
-    run_manager: RunManager = Depends(get_run_manager),
-    subagent_executor: SubagentExecutor = Depends(get_subagent_executor),
-    command_executor: Any = Depends(get_command_executor),
-    workflow_manager: WorkflowManager = Depends(get_workflow_manager),
-):
-    """停止流式消息"""
-    try:
-        if not chat_manager.storage.index.get(conversation_id):
-            raise HTTPException(status_code=404, detail="对话不存在")
-        run = run_manager.find_active_by_target(
-            conversation_id=conversation_id,
-            target_node_id=node_id,
-            kind=RunKind.CHAT,
-        )
-        if run:
-            await stop_run_tree(
-                str(run["run_id"]),
-                run_manager=run_manager,
-                chat_manager=chat_manager,
-                subagent_executor=subagent_executor,
-                command_executor=command_executor,
-                workflow_manager=workflow_manager,
-            )
-        for run_kind in _ANCHOR_STOP_RUN_KINDS:
-            anchored_run = run_manager.find_active_by_anchor(
-                conversation_id=conversation_id,
-                anchor_node_id=node_id,
-                kind=run_kind,
-            )
-            if anchored_run:
-                await stop_run_tree(
-                    str(anchored_run["run_id"]),
-                    run_manager=run_manager,
-                    chat_manager=chat_manager,
-                    subagent_executor=subagent_executor,
-                    command_executor=command_executor,
-                    workflow_manager=workflow_manager,
-                )
-        await chat_manager.stop_stream(node_id)
-        return {"detail": "流式消息已停止"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/conversations/{conversation_id}/messages/{node_id}", response_model=List[Message])
-async def get_messages(
-    conversation_id: str,
-    node_id: str,
-    chat_manager: ChatManager = Depends(get_chat_manager)
-):
-    """获取消息历史"""
-    try:
-        conversation = chat_manager.get_conversation(conversation_id)
-        if not conversation:
-            raise HTTPException(status_code=404, detail="对话不存在")
-        return slim_messages_for_ui(conversation.get_message_chain_from_node(node_id))
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/conversations/{conversation_id}/messages", response_model=List[Message])
-async def get_all_messages(
-    conversation_id: str,
-    chat_manager: ChatManager = Depends(get_chat_manager)
-):
-    """获取对话中所有消息"""
-    try:
-        conversation = chat_manager.get_conversation(conversation_id)
-        if not conversation:
-            raise HTTPException(status_code=404, detail="对话不存在")
-        return slim_messages_for_ui(conversation.get_message_chain_from_node())
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))

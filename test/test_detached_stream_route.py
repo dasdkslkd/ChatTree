@@ -2,6 +2,7 @@ import asyncio
 import json
 
 from backend.api.routes import messages as messages_route
+from backend.api.routes import runs as runs_route
 from backend.core.config.types import StreamChunk, StreamStatus
 from backend.core.runs import RunKind, RunManager
 from backend.core.slash import SlashCommandDispatcher, SlashDispatchKind
@@ -10,6 +11,30 @@ from backend.core.slash import SlashCommandDispatcher, SlashDispatchKind
 def parse_sse(event: str):
     assert event.startswith("data: ")
     return json.loads(event.removeprefix("data: ").strip())
+
+
+class PatchSession:
+    def __init__(self):
+        self.revision = 0
+
+    def feed(self, payload, *, emit=True):
+        if not emit:
+            return None
+        conversation_id = payload.get("conversation_id") or "conv-1"
+        node_id = payload.get("target_node_id") or payload.get("node_id") or "node-1"
+        self.revision += 1
+        return {
+            "type": "transcript_patch",
+            "conversation_id": conversation_id,
+            "node_id": node_id,
+            "revision": self.revision,
+            "operations": [],
+        }
+
+
+class PatchAssembler:
+    def patch_session(self, run_id, from_event=0):
+        return PatchSession()
 
 
 async def _start_test_producer(
@@ -139,11 +164,11 @@ def test_subscriber_disconnect_does_not_cancel_the_message_producer():
             model_id="fake-model",
         )
         run, producer = await _start_test_producer(request, manager, run_manager)
-        stream = messages_route._subscribe_sse(run_manager, run.run_id)
+        stream = runs_route._subscribe_sse(run_manager, PatchAssembler(), run.run_id)
 
-        assert parse_sse(await anext(stream))["type"] == "run_started"
-        assert parse_sse(await anext(stream))["type"] == "run_target_bound"
-        assert parse_sse(await anext(stream))["content"] == "first"
+        assert parse_sse(await anext(stream))["type"] == "transcript_patch"
+        assert parse_sse(await anext(stream))["type"] == "transcript_patch"
+        assert parse_sse(await anext(stream))["type"] == "transcript_patch"
         await stream.aclose()
 
         manager.allow_continue.set()
@@ -164,15 +189,18 @@ def test_run_event_subscription_replays_then_continues_live():
             model_id="fake-model",
         )
         run, producer = await _start_test_producer(request, manager, run_manager)
-        first = messages_route._subscribe_sse(run_manager, run.run_id)
+        first = runs_route._subscribe_sse(run_manager, PatchAssembler(), run.run_id)
         replayed = [await anext(first) for _ in range(3)]
         await first.aclose()
 
-        attached = messages_route._subscribe_sse(run_manager, run.run_id)
+        attached = runs_route._subscribe_sse(run_manager, PatchAssembler(), run.run_id)
         assert [await anext(attached) for _ in range(3)] == replayed
         manager.allow_continue.set()
-        assert parse_sse(await anext(attached))["content"] == "second"
-        assert "[DONE]" in await anext(attached)
+        while True:
+            event = await anext(attached)
+            if "[DONE]" in event:
+                break
+            assert parse_sse(event)["type"] == "transcript_patch"
         await asyncio.wait_for(producer, timeout=1)
 
     asyncio.run(scenario())
@@ -233,7 +261,7 @@ def test_active_streams_include_targetless_direct_responses():
             anchor_node_id="node-anchor",
         )
 
-        active_streams = await messages_route.get_all_active_streams(run_manager)
+        active_streams = await runs_route.list_active_runs(run_manager=run_manager)
 
         assert len(active_streams) == 1
         assert active_streams[0]["run_id"] == direct.run_id

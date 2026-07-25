@@ -18,11 +18,18 @@ import httpx
 from backend.core.subprocess_utils import subprocess_window_kwargs
 from client_launcher.http_errors import canonical_request_id
 from client_launcher.local_server import (
-    MIN_PROTOCOL_VERSION,
     ConnectedServer,
     PhaseCallback,
 )
 from client_launcher.models import LauncherError, ServerProfile
+from client_launcher.server_compat import (
+    MIN_SERVER_VERSION,
+    check_server_version,
+    handshake_protocol_error,
+    handshake_protocol_details,
+    handshake_version_details,
+    parse_chattree_server_version,
+)
 from client_launcher.settings import LauncherSettings
 
 
@@ -163,6 +170,7 @@ class SshServerConnector:
         lock = self._locks.setdefault(profile.id, asyncio.Lock())
         async with lock:
             await self.disconnect(profile)
+            await self._remote_version(profile, host_alias, phase_callback)
             remote = await self._remote_start(
                 profile,
                 host_alias,
@@ -307,6 +315,85 @@ class SshServerConnector:
                 details={"log_path": str(log_path), "log_tail": tail},
             )
         return self._parse_remote_start(output, log_path)
+
+    async def _remote_version(
+        self,
+        profile: ServerProfile,
+        host_alias: str,
+        phase_callback: PhaseCallback | None,
+    ) -> str:
+        await self._emit_phase(phase_callback, "remote_version")
+        log_path = self._log_path(profile.id)
+        argv = ["ssh", host_alias, "chattree-server", "--version"]
+        process = self._spawn_capture(argv, log_path, phase="remote_version")
+
+        def communicate() -> tuple[str, int | None]:
+            output, _stderr = process.communicate(
+                timeout=float(self._settings.connect_timeout_seconds)
+            )
+            return str(output or ""), process.poll()
+
+        try:
+            output, exit_code = await asyncio.to_thread(communicate)
+        except subprocess.TimeoutExpired as exc:
+            process.kill()
+            try:
+                output, _stderr = process.communicate(timeout=5)
+                if output:
+                    self._append_log(log_path, str(output))
+            except (subprocess.TimeoutExpired, OSError):
+                await asyncio.to_thread(process.wait)
+            raise SshConnectionError(
+                "remote_server_version_timeout",
+                f"Remote chattree-server --version timed out; see {log_path}",
+                phase="remote_version",
+                retryable=True,
+                status_code=504,
+                details={"log_path": str(log_path)},
+            ) from exc
+        self._append_log(log_path, output)
+        if exit_code != 0:
+            tail = _read_log_tail(log_path) or output.strip()
+            code, message, _retryable = _classify_ssh_failure(
+                tail,
+                phase="remote_version",
+            )
+            if code == "ssh_command_failed":
+                code = "remote_server_version_failed"
+                message = "Remote chattree-server --version failed"
+            raise SshConnectionError(
+                code,
+                f"{message}; see {log_path}",
+                phase="remote_version",
+                retryable=False,
+                details={"log_path": str(log_path), "log_tail": tail},
+            )
+        version = parse_chattree_server_version(output)
+        if version is None:
+            raise SshConnectionError(
+                "remote_server_version_invalid",
+                f"Remote chattree-server --version returned an invalid response; see {log_path}",
+                phase="remote_version",
+                retryable=False,
+                details={"log_path": str(log_path), "log_tail": output.strip()},
+            )
+        check = check_server_version(version)
+        if not check.compatible:
+            raise SshConnectionError(
+                "remote_server_version_incompatible",
+                (
+                    "Remote chattree-server binary is incompatible: "
+                    f"required {MIN_SERVER_VERSION}, got {version}"
+                ),
+                phase="remote_version",
+                retryable=False,
+                status_code=409,
+                details={
+                    "required_server_version": check.minimum_version,
+                    "observed_server_version": check.observed_version,
+                },
+            )
+        return version
 
     def _spawn(
         self,
@@ -593,21 +680,36 @@ class SshServerConnector:
         return payload
 
     def _validate_handshake(self, payload: Mapping[str, Any]) -> str:
-        protocol_version = payload.get("protocol_version")
-        if (
-            isinstance(protocol_version, bool)
-            or not isinstance(protocol_version, int)
-            or protocol_version < MIN_PROTOCOL_VERSION
-        ):
+        protocol_error = handshake_protocol_error(payload)
+        if protocol_error is not None:
             raise SshConnectionError(
                 "ssh_server_protocol_mismatch",
+                f"Remote {protocol_error}",
+                phase="handshake",
+                retryable=False,
+                status_code=409,
+                details=handshake_protocol_details(payload),
+            )
+        version = payload.get("server_version")
+        if not isinstance(version, str) or not version.strip():
+            raise SshConnectionError(
+                "ssh_server_invalid_handshake",
+                "Remote Server handshake server_version must be a non-empty string",
+                phase="handshake",
+                retryable=False,
+            )
+        check = check_server_version(version)
+        if not check.compatible:
+            raise SshConnectionError(
+                "ssh_server_version_mismatch",
                 (
-                    "Remote Server protocol version is incompatible: "
-                    f"minimum {MIN_PROTOCOL_VERSION}, got {protocol_version!r}"
+                    "Remote Server version is incompatible: "
+                    f"minimum {MIN_SERVER_VERSION}, got {version}"
                 ),
                 phase="handshake",
                 retryable=False,
                 status_code=409,
+                details=handshake_version_details(payload),
             )
         value = payload.get("server_instance_id")
         if not isinstance(value, str):

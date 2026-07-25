@@ -110,62 +110,100 @@ async def _drain(stream):
         pass
 
 
+def _manager(tmp):
+    storage = ChatStorage(storage_dir=os.path.join(tmp, "conversations"))
+    prompts = PromptStorage(storage_dir=os.path.join(tmp, "prompts"))
+    return ChatManager(CompactModelManager(), storage, prompts)
+
+
+def _messages_for_node(manager, conversation_id, node_id):
+    return manager._canonical_messages_by_node(conversation_id, [node_id]).get(node_id, [])
+
+
+def _add_turn(manager, conv, user_content, assistant_content=None, *, import_files=None, parent_id=None, focus=True):
+    parent_id = parent_id or conv.current_node_id
+    node = NodeManager.create_node(parent_id=parent_id, model_id="fake-model")
+    conv.add_node(node, parent_id, focus=focus)
+    manager._save(conv)
+    manager._sqlite_ensure_branch(conv, node["id"], provider_id="fake", model_id="fake-model")
+    metadata = {"import_files": import_files} if import_files else None
+    manager.chat_repository.add_message(
+        conv.metadata["id"],
+        node["id"],
+        role=Role.USER.value,
+        content=user_content,
+        metadata=metadata,
+    )
+    if assistant_content is not None:
+        manager.chat_repository.add_message(
+            conv.metadata["id"],
+            node["id"],
+            role=Role.ASSISTANT.value,
+            content=assistant_content,
+        )
+    return node
+
+
+def _add_compact_node(manager, conv, summary, *, trigger="manual", pre_tokens=100, messages_to_keep=0):
+    parent_id = conv.current_node_id
+    node = NodeManager.create_compact_node(parent_id=parent_id, model_id="fake-model")
+    conv.add_node(node, parent_id)
+    manager._save(conv)
+    manager._sqlite_ensure_branch(conv, node["id"], provider_id="fake", model_id="fake-model")
+    metadata = {
+        "trigger": trigger,
+        "pre_tokens": pre_tokens,
+        "messages_to_keep": messages_to_keep,
+        "last_pre_compact_message_id": parent_id,
+    }
+    manager.chat_repository.add_message(
+        conv.metadata["id"],
+        node["id"],
+        role=Role.SYSTEM.value,
+        content="Conversation compacted",
+        subtype="compact_boundary",
+        hidden=True,
+        metadata=metadata,
+    )
+    manager.chat_repository.add_message(
+        conv.metadata["id"],
+        node["id"],
+        role=Role.ASSISTANT.value,
+        content=summary,
+        subtype="compact_summary",
+        hidden=True,
+        transcript_only=True,
+        metadata=metadata,
+    )
+    return node
+
+
 def test_compact_node_uses_claude_style_boundary_and_summary_message():
-    node = NodeManager.create_compact_node(
-        parent_id="parent-1",
-        summary="Summary:\nkept facts",
-        trigger="manual",
-        pre_tokens=123,
-        model_id="fake-model",
-        last_pre_compact_message_id="msg-9",
-    )
+    node = NodeManager.create_compact_node(parent_id="parent-1", model_id="fake-model")
 
-    boundary = node["system_message"]
-    assert boundary["role"] == Role.SYSTEM
-    assert boundary["subtype"] == "compact_boundary"
-    assert boundary["content"] == "Conversation compacted"
-    assert boundary["compact_metadata"]["trigger"] == "manual"
-    assert boundary["compact_metadata"]["pre_tokens"] == 123
-    assert boundary["compact_metadata"]["last_pre_compact_message_id"] == "msg-9"
-
-    summary = node["user_message"]
-    assert summary["role"] == Role.USER
-    assert summary["is_compact_summary"] is True
-    assert summary["is_visible_in_transcript_only"] is True
-    assert "This session is being continued from a previous conversation that ran out of context." in summary["content"]
-    assert "Summary:\nkept facts" in summary["content"]
+    assert node["parent_id"] == "parent-1"
+    assert node["model_id"] == "fake-model"
+    assert "system_message" not in node
+    assert "user_message" not in node
+    assert "assistant_message" not in node
 
 
-def test_model_context_starts_at_latest_compact_summary_and_keeps_root_system():
-    conv = Conversation(title="compact projection")
-    conv.initialize_with_system_message("root instructions")
-
-    first = NodeManager.create_node(_message(Role.USER, "old question"), conv.current_node_id, "fake-model")
-    first["assistant_message"] = _message(Role.ASSISTANT, "old answer")
-    conv.add_node(first, conv.current_node_id)
-
-    compact = NodeManager.create_compact_node(
-        parent_id=conv.current_node_id,
-        summary="Summary:\nold question was answered",
-        trigger="manual",
-        pre_tokens=100,
-        model_id="fake-model",
-        messages_to_keep=0,
-    )
-    conv.add_node(compact, conv.current_node_id)
-
-    latest = NodeManager.create_node(_message(Role.USER, "new question"), conv.current_node_id, "fake-model")
-    conv.add_node(latest, conv.current_node_id)
-
-    manager = ChatManager(CompactModelManager(), ChatStorage(tempfile.mkdtemp()), PromptStorage(tempfile.mkdtemp()))
+def test_model_context_starts_at_latest_compact_summary():
+    tmp = tempfile.mkdtemp(prefix="chattree_compact_projection_")
     try:
+        manager = _manager(tmp)
+        conv = manager.create_conversation("compact projection")
+        conv.metadata["provider_id"] = "fake"
+        conv.metadata["model_id"] = "fake-model"
+        _add_turn(manager, conv, "old question", "old answer")
+        _add_compact_node(manager, conv, "Summary:\nold question was answered", messages_to_keep=0)
+        _add_turn(manager, conv, "new question")
+
         messages = manager._prepare_messages_for_api_with_conversation(conv)
     finally:
-        shutil.rmtree(manager.storage.storage_dir, ignore_errors=True)
-        shutil.rmtree(manager.prompts.storage_dir, ignore_errors=True)
+        shutil.rmtree(tmp, ignore_errors=True)
 
     contents = [message["content"] for message in messages]
-    assert contents[0] == "root instructions"
     assert any("This session is being continued" in content for content in contents)
     assert contents[-1] == "new question"
     assert "old question" not in contents
@@ -176,27 +214,24 @@ def test_model_context_starts_at_latest_compact_summary_and_keeps_root_system():
 def test_manual_compact_saves_boundary_summary_and_moves_current_node():
     tmp = tempfile.mkdtemp(prefix="chattree_compact_")
     try:
-        storage = ChatStorage(storage_dir=os.path.join(tmp, "conversations"))
-        prompts = PromptStorage(storage_dir=os.path.join(tmp, "prompts"))
-        manager = ChatManager(CompactModelManager(), storage, prompts)
+        manager = _manager(tmp)
         conv = manager.create_conversation("manual compact")
         conv.metadata["provider_id"] = "fake"
         conv.metadata["model_id"] = "fake-model"
-
-        first = NodeManager.create_node(_message(Role.USER, "old question"), conv.current_node_id, "fake-model")
-        first["assistant_message"] = _message(Role.ASSISTANT, "old answer")
-        conv.add_node(first, conv.current_node_id)
-        manager._save(conv)
+        _add_turn(manager, conv, "old question", "old answer")
 
         result = asyncio.run(manager.compact_conversation(conv.metadata["id"]))
 
-        reloaded = Conversation.from_dict(storage.load(conv.metadata["id"]))
+        reloaded = manager.get_conversation(conv.metadata["id"])
         current = reloaded.nodes[reloaded.current_node_id]
         assert result["node_id"] == reloaded.current_node_id
-        assert current["system_message"]["subtype"] == "compact_boundary"
-        assert current["user_message"]["is_compact_summary"] is True
-        assert "Summary:" in current["user_message"]["content"]
-        assert "<analysis>" not in current["user_message"]["content"]
+        messages = _messages_for_node(manager, conv.metadata["id"], current["id"])
+        boundary = next(message for message in messages if message.get("subtype") == "compact_boundary")
+        summary = next(message for message in messages if message.get("subtype") == "compact_summary")
+        assert boundary["trigger"] == "manual"
+        assert summary["is_visible_in_transcript_only"] is True
+        assert "Primary Request and Intent" in summary["content"]
+        assert "<analysis>" not in summary["content"]
 
         compact_call = manager.model_manager.provider.calls[-1]
         assert compact_call["tools"] is None
@@ -212,31 +247,27 @@ def test_manual_compact_saves_boundary_summary_and_moves_current_node():
 def test_compact_restores_recent_import_file_context_after_summary():
     tmp = tempfile.mkdtemp(prefix="chattree_compact_files_")
     try:
-        storage = ChatStorage(storage_dir=os.path.join(tmp, "conversations"))
-        prompts = PromptStorage(storage_dir=os.path.join(tmp, "prompts"))
-        manager = ChatManager(CompactModelManager(), storage, prompts)
+        manager = _manager(tmp)
         conv = manager.create_conversation("file restore")
         conv.metadata["provider_id"] = "fake"
         conv.metadata["model_id"] = "fake-model"
-        storage.save_import_file(conv.metadata["id"], "notes.txt", "important file facts".encode("utf-8"))
-
-        with_file = NodeManager.create_node(
-            _message(
-                Role.USER,
-                "'''USER MENTIONED FILES: notes.txt '''\n\n<file>\nstale inline copy\n</file>\n\n---\n\nuse this file",
-            ),
-            conv.current_node_id,
-            "fake-model",
+        manager.storage.save_import_file(conv.metadata["id"], "notes.txt", "important file facts".encode("utf-8"))
+        _add_turn(
+            manager,
+            conv,
+            "'''USER MENTIONED FILES: notes.txt '''\n\n<file>\nstale inline copy\n</file>\n\n---\n\nuse this file",
+            "read it",
         )
-        with_file["assistant_message"] = _message(Role.ASSISTANT, "read it")
-        conv.add_node(with_file, conv.current_node_id)
-        manager._save(conv)
 
         asyncio.run(manager.compact_conversation(conv.metadata["id"], messages_to_keep=0))
 
-        reloaded = Conversation.from_dict(storage.load(conv.metadata["id"]))
+        reloaded = manager.get_conversation(conv.metadata["id"])
         compact_node = reloaded.nodes[reloaded.current_node_id]
-        restored = compact_node["system_message"]["compact_metadata"]["restored_files"]
+        boundary = next(
+            message for message in _messages_for_node(manager, conv.metadata["id"], compact_node["id"])
+            if message.get("subtype") == "compact_boundary"
+        )
+        restored = boundary["restored_files"]
         assert restored == [{"filename": "notes.txt", "content": "important file facts", "truncated": False}]
 
         messages = manager._prepare_messages_for_api_with_conversation(reloaded)
@@ -254,24 +285,15 @@ def test_compact_restores_recent_import_file_context_after_summary():
 def test_import_file_references_are_injected_as_model_context_without_mutating_user_text():
     tmp = tempfile.mkdtemp(prefix="chattree_import_context_")
     try:
-        storage = ChatStorage(storage_dir=os.path.join(tmp, "conversations"))
-        prompts = PromptStorage(storage_dir=os.path.join(tmp, "prompts"))
-        manager = ChatManager(CompactModelManager(), storage, prompts)
+        manager = _manager(tmp)
         conv = manager.create_conversation("file references")
-        storage.save_import_file(conv.metadata["id"], "notes with space.txt", "important file facts".encode("utf-8"))
-
-        node = NodeManager.create_node(
-            Message({
-                "id": "user-with-files",
-                "role": Role.USER,
-                "content": "请根据这个文件回答",
-                "import_files": [{"filename": "notes with space.txt"}],
-                "timestamp": 1,
-            }),
-            conv.current_node_id,
-            "fake-model",
+        manager.storage.save_import_file(conv.metadata["id"], "notes with space.txt", "important file facts".encode("utf-8"))
+        _add_turn(
+            manager,
+            conv,
+            "请根据这个文件回答",
+            import_files=[{"filename": "notes with space.txt"}],
         )
-        conv.add_node(node, conv.current_node_id)
 
         messages = manager._prepare_messages_for_api_with_conversation(conv)
 
@@ -288,67 +310,46 @@ def test_import_file_references_are_injected_as_model_context_without_mutating_u
 def test_compact_restores_structured_import_file_references_after_summary():
     tmp = tempfile.mkdtemp(prefix="chattree_compact_structured_files_")
     try:
-        storage = ChatStorage(storage_dir=os.path.join(tmp, "conversations"))
-        prompts = PromptStorage(storage_dir=os.path.join(tmp, "prompts"))
-        manager = ChatManager(CompactModelManager(), storage, prompts)
+        manager = _manager(tmp)
         conv = manager.create_conversation("structured file restore")
         conv.metadata["provider_id"] = "fake"
         conv.metadata["model_id"] = "fake-model"
-        storage.save_import_file(conv.metadata["id"], "notes with space.txt", "important file facts".encode("utf-8"))
-
-        with_file = NodeManager.create_node(
-            Message({
-                "id": "structured-file-user",
-                "role": Role.USER,
-                "content": "use this file",
-                "import_files": [{"filename": "notes with space.txt"}],
-                "timestamp": 1,
-            }),
-            conv.current_node_id,
-            "fake-model",
+        manager.storage.save_import_file(conv.metadata["id"], "notes with space.txt", "important file facts".encode("utf-8"))
+        _add_turn(
+            manager,
+            conv,
+            "use this file",
+            "read it",
+            import_files=[{"filename": "notes with space.txt"}],
         )
-        with_file["assistant_message"] = _message(Role.ASSISTANT, "read it")
-        conv.add_node(with_file, conv.current_node_id)
-        manager._save(conv)
 
         asyncio.run(manager.compact_conversation(conv.metadata["id"], messages_to_keep=0))
 
-        reloaded = Conversation.from_dict(storage.load(conv.metadata["id"]))
+        reloaded = manager.get_conversation(conv.metadata["id"])
         compact_node = reloaded.nodes[reloaded.current_node_id]
-        restored = compact_node["system_message"]["compact_metadata"]["restored_files"]
+        boundary = next(
+            message for message in _messages_for_node(manager, conv.metadata["id"], compact_node["id"])
+            if message.get("subtype") == "compact_boundary"
+        )
+        restored = boundary["restored_files"]
         assert restored == [{"filename": "notes with space.txt", "content": "important file facts", "truncated": False}]
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
 def test_messages_to_keep_preserves_latest_original_turn_after_summary():
-    conv = Conversation(title="compact keep")
-    conv.initialize_with_system_message("root instructions")
-
-    first = NodeManager.create_node(_message(Role.USER, "first old question"), conv.current_node_id, "fake-model")
-    first["assistant_message"] = _message(Role.ASSISTANT, "first old answer")
-    conv.add_node(first, conv.current_node_id)
-
-    second = NodeManager.create_node(_message(Role.USER, "latest kept question"), conv.current_node_id, "fake-model")
-    second["assistant_message"] = _message(Role.ASSISTANT, "latest kept answer")
-    conv.add_node(second, conv.current_node_id)
-
-    compact = NodeManager.create_compact_node(
-        parent_id=conv.current_node_id,
-        summary="Summary:\nolder work",
-        trigger="manual",
-        pre_tokens=100,
-        model_id="fake-model",
-        messages_to_keep=1,
-    )
-    conv.add_node(compact, conv.current_node_id)
-
-    manager = ChatManager(CompactModelManager(), ChatStorage(tempfile.mkdtemp()), PromptStorage(tempfile.mkdtemp()))
+    tmp = tempfile.mkdtemp(prefix="chattree_compact_keep_")
     try:
+        manager = _manager(tmp)
+        conv = manager.create_conversation("compact keep")
+        conv.metadata["provider_id"] = "fake"
+        conv.metadata["model_id"] = "fake-model"
+        _add_turn(manager, conv, "first old question", "first old answer")
+        _add_turn(manager, conv, "latest kept question", "latest kept answer")
+        _add_compact_node(manager, conv, "Summary:\nolder work", messages_to_keep=1)
         contents = [message["content"] for message in manager._prepare_messages_for_api_with_conversation(conv)]
     finally:
-        shutil.rmtree(manager.storage.storage_dir, ignore_errors=True)
-        shutil.rmtree(manager.prompts.storage_dir, ignore_errors=True)
+        shutil.rmtree(tmp, ignore_errors=True)
 
     assert any("This session is being continued" in content for content in contents)
     assert "latest kept question" in contents
@@ -374,16 +375,12 @@ def test_microcompact_shortens_large_tool_results_without_touching_user_text():
 def test_send_message_auto_compacts_when_context_usage_reaches_90_percent():
     tmp = tempfile.mkdtemp(prefix="chattree_auto_compact_")
     try:
-        storage = ChatStorage(storage_dir=os.path.join(tmp, "conversations"))
-        prompts = PromptStorage(storage_dir=os.path.join(tmp, "prompts"))
-        manager = ChatManager(CompactModelManager(), storage, prompts)
+        manager = _manager(tmp)
         conv = manager.create_conversation("auto compact")
         conv.metadata["provider_id"] = "fake"
         conv.metadata["model_id"] = "fake-model"
 
-        old = NodeManager.create_node(_message(Role.USER, "old question"), conv.current_node_id, "fake-model")
-        old["assistant_message"] = _message(Role.ASSISTANT, "old answer")
-        conv.add_node(old, conv.current_node_id)
+        old = _add_turn(manager, conv, "old question", "old answer")
         old["usage"]["active_context_usage"] = {
             "input_tokens": 179999,
             "output_tokens": 1,
@@ -391,13 +388,7 @@ def test_send_message_auto_compacts_when_context_usage_reaches_90_percent():
             "source": "api",
         }
         target_parent_id = old["id"]
-        sibling = NodeManager.create_node(
-            _message(Role.USER, "other branch"),
-            conv.root_node_id,
-            "fake-model",
-        )
-        sibling["assistant_message"] = _message(Role.ASSISTANT, "other answer")
-        conv.add_node(sibling, conv.root_node_id)
+        _add_turn(manager, conv, "other branch", "other answer", parent_id=conv.root_node_id, focus=False)
         manager._save(conv)
 
         asyncio.run(_drain(manager.send_message_stream(
@@ -407,12 +398,25 @@ def test_send_message_auto_compacts_when_context_usage_reaches_90_percent():
             parent_node_id=target_parent_id,
         )))
 
-        reloaded = Conversation.from_dict(storage.load(conv.metadata["id"]))
+        reloaded = manager.get_conversation(conv.metadata["id"])
         chain = reloaded.get_node_chain(reloaded.current_node_id)
-        assert any((node.get("system_message") or {}).get("subtype") == "compact_boundary" for node in chain)
-        assert chain[-2]["system_message"]["compact_metadata"]["trigger"] == "auto"
+        compact_nodes = [
+            node for node in chain
+            if any(message.get("subtype") == "compact_boundary" for message in _messages_for_node(manager, conv.metadata["id"], node["id"]))
+        ]
+        assert compact_nodes
+        assert compact_nodes[-1]["id"] == chain[-2]["id"]
+        boundary = next(
+            message for message in _messages_for_node(manager, conv.metadata["id"], chain[-2]["id"])
+            if message.get("subtype") == "compact_boundary"
+        )
+        assert boundary["trigger"] == "auto"
         assert chain[-2]["parent_id"] == target_parent_id
-        assert chain[-1]["user_message"]["content"] == "new question"
+        user_message = next(
+            message for message in _messages_for_node(manager, conv.metadata["id"], chain[-1]["id"])
+            if message.get("role") == Role.USER
+        )
+        assert user_message["content"] == "new question"
         assert chain[-1]["parent_id"] == chain[-2]["id"]
         assert manager.model_manager.provider.calls
     finally:

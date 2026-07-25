@@ -14,10 +14,7 @@ assert.match(mainPage, /taskContextMode === 'attached'/);
 assert.match(mainPage, /setTaskContextMode\(checked \? 'attached' : 'detached'\)/);
 assert.match(mainPage, /task_context_mode:\s*taskContextMode/);
 assert.match(mainPage, /当前对话暂无任务/);
-assert.match(mainPage, /taskStateApi\.bind\(conversationId, notificationId, deliveryNodeId/);
-assert.match(mainPage, /taskStateApi\.delete\(conversationId, notificationId\)/);
 assert.doesNotMatch(mainPage, /activeTaskService/);
-assert.doesNotMatch(mainPage, /taskNotificationsApi/);
 assert.doesNotMatch(
   mainPage,
   /refreshActiveTask\(conversationId\);\s*}\s*, \[currentBranchStreamActivity,[^\]]*sideRunActivity\]/,

@@ -22,7 +22,7 @@ type TaskStateEntry = {
 };
 
 function shouldContinueRefreshing(state: TaskStateSnapshot): boolean {
-  return state.flags.running || state.flags.delivering;
+  return state.flags.running;
 }
 
 export class TaskStateCoordinator {

@@ -119,6 +119,13 @@ def messages_contain_skill(messages) -> bool:
     )
 
 
+def user_active_skill_names(manager, conversation_id, node_id):
+    messages = manager._canonical_messages_by_node(conversation_id, [node_id]).get(node_id, [])
+    user_messages = [message for message in messages if message.get("role") == "user"]
+    assert user_messages
+    return user_messages[-1].get("active_skill_names")
+
+
 def test_skill_injection_uses_turn_intent_and_inherits_active_skill(tmp_path):
     manager = make_manager(tmp_path)
     conversation = manager.create_conversation("skills")
@@ -138,7 +145,7 @@ def test_skill_injection_uses_turn_intent_and_inherits_active_skill(tmp_path):
     reloaded = manager.get_conversation(conversation_id)
     assert reloaded is not None
     first_node = reloaded.nodes[reloaded.current_node_id]
-    assert first_node["active_skill_names"] == ["kimi-webbridge"]
+    assert user_active_skill_names(manager, conversation_id, first_node["id"]) == ["kimi-webbridge"]
     assert messages_contain_skill(manager.model_manager.provider.message_calls[-1])
 
     asyncio.run(
@@ -155,5 +162,5 @@ def test_skill_injection_uses_turn_intent_and_inherits_active_skill(tmp_path):
     reloaded = manager.get_conversation(conversation_id)
     assert reloaded is not None
     second_node = reloaded.nodes[reloaded.current_node_id]
-    assert second_node["active_skill_names"] == ["kimi-webbridge"]
+    assert user_active_skill_names(manager, conversation_id, second_node["id"]) == ["kimi-webbridge"]
     assert messages_contain_skill(manager.model_manager.provider.message_calls[-1])

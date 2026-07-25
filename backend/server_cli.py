@@ -214,20 +214,13 @@ def _start(args: argparse.Namespace) -> int:
         print(f"Could not open server log: {log_path}: {exc}", file=sys.stderr)
         return 1
 
-    command = [
-        sys.executable,
-        "-m",
-        "backend.server_cli",
-        "serve",
-        "--host",
-        args.host,
-        "--port",
-        str(port),
-    ]
+    command = _serve_command(args.host, port)
     if args.home:
         command.extend(["--home", os.environ["CHATTREE_HOME"]])
 
     env = os.environ.copy()
+    if getattr(sys, "frozen", False):
+        env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
     try:
         process = subprocess.Popen(
             command,
@@ -332,6 +325,15 @@ def _http_host(host: str) -> str:
     if ":" in host and not host.startswith("["):
         return f"[{host}]"
     return host
+
+
+def _serve_command(host: str, port: int) -> list[str]:
+    if getattr(sys, "frozen", False):
+        command = [sys.executable, "serve"]
+    else:
+        command = [sys.executable, "-m", "backend.server_cli", "serve"]
+    command.extend(["--host", host, "--port", str(port)])
+    return command
 
 
 def _load_main_module() -> Any:

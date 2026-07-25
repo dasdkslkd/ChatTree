@@ -12,50 +12,11 @@ from backend.core.command_runtime import CommandExecutor, CommandExecutorClosing
 from backend.core.persistence.database import SQLitePersistence
 from backend.core.persistence.repository import ChatRepository
 from backend.core.persistence.run_repository import SQLiteRunRepository
-from backend.core.notifications import TaskNotificationService
 from backend.core.runs import RunKind, RunManager, RunStatus
 from backend.core.runs.repository import MemoryRunRepository
 from backend.core.tasks import ActiveTaskService, TaskContextDisabledError
 from backend.core.tools.code_tools import CodeToolConfig, RunCommandTool
 from backend.core.tools.tool_manager import ToolManager
-
-
-class MemoryNotificationRepository:
-    def __init__(self):
-        self.items = {}
-
-    def upsert_for_run(self, **kwargs):
-        source_run_id = kwargs["source_run_id"]
-        item = self.items.get(source_run_id) or {
-            "id": f"notification-{source_run_id}",
-            "status": "unbound",
-        }
-        item.update(kwargs)
-        self.items[source_run_id] = item
-        return dict(item)
-
-    def mark_observed_by_source(self, source_run_id):
-        item = self.items.get(source_run_id)
-        if item:
-            item["status"] = "observed"
-        return dict(item) if item else None
-
-
-def install_notification_service(run_manager: RunManager) -> MemoryNotificationRepository:
-    repository = MemoryNotificationRepository()
-    run_manager.notification_service = TaskNotificationService(
-        repository=repository,
-        run_manager=run_manager,
-    )
-    return repository
-
-
-class FailingNotificationService:
-    async def register_run_notification(self, **kwargs):
-        raise RuntimeError("notification store unavailable")
-
-    async def publish_run_notification(self, **kwargs):
-        raise RuntimeError("notification store unavailable")
 
 
 class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
@@ -102,84 +63,6 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status"], "running")
         self.assertIs(payload["result_observed"], False)
         self.assertIn("does not contain the command result", payload["message"])
-
-    async def test_shell_short_managed_command_returns_sync_output_and_suppresses_notification(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            run_manager = RunManager()
-            notifications = install_notification_service(run_manager)
-            command_executor = CommandExecutor(run_manager)
-            parent = await run_manager.create_run(
-                conversation_id="conv_1",
-                kind=RunKind.CHAT,
-                anchor_node_id="node_1",
-                target_node_id="node_2",
-            )
-            tool = RunCommandTool(CodeToolConfig.from_dict({
-                "workspace_roots": [tmpdir],
-                "command_timeout_seconds": 10,
-                "shell_initial_wait_seconds": 5,
-            }))
-
-            raw = await tool.execute(
-                command=f"{sys.executable} -c \"print('managed-short')\"",
-                cwd=".",
-                _runtime_context={
-                    "conversation_id": "conv_1",
-                    "node_id": "node_1",
-                    "run_id": parent.run_id,
-                    "command_executor": command_executor,
-                },
-            )
-            payload = json.loads(raw)
-            await run_manager.finish_run(parent.run_id, RunStatus.COMPLETED)
-
-            self.assertEqual(payload["exit_code"], 0)
-            self.assertEqual(payload["timed_out"], False)
-            self.assertEqual(payload["background"], False)
-            self.assertEqual(payload["kind"], RunKind.COMMAND.value)
-            self.assertIn("managed-short", payload["stdout"])
-            self.assertIn("command_run_id", payload)
-            self.assertIn("shell", payload)
-            self.assertNotIn("terminal_run_id", payload)
-            self.assertEqual(notifications.items[payload["command_run_id"]]["status"], "observed")
-
-    async def test_workflow_worker_shell_does_not_create_task_notification(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            run_manager = RunManager()
-            notifications = install_notification_service(run_manager)
-            command_executor = CommandExecutor(run_manager)
-            worker = await run_manager.create_run(
-                conversation_id="conv_1",
-                kind=RunKind.SUBAGENT,
-                anchor_node_id="node_1",
-                summary="workflow worker",
-                metadata={"agent_name": "workflow-worker", "delivery_policy": "silent"},
-            )
-            tool = RunCommandTool(CodeToolConfig.from_dict({
-                "workspace_roots": [tmpdir],
-                "command_timeout_seconds": 10,
-                "shell_initial_wait_seconds": 5,
-            }))
-
-            raw = await tool.execute(
-                command=f"{sys.executable} -c \"print('workflow-worker-managed')\"",
-                cwd=".",
-                _runtime_context={
-                    "conversation_id": "conv_1",
-                    "node_id": "node_1",
-                    "run_id": worker.run_id,
-                    "run_kind": RunKind.SUBAGENT.value,
-                    "agent_name": "workflow-worker",
-                    "delivery_policy": "silent",
-                    "command_executor": command_executor,
-                },
-            )
-            payload = json.loads(raw)
-
-            self.assertEqual(payload["exit_code"], 0)
-            run = run_manager.get_run(payload["command_run_id"]) or {}
-            self.assertIs((run.get("metadata") or {}).get("suppress_task_notification"), True)
-            self.assertEqual(notifications.items, {})
 
     async def test_shell_short_managed_command_truncates_output(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -283,7 +166,7 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(web_search)
         self.assertEqual(web_search.searxng_url, "http://searxng.example.test")
 
-    @unittest.skip("legacy command control tools removed; command observation now uses managed side-run notifications")
+    @unittest.skip("legacy command control tools removed")
     async def test_command_control_tools_wait_read_and_stop(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_manager = RunManager()
@@ -327,131 +210,6 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("out", read["stdout"])
             self.assertIn("err", read["stderr"])
             self.assertFalse(stopped["stopped"])
-
-    async def test_background_command_streams_events_and_enqueues_completion_notification(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            run_manager = RunManager()
-            notifications = install_notification_service(run_manager)
-            command_executor = CommandExecutor(run_manager)
-
-            run = await command_executor.start(
-                conversation_id="conv_1",
-                command=f"{sys.executable} -c \"print('hello-command')\"",
-                cwd=tmpdir,
-                anchor_node_id="node_1",
-                summary="say hello",
-            )
-            await command_executor.wait(run["run_id"], timeout=5)
-
-            record = run_manager.get_run(run["run_id"])
-            self.assertEqual(record["kind"], RunKind.COMMAND.value)
-            self.assertEqual(record["status"], RunStatus.COMPLETED.value)
-
-            events = [
-                event["payload"]
-                for event in run_manager.journal.read_from_index("conv_1", run["run_id"], 0)
-            ]
-            event_types = [event.get("event_type") or event.get("type") for event in events]
-            self.assertIn("command_started", event_types)
-            self.assertIn("command_stdout", event_types)
-            self.assertIn("command_exited", event_types)
-
-            self.assertEqual(len(notifications.items), 1)
-            notification = list(notifications.items.values())[0]
-            self.assertEqual(notification["source_run_kind"], RunKind.COMMAND.value)
-            payload = json.loads(notification["content"])
-            self.assertEqual(payload["command_run_id"], run["run_id"])
-            self.assertNotIn("terminal_run_id", payload)
-            self.assertIn("hello-command", payload["stdout_tail"])
-
-    async def test_notification_failure_does_not_block_or_fail_command_run(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            run_manager = RunManager()
-            run_manager.notification_service = FailingNotificationService()
-            command_executor = CommandExecutor(run_manager)
-
-            run = await command_executor.start(
-                conversation_id="conv_1",
-                command=f'{sys.executable} -c "print(\'still-runs\')"',
-                cwd=tmpdir,
-                anchor_node_id="node_1",
-            )
-            await command_executor.wait(run["run_id"], timeout=5)
-
-            record = run_manager.get_run(run["run_id"])
-            self.assertEqual(record["status"], RunStatus.COMPLETED.value)
-
-    async def test_workflow_child_command_does_not_create_task_notification(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            run_manager = RunManager()
-            notifications = install_notification_service(run_manager)
-            command_executor = CommandExecutor(run_manager)
-            workflow = await run_manager.create_run(
-                conversation_id="conv_1",
-                kind=RunKind.WORKFLOW,
-                anchor_node_id="node_1",
-                summary="workflow",
-            )
-            worker = await run_manager.create_run(
-                conversation_id="conv_1",
-                kind=RunKind.SUBAGENT,
-                anchor_node_id="node_1",
-                created_by_run_id=workflow.run_id,
-                cancellation_parent_run_id=workflow.run_id,
-                summary="workflow worker",
-                metadata={"agent_name": "workflow-worker", "delivery_policy": "silent"},
-            )
-
-            run = await command_executor.start(
-                conversation_id="conv_1",
-                command=f"{sys.executable} -c \"print('workflow-command')\"",
-                cwd=tmpdir,
-                anchor_node_id="node_1",
-                created_by_run_id=worker.run_id,
-                cancellation_parent_run_id=worker.run_id,
-                summary="workflow command",
-            )
-            await command_executor.wait(run["run_id"], timeout=5)
-
-            self.assertEqual(notifications.items, {})
-
-    @unittest.skip("legacy command control tools removed; workflow workers use shell")
-    async def test_workflow_worker_command_tool_marks_notification_suppressed(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            run_manager = RunManager()
-            notifications = install_notification_service(run_manager)
-            command_executor = CommandExecutor(run_manager)
-            worker = await run_manager.create_run(
-                conversation_id="conv_1",
-                kind=RunKind.SUBAGENT,
-                anchor_node_id="node_1",
-                summary="workflow worker",
-                metadata={"agent_name": "workflow-worker"},
-            )
-            tool = StartBackgroundCommandTool(CodeToolConfig.from_dict({
-                "workspace_roots": [tmpdir],
-                "command_timeout_seconds": 10,
-            }))
-
-            raw = await tool.execute(
-                command=f"{sys.executable} -c \"print('workflow-worker-command')\"",
-                cwd=tmpdir,
-                _runtime_context={
-                    "conversation_id": "conv_1",
-                    "run_id": worker.run_id,
-                    "run_kind": RunKind.SUBAGENT.value,
-                    "anchor_node_id": "node_1",
-                    "agent_name": "workflow-worker",
-                    "delivery_policy": "silent",
-                    "command_executor": command_executor,
-                },
-            )
-            result = json.loads(raw)
-            await command_executor.wait(result["run_id"], timeout=5)
-
-            run = run_manager.get_run(result["run_id"]) or {}
-            self.assertIs((run.get("metadata") or {}).get("suppress_task_notification"), True)
-            self.assertEqual(notifications.items, {})
 
     async def test_command_snapshot_reads_repository_events(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -497,33 +255,9 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(snapshot["exit_code"], 0)
             self.assertEqual(snapshot["status"], RunStatus.COMPLETED.value)
 
-    async def test_background_command_notification_does_not_create_task(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            run_manager = RunManager()
-            notifications = install_notification_service(run_manager)
-            task_service = ActiveTaskService(run_manager=run_manager)
-            run_manager.task_service = task_service
-            command_executor = CommandExecutor(run_manager, task_service=task_service)
-
-            run = await command_executor.start(
-                conversation_id="conv_1",
-                command=f"{sys.executable} -c \"print('task-command')\"",
-                cwd=tmpdir,
-                anchor_node_id="node_1",
-                summary="task command",
-            )
-            await command_executor.wait(run["run_id"], timeout=5)
-
-            self.assertIsNone(await task_service.get_active_task("conv_1"))
-            record = run_manager.get_run(run["run_id"])
-            notification = notifications.items[run["run_id"]]
-            self.assertNotIn("task_id", notification)
-            self.assertNotIn("task_id", record["metadata"])
-
     async def test_command_binds_only_the_explicit_numbered_step(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_manager = RunManager()
-            install_notification_service(run_manager)
             task_service = ActiveTaskService(run_manager=run_manager)
             run_manager.task_service = task_service
             command_executor = CommandExecutor(run_manager, task_service=task_service)
@@ -640,45 +374,7 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(run_manager.list_runs("conv_1"), [])
 
-    @unittest.skip("legacy command control tools removed; shell marks observed results directly")
-    async def test_shell_marks_final_result_observed_and_suppresses_notification(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            run_manager = RunManager()
-            notifications = install_notification_service(run_manager)
-            command_executor = CommandExecutor(run_manager)
-            parent = await run_manager.create_run(
-                conversation_id="conv_1",
-                kind=RunKind.CHAT,
-                anchor_node_id="node_1",
-                target_node_id="node_2",
-            )
-            run = await command_executor.start(
-                conversation_id="conv_1",
-                command=f"{sys.executable} -c \"print('joined-command')\"",
-                cwd=tmpdir,
-                anchor_node_id="node_1",
-                created_by_run_id=parent.run_id,
-                cancellation_parent_run_id=parent.run_id,
-            )
-
-            waited = json.loads(await WaitCommandTool().execute(
-                command_run_id=run["run_id"],
-                timeout_seconds=5,
-                _runtime_context={
-                    "command_executor": command_executor,
-                    "run_id": parent.run_id,
-                },
-            ))
-            await run_manager.finish_run(parent.run_id, RunStatus.COMPLETED)
-
-            self.assertEqual(waited["status"], RunStatus.COMPLETED.value)
-            self.assertIn("joined-command", waited["stdout"])
-            updated = run_manager.get_run(run["run_id"])
-            self.assertEqual(updated["metadata"]["result_observed_by_run_id"], parent.run_id)
-            self.assertEqual(updated["metadata"]["result_observed_via"], "wait_command")
-            self.assertEqual(notifications.items[run["run_id"]]["status"], "observed")
-
-    @unittest.skip("legacy command control tools removed; shell marks observed results directly")
+    @unittest.skip("legacy command control tools removed")
     async def test_shell_marks_stopped_result_observed(self):
         class StoppedExecutor:
             def __init__(self):
@@ -1193,116 +889,6 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 run_manager.get_run(run_id)["status"],
                 RunStatus.CANCELLED.value,
-            )
-            await run_manager.close()
-
-    async def test_close_racing_start_interrupts_run_before_process_spawn(self):
-        class BlockingNotificationService:
-            def __init__(self):
-                self.entered = asyncio.Event()
-                self.release = asyncio.Event()
-
-            async def register_run_notification(self, **kwargs):
-                self.entered.set()
-                await self.release.wait()
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            run_manager = RunManager()
-            notification_service = BlockingNotificationService()
-            run_manager.notification_service = notification_service
-            command_executor = CommandExecutor(run_manager)
-            starting = asyncio.create_task(command_executor.start(
-                conversation_id="conv_1",
-                command=f'{sys.executable} -c "import time; time.sleep(30)"',
-                cwd=tmpdir,
-            ))
-            await asyncio.wait_for(notification_service.entered.wait(), timeout=5)
-
-            closing = asyncio.create_task(command_executor.close(timeout=5))
-            await asyncio.sleep(0)
-            self.assertFalse(closing.done())
-            notification_service.release.set()
-            with self.assertRaises(CommandExecutorClosingError):
-                await starting
-            self.assertEqual(await closing, ())
-
-            runs = run_manager.list_runs()
-            self.assertEqual(len(runs), 1)
-            self.assertEqual(runs[0]["status"], RunStatus.INTERRUPTED.value)
-            self.assertEqual(command_executor._processes, {})
-            await run_manager.close()
-
-    async def test_cancel_during_notification_interrupts_unowned_command_run(self):
-        class BlockingNotificationService:
-            def __init__(self):
-                self.entered = asyncio.Event()
-
-            async def register_run_notification(self, **kwargs):
-                self.entered.set()
-                await asyncio.Event().wait()
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            run_manager = RunManager()
-            notification_service = BlockingNotificationService()
-            run_manager.notification_service = notification_service
-            command_executor = CommandExecutor(run_manager)
-            starting = asyncio.create_task(command_executor.start(
-                conversation_id="conv_1",
-                command=f'{sys.executable} -c "import time; time.sleep(30)"',
-                cwd=tmpdir,
-            ))
-            await asyncio.wait_for(notification_service.entered.wait(), timeout=5)
-
-            starting.cancel()
-            with self.assertRaises(asyncio.CancelledError):
-                await starting
-
-            runs = run_manager.list_runs()
-            self.assertEqual(len(runs), 1)
-            self.assertEqual(runs[0]["status"], RunStatus.INTERRUPTED.value)
-            self.assertEqual(
-                run_manager.repository.get_run(runs[0]["run_id"])["status"],
-                RunStatus.INTERRUPTED.value,
-            )
-            self.assertEqual(command_executor._tasks, {})
-            self.assertEqual(command_executor._processes, {})
-            self.assertEqual(await command_executor.close(timeout=1), ())
-            await run_manager.close()
-
-    async def test_close_timeout_covers_inflight_start_admission(self):
-        class BlockingNotificationService:
-            def __init__(self):
-                self.entered = asyncio.Event()
-
-            async def register_run_notification(self, **kwargs):
-                self.entered.set()
-                await asyncio.Event().wait()
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            run_manager = RunManager()
-            notification_service = BlockingNotificationService()
-            run_manager.notification_service = notification_service
-            command_executor = CommandExecutor(run_manager)
-            starting = asyncio.create_task(command_executor.start(
-                conversation_id="conv_1",
-                command=f'{sys.executable} -c "import time; time.sleep(30)"',
-                cwd=tmpdir,
-            ))
-            await asyncio.wait_for(notification_service.entered.wait(), timeout=5)
-            run_id = run_manager.list_runs()[0]["run_id"]
-
-            report = await asyncio.wait_for(
-                command_executor.close(timeout=0.05),
-                timeout=0.2,
-            )
-
-            self.assertEqual(report, (run_id,))
-            starting.cancel()
-            with self.assertRaises(asyncio.CancelledError):
-                await starting
-            self.assertEqual(
-                run_manager.repository.get_run(run_id)["status"],
-                RunStatus.INTERRUPTED.value,
             )
             await run_manager.close()
 

@@ -15,6 +15,7 @@ from backend.core.server.identity import ServerIdentity
 
 
 SERVER_ID = "5fb0d7cc-785e-40c2-875d-218447b15583"
+_MISSING = object()
 
 
 def request_main_app(method: str, path: str, **kwargs):
@@ -126,25 +127,125 @@ class _StreamingRunManager:
     def get_run(self, run_id: str):
         return {"run_id": run_id}
 
+    def read_events(self, run_id: str, from_event: int):
+        return []
+
     async def subscribe(self, run_id: str, from_event: int):
         yield {"run_id": run_id, "sequence": from_event + 1}
 
 
+class _FinishedRunManager:
+    def get_run(self, run_id: str):
+        return {"run_id": run_id, "status": "completed"}
+
+    async def subscribe(self, run_id: str, from_event: int):
+        raise AssertionError("finished runs must not open an attach stream")
+
+
+class _RaceFinishedRunManager:
+    def __init__(self):
+        self.get_calls = 0
+
+    def get_run(self, run_id: str):
+        self.get_calls += 1
+        status = "running" if self.get_calls == 1 else "completed"
+        return {"run_id": run_id, "status": status}
+
+    def read_events(self, run_id: str, from_event: int):
+        if from_event > 0:
+            return []
+        return [
+            {
+                "type": "run_finished",
+                "run_id": run_id,
+                "event_index": 0,
+                "status": "completed",
+            }
+        ]
+
+    async def subscribe(self, run_id: str, from_event: int):
+        if False:
+            yield {}
+
+
+class _PatchSession:
+    def feed(self, payload, *, emit=True):
+        if not emit:
+            return None
+        return {"type": "transcript_patch", "payload": payload}
+
+
+class _TranscriptAssembler:
+    def patch_session(self, run_id: str):
+        return _PatchSession()
+
+
 def test_production_sse_response_has_request_id_before_body():
+    previous = getattr(main.app.state, "transcript_assembler", _MISSING)
+    main.app.state.transcript_assembler = _TranscriptAssembler()
     main.app.dependency_overrides[get_run_manager] = _StreamingRunManager
     try:
         response = request_main_app(
             "GET",
-            "/api/v1/runs/run-1/attach",
+            "/api/v1/runs/run-1/events",
             headers={"X-Request-ID": "req_sse"},
         )
     finally:
         main.app.dependency_overrides.pop(get_run_manager, None)
+        if previous is _MISSING:
+            delattr(main.app.state, "transcript_assembler")
+        else:
+            main.app.state.transcript_assembler = previous
 
     assert response.status_code == 200
     assert response.headers["X-Request-ID"] == "req_sse"
     assert response.headers["content-type"].startswith("text/event-stream")
     assert response.text.startswith("data: ")
+
+
+def test_production_finished_run_events_replays_terminal_body():
+    previous = getattr(main.app.state, "transcript_assembler", _MISSING)
+    main.app.state.transcript_assembler = _TranscriptAssembler()
+    main.app.dependency_overrides[get_run_manager] = _FinishedRunManager
+    try:
+        response = request_main_app(
+            "GET",
+            "/api/v1/runs/run-1/events",
+            headers={"X-Request-ID": "req_finished_events"},
+        )
+    finally:
+        main.app.dependency_overrides.pop(get_run_manager, None)
+        if previous is _MISSING:
+            delattr(main.app.state, "transcript_assembler")
+        else:
+            main.app.state.transcript_assembler = previous
+
+    assert response.status_code == 200
+    assert response.headers["X-Request-ID"] == "req_finished_events"
+    assert response.headers["content-type"].startswith("text/event-stream")
+
+
+def test_production_attach_race_finished_run_returns_terminal_body(monkeypatch):
+    previous = getattr(main.app.state, "transcript_assembler", _MISSING)
+    main.app.state.transcript_assembler = _TranscriptAssembler()
+    main.app.dependency_overrides[get_run_manager] = _RaceFinishedRunManager
+    try:
+        response = request_main_app(
+            "GET",
+            "/api/v1/runs/run-1/events",
+            headers={"X-Request-ID": "req_finished_race"},
+        )
+    finally:
+        main.app.dependency_overrides.pop(get_run_manager, None)
+        if previous is _MISSING:
+            delattr(main.app.state, "transcript_assembler")
+        else:
+            main.app.state.transcript_assembler = previous
+
+    assert response.status_code == 200
+    assert response.headers["X-Request-ID"] == "req_finished_race"
+    assert '"type": "transcript_patch"' in response.text
+    assert response.text.strip().endswith("data: [DONE]")
 
 
 def test_request_boundary_forwards_first_stream_chunk_without_buffering():

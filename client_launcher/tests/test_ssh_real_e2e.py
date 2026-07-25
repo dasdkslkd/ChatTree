@@ -54,7 +54,7 @@ def _settings(tmp_path: Path) -> LauncherSettings:
         project_root=tmp_path,
         server_python="python",
         port=18120,
-        connect_timeout_seconds=2.0,
+        connect_timeout_seconds=5.0,
         start_timeout_seconds=30.0,
         poll_interval_seconds=0.1,
     )

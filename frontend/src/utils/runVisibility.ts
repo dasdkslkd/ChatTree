@@ -40,6 +40,7 @@ export function isRunVisibleInSelectedTranscript(
       run.status === 'streaming'
       || run.status === 'waiting_approval'
       || run.status === 'stopping'
+      || run.status === 'completed'
       || run.status === 'stopped'
       || run.status === 'error'
     )

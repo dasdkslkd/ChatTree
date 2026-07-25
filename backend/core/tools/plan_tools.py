@@ -8,7 +8,11 @@ from backend.core.plans import PlanLedger
 from .base import BaseTool
 
 
-PLAN_TOOL_NAMES = {"plan", "enter_plan_mode", "update_plan", "exit_plan_mode", "ask_user_question"}
+PLAN_TOOL_NAMES = {
+    "enter_plan_mode",
+    "ask_user_question",
+    "exit_plan_mode",
+}
 
 
 def _json(payload: Dict[str, Any]) -> str:
@@ -43,54 +47,6 @@ class PlanLedgerTool(BaseTool):
 
     def _context(self, kwargs: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return _runtime_context(kwargs)
-
-
-class PlanTool(PlanLedgerTool):
-    @property
-    def name(self) -> str:
-        return "plan"
-
-    @property
-    def description(self) -> str:
-        return "Enter, update, ask from, or submit ChatTree plan mode through one planning tool."
-
-    def parameters_schema(self) -> Dict[str, Any]:
-        return {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "action": {"type": "string", "enum": ["enter", "update", "ask", "exit"]},
-                "mode": {"type": "string", "enum": ["replace", "apply_patch"]},
-                "content": {"type": "string"},
-                "patch": {"type": "string"},
-                "question": {"type": "string"},
-                "options": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "properties": {
-                            "label": {"type": "string"},
-                            "description": {"type": "string"},
-                        },
-                        "required": ["label"],
-                    },
-                },
-            },
-            "required": ["action"],
-        }
-
-    async def execute(self, **kwargs) -> str:
-        action = str(kwargs.get("action") or "").strip().lower()
-        if action == "enter":
-            return await EnterPlanModeTool(self._plan_ledger).execute(**kwargs)
-        if action == "update":
-            return await UpdatePlanTool(self._plan_ledger).execute(**kwargs)
-        if action == "ask":
-            return await AskUserQuestionTool(self._plan_ledger).execute(**kwargs)
-        if action == "exit":
-            return await ExitPlanModeTool(self._plan_ledger).execute(**kwargs)
-        return _invalid_arguments("action must be enter, update, ask, or exit")
 
 
 class EnterPlanModeTool(PlanLedgerTool):
@@ -141,112 +97,8 @@ class EnterPlanModeTool(PlanLedgerTool):
                 "Explore the codebase, identify existing patterns, compare viable approaches, and "
                 "design a concrete implementation strategy. Do not edit files, run implementation "
                 "commands, change configuration, commit, or claim changes were made.\n"
-                "Your next plan-mode turn must end with ask_user_question or exit_plan_mode: use "
-                "ask_user_question only when a genuine user decision blocks planning; use "
-                "update_plan to write the plan artifact, then call exit_plan_mode with no arguments "
-                "when ready for approval. Do not write the full plan in assistant text."
+                "Use ask_user_question only when a genuine user decision blocks planning."
             ),
-        })
-
-
-class UpdatePlanTool(PlanLedgerTool):
-    @property
-    def name(self) -> str:
-        return "update_plan"
-
-    @property
-    def description(self) -> str:
-        return (
-            "Create or update the current plan-mode plan artifact. Use this instead of writing the "
-            "full plan in assistant text. The file path is controlled by ChatTree."
-        )
-
-    def parameters_schema(self) -> Dict[str, Any]:
-        return {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "mode": {"type": "string", "enum": ["replace", "apply_patch"]},
-                "content": {"type": "string"},
-                "patch": {"type": "string"},
-            },
-            "required": ["mode"],
-        }
-
-    async def execute(self, **kwargs) -> str:
-        context = self._context(kwargs)
-        if context is None:
-            return _missing_context_error()
-        conversation_id = _conversation_id(context)
-        if not conversation_id:
-            return _invalid_arguments("conversation_id is required")
-        mode = str(kwargs.get("mode") or "").strip()
-        content = kwargs.get("content")
-        patch = kwargs.get("patch")
-        if mode == "replace" and not isinstance(content, str):
-            return _invalid_arguments("content is required when mode is replace")
-        if mode == "apply_patch" and not isinstance(patch, str):
-            return _invalid_arguments("patch is required when mode is apply_patch")
-        if mode not in {"replace", "apply_patch"}:
-            return _invalid_arguments("mode must be replace or apply_patch")
-        try:
-            session = await self._plan_ledger.update_plan(
-                conversation_id=conversation_id,
-                mode=mode,
-                content=content if isinstance(content, str) else None,
-                patch=patch if isinstance(patch, str) else None,
-            )
-        except ValueError as exc:
-            return _invalid_arguments(str(exc))
-        return _json({
-            "plan_id": session.plan_id,
-            "status": session.status.value,
-            "message": "Plan artifact updated.",
-            "revision": session.plan_revision,
-            "plan_artifact_path": session.plan_artifact_path,
-        })
-
-
-class ExitPlanModeTool(PlanLedgerTool):
-    @property
-    def name(self) -> str:
-        return "exit_plan_mode"
-
-    @property
-    def description(self) -> str:
-        return "Use this tool when you are in plan mode and have finished writing your plan and are ready for user approval."
-
-    def parameters_schema(self) -> Dict[str, Any]:
-        return {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {},
-        }
-
-    async def execute(self, **kwargs) -> str:
-        context = self._context(kwargs)
-        if context is None:
-            return _missing_context_error()
-        conversation_id = _conversation_id(context)
-        if not conversation_id:
-            return _invalid_arguments("conversation_id is required")
-        try:
-            tool_call_id = str(context.get("tool_call_id") or "") or None
-            session = await self._plan_ledger.submit_plan(
-                conversation_id=conversation_id,
-                node_id=str(context.get("node_id") or "") or None,
-                run_id=str(context.get("run_id") or "") or None,
-                tool_call_id=tool_call_id,
-            )
-        except ValueError as exc:
-            return _invalid_arguments(str(exc))
-        return _json({
-            "plan_id": session.plan_id,
-            "status": session.status.value,
-            "requires_user_approval": True,
-            "message": "Plan submitted for user approval.",
-            "proposal_id": session.proposal_id,
-            "revision": session.proposal_revision,
         })
 
 
@@ -259,8 +111,7 @@ class AskUserQuestionTool(PlanLedgerTool):
     def description(self) -> str:
         return (
             "Ask the user one concise clarification question while in plan mode. Use only when a "
-            "genuine user decision is required to continue planning. Do not use this to ask whether "
-            "the completed plan is acceptable; use exit_plan_mode for plan approval."
+            "genuine user decision is required to continue planning."
         )
 
     def parameters_schema(self) -> Dict[str, Any]:
@@ -319,7 +170,58 @@ class AskUserQuestionTool(PlanLedgerTool):
             "status": session.status.value,
             "requires_user_response": True,
             "message": "Question submitted for user clarification.",
-            "question": session.question,
+        })
+
+
+class ExitPlanModeTool(PlanLedgerTool):
+    @property
+    def name(self) -> str:
+        return "exit_plan_mode"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Submit the final implementation plan for user approval and leave plan mode only after "
+            "the user approves it. Use this in plan mode when the plan is concrete enough to execute."
+        )
+
+    def parameters_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "plan": {
+                    "type": "string",
+                    "description": "The concrete implementation plan that requires user approval.",
+                },
+            },
+            "required": ["plan"],
+        }
+
+    async def execute(self, **kwargs) -> str:
+        context = self._context(kwargs)
+        if context is None:
+            return _missing_context_error()
+        conversation_id = _conversation_id(context)
+        plan = str(kwargs.get("plan") or "").strip()
+        if not conversation_id:
+            return _invalid_arguments("conversation_id is required")
+        if not plan:
+            return _invalid_arguments("plan is required")
+        try:
+            session = await self._plan_ledger.exit_plan_mode(
+                conversation_id=conversation_id,
+                node_id=str(context.get("node_id") or "") or None,
+                run_id=str(context.get("run_id") or "") or None,
+                tool_call_id=str(context.get("tool_call_id") or "") or None,
+            )
+        except ValueError as exc:
+            return _invalid_arguments(str(exc))
+        return _json({
+            "plan_id": session.plan_id,
+            "status": session.status.value,
+            "requires_user_response": True,
+            "message": "Plan submitted for user approval.",
         })
 
 
@@ -328,10 +230,8 @@ def register_plan_tools(tool_manager: Any, plan_ledger: PlanLedger) -> None:
     if not callable(register):
         return
     for tool in (
-        PlanTool(plan_ledger),
         EnterPlanModeTool(plan_ledger),
-        UpdatePlanTool(plan_ledger),
-        ExitPlanModeTool(plan_ledger),
         AskUserQuestionTool(plan_ledger),
+        ExitPlanModeTool(plan_ledger),
     ):
         register(tool)

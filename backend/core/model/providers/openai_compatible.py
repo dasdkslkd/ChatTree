@@ -12,6 +12,7 @@ from ...config.types import Message, StreamChunk, StreamStatus, StreamController
 from .retry import RetryPolicy, RetryableHTTPError, classify_retry_error, run_with_retries, sleep_before_retry
 from .sse import iter_decoded_sse_lines
 from .multimodal import to_openai_responses_content
+from .stream_queue import StreamStopped, get_queue_item_or_stop
 
 _SENTINEL = object()
 
@@ -151,15 +152,6 @@ class OpenAICompatibleProvider(BaseProvider):
         usage_info = None
 
         try:
-            yield StreamChunk(
-                status=StreamStatus.START,
-                content=None,
-                node_id=stream_controller.node_id if stream_controller else None,
-                conversation_id=stream_controller.conversation_id if stream_controller else None,
-                error=None,
-                tokens_used=0,
-            )
-
             if self._use_responses_api():
                 async for chunk in self._stream_responses_api(
                     model=model,
@@ -181,6 +173,7 @@ class OpenAICompatibleProvider(BaseProvider):
                 return
 
             api_messages = self._convert_messages(messages)
+            reasoning_requested = bool(reasoning_effort or thinking_enabled)
             request_kwargs = self._build_chat_request_kwargs(
                 model=model,
                 messages=api_messages,
@@ -227,7 +220,11 @@ class OpenAICompatibleProvider(BaseProvider):
                     attempt_had_output = False
                     try:
                         tool_call_started = False
-                        async for event in self._iter_sse_events("/chat/completions", current_kwargs):
+                        async for event in self._iter_sse_events(
+                            "/chat/completions",
+                            current_kwargs,
+                            stream_controller=stream_controller,
+                        ):
                             if stream_controller and await stream_controller.is_stopped():
                                 yield StreamChunk(
                                     status=StreamStatus.STOPPED,
@@ -279,7 +276,7 @@ class OpenAICompatibleProvider(BaseProvider):
                                             tool_calls=tool_calls,
                                         )
                             reasoning = delta.get("reasoning_content") or delta.get("reasoning")
-                            if reasoning:
+                            if reasoning and reasoning_requested:
                                 attempt_had_output = True
                                 yield StreamChunk(
                                     status=StreamStatus.CONTENT,
@@ -290,6 +287,19 @@ class OpenAICompatibleProvider(BaseProvider):
                                     tokens_used=0,
                                     event_type="reasoning",
                                     reasoning=reasoning,
+                                )
+                            elif reasoning:
+                                attempt_had_output = True
+                                total_content += reasoning
+                                token_delta = int(len(str(reasoning).split()) * 1.3)
+                                total_tokens += token_delta
+                                yield StreamChunk(
+                                    status=StreamStatus.CONTENT,
+                                    content=reasoning,
+                                    node_id=stream_controller.node_id if stream_controller else None,
+                                    conversation_id=stream_controller.conversation_id if stream_controller else None,
+                                    error=None,
+                                    tokens_used=token_delta,
                                 )
 
                             content = delta.get("content") or ""
@@ -325,8 +335,28 @@ class OpenAICompatibleProvider(BaseProvider):
                                         tool_calls=tool_calls,
                                     )
                         break
+                    except StreamStopped:
+                        yield StreamChunk(
+                            status=StreamStatus.STOPPED,
+                            content=None,
+                            node_id=stream_controller.node_id if stream_controller else None,
+                            conversation_id=stream_controller.conversation_id if stream_controller else None,
+                            error="用户手动终止",
+                            tokens_used=total_tokens,
+                        )
+                        return
                     except ProviderHTTPError as exc:
                         last_error = exc
+                        if stream_controller and await stream_controller.is_stopped():
+                            yield StreamChunk(
+                                status=StreamStatus.STOPPED,
+                                content=None,
+                                node_id=stream_controller.node_id,
+                                conversation_id=stream_controller.conversation_id,
+                                error="用户手动终止",
+                                tokens_used=total_tokens,
+                            )
+                            return
                         if attempt_index + 1 < len(attempts) and exc.status == 400 and not attempt_had_output:
                             logger.warning(f"Chat completions request rejected, retrying with fewer params: {exc}")
                             fallback_to_next_params = True
@@ -351,6 +381,16 @@ class OpenAICompatibleProvider(BaseProvider):
                         )
                         continue
                     except Exception as exc:
+                        if stream_controller and await stream_controller.is_stopped():
+                            yield StreamChunk(
+                                status=StreamStatus.STOPPED,
+                                content=None,
+                                node_id=stream_controller.node_id,
+                                conversation_id=stream_controller.conversation_id,
+                                error="用户手动终止",
+                                tokens_used=total_tokens,
+                            )
+                            return
                         decision = classify_retry_error(exc, stream_policy)
                         if (
                             attempt_had_output
@@ -461,7 +501,11 @@ class OpenAICompatibleProvider(BaseProvider):
                 last_emitted_tool_calls = ""
                 attempt_had_output = False
                 try:
-                    async for event in self._iter_sse_events("/responses", current_kwargs):
+                    async for event in self._iter_sse_events(
+                        "/responses",
+                        current_kwargs,
+                        stream_controller=stream_controller,
+                    ):
                         if stream_controller and await stream_controller.is_stopped():
                             yield StreamChunk(
                                 status=StreamStatus.STOPPED,
@@ -479,6 +523,28 @@ class OpenAICompatibleProvider(BaseProvider):
                             if usage := response.get("usage"):
                                 usage_info = usage_from_openai(usage)
                                 total_tokens = usage_total(usage_info, total_tokens)
+                            completed_text = self._extract_responses_text(response)
+                            if completed_text and completed_text != total_content:
+                                content = (
+                                    completed_text[len(total_content):]
+                                    if total_content and completed_text.startswith(total_content)
+                                    else completed_text
+                                    if not total_content
+                                    else ""
+                                )
+                                if content:
+                                    attempt_had_output = True
+                                    total_content += content
+                                    token_delta = int(len(content.split()) * 1.3)
+                                    total_tokens += token_delta
+                                    yield StreamChunk(
+                                        status=StreamStatus.CONTENT,
+                                        content=content,
+                                        node_id=stream_controller.node_id if stream_controller else None,
+                                        conversation_id=stream_controller.conversation_id if stream_controller else None,
+                                        error=None,
+                                        tokens_used=token_delta,
+                                    )
                             completed_tool_calls = self._extract_responses_tool_calls(response)
                             if completed_tool_calls:
                                 function_calls.clear()
@@ -629,7 +695,27 @@ class OpenAICompatibleProvider(BaseProvider):
                             tokens_used=token_delta,
                         )
                     break
+                except StreamStopped:
+                    yield StreamChunk(
+                        status=StreamStatus.STOPPED,
+                        content=None,
+                        node_id=stream_controller.node_id if stream_controller else None,
+                        conversation_id=stream_controller.conversation_id if stream_controller else None,
+                        error="用户手动终止",
+                        tokens_used=total_tokens,
+                    )
+                    return
                 except ProviderHTTPError as exc:
+                    if stream_controller and await stream_controller.is_stopped():
+                        yield StreamChunk(
+                            status=StreamStatus.STOPPED,
+                            content=None,
+                            node_id=stream_controller.node_id,
+                            conversation_id=stream_controller.conversation_id,
+                            error="用户手动终止",
+                            tokens_used=total_tokens,
+                        )
+                        return
                     if (
                         attempt_index + 1 < len(attempts)
                         and exc.status == 400
@@ -655,6 +741,16 @@ class OpenAICompatibleProvider(BaseProvider):
                     )
                     continue
                 except Exception as exc:
+                    if stream_controller and await stream_controller.is_stopped():
+                        yield StreamChunk(
+                            status=StreamStatus.STOPPED,
+                            content=None,
+                            node_id=stream_controller.node_id,
+                            conversation_id=stream_controller.conversation_id,
+                            error="用户手动终止",
+                            tokens_used=total_tokens,
+                        )
+                        return
                     decision = classify_retry_error(exc, stream_policy)
                     if (
                         attempt_had_output
@@ -703,13 +799,19 @@ class OpenAICompatibleProvider(BaseProvider):
             usage_info=usage_info,
         )
 
-    async def _iter_sse_events(self, path: str, body: Dict[str, Any]) -> AsyncIterator[Dict[str, Any]]:
+    async def _iter_sse_events(
+        self,
+        path: str,
+        body: Dict[str, Any],
+        *,
+        stream_controller: Optional[StreamController] = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
         queue: asyncio.Queue = asyncio.Queue()
         loop = asyncio.get_event_loop()
         loop.run_in_executor(None, self._stream_to_queue, path, body, queue, loop)
 
         while True:
-            item = await queue.get()
+            item = await get_queue_item_or_stop(queue, stream_controller)
             if item is _SENTINEL:
                 break
             if isinstance(item, Exception):
@@ -954,7 +1056,7 @@ class OpenAICompatibleProvider(BaseProvider):
         converted: List[Dict[str, Any]] = []
         for msg in messages:
             item = {
-                "role": msg["role"],
+                "role": msg["role"].value if hasattr(msg["role"], "value") else str(msg["role"]),
                 "content": msg["content"],
                 "name": msg.get("name"),
                 "tool_calls": msg.get("tool_calls"),

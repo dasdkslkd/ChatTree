@@ -13,17 +13,30 @@ from backend.core.config.types import SCHEMA_VERSION
 def _root(nid="root"):
     return {
         "id": nid, "parent_id": "None", "children_ids": [],
-        "user_message": None, "assistant_message": None, "tool_messages": [],
-        "system_message": None, "timestamp": int(time()), "model_id": None, "total_tokens": 0,
+        "timestamp": int(time()), "model_id": None,
+        "tool_permission_mode": None, "task_context_mode": "attached",
+        "total_tokens": 0, "branch_usage_info": {"total_tokens": 0},
+        "usage": {
+            "turn_usage": {"total_tokens": 0},
+            "branch_usage": {"total_tokens": 0},
+            "active_context_usage": {"total_tokens": 0},
+            "model_context_window": None,
+        },
     }
 
 
 def _child(nid, parent):
     return {
         "id": nid, "parent_id": parent, "children_ids": [],
-        "user_message": {"id": "m", "role": "user", "content": "hi", "timestamp": int(time())},
-        "assistant_message": None, "tool_messages": [],
-        "system_message": None, "timestamp": int(time()), "model_id": None, "total_tokens": 0,
+        "timestamp": int(time()), "model_id": None,
+        "tool_permission_mode": None, "task_context_mode": "attached",
+        "total_tokens": 0, "branch_usage_info": {"total_tokens": 0},
+        "usage": {
+            "turn_usage": {"total_tokens": 0},
+            "branch_usage": {"total_tokens": 0},
+            "active_context_usage": {"total_tokens": 0},
+            "model_context_window": None,
+        },
     }
 
 
@@ -72,10 +85,6 @@ def main():
     conv = Conversation.from_dict(base([r, _child("ok", "root")], current="nonexistent"))
     assert conv.current_node_id == conv.root_node_id, "非法 current 应重置为 root"
     assert "ok" in conv.nodes, "合法节点不应被剔除"
-
-    # 7. 缺失 schema_version -> 接受（无迁移）
-    d = base([_root()]); d["metadata"].pop("schema_version")
-    Conversation.from_dict(d)  # 不应抛
 
     print("PASS: 完整性校验与版本检查行为正确")
 

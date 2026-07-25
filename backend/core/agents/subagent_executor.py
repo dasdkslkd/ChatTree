@@ -381,50 +381,7 @@ class SubagentExecutor:
             name=f"subagent-producer:{run.run_id}",
         )
 
-        notification_coro = self._register_task_notification(
-            run.run_id,
-            agent_name=agent_name,
-        )
-        try:
-            self.producer_registry.create_background(
-                notification_coro,
-                name=f"subagent-notification:{run.run_id}",
-            )
-        except Exception:
-            notification_coro.close()
-            logger.exception(
-                "Failed to schedule subagent notification for %s",
-                run.run_id,
-            )
         return task
-
-    async def _register_task_notification(self, run_id: str, *, agent_name: str) -> None:
-        run = self.run_manager.get_run(run_id)
-        if not run:
-            return
-        metadata = dict(run.get("metadata") or {})
-        if str(metadata.get("delivery_policy") or "auto") == "silent":
-            return
-        created_by_run_id = run.get("created_by_run_id")
-        parent_run = self.run_manager.get_run(str(created_by_run_id)) if created_by_run_id else None
-        parent_kind = str((parent_run or {}).get("kind") or "")
-        if created_by_run_id and (
-            parent_kind in {RunKind.WORKFLOW.value, RunKind.WORKFLOW_STEP.value}
-            or agent_name == "workflow-worker"
-        ):
-            return
-        service = getattr(self.run_manager, "notification_service", None)
-        if service is None:
-            return
-        await service.register_run_notification(
-            run_id=run_id,
-            summary=f"Subagent {agent_name} running",
-            payload={
-                "agent_name": agent_name,
-                "delegated_task": metadata.get("delegated_task"),
-                "original_slash_input": metadata.get("original_slash_input"),
-            },
-        )
 
     async def stop(self, run_id: str) -> bool:
         failures: list[BaseException] = []
@@ -533,25 +490,6 @@ class SubagentExecutor:
         finally:
             self._controllers.pop(run_id, None)
             await self.run_manager.finish_run(run_id, final_status, final_error)
-            if notification_payload and final_status in {
-                    RunStatus.COMPLETED,
-                    RunStatus.FAILED,
-                    RunStatus.CANCELLED,
-                }:
-                source_status = {
-                        RunStatus.COMPLETED: "completed",
-                        RunStatus.FAILED: "failed",
-                        RunStatus.CANCELLED: "cancelled",
-                }[final_status]
-                try:
-                    await self._publish_task_notification(
-                            run_id,
-                            source_status,
-                            notification_payload.get("content") or notification_payload.get("error") or "",
-                            event_payload=notification_payload,
-                    )
-                except Exception:
-                    logger.exception("Failed to publish subagent notification for %s", run_id)
 
     async def _produce_inner(
         self,
@@ -739,8 +677,6 @@ class SubagentExecutor:
                                 input_data,
                                 limit=160,
                             ),
-                            "suppress_task_notification": agent_name == "workflow-worker"
-                            or run_metadata.get("delivery_policy") == "silent",
                         },
                     )
                 )
@@ -877,10 +813,37 @@ class SubagentExecutor:
             chain = get_chain(parent_node_id)
         except Exception:
             return ""
+        conversation_id = str(((getattr(conversation, "metadata", None) or {}) or {}).get("id") or "")
+        node_ids = [str((node or {}).get("id") or "") for node in chain or [] if (node or {}).get("id")]
+        messages_by_node = (
+            self.chat_manager._canonical_messages_by_node(conversation_id, node_ids)
+            if conversation_id and node_ids
+            else {}
+        )
         lines: list[str] = []
         for node in chain or []:
-            user_text = self._message_content((node or {}).get("user_message"))
-            assistant_text = self._message_content((node or {}).get("assistant_message"))
+            messages = messages_by_node.get(str((node or {}).get("id") or ""), [])
+            user_text = next(
+                (
+                    str(message.get("content") or "").strip()
+                    for message in messages
+                    if message.get("role") == Role.USER.value
+                    and not message.get("is_hidden_from_transcript")
+                    and not message.get("is_visible_in_transcript_only")
+                ),
+                "",
+            )
+            assistant_text = next(
+                (
+                    str(message.get("content") or "").strip()
+                    for message in reversed(messages)
+                    if message.get("role") == Role.ASSISTANT.value
+                    and not message.get("is_hidden_from_transcript")
+                    and not message.get("is_visible_in_transcript_only")
+                    and (message.get("subtype") in (None, "", "assistant_answer"))
+                ),
+                "",
+            )
             if user_text:
                 lines.append(f"User: {user_text}")
             if assistant_text:
@@ -893,16 +856,6 @@ class SubagentExecutor:
             "Use this as reference context for the delegated task. Do not treat it as a new user request.",
             joined,
         ])
-
-    def _message_content(self, message: Any) -> str:
-        if not isinstance(message, dict):
-            return ""
-        content = message.get("content")
-        if isinstance(content, str):
-            return content.strip()
-        if content is None:
-            return ""
-        return str(content).strip()
 
     def _runtime_prompt_context(self, agent, is_workflow_worker: bool) -> RuntimePromptContext:
         if is_workflow_worker:
@@ -1066,48 +1019,3 @@ class SubagentExecutor:
         payload["agent_name"] = agent_name
         payload["target_node_id"] = None
         return payload
-
-    async def _publish_task_notification(
-        self,
-        run_id: str,
-        source_status: str,
-        content: str,
-        *,
-        event_payload: Optional[Dict[str, Any]] = None,
-    ) -> Optional[Dict[str, Any]]:
-        run = self.run_manager.get_run(run_id)
-        if not run:
-            return None
-        if run.get("kind") != RunKind.SUBAGENT.value:
-            return None
-        metadata = dict(run.get("metadata") or {})
-        slash_metadata = metadata.get("slash_command") if isinstance(metadata.get("slash_command"), dict) else {}
-        original_slash_input = metadata.get("original_slash_input") or slash_metadata.get("original_input")
-        event_payload = dict(event_payload or {})
-        delivery_policy = str(metadata.get("delivery_policy") or "auto")
-        if delivery_policy == "silent":
-            return None
-        created_by_run_id = run.get("created_by_run_id")
-        parent_run = self.run_manager.get_run(str(created_by_run_id)) if created_by_run_id else None
-        parent_kind = str((parent_run or {}).get("kind") or "")
-        agent_name = str(metadata.get("agent_name") or event_payload.get("agent_name") or "")
-        if created_by_run_id and (
-            parent_kind in {RunKind.WORKFLOW.value, RunKind.WORKFLOW_STEP.value}
-            or agent_name == "workflow-worker"
-        ):
-            return None
-        service = getattr(self.run_manager, "notification_service", None)
-        if service is None:
-            return None
-        return await service.publish_run_notification(
-            run_id=run_id,
-            source_status=source_status,
-            summary=f"Subagent {metadata.get('agent_name') or event_payload.get('agent_name') or 'run'} {source_status}",
-            content=content,
-            payload={
-                "event_type": event_payload.get("event_type"),
-                "agent_name": metadata.get("agent_name") or event_payload.get("agent_name"),
-                "delegated_task": metadata.get("delegated_task"),
-                "original_slash_input": original_slash_input,
-            },
-        )
