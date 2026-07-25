@@ -14,10 +14,10 @@ from backend.core.tools.agent_tools import (
     register_agent_management_tools,
 )
 from backend.core.chat.chat_manager import ChatManager
-from backend.core.chat.node import NodeManager
-from backend.core.chat.conversation import Conversation
-from backend.core.config.types import Message, Role
+from backend.core.config.types import Message, Role, StreamStatus
 from backend.core.model.providers.openai_compatible import OpenAICompatibleProvider
+from backend.core.model.providers.anthropic_provider import AnthropicProvider
+from backend.core.model.providers.gemini_provider import GeminiProvider
 from backend.core.tools import mcp_server as mcp_server_module
 from backend.core.tools.exposure import ToolExposureContext
 from backend.core.tools.mcp_server import McpServerManager
@@ -203,6 +203,30 @@ def test_tool_manager_full_exposure_keeps_raw_write_internal():
 
     assert "edit" in names
     assert "write" not in names
+
+
+def test_tool_manager_coding_exposure_includes_plan_control_candidates(tmp_path):
+    manager = ToolManager({
+        "tools": {
+            "enabled": True,
+            "builtin": {
+                "exposure": "coding",
+                "web_search": {"enabled": False},
+                "code": {"enabled": True},
+            },
+        }
+    })
+    from backend.core.plans import PlanLedger
+    from backend.core.persistence import SQLitePersistence, SQLitePlanRepository
+    from backend.core.tools.plan_tools import register_plan_tools
+
+    persistence = SQLitePersistence(tmp_path)
+    persistence.initialize()
+    register_plan_tools(manager, PlanLedger(repository=SQLitePlanRepository(persistence)))
+    names = {tool["function"]["name"] for tool in manager.get_openai_tools()}
+
+    assert {"enter_plan_mode", "ask_user_question", "exit_plan_mode"} <= names
+    assert "plan" not in names
 
 
 def test_tool_manager_exposure_context_supports_explicit_allow_and_deny():
@@ -521,56 +545,29 @@ def test_stdio_process_prefers_popen_on_windows(monkeypatch):
         assert "startupinfo" in popen_calls[0][1]
 
 
-def test_prepare_messages_reconstructs_tool_interaction_order():
-    conversation = Conversation(title="tools")
-    conversation.initialize_with_system_message("system prompt")
-
-    user_msg = Message({
-        "id": "user-1",
-        "role": Role.USER,
-        "content": "查一下天气",
-        "timestamp": 1,
-    })
-    node = NodeManager.create_node(user_msg, parent_id=conversation.current_node_id, model_id="model")
-
-    assistant_tool = {
-        "role": "assistant",
-        "content": "",
-        "tool_calls": [{
-            "id": "call-1",
-            "type": "function",
-            "function": {"name": "web_search", "arguments": "{\"query\":\"上海天气\"}"},
-        }],
-    }
-    tool_msg = Message({
-        "id": "tool-1",
-        "role": Role.TOOL,
-        "content": "{\"result\":\"晴\"}",
-        "name": "web_search",
-        "tool_call_id": "call-1",
-        "timestamp": 2,
-    })
-    assistant_final = Message({
-        "id": "assistant-1",
-        "role": Role.ASSISTANT,
-        "content": "上海天气晴。",
-        "timestamp": 3,
-        "tool_calls": assistant_tool["tool_calls"],
-        "tool_results": [tool_msg],
-        "tool_interactions": [{"assistant": assistant_tool, "tools": [tool_msg]}],
-    })
-    node["assistant_message"] = assistant_final
-    node["tool_messages"] = [tool_msg]
-    conversation.add_node(node, parent_id=conversation.current_node_id)
-
+def test_assistant_continuation_merges_text_process_and_reasoning():
     manager = ChatManager.__new__(ChatManager)
-    messages = manager._prepare_messages_for_api_with_conversation(conversation)
 
-    assert [msg["role"] for msg in messages] == ["system", "user", "assistant", "tool", "assistant"]
-    assert messages[2]["tool_calls"][0]["id"] == "call-1"
-    assert messages[3]["tool_call_id"] == "call-1"
-    assert messages[4]["content"] == "上海天气晴。"
-    assert "tool_calls" not in messages[4]
+    merged = manager._merge_existing_node_assistant_continuation(
+        Message({
+            "id": "assistant-old",
+            "role": Role.ASSISTANT,
+            "content": "old answer\n",
+            "process_content": "old process\n",
+            "reasoning": "old reasoning\n",
+        }),
+        Message({
+            "id": "assistant-new",
+            "role": Role.ASSISTANT,
+            "content": "new answer",
+            "process_content": "new process",
+            "reasoning": "new reasoning",
+        }),
+    )
+
+    assert merged["content"] == "old answer\nnew answer"
+    assert merged["process_content"] == "old process\nnew process"
+    assert merged["reasoning"] == "old reasoning\nnew reasoning"
 
 
 def test_execute_tool_calls_returns_tool_messages():
@@ -633,7 +630,7 @@ def test_openai_stream_emits_tool_call_start_before_final_tool_call():
     async def run_case():
         provider = OpenAICompatibleProvider({"api_key": "test"})
 
-        async def fake_iter_sse_events(_path, _body):
+        async def fake_iter_sse_events(_path, _body, **_kwargs):
             yield {
                 "choices": [{
                     "delta": {"content": "准备调用工具。"},
@@ -688,11 +685,66 @@ def test_openai_stream_emits_tool_call_start_before_final_tool_call():
     asyncio.run(run_case())
 
 
+def test_openai_stream_treats_unrequested_reasoning_field_as_content():
+    async def run_case():
+        provider = OpenAICompatibleProvider({"api_key": "test"})
+
+        async def fake_iter_sse_events(_path, _body, **_kwargs):
+            yield {
+                "choices": [{
+                    "delta": {"reasoning_content": "plain answer"},
+                    "finish_reason": "stop",
+                }],
+            }
+
+        provider._iter_sse_events = fake_iter_sse_events
+        chunks = [
+            dict(chunk)
+            async for chunk in provider.generate_response_stream(
+                model="compatible-test",
+                messages=[],
+            )
+        ]
+
+        assert [chunk.get("content") for chunk in chunks if chunk.get("content")] == ["plain answer"]
+        assert not [chunk for chunk in chunks if chunk.get("reasoning")]
+
+    asyncio.run(run_case())
+
+
+def test_openai_stream_preserves_requested_reasoning_field_as_reasoning():
+    async def run_case():
+        provider = OpenAICompatibleProvider({"api_key": "test"})
+
+        async def fake_iter_sse_events(_path, _body, **_kwargs):
+            yield {
+                "choices": [{
+                    "delta": {"reasoning_content": "actual reasoning"},
+                    "finish_reason": "stop",
+                }],
+            }
+
+        provider._iter_sse_events = fake_iter_sse_events
+        chunks = [
+            dict(chunk)
+            async for chunk in provider.generate_response_stream(
+                model="reasoning-test",
+                messages=[],
+                reasoning_effort="high",
+            )
+        ]
+
+        assert [chunk.get("reasoning") for chunk in chunks if chunk.get("reasoning")] == ["actual reasoning"]
+        assert not [chunk for chunk in chunks if chunk.get("content")]
+
+    asyncio.run(run_case())
+
+
 def test_openai_responses_stream_emits_tool_call_start_before_final_tool_call():
     async def run_case():
         provider = OpenAICompatibleProvider({"api_key": "test"})
 
-        async def fake_iter_sse_events(_path, _body):
+        async def fake_iter_sse_events(_path, _body, **_kwargs):
             yield {
                 "type": "response.output_text.delta",
                 "delta": "准备调用工具。",
@@ -733,6 +785,102 @@ def test_openai_responses_stream_emits_tool_call_start_before_final_tool_call():
         assert tool_call_chunks[0]["tool_calls"][0]["function"]["name"] == "web_search"
         assert tool_call_chunks[0]["tool_calls"][0]["function"]["arguments"] == ""
         assert tool_call_chunks[-1]["tool_calls"][0]["function"]["arguments"] == "{\"query\":\"ChatTree\"}"
+
+    asyncio.run(run_case())
+
+
+def test_openai_responses_completed_payload_supplies_missing_final_text():
+    async def run_case():
+        provider = OpenAICompatibleProvider({"api_key": "test", "api_format": "responses"})
+
+        async def fake_iter_sse_events(_path, _body, **_kwargs):
+            yield {
+                "type": "response.completed",
+                "response": {
+                    "output_text": "completed only answer",
+                    "usage": {"input_tokens": 1, "output_tokens": 3, "total_tokens": 4},
+                },
+            }
+
+        provider._iter_sse_events = fake_iter_sse_events
+        chunks = [
+            dict(chunk)
+            async for chunk in provider.generate_response_stream(
+                model="responses-test",
+                messages=[],
+            )
+        ]
+
+        assert [chunk.get("content") for chunk in chunks if chunk.get("content")] == ["completed only answer"]
+        assert chunks[-1]["status"] == StreamStatus.COMPLETE
+
+    asyncio.run(run_case())
+
+
+def test_gemini_build_body_includes_tools_and_normalizes_role_enum():
+    provider = GeminiProvider({"api_key": "test"})
+    body = provider._build_body(
+        messages=[
+            Message({"role": Role.ASSISTANT, "content": "", "tool_calls": [{
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "web_search", "arguments": "{\"query\":\"ChatTree\"}"},
+            }]}),
+            Message({"role": Role.TOOL, "name": "web_search", "tool_call_id": "call-1", "content": "{\"ok\":true}"}),
+        ],
+        max_tokens=None,
+        temperature=None,
+        top_p=None,
+        reasoning_effort=None,
+        thinking_enabled=None,
+        extra_kwargs={},
+        tools=[{"type": "function", "function": {"name": "web_search", "description": "search", "parameters": {"type": "object"}}}],
+        tool_choice="auto",
+    )
+
+    assert body["contents"][0]["role"] == "model"
+    assert body["contents"][0]["parts"][0]["functionCall"]["name"] == "web_search"
+    assert body["contents"][1]["parts"][0]["functionResponse"]["name"] == "web_search"
+    assert body["tools"][0]["functionDeclarations"][0]["name"] == "web_search"
+    assert body["toolConfig"]["functionCallingConfig"]["mode"] == "AUTO"
+
+
+def test_anthropic_stream_tool_call_snapshots_keep_previous_tools():
+    async def run_case():
+        import backend.core.model.providers.anthropic_provider as anthropic_module
+
+        class SnapshotProvider(AnthropicProvider):
+            def _stream_to_queue(self, _body, queue, loop):
+                events = [
+                    {
+                        "type": "content_block_start",
+                        "index": 0,
+                        "content_block": {"type": "tool_use", "id": "toolu_1", "name": "first", "input": {"a": 1}},
+                    },
+                    {"type": "content_block_stop", "index": 0},
+                    {
+                        "type": "content_block_start",
+                        "index": 1,
+                        "content_block": {"type": "tool_use", "id": "toolu_2", "name": "second", "input": {"b": 2}},
+                    },
+                    {"type": "content_block_stop", "index": 1},
+                ]
+                for event in events:
+                    loop.call_soon_threadsafe(queue.put_nowait, "data: " + json.dumps(event))
+                loop.call_soon_threadsafe(queue.put_nowait, anthropic_module._SENTINEL)
+
+        provider = SnapshotProvider({"api_key": "test"})
+        chunks = [
+            dict(chunk)
+            async for chunk in provider.generate_response_stream(
+                model="claude-test",
+                messages=[],
+                tools=[{"type": "function", "function": {"name": "first", "parameters": {}}}],
+            )
+        ]
+
+        tool_chunks = [chunk for chunk in chunks if chunk.get("event_type") == "tool_call"]
+        assert [call["function"]["name"] for call in tool_chunks[-1]["tool_calls"]] == ["first", "second"]
 
     asyncio.run(run_case())
 

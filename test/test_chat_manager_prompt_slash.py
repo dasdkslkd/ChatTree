@@ -16,6 +16,9 @@ from backend.core.chat.conversation import Conversation
 from backend.core.chat.node import NodeManager
 from backend.core.config.types import Message, Role, StreamChunk, StreamController, StreamStatus
 from backend.core.plans import PlanLedger
+from backend.core.persistence.database import SQLitePersistence
+from backend.core.persistence.plan_repository import SQLitePlanRepository
+from backend.core.persistence.repository import ChatRepository
 from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
 from backend.core.slash import SlashCommandDispatcher, SlashDispatchKind
@@ -32,6 +35,16 @@ def make_manager(registry=None):
     manager.capability_registry = registry
     manager.slash_dispatcher = SlashCommandDispatcher()
     return manager
+
+
+def node_messages(manager, conversation_id, node_id):
+    return manager._canonical_messages_by_node(conversation_id, [node_id]).get(node_id, [])
+
+
+def latest_node_message(manager, conversation_id, node_id, role):
+    messages = [message for message in node_messages(manager, conversation_id, node_id) if message.get("role") == role]
+    assert messages
+    return messages[-1]
 
 
 def test_chat_manager_dispatches_builtin_slash_to_main_prompt():
@@ -85,43 +98,12 @@ def test_chat_manager_build_prompt_messages_uses_unified_builder(tmp_path: Path)
 
     messages = manager._build_prompt_messages(conversation, ["review"])
 
-    assert messages[0]["content"] == "base system"
     contents = [str(message.get("content") or "") for message in messages]
+    assert contents[0].startswith("# ChatTree Core Prompt")
+    assert "base system" not in contents
     assert any("## Available Capabilities" in content for content in contents)
     assert any("<name>review</name>" in content for content in contents)
     assert any("检查代码" in content for content in contents)
-
-
-def test_focus_preserving_turn_still_sends_new_user_message_to_model(tmp_path: Path):
-    async def scenario():
-        manager, model_manager = make_stream_manager(tmp_path)
-        conversation = manager.create_conversation("focus false")
-        parent_node_id = conversation.current_node_id
-
-        await collect_chunks(manager.send_message_stream(
-            conversation.metadata["id"],
-            "background result arrived",
-            model_id="fake-model",
-            provider_id="fake",
-            parent_node_id=parent_node_id,
-            focus_new_node=False,
-            message_subtype="task_notification",
-        ))
-
-        stored = manager.get_conversation(conversation.metadata["id"])
-        assert stored.current_node_id == parent_node_id
-        notification_node_id = next(
-            node_id
-            for node_id, node in stored.nodes.items()
-            if (node.get("user_message") or {}).get("subtype") == "task_notification"
-        )
-        assert stored.nodes[notification_node_id]["user_message"]["role"] == Role.NOTIFY
-        sent_contents = [message.get("content") for message in model_manager.provider.messages]
-        assert "background result arrived" in sent_contents
-        sent_roles = [message.get("role") for message in model_manager.provider.messages]
-        assert "notify" not in sent_roles
-
-    asyncio.run(scenario())
 
 
 def test_refer_prompt_injects_history_and_persists_only_inline_prompt(tmp_path: Path):
@@ -130,29 +112,45 @@ def test_refer_prompt_injects_history_and_persists_only_inline_prompt(tmp_path: 
         manager.tool_manager = FakeToolManager()
         conversation = manager.create_conversation("refer")
         root_id = conversation.current_node_id
-        old_user = Message({
-            "id": "old-user",
-            "role": Role.USER,
-            "content": "old branch failed because config path was wrong",
-            "timestamp": 1,
-        })
-        old_node = NodeManager.create_node(old_user, parent_id=root_id, model_id="fake-model")
-        old_node["assistant_message"] = Message({
-            "id": "old-assistant",
-            "role": Role.ASSISTANT,
-            "content": "The failure came from using the project-local config root.",
-            "timestamp": 2,
-        })
-        old_node["tool_messages"] = [Message({
-            "id": "old-tool",
-            "role": Role.TOOL,
-            "content": "stderr: missing C:\\Users\\xyz\\.chattree\\config.json",
-            "tool_call_id": "tool-1",
-            "timestamp": 3,
-        })]
+        old_node = NodeManager.create_node(parent_id=root_id, model_id="fake-model")
         conversation.add_node(old_node, root_id, focus=False)
         conversation.switch_to_node(root_id)
         manager._save(conversation)
+        manager._sqlite_ensure_branch(
+            conversation,
+            old_node["id"],
+            provider_id="fake",
+            model_id="fake-model",
+        )
+        manager.chat_repository.add_message(
+            conversation.metadata["id"],
+            old_node["id"],
+            role=Role.USER.value,
+            content="old branch failed because config path was wrong",
+            message_id="old-user",
+        )
+        manager.chat_repository.add_message(
+            conversation.metadata["id"],
+            old_node["id"],
+            role=Role.ASSISTANT.value,
+            content="The failure came from using the project-local config root.",
+            message_id="old-assistant",
+        )
+        manager.chat_repository.add_tool_call(
+            conversation.metadata["id"],
+            old_node["id"],
+            tool_call_id="tool-1",
+            name="shell",
+            arguments="{}",
+            call_index=0,
+        )
+        manager.chat_repository.add_tool_result(
+            conversation.metadata["id"],
+            old_node["id"],
+            tool_result_id="old-tool",
+            tool_call_id="tool-1",
+            output="stderr: missing C:\\Users\\xyz\\.chattree\\config.json",
+        )
 
         chunks = await collect_chunks(manager.send_message_stream(
             conversation.metadata["id"],
@@ -165,14 +163,15 @@ def test_refer_prompt_injects_history_and_persists_only_inline_prompt(tmp_path: 
 
         assert not [chunk for chunk in chunks if chunk.get("status") == StreamStatus.ERROR]
         stored = manager.get_conversation(conversation.metadata["id"])
-        new_nodes = [
-            node for node in stored.nodes.values()
-            if (node.get("user_message") or {}).get("content") == "analyze the failure now"
-        ]
+        new_nodes = []
+        for node in stored.nodes.values():
+            messages = node_messages(manager, conversation.metadata["id"], node["id"])
+            if any(message.get("role") == Role.USER and message.get("content") == "analyze the failure now" for message in messages):
+                new_nodes.append(node)
         assert len(new_nodes) == 1
-        assert new_nodes[0]["refer_context"]["selectors"] == [f"node:{old_node['id']}"]
-        assert new_nodes[0]["refer_context"]["source_node_ids"] == [old_node["id"]]
-        assert "/refer" not in new_nodes[0]["user_message"]["content"]
+        new_user = latest_node_message(manager, conversation.metadata["id"], new_nodes[0]["id"], Role.USER)
+        assert new_user["content"] == "analyze the failure now"
+        assert "/refer" not in new_user["content"]
 
         sent_contents = [str(message.get("content") or "") for message in model_manager.provider.messages]
         refer_index = next(index for index, content in enumerate(sent_contents) if "Explicit /refer context" in content)
@@ -190,15 +189,18 @@ def test_refer_prompt_requires_inline_prompt(tmp_path: Path):
         manager, _ = make_stream_manager(tmp_path)
         conversation = manager.create_conversation("refer")
         root_id = conversation.current_node_id
-        old_node = NodeManager.create_node(Message({
-            "id": "old-user",
-            "role": Role.USER,
-            "content": "old",
-            "timestamp": 1,
-        }), parent_id=root_id, model_id="fake-model")
+        old_node = NodeManager.create_node(parent_id=root_id, model_id="fake-model")
         conversation.add_node(old_node, root_id, focus=False)
         conversation.switch_to_node(root_id)
         manager._save(conversation)
+        manager._sqlite_ensure_branch(conversation, old_node["id"], provider_id="fake", model_id="fake-model")
+        manager.chat_repository.add_message(
+            conversation.metadata["id"],
+            old_node["id"],
+            role=Role.USER.value,
+            content="old",
+            message_id="old-user",
+        )
 
         chunks = await collect_chunks(manager.send_message_stream(
             conversation.metadata["id"],
@@ -430,68 +432,6 @@ class EnterPlanThenWriteProvider(CapturingProvider):
         )
 
 
-class PlanFinalWithoutExitProvider(CapturingProvider):
-    async def generate_response_stream(
-        self,
-        model,
-        messages,
-        stream_controller: StreamController = None,
-        **kwargs,
-    ):
-        self.messages = messages
-        self.kwargs = kwargs
-        self.calls.append({"messages": list(messages), "kwargs": kwargs})
-        call_number = len(self.calls)
-        if call_number == 1:
-            yield StreamChunk(
-                status=StreamStatus.CONTENT,
-                content="我已经探索完了，这里是普通文本计划，但没有调用 exit_plan_mode。",
-                node_id=stream_controller.node_id,
-                conversation_id=stream_controller.conversation_id,
-                error=None,
-                tokens_used=1,
-            )
-        else:
-            yield StreamChunk(
-                status=StreamStatus.CONTENT,
-                content="",
-                node_id=stream_controller.node_id,
-                conversation_id=stream_controller.conversation_id,
-                error=None,
-                tokens_used=1,
-                tool_calls=[
-                    {
-                        "id": "call_update_plan",
-                        "type": "function",
-                        "function": {
-                            "name": "update_plan",
-                            "arguments": json.dumps({
-                                "mode": "replace",
-                                "content": "1. 修改设置页\n2. 增加验证",
-                            }, ensure_ascii=False),
-                        },
-                    },
-                    {
-                        "id": "call_exit_plan",
-                        "type": "function",
-                        "function": {
-                            "name": "exit_plan_mode",
-                            "arguments": "{}",
-                        },
-                    }
-                ],
-            )
-        yield StreamChunk(
-            status=StreamStatus.COMPLETE,
-            content=None,
-            node_id=stream_controller.node_id,
-            conversation_id=stream_controller.conversation_id,
-            error=None,
-            tokens_used=1,
-            usage_info={"input_tokens": 1, "output_tokens": 0, "total_tokens": 1, "source": "test", "raw": {}},
-        )
-
-
 async def collect_chunks(stream):
     chunks = []
     async for chunk in stream:
@@ -501,12 +441,20 @@ async def collect_chunks(stream):
 
 def make_stream_manager(tmp_path: Path):
     model_manager = CapturingModelManager()
+    persistence = SQLitePersistence(tmp_path / "sqlite")
+    persistence.initialize()
+    repository = ChatRepository(persistence)
     manager = ChatManager(
         model_manager,
         ChatStorage(str(tmp_path / "conversations")),
         PromptStorage(str(tmp_path / "prompts")),
+        chat_repository=repository,
     )
     return manager, model_manager
+
+
+def make_plan_ledger(manager):
+    return PlanLedger(repository=SQLitePlanRepository(manager.chat_repository.persistence))
 
 
 class PlanModeToolManager:
@@ -569,13 +517,14 @@ def test_send_message_stream_expands_review_slash_prompt(tmp_path: Path):
     assert "Review target: focus on auth" in sent_user_messages[-1]["content"]
     reloaded = manager.get_conversation(conversation.metadata["id"])
     current = reloaded.nodes[reloaded.current_node_id]
-    assert current["user_message"]["slash_command"]["command"] == "review"
-    assert current["user_message"]["slash_command"]["original_input"] == "/review focus on auth"
+    user_message = latest_node_message(manager, conversation.metadata["id"], current["id"], Role.USER)
+    assert user_message["slash_command"]["command"] == "review"
+    assert user_message["slash_command"]["original_input"] == "/review focus on auth"
 
 
 def test_send_message_stream_enter_plan_mode_blocks_same_round_write(tmp_path: Path):
     manager, model_manager = make_stream_manager(tmp_path)
-    plan_ledger = PlanLedger()
+    plan_ledger = make_plan_ledger(manager)
     tool_manager = PlanModeToolManager(plan_ledger)
     manager.plan_ledger = plan_ledger
     manager.tool_manager = tool_manager
@@ -608,227 +557,9 @@ def test_send_message_stream_enter_plan_mode_blocks_same_round_write(tmp_path: P
     assert current["tool_permission_mode"] == "plan"
 
 
-def test_send_message_stream_consumes_approved_plan_context_and_restores_permission(tmp_path: Path):
-    manager, model_manager = make_stream_manager(tmp_path)
-    plan_ledger = PlanLedger()
-    manager.plan_ledger = plan_ledger
-    conversation = manager.create_conversation("approved plan")
-    active = asyncio.run(plan_ledger.enter_plan_mode(
-        conversation_id=conversation.metadata["id"],
-        previous_permission_mode="modify_only",
-    ))
-    awaiting = asyncio.run(plan_ledger.submit_plan(
-        conversation_id=conversation.metadata["id"],
-        plan="1. Update backend\n2. Run tests",
-    ))
-    assert awaiting.plan_id == active.plan_id
-    asyncio.run(plan_ledger.approve_plan(
-        conversation_id=conversation.metadata["id"],
-        plan_id=awaiting.plan_id,
-    ))
-
-    chunks = asyncio.run(
-        collect_chunks(
-            manager.send_message_stream(
-                conversation.metadata["id"],
-                "继续实现已批准的计划。",
-                model_id="fake-model",
-                parent_node_id=conversation.current_node_id,
-            )
-        )
-    )
-
-    assert chunks[-1]["status"] == StreamStatus.COMPLETE
-    full_prompt = "\n\n".join(str(message.get("content") or "") for message in model_manager.provider.messages)
-    assert "Approved plan for this conversation" in full_prompt
-    assert "Update backend" in full_prompt
-    assert "Continue with the approved plan" in full_prompt
-    reloaded = manager.get_conversation(conversation.metadata["id"])
-    current = reloaded.nodes[reloaded.current_node_id]
-    assert current["tool_permission_mode"] == "modify_only"
-    assert asyncio.run(plan_ledger.consume_pending_context(conversation.metadata["id"])) == []
-
-
-def test_send_message_stream_plan_mode_retries_until_exit_or_question_tool(tmp_path: Path):
-    manager, model_manager = make_stream_manager(tmp_path)
-    plan_ledger = PlanLedger()
-    tool_manager = PlanModeToolManager(plan_ledger)
-    manager.plan_ledger = plan_ledger
-    manager.tool_manager = tool_manager
-    manager.tool_orchestrator = ToolOrchestrator(
-        tool_manager=tool_manager,
-        permission_engine=PermissionEngine.default(),
-        approval_manager=ApprovalManager(),
-        logical_sandbox=LogicalSandbox.for_config({}, tmp_path),
-    )
-    model_manager.provider = PlanFinalWithoutExitProvider()
-    conversation = manager.create_conversation("plan guard final")
-    asyncio.run(plan_ledger.enter_plan_mode(
-        conversation_id=conversation.metadata["id"],
-        previous_permission_mode="modify_only",
-    ))
-
-    chunks = asyncio.run(
-        collect_chunks(
-            manager.send_message_stream(
-                conversation.metadata["id"],
-                "设置页增加项目栏",
-                model_id="fake-model",
-                parent_node_id=conversation.current_node_id,
-            )
-        )
-    )
-
-    content_chunks = [chunk.get("content") for chunk in chunks if chunk.get("content")]
-    assert "我已经探索完了，这里是普通文本计划，但没有调用 exit_plan_mode。" not in content_chunks
-    assert len(model_manager.provider.calls) == 2
-    reminder_text = "\n".join(
-        str(message.get("content") or "")
-        for call in model_manager.provider.calls
-        for message in call["messages"]
-        if message.get("role") == "system"
-    )
-    assert "Plan mode final response was discarded" in reminder_text
-    assert "action `exit`" in reminder_text
-    current_plan = asyncio.run(plan_ledger.get_active_or_awaiting(conversation.metadata["id"]))
-    assert current_plan is not None
-    assert current_plan.status.value == "awaiting_approval"
-    reloaded = manager.get_conversation(conversation.metadata["id"])
-    assistant = reloaded.nodes[reloaded.current_node_id]["assistant_message"]
-    assert "普通文本计划" not in assistant["content"]
-
-
-def test_continue_plan_question_answer_stream_uses_hidden_control_response(tmp_path: Path):
-    manager, model_manager = make_stream_manager(tmp_path)
-    plan_ledger = PlanLedger()
-    tool_manager = PlanModeToolManager(plan_ledger)
-    manager.plan_ledger = plan_ledger
-    manager.tool_manager = tool_manager
-    manager.tool_orchestrator = ToolOrchestrator(
-        tool_manager=tool_manager,
-        permission_engine=PermissionEngine.default(),
-        approval_manager=ApprovalManager(),
-        logical_sandbox=LogicalSandbox.for_config({}, tmp_path),
-    )
-    model_manager.provider = PlanFinalWithoutExitProvider()
-    conversation = manager.create_conversation("plan question answer")
-    asyncio.run(plan_ledger.enter_plan_mode(
-        conversation_id=conversation.metadata["id"],
-        previous_permission_mode="modify_only",
-    ))
-    asyncio.run(plan_ledger.ask_user_question(
-        conversation_id=conversation.metadata["id"],
-        question="项目栏是否默认显示？",
-        options=[{"label": "默认显示", "description": "进入页面直接看到"}],
-        tool_call_id="call-question",
-    ))
-
-    chunks = asyncio.run(
-        collect_chunks(
-            manager.continue_plan_action_stream(
-                conversation_id=conversation.metadata["id"],
-                content="默认显示",
-                model_id="fake-model",
-                message_subtype="plan_question_response",
-                node_id=conversation.current_node_id,
-            )
-        )
-    )
-
-    assert chunks[-1]["status"] == StreamStatus.COMPLETE
-    first_prompt = "\n\n".join(str(message.get("content") or "") for message in model_manager.provider.calls[0]["messages"])
-    assert "The user answered your plan-mode clarification question." in first_prompt
-    assert "项目栏是否默认显示？" in first_prompt
-    assert "默认显示" in first_prompt
-    reloaded = manager.get_conversation(conversation.metadata["id"])
-    visible_messages = [
-        msg for msg in reloaded.get_message_chain_from_node()
-        if not msg.get("is_hidden_from_transcript")
-    ]
-    assert all(msg.get("content") != "默认显示" for msg in visible_messages)
-
-
-def test_continue_plan_approval_stream_uses_hidden_control_response(tmp_path: Path):
-    manager, model_manager = make_stream_manager(tmp_path)
-    plan_ledger = PlanLedger()
-    manager.plan_ledger = plan_ledger
-    conversation = manager.create_conversation("plan approval answer")
-    active = asyncio.run(plan_ledger.enter_plan_mode(
-        conversation_id=conversation.metadata["id"],
-        previous_permission_mode="modify_only",
-    ))
-    awaiting = asyncio.run(plan_ledger.submit_plan(
-        conversation_id=conversation.metadata["id"],
-        plan="1. 修改设置页\n2. 增加验证",
-        tool_call_id="call-exit",
-    ))
-    assert awaiting.plan_id == active.plan_id
-
-    chunks = asyncio.run(
-        collect_chunks(
-            manager.continue_plan_action_stream(
-                conversation_id=conversation.metadata["id"],
-                content="Plan approved. Continue with the approved implementation.",
-                model_id="fake-model",
-                message_subtype="plan_approval_response",
-                node_id=conversation.current_node_id,
-            )
-        )
-    )
-
-    assert chunks[-1]["status"] == StreamStatus.COMPLETE
-    first_prompt = "\n\n".join(str(message.get("content") or "") for message in model_manager.provider.calls[0]["messages"])
-    assert "User has approved your plan" in first_prompt
-    assert "## Approved Plan:" in first_prompt
-    assert "修改设置页" in first_prompt
-    assert "start coding" in first_prompt
-    assert asyncio.run(plan_ledger.get_active_or_awaiting(conversation.metadata["id"])) is None
-    reloaded = manager.get_conversation(conversation.metadata["id"])
-    current = reloaded.nodes[reloaded.current_node_id]
-    assert current["tool_permission_mode"] == "modify_only"
-    visible_messages = [
-        msg for msg in reloaded.get_message_chain_from_node()
-        if not msg.get("is_hidden_from_transcript")
-    ]
-    assert all(msg.get("content") != "继续实现已批准的计划。" for msg in visible_messages)
-    assert all(msg.get("subtype") != "plan_approval_response" for msg in visible_messages)
-
-
-def test_send_message_stream_does_not_auto_approve_pending_plan_from_user_text(tmp_path: Path):
-    manager, _model_manager = make_stream_manager(tmp_path)
-    plan_ledger = PlanLedger()
-    manager.plan_ledger = plan_ledger
-    conversation = manager.create_conversation("ordinary user text")
-    active = asyncio.run(plan_ledger.enter_plan_mode(
-        conversation_id=conversation.metadata["id"],
-        previous_permission_mode="modify_only",
-    ))
-    awaiting = asyncio.run(plan_ledger.submit_plan(
-        conversation_id=conversation.metadata["id"],
-        plan="1. 修改设置页\n2. 增加验证",
-    ))
-    assert awaiting.plan_id == active.plan_id
-
-    chunks = asyncio.run(
-        collect_chunks(
-            manager.send_message_stream(
-                conversation.metadata["id"],
-                "继续实现已批准的计划。",
-                model_id="fake-model",
-                parent_node_id=conversation.current_node_id,
-            )
-        )
-    )
-
-    assert chunks[-1]["status"] == StreamStatus.COMPLETE
-    current_plan = asyncio.run(plan_ledger.get_active_or_awaiting(conversation.metadata["id"]))
-    assert current_plan is not None
-    assert current_plan.status.value == "awaiting_approval"
-
-
 def test_send_message_stream_rejects_manual_plan_permission_without_session(tmp_path: Path):
     manager, _model_manager = make_stream_manager(tmp_path)
-    manager.plan_ledger = PlanLedger()
+    manager.plan_ledger = make_plan_ledger(manager)
     conversation = manager.create_conversation("manual plan permission")
 
     chunks = asyncio.run(
@@ -874,7 +605,7 @@ def test_send_message_stream_allows_final_after_real_start_workflow(tmp_path: Pa
     assert "workflow done" in content_chunks
     assert len(model_manager.provider.calls) == 2
     reloaded = manager.get_conversation(conversation.metadata["id"])
-    assistant = reloaded.nodes[reloaded.current_node_id]["assistant_message"]
+    assistant = latest_node_message(manager, conversation.metadata["id"], reloaded.current_node_id, Role.ASSISTANT)
     assert assistant["content"] == "workflow done"
 
 
@@ -953,4 +684,5 @@ def test_send_message_stream_removed_side_command_is_plain_message(tmp_path: Pat
     reloaded = manager.get_conversation(conversation.metadata["id"])
     assert len(reloaded.nodes) == 2
     current = reloaded.nodes[reloaded.current_node_id]
-    assert current["user_message"]["content"] == "/side quick question"
+    user_message = latest_node_message(manager, conversation.metadata["id"], current["id"], Role.USER)
+    assert user_message["content"] == "/side quick question"

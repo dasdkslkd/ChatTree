@@ -1,13 +1,31 @@
 import { useState } from 'react';
 import { Check, ChevronRight, Loader2, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { Button } from '@/components/ui/button';
-import { messageApi, type ToolResultSlice } from '../../../api/message';
 import type { TranscriptItem } from '../../../types/transcript';
-import type { AssistantProcessRenderProps, AssistantTimelineBlock, ToolRenderItem } from '../../../utils/assistantTimeline';
-import { formatProcessedDuration } from '../../../utils/assistantTimelineFolding';
-import { formatToolOutput } from '../../../utils/toolDisplay';
+import { formatProcessedDuration, getStreamingTimelineFoldState } from '../../../utils/assistantTimelineFolding';
 import MarkdownContent from '../../MarkdownContent';
+
+export type ToolRenderItem = {
+  key: string;
+  name: string;
+  summary: string;
+  argsText: string;
+  outputText: string;
+  status: 'done' | 'error' | 'running';
+};
+
+export type ProcessRenderBlock =
+  | { type: 'reasoning'; key: string; reasoning: string; streaming: boolean }
+  | { type: 'content'; key: string; content: string; streaming: boolean }
+  | { type: 'tools'; key: string; items: ToolRenderItem[] };
+
+export type AssistantProcessRenderProps = {
+  timeline: ProcessRenderBlock[];
+  status: string | null;
+  duration: number;
+  errorMessage: string | null;
+  showStatusLabel?: boolean;
+};
 
 export function getStreamStatusLabel(status: AssistantProcessRenderProps['status'], errorMessage: string | null): string | null {
   if (status === 'error') return errorMessage || '生成失败';
@@ -19,7 +37,6 @@ export function getStreamStatusLabel(status: AssistantProcessRenderProps['status
 function ThoughtBlock({ reasoning, streaming }: { reasoning: string; streaming?: boolean }) {
   const [expanded, setExpanded] = useState(false);
   if (!reasoning) return null;
-  const label = streaming ? '思考中' : '思考完成';
   return (
     <div className={cn('thought', expanded && 'expanded')}>
       <button
@@ -29,50 +46,19 @@ function ThoughtBlock({ reasoning, streaming }: { reasoning: string; streaming?:
         onClick={() => setExpanded((value) => !value)}
       >
         <ChevronRight className="thought-chevron" />
-        <span>{label}</span>
+        <span>{streaming ? '思考中' : '思考完成'}</span>
       </button>
       <div className="thought-body-shell" aria-hidden={!expanded}>
         <div className="thought-body-clip">
-          <div className="thought-body custom-scrollbar">
-            {reasoning}
-          </div>
+          <div className="thought-body custom-scrollbar">{reasoning}</div>
         </div>
       </div>
     </div>
   );
 }
 
-function ToolCallCard({ item }: { item: ToolRenderItem }) {
+function GenericToolCallCard({ item }: { item: ToolRenderItem }) {
   const [expanded, setExpanded] = useState(false);
-  const [fullResult, setFullResult] = useState<ToolResultSlice | null>(null);
-  const [loadingFullResult, setLoadingFullResult] = useState(false);
-  const [fullResultError, setFullResultError] = useState<string | null>(null);
-  const fullResultText = fullResult ? formatToolOutput({ content: fullResult.content }) : '';
-  const outputText = fullResult ? fullResultText : item.outputText;
-  const canLoadFullResult = Boolean(item.resultEnvelope?.toolResultId && !fullResult);
-  const resultStatus = fullResult
-    ? fullResult.has_more
-      ? `已读取 ${fullResult.content.length}/${fullResult.total_chars} 字，已截断/可继续读取`
-      : `已读取完整结果（${fullResult.total_chars} 字）`
-    : item.resultEnvelope?.truncated
-      ? '预览已截断'
-      : null;
-
-  const handleLoadFullResult = async () => {
-    const toolResultId = item.resultEnvelope?.toolResultId;
-    if (!toolResultId || loadingFullResult) return;
-    setLoadingFullResult(true);
-    setFullResultError(null);
-    try {
-      const result = await messageApi.getToolResult(toolResultId, 0, 16000);
-      setFullResult(result);
-    } catch (error) {
-      console.error('Failed to load tool result:', error);
-      setFullResultError('读取完整结果失败');
-    } finally {
-      setLoadingFullResult(false);
-    }
-  };
 
   return (
     <div className={cn('tool-call', expanded && 'expanded')}>
@@ -93,32 +79,7 @@ function ToolCallCard({ item }: { item: ToolRenderItem }) {
       </button>
       <div className="tc-body">
         {item.argsText && <pre className="tc-cmd custom-scrollbar">{item.argsText}</pre>}
-        {outputText && <pre className="tc-output custom-scrollbar">{outputText}</pre>}
-        {(canLoadFullResult || resultStatus || fullResultError) && (
-          <div className="tool-approval-actions">
-            {canLoadFullResult && (
-              <Button
-                type="button"
-                size="xs"
-                variant="secondary"
-                disabled={loadingFullResult}
-                onClick={handleLoadFullResult}
-              >
-                {loadingFullResult ? (
-                  <><Loader2 className="h-3 w-3 animate-spin" /> 读取中</>
-                ) : (
-                  '读取完整结果'
-                )}
-              </Button>
-            )}
-            {resultStatus && (
-              <span className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>{resultStatus}</span>
-            )}
-            {fullResultError && (
-              <span className="text-xs text-destructive">{fullResultError}</span>
-            )}
-          </div>
-        )}
+        {item.outputText && <pre className="tc-output custom-scrollbar">{item.outputText}</pre>}
       </div>
     </div>
   );
@@ -127,7 +88,7 @@ function ToolCallCard({ item }: { item: ToolRenderItem }) {
 function ToolCallGroup({ items }: { items: ToolRenderItem[] }) {
   const [collapsed, setCollapsed] = useState(false);
   if (items.length === 0) return null;
-  if (items.length === 1) return <ToolCallCard item={items[0]} />;
+  if (items.length === 1) return <GenericToolCallCard item={items[0]} />;
   return (
     <div className={cn('tool-group', collapsed && 'collapsed')}>
       <button
@@ -141,13 +102,13 @@ function ToolCallGroup({ items }: { items: ToolRenderItem[] }) {
         <span className="tg-count">{items.length} 个</span>
       </button>
       <div className="tool-group-body">
-        {items.map((item) => <ToolCallCard key={item.key} item={item} />)}
+        {items.map((item) => <GenericToolCallCard key={item.key} item={item} />)}
       </div>
     </div>
   );
 }
 
-function ContentBlock({ block }: { block: Extract<AssistantTimelineBlock, { type: 'content' }> }) {
+function ContentBlock({ block }: { block: Extract<ProcessRenderBlock, { type: 'content' }> }) {
   return (
     <div
       key={block.key}
@@ -159,39 +120,17 @@ function ContentBlock({ block }: { block: Extract<AssistantTimelineBlock, { type
   );
 }
 
-function MarkerBlock({ block }: { block: Extract<AssistantTimelineBlock, { type: 'marker' }> }) {
-  return (
-    <div
-      key={block.key}
-      className="my-1 flex items-center gap-2 px-3 py-1 text-xs"
-      style={{ color: 'var(--fg-tertiary)' }}
-    >
-      <span className="h-px w-6 shrink-0" style={{ background: 'var(--border-subtle)' }} />
-      <span className="min-w-0 truncate">{block.content}</span>
-    </div>
-  );
-}
-
-function renderTimelineBlock(
-  block: AssistantTimelineBlock,
-  _item: TranscriptItem,
-  props: AssistantProcessRenderProps,
-) {
+function renderTimelineBlock(block: ProcessRenderBlock) {
   if (block.type === 'reasoning') {
     return (
       <ThoughtBlock
         key={block.key}
         reasoning={block.reasoning}
-        streaming={block.key === props.activeReasoningKey}
+        streaming={block.streaming}
       />
     );
   }
-  if (block.type === 'tools') {
-    return <ToolCallGroup key={block.key} items={block.items} />;
-  }
-  if (block.type === 'marker') {
-    return <MarkerBlock key={block.key} block={block} />;
-  }
+  if (block.type === 'tools') return <ToolCallGroup key={block.key} items={block.items} />;
   return <ContentBlock key={block.key} block={block} />;
 }
 
@@ -203,84 +142,68 @@ export function AssistantProcessTimeline({
   props: AssistantProcessRenderProps;
 }) {
   const timeline = Array.isArray(props.timeline) ? props.timeline : [];
-  const statusLabel = props.compactWithNextAnswer || props.showStatusLabel === false ? null : getStreamStatusLabel(props.status, props.errorMessage);
-  const showPendingBubble = Boolean(props.showPendingBubble && props.pendingUserMessage);
-  const showStreamBlock = props.showStreamBlock !== false;
-  const [processExpanded, setProcessExpanded] = useState(props.streamingFoldState?.processExpanded ?? true);
-  const foldedContentBlocks = processExpanded ? [] : props.streamingFoldState?.contentBlocks ?? [];
+  const statusLabel = props.showStatusLabel === false ? null : getStreamStatusLabel(props.status, props.errorMessage);
+  const compactWithNextAnswer = Boolean((item as TranscriptItem & { compact_with_next_answer?: boolean }).compact_with_next_answer);
+  const foldState = getStreamingTimelineFoldState(
+    timeline,
+    [],
+    { allowProcessOnly: compactWithNextAnswer },
+  );
+  const [processExpanded, setProcessExpanded] = useState(foldState.processExpanded);
+  const visibleBlocks = foldState.canFoldProcess ? foldState.visibleBlocks : timeline;
+  const foldedContentBlocks = foldState.canFoldProcess && !processExpanded ? foldState.contentBlocks : [];
+
   return (
     <div className="contents">
-      {showPendingBubble && (
-        <div className="w-full my-2 flex flex-col items-end" role="listitem">
-          <div className="flex flex-col items-start max-w-full">
+      <div className="w-full flex flex-col items-start my-2" role="listitem">
+        <div className="flex flex-col items-start max-w-full w-full min-w-0">
+          {foldState.canFoldProcess && (
+            <div className={cn('processed-fold', processExpanded && 'expanded')}>
+              <button
+                type="button"
+                className="processed-fold-button"
+                aria-expanded={processExpanded}
+                onClick={() => setProcessExpanded((value) => !value)}
+              >
+                <span>{props.duration > 0 ? `已处理 ${formatProcessedDuration(props.duration) ?? ''}`.trim() : '已处理'}</span>
+                <ChevronRight className="processed-fold-chevron" />
+              </button>
+            </div>
+          )}
+          {(!foldState.canFoldProcess || processExpanded) && (
+            <div className={cn('processed-blocks-shell', processExpanded && 'expanded')} aria-hidden={foldState.canFoldProcess && !processExpanded}>
+              <div className="processed-blocks-inner">
+                {visibleBlocks.map((block) => renderTimelineBlock(block))}
+              </div>
+            </div>
+          )}
+          {foldedContentBlocks.length > 0 && (
+            <div className="w-full flex flex-col items-start">
+              {foldedContentBlocks.map((block) => renderTimelineBlock(block))}
+            </div>
+          )}
+          {timeline.length === 0 && props.status === 'running' && (
             <div
-              className="max-w-full rounded-lg px-3 py-2 text-sm prose prose-sm prose-invert max-w-none [&_p]:m-0"
+              className="max-w-full w-fit px-3 py-2 rounded-2xl rounded-bl-sm leading-relaxed prose prose-sm max-w-none [&_p]:m-0"
               style={{
-                background: 'linear-gradient(160deg, rgba(217,119,87,0.16), rgba(217,119,87,0.08))',
-                border: '0.5px solid rgba(217,119,87,0.28)',
-                color: 'var(--fg-85)',
+                color: 'var(--fg-secondary)',
+                fontSize: 'var(--codex-chat-font-size)',
+                lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
               }}
             >
-              <MarkdownContent enableMermaid>{props.pendingUserMessage || ''}</MarkdownContent>
+              <div className="flex items-center gap-2">
+                <Loader2 className="h-4 w-4 animate-spin" style={{ color: 'var(--icon-accent)' }} />
+                <span className="text-sm" style={{ color: 'var(--fg-tertiary)' }}>思考中...</span>
+              </div>
             </div>
-          </div>
+          )}
+          {statusLabel && (
+            <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
+              <span className="text-destructive">{statusLabel}</span>
+            </div>
+          )}
         </div>
-      )}
-      {showStreamBlock && (
-        <div className={cn('w-full flex flex-col items-start', props.compactWithNextAnswer ? 'mt-2 mb-0' : 'my-2')} role="listitem">
-          <div className="flex flex-col items-start max-w-full w-full min-w-0">
-            {props.streamingFoldState?.canFoldProcess ? (
-              <>
-                <div className={cn('processed-fold', processExpanded && 'expanded')}>
-                  <button
-                    type="button"
-                    className="processed-fold-button"
-                    aria-expanded={processExpanded}
-                    onClick={() => setProcessExpanded((value) => !value)}
-                  >
-                    <span>{props.duration > 0 ? `已处理 ${formatProcessedDuration(props.duration) ?? ''}`.trim() : '已处理'}</span>
-                    <ChevronRight className="processed-fold-chevron" />
-                  </button>
-                </div>
-                <div className={cn('processed-blocks-shell', processExpanded && 'expanded')} aria-hidden={!processExpanded}>
-                  <div className="processed-blocks-inner">
-                    {props.streamingFoldState.visibleBlocks.map((block) => renderTimelineBlock(block, item, props))}
-                  </div>
-                </div>
-                {foldedContentBlocks.length > 0 && (
-                  <div className="w-full flex flex-col items-start">
-                    {foldedContentBlocks.map((block) => renderTimelineBlock(block, item, props))}
-                  </div>
-                )}
-              </>
-            ) : (
-              <div className="w-full flex flex-col items-start">
-                {timeline.map((block) => renderTimelineBlock(block, item, props))}
-              </div>
-            )}
-            {!props.streamingFoldState?.canFoldProcess && timeline.length === 0 && props.status === 'streaming' && (
-              <div
-                className="max-w-full w-fit px-3 py-2 rounded-2xl rounded-bl-sm leading-relaxed prose prose-sm max-w-none [&_p]:m-0"
-                style={{
-                  color: 'var(--fg-secondary)',
-                  fontSize: 'var(--codex-chat-font-size)',
-                  lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
-                }}
-              >
-                <div className="flex items-center gap-2">
-                  <Loader2 className="h-4 w-4 animate-spin" style={{ color: 'var(--icon-accent)' }} />
-                  <span className="text-sm" style={{ color: 'var(--fg-tertiary)' }}>思考中...</span>
-                </div>
-              </div>
-            )}
-            {statusLabel && (
-              <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
-                <span className="text-destructive">{statusLabel}</span>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
+      </div>
     </div>
   );
 }

@@ -440,8 +440,14 @@ class TranscriptAssembler:
     def _participation_kind(self, call: dict[str, Any], result: dict[str, Any] | None) -> str:
         name = str(call.get("name") or "")
         if name in PLAN_QUESTION_TOOLS:
+            result_payload = self._tool_result_payload(result)
+            if not result_payload or result_payload.get("error"):
+                return "process_tool"
             return "plan_question"
         if name in PLAN_APPROVAL_TOOLS:
+            result_payload = self._tool_result_payload(result)
+            if not result_payload or result_payload.get("error"):
+                return "process_tool"
             return "plan_approval"
         if self._is_tool_approval_call(call, result):
             return "tool_approval"
@@ -1115,7 +1121,6 @@ class TranscriptPatchSession:
             if event_type == "process_content" and isinstance(content, str) and content:
                 flush_reasoning(status == "running")
                 pending_content += content
-                flush_process_content(status == "running")
             if event_type in {"tool_calls_committed", "tool_call_start", "tool_call"}:
                 flush_reasoning(status == "running")
                 flush_process_content(status == "running")

@@ -37,7 +37,6 @@ from backend.core.prompts.catalog import (
     validate_prompt_catalog,
 )
 from backend.core.prompts.types import PromptBuildRequest
-from backend.core.notifications import TaskNotificationService
 from backend.core.runs import (
     RunKind,
     RunManager,
@@ -46,9 +45,10 @@ from backend.core.runs import (
     RunStatus,
 )
 from backend.core.runs.journal import RunJournal
-from backend.core.storage.tool_result_storage import ToolResultStorage
 from backend.core.tools.agent_tools import StartSubagentTool, StartWorkflowTool
 from backend.core.plans import PlanLedger
+from backend.core.persistence.database import SQLitePersistence
+from backend.core.persistence.plan_repository import SQLitePlanRepository
 from backend.core.tasks import ActiveTaskService, TaskContextMode, TaskOutcome, TaskTurnContext
 from backend.core.workflows.workflow_manager import WorkflowManager
 from backend.core.slash.dispatcher import SlashCommandDispatcher
@@ -57,42 +57,28 @@ from backend.core.workflows.js_runner import WorkflowJsRunner, WorkflowScriptErr
 from backend.core.workflows.runtime_bridge import WorkflowRuntimeBridge
 
 
-class MemoryNotificationRepository:
+class _TestTranscriptPatchSession:
     def __init__(self):
-        self.items = {}
+        self.revision = 0
 
-    def upsert_for_run(self, **kwargs):
-        source_run_id = kwargs["source_run_id"]
-        item = self.items.get(source_run_id) or {
-            "id": f"notification-{source_run_id}",
-            "status": "unbound",
+    def feed(self, payload, *, emit=True):
+        if not emit:
+            return None
+        conversation_id = payload.get("conversation_id") or "conversation-1"
+        node_id = payload.get("target_node_id") or payload.get("node_id") or "node-1"
+        self.revision += 1
+        return {
+            "type": "transcript_patch",
+            "conversation_id": conversation_id,
+            "node_id": node_id,
+            "revision": self.revision,
+            "operations": [],
         }
-        item.update(kwargs)
-        self.items[source_run_id] = item
-        return dict(item)
-
-    def mark_observed_by_source(self, source_run_id):
-        item = self.items.get(source_run_id)
-        if item:
-            item["status"] = "observed"
-        return dict(item) if item else None
-
-    def list_for_conversation(self, conversation_id, include_deleted=False):
-        return [
-            dict(item)
-            for item in self.items.values()
-            if item.get("conversation_id") == conversation_id
-            and (include_deleted or item.get("status") != "deleted")
-        ]
 
 
-def install_notification_service(run_manager: RunManager) -> MemoryNotificationRepository:
-    repository = MemoryNotificationRepository()
-    run_manager.notification_service = TaskNotificationService(
-        repository=repository,
-        run_manager=run_manager,
-    )
-    return repository
+class _TestTranscriptAssembler:
+    def patch_session(self, run_id, from_event=0):
+        return _TestTranscriptPatchSession()
 
 
 def _run_start_request() -> Request:
@@ -141,8 +127,62 @@ async def _produce_message_events(request, chat_manager, run_manager):
         )
     return [
         event
-        async for event in messages_route._subscribe_sse(run_manager, run.run_id)
+        async for event in runs_route._subscribe_sse(
+            run_manager,
+            _TestTranscriptAssembler(),
+            run.run_id,
+        )
     ]
+
+
+def _system_text(messages):
+    return "\n\n".join(
+        str(message.get("content") or "")
+        for message in messages
+        if message.get("role") == "system"
+    )
+
+
+def _append_canonical_turn(manager, conversation, user_content, assistant_content=None):
+    parent_id = conversation.current_node_id
+    node = NodeManager.create_node(parent_id=parent_id)
+    conversation.add_node(node, parent_id=parent_id)
+    manager._save(conversation)
+    manager._sqlite_ensure_branch(
+        conversation,
+        node["id"],
+        provider_id=conversation.metadata.get("provider_id"),
+        model_id=conversation.metadata.get("model_id"),
+    )
+    manager.chat_repository.add_message(
+        conversation.metadata["id"],
+        node["id"],
+        role=Role.USER.value,
+        content=user_content,
+    )
+    if assistant_content is not None:
+        manager.chat_repository.add_message(
+            conversation.metadata["id"],
+            node["id"],
+            role=Role.ASSISTANT.value,
+            content=assistant_content,
+        )
+    return node
+
+
+def _add_canonical_user_message(manager, conversation, content):
+    manager.chat_repository.add_message(
+        conversation.metadata["id"],
+        conversation.current_node_id,
+        role=Role.USER.value,
+        content=content,
+    )
+
+
+def _plan_ledger_for_storage(storage):
+    persistence = SQLitePersistence(Path(storage.storage_dir).parent)
+    persistence.initialize()
+    return PlanLedger(repository=SQLitePlanRepository(persistence))
 
 
 class PromptCatalogTests(unittest.TestCase):
@@ -347,10 +387,8 @@ class PromptBuilderFrameworkTests(unittest.TestCase):
 class ChatManagerPromptSelectionTests(unittest.TestCase):
     class FakeStorage:
         def __init__(self):
-            self.saved = None
-
-        def save(self, data):
-            self.saved = data
+            self.tmp = tempfile.TemporaryDirectory()
+            self.storage_dir = str(Path(self.tmp.name) / "conversations")
 
     class FakePromptStorage:
         def load(self, prompt_id):
@@ -378,25 +416,14 @@ class ChatManagerPromptSelectionTests(unittest.TestCase):
             },
         )
         root = conversation.nodes[conversation.root_node_id]
-        self.assertIsNone(root["system_message"])
-        self.assertEqual(
-            storage.saved["metadata"]["selected_system_prompt"]["content"],
-            "snapshot prompt body",
-        )
+        self.assertNotIn("system_message", root)
 
 
 class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
     class FakeStorage:
         def __init__(self):
-            self.saved = None
-
-        def save(self, data):
-            self.saved = data
-
-        def load(self, conversation_id):
-            if self.saved and self.saved["metadata"]["id"] == conversation_id:
-                return self.saved
-            return None
+            self.tmp = tempfile.TemporaryDirectory()
+            self.storage_dir = str(Path(self.tmp.name) / "conversations")
 
     class FakePromptStorage:
         def load(self, prompt_id):
@@ -421,35 +448,38 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
         messages = manager._build_prompt_messages(conversation, [])
 
         self.assertIn("# ChatTree Core Prompt", messages[0]["content"])
-        self.assertIn("Runtime mode: main chat", messages[1]["content"])
-        self.assertNotIn("start_subagent", messages[1]["content"])
-        self.assertNotIn("spawn_agent", messages[1]["content"])
+        runtime_prompt = _system_text(messages)
+        self.assertIn("Runtime mode: main chat", runtime_prompt)
+        self.assertNotIn("start_subagent", runtime_prompt)
+        self.assertNotIn("spawn_agent", runtime_prompt)
 
     def test_main_runtime_context_includes_plan_mode_rules_when_enabled(self):
+        storage = self.FakeStorage()
         manager = ChatManager(
             model_manager=None,
-            storage=self.FakeStorage(),
+            storage=storage,
             prompts=self.FakePromptStorage(),
-            plan_ledger=PlanLedger(),
+            plan_ledger=_plan_ledger_for_storage(storage),
         )
         conversation = manager.create_conversation("title")
 
         messages = manager._build_prompt_messages(conversation, [])
 
-        self.assertIn("Plan mode rules:", messages[1]["content"])
-        self.assertIn("Use `plan` action `enter` only when", messages[1]["content"])
-        self.assertIn("genuine ambiguity", messages[1]["content"])
-        self.assertIn("Do not enter plan mode merely because the task is large", messages[1]["content"])
-        self.assertIn("When the user asks you to implement now", messages[1]["content"])
-        self.assertIn("call `plan` action `update` to write the plan artifact", messages[1]["content"])
-        self.assertIn("call `plan` action `exit`", messages[1]["content"])
+        runtime_prompt = _system_text(messages)
+        self.assertIn("Plan mode rules:", runtime_prompt)
+        self.assertIn("Use `enter_plan_mode` only when", runtime_prompt)
+        self.assertIn("genuine ambiguity", runtime_prompt)
+        self.assertIn("Do not enter plan mode merely because the task is large", runtime_prompt)
+        self.assertIn("When the user asks you to implement now", runtime_prompt)
+        self.assertIn("Use `ask_user_question` in plan mode only for genuine user decisions", runtime_prompt)
 
-    def test_active_plan_mode_prompt_requires_structured_exit_or_question(self):
+    def test_active_plan_mode_prompt_stays_read_only_and_allows_questions(self):
+        storage = self.FakeStorage()
         manager = ChatManager(
             model_manager=None,
-            storage=self.FakeStorage(),
+            storage=storage,
             prompts=self.FakePromptStorage(),
-            plan_ledger=PlanLedger(),
+            plan_ledger=_plan_ledger_for_storage(storage),
         )
         conversation = manager.create_conversation("title")
         root = conversation.nodes[conversation.current_node_id]
@@ -457,18 +487,17 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
 
         messages = manager._build_prompt_messages(conversation, [])
 
-        self.assertIn("Plan mode is active:", messages[1]["content"])
-        self.assertIn("read-only planning phase", messages[1]["content"])
-        self.assertIn("must end with exactly one structured plan-mode action", messages[1]["content"])
-        self.assertIn("Do not write the full plan in assistant text", messages[1]["content"])
-        self.assertIn("Call `plan` with action `update`", messages[1]["content"])
-        self.assertIn("Call `plan` with action `exit`", messages[1]["content"])
-        self.assertIn("Do not ask whether the plan is acceptable in text", messages[1]["content"])
+        runtime_prompt = _system_text(messages)
+        self.assertIn("Plan mode is active:", runtime_prompt)
+        self.assertIn("read-only planning phase", runtime_prompt)
+        self.assertIn("Use `ask_user_question` only when a genuine user decision is required", runtime_prompt)
 
     def test_plan_control_tools_are_visible_only_in_plan_mode(self):
         manager = ChatManager.__new__(ChatManager)
         tools = [
-            {"type": "function", "function": {"name": "plan"}},
+            {"type": "function", "function": {"name": "enter_plan_mode"}},
+            {"type": "function", "function": {"name": "ask_user_question"}},
+            {"type": "function", "function": {"name": "exit_plan_mode"}},
             {"type": "function", "function": {"name": "read"}},
             {"type": "function", "function": {"name": "edit"}},
             {"type": "function", "function": {"name": "shell"}},
@@ -483,8 +512,8 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
             for tool in manager._filter_plan_tools_for_mode(tools, "plan")
         }
 
-        self.assertEqual(normal_names, {"plan", "read", "edit", "shell"})
-        self.assertEqual(plan_names, {"plan", "read"})
+        self.assertEqual(normal_names, {"enter_plan_mode", "read", "edit", "shell"})
+        self.assertEqual(plan_names, {"ask_user_question", "exit_plan_mode", "read"})
 
     async def test_attached_runtime_context_lists_active_task_without_internal_ids(self):
         task_service = ActiveTaskService()
@@ -508,16 +537,17 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
 
         messages = manager._build_prompt_messages(conversation, [])
 
-        self.assertIn("Active Conversation Task", messages[1]["content"])
-        self.assertIn("Task detail:", messages[1]["content"])
-        self.assertIn("x" * 120, messages[1]["content"])
-        self.assertIn("1. [pending] 读取实现", messages[1]["content"])
-        self.assertIn("核对任务持久化与分支注入", messages[1]["content"])
-        self.assertIn("2. [pending] 验证行为", messages[1]["content"])
-        self.assertIn("pass `step`", messages[1]["content"])
-        self.assertNotIn("taskgen_", messages[1]["content"])
-        self.assertNotIn("task_id", messages[1]["content"])
-        self.assertNotIn("x" * 200, messages[1]["content"])
+        runtime_prompt = _system_text(messages)
+        self.assertIn("Active Conversation Task", runtime_prompt)
+        self.assertIn("Task detail:", runtime_prompt)
+        self.assertIn("x" * 120, runtime_prompt)
+        self.assertIn("1. [pending] 读取实现", runtime_prompt)
+        self.assertIn("核对任务持久化与分支注入", runtime_prompt)
+        self.assertIn("2. [pending] 验证行为", runtime_prompt)
+        self.assertIn("pass `step`", runtime_prompt)
+        self.assertNotIn("taskgen_", runtime_prompt)
+        self.assertNotIn("task_id", runtime_prompt)
+        self.assertNotIn("x" * 200, runtime_prompt)
 
     async def test_terminal_task_outcome_preserves_sibling_progress_for_final_model_round(self):
         task_service = ActiveTaskService()
@@ -805,16 +835,33 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_persisted_task_tool_results_use_raw_payload_for_runtime_outcomes(self):
         task_service = ActiveTaskService()
-        with tempfile.TemporaryDirectory() as temp_dir:
-            tool_manager = type("ToolManager", (), {
-                "tool_result_store": ToolResultStorage(str(Path(temp_dir) / "tool-results")),
-            })()
+        class FakeChatRepository:
+            persistence = None
+            calls = []
+
+            def ensure_conversation(self, *args, **kwargs):
+                return None
+
+            def ensure_node(self, *args, **kwargs):
+                return None
+
+            def tool_call_exists(self, conversation_id, tool_call_id):
+                return any(call.get("tool_call_id") == tool_call_id for call in self.calls)
+
+            def add_tool_call(self, *args, **kwargs):
+                self.calls.append(kwargs)
+                return kwargs.get("tool_call_id")
+
+            def add_tool_result(self, *args, **kwargs):
+                return "result-persisted-step"
+
+        with tempfile.TemporaryDirectory():
             manager = ChatManager(
                 model_manager=None,
                 storage=self.FakeStorage(),
                 prompts=self.FakePromptStorage(),
-                tool_manager=tool_manager,
                 task_service=task_service,
+                chat_repository=FakeChatRepository(),
             )
             conversation = manager.create_conversation("title")
             conversation_id = conversation.metadata["id"]
@@ -1161,7 +1208,7 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
         conversation = manager.create_conversation("title")
 
         messages = manager._build_prompt_messages(conversation, [])
-        runtime_prompt = messages[1]["content"]
+        runtime_prompt = _system_text(messages)
 
         self.assertIn("there is no active conversation task", runtime_prompt)
         self.assertIn("pass `step`", runtime_prompt)
@@ -1200,9 +1247,10 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
             task_context_mode="detached",
         )
 
-        self.assertNotIn("Active Conversation Task", messages[1]["content"])
-        self.assertNotIn("Task rules:", messages[1]["content"])
-        self.assertNotIn("pass `step`", messages[1]["content"])
+        runtime_prompt = _system_text(messages)
+        self.assertNotIn("Active Conversation Task", runtime_prompt)
+        self.assertNotIn("Task rules:", runtime_prompt)
+        self.assertNotIn("pass `step`", runtime_prompt)
         self.assertEqual([tool["function"]["name"] for tool in filtered], ["shell"])
         self.assertNotIn("step", filtered[0]["function"]["parameters"]["properties"])
 
@@ -1213,17 +1261,15 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
             prompts=self.FakePromptStorage(),
         )
         conversation = manager.create_conversation("title")
-        conversation.nodes[conversation.current_node_id]["user_message"] = {
-            "role": "user",
-            "content": "请开 subagent 检查这个问题",
-        }
+        _add_canonical_user_message(manager, conversation, "请开 subagent 检查这个问题")
 
         messages = manager._build_prompt_messages(conversation, [])
 
-        self.assertIn("`agent` with the appropriate action", messages[1]["content"])
-        self.assertIn("action `wait`", messages[1]["content"])
-        self.assertIn("Do not replace an explicit subagent request", messages[1]["content"])
-        self.assertNotIn("start_subagent", messages[1]["content"])
+        runtime_prompt = _system_text(messages)
+        self.assertIn("`agent` with the appropriate action", runtime_prompt)
+        self.assertIn("action `wait`", runtime_prompt)
+        self.assertIn("Do not replace an explicit subagent request", runtime_prompt)
+        self.assertNotIn("start_subagent", runtime_prompt)
 
     def test_create_conversation_persists_initial_multi_agent_mode(self):
         manager = ChatManager(
@@ -1236,7 +1282,7 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(conversation.metadata["multi_agent_mode"], "proactive")
         messages = manager._build_prompt_messages(conversation, [])
-        self.assertIn("You may proactively delegate", messages[1]["content"])
+        self.assertIn("You may proactively delegate", _system_text(messages))
 
     def test_clarification_turn_inherits_explicit_subagent_request(self):
         manager = ChatManager(
@@ -1245,16 +1291,8 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
             prompts=self.FakePromptStorage(),
         )
         conversation = manager.create_conversation("title")
-        first = NodeManager.create_node(
-            Message({"role": Role.USER, "content": "开 subagent 计算几个积分"}),
-            parent_id=conversation.current_node_id,
-        )
-        conversation.add_node(first, parent_id=conversation.current_node_id)
-        second = NodeManager.create_node(
-            Message({"role": Role.USER, "content": "计算几个随机的积分"}),
-            parent_id=conversation.current_node_id,
-        )
-        conversation.add_node(second, parent_id=conversation.current_node_id)
+        _append_canonical_turn(manager, conversation, "开 subagent 计算几个积分")
+        _append_canonical_turn(manager, conversation, "计算几个随机的积分")
 
         messages = manager._build_prompt_messages(conversation, [])
         inherited_text = manager._multi_agent_intent_text(conversation, "计算几个随机的积分")
@@ -1267,7 +1305,7 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
             mode,
         )
 
-        self.assertIn("`agent` with the appropriate action", messages[1]["content"])
+        self.assertIn("`agent` with the appropriate action", _system_text(messages))
         self.assertEqual(mode, "explicit_request_only")
         self.assertEqual([tool["function"]["name"] for tool in tools], ["agent", "shell"])
 
@@ -1318,17 +1356,8 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
             prompts=self.FakePromptStorage(),
         )
         conversation = manager.create_conversation("title")
-        first = NodeManager.create_node(
-            Message({"role": Role.USER, "content": "请用 subagent 检查这个实现"}),
-            parent_id=conversation.current_node_id,
-        )
-        conversation.add_node(first, parent_id=conversation.current_node_id)
-        first["assistant_message"] = Message({"role": Role.ASSISTANT, "content": "可以，具体检查什么？"})
-        second = NodeManager.create_node(
-            Message({"role": Role.USER, "content": "继续"}),
-            parent_id=conversation.current_node_id,
-        )
-        conversation.add_node(second, parent_id=conversation.current_node_id)
+        _append_canonical_turn(manager, conversation, "请用 subagent 检查这个实现", "可以，具体检查什么？")
+        _append_canonical_turn(manager, conversation, "继续")
 
         inherited_text = manager._multi_agent_intent_text(conversation, "继续")
         mode = manager._resolve_multi_agent_mode(inherited_text, conversation.metadata)
@@ -1361,7 +1390,7 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(loaded)
         self.assertEqual(loaded.metadata["multi_agent_mode"], "proactive")
         messages = manager._build_prompt_messages(loaded, [])
-        self.assertIn("You may proactively delegate", messages[1]["content"])
+        self.assertIn("You may proactively delegate", _system_text(messages))
         tools = manager._filter_agent_tools_for_mode(
             [
                 {"type": "function", "function": {"name": "agent"}},
@@ -1393,7 +1422,7 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(provider.messages)
         self.assertIn("# ChatTree Core Prompt", provider.messages[0]["content"])
-        self.assertIn("Runtime mode: side question (/btw)", provider.messages[1]["content"])
+        self.assertIn("Runtime mode: side question (/btw)", _system_text(provider.messages))
         self.assertEqual(provider.messages[-1]["content"], "summarize this")
 
 
@@ -1467,6 +1496,23 @@ class StreamChunkRoutingTests(unittest.TestCase):
         self.assertEqual(payload["child_status"], "running")
         self.assertEqual(payload["child_summary"], "检查实现")
         self.assertEqual(payload["payload"]["run_id"], "run-child")
+
+    def test_chunk_preserves_permission_mode_change(self):
+        chunk = {
+            "status": StreamStatus.CONTENT,
+            "content": "",
+            "node_id": "node-plan",
+            "run_id": "run-plan",
+            "conversation_id": "conversation-1",
+            "event_type": "permission_mode_changed",
+            "tool_permission_mode": "modify_only",
+            "tokens_used": 0,
+        }
+
+        payload = messages_route.build_stream_chunk_data(chunk, "conversation-1")
+
+        self.assertEqual(payload["event_type"], "permission_mode_changed")
+        self.assertEqual(payload["tool_permission_mode"], "modify_only")
 
 
 class SlashRuntimeDispatchTests(unittest.IsolatedAsyncioTestCase):
@@ -1612,7 +1658,7 @@ class SlashRuntimeDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(runs[0]["target_node_id"])
         self.assertIn("summarize context", chat.kwargs["content"])
         self.assertEqual(chat.kwargs["parent_node_id"], "node-1")
-        self.assertTrue(any('"target_node_id": null' in event for event in events))
+        self.assertTrue(any('"type": "transcript_patch"' in event for event in events))
         self.assertTrue(events[-1].strip().endswith("[DONE]"))
 
     async def test_status_slash_runs_as_direct_response_without_chat_stream(self):
@@ -1630,8 +1676,7 @@ class SlashRuntimeDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(runs), 1)
         self.assertEqual(runs[0]["kind"], "direct_response")
         self.assertIsNone(runs[0]["target_node_id"])
-        self.assertTrue(any('"status": "content"' in event for event in events))
-        self.assertTrue(any("ChatTree" in event for event in events))
+        self.assertTrue(any('"type": "transcript_patch"' in event for event in events))
         self.assertTrue(events[-1].strip().endswith("[DONE]"))
 
 
@@ -1727,634 +1772,9 @@ class RunLifecycleContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manager.kwargs["parent_node_id"], "branch-anchor-1")
 
 
-class TaskNotificationTests(unittest.IsolatedAsyncioTestCase):
-    class FakeConversation:
-        current_provider = "fake"
-        current_model = "model"
-        metadata = {}
-
-    class FakeProvider:
-        def __init__(self, *, fail: bool = False):
-            self.fail = fail
-
-        async def generate_response_stream(self, **kwargs):
-            if self.fail:
-                yield {"status": StreamStatus.ERROR, "error": "provider failed"}
-                return
-            yield {"status": StreamStatus.CONTENT, "content": "subagent answer"}
-            yield {"status": StreamStatus.COMPLETE, "content": "", "tokens_used": 0}
-
-    class FakeModelManager:
-        def __init__(self, provider):
-            self.provider = provider
-            self.model_list = {"fake": ["model"]}
-
-        def get_model(self, provider_id, stream=False):
-            return self.provider
-
-    class FakeChatManager:
-        tool_manager = None
-
-        def __init__(self, provider):
-            self.model_manager = TaskNotificationTests.FakeModelManager(provider)
-
-        def get_conversation(self, conversation_id):
-            return TaskNotificationTests.FakeConversation()
-
-        def _provider_for_model(self, model_id):
-            return "fake"
-
-    def _executor(self, run_manager, provider, mailbox=None):
-        registry = CapabilityRegistry()
-        registry.add_agents([
-            AgentDefinition(
-                name="implementer",
-                system_prompt="Implementer body",
-                provider_id="fake",
-                model_id="model",
-            )
-        ])
-        return SubagentExecutor(
-            chat_manager=self.FakeChatManager(provider),
-            run_manager=run_manager,
-            capability_registry=registry,
-            mailbox=mailbox,
-        )
-
-    async def test_completed_subagent_enqueues_pending_task_notification_once(self):
-        run_manager = RunManager()
-        notifications = install_notification_service(run_manager)
-        executor = self._executor(run_manager, self.FakeProvider())
-        run = await run_manager.create_run(
-            conversation_id="conversation-1",
-            kind=RunKind.SUBAGENT,
-            anchor_node_id="node-1",
-            summary="implementer: inspect",
-            metadata={
-                "agent_name": "implementer",
-                "delegated_task": "inspect",
-                "slash_command": {"original_input": "/fork inspect"},
-                "task_outcome": {
-                    "kind": "run_finished",
-                    "task_status": "completed",
-                    "step": 2,
-                    "step_status": "completed",
-                    "run_status": "completed",
-                },
-            },
-        )
-
-        await executor._produce(
-            run_id=run.run_id,
-            conversation_id="conversation-1",
-            agent_name="implementer",
-            input_data="inspect",
-            parent_node_id="node-1",
-            created_by_run_id=None,
-            cancellation_parent_run_id=None,
-            provider_id=None,
-            model_id=None,
-            permission_mode=None,
-            workspace=None,
-        )
-        await executor._publish_task_notification(run.run_id, "completed", "duplicate")
-
-        pending = notifications.list_for_conversation("conversation-1")
-        self.assertEqual(len(pending), 1)
-        self.assertEqual(pending[0]["source_run_id"], run.run_id)
-        self.assertEqual(pending[0]["source_run_kind"], "subagent")
-        self.assertEqual(pending[0]["payload"]["source_status"], "completed")
-        self.assertEqual(pending[0]["payload"]["delegated_task"], "inspect")
-        self.assertEqual(pending[0]["payload"]["original_slash_input"], "/fork inspect")
-        self.assertEqual(pending[0]["payload"]["task_outcome"]["task_status"], "completed")
-        self.assertIn("duplicate", pending[0]["content"])
-        from backend.core.notifications import format_task_notification_content
-        wrapped = format_task_notification_content(pending[0])
-        self.assertIn('"delegated_task": "inspect"', wrapped)
-        self.assertIn('"/fork inspect"', wrapped)
-        self.assertIn('"task_status": "completed"', wrapped)
-
-    async def test_subagent_tool_execution_uses_anchor_node_id_for_tool_context(self):
-        class ToolCallingProvider:
-            def __init__(self):
-                self.calls = 0
-
-            async def generate_response_stream(self, **kwargs):
-                self.calls += 1
-                if self.calls == 1:
-                    yield {
-                        "status": StreamStatus.COMPLETE,
-                        "content": "",
-                        "tool_calls": [
-                            {
-                                "id": "call-1",
-                                "type": "function",
-                                "function": {"name": "read", "arguments": "{}"},
-                            }
-                        ],
-                    }
-                    return
-                yield {"status": StreamStatus.CONTENT, "content": "done"}
-                yield {"status": StreamStatus.COMPLETE, "content": "", "tokens_used": 0}
-
-        class RecordingChatManager(self.FakeChatManager):
-            def __init__(self, provider):
-                super().__init__(provider)
-                self.seen_node_ids: list[str] = []
-                self.seen_context_node_ids: list[str] = []
-
-            def _merge_tool_call_lists(self, existing, incoming):
-                return list(existing) + list(incoming)
-
-            async def _execute_tool_calls(self, tool_calls, **kwargs):
-                self.seen_node_ids.append(kwargs["node_id"])
-                self.seen_context_node_ids.append(kwargs["run_context"]["node_id"])
-                return [{
-                    "role": "tool",
-                    "name": "read",
-                    "tool_call_id": "call-1",
-                    "content": "{}",
-                }]
-
-            def _apply_round_tool_result_budget(self, tool_messages):
-                return tool_messages
-
-        run_manager = RunManager()
-        registry = CapabilityRegistry()
-        registry.add_agents([
-            AgentDefinition(
-                name="implementer",
-                system_prompt="Implementer body",
-                provider_id="fake",
-                model_id="model",
-                tools=["read"],
-            )
-        ])
-        chat_manager = RecordingChatManager(ToolCallingProvider())
-        executor = SubagentExecutor(
-            chat_manager=chat_manager,
-            run_manager=run_manager,
-            capability_registry=registry,
-        )
-        run = await run_manager.create_run(
-            conversation_id="conversation-1",
-            kind=RunKind.SUBAGENT,
-            anchor_node_id="node-anchor-1",
-            summary="implementer: inspect",
-            metadata={"agent_name": "implementer"},
-        )
-
-        await executor._produce(
-            run_id=run.run_id,
-            conversation_id="conversation-1",
-            agent_name="implementer",
-            input_data="inspect",
-            parent_node_id="node-anchor-1",
-            created_by_run_id=None,
-            cancellation_parent_run_id=None,
-            provider_id=None,
-            model_id=None,
-            permission_mode="modify_only",
-            workspace=None,
-        )
-
-        self.assertEqual(chat_manager.seen_node_ids, ["node-anchor-1"])
-        self.assertEqual(chat_manager.seen_context_node_ids, ["node-anchor-1"])
-
-    async def test_failed_subagent_enqueues_failed_task_notification(self):
-        run_manager = RunManager()
-        notifications = install_notification_service(run_manager)
-        executor = self._executor(run_manager, self.FakeProvider(fail=True))
-        run = await run_manager.create_run(
-            conversation_id="conversation-1",
-            kind=RunKind.SUBAGENT,
-            anchor_node_id="node-1",
-            summary="implementer: inspect",
-            metadata={"agent_name": "implementer"},
-        )
-
-        await executor._produce(
-            run_id=run.run_id,
-            conversation_id="conversation-1",
-            agent_name="implementer",
-            input_data="inspect",
-            parent_node_id="node-1",
-            created_by_run_id=None,
-            cancellation_parent_run_id=None,
-            provider_id=None,
-            model_id=None,
-            permission_mode=None,
-            workspace=None,
-        )
-
-        pending = notifications.list_for_conversation("conversation-1")
-        self.assertEqual(len(pending), 1)
-        self.assertEqual(pending[0]["payload"]["source_status"], "failed")
-        self.assertIn("provider failed", pending[0]["content"])
-
-    async def test_workflow_child_subagent_does_not_enqueue_notification(self):
-        run_manager = RunManager()
-        notifications = install_notification_service(run_manager)
-        executor = self._executor(run_manager, self.FakeProvider())
-        run = await run_manager.create_run(
-            conversation_id="conversation-1",
-            kind=RunKind.SUBAGENT,
-            anchor_node_id="node-1",
-            created_by_run_id="workflow-1",
-            cancellation_parent_run_id="workflow-1",
-            summary="workflow-worker: inspect",
-            metadata={"agent_name": "workflow-worker"},
-        )
-
-        await executor._produce(
-            run_id=run.run_id,
-            conversation_id="conversation-1",
-            agent_name="implementer",
-            input_data="inspect",
-            parent_node_id="node-1",
-            created_by_run_id="workflow-1",
-            cancellation_parent_run_id="workflow-1",
-            provider_id=None,
-            model_id=None,
-            permission_mode=None,
-            workspace=None,
-        )
-
-        self.assertEqual(notifications.list_for_conversation("conversation-1"), [])
-
-    async def test_parented_silent_subagent_suppresses_notifications(self):
-        run_manager = RunManager()
-        notifications = install_notification_service(run_manager)
-        mailbox = AgentMailbox()
-        executor = self._executor(run_manager, self.FakeProvider(), mailbox=mailbox)
-        run = await run_manager.create_run(
-            conversation_id="conversation-1",
-            kind=RunKind.SUBAGENT,
-            anchor_node_id="node-1",
-            created_by_run_id="chat-1",
-            cancellation_parent_run_id=None,
-            summary="implementer: inspect",
-            metadata={"agent_name": "implementer", "delivery_policy": "silent"},
-        )
-
-        await executor._produce(
-            run_id=run.run_id,
-            conversation_id="conversation-1",
-            agent_name="implementer",
-            input_data="inspect",
-            parent_node_id="node-1",
-            created_by_run_id="chat-1",
-            cancellation_parent_run_id=None,
-            provider_id=None,
-            model_id=None,
-            permission_mode=None,
-            workspace=None,
-        )
-
-        messages = await mailbox.list_pending_notifications("conversation-1")
-        self.assertEqual(notifications.list_for_conversation("conversation-1"), [])
-        self.assertEqual(messages, [])
-
-    async def test_parented_auto_subagent_creates_unbound_task_notification(self):
-        run_manager = RunManager()
-        notifications = install_notification_service(run_manager)
-        mailbox = AgentMailbox()
-        executor = self._executor(run_manager, self.FakeProvider(), mailbox=mailbox)
-        parent = await run_manager.create_run(
-            conversation_id="conversation-1",
-            kind=RunKind.CHAT,
-            anchor_node_id="node-1",
-            summary="chat",
-        )
-        run = await run_manager.create_run(
-            conversation_id="conversation-1",
-            kind=RunKind.SUBAGENT,
-            anchor_node_id="node-1",
-            created_by_run_id=parent.run_id,
-            cancellation_parent_run_id=None,
-            summary="implementer: inspect",
-            metadata={"agent_name": "implementer", "delivery_policy": "auto"},
-        )
-
-        await executor._produce(
-            run_id=run.run_id,
-            conversation_id="conversation-1",
-            agent_name="implementer",
-            input_data="inspect",
-            parent_node_id="node-1",
-            created_by_run_id=parent.run_id,
-            cancellation_parent_run_id=None,
-            provider_id=None,
-            model_id=None,
-            permission_mode=None,
-            workspace=None,
-        )
-
-        messages = await mailbox.list_pending_notifications("conversation-1")
-        pending = notifications.list_for_conversation("conversation-1")
-        self.assertEqual(messages, [])
-        self.assertEqual(len(pending), 1)
-        self.assertEqual(pending[0]["source_run_id"], run.run_id)
-
-    async def test_workflow_completion_enqueues_task_notification(self):
-        class FakeRunner:
-            async def run(self, **kwargs):
-                return "workflow answer"
-
-        run_manager = RunManager()
-        notifications = install_notification_service(run_manager)
-        manager = WorkflowManager(
-            run_manager=run_manager,
-            subagent_executor=self._executor(run_manager, self.FakeProvider()),
-            runner=FakeRunner(),
-        )
-        run = await run_manager.create_run(
-            conversation_id="conversation-1",
-            kind=RunKind.WORKFLOW,
-            anchor_node_id="node-1",
-            summary="Dynamic workflow",
-            metadata={
-                "delegated_task": "return 1",
-                "slash_command": {"original_input": "/workflow return 1"},
-            },
-        )
-
-        await manager._produce(
-            run_id=run.run_id,
-            conversation_id="conversation-1",
-            script="return 1",
-            args={},
-            parent_node_id="node-1",
-            created_by_run_id=None,
-            cancellation_parent_run_id=None,
-            budget={"max_seconds": 10, "max_parallel": 1},
-        )
-
-        pending = notifications.list_for_conversation("conversation-1")
-        self.assertEqual(len(pending), 1)
-        self.assertEqual(pending[0]["source_run_kind"], "workflow")
-        self.assertEqual(pending[0]["payload"]["source_status"], "completed")
-        self.assertEqual(pending[0]["payload"]["delegated_task"], "return 1")
-        self.assertEqual(pending[0]["payload"]["original_slash_input"], "/workflow return 1")
-        self.assertIn("workflow answer", pending[0]["content"])
-
-    async def test_subagent_stop_interrupts_pending_tool_approval_wait(self):
-        approval_requested = asyncio.Event()
-        tool_wait_cancelled = asyncio.Event()
-
-        class ToolCallingProvider:
-            async def generate_response_stream(self, **kwargs):
-                yield {
-                    "status": StreamStatus.COMPLETE,
-                    "content": "",
-                    "tool_calls": [
-                        {
-                            "id": "call-1",
-                            "type": "function",
-                            "function": {"name": "read", "arguments": "{}"},
-                        }
-                    ],
-                }
-
-        class WaitingToolChatManager(self.FakeChatManager):
-            def __init__(self, provider):
-                super().__init__(provider)
-                self.tool_manager = type(
-                    "FakeToolManager",
-                    (),
-                    {
-                        "get_openai_tools": lambda _self, **_kwargs: [
-                            {"type": "function", "function": {"name": "read"}}
-                        ]
-                    },
-                )()
-
-            def _merge_tool_call_lists(self, existing, incoming):
-                return list(existing) + list(incoming)
-
-            async def _execute_tool_calls(self, tool_calls, **kwargs):
-                await kwargs["emit_event"]({
-                    "event_type": "tool_approval_request",
-                    "approval": {"id": "approval-1", "status": "pending"},
-                })
-                approval_requested.set()
-                try:
-                    await asyncio.Event().wait()
-                except asyncio.CancelledError:
-                    tool_wait_cancelled.set()
-                    raise
-
-            def _apply_round_tool_result_budget(self, tool_messages):
-                return tool_messages
-
-            def _tool_event_stream_chunk(self, event, node_id, conversation_id):
-                payload = dict(event)
-                payload.update({
-                    "status": "content",
-                    "node_id": node_id,
-                    "conversation_id": conversation_id,
-                })
-                return payload
-
-        run_manager = RunManager()
-        registry = CapabilityRegistry()
-        registry.add_agents([
-            AgentDefinition(
-                name="implementer",
-                system_prompt="Implementer body",
-                provider_id="fake",
-                model_id="model",
-                tools=["read"],
-            )
-        ])
-        executor = SubagentExecutor(
-            chat_manager=WaitingToolChatManager(ToolCallingProvider()),
-            run_manager=run_manager,
-            capability_registry=registry,
-        )
-        run = await run_manager.create_run(
-            conversation_id="conversation-1",
-            kind=RunKind.SUBAGENT,
-            anchor_node_id="slash-node-1",
-            summary="implementer: inspect",
-            metadata={"agent_name": "implementer"},
-        )
-        task = asyncio.create_task(executor._produce(
-            run_id=run.run_id,
-            conversation_id="conversation-1",
-            agent_name="implementer",
-            input_data="inspect",
-            parent_node_id="slash-node-1",
-            created_by_run_id=None,
-            cancellation_parent_run_id=None,
-            provider_id=None,
-            model_id=None,
-            permission_mode="ask_always",
-            workspace=None,
-        ))
-        try:
-            await asyncio.wait_for(approval_requested.wait(), timeout=1)
-            await executor.stop(run.run_id)
-            await asyncio.wait_for(task, timeout=0.5)
-        finally:
-            if not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-
-        self.assertTrue(tool_wait_cancelled.is_set())
-        self.assertEqual(run_manager.get_run(run.run_id)["status"], "cancelled")
-
-    async def test_subagent_marks_run_waiting_during_tool_approval(self):
-        approval_requested = asyncio.Event()
-        release_tools = asyncio.Event()
-        statuses: list[str] = []
-
-        class ToolCallingProvider:
-            async def generate_response_stream(self, **kwargs):
-                yield {
-                    "status": StreamStatus.COMPLETE,
-                    "content": "",
-                    "tool_calls": [
-                        {
-                            "id": "call-1",
-                            "type": "function",
-                            "function": {"name": "read", "arguments": "{}"},
-                        }
-                    ],
-                }
-
-        class WaitingToolChatManager(self.FakeChatManager):
-            def __init__(self, provider, run_manager, run_id_getter):
-                super().__init__(provider)
-                self.run_manager = run_manager
-                self.run_id_getter = run_id_getter
-                self.tool_manager = type(
-                    "FakeToolManager",
-                    (),
-                    {
-                        "get_openai_tools": lambda _self, **_kwargs: [
-                            {"type": "function", "function": {"name": "read"}}
-                        ]
-                    },
-                )()
-
-            def _merge_tool_call_lists(self, existing, incoming):
-                return list(existing) + list(incoming)
-
-            async def _execute_tool_calls(self, tool_calls, **kwargs):
-                await kwargs["emit_event"]({
-                    "event_type": "tool_approval_request",
-                    "approval": {"id": "approval-1", "status": "pending"},
-                })
-                statuses.append(self.run_manager.get_run(self.run_id_getter())["status"])
-                approval_requested.set()
-                await release_tools.wait()
-                await kwargs["emit_event"]({
-                    "event_type": "tool_approval_result",
-                    "approval": {"id": "approval-1", "status": "denied"},
-                })
-                statuses.append(self.run_manager.get_run(self.run_id_getter())["status"])
-                return [{
-                    "role": "tool",
-                    "name": "read",
-                    "tool_call_id": "call-1",
-                    "content": "{}",
-                }]
-
-            def _apply_round_tool_result_budget(self, tool_messages):
-                return tool_messages
-
-            def _tool_event_stream_chunk(self, event, node_id, conversation_id):
-                payload = dict(event)
-                payload.update({
-                    "status": "content",
-                    "node_id": node_id,
-                    "conversation_id": conversation_id,
-                })
-                return payload
-
-        run_manager = RunManager()
-        run_id_holder: dict[str, str] = {}
-        registry = CapabilityRegistry()
-        registry.add_agents([
-            AgentDefinition(
-                name="implementer",
-                system_prompt="Implementer body",
-                provider_id="fake",
-                model_id="model",
-                tools=["read"],
-                max_tool_rounds=1,
-            )
-        ])
-        executor = SubagentExecutor(
-            chat_manager=WaitingToolChatManager(
-                ToolCallingProvider(),
-                run_manager,
-                lambda: run_id_holder["run_id"],
-            ),
-            run_manager=run_manager,
-            capability_registry=registry,
-        )
-        run = await run_manager.create_run(
-            conversation_id="conversation-1",
-            kind=RunKind.SUBAGENT,
-            anchor_node_id="slash-node-1",
-            summary="implementer: inspect",
-            metadata={"agent_name": "implementer"},
-        )
-        run_id_holder["run_id"] = run.run_id
-        task = asyncio.create_task(executor._produce(
-            run_id=run.run_id,
-            conversation_id="conversation-1",
-            agent_name="implementer",
-            input_data="inspect",
-            parent_node_id="slash-node-1",
-            created_by_run_id=None,
-            cancellation_parent_run_id=None,
-            provider_id=None,
-            model_id=None,
-            permission_mode="ask_always",
-            workspace=None,
-        ))
-        await asyncio.wait_for(approval_requested.wait(), timeout=1)
-        release_tools.set()
-        await asyncio.wait_for(task, timeout=1)
-
-        self.assertEqual(statuses[:2], ["waiting_approval", "running"])
-
-    async def test_btw_and_status_do_not_enqueue_task_notifications(self):
-        class FakeChatManager:
-            async def send_message_stream(self, **kwargs):
-                yield {
-                    "status": "complete",
-                    "content": "side answer",
-                    "node_id": None,
-                    "target_node_id": None,
-                    "run_id": kwargs["run_id"],
-                }
-
-        run_manager = RunManager()
-        notifications = install_notification_service(run_manager)
-        await _produce_message_events(
-            SendMessageRequest(content="/btw summarize context", parent_node_id="node-1"),
-            FakeChatManager(),
-            run_manager,
-        )
-        await _produce_message_events(
-            SendMessageRequest(content="/status", parent_node_id="node-1"),
-            FakeChatManager(),
-            run_manager,
-        )
-
-        self.assertEqual(notifications.list_for_conversation("conversation-1"), [])
-
-
 class DetachedSlashStopRouteTests(unittest.TestCase):
     class FakeChatManager:
-        storage = type("FakeStorage", (), {"index": {"conversation-1": True}})()
+        storage = object()
 
         def __init__(self):
             self.stopped_nodes: list[str] = []
@@ -2400,103 +1820,6 @@ class DetachedSlashStopRouteTests(unittest.TestCase):
         app.dependency_overrides[get_subagent_executor] = lambda: subagent_executor
         app.dependency_overrides[get_workflow_manager] = lambda: workflow_manager
         return TestClient(app)
-
-    def test_stop_stream_message_stops_detached_subagent_by_anchor_node(self):
-        run_manager = RunManager()
-        run = asyncio.run(run_manager.create_run(
-            conversation_id="conversation-1",
-            kind=RunKind.SUBAGENT,
-            anchor_node_id="slash-node-1",
-            summary="implementer: inspect",
-        ))
-        subagent_executor = self.FakeSubagentExecutor()
-        client = self._client(
-            run_manager,
-            self.FakeChatManager(),
-            subagent_executor,
-            self.FakeWorkflowManager(),
-        )
-
-        response = client.post("/conversations/conversation-1/messages/slash-node-1/stream/stop")
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(subagent_executor.stopped_run_id, run.run_id)
-        self.assertEqual(run_manager.get_run(run.run_id)["status"], "stopping")
-
-    def test_stop_stream_message_stops_detached_workflow_by_anchor_node(self):
-        run_manager = RunManager()
-        run = asyncio.run(run_manager.create_run(
-            conversation_id="conversation-1",
-            kind=RunKind.WORKFLOW,
-            anchor_node_id="slash-node-1",
-            summary="Dynamic workflow",
-        ))
-        workflow_manager = self.FakeWorkflowManager()
-        client = self._client(
-            run_manager,
-            self.FakeChatManager(),
-            self.FakeSubagentExecutor(),
-            workflow_manager,
-        )
-
-        response = client.post("/conversations/conversation-1/messages/slash-node-1/stream/stop")
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(workflow_manager.stopped_run_id, run.run_id)
-        self.assertEqual(run_manager.get_run(run.run_id)["status"], "stopping")
-
-    def test_stop_stream_message_stops_workflow_step_by_anchor_node(self):
-        run_manager = RunManager()
-        run = asyncio.run(run_manager.create_run(
-            conversation_id="conversation-1",
-            kind=RunKind.WORKFLOW_STEP,
-            anchor_node_id="slash-node-1",
-            summary="step: inspect",
-        ))
-        subagent_executor = self.FakeSubagentExecutor()
-        client = self._client(
-            run_manager,
-            self.FakeChatManager(),
-            subagent_executor,
-            self.FakeWorkflowManager(),
-        )
-
-        response = client.post("/conversations/conversation-1/messages/slash-node-1/stream/stop")
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(subagent_executor.stopped_run_id, run.run_id)
-        self.assertEqual(run_manager.get_run(run.run_id)["status"], "stopping")
-
-    def test_stop_stream_message_stops_child_subagent_by_cancellation_parent(self):
-        run_manager = RunManager()
-        parent = asyncio.run(run_manager.create_run(
-            conversation_id="conversation-1",
-            kind=RunKind.CHAT,
-            target_node_id="assistant-node-1",
-            summary="parent chat",
-        ))
-        child = asyncio.run(run_manager.create_run(
-            conversation_id="conversation-1",
-            kind=RunKind.SUBAGENT,
-            anchor_node_id="assistant-node-1",
-            created_by_run_id=parent.run_id,
-            cancellation_parent_run_id=parent.run_id,
-            summary="child agent",
-        ))
-        subagent_executor = self.FakeSubagentExecutor()
-        client = self._client(
-            run_manager,
-            self.FakeChatManager(),
-            subagent_executor,
-            self.FakeWorkflowManager(),
-        )
-
-        response = client.post("/conversations/conversation-1/messages/assistant-node-1/stream/stop")
-
-        self.assertEqual(response.status_code, 200)
-        self.assertIn(child.run_id, subagent_executor.stopped_run_ids)
-        self.assertEqual(run_manager.get_run(parent.run_id)["status"], "stopping")
-        self.assertEqual(run_manager.get_run(child.run_id)["status"], "stopping")
 
     def test_stop_run_stops_child_subagent_by_cancellation_parent(self):
         run_manager = RunManager()
@@ -2562,6 +1885,14 @@ class AgentRolePromptTests(unittest.TestCase):
 class DummyChatManager:
     tool_manager = None
 
+    def _canonical_messages_by_node(self, conversation_id, node_ids):
+        return {
+            "node-1": [
+                {"role": Role.USER.value, "content": "父对话问题"},
+                {"role": Role.ASSISTANT.value, "content": "父对话回答"},
+            ]
+        }
+
 
 class DummyRunManager:
     pass
@@ -2582,7 +1913,7 @@ class RuntimePolicyTests(unittest.TestCase):
         system_text = "\n\n".join(message["content"] for message in messages if message["role"] == "system")
         self.assertIn("ChatTree", messages[0]["content"])
         self.assertIn("Worker body", messages[0]["content"])
-        self.assertIn("Runtime mode: workflow worker", messages[1]["content"])
+        self.assertIn("Runtime mode: workflow worker", system_text)
         self.assertIn("workflow", system_text.lower())
         self.assertIn("directive", system_text.lower())
         self.assertNotIn("# ChatTree Core Prompt", system_text)
@@ -2604,7 +1935,7 @@ class RuntimePolicyTests(unittest.TestCase):
         messages = executor._build_messages("custom-worker", "task", None)
         system_text = "\n\n".join(message["content"] for message in messages if message["role"] == "system")
         self.assertIn("Custom worker body", messages[0]["content"])
-        self.assertIn("Runtime mode: workflow worker", messages[1]["content"])
+        self.assertIn("Runtime mode: workflow worker", system_text)
         self.assertNotIn("pipeline(", system_text)
         self.assertIn("returned verbatim", system_text)
         self.assertIn("workflow", system_text.lower())
@@ -2625,7 +1956,7 @@ class RuntimePolicyTests(unittest.TestCase):
 
         system_text = "\n\n".join(message["content"] for message in messages if message["role"] == "system")
         self.assertIn("Reviewer worker body", messages[0]["content"])
-        self.assertIn("Runtime mode: subagent worker", messages[1]["content"])
+        self.assertIn("Runtime mode: subagent worker", system_text)
         self.assertIn("do not write report/output files", system_text.lower())
         self.assertNotIn("# ChatTree Core Prompt", system_text)
 
@@ -2636,18 +1967,12 @@ class RuntimePolicyTests(unittest.TestCase):
         ])
 
         class ParentConversation:
+            metadata = {"id": "parent-conversation"}
+
             def get_node_chain(self, node_id):
                 return [
-                    {
-                        "id": "root",
-                        "user_message": None,
-                        "assistant_message": None,
-                    },
-                    {
-                        "id": "node-1",
-                        "user_message": {"role": "user", "content": "父对话问题"},
-                        "assistant_message": {"role": "assistant", "content": "父对话回答"},
-                    },
+                    {"id": "root"},
+                    {"id": "node-1"},
                 ]
 
         executor = SubagentExecutor(

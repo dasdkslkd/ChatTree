@@ -235,11 +235,9 @@ def default_permission_rules() -> List[PermissionRule]:
         PermissionRule("default-allow-create-task", "allow", "tool", "create_task", source="default"),
         PermissionRule("default-allow-set-task-step", "allow", "tool", "set_task_step", source="default"),
         PermissionRule("default-allow-cancel-task", "allow", "tool", "cancel_task", source="default"),
-        PermissionRule("default-allow-plan", "allow", "tool", "plan", source="default"),
         PermissionRule("default-allow-enter-plan-mode", "allow", "tool", "enter_plan_mode", source="default"),
-        PermissionRule("default-allow-update-plan", "allow", "tool", "update_plan", source="default"),
-        PermissionRule("default-allow-exit-plan-mode", "allow", "tool", "exit_plan_mode", source="default"),
         PermissionRule("default-allow-ask-user-question", "allow", "tool", "ask_user_question", source="default"),
+        PermissionRule("default-allow-exit-plan-mode", "allow", "tool", "exit_plan_mode", source="default"),
         PermissionRule("default-allow-glob", "allow", "tool", "glob", source="default"),
         PermissionRule("default-allow-read", "allow", "tool", "read", source="default"),
         PermissionRule("default-allow-grep", "allow", "tool", "grep", source="default"),
@@ -307,7 +305,6 @@ _BUILTIN_READ_TOOLS = {
     "read_tool_result",
     "list_available_tools",
     "tools",
-    "plan",
     "glob",
     "read",
     "grep",
@@ -318,16 +315,14 @@ _PLAN_ALLOWED_TOOLS = {
     "read",
     "grep",
     "web",
-    "plan",
     "list_available_tools",
     "tools",
     "read_tool_result",
     "web_search",
     "fetch_url",
     "enter_plan_mode",
-    "update_plan",
-    "exit_plan_mode",
     "ask_user_question",
+    "exit_plan_mode",
 }
 
 
@@ -340,7 +335,7 @@ def _is_plan_allowed_tool(tool_name: str) -> bool:
 
 
 def _is_plan_control_tool(tool_name: str) -> bool:
-    return tool_name in {"enter_plan_mode", "update_plan", "exit_plan_mode", "ask_user_question"}
+    return tool_name in {"enter_plan_mode", "ask_user_question", "exit_plan_mode"}
 
 
 def _is_mutating_tool_call(tool_name: str, arguments: Dict[str, Any]) -> bool:

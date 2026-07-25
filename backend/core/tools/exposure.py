@@ -15,8 +15,10 @@ CANONICAL_CODING_TOOLS = {
     "edit",
     "shell",
     "agent",
-    "plan",
     "web",
+    "enter_plan_mode",
+    "ask_user_question",
+    "exit_plan_mode",
 }
 
 DISCOVERY_TOOLS = {"tools"}
@@ -37,10 +39,6 @@ INTERNAL_MODEL_TOOL_NAMES = {
     "interrupt_agent",
     "start_subagent",
     "start_workflow",
-    "enter_plan_mode",
-    "update_plan",
-    "exit_plan_mode",
-    "ask_user_question",
     "web_search",
     "fetch_url",
     "write",
@@ -246,8 +244,6 @@ def descriptor_for_tool_name(name: str) -> ToolDescriptor:
         return ToolDescriptor(name=name, category="code", capabilities=frozenset({"command"}), exposure_tags=frozenset({"coding"}))
     if name == "agent":
         return ToolDescriptor(name=name, category="agent", capabilities=frozenset({"agent"}), exposure_tags=frozenset({"coding"}))
-    if name == "plan":
-        return ToolDescriptor(name=name, category="plan", capabilities=frozenset({"plan"}), exposure_tags=frozenset({"coding", "plan_safe"}))
     if name == "web":
         return ToolDescriptor(name=name, category="web", capabilities=frozenset({"network_read"}), exposure_tags=frozenset({"coding", "plan_safe"}))
     if name == "tools":

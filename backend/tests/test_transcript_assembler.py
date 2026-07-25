@@ -298,6 +298,13 @@ def test_snapshot_keeps_plan_cards_at_tool_call_position(tmp_path):
         arguments={"question": "继续吗？"},
         call_index=1,
     )
+    repository.add_tool_result(
+        conversation_id,
+        node_id,
+        tool_result_id="result-question",
+        tool_call_id="call-question",
+        output=json.dumps({"plan_id": "plan-1", "status": "awaiting_question", "message": "ok"}, ensure_ascii=False),
+    )
     repository.add_tool_call(
         conversation_id,
         node_id,
@@ -317,6 +324,46 @@ def test_snapshot_keeps_plan_cards_at_tool_call_position(tmp_path):
     assert items[0]["blocks"][0]["tool_call_id"] == "call-before"
     assert items[1]["id"] == "plan-question:call-question"
     assert items[2]["blocks"][0]["tool_call_id"] == "call-after"
+
+
+def test_snapshot_renders_failed_plan_tools_as_process_tools(tmp_path):
+    persistence, repository = _repo(tmp_path)
+    conversation_id, node_id = _conversation(repository)
+    repository.add_tool_call(
+        conversation_id,
+        node_id,
+        tool_call_id="call-question-error",
+        name="ask_user_question",
+        arguments={"question": "继续吗？"},
+        call_index=0,
+    )
+    repository.add_tool_result(
+        conversation_id,
+        node_id,
+        tool_result_id="result-question-error",
+        tool_call_id="call-question-error",
+        output=json.dumps({"error": {"type": "invalid_arguments", "message": "active plan session is required"}}, ensure_ascii=False),
+    )
+    repository.add_tool_call(
+        conversation_id,
+        node_id,
+        tool_call_id="call-exit-error",
+        name="exit_plan_mode",
+        arguments={"plan": "计划"},
+        call_index=1,
+    )
+    repository.add_tool_result(
+        conversation_id,
+        node_id,
+        tool_result_id="result-exit-error",
+        tool_call_id="call-exit-error",
+        output=json.dumps({"error": {"type": "invalid_arguments", "message": "active plan session is required"}}, ensure_ascii=False),
+    )
+
+    items = _snapshot(persistence, conversation_id, node_id)["items"]
+
+    assert [item["type"] for item in items] == ["assistant_process"]
+    assert [block["tool_call_id"] for block in items[0]["blocks"]] == ["call-question-error", "call-exit-error"]
 
 
 def test_snapshot_uses_canonical_timeline_for_process_segments_around_plan_card(tmp_path):
@@ -353,6 +400,13 @@ def test_snapshot_uses_canonical_timeline_for_process_segments_around_plan_card(
         name="exit_plan_mode",
         arguments={"plan": "执行计划"},
         run_id=first_run,
+    )
+    repository.add_tool_result(
+        conversation_id,
+        node_id,
+        tool_result_id="result-exit",
+        tool_call_id="call-exit",
+        output=json.dumps({"plan_id": "plan-1", "status": "awaiting_approval", "message": "ok"}, ensure_ascii=False),
     )
     repository.add_message(
         conversation_id,
@@ -402,6 +456,13 @@ def test_live_patch_keeps_canonical_tool_card_when_stream_entries_exist(tmp_path
         name="exit_plan_mode",
         arguments={"plan": "plan"},
         run_id=run_id,
+    )
+    repository.add_tool_result(
+        conversation_id,
+        node_id,
+        tool_result_id="result-exit",
+        tool_call_id="call-exit",
+        output=json.dumps({"plan_id": "plan-1", "status": "awaiting_approval", "message": "ok"}, ensure_ascii=False),
     )
 
     patch = TranscriptAssembler(persistence).patch_session(run_id).feed({
@@ -578,6 +639,45 @@ def test_patch_streams_plain_text_as_process_content_until_complete(tmp_path):
         operation for operation in final["operations"]
         if operation["op"] == "upsert" and operation["item"]["id"] == "message:assistant-1"
     ]) == 1
+
+
+def test_patch_accumulates_plan_process_content_in_one_block(tmp_path):
+    persistence, repository = _repo(tmp_path)
+    conversation_id, node_id = _conversation(repository)
+    run_id = SQLiteRunRepository(persistence).create_run(
+        conversation_id,
+        kind="chat",
+        target_node_id=node_id,
+        summary="plan stream",
+    )
+    session = TranscriptAssembler(persistence).patch_session(run_id)
+    session.feed({
+        "status": "start",
+        "conversation_id": conversation_id,
+        "node_id": node_id,
+        "assistant_message_id": "assistant-plan",
+    })
+
+    first = session.feed({
+        "event_type": "process_content",
+        "conversation_id": conversation_id,
+        "node_id": node_id,
+        "content": "计划",
+    })
+    second = session.feed({
+        "event_type": "process_content",
+        "conversation_id": conversation_id,
+        "node_id": node_id,
+        "content": "内容",
+    })
+
+    first_process = next(operation["item"] for operation in first["operations"] if operation["item"]["type"] == "assistant_process")
+    second_process = next(operation["item"] for operation in second["operations"] if operation["item"]["type"] == "assistant_process")
+    assert len(first_process["blocks"]) == 1
+    assert first_process["blocks"][0]["content"] == "计划"
+    assert len(second_process["blocks"]) == 1
+    assert second_process["blocks"][0]["id"] == first_process["blocks"][0]["id"]
+    assert second_process["blocks"][0]["content"] == "计划内容"
 
 
 def test_complete_patch_uses_trailing_live_content_as_answer_before_sqlite_assistant_is_persisted(tmp_path):
