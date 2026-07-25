@@ -30,7 +30,7 @@ export function PlanQuestionCard({
   };
 
   return (
-    <div className="transcript-plan-question w-full my-2 flex flex-col items-start" role="listitem">
+    <div className="transcript-plan-question w-full flex flex-col items-start" role="listitem">
       <div
         className="flex max-w-[760px] w-full min-w-0 flex-col gap-3 rounded-md px-3 py-3 text-sm"
         style={{

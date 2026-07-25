@@ -265,7 +265,7 @@ class TranscriptAssembler:
         raw_status = str((stream or {}).get("status") or self._run_status(runs))
         use_live_stream = stream is not None and raw_status in {"running", "stopping", "finalizing", "stopped", "error"}
         stream_run_id = str((stream or {}).get("run_id") or "") or None
-        process_run_id: str | None = stream_run_id if use_live_stream else None
+        process_run_id: str | None = None
 
         def append_process_item() -> None:
             nonlocal process_blocks, process_sequence, process_run_id
@@ -286,7 +286,7 @@ class TranscriptAssembler:
             })
             process_blocks = []
             process_sequence += 1
-            process_run_id = stream_run_id if use_live_stream else None
+            process_run_id = None
 
         def append_process_block(block: dict[str, Any], run_id: str | None) -> None:
             nonlocal process_run_id

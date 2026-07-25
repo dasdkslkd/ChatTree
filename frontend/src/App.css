@@ -374,7 +374,7 @@
   width: min(100%, 760px);
   display: flex;
   align-items: center;
-  margin: 4px 0 0;
+  margin: 0;
   color: var(--fg-tertiary, rgba(251,247,244,0.55));
   font-size: 13px;
   line-height: 18px;
@@ -423,7 +423,7 @@
 .processed-blocks-shell.expanded {
   grid-template-rows: 1fr;
   opacity: 1;
-  margin: 3px 0 4px;
+  margin: 0;
 }
 
 .processed-blocks-inner {

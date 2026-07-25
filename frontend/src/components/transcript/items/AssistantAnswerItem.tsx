@@ -20,7 +20,7 @@ export function AssistantAnswerItem({ item, onCopy }: { item: AssistantAnswerTra
   };
 
   return (
-    <div className={cn('chat-message-row w-full flex flex-col group items-start my-2')} role="listitem">
+    <div className={cn('chat-message-row w-full flex flex-col group items-start')} role="listitem">
       <div className="flex flex-col max-w-full items-start w-full">
         <div
           className="max-w-full w-fit px-3 py-2 rounded-2xl leading-relaxed prose prose-sm max-w-none [&_p]:m-0 [&_p:not(:last-child)]:mb-2"

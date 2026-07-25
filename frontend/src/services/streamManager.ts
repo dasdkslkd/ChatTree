@@ -497,7 +497,7 @@ export class StreamManager {
     action: PlanActionKind,
     openStream: TranscriptPatchStreamFactory,
   ): Promise<void> {
-    const runId = `plan_action_${action}_${Date.now()}_${this.tempSeq++}`;
+    const runId = `client_plan_${action}_${Date.now()}_${this.tempSeq++}`;
     const abortController = new AbortController();
     const state = this.createState(
       runId,
@@ -505,7 +505,7 @@ export class StreamManager {
       abortController,
       null,
       nodeId,
-      'plan_action',
+      'chat',
       nodeId,
     );
     state.metadata = { plan_action: action };

@@ -43,7 +43,7 @@ export function UserMessageItem({
   const hasActions = Boolean(onCopy || onEdit || onDelete);
 
   return (
-    <div className="chat-message-row w-full my-2 flex flex-col group items-end" role="listitem">
+    <div className="chat-message-row w-full flex flex-col group items-end" role="listitem">
       <div className="flex flex-col max-w-full items-end">
         <div
           className="max-w-full w-fit px-3 py-2 rounded-2xl rounded-br-sm leading-relaxed prose prose-sm prose-invert max-w-none [&_p]:m-0 [&_p:not(:last-child)]:mb-2"

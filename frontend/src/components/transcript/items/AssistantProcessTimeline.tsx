@@ -2,7 +2,6 @@ import { useState } from 'react';
 import { Check, ChevronRight, Loader2, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { TranscriptItem } from '../../../types/transcript';
-import { formatProcessedDuration, getStreamingTimelineFoldState } from '../../../utils/assistantTimelineFolding';
 import MarkdownContent from '../../MarkdownContent';
 
 export type ToolRenderItem = {
@@ -22,7 +21,6 @@ export type ProcessRenderBlock =
 export type AssistantProcessRenderProps = {
   timeline: ProcessRenderBlock[];
   status: string | null;
-  duration: number;
   errorMessage: string | null;
   showStatusLabel?: boolean;
 };
@@ -135,7 +133,6 @@ function renderTimelineBlock(block: ProcessRenderBlock) {
 }
 
 export function AssistantProcessTimeline({
-  item,
   props,
 }: {
   item: TranscriptItem;
@@ -143,45 +140,16 @@ export function AssistantProcessTimeline({
 }) {
   const timeline = Array.isArray(props.timeline) ? props.timeline : [];
   const statusLabel = props.showStatusLabel === false ? null : getStreamStatusLabel(props.status, props.errorMessage);
-  const compactWithNextAnswer = Boolean((item as TranscriptItem & { compact_with_next_answer?: boolean }).compact_with_next_answer);
-  const foldState = getStreamingTimelineFoldState(
-    timeline,
-    [],
-    { allowProcessOnly: compactWithNextAnswer },
-  );
-  const [processExpanded, setProcessExpanded] = useState(foldState.processExpanded);
-  const visibleBlocks = foldState.canFoldProcess ? foldState.visibleBlocks : timeline;
-  const foldedContentBlocks = foldState.canFoldProcess && !processExpanded ? foldState.contentBlocks : [];
 
   return (
     <div className="contents">
-      <div className="w-full flex flex-col items-start my-2" role="listitem">
+      <div className="w-full flex flex-col items-start" role="listitem">
         <div className="flex flex-col items-start max-w-full w-full min-w-0">
-          {foldState.canFoldProcess && (
-            <div className={cn('processed-fold', processExpanded && 'expanded')}>
-              <button
-                type="button"
-                className="processed-fold-button"
-                aria-expanded={processExpanded}
-                onClick={() => setProcessExpanded((value) => !value)}
-              >
-                <span>{props.duration > 0 ? `已处理 ${formatProcessedDuration(props.duration) ?? ''}`.trim() : '已处理'}</span>
-                <ChevronRight className="processed-fold-chevron" />
-              </button>
+          <div className="processed-blocks-shell expanded">
+            <div className="processed-blocks-inner">
+              {timeline.map((block) => renderTimelineBlock(block))}
             </div>
-          )}
-          {(!foldState.canFoldProcess || processExpanded) && (
-            <div className={cn('processed-blocks-shell', processExpanded && 'expanded')} aria-hidden={foldState.canFoldProcess && !processExpanded}>
-              <div className="processed-blocks-inner">
-                {visibleBlocks.map((block) => renderTimelineBlock(block))}
-              </div>
-            </div>
-          )}
-          {foldedContentBlocks.length > 0 && (
-            <div className="w-full flex flex-col items-start">
-              {foldedContentBlocks.map((block) => renderTimelineBlock(block))}
-            </div>
-          )}
+          </div>
           {timeline.length === 0 && props.status === 'running' && (
             <div
               className="max-w-full w-fit px-3 py-2 rounded-2xl rounded-bl-sm leading-relaxed prose prose-sm max-w-none [&_p]:m-0"

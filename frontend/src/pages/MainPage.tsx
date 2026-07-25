@@ -1566,7 +1566,7 @@ export default function ChatPage() {
     return streamManager.onTranscriptPatch((patch, sourceRun) => {
       const visible = getCurrentVisibleTranscriptTip();
       if (!visible || visible.conversationId !== patch.conversation_id) return;
-      if (!shouldPatchRunIntoMainConversation(sourceRun) && sourceRun.kind !== 'plan_action') return;
+      if (!shouldPatchRunIntoMainConversation(sourceRun)) return;
       if (visible.tipNodeId !== patch.node_id) {
         useConversationStore.getState().setCurrentNodeIdLocal(patch.node_id);
         void (async () => {

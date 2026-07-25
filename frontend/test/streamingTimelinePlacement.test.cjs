@@ -23,6 +23,8 @@ function testPatchReducerHasOnlyUpsertRemovePlacement() {
 function testStreamManagerConsumesTranscriptPatchPayloads() {
   assert.match(streamManager, /type !== 'transcript_patch'/);
   assert.match(streamManager, /applyTranscriptPatchChunk/);
+  assert.doesNotMatch(mainPage, /kind !== 'plan_action'/);
+  assert.doesNotMatch(streamManager, /`plan_action_/);
   assert.doesNotMatch(streamManager, new RegExp(`${['plan', 'state'].join('_')}|${['onPlan', 'State'].join('')}`));
 }
 

@@ -529,6 +529,103 @@ def test_snapshot_splits_same_node_process_items_by_run_id(tmp_path):
     assert [item["status"] for item in process_items] == ["complete", "error"]
 
 
+def test_live_stream_aggregates_previous_run_blocks_into_single_process_item(tmp_path):
+    persistence, repository = _repo(tmp_path)
+    conversation_id, node_id = _conversation(repository)
+    run_repository = SQLiteRunRepository(persistence)
+    first_run = run_repository.create_run(
+        conversation_id,
+        kind="chat",
+        target_node_id=node_id,
+        summary="round-1",
+    )
+    second_run = run_repository.create_run(
+        conversation_id,
+        kind="chat",
+        target_node_id=node_id,
+        summary="round-2",
+    )
+    run_repository.finish_run(first_run, "completed", None)
+    repository.add_message(
+        conversation_id,
+        node_id,
+        "assistant",
+        "先思考。",
+        subtype="assistant_process_reasoning",
+        hidden=True,
+        transcript_only=True,
+        metadata={"run_id": first_run},
+        message_id="reasoning-1",
+    )
+    repository.add_message(
+        conversation_id,
+        node_id,
+        "assistant",
+        "读文件。",
+        subtype="assistant_process_content",
+        hidden=True,
+        transcript_only=True,
+        metadata={"run_id": first_run},
+        message_id="content-1",
+    )
+    repository.add_tool_call(
+        conversation_id,
+        node_id,
+        tool_call_id="call-read",
+        name="read",
+        arguments={"path": "a"},
+        run_id=first_run,
+        call_index=0,
+    )
+    repository.add_tool_result(
+        conversation_id,
+        node_id,
+        tool_result_id="result-read",
+        tool_call_id="call-read",
+        output="content",
+        run_id=first_run,
+    )
+    with persistence.connect() as conn:
+        conn.execute("UPDATE runs SET created_at = 10 WHERE id = ?", (first_run,))
+        conn.execute("UPDATE runs SET created_at = 20 WHERE id = ?", (second_run,))
+        conn.execute("UPDATE messages SET created_at = 100 WHERE id = 'reasoning-1'")
+        conn.execute("UPDATE messages SET created_at = 100 WHERE id = 'content-1'")
+        conn.execute("UPDATE tool_calls SET created_at = 100 WHERE id = 'call-read'")
+
+    session = TranscriptAssembler(persistence).patch_session(second_run)
+    first_patch = session.feed({
+        "status": "start",
+        "conversation_id": conversation_id,
+        "node_id": node_id,
+        "assistant_message_id": "assistant-2",
+    })
+    second_patch = session.feed({
+        "event_type": "tool_call",
+        "conversation_id": conversation_id,
+        "node_id": node_id,
+        "tool_call": {"id": "call-write", "name": "write", "arguments": "{}"},
+    })
+
+    first_process = next(
+        operation["item"]
+        for operation in first_patch["operations"]
+        if operation["op"] == "upsert" and operation["item"]["type"] == "assistant_process"
+    )
+    assert first_process["run_id"] == first_run
+    assert [block["type"] for block in first_process["blocks"]] == ["reasoning", "content", "tool_call"]
+    assert first_process["status"] == "complete"
+
+    second_process = next(
+        operation["item"]
+        for operation in second_patch["operations"]
+        if operation["op"] == "upsert" and operation["item"]["type"] == "assistant_process"
+    )
+    assert second_process["run_id"] == second_run
+    assert [block["type"] for block in second_process["blocks"]] == ["tool_call"]
+    assert second_process["blocks"][0]["tool_call_id"] == "call-write"
+    assert second_process["status"] == "running"
+
+
 def test_snapshot_restores_assistant_answer_status_from_corresponding_run(tmp_path):
     persistence, repository = _repo(tmp_path)
     conversation_id, node_id = _conversation(repository)

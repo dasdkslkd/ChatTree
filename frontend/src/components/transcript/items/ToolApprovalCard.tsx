@@ -25,7 +25,7 @@ export function ToolApprovalCard({
   const disabled = toolApprovalPending !== null;
 
   return (
-    <div className="transcript-tool-approval w-full my-2 flex flex-col items-start" role="listitem">
+    <div className="transcript-tool-approval w-full flex flex-col items-start" role="listitem">
       <div
         className="flex max-w-[760px] w-full min-w-0 flex-col gap-2 rounded-md px-3 py-2 text-xs"
         style={{

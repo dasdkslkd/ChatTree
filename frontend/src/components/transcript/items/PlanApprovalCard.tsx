@@ -31,7 +31,7 @@ export function PlanApprovalCard({
   const title = (item.plan || '').split(/\r?\n/).map((line) => line.trim().replace(/^#+\s*/, '')).find(Boolean) || '计划';
 
   return (
-    <div className="transcript-plan-approval w-full my-2 flex flex-col items-start" role="listitem">
+    <div className="transcript-plan-approval w-full flex flex-col items-start" role="listitem">
       <div className="flex max-w-[760px] w-full min-w-0 flex-col gap-2 text-sm" style={{ color: 'var(--fg-secondary)' }}>
         <div className="flex min-w-0 items-center gap-2 text-xs font-medium" style={{ color: 'var(--fg-tertiary)' }}>
           <ClipboardList className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--icon-accent)' }} />

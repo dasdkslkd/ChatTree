@@ -18,6 +18,11 @@ function testPlanRenderingIsTypedAndTopLevel() {
   assert.doesNotMatch(process, new RegExp(`${removedCard}|item\\.props\\?\\.timeline`));
   assert.doesNotMatch(timeline, new RegExp(removedCard));
   assert.doesNotMatch(transcriptItems, /rawType|plan_card/);
+  const list = read('src/components/transcript/TranscriptList.tsx');
+  assert.match(list, /normalizeTranscriptItems\(items\)/);
+  assert.doesNotMatch(list, /mergeNodeProcessItems|processByNode/);
+  assert.doesNotMatch(list, /compact_with_next_answer|compact_after_process/);
+  assert.doesNotMatch(timeline, /allowProcessOnly: true/);
 }
 
 function testPlanCardsUseDirectDtoFields() {

@@ -79,7 +79,6 @@ function getProcessProps(item: AssistantProcessTranscriptItem): AssistantProcess
   return {
     timeline,
     status,
-    duration: typeof item.duration_ms === 'number' ? item.duration_ms : 0,
     errorMessage: typeof item.message === 'string' ? item.message : null,
   };
 }

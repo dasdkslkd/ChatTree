@@ -14,7 +14,7 @@ interface TranscriptItemRendererProps extends TranscriptActionHandlers {
 
 function UnknownTranscriptItem({ item }: { item: TranscriptItem }) {
   return (
-    <div className="transcript-unknown-item w-full my-2 flex flex-col items-start" role="listitem">
+    <div className="transcript-unknown-item w-full flex flex-col items-start" role="listitem">
       <div
         className="flex max-w-[760px] min-w-0 items-center gap-2 rounded-md px-2.5 py-1.5 text-xs"
         style={{
@@ -46,7 +46,7 @@ function RunStatusTranscriptItem({ item }: { item: RunStatusItem }) {
         ? RotateCw
         : Square;
   return (
-    <div className="transcript-run-status w-full my-2 flex flex-col items-start" role="listitem">
+    <div className="transcript-run-status w-full flex flex-col items-start" role="listitem">
       <div
         className="flex max-w-[760px] min-w-0 items-center gap-2 rounded-md px-2.5 py-1.5 text-xs"
         style={{
