@@ -10,6 +10,7 @@ import tempfile
 sys.path.insert(0, ".")
 
 from backend.core.chat.chat_manager import ChatManager
+from backend.core.chat.canonical_reader import messages_by_node
 from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
 from backend.core.config.types import StreamChunk, StreamStatus, StreamController
@@ -78,7 +79,7 @@ def _role_value(role):
 
 
 def _node_messages(manager, conversation_id, node_id):
-    return manager._canonical_messages_by_node(conversation_id, [node_id]).get(node_id, [])
+    return messages_by_node(manager.chat_repository, conversation_id, [node_id]).get(node_id, [])
 
 
 def test_concurrent_streams_with_explicit_parent_create_sibling_nodes():

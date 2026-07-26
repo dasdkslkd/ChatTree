@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import uuid
-from typing import Any
+from contextlib import suppress
+from typing import Any, Dict, List, Optional
 
 from .blob_store import BlobStore
 from .content import store_text_content
@@ -10,6 +11,10 @@ from .database import SQLitePersistence
 
 
 _UNSET = object()
+
+
+def _role_value(role: Any) -> str:
+    return str(getattr(role, "value", role))
 
 
 class ChatRepository:
@@ -851,3 +856,322 @@ class ChatRepository:
             (conversation_id, value),
         ).fetchone()
         return value if row is not None else None
+
+    def ensure_branch(
+        self,
+        conversation: Any,
+        node_id: str,
+        *,
+        provider_id: Optional[str],
+        model_id: Optional[str],
+        focus_node_id: Optional[str] = None,
+    ) -> None:
+        """确保 conversation + 节点链（从 root 到 node_id）都已落盘。"""
+        metadata = conversation.metadata
+        self.ensure_conversation(
+            metadata["id"],
+            title=str(metadata.get("title") or ""),
+            provider_id=provider_id or metadata.get("provider_id"),
+            model_id=model_id or metadata.get("model_id"),
+            reasoning_effort=metadata.get("reasoning_effort"),
+            thinking_enabled=metadata.get("thinking_enabled"),
+            multi_agent_mode=metadata.get("multi_agent_mode"),
+            workspace=metadata.get("workspace") if isinstance(metadata.get("workspace"), dict) else None,
+        )
+        chain = conversation.get_node_chain(node_id)
+        for item in chain:
+            parent_id = item.get("parent_id")
+            if parent_id == "None":
+                parent_id = None
+            child_order = 0
+            if parent_id and parent_id in conversation.nodes:
+                siblings = conversation.nodes[parent_id].get("children_ids") or []
+                with suppress(ValueError):
+                    child_order = siblings.index(item["id"])
+            self.ensure_node(
+                metadata["id"],
+                item["id"],
+                parent_id,
+                child_order=child_order,
+                model_id=item.get("model_id") or model_id,
+                provider_id=provider_id,
+                tool_permission_mode=item.get("tool_permission_mode"),
+                task_context_mode=item.get("task_context_mode") or "attached",
+                turn_usage=(item.get("usage") or {}).get("turn_usage"),
+                branch_usage=(item.get("usage") or {}).get("branch_usage") or item.get("branch_usage_info"),
+                active_context_usage=(item.get("usage") or {}).get("active_context_usage"),
+                focus=item["id"] == focus_node_id,
+            )
+
+    def save(self, conversation: Any) -> None:
+        """保存 canonical conversation/node 结构。"""
+        if conversation.current_node_id:
+            self.ensure_branch(
+                conversation,
+                conversation.current_node_id,
+                provider_id=conversation.metadata.get("provider_id"),
+                model_id=conversation.metadata.get("model_id"),
+                focus_node_id=conversation.current_node_id,
+            )
+            return
+        metadata = conversation.metadata
+        self.ensure_conversation(
+            metadata["id"],
+            title=str(metadata.get("title") or ""),
+            provider_id=metadata.get("provider_id"),
+            model_id=metadata.get("model_id"),
+            reasoning_effort=metadata.get("reasoning_effort"),
+            thinking_enabled=metadata.get("thinking_enabled"),
+            multi_agent_mode=metadata.get("multi_agent_mode"),
+            workspace=metadata.get("workspace") if isinstance(metadata.get("workspace"), dict) else None,
+        )
+
+    def persist_user_turn(
+        self,
+        conversation: Any,
+        node: Dict[str, Any],
+        user_msg: Dict[str, Any],
+        *,
+        provider_id: Optional[str],
+        model_id: Optional[str],
+        run_id: Optional[str],
+    ) -> None:
+        """持久化用户消息：先 ensure_branch，再 add_message。"""
+        conversation_id = conversation.metadata["id"]
+        node_id = node["id"]
+        self.ensure_branch(
+            conversation,
+            node_id,
+            provider_id=provider_id,
+            model_id=model_id,
+            focus_node_id=conversation.current_node_id,
+        )
+        self.add_message(
+            conversation_id,
+            node_id,
+            role=_role_value(user_msg.get("role") or "user"),
+            content=str(user_msg.get("content") or ""),
+            subtype=user_msg.get("subtype"),
+            hidden=bool(user_msg.get("is_hidden_from_transcript")),
+            metadata={
+                key: value
+                for key, value in dict(user_msg).items()
+                if key not in {"id", "role", "content", "subtype"}
+            },
+            message_id=user_msg.get("id"),
+        )
+
+    def persist_tool_metadata(
+        self,
+        conversation_id: str,
+        node_id: str,
+        *,
+        run_id: Optional[str],
+        assistant_message_id: Optional[str],
+        tool_calls: List[Dict[str, Any]],
+        tool_messages: List[Dict[str, Any]],
+        approval_events: List[Dict[str, Any]],
+        generation_status: str,
+    ) -> None:
+        """持久化工具调用与结果元数据。"""
+        approval_status_by_call_id: Dict[str, str] = {}
+        for event in approval_events:
+            approval = event.get("approval") if isinstance(event, dict) else None
+            if not isinstance(approval, dict):
+                continue
+            tool_call_id = str(approval.get("tool_call_id") or "")
+            if not tool_call_id:
+                continue
+            if event.get("event_type") == "tool_approval_request":
+                approval_status_by_call_id[tool_call_id] = "waiting_approval"
+                continue
+            status = str(approval.get("status") or "")
+            if status == "approved":
+                approval_status_by_call_id[tool_call_id] = "approved"
+            elif status in {"denied", "expired", "cancelled", "rejected"}:
+                approval_status_by_call_id[tool_call_id] = "rejected"
+        result_call_ids = {
+            str(message.get("tool_call_id") or "")
+            for message in tool_messages
+            if message.get("tool_call_id")
+        }
+        unresolved_status = "stopped" if generation_status == "stopped" else "error"
+        for index, call in enumerate(tool_calls):
+            fn = call.get("function") or {}
+            name = str(fn.get("name") or "")
+            arguments = fn.get("arguments")
+            call_id = str(call.get("id") or "")
+            try:
+                call_index = int(call.get("call_index") if call.get("call_index") is not None else index)
+            except (TypeError, ValueError):
+                call_index = index
+            call_status = approval_status_by_call_id.get(call_id)
+            if call_status is None:
+                call_status = "complete" if call_id in result_call_ids else unresolved_status
+            self.add_tool_call(
+                conversation_id,
+                node_id,
+                tool_call_id=call_id or call.get("id"),
+                name=name,
+                arguments=arguments,
+                call_index=call_index,
+                status=call_status,
+                run_id=run_id,
+                assistant_message_id=assistant_message_id,
+            )
+        for message in tool_messages:
+            raw_output = str(message.get("raw_content") or message.get("content") or "")
+            tool_call_id = message.get("tool_call_id")
+            if tool_call_id and not self.tool_call_exists(
+                conversation_id,
+                str(tool_call_id),
+            ):
+                self.add_tool_call(
+                    conversation_id,
+                    node_id,
+                    tool_call_id=tool_call_id,
+                    name=str(message.get("name") or ""),
+                    arguments=None,
+                    call_index=0,
+                    status=approval_status_by_call_id.get(str(tool_call_id), "complete"),
+                    run_id=run_id,
+                    assistant_message_id=assistant_message_id,
+                )
+            result_id = message.get("tool_result_id")
+            self.add_tool_result(
+                conversation_id,
+                node_id,
+                tool_result_id=result_id,
+                tool_call_id=tool_call_id,
+                output=raw_output,
+                status="complete",
+                run_id=run_id,
+                metadata={
+                    "tool_name": message.get("name"),
+                    "tool_result_id": message.get("tool_result_id"),
+                },
+            )
+
+    def persist_assistant_turn(
+        self,
+        conversation: Any,
+        node: Dict[str, Any],
+        assistant_msg: Dict[str, Any],
+        *,
+        provider_id: Optional[str],
+        model_id: Optional[str],
+        run_id: Optional[str],
+        tool_messages: List[Dict[str, Any]],
+        tool_calls: List[Dict[str, Any]],
+        approval_events: Optional[List[Dict[str, Any]]] = None,
+        plan_participation_only: bool = False,
+    ) -> None:
+        """持久化助手回合：process parts/reasoning + 最终内容 + 工具元数据。"""
+        conversation_id = conversation.metadata["id"]
+        node_id = node["id"]
+        self.ensure_branch(
+            conversation,
+            node_id,
+            provider_id=provider_id,
+            model_id=model_id,
+            focus_node_id=conversation.current_node_id,
+        )
+        content = str(assistant_msg.get("content") or "")
+        assistant_message_id: Optional[str] = None
+        process_message_base_id = str(assistant_msg.get("id") or run_id or uuid.uuid4())
+        process_parts = assistant_msg.get("process_parts")
+        if isinstance(process_parts, list):
+            for part in process_parts:
+                if not isinstance(part, dict):
+                    continue
+                content_text = str(part.get("content") or "")
+                if not content_text:
+                    continue
+                part_type = str(part.get("type") or "")
+                subtype = (
+                    "assistant_process_reasoning"
+                    if part_type == "reasoning"
+                    else "assistant_process_content"
+                )
+                order = int(part.get("order") or 0)
+                metadata = {"run_id": run_id, "order": order} if run_id else {"order": order}
+                self.add_message(
+                    conversation_id,
+                    node_id,
+                    role=_role_value(assistant_msg.get("role") or "assistant"),
+                    content=content_text,
+                    subtype=subtype,
+                    hidden=True,
+                    transcript_only=True,
+                    metadata=metadata,
+                    message_id=f"{process_message_base_id}:{part_type}:{order}",
+                )
+        else:
+            reasoning_content = str(assistant_msg.get("reasoning") or "")
+            if reasoning_content:
+                self.add_message(
+                    conversation_id,
+                    node_id,
+                    role=_role_value(assistant_msg.get("role") or "assistant"),
+                    content=reasoning_content,
+                    subtype="assistant_process_reasoning",
+                    hidden=True,
+                    transcript_only=True,
+                    metadata={"run_id": run_id} if run_id else None,
+                    message_id=f"{process_message_base_id}:reasoning",
+                )
+            process_content = str(assistant_msg.get("process_content") or "")
+            if process_content:
+                self.add_message(
+                    conversation_id,
+                    node_id,
+                    role=_role_value(assistant_msg.get("role") or "assistant"),
+                    content=process_content,
+                    subtype="assistant_process_content",
+                    hidden=True,
+                    transcript_only=True,
+                    metadata={"run_id": run_id} if run_id else None,
+                    message_id=f"{process_message_base_id}:process-content",
+                )
+        if content and not plan_participation_only:
+            assistant_message_id = self.add_message(
+                conversation_id,
+                node_id,
+                role=_role_value(assistant_msg.get("role") or "assistant"),
+                content=content,
+                subtype="assistant_answer",
+                metadata={
+                    **{
+                        key: value
+                        for key, value in dict(assistant_msg).items()
+                        if key not in {
+                            "id",
+                            "role",
+                            "content",
+                            "tool_calls",
+                            "tool_results",
+                            "approval_events",
+                            "process_content",
+                            "process_parts",
+                            "reasoning",
+                        }
+                    },
+                    **({"run_id": run_id} if run_id else {}),
+                },
+                message_id=assistant_msg.get("id"),
+            )
+        if tool_calls or tool_messages:
+            generation_info = assistant_msg.get("generation_info")
+            generation_status = "completed"
+            if isinstance(generation_info, dict):
+                generation_status = str(generation_info.get("status") or generation_status)
+            self.persist_tool_metadata(
+                conversation_id,
+                node_id,
+                run_id=run_id,
+                assistant_message_id=assistant_message_id,
+                tool_calls=tool_calls,
+                tool_messages=tool_messages,
+                approval_events=list(approval_events or []),
+                generation_status=generation_status,
+            )

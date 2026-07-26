@@ -1,3 +1,5 @@
+import type { StreamState } from '../services/streamManager';
+
 export const SIDE_RUN_GROUP_ORDER = ['side_question', 'subagent', 'command', 'workflow', 'direct_response'] as const;
 
 export type SideRunGroupKind = typeof SIDE_RUN_GROUP_ORDER[number];
@@ -164,4 +166,18 @@ export function getWorkflowProgressSteps(run: SideRunLike): WorkflowProgressStep
     }];
   }
   return allSteps;
+}
+
+export type SideRunDraft = {
+  run: StreamState;
+  showPendingBubble: boolean;
+  showStreamBlock: boolean;
+};
+
+export function buildSidePanelDraft(run: StreamState): SideRunDraft {
+  return {
+    run,
+    showPendingBubble: !!run.pendingUserMessage,
+    showStreamBlock: run.status !== 'idle',
+  };
 }

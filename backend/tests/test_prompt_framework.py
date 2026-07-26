@@ -1,4 +1,4 @@
-﻿import unittest
+import unittest
 import asyncio
 import json
 import tempfile
@@ -31,6 +31,10 @@ from backend.core.chat.node import NodeManager
 from backend.core.config.types import Message, Role, StreamStatus
 from backend.core.prompts import PromptBuilder
 from backend.core.prompts import types as prompt_types
+from backend.core.prompts.runtime_context import (
+    format_task_turn_context_for_prompt,
+    runtime_prompt_context,
+)
 from backend.core.prompts.catalog import (
     PROMPT_SOURCES,
     load_prompt_template,
@@ -147,13 +151,7 @@ def _append_canonical_turn(manager, conversation, user_content, assistant_conten
     parent_id = conversation.current_node_id
     node = NodeManager.create_node(parent_id=parent_id)
     conversation.add_node(node, parent_id=parent_id)
-    manager._save(conversation)
-    manager._sqlite_ensure_branch(
-        conversation,
-        node["id"],
-        provider_id=conversation.metadata.get("provider_id"),
-        model_id=conversation.metadata.get("model_id"),
-    )
+    manager.chat_repository.save(conversation)
     manager.chat_repository.add_message(
         conversation.metadata["id"],
         node["id"],
@@ -626,7 +624,7 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
                 "tool_call_id": "call-step-3",
             }),
         )
-        runtime = manager._runtime_prompt_context(
+        runtime = runtime_prompt_context(
             "main",
             conversation,
             task_turn_context=turn_context,
@@ -823,7 +821,7 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
                 "tool_call_id": "call-direct-step",
             }),
         )
-        runtime = manager._runtime_prompt_context(
+        runtime = runtime_prompt_context(
             "main",
             conversation,
             task_turn_context=turn_context,
@@ -843,6 +841,9 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
                 return None
 
             def ensure_node(self, *args, **kwargs):
+                return None
+
+            def save(self, conversation):
                 return None
 
             def tool_call_exists(self, conversation_id, tool_call_id):
@@ -906,7 +907,7 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
                 },
                 tool_message=visible_message,
             )
-            completed_runtime = manager._runtime_prompt_context(
+            completed_runtime = runtime_prompt_context(
                 "main",
                 conversation,
                 task_turn_context=turn_context,
@@ -963,7 +964,7 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
                 },
                 tool_message=cancel_message,
             )
-            cancelled_runtime = manager._runtime_prompt_context(
+            cancelled_runtime = runtime_prompt_context(
                 "main",
                 conversation,
                 task_turn_context=cancel_context,
@@ -1101,7 +1102,7 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
         )
 
         turn_context.refresh(second_task)
-        runtime = manager._runtime_prompt_context(
+        runtime = runtime_prompt_context(
             "main",
             conversation,
             task_turn_context=turn_context,
@@ -1139,7 +1140,7 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
         context = TaskTurnContext.start(TaskContextMode.ATTACHED, None)
         context.refresh(None, outcome)
 
-        prompt = "\n".join(manager._format_task_turn_context_for_prompt(context))
+        prompt = "\n".join(format_task_turn_context_for_prompt(context))
 
         self.assertIn("Authoritative Task State After Outcome", prompt)
         self.assertIn("2. [completed] 第二步", prompt)
@@ -1193,7 +1194,7 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
             "task_snapshot": final.task_snapshot.public_dict(),
         }))
 
-        prompt = "\n".join(manager._format_task_turn_context_for_prompt(context))
+        prompt = "\n".join(format_task_turn_context_for_prompt(context))
 
         self.assertNotIn("Authoritative Task Snapshot At Turn Start", prompt)
         self.assertEqual(prompt.count("2. [completed] 第二步"), 1)

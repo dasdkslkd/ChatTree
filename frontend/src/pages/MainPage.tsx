@@ -1,46 +1,14 @@
 import {
-  lazy,
-  Suspense,
   useEffect,
   useState,
   useRef,
   useLayoutEffect,
   useCallback,
   useMemo,
-  isValidElement,
   type DragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from 'react';
-import SyntaxHighlighter from 'react-syntax-highlighter/dist/esm/prism-light';
-import oneDark from 'react-syntax-highlighter/dist/esm/styles/prism/one-dark';
-import bash from 'react-syntax-highlighter/dist/esm/languages/prism/bash';
-import c from 'react-syntax-highlighter/dist/esm/languages/prism/c';
-import cpp from 'react-syntax-highlighter/dist/esm/languages/prism/cpp';
-import csharp from 'react-syntax-highlighter/dist/esm/languages/prism/csharp';
-import css from 'react-syntax-highlighter/dist/esm/languages/prism/css';
-import diff from 'react-syntax-highlighter/dist/esm/languages/prism/diff';
-import docker from 'react-syntax-highlighter/dist/esm/languages/prism/docker';
-import go from 'react-syntax-highlighter/dist/esm/languages/prism/go';
-import ini from 'react-syntax-highlighter/dist/esm/languages/prism/ini';
-import java from 'react-syntax-highlighter/dist/esm/languages/prism/java';
-import javascript from 'react-syntax-highlighter/dist/esm/languages/prism/javascript';
-import json from 'react-syntax-highlighter/dist/esm/languages/prism/json';
-import jsx from 'react-syntax-highlighter/dist/esm/languages/prism/jsx';
-import less from 'react-syntax-highlighter/dist/esm/languages/prism/less';
-import markdown from 'react-syntax-highlighter/dist/esm/languages/prism/markdown';
-import markup from 'react-syntax-highlighter/dist/esm/languages/prism/markup';
-import php from 'react-syntax-highlighter/dist/esm/languages/prism/php';
-import powershell from 'react-syntax-highlighter/dist/esm/languages/prism/powershell';
-import python from 'react-syntax-highlighter/dist/esm/languages/prism/python';
-import ruby from 'react-syntax-highlighter/dist/esm/languages/prism/ruby';
-import rust from 'react-syntax-highlighter/dist/esm/languages/prism/rust';
-import scss from 'react-syntax-highlighter/dist/esm/languages/prism/scss';
-import sql from 'react-syntax-highlighter/dist/esm/languages/prism/sql';
-import toml from 'react-syntax-highlighter/dist/esm/languages/prism/toml';
-import tsx from 'react-syntax-highlighter/dist/esm/languages/prism/tsx';
-import typescript from 'react-syntax-highlighter/dist/esm/languages/prism/typescript';
-import yaml from 'react-syntax-highlighter/dist/esm/languages/prism/yaml';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -66,7 +34,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import {
   Plus, X, MoreHorizontal, ChevronRight, Square,
-  Copy, Check, Pencil, Loader2, Network, MessageSquare, FileText, Download, FolderOpen, FolderPlus, Search, Settings,
+  Check, Pencil, Loader2, Network, MessageSquare, FileText, Download, FolderOpen, FolderPlus, Search, Settings,
   PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, ArrowLeft,
 } from 'lucide-react';
 import { conversationApi } from '../api/conversation';
@@ -104,8 +72,6 @@ import {
 } from '../runtime/importAssetPreview';
 import {
   LEFT_SIDEBAR_STORAGE_KEY,
-  MANUAL_PROJECTS_STORAGE_KEY,
-  PROJECT_ORDER_STORAGE_KEY,
   RIGHT_PANEL_STORAGE_KEY,
   profileStorageKey,
 } from '../runtime/profileStorage';
@@ -125,7 +91,9 @@ import { getSlashRunLabel, shouldQueueForMainThread, shouldRenderRunDraft } from
 import {
   groupDetachedSideRuns,
   getWorkflowProgressSteps,
+  buildSidePanelDraft,
   type SideRunGroupItem,
+  type SideRunDraft,
 } from '../utils/sideRunGrouping';
 import {
   SIDE_RUN_KINDS,
@@ -134,6 +102,7 @@ import {
   createToolPermissionDraft,
   getConfiguredDefaultToolPermissionMode,
   syncToolPermissionDraftFromBranch,
+  normalizeToolPermissionMode,
   type ToolPermissionDraft,
 } from '../utils/toolPermissionDraft';
 import {
@@ -163,14 +132,36 @@ import {
   applyTranscriptPatch,
   normalizeTranscriptItems,
   stateFromTranscriptSnapshot,
+  findTranscriptAnchorElement,
+  isTranscriptItemVisibleNow,
+  isTranscriptItemOnCurrentBranch,
+  getTranscriptItemNodeId,
+  getTranscriptItemMessageId,
+  getEditableUserMessageAttachmentRefs,
+  userMessageItemReferencesAttachment,
   type TranscriptState,
+  type TranscriptScrollTarget,
 } from '../utils/transcriptItems';
 import { createTaskPanelItem } from '../utils/activeTask';
+import { MarkdownView, ThinkingBlock } from '../components/markdown/MarkdownView';
+import { SyntaxHighlighter, oneDark } from '../components/markdown/languages';
+import {
+  getBrowserStorage,
+  loadManualProjectWorkspaces,
+  saveManualProjectWorkspaces,
+  loadProjectOrder,
+  saveProjectOrder,
+  mergeManualProjectWorkspace,
+} from '../utils/projectStorage';
+import {
+  normalizeTaskContextMode,
+  getBranchToolPermissionMode,
+  getBranchTaskContextMode,
+} from '../utils/branchMode';
+import { formatConversationTime } from '../utils/conversationTime';
+import { createQueuedMessageId } from '../utils/queuedMessage';
 
-const MarkdownContent = lazy(() => import('../components/MarkdownContent'));
 const PROFILE_ID = getProfileContext().profileId;
-const PROFILE_MANUAL_PROJECTS_STORAGE_KEY = profileStorageKey(PROFILE_ID, MANUAL_PROJECTS_STORAGE_KEY);
-const PROFILE_PROJECT_ORDER_STORAGE_KEY = profileStorageKey(PROFILE_ID, PROJECT_ORDER_STORAGE_KEY);
 const PROFILE_LEFT_SIDEBAR_STORAGE_KEY = profileStorageKey(PROFILE_ID, LEFT_SIDEBAR_STORAGE_KEY);
 const PROFILE_RIGHT_PANEL_STORAGE_KEY = profileStorageKey(PROFILE_ID, RIGHT_PANEL_STORAGE_KEY);
 type SidebarResizeSession = {
@@ -181,328 +172,11 @@ type SidebarResizeSession = {
   config: SidebarWidthConfig;
 };
 
-function getBrowserStorage(): Storage | null {
-  return typeof window === 'undefined' ? null : window.localStorage;
-}
-
 function getCurrentVisibleTranscriptTip(): { conversationId: string; tipNodeId: string } | null {
   const state = useConversationStore.getState();
   const conversationId = state.currentConversation?.id;
   const tipNodeId = state.currentNodeId || state.currentConversation?.current_node_id || null;
   return conversationId && tipNodeId ? { conversationId, tipNodeId } : null;
-}
-
-function getTranscriptItemNodeId(item: TranscriptItem): string | null {
-  return item.node_id || null;
-}
-
-type TranscriptScrollTarget = {
-  messageId?: string | null;
-  nodeId?: string | null;
-  legacyIndex?: number | null;
-};
-
-function findTranscriptAnchorElement(
-  container: HTMLElement | null,
-  target: TranscriptScrollTarget,
-): HTMLElement | null {
-  const anchors = Array.from(
-    container?.querySelectorAll<HTMLElement>('[data-transcript-message-id], [data-transcript-node-id]') ?? [],
-  );
-  if (target.messageId) {
-    const byMessage = anchors.find((element) => element.dataset.transcriptMessageId === target.messageId);
-    if (byMessage) return byMessage;
-  }
-  if (target.nodeId) {
-    const byNode = anchors.find((element) => element.dataset.transcriptNodeId === target.nodeId);
-    if (byNode) return byNode;
-  }
-  return target.legacyIndex === undefined || target.legacyIndex === null
-    ? null
-    : document.getElementById(`message-${target.legacyIndex}`);
-}
-
-function getTranscriptItemMessageId(item: TranscriptItem): string | null {
-  return 'message_id' in item ? item.message_id : null;
-}
-
-function getEditableUserMessageAttachmentRefs(
-  item: UserMessageItem,
-): {
-  importFiles: string[];
-  imageRefs: Array<{ filename: string; mime_type?: string }>;
-} {
-  return {
-    importFiles: (item.import_files ?? []).map((file) => file.filename).filter(Boolean),
-    imageRefs: (item.image_refs ?? [])
-      .filter((file) => Boolean(file.filename))
-      .map((file) => ({ filename: file.filename, mime_type: file.mime_type ?? undefined })),
-  };
-}
-
-function userMessageItemReferencesAttachment(item: UserMessageItem, filename: string): boolean {
-  return Boolean(
-    item.import_files?.some((file) => file.filename === filename)
-    || item.image_refs?.some((file) => file.filename === filename)
-  );
-}
-
-function isTranscriptItemVisibleNow(
-  item: TranscriptItem,
-  currentConversationId: string | null,
-  selectedBranchTipId: string | null,
-): boolean {
-  if (!currentConversationId) return false;
-  if (item.conversation_id && item.conversation_id !== currentConversationId) return false;
-  const itemNodeId = getTranscriptItemNodeId(item);
-  return !itemNodeId || itemNodeId === selectedBranchTipId;
-}
-
-function isTranscriptItemOnCurrentBranch(
-  item: TranscriptItem,
-  currentConversationId: string | null,
-  currentBranchNodeIds: Set<string>,
-): boolean {
-  if (!currentConversationId) return false;
-  if (item.conversation_id && item.conversation_id !== currentConversationId) return false;
-  const itemNodeId = getTranscriptItemNodeId(item);
-  return Boolean(itemNodeId && currentBranchNodeIds.has(itemNodeId));
-}
-
-SyntaxHighlighter.registerLanguage('bash', bash);
-SyntaxHighlighter.registerLanguage('batch', bash);
-SyntaxHighlighter.registerLanguage('c', c);
-SyntaxHighlighter.registerLanguage('cpp', cpp);
-SyntaxHighlighter.registerLanguage('csharp', csharp);
-SyntaxHighlighter.registerLanguage('css', css);
-SyntaxHighlighter.registerLanguage('diff', diff);
-SyntaxHighlighter.registerLanguage('docker', docker);
-SyntaxHighlighter.registerLanguage('go', go);
-SyntaxHighlighter.registerLanguage('ini', ini);
-SyntaxHighlighter.registerLanguage('java', java);
-SyntaxHighlighter.registerLanguage('javascript', javascript);
-SyntaxHighlighter.registerLanguage('json', json);
-SyntaxHighlighter.registerLanguage('jsx', jsx);
-SyntaxHighlighter.registerLanguage('less', less);
-SyntaxHighlighter.registerLanguage('markdown', markdown);
-SyntaxHighlighter.registerLanguage('markup', markup);
-SyntaxHighlighter.registerLanguage('html', markup);
-SyntaxHighlighter.registerLanguage('xml', markup);
-SyntaxHighlighter.registerLanguage('php', php);
-SyntaxHighlighter.registerLanguage('powershell', powershell);
-SyntaxHighlighter.registerLanguage('python', python);
-SyntaxHighlighter.registerLanguage('ruby', ruby);
-SyntaxHighlighter.registerLanguage('rust', rust);
-SyntaxHighlighter.registerLanguage('scss', scss);
-SyntaxHighlighter.registerLanguage('sql', sql);
-SyntaxHighlighter.registerLanguage('toml', toml);
-SyntaxHighlighter.registerLanguage('tsx', tsx);
-SyntaxHighlighter.registerLanguage('typescript', typescript);
-SyntaxHighlighter.registerLanguage('yaml', yaml);
-
-function loadManualProjectWorkspaces(): WorkspaceContext[] {
-  try {
-    const raw = window.localStorage.getItem(PROFILE_MANUAL_PROJECTS_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((item): item is WorkspaceContext =>
-      !!item && typeof item.cwd === 'string' && Array.isArray(item.workspace_roots)
-    );
-  } catch {
-    return [];
-  }
-}
-
-function saveManualProjectWorkspaces(workspaces: WorkspaceContext[]) {
-  window.localStorage.setItem(PROFILE_MANUAL_PROJECTS_STORAGE_KEY, JSON.stringify(workspaces));
-}
-
-function loadProjectOrder(): string[] {
-  try {
-    const raw = window.localStorage.getItem(PROFILE_PROJECT_ORDER_STORAGE_KEY);
-    const parsed = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
-  } catch (_) {
-    return [];
-  }
-}
-
-function saveProjectOrder(order: string[]) {
-  window.localStorage.setItem(PROFILE_PROJECT_ORDER_STORAGE_KEY, JSON.stringify(order));
-}
-
-function mergeManualProjectWorkspace(workspaces: WorkspaceContext[], workspace: WorkspaceContext): WorkspaceContext[] {
-  const existing = workspaces.filter((item) => item.cwd !== workspace.cwd);
-  return [workspace, ...existing];
-}
-
-function formatConversationTime(timestamp: number | undefined): string {
-  if (!timestamp) return '';
-  const timeMs = timestamp > 1_000_000_000_000 ? timestamp : timestamp * 1000;
-  const diffMinutes = Math.max(0, Math.floor((Date.now() - timeMs) / 60000));
-  if (diffMinutes < 1) return '刚刚';
-  if (diffMinutes < 60) return `${diffMinutes} 分`;
-  const diffHours = Math.floor(diffMinutes / 60);
-  if (diffHours < 24) return `${diffHours} 小时`;
-  const diffDays = Math.floor(diffHours / 24);
-  return `${diffDays} 天`;
-}
-
-/* ---------- Markdown custom code blocks ---------- */
-
-function normalizeCodeLanguage(language: string): string {
-  const normalized = language.toLowerCase();
-  if (normalized === 'js') return 'javascript';
-  if (normalized === 'ts') return 'typescript';
-  if (normalized === 'py') return 'python';
-  if (normalized === 'ps1' || normalized === 'pwsh' || normalized === 'shell') return 'powershell';
-  if (normalized === 'sh' || normalized === 'zsh') return 'bash';
-  if (normalized === 'yml') return 'yaml';
-  return normalized;
-}
-
-function getCodeBlockPayload(children: React.ReactNode): { code: string; language: string | null } | null {
-  const codeElement = Array.isArray(children)
-    ? children.find((child) => isValidElement(child))
-    : children;
-  if (!isValidElement(codeElement)) return null;
-  const props = codeElement.props as { className?: string; children?: React.ReactNode };
-  const className = props.className || '';
-  const languageMatch = className.match(/language-([\w-]+)/);
-  const rawChildren = props.children;
-  const code = Array.isArray(rawChildren)
-    ? rawChildren.map((child) => String(child)).join('')
-    : typeof rawChildren === 'string'
-      ? rawChildren
-      : rawChildren == null
-        ? ''
-        : String(rawChildren);
-  return {
-    code: code.replace(/\n$/, ''),
-    language: languageMatch ? normalizeCodeLanguage(languageMatch[1]) : null,
-  };
-}
-
-function CodeBlockWrapper({ children, ...props }: React.HTMLAttributes<HTMLPreElement>) {
-  const [copied, setCopied] = useState(false);
-  const codeRef = useRef<HTMLDivElement>(null);
-  const payload = getCodeBlockPayload(children);
-  const languageLabel = payload?.language || '代码';
-
-  const handleCopy = () => {
-    const pre = codeRef.current?.querySelector('pre');
-    const text = pre?.textContent || '';
-    navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  return (
-    <div ref={codeRef} className="code-block-wrapper my-2">
-      <div className="code-toolbar-wrapper">
-        <div className="code-toolbar">
-          <span className="text-xs text-muted-foreground select-none">{languageLabel}</span>
-          <button
-            className="flex items-center gap-1 px-0 py-1.5 rounded text-xs text-muted-foreground hover:text-foreground hover:bg-black/5 transition-colors cursor-pointer"
-            onClick={handleCopy}
-            aria-label="复制代码"
-          >
-            {copied ? (
-              <><Check className="h-3 w-3" /> 已复制</>
-            ) : (
-              <><Copy className="h-3 w-3" /> 复制</>
-            )}
-          </button>
-        </div>
-      </div>
-      {payload?.language ? (
-        <SyntaxHighlighter
-          language={payload.language}
-          style={oneDark}
-          customStyle={{
-            margin: 0,
-            padding: '10px 12px',
-            background: 'transparent',
-            fontSize: 13,
-            lineHeight: '20px',
-          }}
-          codeTagProps={{
-            style: {
-              fontFamily: 'var(--font-mono, "JetBrains Mono", ui-monospace, monospace)',
-            },
-          }}
-        >
-          {payload.code}
-        </SyntaxHighlighter>
-      ) : (
-        <pre {...props}>
-          {children}
-        </pre>
-      )}
-    </div>
-  );
-}
-
-const markdownComponents = {
-  pre: CodeBlockWrapper,
-};
-
-function MarkdownFallback({ content }: { content: string }) {
-  return <span className="whitespace-pre-wrap break-words">{content}</span>;
-}
-
-function MarkdownView({ content, enableMermaid = false }: { content: string; enableMermaid?: boolean }) {
-  return (
-    <Suspense fallback={<MarkdownFallback content={content} />}>
-      <MarkdownContent components={markdownComponents} enableMermaid={enableMermaid}>
-        {content}
-      </MarkdownContent>
-    </Suspense>
-  );
-}
-
-/* ---------- Collapsible thinking (reasoning) block ---------- */
-
-function ThinkingBlock({ reasoning, streaming }: { reasoning: string; streaming?: boolean }) {
-  // 默认折叠；流式进行中也保持折叠（用户可手动展开看实时思考）。
-  const [expanded, setExpanded] = useState(false);
-  if (!reasoning) return null;
-  const label = streaming ? '思考中' : '思考完成';
-  return (
-    <div className={cn('thought', expanded && 'expanded')}>
-      <button
-        type="button"
-        className="thought-head"
-        aria-expanded={expanded}
-        onClick={() => setExpanded((v) => !v)}
-      >
-        <ChevronRight className="thought-chevron" />
-        <span>{label}</span>
-      </button>
-      <div className="thought-body-shell" aria-hidden={!expanded}>
-        <div className="thought-body-clip">
-          <div className="thought-body custom-scrollbar">
-            {reasoning}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-type SideRunDraft = {
-  run: StreamState;
-  showPendingBubble: boolean;
-  showStreamBlock: boolean;
-};
-
-function buildSidePanelDraft(run: StreamState): SideRunDraft {
-  return {
-    run,
-    showPendingBubble: !!run.pendingUserMessage,
-    showStreamBlock: run.status !== 'idle',
-  };
 }
 
 type QueuedMessage = {
@@ -514,53 +188,6 @@ type QueuedMessage = {
   content: string;
   request: SendMessageRequest;
 };
-
-function createQueuedMessageId(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
-  }
-  return `queued-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
-
-function normalizeToolPermissionMode(value: unknown): ToolPermissionMode | undefined {
-  return value === 'auto_approve' || value === 'modify_only' || value === 'ask_always' || value === 'plan'
-    ? value
-    : undefined;
-}
-
-function getBranchToolPermissionMode(
-  items: TranscriptItem[],
-  nodeId: string | null,
-): ToolPermissionMode | undefined {
-  if (!nodeId) return undefined;
-  for (let index = items.length - 1; index >= 0; index -= 1) {
-    const item = items[index];
-    if (item.type === 'user_message' && item.node_id === nodeId) {
-      const mode = normalizeToolPermissionMode(item.tool_permission_mode);
-      if (mode) return mode;
-    }
-  }
-  return undefined;
-}
-
-function normalizeTaskContextMode(value: unknown): TaskContextMode | undefined {
-  return value === 'attached' || value === 'detached' ? value : undefined;
-}
-
-function getBranchTaskContextMode(
-  items: TranscriptItem[],
-  nodeId: string | null,
-): TaskContextMode | undefined {
-  if (!nodeId) return undefined;
-  for (let index = items.length - 1; index >= 0; index -= 1) {
-    const item = items[index];
-    if (item.type === 'user_message' && item.node_id === nodeId) {
-      const mode = normalizeTaskContextMode(item.task_context_mode);
-      if (mode) return mode;
-    }
-  }
-  return undefined;
-}
 
 /* ---------- Component ---------- */
 export default function ChatPage() {

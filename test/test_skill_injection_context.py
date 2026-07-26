@@ -7,6 +7,7 @@ sys.path.insert(0, ".")
 from backend.core.capabilities import CapabilitySource, load_skill_roots
 from backend.core.capabilities.registry import CapabilityRegistry
 from backend.core.chat.chat_manager import ChatManager
+from backend.core.chat.canonical_reader import messages_by_node
 from backend.core.config.types import StreamChunk, StreamController, StreamStatus
 from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
@@ -120,7 +121,7 @@ def messages_contain_skill(messages) -> bool:
 
 
 def user_active_skill_names(manager, conversation_id, node_id):
-    messages = manager._canonical_messages_by_node(conversation_id, [node_id]).get(node_id, [])
+    messages = messages_by_node(manager.chat_repository, conversation_id, [node_id]).get(node_id, [])
     user_messages = [message for message in messages if message.get("role") == "user"]
     assert user_messages
     return user_messages[-1].get("active_skill_names")

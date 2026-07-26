@@ -1,4 +1,4 @@
-﻿from pathlib import Path
+from pathlib import Path
 import asyncio
 import json
 import sys
@@ -12,6 +12,7 @@ from backend.core.capabilities.types import (
     CapabilitySource,
 )
 from backend.core.chat.chat_manager import ChatManager
+from backend.core.chat.canonical_reader import messages_by_node
 from backend.core.chat.conversation import Conversation
 from backend.core.chat.node import NodeManager
 from backend.core.config.types import Message, Role, StreamChunk, StreamController, StreamStatus
@@ -33,12 +34,13 @@ from backend.core.tools.security.permissions import PermissionEngine
 def make_manager(registry=None):
     manager = ChatManager.__new__(ChatManager)
     manager.capability_registry = registry
+    manager.chat_repository = None
     manager.slash_dispatcher = SlashCommandDispatcher()
     return manager
 
 
 def node_messages(manager, conversation_id, node_id):
-    return manager._canonical_messages_by_node(conversation_id, [node_id]).get(node_id, [])
+    return messages_by_node(manager.chat_repository, conversation_id, [node_id]).get(node_id, [])
 
 
 def latest_node_message(manager, conversation_id, node_id, role):
@@ -115,8 +117,8 @@ def test_refer_prompt_injects_history_and_persists_only_inline_prompt(tmp_path: 
         old_node = NodeManager.create_node(parent_id=root_id, model_id="fake-model")
         conversation.add_node(old_node, root_id, focus=False)
         conversation.switch_to_node(root_id)
-        manager._save(conversation)
-        manager._sqlite_ensure_branch(
+        manager.chat_repository.save(conversation)
+        manager.chat_repository.ensure_branch(
             conversation,
             old_node["id"],
             provider_id="fake",
@@ -192,8 +194,8 @@ def test_refer_prompt_requires_inline_prompt(tmp_path: Path):
         old_node = NodeManager.create_node(parent_id=root_id, model_id="fake-model")
         conversation.add_node(old_node, root_id, focus=False)
         conversation.switch_to_node(root_id)
-        manager._save(conversation)
-        manager._sqlite_ensure_branch(conversation, old_node["id"], provider_id="fake", model_id="fake-model")
+        manager.chat_repository.save(conversation)
+        manager.chat_repository.ensure_branch(conversation, old_node["id"], provider_id="fake", model_id="fake-model")
         manager.chat_repository.add_message(
             conversation.metadata["id"],
             old_node["id"],

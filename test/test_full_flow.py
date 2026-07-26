@@ -4,6 +4,7 @@ import sys
 sys.path.insert(0, ".")
 
 from backend.core.chat.chat_manager import ChatManager
+from backend.core.chat.canonical_reader import messages_by_node
 from backend.core.config.types import Role, StreamChunk, StreamController, StreamStatus
 from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
@@ -89,7 +90,7 @@ def test_stream_round_persists_and_replays_canonical_messages(tmp_path):
     reloaded = manager.get_conversation(conversation.metadata["id"])
     assert reloaded is not None
     node_id = reloaded.current_node_id
-    stored = manager._canonical_messages_by_node(conversation.metadata["id"], [node_id])[node_id]
+    stored = messages_by_node(manager.chat_repository, conversation.metadata["id"], [node_id])[node_id]
     assert [(_role_value(message.get("role")), message.get("content")) for message in stored] == [
         (Role.USER.value, "hello"),
         (Role.ASSISTANT.value, "assistant answer"),

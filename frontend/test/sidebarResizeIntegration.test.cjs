@@ -4,6 +4,7 @@ const path = require('node:path');
 
 const mainPage = fs.readFileSync(path.join(__dirname, '../src/pages/MainPage.tsx'), 'utf8');
 const indexCss = fs.readFileSync(path.join(__dirname, '../src/index.css'), 'utf8');
+const projectStorage = fs.readFileSync(path.join(__dirname, '../src/utils/projectStorage.ts'), 'utf8');
 
 function testMainPageHasAccessibleResizeSeparators() {
   assert.match(mainPage, /aria-label="调整左侧栏宽度"/);
@@ -36,8 +37,6 @@ function testRightPanelUsesOneWidthAcrossViews() {
 function testEveryMainPagePersistenceKeyIsProfileScoped() {
   assert.match(mainPage, /const PROFILE_ID = getProfileContext\(\)\.profileId;/);
   for (const key of [
-    'MANUAL_PROJECTS_STORAGE_KEY',
-    'PROJECT_ORDER_STORAGE_KEY',
     'LEFT_SIDEBAR_STORAGE_KEY',
     'RIGHT_PANEL_STORAGE_KEY',
   ]) {
@@ -47,12 +46,23 @@ function testEveryMainPagePersistenceKeyIsProfileScoped() {
       `${key} must be scoped by the immutable route Profile`,
     );
   }
+  assert.match(projectStorage, /const PROFILE_ID = getProfileContext\(\)\.profileId;/);
+  for (const key of [
+    'MANUAL_PROJECTS_STORAGE_KEY',
+    'PROJECT_ORDER_STORAGE_KEY',
+  ]) {
+    assert.match(
+      projectStorage,
+      new RegExp(`profileStorageKey\\(PROFILE_ID, ${key}\\)`),
+      `${key} must be scoped by the immutable route Profile`,
+    );
+  }
   for (const key of [
     'PROFILE_MANUAL_PROJECTS_STORAGE_KEY',
     'PROFILE_PROJECT_ORDER_STORAGE_KEY',
   ]) {
-    assert.match(mainPage, new RegExp(`localStorage\\.getItem\\(${key}\\)`));
-    assert.match(mainPage, new RegExp(`localStorage\\.setItem\\(${key},`));
+    assert.match(projectStorage, new RegExp(`localStorage\\.getItem\\(${key}\\)`));
+    assert.match(projectStorage, new RegExp(`localStorage\\.setItem\\(${key},`));
   }
   for (const key of [
     'PROFILE_LEFT_SIDEBAR_STORAGE_KEY',
@@ -70,6 +80,10 @@ function testEveryMainPagePersistenceKeyIsProfileScoped() {
   }
   assert.doesNotMatch(
     mainPage,
+    /(?:getItem|setItem)\((?:MANUAL_PROJECTS_STORAGE_KEY|PROJECT_ORDER_STORAGE_KEY)/,
+  );
+  assert.doesNotMatch(
+    projectStorage,
     /(?:getItem|setItem)\((?:MANUAL_PROJECTS_STORAGE_KEY|PROJECT_ORDER_STORAGE_KEY)/,
   );
 }

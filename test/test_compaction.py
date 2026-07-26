@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import os
 import shutil
 import sys
@@ -7,6 +7,7 @@ import tempfile
 sys.path.insert(0, ".")
 
 from backend.core.chat.chat_manager import ChatManager
+from backend.core.chat.canonical_reader import messages_by_node
 from backend.core.chat.compact import get_auto_compact_threshold, microcompact_messages
 from backend.core.chat.conversation import Conversation
 from backend.core.chat.node import NodeManager
@@ -117,15 +118,15 @@ def _manager(tmp):
 
 
 def _messages_for_node(manager, conversation_id, node_id):
-    return manager._canonical_messages_by_node(conversation_id, [node_id]).get(node_id, [])
+    return messages_by_node(manager.chat_repository, conversation_id, [node_id]).get(node_id, [])
 
 
 def _add_turn(manager, conv, user_content, assistant_content=None, *, import_files=None, parent_id=None, focus=True):
     parent_id = parent_id or conv.current_node_id
     node = NodeManager.create_node(parent_id=parent_id, model_id="fake-model")
     conv.add_node(node, parent_id, focus=focus)
-    manager._save(conv)
-    manager._sqlite_ensure_branch(conv, node["id"], provider_id="fake", model_id="fake-model")
+    manager.chat_repository.save(conv)
+    manager.chat_repository.ensure_branch(conv, node["id"], provider_id="fake", model_id="fake-model")
     metadata = {"import_files": import_files} if import_files else None
     manager.chat_repository.add_message(
         conv.metadata["id"],
@@ -148,8 +149,8 @@ def _add_compact_node(manager, conv, summary, *, trigger="manual", pre_tokens=10
     parent_id = conv.current_node_id
     node = NodeManager.create_compact_node(parent_id=parent_id, model_id="fake-model")
     conv.add_node(node, parent_id)
-    manager._save(conv)
-    manager._sqlite_ensure_branch(conv, node["id"], provider_id="fake", model_id="fake-model")
+    manager.chat_repository.save(conv)
+    manager.chat_repository.ensure_branch(conv, node["id"], provider_id="fake", model_id="fake-model")
     metadata = {
         "trigger": trigger,
         "pre_tokens": pre_tokens,
@@ -389,7 +390,7 @@ def test_send_message_auto_compacts_when_context_usage_reaches_90_percent():
         }
         target_parent_id = old["id"]
         _add_turn(manager, conv, "other branch", "other answer", parent_id=conv.root_node_id, focus=False)
-        manager._save(conv)
+        manager.chat_repository.save(conv)
 
         asyncio.run(_drain(manager.send_message_stream(
             conv.metadata["id"],

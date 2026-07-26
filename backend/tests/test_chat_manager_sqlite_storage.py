@@ -300,7 +300,7 @@ def test_continuation_sqlite_persists_only_current_run_tool_facts(tmp_path: Path
         ],
         "timestamp": 1,
     })
-    manager._persist_sqlite_assistant_turn(
+    repository.persist_assistant_turn(
         conversation=conversation,
         node=node,
         assistant_msg=old,
@@ -327,7 +327,7 @@ def test_continuation_sqlite_persists_only_current_run_tool_facts(tmp_path: Path
     transcript_msg = Message(deepcopy(merged))
     transcript_msg["process_parts"] = continuation.get("process_parts")
 
-    manager._persist_sqlite_assistant_turn(
+    repository.persist_assistant_turn(
         conversation=conversation,
         node=node,
         assistant_msg=transcript_msg,
@@ -380,7 +380,7 @@ def test_compact_conversation_writes_canonical_compact_messages(tmp_path: Path):
     conversation.metadata["provider_id"] = "fake"
     conversation.metadata["model_id"] = "fake-model"
     parent_id = conversation.current_node_id
-    manager._save(conversation)
+    manager.chat_repository.save(conversation)
 
     result = asyncio.run(manager.compact_conversation(conversation.metadata["id"]))
     items = _items(persistence, conversation.metadata["id"], result["node_id"])

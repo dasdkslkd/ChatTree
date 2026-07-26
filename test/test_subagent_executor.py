@@ -85,9 +85,6 @@ class FakeChatManager:
             for call in tool_calls
         ]
 
-    def _apply_round_tool_result_budget(self, tool_messages):
-        return [{"role": "tool", "content": message["content"]} for message in tool_messages]
-
     def _tool_event_stream_chunk(self, event, node_id, conversation_id):
         return {
             "status": "content",

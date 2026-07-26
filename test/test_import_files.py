@@ -15,6 +15,7 @@ from starlette.datastructures import Headers, UploadFile
 
 from backend.api.routes.conversations import read_import_file, upload_import_file
 from backend.core.chat.chat_manager import ChatManager
+from backend.core.chat.canonical_reader import messages_by_node
 from backend.core.config.types import Message, Role
 from backend.core.model.providers.anthropic_provider import AnthropicProvider
 from backend.core.model.providers.gemini_provider import GeminiProvider
@@ -84,7 +85,7 @@ def test_image_references_are_injected_as_multimodal_user_content():
                 slash_metadata=None,
             )
         )
-        user_messages = manager._canonical_messages_by_node(conv.metadata["id"], [current_node_id])[current_node_id]
+        user_messages = messages_by_node(manager.chat_repository, conv.metadata["id"], [current_node_id])[current_node_id]
         user_message_id = next(message["id"] for message in user_messages if message.get("role") == "user")
         manager.chat_repository.add_message(
             conv.metadata["id"],

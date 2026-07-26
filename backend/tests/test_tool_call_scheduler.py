@@ -58,6 +58,7 @@ def _chat_manager_for_parallel_test(
 ) -> ChatManager:
     manager = ChatManager.__new__(ChatManager)
     manager.tool_manager = _FakeToolManager(capabilities)
+    manager.chat_repository = None
     events = events if events is not None else []
 
     async def execute_single(tool_call: dict, **kwargs) -> dict:
@@ -126,6 +127,7 @@ def test_chat_manager_serial_tool_is_a_barrier_between_parallel_waves():
 def test_single_tool_call_does_not_emit_running_heartbeat_for_short_tool():
     manager = ChatManager.__new__(ChatManager)
     manager.tool_manager = _ImmediateToolManager()
+    manager.chat_repository = None
     manager.tool_orchestrator = None
     events: list[dict] = []
 

@@ -8,6 +8,7 @@ import time
 sys.path.insert(0, ".")
 
 from backend.core.chat.chat_manager import ChatManager
+from backend.core.chat.canonical_reader import prune_summaries_by_node
 from backend.core.chat.conversation import Conversation
 from backend.core.chat.node import NodeManager
 from backend.core.chat.prune_summary import build_prune_packets
@@ -205,9 +206,9 @@ def _make_tree(manager):
     conv.add_node(child_b, parent["id"], focus=False)
     conv.switch_to_node(parent["id"])
     turns = [(node, *_pop_test_turn(node)) for node in (parent, child_a, child_b)]
-    manager._save(conv)
+    manager.chat_repository.save(conv)
     for node, _user, _assistant in turns:
-        manager._sqlite_ensure_branch(
+        manager.chat_repository.ensure_branch(
             conv,
             node["id"],
             provider_id="fake",
@@ -276,7 +277,8 @@ def test_prune_summary_saves_parent_attachment_and_uses_clean_no_tool_call():
         conv, parent, child_a, _ = _make_tree(manager)
 
         result = asyncio.run(manager.prune_summary(conv.metadata["id"], parent["id"], custom_instructions="focus facts"))
-        summaries = manager._canonical_prune_summaries_by_node(
+        summaries = prune_summaries_by_node(
+            manager.chat_repository,
             conv.metadata["id"],
             [parent["id"]],
         )[parent["id"]]
@@ -310,8 +312,8 @@ def test_prune_summary_packet_uses_canonical_sqlite_tool_history():
             chat_repository=repository,
         )
         conv, parent, child_a, _ = _make_tree(manager)
-        manager._save(conv)
-        manager._sqlite_ensure_branch(
+        manager.chat_repository.save(conv)
+        manager.chat_repository.ensure_branch(
             conv,
             child_a["id"],
             provider_id="fake",
@@ -350,7 +352,8 @@ def test_prune_summary_keeps_previous_parent_summaries():
 
         first = asyncio.run(manager.prune_summary(conv.metadata["id"], parent["id"], custom_instructions="first"))
         second = asyncio.run(manager.prune_summary(conv.metadata["id"], parent["id"], custom_instructions="second"))
-        summaries = manager._canonical_prune_summaries_by_node(
+        summaries = prune_summaries_by_node(
+            manager.chat_repository,
             conv.metadata["id"],
             [parent["id"]],
         )[parent["id"]]
@@ -367,7 +370,8 @@ def test_prune_summary_uses_branch_digests_when_packet_exceeds_budget(monkeypatc
         monkeypatch.setattr("backend.core.chat.chat_manager.PRUNE_PACKET_BUDGET_CHARS", 1)
 
         result = asyncio.run(manager.prune_summary(conv.metadata["id"], parent["id"]))
-        summary = manager._canonical_prune_summaries_by_node(
+        summary = prune_summaries_by_node(
+            manager.chat_repository,
             conv.metadata["id"],
             [parent["id"]],
         )[parent["id"]][0]

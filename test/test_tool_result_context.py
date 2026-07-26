@@ -1,11 +1,17 @@
-﻿import asyncio
+import asyncio
 import json
 import time
 
 from backend.core.chat.chat_manager import ChatManager
+from backend.core.chat.tool_result_format import (
+    apply_round_tool_result_budget,
+    build_model_visible_tool_result,
+)
 from backend.core.config.config import cfg
 from backend.core.config.types import Message, Role
 from backend.core.tools import code_tools
+from backend.core.tools.code import python_fallback as code_python_fallback
+from backend.core.tools.code import ripgrep as code_ripgrep
 from backend.core.tools.code_tools import CodeToolConfig, ListFilesTool
 from backend.core.tools.security.capabilities import ToolCapability
 
@@ -96,7 +102,8 @@ def test_command_tool_result_is_model_readable_text(monkeypatch):
     )
     manager = make_manager(FakeToolManager())
 
-    content = manager._build_model_visible_tool_result(
+    content = build_model_visible_tool_result(
+        manager.chat_repository,
         raw_result=raw_result,
         name="shell",
         conversation_id="conv-1",
@@ -124,7 +131,8 @@ def test_model_visible_tool_result_initial_persistence_binds_tool_call_id(monkey
     monkeypatch.setitem(cfg.data, "tools", {"max_result_length": 2000})
     manager = make_manager(FakeToolManager())
 
-    manager._build_model_visible_tool_result(
+    build_model_visible_tool_result(
+        manager.chat_repository,
         raw_result="bound output",
         name="web_search",
         conversation_id="conv-1",
@@ -151,7 +159,8 @@ def test_non_command_tool_result_keeps_preview_with_metadata(monkeypatch):
     monkeypatch.setitem(cfg.data, "tools", {"max_result_length": 5})
     manager = make_manager(FakeToolManager())
 
-    content = manager._build_model_visible_tool_result(
+    content = build_model_visible_tool_result(
+        manager.chat_repository,
         raw_result="abcdefghi",
         name="web_search",
         conversation_id="conv-1",
@@ -357,8 +366,8 @@ def test_glob_tool_sync_work_runs_off_event_loop(monkeypatch, tmp_path):
             "scanned_entries": 1,
         }
 
-    monkeypatch.setattr(code_tools, "_resolve_ripgrep_executable", lambda config: None)
-    monkeypatch.setattr(code_tools, "_glob_files_python", slow_glob_python)
+    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda config: None)
+    monkeypatch.setattr(code_python_fallback, "_glob_files_python", slow_glob_python)
     tool = ListFilesTool(CodeToolConfig.from_dict({
         "workspace_roots": [str(tmp_path)],
         "command_timeout_seconds": 1,
@@ -405,7 +414,7 @@ def test_round_result_budget_shortens_longest_model_visible_result(monkeypatch):
         ),
     ]
 
-    budgeted = manager._apply_round_tool_result_budget(messages)
+    budgeted = apply_round_tool_result_budget(messages)
 
     assert budgeted[0]["content"] == "short result"
     assert len(budgeted[1]["content"]) < 120

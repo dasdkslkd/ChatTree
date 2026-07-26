@@ -9,6 +9,7 @@ from typing import Any, Awaitable, Callable, Dict, Mapping, Optional
 
 from backend.core.capabilities.registry import CapabilityRegistry
 from backend.core.chat.chat_manager import ChatManager
+from backend.core.chat.tool_result_format import apply_round_tool_result_budget
 from backend.core.config.config import cfg
 from backend.core.config.types import Message, Role, StreamController, StreamStatus
 from backend.core.instructions import build_agents_instruction_section
@@ -716,7 +717,7 @@ class SubagentExecutor:
                         execute_task.cancel()
                         with suppress(asyncio.CancelledError):
                             await execute_task
-                model_tool_messages = self.chat_manager._apply_round_tool_result_budget(tool_messages)
+                model_tool_messages = apply_round_tool_result_budget(tool_messages)
                 messages.extend(model_tool_messages)
                 for tool_msg in tool_messages:
                     await self.run_manager.append_event(run_id, {

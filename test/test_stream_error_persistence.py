@@ -6,6 +6,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from backend.core.chat.chat_manager import ChatManager
+from backend.core.chat.canonical_reader import messages_by_node
 from backend.core.config.types import StreamChunk, StreamController, StreamStatus
 from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
@@ -59,7 +60,8 @@ async def _provider_exception_streams_and_persists_real_error(tmp_path):
     assert error_chunk["error"] == "upstream quota exceeded"
     assert error_chunk["node_id"]
 
-    messages = chat_manager._canonical_messages_by_node(
+    messages = messages_by_node(
+        chat_manager.chat_repository,
         conversation.metadata["id"],
         [error_chunk["node_id"]],
     ).get(error_chunk["node_id"], [])

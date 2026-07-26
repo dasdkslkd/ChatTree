@@ -1,7 +1,7 @@
 # chat/chat_manager.py - 适配延迟加载
 from typing import Any, Callable, List, Optional, Dict, AsyncIterator
 import uuid
-import asyncio  
+import asyncio
 import json
 import base64
 from pathlib import Path
@@ -11,6 +11,19 @@ from inspect import isawaitable
 from time import perf_counter, time
 from .conversation import Conversation
 from .node import NodeManager
+from .canonical_reader import (
+    BLOCKING_PLAN_TOOLS,
+    compact_metadata_by_node,
+    has_blocking_plan_participation_result,
+    latest_assistant_answer,
+    messages_by_node as _canonical_messages_by_node,
+    process_content_for_node,
+    prune_summaries_by_node,
+    tool_context_by_node,
+    tool_history_by_node,
+    turn_usage_for_node,
+    usage_from_message,
+)
 from .compact import (
     COMPACT_MAX_OUTPUT_TOKENS,
     POST_COMPACT_MAX_CHARS_PER_FILE,
@@ -39,10 +52,15 @@ from .refer_context import (
     format_refer_context_message,
     parse_refer_prompt_args,
 )
+from .tool_result_format import (
+    apply_round_tool_result_budget,
+    build_model_visible_tool_result,
+    persist_model_visible_tool_result,
+    parse_command_tool_result,
+)
 from ..config.types import Message, Role, StreamChunk, StreamStatus, StreamController, GenerationInfo, SCHEMA_VERSION
 from ..storage.chat_storage import ChatStorage
 from ..storage.prompt_storage import PromptStorage
-from ..persistence.blob_store import BlobStore
 from ..model.model_manager import ModelManager
 from ..model.usage import add_usage, estimated_usage, usage_total
 from ..perf import get_profiler
@@ -53,8 +71,16 @@ from ..projects import filter_capability_registry_for_workspace
 from ..capabilities.prompting import (
     collect_skill_injection_names,
 )
-from ..instructions import build_agents_instruction_section
 from ..prompts import PromptBuilder, PromptBuildRequest
+from ..prompts.runtime_context import (
+    agents_instruction_sections,
+    format_task_turn_context_for_prompt,
+    normalize_selected_system_prompt_mode,
+    plan_mode_runtime_lines,
+    runtime_context_details,
+    runtime_prompt_context,
+    selected_system_prompt,
+)
 from ..prompts.types import RuntimePromptContext
 from ..slash import (
     SlashCommandDispatcher,
@@ -73,7 +99,6 @@ from ..tools.task_tools import (
     TASK_TOOL_NAMES,
     filter_task_tools_for_context,
 )
-from ..tools.task_contract import TASK_RUNTIME_RULES
 from ..tasks import (
     TaskContextMode,
     TaskOutcome,
@@ -82,8 +107,6 @@ from ..tasks import (
 )
 
 logger = setup_logger('ChatManager')
-
-BLOCKING_PLAN_TOOLS = {"ask_user_question", "exit_plan_mode"}
 
 MULTI_AGENT_REJECTION_TOKENS = (
     "不要用 subagent",
@@ -109,28 +132,6 @@ MULTI_AGENT_REQUEST_TOKENS = (
     "workflow",
     "工作流",
 )
-
-
-def _tool_result_payload(value: Any) -> Dict[str, Any]:
-    if isinstance(value, dict):
-        return value
-    if not isinstance(value, str):
-        return {}
-    try:
-        parsed = json.loads(value)
-    except json.JSONDecodeError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
-def has_blocking_plan_participation_result(messages: List[Dict[str, Any]]) -> bool:
-    for message in messages:
-        if str(message.get("name") or "") not in BLOCKING_PLAN_TOOLS:
-            continue
-        payload = _tool_result_payload(message.get("raw_content") or message.get("content"))
-        if str(payload.get("status") or "") in {"awaiting_approval", "awaiting_question"}:
-            return True
-    return False
 
 
 def should_emit_as_intermediate_text(*, has_tool_calls: bool, plan_guard_active: bool) -> bool:
@@ -233,7 +234,7 @@ class ChatManager:
         nodes = self.chat_repository.list_nodes(conversation_id) if self.chat_repository is not None else []
         workspace = row.get("workspace")
         if workspace is None and row.get("workspace_json"):
-            workspace = _tool_result_payload(row.get("workspace_json"))
+            workspace = self._json_tool_payload(row.get("workspace_json"))
         data = {
             "metadata": {
                 "id": conversation_id,
@@ -316,8 +317,8 @@ class ChatManager:
                 task_context_mode=eff_task_context_mode,
             )
             conversation.add_node(new_node, parent_id=current_node_id)
-            self._save(conversation)
-            self._persist_sqlite_user_turn(
+            self.chat_repository.save(conversation)
+            self.chat_repository.persist_user_turn(
                 conversation=conversation,
                 node=new_node,
                 user_msg=user_msg,
@@ -353,12 +354,12 @@ class ChatManager:
             if system_prompt:
                 conversation.metadata["selected_system_prompt"] = {
                     "id": prompt_id,
-                    "mode": self._normalize_selected_system_prompt_mode(prompt_mode),
+                    "mode": normalize_selected_system_prompt_mode(prompt_mode),
                     "content": system_prompt,
                 }
 
         # 直接持久化新对话（不依赖共享 current_conversation 做后续保存）
-        self._save(conversation)
+        self.chat_repository.save(conversation)
         self.current_conversation = conversation
         logger.info(f"对话创建成功 id: {conversation.metadata['id']}")
         return conversation
@@ -374,7 +375,7 @@ class ChatManager:
     def save_conversation(self):
         """保存当前对话"""
         if self.current_conversation:
-            self._save(self.current_conversation)
+            self.chat_repository.save(self.current_conversation)
     
     def list_conversations(self) -> List[Dict[str, Any]]:
         """列出所有对话"""
@@ -487,349 +488,6 @@ class ChatManager:
                 "parent_node_id": parent_id,
             }
 
-    def _save(self, conversation: Conversation):
-        """保存 canonical conversation/node 结构。"""
-        self._sqlite_ensure_conversation(conversation)
-        if conversation.current_node_id:
-            self._sqlite_ensure_branch(
-                conversation,
-                conversation.current_node_id,
-                provider_id=conversation.metadata.get("provider_id"),
-                model_id=conversation.metadata.get("model_id"),
-                focus_node_id=conversation.current_node_id,
-            )
-
-    def _mark_conversation_updated_at(self, conversation: Conversation, updated_at: int):
-        conversation.metadata["updated_at"] = max(
-            int(conversation.metadata.get("updated_at") or 0),
-            updated_at,
-        )
-
-    def _sqlite_enabled(self) -> bool:
-        return self.chat_repository is not None
-
-    def _sqlite_ensure_conversation(self, conversation: Conversation) -> None:
-        if self.chat_repository is None:
-            return
-        metadata = conversation.metadata
-        try:
-            self.chat_repository.ensure_conversation(
-                metadata["id"],
-                title=str(metadata.get("title") or ""),
-                provider_id=metadata.get("provider_id"),
-                model_id=metadata.get("model_id"),
-                reasoning_effort=metadata.get("reasoning_effort"),
-                thinking_enabled=metadata.get("thinking_enabled"),
-                multi_agent_mode=metadata.get("multi_agent_mode"),
-                workspace=metadata.get("workspace") if isinstance(metadata.get("workspace"), dict) else None,
-            )
-        except Exception as exc:
-            logger.warning("SQLite conversation ensure failed: %s", exc, exc_info=True)
-
-    def _role_value(self, role: Any) -> str:
-        return str(getattr(role, "value", role))
-
-    def _sqlite_ensure_branch(
-        self,
-        conversation: Conversation,
-        node_id: str,
-        *,
-        provider_id: Optional[str],
-        model_id: Optional[str],
-        focus_node_id: Optional[str] = None,
-    ) -> None:
-        if not self._sqlite_enabled():
-            return
-        repo = self.chat_repository
-        metadata = conversation.metadata
-        repo.ensure_conversation(
-            metadata["id"],
-            title=str(metadata.get("title") or ""),
-            provider_id=provider_id or metadata.get("provider_id"),
-            model_id=model_id or metadata.get("model_id"),
-            reasoning_effort=metadata.get("reasoning_effort"),
-            thinking_enabled=metadata.get("thinking_enabled"),
-            multi_agent_mode=metadata.get("multi_agent_mode"),
-            workspace=metadata.get("workspace") if isinstance(metadata.get("workspace"), dict) else None,
-        )
-        chain = conversation.get_node_chain(node_id)
-        for item in chain:
-            parent_id = item.get("parent_id")
-            if parent_id == "None":
-                parent_id = None
-            child_order = 0
-            if parent_id and parent_id in conversation.nodes:
-                siblings = conversation.nodes[parent_id].get("children_ids") or []
-                with suppress(ValueError):
-                    child_order = siblings.index(item["id"])
-            repo.ensure_node(
-                metadata["id"],
-                item["id"],
-                parent_id,
-                child_order=child_order,
-                model_id=item.get("model_id") or model_id,
-                provider_id=provider_id,
-                tool_permission_mode=item.get("tool_permission_mode"),
-                task_context_mode=item.get("task_context_mode") or "attached",
-                turn_usage=(item.get("usage") or {}).get("turn_usage"),
-                branch_usage=(item.get("usage") or {}).get("branch_usage") or item.get("branch_usage_info"),
-                active_context_usage=(item.get("usage") or {}).get("active_context_usage"),
-                focus=item["id"] == focus_node_id,
-            )
-
-    def _persist_sqlite_user_turn(
-        self,
-        *,
-        conversation: Conversation,
-        node: Dict[str, Any],
-        user_msg: Message,
-        provider_id: Optional[str],
-        model_id: Optional[str],
-        run_id: Optional[str],
-    ) -> None:
-        if not self._sqlite_enabled():
-            return
-        conversation_id = conversation.metadata["id"]
-        node_id = node["id"]
-        self._sqlite_ensure_branch(
-            conversation,
-            node_id,
-            provider_id=provider_id,
-            model_id=model_id,
-            focus_node_id=conversation.current_node_id,
-        )
-        self.chat_repository.add_message(
-            conversation_id,
-            node_id,
-            role=self._role_value(user_msg.get("role") or Role.USER),
-            content=str(user_msg.get("content") or ""),
-            subtype=user_msg.get("subtype"),
-            hidden=bool(user_msg.get("is_hidden_from_transcript")),
-            metadata={
-                key: value
-                for key, value in dict(user_msg).items()
-                if key not in {"id", "role", "content", "subtype"}
-            },
-            message_id=user_msg.get("id"),
-        )
-
-    def _persist_sqlite_tool_metadata(
-        self,
-        *,
-        conversation_id: str,
-        node_id: str,
-        run_id: Optional[str],
-        assistant_message_id: Optional[str],
-        tool_calls: List[Dict[str, Any]],
-        tool_messages: List[Message],
-        approval_events: List[Dict[str, Any]],
-        generation_status: str,
-    ) -> None:
-        if self.chat_repository is None:
-            return
-        approval_status_by_call_id: Dict[str, str] = {}
-        for event in approval_events:
-            approval = event.get("approval") if isinstance(event, dict) else None
-            if not isinstance(approval, dict):
-                continue
-            tool_call_id = str(approval.get("tool_call_id") or "")
-            if not tool_call_id:
-                continue
-            if event.get("event_type") == "tool_approval_request":
-                approval_status_by_call_id[tool_call_id] = "waiting_approval"
-                continue
-            status = str(approval.get("status") or "")
-            if status == "approved":
-                approval_status_by_call_id[tool_call_id] = "approved"
-            elif status in {"denied", "expired", "cancelled", "rejected"}:
-                approval_status_by_call_id[tool_call_id] = "rejected"
-        result_call_ids = {
-            str(message.get("tool_call_id") or "")
-            for message in tool_messages
-            if message.get("tool_call_id")
-        }
-        unresolved_status = "stopped" if generation_status == "stopped" else "error"
-        for index, call in enumerate(tool_calls):
-            fn = call.get("function") or {}
-            name = str(fn.get("name") or "")
-            arguments = fn.get("arguments")
-            call_id = str(call.get("id") or "")
-            try:
-                call_index = int(call.get("call_index") if call.get("call_index") is not None else index)
-            except (TypeError, ValueError):
-                call_index = index
-            call_status = approval_status_by_call_id.get(call_id)
-            if call_status is None:
-                call_status = "complete" if call_id in result_call_ids else unresolved_status
-            self.chat_repository.add_tool_call(
-                conversation_id,
-                node_id,
-                tool_call_id=call_id or call.get("id"),
-                name=name,
-                arguments=arguments,
-                call_index=call_index,
-                status=call_status,
-                run_id=run_id,
-                assistant_message_id=assistant_message_id,
-            )
-        for message in tool_messages:
-            raw_output = str(message.get("raw_content") or message.get("content") or "")
-            tool_call_id = message.get("tool_call_id")
-            if tool_call_id and not self.chat_repository.tool_call_exists(
-                conversation_id,
-                str(tool_call_id),
-            ):
-                self.chat_repository.add_tool_call(
-                    conversation_id,
-                    node_id,
-                    tool_call_id=tool_call_id,
-                    name=str(message.get("name") or ""),
-                    arguments=None,
-                    call_index=0,
-                    status=approval_status_by_call_id.get(str(tool_call_id), "complete"),
-                    run_id=run_id,
-                    assistant_message_id=assistant_message_id,
-                )
-            result_id = message.get("tool_result_id")
-            self.chat_repository.add_tool_result(
-                conversation_id,
-                node_id,
-                tool_result_id=result_id,
-                tool_call_id=tool_call_id,
-                output=raw_output,
-                status="complete",
-                run_id=run_id,
-                metadata={
-                    "tool_name": message.get("name"),
-                    "tool_result_id": message.get("tool_result_id"),
-                },
-            )
-
-    def _persist_sqlite_assistant_turn(
-        self,
-        *,
-        conversation: Conversation,
-        node: Dict[str, Any],
-        assistant_msg: Message,
-        provider_id: Optional[str],
-        model_id: Optional[str],
-        run_id: Optional[str],
-        tool_messages: List[Message],
-        tool_calls: List[Dict[str, Any]],
-        approval_events: List[Dict[str, Any]] | None = None,
-    ) -> None:
-        if not self._sqlite_enabled():
-            return
-        conversation_id = conversation.metadata["id"]
-        node_id = node["id"]
-        self._sqlite_ensure_branch(
-            conversation,
-            node_id,
-            provider_id=provider_id,
-            model_id=model_id,
-            focus_node_id=conversation.current_node_id,
-        )
-        content = str(assistant_msg.get("content") or "")
-        plan_participation_only = has_blocking_plan_participation_result(tool_messages)
-        assistant_message_id: Optional[str] = None
-        process_message_base_id = str(assistant_msg.get("id") or run_id or uuid.uuid4())
-        process_parts = assistant_msg.get("process_parts")
-        if isinstance(process_parts, list):
-            for part in process_parts:
-                if not isinstance(part, dict):
-                    continue
-                content_text = str(part.get("content") or "")
-                if not content_text:
-                    continue
-                part_type = str(part.get("type") or "")
-                subtype = (
-                    "assistant_process_reasoning"
-                    if part_type == "reasoning"
-                    else "assistant_process_content"
-                )
-                order = int(part.get("order") or 0)
-                metadata = {"run_id": run_id, "order": order} if run_id else {"order": order}
-                self.chat_repository.add_message(
-                    conversation_id,
-                    node_id,
-                    role=self._role_value(assistant_msg.get("role") or Role.ASSISTANT),
-                    content=content_text,
-                    subtype=subtype,
-                    hidden=True,
-                    transcript_only=True,
-                    metadata=metadata,
-                    message_id=f"{process_message_base_id}:{part_type}:{order}",
-                )
-        else:
-            reasoning_content = str(assistant_msg.get("reasoning") or "")
-            if reasoning_content:
-                self.chat_repository.add_message(
-                    conversation_id,
-                    node_id,
-                    role=self._role_value(assistant_msg.get("role") or Role.ASSISTANT),
-                    content=reasoning_content,
-                    subtype="assistant_process_reasoning",
-                    hidden=True,
-                    transcript_only=True,
-                    metadata={"run_id": run_id} if run_id else None,
-                    message_id=f"{process_message_base_id}:reasoning",
-                )
-            process_content = str(assistant_msg.get("process_content") or "")
-            if process_content:
-                self.chat_repository.add_message(
-                    conversation_id,
-                    node_id,
-                    role=self._role_value(assistant_msg.get("role") or Role.ASSISTANT),
-                    content=process_content,
-                    subtype="assistant_process_content",
-                    hidden=True,
-                    transcript_only=True,
-                    metadata={"run_id": run_id} if run_id else None,
-                    message_id=f"{process_message_base_id}:process-content",
-                )
-        if content and not plan_participation_only:
-            assistant_message_id = self.chat_repository.add_message(
-                conversation_id,
-                node_id,
-                role=self._role_value(assistant_msg.get("role") or Role.ASSISTANT),
-                content=content,
-                subtype="assistant_answer",
-                metadata={
-                    **{
-                        key: value
-                        for key, value in dict(assistant_msg).items()
-                        if key not in {
-                            "id",
-                            "role",
-                            "content",
-                            "tool_calls",
-                            "tool_results",
-                            "approval_events",
-                            "process_content",
-                            "process_parts",
-                            "reasoning",
-                        }
-                    },
-                    **({"run_id": run_id} if run_id else {}),
-                },
-                message_id=assistant_msg.get("id"),
-            )
-        if tool_calls or tool_messages:
-            generation_info = assistant_msg.get("generation_info")
-            generation_status = "completed"
-            if isinstance(generation_info, dict):
-                generation_status = str(generation_info.get("status") or generation_status)
-            self._persist_sqlite_tool_metadata(
-                conversation_id=conversation_id,
-                node_id=node_id,
-                run_id=run_id,
-                assistant_message_id=assistant_message_id,
-                tool_calls=tool_calls,
-                tool_messages=tool_messages,
-                approval_events=list(approval_events or []),
-                generation_status=generation_status,
-            )
-
     def _provider_for_model(self, model_id: Optional[str]) -> Optional[str]:
         if not model_id:
             return None
@@ -863,7 +521,7 @@ class ChatManager:
         checked = 0
         chain = conversation.get_node_chain(conversation.current_node_id)
         node_ids = [str(node.get("id")) for node in chain if node.get("id")]
-        messages_by_node = self._canonical_messages_by_node(conversation.metadata["id"], node_ids)
+        messages_by_node = _canonical_messages_by_node(self.chat_repository,conversation.metadata["id"], node_ids)
         for node in reversed(chain):
             checked += 1
             node_skill_names: list[str] = []
@@ -987,19 +645,26 @@ class ChatManager:
         if task_turn_context is None:
             task_turn_context = self._start_task_turn_context(conversation)
         base_messages = self._prepare_messages_for_api_with_conversation(conversation)
-        custom_prompt, custom_mode = self._selected_system_prompt(conversation)
+        custom_prompt, custom_mode = selected_system_prompt(conversation)
         latest_user_content = self._latest_user_content(conversation)
         built_messages = PromptBuilder(self._scoped_capability_registry(conversation)).build(
             PromptBuildRequest(
                 base_messages=base_messages,
                 active_skill_names=skill_names,
-                runtime_context=self._runtime_prompt_context(
+                runtime_context=runtime_prompt_context(
                     "main",
                     conversation,
                     latest_user_content=latest_user_content,
                     task_turn_context=task_turn_context,
+                    multi_agent_mode=self._resolve_multi_agent_mode(
+                        self._multi_agent_intent_text(conversation, latest_user_content),
+                        conversation.metadata if conversation is not None else {},
+                    ),
+                    permission_mode=self._current_node_permission_mode(conversation),
+                    task_context_mode=self._current_node_task_context_mode(conversation),
+                    plan_ledger=getattr(self, "plan_ledger", None),
                 ),
-                extra_sections=self._agents_instruction_sections(conversation),
+                extra_sections=agents_instruction_sections(conversation),
                 custom_system_prompt=custom_prompt,
                 custom_system_prompt_mode=custom_mode,
             )
@@ -1018,7 +683,7 @@ class ChatManager:
         run_id: Optional[str],
     ) -> AsyncIterator[StreamChunk]:
         base_messages = self._prepare_messages_for_api_with_conversation(conversation)
-        custom_prompt, custom_mode = self._selected_system_prompt(conversation)
+        custom_prompt, custom_mode = selected_system_prompt(conversation)
         messages = [
             Message(message)
             for message in PromptBuilder(self._scoped_capability_registry(conversation)).build(
@@ -1026,8 +691,13 @@ class ChatManager:
                     base_messages=base_messages,
                     active_skill_names=[],
                     include_available_capabilities=False,
-                    runtime_context=self._runtime_prompt_context("side_question", conversation),
-                    extra_sections=self._agents_instruction_sections(conversation),
+                    runtime_context=runtime_prompt_context(
+                        "side_question",
+                        conversation,
+                        permission_mode=self._current_node_permission_mode(conversation),
+                        task_context_mode=self._current_node_task_context_mode(conversation),
+                    ),
+                    extra_sections=agents_instruction_sections(conversation),
                     custom_system_prompt=custom_prompt,
                     custom_system_prompt_mode=custom_mode,
                 )
@@ -1090,29 +760,21 @@ class ChatManager:
         finally:
             self._active_controllers.pop(controller_key, None)
 
-    async def send_message_stream(
+    async def _resolve_stream_preload(
         self,
+        *,
         conversation_id: str,
         content: str,
-        model_id: Optional[str] = None,
-        provider_id: Optional[str] = None,
-        parent_node_id: Optional[str] = None,
-        focus_new_node: bool = True,
-        reasoning_effort: Optional[str] = None,
-        thinking_enabled: Optional[bool] = None,
-        import_files: Optional[List[Dict[str, Any]]] = None,
-        image_refs: Optional[List[Dict[str, Any]]] = None,
-        tool_permission_mode: Optional[str] = None,
-        task_context_mode: Optional[str] = None,
-        hidden_user_message: bool = False,
-        run_id: Optional[str] = None,
-        continuation_messages: Optional[List[Message]] = None,
-        suppress_user_message: bool = False,
-        append_to_existing_node: bool = False,
-    ) -> AsyncIterator[StreamChunk]:
-        """
-        异步流式发送消息
-        前端可以：for chunk in stream: 实时更新UI
+        model_id: Optional[str],
+        provider_id: Optional[str],
+        parent_node_id: Optional[str],
+        reasoning_effort: Optional[str],
+        thinking_enabled: Optional[bool],
+        append_to_existing_node: bool,
+        run_id: Optional[str],
+    ) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+        """预加载阶段：验证并解析模型/提供商/slash/refer/reasoning。
+        返回 (context, None) 成功，或 (None, error_message) 失败。
         """
         profiler = get_profiler()
         # 预加载（只读）用于解析模型/提供商，不做任何修改或保存。
@@ -1121,82 +783,31 @@ class ChatManager:
             preview = self.get_conversation(conversation_id)
         if preview is None:
             logger.error(f"对话 {conversation_id} 不存在")
-            yield StreamChunk(
-                status=StreamStatus.ERROR,
-                node_id=None,
-                conversation_id=conversation_id,
-                run_id=run_id,
-                content="",
-                error="对话不存在",
-                tokens_used=0
-            )
-            return
+            return None, "对话不存在"
         requested_parent_node_id = str(parent_node_id or "").strip()
         if not requested_parent_node_id:
-            yield StreamChunk(
-                status=StreamStatus.ERROR,
-                content="",
-                node_id=None,
-                conversation_id=conversation_id,
-                run_id=run_id,
-                error="parent_node_id is required",
-                tokens_used=0,
-            )
-            return
+            return None, "parent_node_id is required"
         if requested_parent_node_id not in preview.nodes:
-            yield StreamChunk(
-                status=StreamStatus.ERROR,
-                content="",
-                node_id=None,
-                conversation_id=conversation_id,
-                run_id=run_id,
-                error="父节点不存在",
-                tokens_used=0,
-            )
-            return
+            return None, "父节点不存在"
         preview.switch_to_node(requested_parent_node_id)
         # 确定模型：请求值 > 会话 metadata > 当前分支节点 > 第一个可用模型。
         target_model = model_id or preview.current_model or self._current_branch_model(preview)
         if not target_model:
-            # 尝试获取第一个可用的模型
             for provider, models in self.model_manager.model_list.items():
                 if models:
                     target_model = models[0]
                     logger.info(f"使用默认模型: {target_model}")
                     break
-        
         if not target_model:
-            yield StreamChunk(
-                status=StreamStatus.ERROR,
-                node_id=None,
-                conversation_id=conversation_id,
-                run_id=run_id,
-                content="",
-                error="未指定模型ID",
-                tokens_used=0
-            )
-            return
-        
-        # 获取提供商
+            return None, "未指定模型ID"
         target_provider = (
             provider_id
             or preview.current_provider
             or self._provider_for_model(target_model)
         )
-
         logger.info(f"Stream: model={target_model}, provider={target_provider}, model_list_keys={list(self.model_manager.model_list.keys())}")
-
         if not target_provider:
-            yield StreamChunk(
-                status=StreamStatus.ERROR,
-                content="",
-                node_id=None,
-                conversation_id=conversation_id,
-                run_id=run_id,
-                error=f"无法找到模型 {target_model} 对应的提供商",
-                tokens_used=0
-            )
-            return
+            return None, f"无法找到模型 {target_model} 对应的提供商"
 
         slash_result = self._dispatch_slash_content(content)
         if slash_result.kind in {
@@ -1204,23 +815,14 @@ class ChatManager:
             SlashDispatchKind.WORKFLOW,
             SlashDispatchKind.ERROR,
         }:
-            yield StreamChunk(
-                status=StreamStatus.ERROR,
-                content="",
-                node_id=None,
-                conversation_id=conversation_id,
-                run_id=run_id,
-                error=self._slash_runtime_error(slash_result),
-                tokens_used=0,
-            )
-            return
+            return None, self._slash_runtime_error(slash_result)
         model_content = slash_result.model_input or content
         refer_bundle: Optional[Dict[str, Any]] = None
         if slash_result.kind == SlashDispatchKind.REFER_PROMPT:
             try:
                 refer_args = parse_refer_prompt_args(slash_result.args)
                 refer_node_ids = [str(node_id) for node_id in preview.nodes.keys()]
-                prune_by_node = self._canonical_prune_summaries_by_node(
+                prune_by_node = prune_summaries_by_node(self.chat_repository,
                     preview.metadata["id"],
                     refer_node_ids,
                 )
@@ -1229,16 +831,16 @@ class ChatManager:
                     refer_args["selectors"],
                     {
                         node_id: [dict(message) for message in messages]
-                        for node_id, messages in self._canonical_messages_by_node(
+                        for node_id, messages in _canonical_messages_by_node(self.chat_repository,
                             preview.metadata["id"],
                             refer_node_ids,
                         ).items()
                     },
-                    self._canonical_tool_context_by_node(
+                    tool_context_by_node(self.chat_repository,
                         preview.metadata["id"],
                         refer_node_ids,
                     ),
-                    self._canonical_compact_metadata_by_node(
+                    compact_metadata_by_node(self.chat_repository,
                         preview.metadata["id"],
                         refer_node_ids,
                     ),
@@ -1251,31 +853,13 @@ class ChatManager:
                 refer_bundle["prompt"] = refer_args["prompt"]
                 model_content = refer_args["prompt"]
             except ReferContextError as exc:
-                yield StreamChunk(
-                    status=StreamStatus.ERROR,
-                    content="",
-                    node_id=None,
-                    conversation_id=conversation_id,
-                    run_id=run_id,
-                    error=str(exc),
-                    tokens_used=0,
-                )
-                return
-        
+                return None, str(exc)
+
         provider = self.model_manager.get_model(target_provider, True)
         if not provider:
             logger.error(f"无法初始化提供商 {target_provider} (is_async=True)")
-            yield StreamChunk(
-                status=StreamStatus.ERROR,
-                content="",
-                node_id=None,
-                conversation_id=conversation_id,
-                run_id=run_id,
-                error=f"无法初始化提供商 {target_provider}",
-                tokens_used=0
-            )
-            return
-        
+            return None, f"无法初始化提供商 {target_provider}"
+
         # 解析有效推理参数：请求传入 > 对话 metadata > 模型默认；再按模型元数据校验。
         # metadata 不支持的档位/开关会被规范化为 None（不发送），保护配错的第三方模型。
         from ..model.model_metadata import normalize_effort, normalize_thinking
@@ -1328,6 +912,355 @@ class ChatManager:
         eff_effort = normalize_effort(eff_effort, meta)
         eff_thinking = normalize_thinking(eff_thinking, meta)
         logger.info(f"Stream reasoning: effort={eff_effort}, thinking={eff_thinking}")
+
+        return {
+            "preview": preview,
+            "requested_parent_node_id": requested_parent_node_id,
+            "target_model": target_model,
+            "target_provider": target_provider,
+            "slash_result": slash_result,
+            "model_content": model_content,
+            "refer_bundle": refer_bundle,
+            "provider": provider,
+            "meta": meta,
+            "eff_effort": eff_effort,
+            "eff_thinking": eff_thinking,
+        }, None
+
+    async def _create_turn_node(
+        self,
+        *,
+        conversation_id: str,
+        requested_parent_node_id: str,
+        target_model: str,
+        target_provider: str,
+        meta: Dict[str, Any],
+        model_content: str,
+        user_msg: Optional[Message],
+        focus_new_node: bool,
+        append_to_existing_node: bool,
+        requested_tool_permission_mode: Optional[str],
+        active_plan_permission_mode: Optional[str],
+        task_context_mode: Optional[str],
+        hidden_user_message: bool,
+        suppress_user_message: bool,
+        run_id: Optional[str],
+    ) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+        """临界区 1（锁内）：重新加载最新快照 + 建节点 + 立即保存 user 消息。
+        锁内重载确保看到其他并发流刚提交的兄弟节点，add_node 不会丢失 root 引用。
+        立即落盘是为了让前端的 userMsgLanded 判定能尽快看到真实 user 消息。
+        返回 (turn_state, None) 成功，或 (None, error_message) 失败。
+        """
+        profiler = get_profiler()
+        with profiler.span("chat.create_turn_node", conversation_id=conversation_id, run_id=run_id):
+            async with self._lock_for(conversation_id):
+                conversation = self.get_conversation(conversation_id)
+                if conversation is None:
+                    return None, "对话不存在"
+                if requested_parent_node_id not in conversation.nodes:
+                    return None, "父节点不存在"
+                current_node_id = requested_parent_node_id
+                parent_tool_permission_mode = None
+                parent_task_context_mode = TaskContextMode.ATTACHED.value
+                if current_node_id and current_node_id in conversation.nodes:
+                    parent_tool_permission_mode = conversation.nodes[current_node_id].get("tool_permission_mode")
+                    parent_task_context_mode = str(
+                        conversation.nodes[current_node_id].get("task_context_mode")
+                        or TaskContextMode.ATTACHED.value
+                    )
+                if (
+                    parent_tool_permission_mode == "plan"
+                    and active_plan_permission_mode != "plan"
+                ):
+                    parent_tool_permission_mode = None
+                eff_tool_permission_mode = normalize_permission_mode(
+                    requested_tool_permission_mode
+                    if requested_tool_permission_mode
+                    else active_plan_permission_mode
+                    or parent_tool_permission_mode
+                    or _configured_default_tool_permission_mode()
+                )
+                try:
+                    eff_task_context_mode = normalize_context_mode(
+                        task_context_mode if task_context_mode not in (None, "") else parent_task_context_mode
+                    ).value
+                except ValueError:
+                    return None, "task_context_mode must be attached or detached"
+                skill_names: list[str] = []
+                if (
+                    self.capability_registry is not None
+                    and not hidden_user_message
+                    and not suppress_user_message
+                ):
+                    skill_names = collect_skill_injection_names(
+                        model_content,
+                        self._scoped_capability_registry(conversation),
+                        active_skill_names=self._recent_active_skill_names(conversation),
+                    )
+                    if skill_names and user_msg is not None:
+                        user_msg["active_skill_names"] = skill_names
+                if append_to_existing_node:
+                    new_node = conversation.nodes[current_node_id]
+                    new_node["model_id"] = target_model
+                    new_node["tool_permission_mode"] = eff_tool_permission_mode
+                    new_node["task_context_mode"] = eff_task_context_mode
+                    conversation.switch_to_node(current_node_id)
+                else:
+                    new_node = NodeManager.create_node(
+                        parent_id=current_node_id,
+                        model_id=target_model,
+                        tool_permission_mode=eff_tool_permission_mode,
+                        task_context_mode=eff_task_context_mode,
+                    )
+                    conversation.add_node(new_node, parent_id=current_node_id, focus=focus_new_node)
+                self._set_conversation_model_metadata(
+                    conversation,
+                    provider_id=target_provider,
+                    model_id=target_model,
+                )
+                self._update_branch_usage_for_node(
+                    conversation,
+                    new_node["id"],
+                    model_context_window=meta.get("context_length"),
+                )
+                self.chat_repository.save(conversation)
+                if user_msg is not None:
+                    self.chat_repository.persist_user_turn(
+                        conversation=conversation,
+                        node=new_node,
+                        user_msg=user_msg,
+                        provider_id=target_provider,
+                        model_id=target_model,
+                        run_id=run_id,
+                    )
+                return {
+                    "conversation": conversation,
+                    "new_node": new_node,
+                    "current_node_id": current_node_id,
+                    "skill_names": skill_names,
+                }, None
+
+    async def _finalize_assistant_turn(
+        self,
+        *,
+        conversation_id: str,
+        run_id: Optional[str],
+        conversation: Conversation,
+        new_node: Dict[str, Any],
+        target_provider: str,
+        target_model: str,
+        meta: Dict[str, Any],
+        assistant_message_id: str,
+        start_time: float,
+        tokens_used: int,
+        usage_info: Optional[Dict[str, Any]],
+        generation_status: str,
+        error_message: Optional[str],
+        total_content: str,
+        total_reasoning: str,
+        final_content: str,
+        persisted_final_content: Optional[str],
+        process_content_parts: list[str],
+        process_parts: list[Dict[str, Any]],
+        all_tool_calls: List[Dict[str, Any]],
+        all_tool_messages: List[Message],
+        all_approval_events: List[Dict[str, Any]],
+        append_to_existing_node: bool,
+    ) -> None:
+        """临界区 2（锁内）+ 转写持久化：重新加载最新快照、挂助手消息、累加 token、保存。
+        必须锁内重载：流式期间其他并发流可能已提交兄弟节点，直接保存临界区 1 的
+        旧 conversation 会覆盖掉它们对 root.children_ids 的修改。
+        必须在路由发送 [DONE] 之前完成（save-before-[DONE] 不变量）。
+        """
+        # 计算用时
+        duration_ms = int((time() - start_time) * 1000)
+        if usage_info is None:
+            usage_info = estimated_usage(tokens_used)
+        tokens_used = usage_total(usage_info, tokens_used)
+        completion_timestamp = int(time())
+        # 创建生成信息（tokens_used 来自流中捕获的最终值）
+        generation_info: GenerationInfo = {
+            "duration_ms": duration_ms,
+            "status": generation_status,
+            "error_message": error_message,
+            "tokens_used": tokens_used,
+            "usage_info": usage_info
+        }
+        has_tool_rounds = bool(all_tool_calls or all_tool_messages)
+        # 助手消息（包含生成信息）
+        assistant_msg = Message({
+            "id": assistant_message_id,
+            "role": Role.ASSISTANT,
+            "content": persisted_final_content if persisted_final_content is not None else (final_content if has_tool_rounds else total_content),
+            "name": None,
+            "tool_call_id": None,
+            "process_content": "".join(process_content_parts) or None,
+            "process_parts": process_parts or None,
+            "reasoning": total_reasoning or None,
+            "timestamp": completion_timestamp,
+            "generation_info": generation_info
+        })
+
+        assistant_msg_for_transcript = assistant_msg
+        persisted_tool_calls = all_tool_calls
+        if append_to_existing_node:
+            existing_answer = latest_assistant_answer(self.chat_repository, conversation_id, new_node["id"])
+            if existing_answer is not None:
+                assistant_msg_for_transcript = Message(deepcopy(assistant_msg))
+                assistant_msg_for_transcript["id"] = str(existing_answer.get("id") or assistant_message_id)
+                assistant_msg_for_transcript["content"] = (
+                    str(existing_answer.get("content") or "")
+                    + str(assistant_msg.get("content") or "")
+                )
+                if assistant_msg.get("reasoning"):
+                    assistant_msg_for_transcript["reasoning"] = (
+                        process_content_for_node(self.chat_repository,
+                            conversation_id,
+                            new_node["id"],
+                            "assistant_process_reasoning",
+                        )
+                        + str(assistant_msg.get("reasoning") or "")
+                    )
+                if assistant_msg.get("process_content"):
+                    assistant_msg_for_transcript["process_content"] = (
+                        process_content_for_node(self.chat_repository,
+                            conversation_id,
+                            new_node["id"],
+                            "assistant_process_content",
+                        )
+                        + str(assistant_msg.get("process_content") or "")
+                    )
+        async with self._lock_for(conversation_id):
+            latest = self.get_conversation(conversation_id)
+            if latest is not None and new_node["id"] in latest.nodes:
+                latest_node = latest.nodes[new_node["id"]]
+                latest_node["tool_permission_mode"] = new_node.get("tool_permission_mode")
+                persisted_tool_messages = all_tool_messages
+                self._set_conversation_model_metadata(
+                    latest,
+                    provider_id=target_provider,
+                    model_id=target_model,
+                )
+                self._update_token_stats_for_conversation(latest, target_provider, tokens_used)
+                self._update_branch_usage_for_node(
+                    latest,
+                    new_node["id"],
+                    model_context_window=meta.get("context_length"),
+                )
+                latest.metadata["updated_at"] = max(
+                    int(latest.metadata.get("updated_at") or 0),
+                    completion_timestamp,
+                )
+                self.chat_repository.save(latest)
+            else:
+                # 极端情况：节点已被并发删除——退回到只保存本节点，避免丢消息
+                persisted_tool_messages = all_tool_messages
+                new_node["total_tokens"] = usage_total(usage_info, tokens_used)
+                new_node["branch_usage_info"] = usage_info
+                new_node["usage"] = self._node_usage_snapshot(
+                    turn_usage=usage_info,
+                    branch_usage=usage_info,
+                    model_context_window=meta.get("context_length"),
+                )
+                self._set_conversation_model_metadata(
+                    conversation,
+                    provider_id=target_provider,
+                    model_id=target_model,
+                )
+                conversation.metadata["updated_at"] = max(
+                    int(conversation.metadata.get("updated_at") or 0),
+                    completion_timestamp,
+                )
+                self.chat_repository.save(conversation)
+
+        try:
+            latest_for_transcript = self.get_conversation(conversation_id)
+            if latest_for_transcript is not None:
+                self.chat_repository.persist_assistant_turn(
+                    conversation=latest_for_transcript,
+                    node=latest_for_transcript.nodes.get(new_node["id"], new_node),
+                    assistant_msg=assistant_msg_for_transcript,
+                    provider_id=target_provider,
+                    model_id=target_model,
+                    run_id=run_id,
+                    tool_messages=persisted_tool_messages,
+                    tool_calls=persisted_tool_calls,
+                    approval_events=all_approval_events,
+                    plan_participation_only=has_blocking_plan_participation_result(persisted_tool_messages),
+                )
+                async with self._lock_for(conversation_id):
+                    latest_with_messages = self.get_conversation(conversation_id)
+                    if latest_with_messages is not None and new_node["id"] in latest_with_messages.nodes:
+                        self._update_branch_usage_for_node(
+                            latest_with_messages,
+                            new_node["id"],
+                            model_context_window=meta.get("context_length"),
+                        )
+                        self.chat_repository.save(latest_with_messages)
+        finally:
+            if new_node["id"] in self._active_controllers:
+                del self._active_controllers[new_node["id"]]
+
+    async def send_message_stream(
+        self,
+        conversation_id: str,
+        content: str,
+        model_id: Optional[str] = None,
+        provider_id: Optional[str] = None,
+        parent_node_id: Optional[str] = None,
+        focus_new_node: bool = True,
+        reasoning_effort: Optional[str] = None,
+        thinking_enabled: Optional[bool] = None,
+        import_files: Optional[List[Dict[str, Any]]] = None,
+        image_refs: Optional[List[Dict[str, Any]]] = None,
+        tool_permission_mode: Optional[str] = None,
+        task_context_mode: Optional[str] = None,
+        hidden_user_message: bool = False,
+        run_id: Optional[str] = None,
+        continuation_messages: Optional[List[Message]] = None,
+        suppress_user_message: bool = False,
+        append_to_existing_node: bool = False,
+    ) -> AsyncIterator[StreamChunk]:
+        """
+        异步流式发送消息
+        前端可以：for chunk in stream: 实时更新UI
+        """
+        profiler = get_profiler()
+        # ── 阶段 1：预加载（只读）── 解析模型/提供商/slash/refer/reasoning，不做修改。
+        preload, error = await self._resolve_stream_preload(
+            conversation_id=conversation_id,
+            content=content,
+            model_id=model_id,
+            provider_id=provider_id,
+            parent_node_id=parent_node_id,
+            reasoning_effort=reasoning_effort,
+            thinking_enabled=thinking_enabled,
+            append_to_existing_node=append_to_existing_node,
+            run_id=run_id,
+        )
+        if error is not None:
+            yield StreamChunk(
+                status=StreamStatus.ERROR,
+                content="",
+                node_id=None,
+                conversation_id=conversation_id,
+                run_id=run_id,
+                error=error,
+                tokens_used=0,
+            )
+            return
+        preview = preload["preview"]
+        requested_parent_node_id = preload["requested_parent_node_id"]
+        target_model = preload["target_model"]
+        target_provider = preload["target_provider"]
+        slash_result = preload["slash_result"]
+        model_content = preload["model_content"]
+        refer_bundle = preload["refer_bundle"]
+        provider = preload["provider"]
+        meta = preload["meta"]
+        eff_effort = preload["eff_effort"]
+        eff_thinking = preload["eff_thinking"]
+
         if slash_result.kind == SlashDispatchKind.SIDE_QUESTION:
             side_run_context = Conversation.from_dict(preview.to_dict())
             side_run_context.switch_to_node(requested_parent_node_id)
@@ -1365,7 +1298,6 @@ class ChatManager:
         if user_msg is not None and normalized_image_refs:
             user_msg["image_refs"] = normalized_image_refs
 
-        skill_names: list[str] = []
         active_plan_permission_mode = await self._active_plan_permission_mode(conversation_id)
         refer_context_messages = self._refer_context_messages(refer_bundle)
         requested_tool_permission_mode = (
@@ -1391,101 +1323,38 @@ class ChatManager:
         # ── 临界区 1（锁内）：重新加载最新快照 + 建节点 + 立即保存 user 消息 ──
         # 锁内重载确保看到其他并发流刚提交的兄弟节点，add_node 不会丢失 root 引用。
         # 立即落盘是为了让前端的 userMsgLanded 判定能尽快看到真实 user 消息。
-        with profiler.span("chat.create_turn_node", conversation_id=conversation_id, run_id=run_id):
-            async with self._lock_for(conversation_id):
-                conversation = self.get_conversation(conversation_id)
-                if conversation is None:
-                    yield StreamChunk(
-                        status=StreamStatus.ERROR, content="", node_id=None,
-                        conversation_id=conversation_id, run_id=run_id, error="对话不存在", tokens_used=0)
-                    return
-                if requested_parent_node_id not in conversation.nodes:
-                    yield StreamChunk(
-                        status=StreamStatus.ERROR, content="", node_id=None,
-                        conversation_id=conversation_id, run_id=run_id, error="父节点不存在", tokens_used=0)
-                    return
-                current_node_id = requested_parent_node_id
-                parent_tool_permission_mode = None
-                parent_task_context_mode = TaskContextMode.ATTACHED.value
-                if current_node_id and current_node_id in conversation.nodes:
-                    parent_tool_permission_mode = conversation.nodes[current_node_id].get("tool_permission_mode")
-                    parent_task_context_mode = str(
-                        conversation.nodes[current_node_id].get("task_context_mode")
-                        or TaskContextMode.ATTACHED.value
-                    )
-                if (
-                    parent_tool_permission_mode == "plan"
-                    and active_plan_permission_mode != "plan"
-                ):
-                    parent_tool_permission_mode = None
-                eff_tool_permission_mode = normalize_permission_mode(
-                    requested_tool_permission_mode
-                    if requested_tool_permission_mode
-                    else active_plan_permission_mode
-                    or parent_tool_permission_mode
-                    or _configured_default_tool_permission_mode()
-                )
-                try:
-                    eff_task_context_mode = normalize_context_mode(
-                        task_context_mode if task_context_mode not in (None, "") else parent_task_context_mode
-                    ).value
-                except ValueError:
-                    yield StreamChunk(
-                        status=StreamStatus.ERROR,
-                        content="",
-                        node_id=None,
-                        conversation_id=conversation_id,
-                        run_id=run_id,
-                        error="task_context_mode must be attached or detached",
-                        tokens_used=0,
-                    )
-                    return
-                if (
-                    self.capability_registry is not None
-                    and not hidden_user_message
-                    and not suppress_user_message
-                ):
-                    skill_names = collect_skill_injection_names(
-                        model_content,
-                        self._scoped_capability_registry(conversation),
-                        active_skill_names=self._recent_active_skill_names(conversation),
-                    )
-                    if skill_names:
-                        user_msg["active_skill_names"] = skill_names
-                if append_to_existing_node:
-                    new_node = conversation.nodes[current_node_id]
-                    new_node["model_id"] = target_model
-                    new_node["tool_permission_mode"] = eff_tool_permission_mode
-                    new_node["task_context_mode"] = eff_task_context_mode
-                    conversation.switch_to_node(current_node_id)
-                else:
-                    new_node = NodeManager.create_node(
-                        parent_id=current_node_id,
-                        model_id=target_model,
-                        tool_permission_mode=eff_tool_permission_mode,
-                        task_context_mode=eff_task_context_mode,
-                    )
-                    conversation.add_node(new_node, parent_id=current_node_id, focus=focus_new_node)
-                self._set_conversation_model_metadata(
-                    conversation,
-                    provider_id=target_provider,
-                    model_id=target_model,
-                )
-                self._update_branch_usage_for_node(
-                    conversation,
-                    new_node["id"],
-                    model_context_window=meta.get("context_length"),
-                )
-                self._save(conversation)
-                if user_msg is not None:
-                    self._persist_sqlite_user_turn(
-                        conversation=conversation,
-                        node=new_node,
-                        user_msg=user_msg,
-                        provider_id=target_provider,
-                        model_id=target_model,
-                        run_id=run_id,
-                    )
+        turn_state, error = await self._create_turn_node(
+            conversation_id=conversation_id,
+            requested_parent_node_id=requested_parent_node_id,
+            target_model=target_model,
+            target_provider=target_provider,
+            meta=meta,
+            model_content=model_content,
+            user_msg=user_msg,
+            focus_new_node=focus_new_node,
+            append_to_existing_node=append_to_existing_node,
+            requested_tool_permission_mode=requested_tool_permission_mode,
+            active_plan_permission_mode=active_plan_permission_mode,
+            task_context_mode=task_context_mode,
+            hidden_user_message=hidden_user_message,
+            suppress_user_message=suppress_user_message,
+            run_id=run_id,
+        )
+        if error is not None:
+            yield StreamChunk(
+                status=StreamStatus.ERROR,
+                content="",
+                node_id=None,
+                conversation_id=conversation_id,
+                run_id=run_id,
+                error=error,
+                tokens_used=0,
+            )
+            return
+        conversation = turn_state["conversation"]
+        new_node = turn_state["new_node"]
+        current_node_id = turn_state["current_node_id"]
+        skill_names = turn_state["skill_names"]
 
         assistant_message_id = str(uuid.uuid4())
 
@@ -1623,11 +1492,21 @@ class ChatManager:
 
                 self._replace_main_runtime_context_message(
                     messages,
-                    self._runtime_prompt_context(
+                    runtime_prompt_context(
                         "main",
                         prompt_conversation,
                         latest_user_content=self._latest_user_content(prompt_conversation),
                         task_turn_context=task_turn_context,
+                        multi_agent_mode=self._resolve_multi_agent_mode(
+                            self._multi_agent_intent_text(
+                                prompt_conversation,
+                                self._latest_user_content(prompt_conversation),
+                            ),
+                            prompt_conversation.metadata if prompt_conversation is not None else {},
+                        ),
+                        permission_mode=self._current_node_permission_mode(prompt_conversation),
+                        task_context_mode=self._current_node_task_context_mode(prompt_conversation),
+                        plan_ledger=getattr(self, "plan_ledger", None),
                     ),
                 )
                 # provider 引用已在循环前捕获（见上方 get_model）。即便此刻 config 变更
@@ -2154,7 +2033,7 @@ class ChatManager:
                             await execute_task
                 if round_status != "completed":
                     break
-                model_tool_messages = self._apply_round_tool_result_budget(tool_messages)
+                model_tool_messages = apply_round_tool_result_budget(tool_messages)
                 messages.extend(model_tool_messages)
                 all_tool_messages.extend(tool_messages)
                 if has_blocking_plan_participation_result(tool_messages):
@@ -2192,131 +2071,32 @@ class ChatManager:
                 tokens_used=tokens_used,
             ))
         finally:
-            # 计算用时
-            duration_ms = int((time() - start_time) * 1000)
-            if usage_info is None:
-                usage_info = estimated_usage(tokens_used)
-            tokens_used = usage_total(usage_info, tokens_used)
-            completion_timestamp = int(time())
-            # 创建生成信息（tokens_used 来自流中捕获的最终值）
-            generation_info: GenerationInfo = {
-                "duration_ms": duration_ms,
-                "status": generation_status,
-                "error_message": error_message,
-                "tokens_used": tokens_used,
-                "usage_info": usage_info
-            }
-            has_tool_rounds = bool(all_tool_calls or all_tool_messages)
-            # 助手消息（包含生成信息）
-            assistant_msg = Message({
-                "id": assistant_message_id,
-                "role": Role.ASSISTANT,
-                "content": persisted_final_content if persisted_final_content is not None else (final_content if has_tool_rounds else total_content),
-                "name": None,
-                "tool_call_id": None,
-                "process_content": "".join(process_content_parts) or None,
-                "process_parts": process_parts or None,
-                "reasoning": total_reasoning or None,
-                "timestamp": completion_timestamp,
-                "generation_info": generation_info
-            })
-
-            # ── 临界区 2（锁内）：重新加载最新快照，仅在本节点上挂助手消息 + 累加 token + 保存 ──
-            # 必须锁内重载：流式期间其他并发流可能已提交兄弟节点，直接保存临界区 1 的
-            # 旧 conversation 会覆盖掉它们对 root.children_ids 的修改。
-            # 必须在路由发送 [DONE] 之前完成（save-before-[DONE] 不变量）。
-            assistant_msg_for_transcript = assistant_msg
-            persisted_tool_calls = all_tool_calls
-            if append_to_existing_node:
-                existing_answer = self._canonical_latest_assistant_answer(conversation_id, new_node["id"])
-                if existing_answer is not None:
-                    assistant_msg_for_transcript = Message(deepcopy(assistant_msg))
-                    assistant_msg_for_transcript["id"] = str(existing_answer.get("id") or assistant_message_id)
-                    assistant_msg_for_transcript["content"] = (
-                        str(existing_answer.get("content") or "")
-                        + str(assistant_msg.get("content") or "")
-                    )
-                    if assistant_msg.get("reasoning"):
-                        assistant_msg_for_transcript["reasoning"] = (
-                            self._canonical_process_content_for_node(
-                                conversation_id,
-                                new_node["id"],
-                                "assistant_process_reasoning",
-                            )
-                            + str(assistant_msg.get("reasoning") or "")
-                        )
-                    if assistant_msg.get("process_content"):
-                        assistant_msg_for_transcript["process_content"] = (
-                            self._canonical_process_content_for_node(
-                                conversation_id,
-                                new_node["id"],
-                                "assistant_process_content",
-                            )
-                            + str(assistant_msg.get("process_content") or "")
-                        )
-            async with self._lock_for(conversation_id):
-                latest = self.get_conversation(conversation_id)
-                if latest is not None and new_node["id"] in latest.nodes:
-                    latest_node = latest.nodes[new_node["id"]]
-                    latest_node["tool_permission_mode"] = new_node.get("tool_permission_mode")
-                    persisted_tool_messages = all_tool_messages
-                    self._set_conversation_model_metadata(
-                        latest,
-                        provider_id=target_provider,
-                        model_id=target_model,
-                    )
-                    self._update_token_stats_for_conversation(latest, target_provider, tokens_used)
-                    self._update_branch_usage_for_node(
-                        latest,
-                        new_node["id"],
-                        model_context_window=meta.get("context_length"),
-                    )
-                    self._mark_conversation_updated_at(latest, completion_timestamp)
-                    self._save(latest)
-                else:
-                    # 极端情况：节点已被并发删除——退回到只保存本节点，避免丢消息
-                    persisted_tool_messages = all_tool_messages
-                    new_node["total_tokens"] = usage_total(usage_info, tokens_used)
-                    new_node["branch_usage_info"] = usage_info
-                    new_node["usage"] = self._node_usage_snapshot(
-                        turn_usage=usage_info,
-                        branch_usage=usage_info,
-                        model_context_window=meta.get("context_length"),
-                    )
-                    self._set_conversation_model_metadata(
-                        conversation,
-                        provider_id=target_provider,
-                        model_id=target_model,
-                    )
-                    self._mark_conversation_updated_at(conversation, completion_timestamp)
-                    self._save(conversation)
-
-            try:
-                latest_for_transcript = self.get_conversation(conversation_id)
-                if latest_for_transcript is not None:
-                    self._persist_sqlite_assistant_turn(
-                        conversation=latest_for_transcript,
-                        node=latest_for_transcript.nodes.get(new_node["id"], new_node),
-                        assistant_msg=assistant_msg_for_transcript,
-                        provider_id=target_provider,
-                        model_id=target_model,
-                        run_id=run_id,
-                        tool_messages=persisted_tool_messages,
-                        tool_calls=persisted_tool_calls,
-                        approval_events=all_approval_events,
-                    )
-                    async with self._lock_for(conversation_id):
-                        latest_with_messages = self.get_conversation(conversation_id)
-                        if latest_with_messages is not None and new_node["id"] in latest_with_messages.nodes:
-                            self._update_branch_usage_for_node(
-                                latest_with_messages,
-                                new_node["id"],
-                                model_context_window=meta.get("context_length"),
-                            )
-                            self._save(latest_with_messages)
-            finally:
-                if new_node["id"] in self._active_controllers:
-                    del self._active_controllers[new_node["id"]]
+            # ── 临界区 2（锁内）+ 转写持久化：见 _finalize_assistant_turn ──
+            await self._finalize_assistant_turn(
+                conversation_id=conversation_id,
+                run_id=run_id,
+                conversation=conversation,
+                new_node=new_node,
+                target_provider=target_provider,
+                target_model=target_model,
+                meta=meta,
+                assistant_message_id=assistant_message_id,
+                start_time=start_time,
+                tokens_used=tokens_used,
+                usage_info=usage_info,
+                generation_status=generation_status,
+                error_message=error_message,
+                total_content=total_content,
+                total_reasoning=total_reasoning,
+                final_content=final_content,
+                persisted_final_content=persisted_final_content,
+                process_content_parts=process_content_parts,
+                process_parts=process_parts,
+                all_tool_calls=all_tool_calls,
+                all_tool_messages=all_tool_messages,
+                all_approval_events=all_approval_events,
+                append_to_existing_node=append_to_existing_node,
+            )
 
         for terminal_chunk in pending_terminal_chunks:
             yield terminal_chunk
@@ -2342,241 +2122,6 @@ class ChatManager:
         for node_id in list(self._active_controllers.keys()):
             await self.stop_stream(node_id)
 
-    def _canonical_messages_by_node(
-        self,
-        conversation_id: str,
-        node_ids: List[str],
-    ) -> Dict[str, List[Message]]:
-        if getattr(self, "chat_repository", None) is None or not node_ids:
-            return {}
-        placeholders = ",".join("?" for _ in node_ids)
-        blobs = BlobStore(self.chat_repository.persistence)
-        with self.chat_repository.persistence.connect() as conn:
-            rows = conn.execute(
-                f"""
-                SELECT rowid AS _rowid, *
-                FROM messages
-                WHERE conversation_id = ?
-                  AND node_id IN ({placeholders})
-                ORDER BY node_id, created_at, rowid
-                """,
-                (conversation_id, *node_ids),
-            ).fetchall()
-        grouped: Dict[str, List[Message]] = {}
-        for row in rows:
-            content = row["content_inline"]
-            if content is None and row["content_blob_id"]:
-                content = blobs.get_text(str(row["content_blob_id"]))
-            metadata = _tool_result_payload(row["metadata_json"] or "")
-            message = Message({
-                "id": str(row["id"]),
-                "role": Role(str(row["role"])),
-                "content": content or "",
-                "timestamp": int(row["created_at"] or 0),
-                "node_id": row["node_id"],
-                "_rowid": int(row["_rowid"] or 0),
-            })
-            if row["subtype"]:
-                message["subtype"] = str(row["subtype"])
-            if row["hidden"]:
-                message["is_hidden_from_transcript"] = True
-            if row["transcript_only"]:
-                message["is_visible_in_transcript_only"] = True
-            message.update({
-                key: value
-                for key, value in metadata.items()
-                if key not in {"id", "role", "content", "subtype", "timestamp", "node_id"}
-            })
-            grouped.setdefault(str(row["node_id"]), []).append(message)
-        return grouped
-
-    def _canonical_compact_metadata_by_node(
-        self,
-        conversation_id: str,
-        node_ids: List[str],
-    ) -> Dict[str, Dict[str, Any]]:
-        messages = self._canonical_messages_by_node(conversation_id, node_ids)
-        compact: Dict[str, Dict[str, Any]] = {}
-        for node_id, node_messages in messages.items():
-            for message in node_messages:
-                if message.get("role") == Role.SYSTEM and message.get("subtype") == "compact_boundary":
-                    compact[node_id] = {
-                        key: value
-                        for key, value in dict(message).items()
-                        if key not in {
-                            "id",
-                            "role",
-                            "content",
-                            "timestamp",
-                            "node_id",
-                            "subtype",
-                            "is_hidden_from_transcript",
-                            "is_visible_in_transcript_only",
-                        }
-                    }
-                    break
-        return compact
-
-    def _canonical_prune_summaries_by_node(
-        self,
-        conversation_id: str,
-        node_ids: List[str],
-    ) -> Dict[str, List[Dict[str, Any]]]:
-        messages = self._canonical_messages_by_node(conversation_id, node_ids)
-        grouped: Dict[str, List[Dict[str, Any]]] = {}
-        for node_id, node_messages in messages.items():
-            for message in node_messages:
-                if message.get("subtype") != "prune_summary":
-                    continue
-                record = {
-                    key: value
-                    for key, value in dict(message).items()
-                    if key not in {
-                        "role",
-                        "timestamp",
-                        "node_id",
-                        "is_hidden_from_transcript",
-                        "is_visible_in_transcript_only",
-                    }
-                }
-                record["id"] = str(message.get("id") or record.get("id") or "")
-                record["summary"] = str(message.get("content") or "")
-                record["created_at"] = int(message.get("timestamp") or 0)
-                record["type"] = "prune_summary"
-                record["status"] = "completed"
-                grouped.setdefault(node_id, []).append(record)
-        for summaries in grouped.values():
-            summaries.sort(
-                key=lambda item: (
-                    int(item.get("created_at") or 0),
-                    int(item.get("_rowid") or 0),
-                ),
-                reverse=True,
-            )
-            for summary in summaries:
-                summary.pop("_rowid", None)
-        return grouped
-
-    def _canonical_latest_assistant_answer(
-        self,
-        conversation_id: str,
-        node_id: str,
-    ) -> Optional[Message]:
-        for message in reversed(self._canonical_messages_by_node(conversation_id, [node_id]).get(node_id, [])):
-            if (
-                message.get("role") == Role.ASSISTANT
-                and message.get("subtype") in {None, "", "assistant_answer"}
-            ):
-                return message
-        return None
-
-    def _canonical_process_content_for_node(
-        self,
-        conversation_id: str,
-        node_id: str,
-        subtype: str,
-    ) -> str:
-        parts = [
-            str(message.get("content") or "")
-            for message in self._canonical_messages_by_node(conversation_id, [node_id]).get(node_id, [])
-            if message.get("role") == Role.ASSISTANT and message.get("subtype") == subtype
-        ]
-        return "".join(parts)
-
-    def _selected_system_prompt(self, conversation: Conversation) -> tuple[Optional[str], str]:
-        prompt = conversation.metadata.get("selected_system_prompt") or {}
-        if not isinstance(prompt, dict):
-            return None, "override"
-        content = prompt.get("content")
-        if not isinstance(content, str) or not content.strip():
-            return None, "override"
-        return content, self._normalize_selected_system_prompt_mode(
-            str(prompt.get("mode") or "override")
-        )
-
-    def _runtime_prompt_context(
-        self,
-        runtime: str,
-        conversation: Optional[Conversation] = None,
-        *,
-        latest_user_content: str = "",
-        task_turn_context: Optional[TaskTurnContext] = None,
-    ) -> RuntimePromptContext:
-        details = self._runtime_context_details(conversation)
-        if runtime == "side_question":
-            return RuntimePromptContext(
-                name="side_question",
-                content="\n".join([
-                    "## Runtime Context",
-                    "",
-                    "Runtime mode: side question (/btw)",
-                    *details,
-                    "- Answer only the side question using the current conversation context.",
-                    "- Keep the run read-only: do not call tools, edit files, or create a main-branch response.",
-                    "- Preserve selected system prompt semantics: default core prompt, override custom prompt, or appended custom prompt.",
-                ]),
-                metadata={"runtime_mode": "side_question"},
-            )
-        multi_agent_mode = self._resolve_multi_agent_mode(
-            self._multi_agent_intent_text(conversation, latest_user_content),
-            conversation.metadata if conversation is not None else {},
-        )
-        multi_agent_lines: list[str] = []
-        if multi_agent_mode != "none":
-            multi_agent_lines = [
-                "- Multi-agent tools are available in this conversation when tool schemas include `agent`.",
-                "- If the user explicitly asks to use a subagent, agent, forked agent, or workflow, your first relevant action must be `agent` with the appropriate action.",
-                "- Do not replace an explicit subagent request with direct shell commands, file tools, or a natural-language claim that a subagent was started.",
-                "- Use `agent` with action `wait` when you need the delegated result before answering. Use notification delivery for background work.",
-            ]
-            if multi_agent_mode == "proactive":
-                multi_agent_lines.append("- You may proactively delegate independent multi-step investigation or verification work to subagents.")
-            else:
-                multi_agent_lines.append("- Do not proactively spawn agents unless the user explicitly requested agent delegation.")
-        task_lines = self._format_task_turn_context_for_prompt(task_turn_context)
-        plan_lines = self._plan_mode_runtime_lines(conversation)
-        return RuntimePromptContext(
-            name="main",
-                content="\n".join([
-                    "## Runtime Context",
-                    "",
-                    "Runtime mode: main chat",
-                    *details,
-                    "- This is the primary persisted conversation branch.",
-                    "- Use tools only when they are provided for this call and follow the active permission mode.",
-                    *multi_agent_lines,
-                    *task_lines,
-                    *plan_lines,
-                    "- Preserve selected system prompt semantics: default core prompt, override custom prompt, or appended custom prompt.",
-            ]),
-            metadata={"runtime_mode": "main"},
-        )
-
-    def _plan_mode_runtime_lines(self, conversation: Optional[Conversation]) -> list[str]:
-        if getattr(self, "plan_ledger", None) is None:
-            return []
-        active_mode = self._current_node_permission_mode(conversation)
-        if active_mode == "plan":
-            return [
-                "",
-                "Plan mode is active:",
-                "- You are in a read-only planning phase. Inspect, search, compare approaches, and reason only with read-only tools.",
-                "- Do not edit files, run implementation commands, start implementation work, change configuration, commit, or claim changes were made.",
-                "- Use `ask_user_question` only when a genuine user decision is required to continue planning.",
-                "- Use `exit_plan_mode` with a concrete plan when planning is complete and user approval is required.",
-                "- If the user changes direction while you are in plan mode, stay in plan mode instead of implementing.",
-            ]
-        return [
-            "",
-            "Plan mode rules:",
-            "- Use `enter_plan_mode` only when the user explicitly asks for planning/exploration before implementation, or when the implementation approach has genuine ambiguity and user sign-off would prevent significant rework.",
-            "- Do not enter plan mode merely because the task is large. If the path is clear, even across multiple files, proceed with implementation using the existing codebase patterns.",
-            "- When the user asks you to implement now, directly execute, or complete the change, start working instead of planning unless continuing would violate safety or permission rules.",
-            "- Prefer direct implementation for small fixes, clear bug fixes after diagnosis, specific instructions, and features that follow an obvious existing pattern.",
-            "- Use `ask_user_question` in plan mode only for genuine user decisions that block planning.",
-            "- Use `exit_plan_mode` in plan mode only after producing a concrete plan.",
-        ]
-
     def _start_task_turn_context(
         self,
         conversation: Optional[Conversation],
@@ -2601,128 +2146,6 @@ class ChatManager:
                 messages[index] = replacement
                 return
         raise RuntimeError("main runtime context message is missing")
-
-    def _format_task_turn_context_for_prompt(
-        self,
-        context: Optional[TaskTurnContext],
-    ) -> list[str]:
-        if context is None or context.mode != TaskContextMode.ATTACHED:
-            return []
-        baseline = context.baseline_task
-        current = context.current_task
-        observations = context.outcomes
-        outcomes = [observed.outcome for observed in observations]
-        latest_snapshot_observation = next(
-            (observed for observed in reversed(observations) if observed.outcome.task_snapshot is not None),
-            None,
-        )
-        baseline_superseded = (
-            baseline is not None
-            and current is None
-            and latest_snapshot_observation is not None
-            and latest_snapshot_observation.generation_id == baseline.generation_id
-        )
-        task_replaced = (
-            baseline is not None
-            and current is not None
-            and baseline.generation_id != current.generation_id
-        )
-        if current is not None and not task_replaced:
-            lines = self._format_task_snapshot_for_prompt(
-                current,
-                heading="Authoritative Active Conversation Task State",
-            )
-            self._append_task_outcomes_for_prompt(lines, outcomes)
-            lines.extend(["", *TASK_RUNTIME_RULES])
-            return lines
-        if baseline is None and current is None and not outcomes:
-            return [
-                "",
-                "Task context is attached; there is no active conversation task.",
-                "",
-                *TASK_RUNTIME_RULES,
-            ]
-        lines = [""]
-        if baseline is not None and not baseline_superseded:
-            lines.extend(self._format_task_snapshot_for_prompt(
-                baseline,
-                heading="Authoritative Task Snapshot At Turn Start",
-                leading_blank=False,
-            ))
-        self._append_task_outcomes_for_prompt(lines, outcomes)
-        if current is not None:
-            lines.extend(self._format_task_snapshot_for_prompt(
-                current,
-                heading="Authoritative Active Conversation Task State Now",
-                leading_blank=False,
-            ))
-        else:
-            lines.append("There is no active conversation task now.")
-        lines.extend(["", *TASK_RUNTIME_RULES])
-        return lines
-
-    def _append_task_outcomes_for_prompt(
-        self,
-        lines: list[str],
-        outcomes: list[TaskOutcome],
-    ) -> None:
-        if not outcomes:
-            return
-        lines.append("Authoritative Task Outcomes This Turn:")
-        latest_snapshot_index = next(
-            (index for index in range(len(outcomes) - 1, -1, -1) if outcomes[index].task_snapshot is not None),
-            None,
-        )
-        for index, outcome in enumerate(outcomes):
-            outcome_parts = []
-            if outcome.step is not None:
-                outcome_parts.append(f"step {outcome.step} -> {outcome.step_status or 'updated'}")
-            outcome_parts.append(f"task -> {outcome.task_status.value}")
-            if outcome.run_status:
-                outcome_parts.append(f"run -> {outcome.run_status}")
-            lines.append("- " + "; ".join(outcome_parts) + ".")
-            if outcome.task_snapshot is not None and index == latest_snapshot_index:
-                snapshot = outcome.task_snapshot
-                lines.append(
-                    "Authoritative Task State After Outcome "
-                    f"[{outcome.task_status.value}]: {self._compact_task_text(snapshot.title, 120)}"
-                )
-                for step in snapshot.steps:
-                    step_text = self._compact_task_text(step.title, 100)
-                    lines.append(f"{step.position}. [{step.status.value}] {step_text}")
-
-    def _format_task_snapshot_for_prompt(
-        self,
-        task: Any,
-        *,
-        heading: str,
-        leading_blank: bool = True,
-    ) -> list[str]:
-        execution = f", {task.execution_state} step {task.active_step}" if task.active_step else ""
-        lines = [""] if leading_blank else []
-        lines.append(
-            f"{heading} [{task.status}{execution}]: {self._compact_task_text(task.title, 120)}"
-        )
-        if task.detail:
-            lines.append(f"Task detail: {self._compact_task_text(task.detail, 180)}")
-        for step in task.steps:
-            evidence = (
-                f" evidence: {self._compact_task_text(step.evidence_summary, 80)}"
-                if step.evidence_summary
-                else ""
-            )
-            step_text = self._compact_task_text(step.title or step.detail, 100)
-            if step.detail and step.detail != step.title:
-                step_text += f"; detail: {self._compact_task_text(step.detail, 140)}"
-            lines.append(f"{step.position}. [{step.status.value}] {step_text}{evidence}")
-        return lines
-
-    @staticmethod
-    def _compact_task_text(value: Any, max_chars: int) -> str:
-        text = " ".join(str(value or "").split())
-        if len(text) <= max_chars:
-            return text
-        return text[: max(0, max_chars - 3)].rstrip() + "..."
 
     async def _active_plan_permission_mode(self, conversation_id: str) -> Optional[str]:
         plan_ledger = getattr(self, "plan_ledger", None)
@@ -2904,7 +2327,7 @@ class ChatManager:
         if not node_id:
             return ""
         for message in reversed(
-            self._canonical_messages_by_node(conversation.metadata["id"], [node_id]).get(node_id, [])
+            _canonical_messages_by_node(self.chat_repository,conversation.metadata["id"], [node_id]).get(node_id, [])
         ):
             if message.get("role") == Role.USER and not message.get("is_hidden_from_transcript"):
                 content = message.get("content")
@@ -2929,7 +2352,7 @@ class ChatManager:
             return "\n".join(parts)
 
         node_ids = [str(node.get("id")) for node in chain if node.get("id")]
-        messages_by_node = self._canonical_messages_by_node(conversation.metadata["id"], node_ids)
+        messages_by_node = _canonical_messages_by_node(self.chat_repository,conversation.metadata["id"], node_ids)
         for node in reversed(chain):
             node_id = str((node or {}).get("id") or "")
             user_messages = [
@@ -3074,44 +2497,6 @@ class ChatManager:
         except json.JSONDecodeError:
             return None
 
-    def _runtime_context_details(self, conversation: Optional[Conversation]) -> list[str]:
-        if conversation is None:
-            return []
-        metadata = conversation.metadata or {}
-        prompt = metadata.get("selected_system_prompt") or {}
-        workspace = normalize_workspace(
-            metadata.get("workspace"),
-            build_default_workspace(cfg.data if isinstance(cfg.data, dict) else None),
-        )
-        workspace_roots = workspace.get("workspace_roots") or []
-        cwd = workspace.get("cwd") or ""
-        mode = self._normalize_selected_system_prompt_mode(str(prompt.get("mode") or "override")) if prompt else "none"
-        permission_mode = self._current_node_permission_mode(conversation)
-        task_context_mode = self._current_node_task_context_mode(conversation)
-        return [
-            f"- Conversation id: {metadata.get('id') or ''}",
-            f"- Current node id: {conversation.current_node_id or ''}",
-            f"- Current tool permission mode: {permission_mode}",
-            f"- Current task context mode: {task_context_mode}",
-            f"- Provider/model: {(metadata.get('provider_id') or conversation.current_provider or '')}/{(metadata.get('model_id') or conversation.current_model or '')}",
-            f"- Workspace cwd: {cwd}",
-            f"- Workspace roots: {', '.join(map(str, workspace_roots[:3])) if workspace_roots else 'none'}",
-            f"- Selected system prompt mode: {mode}",
-        ]
-
-    def _agents_instruction_sections(self, conversation: Optional[Conversation]) -> list[Any]:
-        if conversation is None:
-            return []
-        workspace = normalize_workspace(
-            conversation.metadata.get("workspace"),
-            build_default_workspace(cfg.data if isinstance(cfg.data, dict) else None),
-        )
-        section = build_agents_instruction_section(
-            workspace,
-            cfg.data if isinstance(cfg.data, dict) else None,
-        )
-        return [section] if section is not None else []
-
     def _current_node_permission_mode(self, conversation: Optional[Conversation]) -> str:
         if conversation is None:
             return "default"
@@ -3124,10 +2509,6 @@ class ChatManager:
         node = conversation.nodes.get(conversation.current_node_id or "") or {}
         return normalize_context_mode(node.get("task_context_mode")).value
 
-    @staticmethod
-    def _normalize_selected_system_prompt_mode(mode: str) -> str:
-        return mode if mode in {"override", "append"} else "override"
-
     def _model_node_chain(
         self,
         conversation: Conversation,
@@ -3138,7 +2519,7 @@ class ChatManager:
         chain = conversation.get_node_chain(conversation.current_node_id)
         if not chain:
             return []
-        compact_metadata = self._canonical_compact_metadata_by_node(
+        compact_metadata = compact_metadata_by_node(self.chat_repository,
             conversation.metadata["id"],
             [str(node.get("id")) for node in chain if node.get("id")],
         )
@@ -3298,7 +2679,7 @@ class ChatManager:
             conversation,
             include_messages_to_keep=include_messages_to_keep,
         )
-        messages_by_node = self._canonical_messages_by_node(
+        messages_by_node = _canonical_messages_by_node(self.chat_repository,
             conversation.metadata["id"],
             [str(node.get("id")) for node in chain if node.get("id")],
         )
@@ -3356,7 +2737,7 @@ class ChatManager:
         node_id: str,
         target_chain_ids: set[str],
     ) -> Optional[Dict[str, Any]]:
-        summaries = self._canonical_prune_summaries_by_node(conversation_id, [node_id]).get(node_id, [])
+        summaries = prune_summaries_by_node(self.chat_repository,conversation_id, [node_id]).get(node_id, [])
         if not summaries:
             return None
         for summary in summaries:
@@ -3411,7 +2792,7 @@ class ChatManager:
             return {"was_compacted": False}
         conversation.switch_to_node(parent_node_id)
         current_node = conversation.nodes.get(parent_node_id)
-        if current_node and parent_node_id in self._canonical_compact_metadata_by_node(
+        if current_node and parent_node_id in compact_metadata_by_node(self.chat_repository,
             conversation_id,
             [parent_node_id],
         ):
@@ -3528,10 +2909,13 @@ class ChatManager:
                 model_context_window=self._model_context_window(target_provider, target_model),
             )
             latest.add_node(compact_node, parent_id=parent_id, focus=focus_new_node)
-            self._mark_conversation_updated_at(latest, int(time()))
-            self._save(latest)
-            if self._sqlite_enabled():
-                self._sqlite_ensure_branch(
+            latest.metadata["updated_at"] = max(
+                int(latest.metadata.get("updated_at") or 0),
+                int(time()),
+            )
+            self.chat_repository.save(latest)
+            if self.chat_repository is not None:
+                self.chat_repository.ensure_branch(
                     latest,
                     compact_node["id"],
                     provider_id=target_provider,
@@ -3616,8 +3000,11 @@ class ChatManager:
             parent = latest.nodes.get(parent_node_id)
             if parent is None:
                 raise ValueError("父节点不存在")
-            self._mark_conversation_updated_at(latest, int(time()))
-            self._save(latest)
+            latest.metadata["updated_at"] = max(
+                int(latest.metadata.get("updated_at") or 0),
+                int(time()),
+            )
+            self.chat_repository.save(latest)
             if self.chat_repository is not None:
                 metadata = {
                     key: value
@@ -3663,7 +3050,7 @@ class ChatManager:
         target_provider: str,
         provider: Any,
     ) -> Dict[str, Any]:
-        tool_history_by_node = {
+        tool_history = {
             node_id: [
                 {
                     "tool_call": dict((tool_call_message.get("tool_calls") or [{}])[0]),
@@ -3671,7 +3058,7 @@ class ChatManager:
                 }
                 for tool_call_message, tool_result_message in pairs
             ]
-            for node_id, pairs in self._canonical_tool_history_by_node(
+            for node_id, pairs in tool_history_by_node(self.chat_repository,
                 conversation.metadata["id"],
                 [str(node_id) for node_id in conversation.nodes.keys()],
             ).items()
@@ -3679,12 +3066,12 @@ class ChatManager:
         node_ids = [str(node_id) for node_id in conversation.nodes.keys()]
         messages_by_node = {
             node_id: [dict(message) for message in messages]
-            for node_id, messages in self._canonical_messages_by_node(
+            for node_id, messages in _canonical_messages_by_node(self.chat_repository,
                 conversation.metadata["id"],
                 node_ids,
             ).items()
         }
-        compact_metadata_by_node = self._canonical_compact_metadata_by_node(
+        compact_metadata = compact_metadata_by_node(self.chat_repository,
             conversation.metadata["id"],
             node_ids,
         )
@@ -3692,8 +3079,8 @@ class ChatManager:
             conversation,
             parent_node_id,
             messages_by_node,
-            tool_history_by_node,
-            compact_metadata_by_node,
+            tool_history,
+            compact_metadata,
         )
         branch_digests: List[Dict[str, Any]] = []
         summary_packet_bundle = packet_bundle
@@ -3767,7 +3154,7 @@ class ChatManager:
                 return
             if msg.get("subtype") == "compact_boundary":
                 return
-            role = self._role_value(msg["role"])
+            role = getattr(msg["role"], "value", msg["role"])
             if role == "notify":
                 role = "user"
             content = msg.get("content") or ""
@@ -3797,27 +3184,27 @@ class ChatManager:
         )
         node_ids = [str(node.get("id")) for node in node_chain if node.get("id")]
         target_chain_ids = set(node_ids)
-        canonical_messages = self._canonical_messages_by_node(conversation.metadata["id"], node_ids)
-        canonical_tool_history = self._canonical_tool_history_by_node(
+        canonical_messages = _canonical_messages_by_node(self.chat_repository,conversation.metadata["id"], node_ids)
+        canonical_tool_history = tool_history_by_node(self.chat_repository,
             conversation.metadata["id"],
             node_ids,
         )
-        compact_metadata_by_node = self._canonical_compact_metadata_by_node(
+        compact_metadata = compact_metadata_by_node(self.chat_repository,
             conversation.metadata["id"],
             node_ids,
         )
         for node in node_chain:
             node_id = str(node.get("id") or "")
             messages_for_node = canonical_messages.get(node_id, [])
-            is_compact_node = node_id in compact_metadata_by_node
+            is_compact_node = node_id in compact_metadata
             final_assistant_messages: List[Message] = []
             for message in messages_for_node:
-                role = self._role_value(message.get("role"))
+                role = getattr(message.get("role"), "value", message.get("role"))
                 subtype = str(message.get("subtype") or "")
                 if subtype == "compact_boundary":
                     continue
                 if subtype == "compact_summary":
-                    compact_meta = compact_metadata_by_node.get(node_id, {})
+                    compact_meta = compact_metadata.get(node_id, {})
                     append_message(Message({
                         "id": message.get("id") or f"{node_id}:compact_summary",
                         "role": Role.USER,
@@ -3853,7 +3240,7 @@ class ChatManager:
                 elif role == Role.SYSTEM.value:
                     append_message(message)
             if is_compact_node:
-                restored_files = compact_metadata_by_node.get(node_id, {}).get("restored_files") or []
+                restored_files = compact_metadata.get(node_id, {}).get("restored_files") or []
                 if restored_files:
                     append_message(Message({
                         "id": f"{node_id}:restored_files",
@@ -3863,7 +3250,7 @@ class ChatManager:
                     }))
             for tool_call_message, tool_result_message in canonical_tool_history.get(str(node.get("id")), []):
                 append_message(tool_call_message)
-                for tool_msg in self._apply_round_tool_result_budget([tool_result_message]):
+                for tool_msg in apply_round_tool_result_budget([tool_result_message]):
                     append_message(tool_msg)
             for final_assistant in final_assistant_messages:
                 append_message(final_assistant)
@@ -3874,104 +3261,6 @@ class ChatManager:
             ))
 
         return microcompact_messages(msg_dict)
-
-    def _canonical_tool_history_by_node(
-        self,
-        conversation_id: str,
-        node_ids: List[str],
-    ) -> Dict[str, List[tuple[Message, Message]]]:
-        chat_repository = getattr(self, "chat_repository", None)
-        if chat_repository is None or not node_ids:
-            return {}
-        placeholders = ",".join("?" for _ in node_ids)
-        blobs = BlobStore(chat_repository.persistence)
-        with chat_repository.persistence.connect() as conn:
-            call_rows = conn.execute(
-                f"""
-                SELECT *
-                FROM tool_calls
-                WHERE conversation_id = ?
-                  AND node_id IN ({placeholders})
-                ORDER BY node_id, call_index, created_at, id
-                """,
-                (conversation_id, *node_ids),
-            ).fetchall()
-            result_rows = conn.execute(
-                f"""
-                SELECT *
-                FROM tool_results
-                WHERE conversation_id = ?
-                  AND node_id IN ({placeholders})
-                ORDER BY created_at, id
-                """,
-                (conversation_id, *node_ids),
-            ).fetchall()
-
-        result_by_call_id = {
-            str(row["tool_call_id"]): row
-            for row in result_rows
-            if row["tool_call_id"]
-        }
-        grouped: Dict[str, List[tuple[Message, Message]]] = {}
-        for row in call_rows:
-            node_id = str(row["node_id"] or "")
-            call_id = str(row["id"] or "")
-            if not node_id or not call_id:
-                continue
-            arguments = row["args_inline"]
-            if arguments is None and row["args_blob_id"]:
-                arguments = blobs.get_text(str(row["args_blob_id"]))
-            name = str(row["name"] or "")
-            tool_call_message = Message({
-                "role": Role.ASSISTANT,
-                "content": "",
-                "tool_calls": [{
-                    "id": call_id,
-                    "type": "function",
-                    "function": {
-                        "name": name,
-                        "arguments": arguments or "",
-                    },
-                }],
-            })
-            result = result_by_call_id.get(call_id)
-            if result is None:
-                content = f"Tool result missing for tool_call_id {call_id}."
-                result_id = None
-            else:
-                result_id = str(result["id"] or "")
-                raw_result = result["output_preview"]
-                if result["output_blob_id"]:
-                    raw_result = blobs.get_text(str(result["output_blob_id"]))
-                content = self._format_persisted_tool_result(
-                    raw_result=str(raw_result or ""),
-                    name=name,
-                    tool_result_id=result_id,
-                )
-            grouped.setdefault(node_id, []).append((
-                tool_call_message,
-                Message({
-                    "id": result_id or str(uuid.uuid4()),
-                    "role": Role.TOOL,
-                    "content": content,
-                    "model_visible_content": content,
-                    "name": name,
-                    "tool_call_id": call_id,
-                    "tool_result_id": result_id,
-                    "timestamp": int(time()),
-                }),
-            ))
-        return grouped
-
-    def _canonical_tool_context_by_node(
-        self,
-        conversation_id: str,
-        node_ids: List[str],
-    ) -> Dict[str, List[Dict[str, Any]]]:
-        return {
-            node_id: [dict(result_message) for _, result_message in pairs]
-            for node_id, pairs in self._canonical_tool_history_by_node(conversation_id, node_ids).items()
-        }
 
     def _merge_tool_call_lists(
         self,
@@ -3994,201 +3283,6 @@ class ChatManager:
                     index_by_id[call_id] = len(merged)
                 merged.append(call_copy)
         return merged
-
-    def _tool_result_preview_chars(self) -> int:
-        tools_config = cfg.data.get("tools", {}) if isinstance(cfg.data, dict) else {}
-        return int(tools_config.get("max_result_length", 8000))
-
-    def _round_tool_result_budget_chars(self) -> int:
-        tools_config = cfg.data.get("tools", {}) if isinstance(cfg.data, dict) else {}
-        default_budget = self._tool_result_preview_chars() * 4
-        return int(tools_config.get("max_round_result_length", default_budget))
-
-    def _read_tool_result_hint(self, tool_result_id: str, offset: int = 0) -> str:
-        args = json.dumps(
-            {"source": "tool_result", "tool_result_id": tool_result_id, "offset": offset},
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        return f"read({args})"
-
-    def _parse_command_tool_result(self, raw_result: str) -> Optional[Dict[str, Any]]:
-        try:
-            parsed = json.loads(raw_result)
-        except json.JSONDecodeError:
-            return None
-        if not isinstance(parsed, dict):
-            return None
-        command_keys = {"command", "cwd", "exit_code", "stdout", "stderr", "timed_out"}
-        if not command_keys.issubset(parsed.keys()):
-            return None
-        return parsed
-
-    def _format_command_tool_result(
-        self,
-        *,
-        raw_result: str,
-        tool_result_id: str,
-    ) -> str:
-        parsed = self._parse_command_tool_result(raw_result)
-        if parsed is None:
-            return raw_result
-        timed_out = parsed.get("timed_out")
-        if isinstance(timed_out, bool):
-            timed_out_text = str(timed_out).lower()
-        else:
-            timed_out_text = str(timed_out)
-        stdout = str(parsed.get("stdout") or "")
-        stderr = str(parsed.get("stderr") or "")
-        return "\n".join(
-            [
-                f"Command: {parsed.get('command', '')}",
-                f"Cwd: {parsed.get('cwd', '')}",
-                f"Exit code: {parsed.get('exit_code', '')}",
-                f"Timed out: {timed_out_text}",
-                f"tool_result_id: {tool_result_id}",
-                f"read_more: {self._read_tool_result_hint(tool_result_id, 0)}",
-                "",
-                "Stdout:",
-                stdout if stdout else "(empty)",
-                "",
-                "Stderr:",
-                stderr if stderr else "(empty)",
-            ]
-        )
-
-    def _format_persisted_tool_result(
-        self,
-        *,
-        raw_result: str,
-        name: str,
-        tool_result_id: str,
-    ) -> str:
-        command_result = self._parse_command_tool_result(raw_result)
-        if command_result is not None:
-            return self._format_command_tool_result(
-                raw_result=raw_result,
-                tool_result_id=tool_result_id,
-            )
-
-        preview_chars = self._tool_result_preview_chars()
-        preview = raw_result[:preview_chars]
-        has_more = len(raw_result) > len(preview)
-        payload: Dict[str, Any] = {
-            "tool_result_id": tool_result_id,
-            "total_chars": len(raw_result),
-            "truncated": has_more,
-            "preview": preview,
-        }
-        if has_more:
-            payload["read_more"] = self._read_tool_result_hint(tool_result_id, len(preview))
-        return json.dumps(payload, ensure_ascii=False)
-
-    def _persist_model_visible_tool_result(
-        self,
-        *,
-        raw_result: str,
-        name: str,
-        conversation_id: str,
-        node_id: str,
-        tool_call_id: Optional[str],
-    ) -> Dict[str, Optional[str]]:
-        chat_repository = getattr(self, "chat_repository", None)
-        if chat_repository is None:
-            return {"content": raw_result, "tool_result_id": None}
-
-        if tool_call_id and not chat_repository.tool_call_exists(conversation_id, tool_call_id):
-            chat_repository.add_tool_call(
-                conversation_id,
-                node_id,
-                tool_call_id=tool_call_id,
-                name=name,
-                arguments=None,
-                status="running",
-            )
-        tool_result_id = chat_repository.add_tool_result(
-            conversation_id=conversation_id,
-            node_id=node_id,
-            tool_call_id=tool_call_id,
-            output=raw_result,
-            metadata={"tool_name": name},
-        )
-        return {
-            "content": self._format_persisted_tool_result(
-                raw_result=raw_result,
-                name=name,
-                tool_result_id=tool_result_id,
-            ),
-            "tool_result_id": tool_result_id,
-        }
-
-    def _build_model_visible_tool_result(
-        self,
-        *,
-        raw_result: str,
-        name: str,
-        conversation_id: str,
-        node_id: str,
-        tool_call_id: Optional[str],
-    ) -> str:
-        return str(
-            self._persist_model_visible_tool_result(
-                raw_result=raw_result,
-                name=name,
-                conversation_id=conversation_id,
-                node_id=node_id,
-                tool_call_id=tool_call_id,
-            )["content"]
-        )
-
-    def _summarize_persisted_tool_result(self, message: Message) -> str:
-        tool_result_id = message.get("tool_result_id")
-        if not tool_result_id:
-            return str(message.get("content") or "")
-        return "\n".join([
-            f"persisted: {tool_result_id}",
-            f"read_more: {self._read_tool_result_hint(str(tool_result_id), 0)}",
-        ])
-
-    def _apply_round_tool_result_budget(self, tool_messages: List[Message]) -> List[Message]:
-        budget = self._round_tool_result_budget_chars()
-        if budget <= 0:
-            return [Message(dict(message)) for message in tool_messages]
-
-        out = [Message(dict(message)) for message in tool_messages]
-
-        def visible_len(message: Message) -> int:
-            return len(str(message.get("model_visible_content") or message.get("content") or ""))
-
-        total = sum(visible_len(message) for message in out)
-        while total > budget:
-            candidates = [
-                (visible_len(message), index)
-                for index, message in enumerate(out)
-                if (
-                    message.get("tool_result_id")
-                    and not message.get("_round_budget_shortened")
-                    and len(self._summarize_persisted_tool_result(message)) < visible_len(message)
-                )
-            ]
-            if not candidates:
-                break
-            _, index = max(candidates)
-            if "raw_content" not in out[index]:
-                out[index]["raw_content"] = str(
-                    out[index].get("model_visible_content") or out[index].get("content") or ""
-                )
-            shortened = self._summarize_persisted_tool_result(out[index])
-            out[index]["content"] = shortened
-            out[index]["model_visible_content"] = shortened
-            out[index]["_round_budget_shortened"] = True
-            new_total = sum(visible_len(message) for message in out)
-            if new_total >= total:
-                break
-            total = new_total
-        for message in out:
-            message.pop("_round_budget_shortened", None)
-        return out
 
     def _tool_event_stream_chunk(
         self,
@@ -4259,7 +3353,8 @@ class ChatManager:
         raw_result = result
         tool_result_id = None
         if conversation_id and name != "read_tool_result":
-            persisted = self._persist_model_visible_tool_result(
+            persisted = persist_model_visible_tool_result(
+                self.chat_repository,
                 raw_result=result,
                 name=name,
                 conversation_id=conversation_id,
@@ -4601,26 +3696,6 @@ class ChatManager:
             conversation.metadata["total_tokens"][provider] = 0
         conversation.metadata["total_tokens"][provider] += tokens
 
-    def _usage_from_message(self, msg: Optional[Message]):
-        if not msg:
-            return None
-        generation_info = msg.get("generation_info") or {}
-        usage_info = generation_info.get("usage_info")
-        if usage_info:
-            return usage_info
-        tokens = generation_info.get("tokens_used")
-        if tokens:
-            return estimated_usage(tokens)
-        return None
-
-    def _canonical_turn_usage_for_node(self, conversation_id: str, node_id: str):
-        messages = self._canonical_messages_by_node(conversation_id, [node_id]).get(node_id, [])
-        usage = None
-        for message in messages:
-            if message.get("role") == Role.ASSISTANT and message.get("subtype") in {None, "", "assistant_answer"}:
-                usage = add_usage(usage, self._usage_from_message(message))
-        return usage
-
     def _node_usage_snapshot(
         self,
         *,
@@ -4649,7 +3724,7 @@ class ChatManager:
         for node in conversation.get_node_chain(node_id):
             usage = add_usage(
                 usage,
-                self._canonical_turn_usage_for_node(conversation.metadata["id"], str(node.get("id") or "")),
+                turn_usage_for_node(self.chat_repository,conversation.metadata["id"], str(node.get("id") or "")),
             )
         return usage or estimated_usage(0)
 
@@ -4662,7 +3737,7 @@ class ChatManager:
         node = conversation.nodes.get(node_id)
         if not node:
             return
-        turn_usage = self._canonical_turn_usage_for_node(conversation.metadata["id"], node_id) or estimated_usage(0)
+        turn_usage = turn_usage_for_node(self.chat_repository,conversation.metadata["id"], node_id) or estimated_usage(0)
         branch_usage = self._branch_usage_for_node(conversation, node_id)
         node["branch_usage_info"] = branch_usage
         node["total_tokens"] = usage_total(branch_usage)
@@ -4681,7 +3756,7 @@ class ChatManager:
             for node in self.current_conversation.get_node_chain(self.current_conversation.current_node_id)
             if node.get("id")
         ]
-        messages_by_node = self._canonical_messages_by_node(self.current_conversation.metadata["id"], node_ids)
+        messages_by_node = _canonical_messages_by_node(self.chat_repository,self.current_conversation.metadata["id"], node_ids)
         history: List[Message] = []
         for node_id in node_ids:
             history.extend(messages_by_node.get(node_id, []))

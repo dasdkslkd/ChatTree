@@ -1,10 +1,87 @@
-import type { TranscriptItem, TranscriptPatch, TranscriptSnapshot } from '../types/transcript';
+import type { TranscriptItem, TranscriptPatch, TranscriptSnapshot, UserMessageItem } from '../types/transcript';
 
 export interface TranscriptState {
   conversationId: string | null;
   nodeId: string | null;
   revision: number;
   items: TranscriptItem[];
+}
+
+export type TranscriptScrollTarget = {
+  messageId?: string | null;
+  nodeId?: string | null;
+  legacyIndex?: number | null;
+};
+
+export function getTranscriptItemNodeId(item: TranscriptItem): string | null {
+  return item.node_id || null;
+}
+
+export function getTranscriptItemMessageId(item: TranscriptItem): string | null {
+  return 'message_id' in item ? item.message_id : null;
+}
+
+export function findTranscriptAnchorElement(
+  container: HTMLElement | null,
+  target: TranscriptScrollTarget,
+): HTMLElement | null {
+  const anchors = Array.from(
+    container?.querySelectorAll<HTMLElement>('[data-transcript-message-id], [data-transcript-node-id]') ?? [],
+  );
+  if (target.messageId) {
+    const byMessage = anchors.find((element) => element.dataset.transcriptMessageId === target.messageId);
+    if (byMessage) return byMessage;
+  }
+  if (target.nodeId) {
+    const byNode = anchors.find((element) => element.dataset.transcriptNodeId === target.nodeId);
+    if (byNode) return byNode;
+  }
+  return target.legacyIndex === undefined || target.legacyIndex === null
+    ? null
+    : document.getElementById(`message-${target.legacyIndex}`);
+}
+
+export function isTranscriptItemVisibleNow(
+  item: TranscriptItem,
+  currentConversationId: string | null,
+  selectedBranchTipId: string | null,
+): boolean {
+  if (!currentConversationId) return false;
+  if (item.conversation_id && item.conversation_id !== currentConversationId) return false;
+  const itemNodeId = getTranscriptItemNodeId(item);
+  return !itemNodeId || itemNodeId === selectedBranchTipId;
+}
+
+export function isTranscriptItemOnCurrentBranch(
+  item: TranscriptItem,
+  currentConversationId: string | null,
+  currentBranchNodeIds: Set<string>,
+): boolean {
+  if (!currentConversationId) return false;
+  if (item.conversation_id && item.conversation_id !== currentConversationId) return false;
+  const itemNodeId = getTranscriptItemNodeId(item);
+  return Boolean(itemNodeId && currentBranchNodeIds.has(itemNodeId));
+}
+
+export function getEditableUserMessageAttachmentRefs(
+  item: UserMessageItem,
+): {
+  importFiles: string[];
+  imageRefs: Array<{ filename: string; mime_type?: string }>;
+} {
+  return {
+    importFiles: (item.import_files ?? []).map((file) => file.filename).filter(Boolean),
+    imageRefs: (item.image_refs ?? [])
+      .filter((file) => Boolean(file.filename))
+      .map((file) => ({ filename: file.filename, mime_type: file.mime_type ?? undefined })),
+  };
+}
+
+export function userMessageItemReferencesAttachment(item: UserMessageItem, filename: string): boolean {
+  return Boolean(
+    item.import_files?.some((file) => file.filename === filename)
+    || item.image_refs?.some((file) => file.filename === filename)
+  );
 }
 
 export type TranscriptPatchResult =
