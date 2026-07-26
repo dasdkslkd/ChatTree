@@ -144,26 +144,35 @@ function launcherApi(apiPath, method = "GET", body = null) {
 
 async function connectProfile(profileId) {
   const result = await launcherApi(`/client/v1/profiles/${profileId}/connect`, "POST");
-  if (result.status === 200) return result.data;
+  if (result.status === 200) {
+    return { serverInstanceId: result.data?.server_instance_id || null };
+  }
   if (result.status === 409 && result.data) {
     throw Object.assign(new Error(result.data.message || "Server already connected"), {
       code: result.data.code,
     });
   }
-  throw new Error(`Failed to connect profile: ${result.status}`);
+  const detail = result.data?.error?.message || `HTTP ${result.status}`;
+  throw new Error(`Failed to connect profile: ${detail}`);
+}
+
+// Mirror of client_launcher.models.ssh_profile_id: "ssh:" + urlsafe_b64(host) without padding.
+function sshProfileId(alias) {
+  return "ssh:" + Buffer.from(alias, "utf-8").toString("base64url");
 }
 
 async function connectSshHost(alias) {
   const result = await launcherApi(`/client/v1/ssh/hosts/${encodeURIComponent(alias)}/connect`, "POST");
   if (result.status === 200 && result.data) {
-    return { profileId: result.data.profile_id, label: alias };
+    return { serverInstanceId: result.data.session?.server_instance_id || null };
   }
   if (result.status === 409 && result.data) {
-    throw Object.assign(new Error(result.data.message || "Server already connected"), {
-      code: result.data.code,
+    throw Object.assign(new Error(result.data.message || result.data.error?.message || "Server already connected"), {
+      code: result.data.code || result.data.error?.code,
     });
   }
-  throw new Error(`Failed to connect SSH host: ${result.status}`);
+  const detail = result.data?.error?.message || `HTTP ${result.status}`;
+  throw new Error(`Failed to connect SSH host: ${detail}`);
 }
 
 async function getSshHosts() {
@@ -189,11 +198,18 @@ function createTabView(profileId) {
 }
 
 function emitTabsUpdated() {
-  const tabList = Object.values(tabs).map(t => ({ id: t.id, label: t.label, status: t.status, error: t.error || null }));
+  const tabList = Object.values(tabs).map(t => ({
+    id: t.id,
+    label: t.label,
+    kind: t.kind,
+    alias: t.alias || null,
+    status: t.status,
+    error: t.error || null,
+  }));
   shellWindow?.webContents.send("tabs:updated", tabList, activeTabId);
 }
 
-async function addTab(profileId, label) {
+async function addTab(profileId, label, kind, alias = null, connectFn = null) {
   if (tabs[profileId]) {
     switchTab(profileId);
     return;
@@ -202,7 +218,10 @@ async function addTab(profileId, label) {
   const tab = {
     id: profileId,
     label,
+    kind,
+    alias,
     status: "disconnected",
+    serverInstanceId: null,
     view: null,
   };
   tabs[profileId] = tab;
@@ -211,7 +230,9 @@ async function addTab(profileId, label) {
   switchTab(profileId);
 
   try {
-    await connectProfile(profileId);
+    const connect = connectFn || (() => connectProfile(profileId));
+    const result = await connect();
+    tab.serverInstanceId = result?.serverInstanceId || null;
     tab.status = "ready";
     emitTabsUpdated();
   } catch (err) {
@@ -256,6 +277,10 @@ async function closeTab(profileId) {
   const tab = tabs[profileId];
   if (!tab) return;
 
+  // Capture server instance id before removing the tab so we can request
+  // a cooperative server shutdown (not just a tunnel disconnect).
+  const { serverInstanceId } = tab;
+
   if (tab.view) {
     shellWindow?.contentView.removeChildView(tab.view);
     tab.view.webContents.close();
@@ -263,7 +288,8 @@ async function closeTab(profileId) {
 
   delete tabs[profileId];
 
-  if (activeTabId === profileId) {
+  const wasActive = activeTabId === profileId;
+  if (wasActive) {
     const remaining = Object.keys(tabs);
     if (remaining.length > 0) {
       switchTab(remaining[0]);
@@ -271,9 +297,18 @@ async function closeTab(profileId) {
       activeTabId = null;
     }
   }
-
-  await launcherApi(`/client/v1/profiles/${profileId}/disconnect`, "POST").catch(() => {});
   emitTabsUpdated();
+
+  // For ready sessions, stop the remote server first (sends shutdown
+  // through the tunnel). For error/connecting sessions, only disconnect.
+  if (serverInstanceId) {
+    await launcherApi(
+      `/client/v1/profiles/${encodeURIComponent(profileId)}/server/stop`,
+      "POST",
+      { expected_server_instance_id: serverInstanceId, timeout_seconds: 15 },
+    ).catch(() => {});
+  }
+  await launcherApi(`/client/v1/profiles/${encodeURIComponent(profileId)}/disconnect`, "POST").catch(() => {});
 }
 
 function layoutActiveTab() {
@@ -311,16 +346,12 @@ function createShellWindow() {
 
 function registerIpc() {
   ipcMain.handle("tab:connect-local", async () => {
-    await addTab("local", "Local");
+    await addTab("local", "Local", "local");
   });
 
   ipcMain.handle("tab:connect-ssh", async (_event, alias) => {
-    try {
-      const result = await connectSshHost(alias);
-      await addTab(result.profileId, result.label);
-    } catch (err) {
-      console.error(`Failed to connect SSH host ${alias}:`, err.message);
-    }
+    const profileId = sshProfileId(alias);
+    await addTab(profileId, alias, "ssh", alias, () => connectSshHost(alias));
   });
 
   ipcMain.handle("tab:close", async (_event, tabId) => {

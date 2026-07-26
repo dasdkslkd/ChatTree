@@ -231,12 +231,12 @@
     overlayRetry.addEventListener("click", async () => {
       const active = tabs.find(t => t.id === activeTabId);
       if (!active) return;
-      const label = active.label;
+      const { kind, alias } = active;
       await window.electronAPI.closeTab(active.id);
-      if (label === "Local") {
+      if (kind === "local") {
         window.electronAPI.connectLocal();
-      } else {
-        window.electronAPI.connectSshHost(label);
+      } else if (kind === "ssh" && alias) {
+        window.electronAPI.connectSshHost(alias);
       }
     });
 

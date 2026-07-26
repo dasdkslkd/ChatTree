@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import signal
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -1269,3 +1271,27 @@ def test_local_server_lifecycle_request_is_strict(tmp_path: Path, payload: dict)
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "invalid_request"
+
+
+def test_shutdown_endpoint_returns_accepted_and_raises_sigint(
+    tmp_path: Path, monkeypatch
+):
+    app, _, connector = _app(tmp_path)
+
+    raised_signals: list[int] = []
+    monkeypatch.setattr(
+        "client_launcher.app.signal.raise_signal",
+        lambda sig: raised_signals.append(sig),
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/client/v1/shutdown")
+        assert response.status_code == 202
+        assert response.json() == {"status": "shutting_down"}
+        # Background task delays 0.3s before raising SIGINT; wait for it.
+        time.sleep(0.6)
+
+    assert raised_signals == [signal.SIGINT]
+    # Lifespan finally block (sessions.close) ran during shutdown or
+    # TestClient context exit; connector.close() must have been called.
+    assert connector.closed is True
