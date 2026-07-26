@@ -1,5 +1,6 @@
 const { app, BrowserWindow, ipcMain, WebContentsView, Menu } = require("electron");
 const path = require("path");
+const fs = require("fs");
 const { spawn } = require("child_process");
 const http = require("http");
 
@@ -7,8 +8,11 @@ const LAUNCHER_PORT = 8000;
 const CLIENT_HOME = path.join(app.getPath("userData"), "client");
 const FRONTEND_DIST = path.join(__dirname, "..", "dist");
 const PROJECT_ROOT = path.join(__dirname, "..", "..");
+const LOG_DIR = path.join(app.getPath("userData"), "logs");
+const LOG_FILE = path.join(LOG_DIR, "launcher.log");
 
 let launcherProcess = null;
+let logStream = null;
 let shellWindow = null;
 const tabs = {};
 let activeTabId = null;
@@ -29,28 +33,60 @@ function resolveLauncherCmd() {
 
   const ext = process.platform === "win32" ? ".exe" : "";
   const resourcesPath = process.resourcesPath || path.join(__dirname, "..", "..");
-  return [path.join(resourcesPath, `chattree-launcher${ext}`)];
+  const binaryPath = path.join(resourcesPath, `chattree-launcher${ext}`);
+  if (!fs.existsSync(binaryPath)) {
+    throw new Error(
+      `Launcher binary not found at ${binaryPath}. The app may be improperly installed.`,
+    );
+  }
+  return [binaryPath];
 }
 
 function resolveServerBinary() {
   if (isDevMode()) return null;
   const ext = process.platform === "win32" ? ".exe" : "";
   const resourcesPath = process.resourcesPath || path.join(__dirname, "..", "..");
-  return path.join(resourcesPath, `chattree-server${ext}`);
+  const binaryPath = path.join(resourcesPath, `chattree-server${ext}`);
+  if (!fs.existsSync(binaryPath)) {
+    throw new Error(
+      `Server binary not found at ${binaryPath}. The app may be improperly installed.`,
+    );
+  }
+  return binaryPath;
 }
 
 function startLauncher() {
-  const [cmd, ...args] = resolveLauncherCmd();
+  let cmd, args;
+  try {
+    [cmd, ...args] = resolveLauncherCmd();
+  } catch (err) {
+    console.error(err.message);
+    app.quit();
+    return;
+  }
+
   const env = {
     ...process.env,
     CHATTREE_CLIENT_HOME: CLIENT_HOME,
     CHATTREE_CLIENT_PORT: String(LAUNCHER_PORT),
     CHATTREE_FRONTEND_DIST: FRONTEND_DIST,
   };
-  const serverBinary = resolveServerBinary();
-  if (serverBinary) {
-    env.CHATTREE_SERVER_BINARY = serverBinary;
+  try {
+    const serverBinary = resolveServerBinary();
+    if (serverBinary) {
+      env.CHATTREE_SERVER_BINARY = serverBinary;
+    }
+  } catch (err) {
+    console.error(err.message);
+    app.quit();
+    return;
   }
+
+  // Open a persistent log file so launcher output survives app exit and can
+  // be inspected for troubleshooting.
+  fs.mkdirSync(LOG_DIR, { recursive: true });
+  logStream = fs.createWriteStream(LOG_FILE, { flags: "a" });
+  logStream.write(`\n--- launcher started ${new Date().toISOString()} ---\n`);
 
   launcherProcess = spawn(cmd, args, {
     env,
@@ -58,15 +94,26 @@ function startLauncher() {
     stdio: ["ignore", "pipe", "pipe"],
   });
 
-  launcherProcess.stdout.on("data", (data) => {
-    process.stdout.write(`[launcher] ${data}`);
-  });
-  launcherProcess.stderr.on("data", (data) => {
-    process.stderr.write(`[launcher] ${data}`);
-  });
+  const writeLog = (prefix, data) => {
+    const chunk = `[launcher] ${data}`;
+    process.stdout.write(chunk);
+    if (logStream && !logStream.destroyed) {
+      logStream.write(data);
+    }
+  };
+  launcherProcess.stdout.on("data", (data) => writeLog("stdout", data));
+  launcherProcess.stderr.on("data", (data) => writeLog("stderr", data));
   launcherProcess.on("error", (err) => {
     console.error("Failed to start launcher:", err.message);
+    if (logStream && !logStream.destroyed) {
+      logStream.write(`Failed to start launcher: ${err.message}\n`);
+    }
     app.quit();
+  });
+  launcherProcess.on("exit", () => {
+    if (logStream && !logStream.destroyed) {
+      logStream.end(`--- launcher exited ${new Date().toISOString()} ---\n`);
+    }
   });
 }
 
@@ -185,6 +232,34 @@ async function getSshHosts() {
 
 // ── Tab management ─────────────────────────────────────────────────────
 
+function handleShortcut(event, input) {
+  if (input.type !== "keyDown") return;
+  const ctrl = input.control || input.meta;
+  if (!ctrl) return;
+
+  if (input.key === "t") {
+    event.preventDefault();
+    showNavigator();
+  } else if (input.key === "w") {
+    event.preventDefault();
+    if (activeTabId) closeTab(activeTabId);
+  } else if (input.key === "tab") {
+    event.preventDefault();
+    const ids = Object.keys(tabs);
+    if (ids.length < 2) return;
+    const idx = ids.indexOf(activeTabId);
+    const next = input.shift
+      ? ids[(idx - 1 + ids.length) % ids.length]
+      : ids[(idx + 1) % ids.length];
+    switchTab(next);
+  } else if (input.key === "r") {
+    event.preventDefault();
+    if (activeTabId && tabs[activeTabId]?.view) {
+      tabs[activeTabId].view.webContents.reload();
+    }
+  }
+}
+
 function createTabView(profileId) {
   const view = new WebContentsView({
     webPreferences: {
@@ -194,6 +269,7 @@ function createTabView(profileId) {
     },
   });
   view.webContents.loadURL(`http://127.0.0.1:${LAUNCHER_PORT}/s/${encodeURIComponent(profileId)}`);
+  view.webContents.on("before-input-event", handleShortcut);
   return view;
 }
 
@@ -336,6 +412,7 @@ function createShellWindow() {
 
   shellWindow.loadFile(path.join(__dirname, "shell.html"));
 
+  shellWindow.webContents.on("before-input-event", handleShortcut);
   shellWindow.on("resize", layoutActiveTab);
   shellWindow.on("closed", () => {
     shellWindow = null;
@@ -364,6 +441,8 @@ function registerIpc() {
 
   ipcMain.handle("tab:show-navigator", async () => {
     showNavigator();
+    const sshHosts = await getSshHosts();
+    return { sshHosts };
   });
 
   ipcMain.handle("tab:list", () => {
