@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import os
+import signal
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -8,6 +11,8 @@ from uuid import uuid4
 import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from client_launcher.http_errors import (
@@ -315,6 +320,22 @@ def create_app(
     async def profile_status(profile_id: str) -> dict[str, Any]:
         return sessions.status(profile_id).to_dict()
 
+    @app.post("/client/v1/shutdown", status_code=202)
+    async def shutdown_launcher() -> dict[str, str]:
+        async def _trigger_shutdown() -> None:
+            # Allow the HTTP response to flush before signalling uvicorn to
+            # perform a graceful shutdown which runs the lifespan finally
+            # block (sessions.close() -> cascades server termination).
+            await asyncio.sleep(0.3)
+            try:
+                signal.raise_signal(signal.SIGINT)
+            except Exception:
+                # Fallback for environments where raise_signal is unavailable.
+                os._exit(0)
+
+        asyncio.create_task(_trigger_shutdown())
+        return {"status": "shutting_down"}
+
     @app.get("/client/v1/ssh/config")
     async def get_ssh_config() -> dict[str, Any]:
         return ssh_config_store.read().to_dict()
@@ -401,4 +422,22 @@ def create_app(
             read_timeout=resolved_settings.proxy_idle_timeout_seconds,
         )
     )
+    _mount_frontend(app, resolved_settings)
     return app
+
+
+def _mount_frontend(app: FastAPI, settings: LauncherSettings) -> None:
+    if settings.frontend_dist is None:
+        return
+    dist = settings.frontend_dist
+    index_path = dist / "index.html"
+    if not index_path.exists():
+        return
+
+    assets_dir = dist / "assets"
+    if assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="frontend_assets")
+
+    @app.get("/s/{path:path}")
+    async def spa_fallback() -> FileResponse:
+        return FileResponse(str(index_path))

@@ -367,6 +367,11 @@ function SshHostsSection() {
   const connectHost = async (host: string) => {
     try {
       setBusyHost(host);
+      if (window.electronAPI) {
+        await window.electronAPI.connectSshHost(host);
+        await refreshStatuses([host]);
+        return;
+      }
       const response = await launcher.connectSshHost(host);
       setStatuses((current) => ({ ...current, [host]: response.session }));
       window.location.href = buildFrontendRoute({ profileId: response.profile_id });
@@ -393,6 +398,10 @@ function SshHostsSection() {
   const openHost = (host: string) => {
     const status = statuses[host];
     if (!status || status.status !== 'ready') return;
+    if (window.electronAPI) {
+      void window.electronAPI.connectSshHost(host);
+      return;
+    }
     window.location.href = buildFrontendRoute({ profileId: status.profile_id });
   };
 

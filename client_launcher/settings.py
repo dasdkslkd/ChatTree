@@ -91,6 +91,7 @@ class LauncherSettings:
     poll_interval_seconds: float = 0.2
     max_request_body_bytes: int = 64 * 1024 * 1024
     proxy_idle_timeout_seconds: float = 300.0
+    frontend_dist: Path | None = None
     allowed_origins: tuple[str, ...] = DEFAULT_ALLOWED_ORIGINS
 
     @classmethod
@@ -118,6 +119,12 @@ class LauncherSettings:
                     "CHATTREE_CLIENT_ALLOWED_ORIGINS must contain at least one origin"
                 )
 
+        frontend_dist_raw = values.get("CHATTREE_FRONTEND_DIST")
+        frontend_dist = (
+            Path(frontend_dist_raw).expanduser().resolve()
+            if frontend_dist_raw
+            else None
+        )
         return cls(
             client_home=resolve_client_home(environ=values),
             project_root=root,
@@ -168,5 +175,6 @@ class LauncherSettings:
                 300.0,
                 maximum=MAX_PROXY_IDLE_TIMEOUT_SECONDS,
             ),
+            frontend_dist=frontend_dist,
             allowed_origins=allowed_origins,
         )
