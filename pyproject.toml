@@ -30,7 +30,7 @@ chattree-server = "backend.server_cli:main"
 py-modules = ["main"]
 
 [tool.setuptools.packages.find]
-include = ["backend*", "chattree_protocol*"]
+include = ["backend*", "chattree_protocol*", "client_launcher*"]
 
 [tool.setuptools.package-data]
 "backend.core.model" = ["model_metadata.toml"]
