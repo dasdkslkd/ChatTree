@@ -124,9 +124,14 @@ class FakeProcess:
 
     def terminate(self):
         self.terminate_calls += 1
+        self._return_codes = [0]
 
     def kill(self):
         self.kill_calls += 1
+        self._return_codes = [0]
+
+    def wait(self, timeout=None):
+        return self._return_codes[-1] or 0
 
 
 class FakePopen:
@@ -310,7 +315,7 @@ def test_connection_refusal_spawns_detached_production_server(tmp_path: Path):
     assert kwargs["stdout"].closed
     assert not list((tmp_path / "client" / "logs").glob("*.spawn.pid"))
     assert phases == ["handshake", "local_version", "local_start", "handshake"]
-    assert process.terminate_calls == 0
+    assert process.terminate_calls == 1
     assert process.kill_calls == 0
 
 
@@ -763,9 +768,10 @@ def test_start_timeout_does_not_kill_server(tmp_path: Path):
 
     with pytest.raises(LocalServerStartTimeoutError) as exc_info:
         asyncio.run(connector.connect(_profile(tmp_path), None))
+    assert process.terminate_calls == 0
     asyncio.run(connector.close())
 
-    assert process.terminate_calls == 0
+    assert process.terminate_calls == 1
     assert process.kill_calls == 0
     assert exc_info.value.log_tail == "startup is still waiting"
     assert exc_info.value.log_tail in str(exc_info.value)
@@ -797,10 +803,11 @@ def test_start_timeout_bounds_a_slow_readiness_probe(tmp_path: Path):
                 connector.connect(_profile(tmp_path), None),
                 timeout=0.25,
             )
+        assert process.terminate_calls == 0
         await connector.close()
 
         assert requests == 2
-        assert process.terminate_calls == 0
+        assert process.terminate_calls == 1
         assert process.kill_calls == 0
 
     asyncio.run(scenario())

@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import FrozenInstanceError
+from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -94,16 +95,20 @@ class FakeConnector:
         await self.shutdown_release.wait()
         if self.shutdown_error is not None:
             raise self.shutdown_error
-        return (
-            f"http://127.0.0.1:{profile.local.server_port}",
-            profile.local.server_home,
-        )
+        if profile.local is not None:
+            return (
+                f"http://127.0.0.1:{profile.local.server_port}",
+                profile.local.server_home,
+            )
+        return "http://127.0.0.1:19081", Path()
 
     def shutdown_target(self, profile):
-        return (
-            f"http://127.0.0.1:{profile.local.server_port}",
-            profile.local.server_home,
-        )
+        if profile.local is not None:
+            return (
+                f"http://127.0.0.1:{profile.local.server_port}",
+                profile.local.server_home,
+            )
+        return "http://127.0.0.1:19081", Path()
 
     async def wait_stopped(self, endpoint, server_home, *, timeout: float):
         self.wait_stopped_calls.append((endpoint, server_home, timeout))
@@ -860,3 +865,51 @@ def test_profile_lifecycle_lock_blocks_connect_until_stop_finishes(tmp_path):
     asyncio.run(
         _profile_lifecycle_lock_blocks_connect_until_stop_finishes_case(tmp_path)
     )
+
+
+async def _ssh_stop_runs_shutdown_through_tunnel_case(tmp_path):
+    store = _store(tmp_path)
+    ssh_profile = store.ensure_ssh_profile("gpu-box")
+    connector = FakeConnector()
+    connector.release.set()
+    manager = SessionManager(store, {"local": connector, "ssh": connector})
+
+    await manager.connect(ssh_profile.id)
+    stopped = await manager.stop(
+        ssh_profile.id,
+        expected_server_instance_id=SERVER_A,
+        timeout=6,
+        request_id="ssh-stop-tree",
+    )
+
+    assert stopped.status == "disconnected"
+    assert manager.status(ssh_profile.id).status == "disconnected"
+    assert connector.shutdown_calls == [
+        (ssh_profile.id, SERVER_A, "ssh-stop-tree")
+    ]
+    assert len(connector.wait_stopped_calls) == 1
+    assert connector.wait_stopped_calls[0][2] == 6
+
+
+def test_ssh_stop_runs_shutdown_through_tunnel(tmp_path):
+    asyncio.run(_ssh_stop_runs_shutdown_through_tunnel_case(tmp_path))
+
+
+async def _ssh_close_stops_remote_server_case(tmp_path):
+    store = _store(tmp_path)
+    ssh_profile = store.ensure_ssh_profile("gpu-box")
+    connector = FakeConnector()
+    connector.release.set()
+    manager = SessionManager(store, {"local": connector, "ssh": connector})
+
+    await manager.connect(ssh_profile.id)
+    await manager.close()
+
+    assert connector.closed is True
+    assert any(
+        call[0] == ssh_profile.id for call in connector.shutdown_calls
+    )
+
+
+def test_ssh_close_stops_remote_server(tmp_path):
+    asyncio.run(_ssh_close_stops_remote_server_case(tmp_path))

@@ -293,6 +293,15 @@ class LocalServerConnector:
             reaper.cancel()
             await asyncio.gather(reaper, return_exceptions=True)
         self._poll_spawned_processes()
+        for process in list(self._spawned_processes):
+            if process.poll() is None:
+                process.terminate()
+        for process in list(self._spawned_processes):
+            try:
+                await asyncio.to_thread(process.wait, 5)
+            except (subprocess.TimeoutExpired, OSError):
+                process.kill()
+                await asyncio.to_thread(process.wait)
         self._spawned_processes.clear()
         await self._client.aclose()
 

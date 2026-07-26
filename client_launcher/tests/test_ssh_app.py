@@ -33,14 +33,14 @@ class ImmediateAnyConnector:
     async def disconnect(self, profile):
         self.disconnected_profiles.append(profile.id)
 
-    async def request_shutdown(self, *_args, **_kwargs):
-        raise AssertionError("ssh tests should not stop remote servers")
+    def shutdown_target(self, profile):
+        return f"http://upstream.test/{profile.id}", Path()
 
-    def shutdown_target(self, *_args, **_kwargs):
-        raise AssertionError("ssh tests should not stop remote servers")
+    async def request_shutdown(self, profile, expected_server_instance_id, *, request_id=None):
+        return f"http://upstream.test/{profile.id}", Path()
 
-    async def wait_stopped(self, *_args, **_kwargs):
-        raise AssertionError("ssh tests should not stop remote servers")
+    async def wait_stopped(self, endpoint, server_home, *, timeout: float):
+        return None
 
     async def close(self):
         self.closed = True
@@ -116,8 +116,8 @@ def test_connect_host_auto_creates_hidden_profile_and_uses_profile_route(
     assert store.get(profile_id).ssh == SshTarget(config_host="gpu-box")
     assert profiles.json() == [store.get("local").to_dict()]
     assert status.json()["session"]["status"] == "ready"
-    assert stopped.status_code == 409
-    assert stopped.json()["error"]["code"] == "server_lifecycle_unsupported"
+    assert stopped.status_code == 200
+    assert stopped.json()["status"] == "disconnected"
     assert disconnected.status_code == 200
     assert disconnected.json()["session"]["status"] == "disconnected"
     assert profile_id in connector.disconnected_profiles

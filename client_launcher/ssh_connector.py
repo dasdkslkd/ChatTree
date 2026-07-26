@@ -34,6 +34,7 @@ from client_launcher.settings import LauncherSettings
 
 
 _HANDSHAKE_PATH = "/api/v1/handshake"
+_SHUTDOWN_PATH = "/api/v1/server/shutdown"
 STARTUP_LOG_TAIL_BYTES = 8 * 1024
 REMOTE_SERVER_HOST = "127.0.0.1"
 
@@ -204,6 +205,96 @@ class SshServerConnector:
         except (subprocess.TimeoutExpired, OSError):
             process.kill()
             await asyncio.to_thread(process.wait)
+
+    def shutdown_target(self, profile: ServerProfile) -> tuple[str, Path]:
+        tunnel = self._tunnels.get(profile.id)
+        if tunnel is None:
+            raise SshConnectionError(
+                "ssh_tunnel_not_ready",
+                "SSH tunnel is not established for this profile",
+                phase="handshake",
+                retryable=False,
+                status_code=409,
+            )
+        return tunnel.endpoint, Path()
+
+    async def request_shutdown(
+        self,
+        profile: ServerProfile,
+        expected_server_instance_id: str,
+        *,
+        request_id: str | None = None,
+    ) -> tuple[str, Path]:
+        tunnel = self._tunnels.get(profile.id)
+        if tunnel is None:
+            raise SshConnectionError(
+                "ssh_tunnel_not_ready",
+                "SSH tunnel is not established for this profile",
+                phase="handshake",
+                retryable=False,
+                status_code=409,
+            )
+        request_id = canonical_request_id(request_id)
+        try:
+            response = await self._client.post(
+                f"{tunnel.endpoint}{_SHUTDOWN_PATH}",
+                json={
+                    "expected_server_instance_id": expected_server_instance_id,
+                },
+                headers={"X-Request-ID": request_id},
+            )
+        except httpx.HTTPError as exc:
+            raise SshConnectionError(
+                "ssh_shutdown_failed",
+                f"SSH server shutdown request failed: {exc}",
+                phase="handshake",
+                retryable=True,
+                details={"endpoint": tunnel.endpoint},
+            ) from exc
+        if response.status_code != 202:
+            raise SshConnectionError(
+                "ssh_shutdown_failed",
+                f"SSH server shutdown returned HTTP {response.status_code}",
+                phase="handshake",
+                retryable=response.status_code >= 500,
+                status_code=response.status_code,
+                details={"endpoint": tunnel.endpoint},
+            )
+        return tunnel.endpoint, Path()
+
+    async def wait_stopped(
+        self,
+        endpoint: str,
+        server_home: Path,
+        *,
+        timeout: float,
+    ) -> None:
+        deadline = self._monotonic() + max(0.0, float(timeout))
+        while True:
+            if await self._endpoint_is_down(endpoint):
+                return
+            remaining = deadline - self._monotonic()
+            if remaining <= 0:
+                raise SshConnectionError(
+                    "ssh_server_stop_timeout",
+                    f"Remote Server did not stop within {timeout}s at {endpoint}",
+                    phase="handshake",
+                    retryable=True,
+                    status_code=504,
+                    details={"endpoint": endpoint},
+                )
+            await self._sleep(
+                min(float(self._settings.poll_interval_seconds), remaining)
+            )
+
+    async def _endpoint_is_down(self, endpoint: str) -> bool:
+        try:
+            await self._client.get(f"{endpoint}{_HANDSHAKE_PATH}")
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            return True
+        except httpx.HTTPError:
+            return False
+        return False
 
     async def close(self) -> None:
         for tunnel in list(self._tunnels.values()):

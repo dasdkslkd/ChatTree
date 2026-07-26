@@ -9,7 +9,7 @@ import pytest
 
 from client_launcher.models import LauncherError, ServerProfile, SshTarget
 from client_launcher.settings import LauncherSettings
-from client_launcher.ssh_connector import SshServerConnector
+from client_launcher.ssh_connector import SshConnectionError, SshServerConnector, _Tunnel
 
 
 SERVER_A = "11111111-1111-4111-8111-111111111111"
@@ -503,3 +503,145 @@ def test_invalid_profile_kind_is_rejected(tmp_path: Path):
         assert exc_info.value.code == "invalid_ssh_profile"
 
     asyncio.run(scenario())
+
+
+def _connector_with_tunnel(
+    tmp_path: Path,
+    *,
+    transport: httpx.MockTransport,
+    endpoint: str = "http://127.0.0.1:19090",
+) -> SshServerConnector:
+    connector = SshServerConnector(
+        _settings(tmp_path),
+        transport=transport,
+        popen_factory=lambda *a, **k: FakeProcess(None),
+        allocate_port=lambda: 19090,
+    )
+    connector._tunnels["ssh:gpu"] = _Tunnel(
+        process=FakeProcess(None),
+        local_port=19090,
+        endpoint=endpoint,
+        log_path=tmp_path / "ssh.log",
+    )
+    return connector
+
+
+def test_shutdown_target_returns_tunnel_endpoint(tmp_path: Path):
+    connector = _connector_with_tunnel(
+        tmp_path,
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json={})),
+    )
+
+    endpoint, server_home = connector.shutdown_target(_profile())
+
+    assert endpoint == "http://127.0.0.1:19090"
+    assert server_home == Path()
+
+
+def test_shutdown_target_fails_without_tunnel(tmp_path: Path):
+    connector = SshServerConnector(
+        _settings(tmp_path),
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json={})),
+    )
+
+    with pytest.raises(SshConnectionError) as exc_info:
+        connector.shutdown_target(_profile())
+    assert exc_info.value.code == "ssh_tunnel_not_ready"
+
+
+def test_request_shutdown_posts_shutdown_payload(tmp_path: Path):
+    received: list[dict] = []
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            received.append(request.read().decode("utf-8"))
+            return httpx.Response(202, json={"status": "stopping"})
+        return httpx.Response(200, json={"server_instance_id": SERVER_A})
+
+    connector = _connector_with_tunnel(
+        tmp_path, transport=httpx.MockTransport(upstream)
+    )
+
+    endpoint, server_home = asyncio.run(
+        connector.request_shutdown(_profile(), SERVER_A, request_id="req-1")
+    )
+
+    assert endpoint == "http://127.0.0.1:19090"
+    assert server_home == Path()
+    assert received == [
+        f'{{"expected_server_instance_id":"{SERVER_A}"}}'
+    ]
+
+
+def test_request_shutdown_fails_without_tunnel(tmp_path: Path):
+    connector = SshServerConnector(
+        _settings(tmp_path),
+        transport=httpx.MockTransport(lambda _: httpx.Response(202)),
+    )
+
+    with pytest.raises(SshConnectionError) as exc_info:
+        asyncio.run(connector.request_shutdown(_profile(), SERVER_A))
+    assert exc_info.value.code == "ssh_tunnel_not_ready"
+
+
+def test_request_shutdown_fails_on_http_error(tmp_path: Path):
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(500, text="internal")
+        return httpx.Response(200, json={"server_instance_id": SERVER_A})
+
+    connector = _connector_with_tunnel(
+        tmp_path, transport=httpx.MockTransport(upstream)
+    )
+
+    with pytest.raises(SshConnectionError) as exc_info:
+        asyncio.run(connector.request_shutdown(_profile(), SERVER_A))
+    assert exc_info.value.code == "ssh_shutdown_failed"
+    assert exc_info.value.status_code == 500
+
+
+def test_request_shutdown_fails_on_transport_error(tmp_path: Path):
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            raise httpx.ConnectError("tunnel down", request=request)
+        return httpx.Response(200, json={"server_instance_id": SERVER_A})
+
+    connector = _connector_with_tunnel(
+        tmp_path, transport=httpx.MockTransport(upstream)
+    )
+
+    with pytest.raises(SshConnectionError) as exc_info:
+        asyncio.run(connector.request_shutdown(_profile(), SERVER_A))
+    assert exc_info.value.code == "ssh_shutdown_failed"
+
+
+def test_wait_stopped_returns_when_endpoint_down(tmp_path: Path):
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    connector = _connector_with_tunnel(
+        tmp_path, transport=httpx.MockTransport(upstream)
+    )
+
+    asyncio.run(
+        connector.wait_stopped(
+            "http://127.0.0.1:19090", Path(), timeout=1.0
+        )
+    )
+
+
+def test_wait_stopped_times_out_when_endpoint_still_up(tmp_path: Path):
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"server_instance_id": SERVER_A})
+
+    connector = _connector_with_tunnel(
+        tmp_path, transport=httpx.MockTransport(upstream)
+    )
+
+    with pytest.raises(SshConnectionError) as exc_info:
+        asyncio.run(
+            connector.wait_stopped(
+                "http://127.0.0.1:19090", Path(), timeout=0.05
+            )
+        )
+    assert exc_info.value.code == "ssh_server_stop_timeout"

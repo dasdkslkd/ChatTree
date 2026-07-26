@@ -331,13 +331,6 @@ class SessionManager:
         async with self._guard:
             profile = self.profiles.get(profile_id)
             session = self._session(profile_id)
-            if profile.kind != "local":
-                raise LauncherError(
-                    "server_lifecycle_unsupported",
-                    "Launcher stop/restart only supports local Server profiles",
-                    retryable=False,
-                    status_code=409,
-                )
             if session.status != "ready" or session.server_instance_id is None:
                 raise LauncherError(
                     "profile_not_ready",
@@ -494,6 +487,19 @@ class SessionManager:
             await asyncio.gather(*self._background_tasks, return_exceptions=True)
         profile_ids = {profile.id for profile in self.profiles.list()}
         profile_ids.update(self._connect_tasks)
+        stop_tasks = [
+            self.stop(
+                profile_id,
+                expected_server_instance_id=session.server_instance_id,
+                timeout=5.0,
+            )
+            for profile_id in profile_ids
+            if (session := self._sessions.get(profile_id))
+            and session.status == "ready"
+            and session.server_instance_id is not None
+        ]
+        if stop_tasks:
+            await asyncio.gather(*stop_tasks, return_exceptions=True)
         for profile_id in profile_ids:
             await self.disconnect(profile_id)
         connectors = (

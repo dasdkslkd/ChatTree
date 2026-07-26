@@ -1213,8 +1213,9 @@ def test_local_server_stop_and_restart_routes(tmp_path: Path):
     assert connector.shutdown_calls == [
         ("local", SERVER_A, "stop-tree"),
         ("local", SERVER_A, "restart-tree"),
+        ("local", SERVER_A, None),
     ]
-    assert [call[2] for call in connector.wait_stopped_calls] == [12.0, 8.0]
+    assert [call[2] for call in connector.wait_stopped_calls] == [12.0, 8.0, 5.0]
     assert connector.connect_calls == 3
 
 
