@@ -5,12 +5,14 @@ export const DEFAULT_TOOLS_CONFIG: ToolsConfig = {
   max_rounds: 5,
   max_result_length: 8000,
   default_permission_mode: 'auto_approve',
+  wait_agent_timeout_seconds: 30,
   builtin: {
     enabled: true,
     exposure: 'coding',
     code: {
       enabled: true,
       groups: ['read', 'search', 'edit', 'shell'],
+      shell_initial_wait_seconds: 120,
     },
   },
   web_search: {

@@ -145,6 +145,7 @@ def _sync_runtime_managers(app, config_data: Dict[str, Any], model_manager, tool
         workflow_manager.subagent_executor = subagent_executor
         workflow_manager.mailbox = agent_mailbox
     agent_runtime = getattr(app.state, 'agent_runtime', None)
+    wait_agent_timeout = float(config_data.get("tools", {}).get("wait_agent_timeout_seconds", 30.0))
     if (
         agent_runtime is None
         and run_manager is not None
@@ -158,6 +159,7 @@ def _sync_runtime_managers(app, config_data: Dict[str, Any], model_manager, tool
             workflow_manager=workflow_manager,
             capability_registry=capability_registry,
             task_service=task_service,
+            default_wait_timeout_seconds=wait_agent_timeout,
         )
         app.state.agent_runtime = agent_runtime
     elif agent_runtime is not None:
@@ -167,6 +169,7 @@ def _sync_runtime_managers(app, config_data: Dict[str, Any], model_manager, tool
         agent_runtime.workflow_manager = workflow_manager
         agent_runtime.capability_registry = capability_registry
         agent_runtime.task_service = task_service
+        agent_runtime.default_wait_timeout_seconds = wait_agent_timeout
     if workflow_manager is not None:
         workflow_manager.agent_runtime = agent_runtime
     register_agent_management_tools(

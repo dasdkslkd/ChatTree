@@ -150,6 +150,26 @@ export function BuiltinToolsSection() {
     }));
   };
 
+  const setShellInitialWait = (value: number) => {
+    updateTools(current => ({
+      ...current,
+      builtin: {
+        ...(current.builtin || {}),
+        code: {
+          ...(current.builtin?.code || {}),
+          shell_initial_wait_seconds: value,
+        },
+      },
+    }));
+  };
+
+  const setWaitAgentTimeout = (value: number) => {
+    updateTools(current => ({
+      ...current,
+      wait_agent_timeout_seconds: value,
+    }));
+  };
+
   const setSearxngField = (key: 'searxng_url' | 'language' | 'engines' | 'max_results' | 'timeout', value: string | number) => {
     updateTools(current => ({
       ...current,
@@ -216,7 +236,7 @@ export function BuiltinToolsSection() {
 
       <div className="flex-1 overflow-y-auto custom-scrollbar min-h-0 px-6 pb-6 space-y-4">
         <div className="rounded-xl overflow-hidden" style={{ border: '0.5px solid var(--border)' }}>
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 px-4 py-3">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 px-4 py-3">
             <div className="flex items-center justify-between gap-3">
               <Label>工具系统</Label>
               <Switch checked={toolsForm.enabled !== false} onCheckedChange={(checked) => updateTools(current => ({ ...current, enabled: checked }))} />
@@ -247,6 +267,18 @@ export function BuiltinToolsSection() {
             <div className="space-y-1">
               <Label className="text-xs">结果上限</Label>
               <Input type="number" min={1000} value={toolsForm.max_result_length ?? 8000} onChange={(e) => updateTools(current => ({ ...current, max_result_length: parseNumber(e.target.value, 8000) }))} />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs">Shell 初始等待(秒)</Label>
+              <TextTooltip content="shell 命令启动后等待该秒数，未结束则自动转后台运行">
+                <Input type="number" min={1} value={toolsForm.builtin?.code?.shell_initial_wait_seconds ?? 120} onChange={(e) => setShellInitialWait(parseNumber(e.target.value, 120))} />
+              </TextTooltip>
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs">Wait Agent 超时(秒)</Label>
+              <TextTooltip content="wait_agent 工具默认等待 subagent 结果的秒数，超时后 subagent 继续在后台运行">
+                <Input type="number" min={1} value={toolsForm.wait_agent_timeout_seconds ?? 30} onChange={(e) => setWaitAgentTimeout(parseNumber(e.target.value, 30))} />
+              </TextTooltip>
             </div>
           </div>
         </div>

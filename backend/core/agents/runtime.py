@@ -38,6 +38,7 @@ class AgentRuntime:
         workflow_manager: Any = None,
         capability_registry: CapabilityRegistry,
         task_service: ActiveTaskService | None = None,
+        default_wait_timeout_seconds: float = 30.0,
     ) -> None:
         self.run_manager = run_manager
         self.mailbox = mailbox
@@ -45,6 +46,7 @@ class AgentRuntime:
         self.workflow_manager = workflow_manager
         self.capability_registry = capability_registry
         self.task_service = task_service
+        self.default_wait_timeout_seconds = default_wait_timeout_seconds
 
     async def spawn_agent(
         self,

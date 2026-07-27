@@ -278,7 +278,7 @@ class WaitAgentTool(AgentRuntimeTool):
         result = await self._agent_runtime.wait_agent(
             source=self._source(context),
             run_ids=[str(run_id) for run_id in run_ids],
-            timeout_seconds=float(kwargs.get("timeout_seconds") or 30),
+            timeout_seconds=float(kwargs.get("timeout_seconds") or self._agent_runtime.default_wait_timeout_seconds),
         )
         return json.dumps(result, ensure_ascii=False)
 

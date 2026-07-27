@@ -75,6 +75,7 @@ export interface BuiltinCodeToolsConfig {
   workspace_roots?: string[];
   protected_paths?: string[];
   command_timeout_seconds?: number;
+  shell_initial_wait_seconds?: number;
   max_read_chars?: number;
   max_output_chars?: number;
   allow_parent_dir_creation?: boolean;
@@ -106,6 +107,7 @@ export interface ToolsConfig {
   default_permission_mode?: 'auto_approve' | 'modify_only' | 'ask_always' | 'plan';
   enabled_tools?: string[] | null;
   disabled_tools?: string[];
+  wait_agent_timeout_seconds?: number;
   builtin?: BuiltinToolsConfig;
   web_search?: WebSearchConfig;
   fetch_url?: Record<string, unknown>;
