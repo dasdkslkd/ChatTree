@@ -118,6 +118,15 @@ async def _stream_openai(
         kwargs["tools"] = body["tools"]
     if body.get("tool_choice"):
         kwargs["tool_choice"] = body["tool_choice"]
+    if body.get("reasoning_effort"):
+        kwargs["reasoning_effort"] = body["reasoning_effort"]
+    if body.get("thinking_enabled") is not None:
+        kwargs["thinking_enabled"] = body["thinking_enabled"]
+
+    # 本地 provider 产出的 tool_calls 是「全量快照」（每次包含已累积的完整 arguments），
+    # 而 OpenAI 流式协议要求「增量 delta」（每次只含新增的 arguments 片段）。
+    # 这里维护每个 index 已发送的 arguments 前缀，把快照转成真正的 delta，避免下游重复拼接。
+    emitted_tool_args: Dict[int, str] = {}
 
     try:
         async for chunk in provider.generate_response_stream(
@@ -136,11 +145,36 @@ async def _stream_openai(
                         delta={"reasoning_content": chunk["reasoning"]},
                     )
                 elif event_type in ("tool_call", "tool_call_start") and chunk.get("tool_calls"):
-                    yield _sse_chunk(
-                        chat_id=chat_id,
-                        model=model,
-                        delta={"tool_calls": chunk["tool_calls"]},
-                    )
+                    for idx, tc in enumerate(chunk["tool_calls"]):
+                        fn = tc.get("function") or {}
+                        args = fn.get("arguments", "") or ""
+                        prev = emitted_tool_args.get(idx)
+                        if prev is None:
+                            yield _sse_chunk(
+                                chat_id=chat_id,
+                                model=model,
+                                delta={"tool_calls": [{
+                                    "index": idx,
+                                    "id": tc.get("id", ""),
+                                    "type": tc.get("type", "function"),
+                                    "function": {
+                                        "name": fn.get("name", ""),
+                                        "arguments": args,
+                                    },
+                                }]},
+                            )
+                        else:
+                            suffix = args[len(prev):] if args.startswith(prev) else args
+                            if suffix:
+                                yield _sse_chunk(
+                                    chat_id=chat_id,
+                                    model=model,
+                                    delta={"tool_calls": [{
+                                        "index": idx,
+                                        "function": {"arguments": suffix},
+                                    }]},
+                                )
+                        emitted_tool_args[idx] = args
                 elif chunk.get("content"):
                     yield _sse_chunk(
                         chat_id=chat_id,
@@ -160,7 +194,7 @@ async def _stream_openai(
                     chat_id=chat_id,
                     model=model,
                     delta={},
-                    finish_reason="stop",
+                    finish_reason="tool_calls" if emitted_tool_args else "stop",
                     usage=usage_payload,
                 )
             elif status == StreamStatus.ERROR:
@@ -235,7 +269,8 @@ async def proxy_chat_completions(
     # 非流式：复用流式实现聚合完整内容
     chat_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
     content_parts: List[str] = []
-    tool_calls: List[Dict[str, Any]] = []
+    tool_call_acc: Dict[int, Dict[str, Any]] = {}
+    had_tool_calls = False
     usage_payload: Dict[str, Any] = {
         "prompt_tokens": 0,
         "completion_tokens": 0,
@@ -257,11 +292,29 @@ async def proxy_chat_completions(
         delta = choice.get("delta") or {}
         if delta.get("content"):
             content_parts.append(delta["content"])
-        if delta.get("tool_calls"):
-            tool_calls.extend(delta["tool_calls"])
-        if choice.get("finish_reason") == "stop" and payload.get("usage"):
+        for tc in delta.get("tool_calls") or []:
+            idx = int(tc.get("index", 0))
+            current = tool_call_acc.setdefault(
+                idx,
+                {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+            )
+            if tc.get("id"):
+                current["id"] = tc["id"]
+            if tc.get("type"):
+                current["type"] = tc["type"]
+            fn = tc.get("function") or {}
+            if fn.get("name"):
+                current["function"]["name"] = fn["name"]
+            if fn.get("arguments"):
+                current["function"]["arguments"] += fn["arguments"]
+            had_tool_calls = True
+        if choice.get("finish_reason") and payload.get("usage"):
             usage_payload = payload["usage"]
 
+    tool_calls = [
+        tool_call_acc[i] for i in sorted(tool_call_acc)
+        if tool_call_acc[i].get("function", {}).get("name")
+    ]
     message: Dict[str, Any] = {"role": "assistant", "content": "".join(content_parts)}
     if tool_calls:
         message["tool_calls"] = tool_calls
@@ -271,7 +324,11 @@ async def proxy_chat_completions(
         "created": int(time.time()),
         "model": model,
         "choices": [
-            {"index": 0, "message": message, "finish_reason": "stop"}
+            {
+                "index": 0,
+                "message": message,
+                "finish_reason": "tool_calls" if had_tool_calls else "stop",
+            }
         ],
         "usage": usage_payload,
     }

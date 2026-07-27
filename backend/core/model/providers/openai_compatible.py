@@ -203,7 +203,6 @@ class OpenAICompatibleProvider(BaseProvider):
                 return
 
             api_messages = self._convert_messages(messages)
-            reasoning_requested = bool(reasoning_effort or thinking_enabled)
             request_kwargs = self._build_chat_request_kwargs(
                 model=model,
                 messages=api_messages,
@@ -306,7 +305,7 @@ class OpenAICompatibleProvider(BaseProvider):
                                             tool_calls=tool_calls,
                                         )
                             reasoning = delta.get("reasoning_content") or delta.get("reasoning")
-                            if reasoning and reasoning_requested:
+                            if reasoning:
                                 attempt_had_output = True
                                 yield StreamChunk(
                                     status=StreamStatus.CONTENT,
@@ -317,19 +316,6 @@ class OpenAICompatibleProvider(BaseProvider):
                                     tokens_used=0,
                                     event_type="reasoning",
                                     reasoning=reasoning,
-                                )
-                            elif reasoning:
-                                attempt_had_output = True
-                                total_content += reasoning
-                                token_delta = int(len(str(reasoning).split()) * 1.3)
-                                total_tokens += token_delta
-                                yield StreamChunk(
-                                    status=StreamStatus.CONTENT,
-                                    content=reasoning,
-                                    node_id=stream_controller.node_id if stream_controller else None,
-                                    conversation_id=stream_controller.conversation_id if stream_controller else None,
-                                    error=None,
-                                    tokens_used=token_delta,
                                 )
 
                             content = delta.get("content") or ""
