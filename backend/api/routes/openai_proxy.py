@@ -239,7 +239,7 @@ async def list_proxy_models(
         for model_id in model_manager.model_list[provider_id]:
             if model_id in hidden:
                 continue
-            data.append({"id": model_id, "object": "model", "owned_by": owner})
+            data.append({"id": f"{owner}/{model_id}", "object": "model", "owned_by": owner})
     return {"object": "list", "data": data}
 
 
@@ -255,13 +255,15 @@ async def proxy_chat_completions(
     model = body.get("model")
     if not model:
         raise HTTPException(status_code=400, detail="model is required")
-    provider_id = _find_provider_for_model(model_manager, model)
+    # /models 返回 "owner/model" 格式；剥离 owner 前缀以匹配本地 provider 的裸模型名
+    lookup_model = model.split("/", 1)[1] if "/" in model else model
+    provider_id = _find_provider_for_model(model_manager, lookup_model)
     messages = _to_internal_messages(body.get("messages") or [])
     stream = bool(body.get("stream", False))
 
     if stream:
         return StreamingResponse(
-            _stream_openai(model_manager, provider_id, model, messages, body),
+            _stream_openai(model_manager, provider_id, lookup_model, messages, body),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -277,7 +279,7 @@ async def proxy_chat_completions(
         "total_tokens": 0,
     }
     async for line in _stream_openai(
-        model_manager, provider_id, model, messages, {**body, "stream": True}
+        model_manager, provider_id, lookup_model, messages, {**body, "stream": True}
     ):
         if not line.startswith("data: ") or line.strip() == "data: [DONE]":
             continue

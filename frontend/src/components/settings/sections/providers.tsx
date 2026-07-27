@@ -828,6 +828,8 @@ export function ProvidersSection() {
                   </div>
                 </>
               )}
+            </>
+            )}
             </div>
 
             {/* ── 右列：模型管理 + 额度 ── */}

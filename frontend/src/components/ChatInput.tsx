@@ -18,7 +18,7 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { ArrowRight, Bot, StickyNote, X, Settings, Square, Plus, FileText, Pencil, Trash2, Check, Loader2, Workflow } from 'lucide-react'
+import { ArrowRight, Bot, Share2, StickyNote, X, Settings, Square, Plus, FileText, Pencil, Trash2, Check, Loader2, Workflow } from 'lucide-react'
 import { useState, useEffect, useMemo, useRef, type ReactNode } from 'react'
 import { useModelStore } from '../store/modelStore'
 import { usePromptStore } from '../store/promtStore'
@@ -369,6 +369,9 @@ export function ChatInput({
   const getProviderDisplayName = (provider: string): string => {
     return config?.provider?.[provider]?.name || provider;
   };
+
+  const isCurrentProxy = currentProvider ? config?.provider?.[currentProvider]?.source === 'reverse_proxy' : false;
+  const isDialogProxy = activeDialogProvider ? config?.provider?.[activeDialogProvider]?.source === 'reverse_proxy' : false;
 
   const hiddenModels = activeDialogProvider ? (config?.provider?.[activeDialogProvider]?.hidden_models || []) : [];
   const dialogModels = (activeDialogProvider ? models[activeDialogProvider] || [] : []).filter(m => !hiddenModels.includes(m));
@@ -815,15 +818,19 @@ export function ChatInput({
               onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-hover)'; (e.currentTarget as HTMLElement).style.color = 'var(--fg-secondary)'; }}
               onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = ''; (e.currentTarget as HTMLElement).style.color = 'var(--fg-tertiary)'; }}
             >
-              <Bot className="h-4 w-4 mr-1" />
+              {isCurrentProxy ? <Share2 className="h-4 w-4 mr-1" style={{ color: 'var(--icon-accent)' }} /> : <Bot className="h-4 w-4 mr-1" />}
               {currentProvider && currentModel
                 ? (
                   <span className="truncate flex items-center gap-1.5">
-                    <span className="truncate">{`${getProviderDisplayName(currentProvider)} / ${currentModel}`}</span>
-                    {config?.provider?.[currentProvider]?.source === 'reverse_proxy' && (
-                      <span className="text-[10px] px-1 py-0 rounded-full flex-shrink-0" style={{ background: 'rgba(99,179,237,0.15)', color: 'var(--icon-accent)' }}>
-                        代理
-                      </span>
+                    {isCurrentProxy ? (
+                      <>
+                        <span className="truncate" style={{ color: 'var(--icon-accent)' }}>{currentModel}</span>
+                        <span className="text-[10px] px-1 py-0 rounded-full flex-shrink-0" style={{ background: 'rgba(99,179,237,0.15)', color: 'var(--icon-accent)' }}>
+                          代理
+                        </span>
+                      </>
+                    ) : (
+                      <span className="truncate">{`${getProviderDisplayName(currentProvider)} / ${currentModel}`}</span>
                     )}
                   </span>
                 )
@@ -1023,7 +1030,8 @@ export function ChatInput({
                 {dialogModels.map((model) => (
                   <div key={model} className="flex items-center space-x-2">
                     <RadioGroupItem value={model} id={`model-${model}`} />
-                    <Label htmlFor={`model-${model}`} className="cursor-pointer">
+                    <Label htmlFor={`model-${model}`} className="cursor-pointer flex items-center gap-1.5" style={isDialogProxy ? { color: 'var(--icon-accent)' } : undefined}>
+                      {isDialogProxy && <Share2 className="h-3 w-3 flex-shrink-0" style={{ color: 'var(--icon-accent)' }} />}
                       {model}
                     </Label>
                   </div>

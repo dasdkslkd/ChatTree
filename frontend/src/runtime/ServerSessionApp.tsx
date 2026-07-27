@@ -2,7 +2,7 @@ import '../App.css'
 import { Toaster } from '@/components/ui/sonner'
 import { TextTooltip } from '@/components/ui/text-tooltip'
 import { TooltipProvider } from '@/components/ui/tooltip'
-import { Wifi, WifiOff } from 'lucide-react'
+import { Share2, Wifi, WifiOff } from 'lucide-react'
 import { SettingsPageView } from '../components/SettingsDialog'
 import { useNavigationStore } from '../store/navigationStore'
 import { useModelStore } from '../store/modelStore'
@@ -43,7 +43,7 @@ export default function ServerSessionApp({
 }) {
   void binding;
   const { activePage, settingsSection, openSettings } = useNavigationStore();
-  const { currentProvider, currentModel, loadMetadata, getMetadata } = useModelStore();
+  const { currentProvider, currentModel, loadMetadata, getMetadata, config } = useModelStore();
   const initializationOwnerRef = useRef<ServerSessionInitializationOwner | null>(null);
   const [contextHovered, setContextHovered] = useState(false);
 
@@ -83,8 +83,11 @@ export default function ServerSessionApp({
     }
   }, [connected, currentProvider, loadMetadata]);
 
+  const isCurrentProxy = currentProvider ? config?.provider?.[currentProvider]?.source === 'reverse_proxy' : false;
   const getModelDisplay = (): string => {
-    if (currentProvider && currentModel) return `${currentProvider} / ${currentModel}`;
+    if (currentProvider && currentModel) {
+      return isCurrentProxy ? currentModel : `${currentProvider} / ${currentModel}`;
+    }
     return '未选择模型';
   };
 
@@ -375,7 +378,11 @@ export default function ServerSessionApp({
                 onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-hover)'; }}
                 onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = ''; }}
               >
-                <span>{getModelDisplay()}</span>
+                {isCurrentProxy && <Share2 className="h-3.5 w-3.5" style={{ color: 'var(--icon-accent)' }} />}
+                <span style={isCurrentProxy ? { color: 'var(--icon-accent)' } : undefined}>{getModelDisplay()}</span>
+                {isCurrentProxy && (
+                  <span className="text-[10px] px-1 py-0 rounded-full" style={{ background: 'rgba(99,179,237,0.15)', color: 'var(--icon-accent)' }}>代理</span>
+                )}
               </div>
             </TextTooltip>
           </footer>
