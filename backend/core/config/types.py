@@ -130,6 +130,8 @@ class ModelProviderConfig(TypedDict, total=False):
     models_url_override: str
     # 自定义 User-Agent：部分端点（如 Kimi Coding Plan）有 UA 白名单
     custom_user_agent: str
+    # 反向代理来源标识：'reverse_proxy' 表示由 launcher 通过 SSH 反向隧道注入
+    source: str
 
 # class MultiModelConfig(TypedDict, total=False):
 #     """多模型配置"""

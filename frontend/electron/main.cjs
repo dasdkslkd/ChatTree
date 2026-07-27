@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, WebContentsView, Menu } = require("electron");
+const { app, BrowserWindow, ipcMain, WebContentsView, Menu, dialog } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const { spawn } = require("child_process");
@@ -209,7 +209,26 @@ function sshProfileId(alias) {
 }
 
 async function connectSshHost(alias) {
-  const result = await launcherApi(`/client/v1/ssh/hosts/${encodeURIComponent(alias)}/connect`, "POST");
+  const url = `/client/v1/ssh/hosts/${encodeURIComponent(alias)}/connect`;
+  let result = await launcherApi(url, "POST");
+  // 远程 server 身份变化（如数据目录被重建）：确认后重新绑定
+  const envelope = result.data?.error;
+  const observed = envelope?.details?.observed_server_instance_id;
+  if (result.status === 409 && envelope?.code === "server_identity_changed" && observed) {
+    const { response } = await dialog.showMessageBox(shellWindow, {
+      type: "question",
+      buttons: ["重新绑定并连接", "取消"],
+      defaultId: 0,
+      cancelId: 1,
+      message: `远程 server 身份已变化（数据目录可能被重建）。\n重新绑定到新的 server 实例并连接 ${alias}？`,
+    });
+    if (response === 0) {
+      result = await launcherApi(url, "POST", {
+        rebind: true,
+        expected_server_instance_id: observed,
+      });
+    }
+  }
   if (result.status === 200 && result.data) {
     return { serverInstanceId: result.data.session?.server_instance_id || null };
   }

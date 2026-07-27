@@ -52,6 +52,8 @@ export interface ModelProviderConfig {
   auth?: AuthInfo;
   models_url_override?: string;
   custom_user_agent?: string;
+  // 反向代理来源标识：'reverse_proxy' 表示由 launcher 通过 SSH 反向隧道注入
+  source?: 'reverse_proxy';
 }
 
 export type McpTransport = 'streamable_http' | 'stdio';

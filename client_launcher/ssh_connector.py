@@ -37,6 +37,7 @@ _HANDSHAKE_PATH = "/api/v1/handshake"
 _SHUTDOWN_PATH = "/api/v1/server/shutdown"
 STARTUP_LOG_TAIL_BYTES = 8 * 1024
 REMOTE_SERVER_HOST = "127.0.0.1"
+REVERSE_PROXY_PROVIDER_ID = "local-proxy"
 
 Sleep = Callable[[float], Awaitable[None]]
 
@@ -68,6 +69,8 @@ class _Tunnel:
     local_port: int
     endpoint: str
     log_path: Path
+    reverse_port: int = 0
+    proxy_token: str = ""
 
 
 @dataclass(frozen=True)
@@ -143,6 +146,7 @@ class SshServerConnector:
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Sleep = asyncio.sleep,
         allocate_port: Callable[[], int] = _allocate_loopback_port,
+        local_port_resolver: Callable[[], int | None] | None = None,
     ) -> None:
         self._settings = settings
         self._popen_factory = popen_factory
@@ -150,6 +154,7 @@ class SshServerConnector:
         self._monotonic = monotonic
         self._sleep = sleep
         self._allocate_port = allocate_port
+        self._local_port_resolver = local_port_resolver
         self._client = httpx.AsyncClient(
             transport=transport,
             timeout=httpx.Timeout(float(settings.connect_timeout_seconds)),
@@ -181,13 +186,15 @@ class SshServerConnector:
             tunnel = self._spawn_tunnel(profile, host_alias, remote.port)
             try:
                 self._tunnels[profile.id] = tunnel
-                return await self._wait_for_ready(
+                connected = await self._wait_for_ready(
                     tunnel,
                     profile,
                     phase_callback,
                     request_id=request_id,
                     allow_timeout=True,
                 )
+                await self._setup_reverse_proxy(profile, tunnel)
+                return connected
             except BaseException:
                 await self.disconnect(profile)
                 raise
@@ -196,6 +203,8 @@ class SshServerConnector:
         tunnel = self._tunnels.pop(profile.id, None)
         if tunnel is None:
             return
+        if tunnel.reverse_port:
+            await self._cleanup_reverse_proxy(profile, tunnel)
         process = tunnel.process
         if process.poll() is not None:
             return
@@ -329,6 +338,8 @@ class SshServerConnector:
         local_port = self._allocate_port()
         endpoint = f"http://127.0.0.1:{local_port}"
         log_path = self._log_path(profile.id)
+        reverse_port = 0
+        proxy_token = ""
         argv = [
             "ssh",
             "-o",
@@ -336,15 +347,86 @@ class SshServerConnector:
             "-N",
             "-L",
             f"127.0.0.1:{local_port}:127.0.0.1:{remote_port}",
-            host_alias,
         ]
+        local_server_port = (
+            self._local_port_resolver() if self._local_port_resolver else None
+        )
+        if local_server_port:
+            reverse_port = self._allocate_port()
+            proxy_token = os.environ.get("CHATTREE_PROXY_TOKEN", "")
+            argv.extend([
+                "-R",
+                f"127.0.0.1:{reverse_port}:127.0.0.1:{local_server_port}",
+            ])
+        argv.append(host_alias)
         process = self._spawn(argv, log_path, phase="ssh_tunnel")
         return _Tunnel(
             process=process,
             local_port=local_port,
             endpoint=endpoint,
             log_path=log_path,
+            reverse_port=reverse_port,
+            proxy_token=proxy_token,
         )
+
+    async def _setup_reverse_proxy(
+        self,
+        profile: ServerProfile,
+        tunnel: _Tunnel,
+    ) -> None:
+        if not tunnel.reverse_port or not tunnel.proxy_token:
+            return
+        base_url = f"http://127.0.0.1:{tunnel.reverse_port}/api/v1/proxy"
+        # 直接写入完整 provider 配置（PUT /config 为整体替换，必须包含全部字段），
+        # 模型列表随后由 refresh 从本地 server 拉取
+        update = {
+            "provider_configs": {
+                REVERSE_PROXY_PROVIDER_ID: {
+                    "name": "本地代理",
+                    "api_format": "chat_completions",
+                    "base_url": base_url,
+                    # base_url 不符合 OpenAI 惯例路径，显式指定模型列表端点
+                    "models_url_override": f"{base_url}/models",
+                    "api_key": tunnel.proxy_token,
+                    "models": [],
+                    "hidden_models": [],
+                    "enabled": True,
+                    "source": "reverse_proxy",
+                }
+            }
+        }
+        try:
+            response = await self._client.put(
+                f"{tunnel.endpoint}/api/v1/config",
+                json=update,
+                headers={"Content-Type": "application/json"},
+            )
+        except httpx.HTTPError:
+            return
+        if response.status_code >= 400:
+            return
+        # 触发远程 server 拉取本地代理的模型列表
+        try:
+            await self._client.post(
+                f"{tunnel.endpoint}/api/v1/config/providers/{REVERSE_PROXY_PROVIDER_ID}/models/refresh",
+                headers={"Content-Type": "application/json"},
+            )
+        except httpx.HTTPError:
+            pass
+
+    async def _cleanup_reverse_proxy(
+        self,
+        profile: ServerProfile,
+        tunnel: _Tunnel,
+    ) -> None:
+        if not tunnel.reverse_port:
+            return
+        try:
+            await self._client.delete(
+                f"{tunnel.endpoint}/api/v1/config/providers/{REVERSE_PROXY_PROVIDER_ID}",
+            )
+        except httpx.HTTPError:
+            pass
 
     async def _remote_start(
         self,

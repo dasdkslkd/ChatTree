@@ -53,7 +53,10 @@ export type LauncherApi = Readonly<{
   getSshConfig(signal?: AbortSignal): Promise<SshConfigSnapshot>;
   saveSshConfig(text: string): Promise<SshConfigSnapshot>;
   listSshHosts(signal?: AbortSignal): Promise<SshHostsResponse>;
-  connectSshHost(hostAlias: string): Promise<SshHostSessionResponse>;
+  connectSshHost(
+    hostAlias: string,
+    rebindServerInstanceId?: string,
+  ): Promise<SshHostSessionResponse>;
   disconnectSshHost(hostAlias: string): Promise<SshHostSessionResponse>;
   getSshHostStatus(
     hostAlias: string,
@@ -127,10 +130,12 @@ export function createLauncherApi(
       );
       return response.data;
     },
-    async connectSshHost(hostAlias) {
+    async connectSshHost(hostAlias, rebindServerInstanceId) {
       const response = await client.post<SshHostSessionResponse>(
         `/ssh/hosts/${encodeURIComponent(hostAlias)}/connect`,
-        {},
+        rebindServerInstanceId
+          ? { rebind: true, expected_server_instance_id: rebindServerInstanceId }
+          : {},
       );
       return response.data;
     },

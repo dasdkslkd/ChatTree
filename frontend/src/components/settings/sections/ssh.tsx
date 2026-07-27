@@ -5,6 +5,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Loader2, Save, Link2, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 import { createLauncherApi, type LauncherProfileStatus } from '@/api/launcher';
+import { ChatTreeApiError } from '@/api/errors';
 import { getProfileContext } from '@/runtime/profileContext';
 import { buildFrontendRoute } from '@/runtime/profileRoute';
 
@@ -86,7 +87,21 @@ export function SshHostsSection() {
         await refreshStatuses([host]);
         return;
       }
-      const response = await launcher.connectSshHost(host);
+      let response;
+      try {
+        response = await launcher.connectSshHost(host);
+      } catch (err) {
+        // 远程 server 身份变化（如数据目录被重建）：确认后重新绑定
+        const observed = err instanceof ChatTreeApiError
+          && err.code === 'server_identity_changed'
+          && err.details?.observed_server_instance_id;
+        if (typeof observed !== 'string' || !window.confirm(
+          `远程 server 身份已变化（数据目录可能被重建）。\n重新绑定到新的 server 实例并连接 ${host}？`,
+        )) {
+          throw err;
+        }
+        response = await launcher.connectSshHost(host, observed);
+      }
       setStatuses((current) => ({ ...current, [host]: response.session }));
       window.location.href = buildFrontendRoute({ profileId: response.profile_id });
     } catch {

@@ -11,6 +11,7 @@ from backend.api.routes import (
     messages,
     models,
     notifications,
+    openai_proxy,
     perf,
     plans,
     prompts,
@@ -41,6 +42,7 @@ _BUSINESS_ROUTERS = (
     (slash.router, ["Slash"]),
     (agents.router, ["Agent"]),
     (workflows.router, ["Workflow"]),
+    (openai_proxy.router, ["反向代理"]),
 )
 
 def _build_business_router() -> APIRouter:

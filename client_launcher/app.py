@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import secrets
 import signal
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -108,13 +109,19 @@ def create_app(
     proxy_client: httpx.AsyncClient | None = None,
 ) -> FastAPI:
     resolved_settings = settings or LauncherSettings.from_env()
+    # 生成反向代理 token：本地 server 子进程继承环境变量，SSH 隧道注入远程 server provider
+    if not os.environ.get("CHATTREE_PROXY_TOKEN"):
+        os.environ["CHATTREE_PROXY_TOKEN"] = secrets.token_urlsafe(24)
     profile_store = profiles or ProfileStore(
         resolved_settings.client_home / PROFILES_FILENAME,
         default_server_port=resolved_settings.default_local_server_port,
     )
     local_connector = connector or {
         "local": LocalServerConnector(resolved_settings),
-        "ssh": SshServerConnector(resolved_settings),
+        "ssh": SshServerConnector(
+            resolved_settings,
+            local_port_resolver=lambda: _resolve_local_server_port(profile_store),
+        ),
     }
     sessions = SessionManager(profile_store, local_connector)
     ssh_config_store = ssh_config or SshConfigStore()
@@ -368,11 +375,15 @@ def create_app(
     async def connect_ssh_host(
         host_alias: str,
         request: Request,
+        body: ConnectProfileRequest | None = None,
     ) -> dict[str, Any]:
         require_config_host(host_alias)
         profile = profile_store.ensure_ssh_profile(host_alias)
+        options = body or ConnectProfileRequest()
         session = await sessions.connect(
             profile.id,
+            rebind=options.rebind,
+            expected_server_instance_id=options.expected_server_instance_id,
             request_id=request.state.request_id,
         )
         return {
@@ -441,3 +452,11 @@ def _mount_frontend(app: FastAPI, settings: LauncherSettings) -> None:
     @app.get("/s/{path:path}")
     async def spa_fallback() -> FileResponse:
         return FileResponse(str(index_path))
+
+
+def _resolve_local_server_port(profile_store: ProfileStore) -> int | None:
+    """查找本地 profile 的 server_port，用于建立 SSH 反向隧道。"""
+    for profile in profile_store.list():
+        if profile.kind == "local" and profile.local is not None:
+            return profile.local.server_port
+    return None

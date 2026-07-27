@@ -817,7 +817,16 @@ export function ChatInput({
             >
               <Bot className="h-4 w-4 mr-1" />
               {currentProvider && currentModel
-                ? <span className="truncate">{`${getProviderDisplayName(currentProvider)} / ${currentModel}`}</span>
+                ? (
+                  <span className="truncate flex items-center gap-1.5">
+                    <span className="truncate">{`${getProviderDisplayName(currentProvider)} / ${currentModel}`}</span>
+                    {config?.provider?.[currentProvider]?.source === 'reverse_proxy' && (
+                      <span className="text-[10px] px-1 py-0 rounded-full flex-shrink-0" style={{ background: 'rgba(99,179,237,0.15)', color: 'var(--icon-accent)' }}>
+                        代理
+                      </span>
+                    )}
+                  </span>
+                )
                 : '选择模型'}
             </button>
 
@@ -980,14 +989,22 @@ export function ChatInput({
                 value={activeDialogProvider || ''}
                 onValueChange={(v) => handleDialogProviderChange(v)}
               >
-                {enabledProviders.map((provider) => (
-                  <div key={provider} className="flex items-center space-x-2">
-                    <RadioGroupItem value={provider} id={`provider-${provider}`} />
-                    <Label htmlFor={`provider-${provider}`} className="cursor-pointer">
-                      {getProviderDisplayName(provider)}
-                    </Label>
-                  </div>
-                ))}
+                {enabledProviders.map((provider) => {
+                  const isReverseProxy = config?.provider?.[provider]?.source === 'reverse_proxy';
+                  return (
+                    <div key={provider} className="flex items-center space-x-2">
+                      <RadioGroupItem value={provider} id={`provider-${provider}`} />
+                      <Label htmlFor={`provider-${provider}`} className="cursor-pointer flex items-center gap-1.5">
+                        <span>{getProviderDisplayName(provider)}</span>
+                        {isReverseProxy && (
+                          <span className="text-[10px] px-1 py-0 rounded-full" style={{ background: 'rgba(99,179,237,0.15)', color: 'var(--icon-accent)' }}>
+                            代理
+                          </span>
+                        )}
+                      </Label>
+                    </div>
+                  );
+                })}
               </RadioGroup>
               {enabledProviders.length === 0 && (
                 <span className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>

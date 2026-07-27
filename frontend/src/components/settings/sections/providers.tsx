@@ -192,7 +192,7 @@ export function ProvidersSection() {
     if (providerId) {
       const cfg = config?.provider?.[providerId] ?? { ...DEFAULT_PROVIDER_CONFIG, name: providerId };
       setEditProviderId(providerId);
-      setEditForm(sanitizeProviderConfig({ ...cfg, hidden_models: [...(cfg.hidden_models || [])] }));
+      setEditForm(sanitizeProviderConfig({ ...DEFAULT_PROVIDER_CONFIG, ...cfg, hidden_models: [...(cfg.hidden_models || [])] }));
       setEditNameInput(cfg.name || providerId);
       setEditIdInput(providerId);
     } else {
@@ -488,6 +488,7 @@ export function ProvidersSection() {
   const currentSubscription = editForm.auth?.subscription;
   const isSubscribed = !!currentSubscription;
   const isLoggedIn = !!editForm.auth?.access;
+  const isReverseProxy = editProviderId ? config?.provider?.[editProviderId]?.source === 'reverse_proxy' : false;
 
   return (
     <div className="flex flex-col h-full" style={{ fontFamily: 'var(--font-sans)' }}>
@@ -576,34 +577,65 @@ export function ProvidersSection() {
           </button>
         </div>
         <div className="divide-y" style={{ '--tw-divide-opacity': 1, '--tw-divide-color': 'var(--border-light, rgba(255,247,240,0.05))' } as React.CSSProperties}>
-          {providerIds.length > 0 ? providerIds.map((pid) => {
-            const pc = config!.provider[pid];
-            return (
-              <div
-                key={pid}
-                className="flex items-center justify-between px-4 py-2.5 cursor-pointer transition-colors"
-                onClick={() => openEditDialog(pid)}
-                onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-hover)'; }}
-                onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = ''; }}
-              >
-                <div className="flex items-center gap-3">
-                  <Settings className="h-4 w-4" style={{ color: 'var(--icon-tertiary)' }} />
-                  <span className="text-sm font-medium" style={{ color: 'var(--fg-85)' }}>{pc.name || pid}</span>
-                  <span className="text-xs px-1.5 py-0.5 rounded" style={{ border: '0.5px solid var(--border)', color: 'var(--fg-tertiary)' }}>
-                    {getApiFormatLabel(pc.api_format)}
+          {providerIds.length > 0 ? (() => {
+            const reverseProxyIds = providerIds.filter((pid) => config!.provider[pid]?.source === 'reverse_proxy');
+            const remoteIds = providerIds.filter((pid) => config!.provider[pid]?.source !== 'reverse_proxy');
+            const renderRow = (pid: string) => {
+              const pc = config!.provider[pid];
+              const isReverseProxy = pc.source === 'reverse_proxy';
+              return (
+                <div
+                  key={pid}
+                  className="flex items-center justify-between px-4 py-2.5 cursor-pointer transition-colors"
+                  onClick={() => openEditDialog(pid)}
+                  onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-hover)'; }}
+                  onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = ''; }}
+                >
+                  <div className="flex items-center gap-3">
+                    <Settings className="h-4 w-4" style={{ color: 'var(--icon-tertiary)' }} />
+                    <span className="text-sm font-medium" style={{ color: 'var(--fg-85)' }}>{pc.name || pid}</span>
+                    {isReverseProxy ? (
+                      <span className="text-xs px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(99,179,237,0.15)', color: 'var(--icon-accent)' }}>
+                        本地代理
+                      </span>
+                    ) : (
+                      <span className="text-xs px-1.5 py-0.5 rounded" style={{ border: '0.5px solid var(--border)', color: 'var(--fg-tertiary)' }}>
+                        {getApiFormatLabel(pc.api_format)}
+                      </span>
+                    )}
+                    {pc.enabled && (
+                      <span className="text-xs px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(95,185,138,0.15)', color: 'var(--accent-green)' }}>
+                        已启用
+                      </span>
+                    )}
+                  </div>
+                  <span className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>
+                    {pc.models?.length || 0} 个模型
                   </span>
-                  {pc.enabled && (
-                    <span className="text-xs px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(95,185,138,0.15)', color: 'var(--accent-green)' }}>
-                      已启用
-                    </span>
-                  )}
                 </div>
-                <span className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>
-                  {pc.models?.length || 0} 个模型
-                </span>
-              </div>
+              );
+            };
+            const renderGroup = (label: string, ids: string[]) => {
+              if (ids.length === 0) return null;
+              return (
+                <>
+                  <div
+                    className="px-4 py-1.5 text-xs font-medium"
+                    style={{ background: 'var(--bg-elevated-secondary, rgba(255,247,240,0.02))', color: 'var(--fg-tertiary)' }}
+                  >
+                    {label} ({ids.length})
+                  </div>
+                  {ids.map(renderRow)}
+                </>
+              );
+            };
+            return (
+              <>
+                {renderGroup('本地代理', reverseProxyIds)}
+                {renderGroup('远程配置', remoteIds)}
+              </>
             );
-          }) : (
+          })() : (
             <div className="px-4 py-8 text-center" style={{ color: 'var(--fg-tertiary)' }}>
               <p className="text-sm">暂无已配置的提供商</p>
             </div>
@@ -620,7 +652,11 @@ export function ProvidersSection() {
         <DialogContent className="sm:max-w-[1120px] max-h-[88vh] overflow-y-auto custom-scrollbar">
           <DialogHeader>
             <DialogTitle>{isEditMode ? (editForm.name || editProviderId) : '添加提供商'}</DialogTitle>
-            <DialogDescription>{isEditMode ? '配置提供商参数和模型列表' : '配置一个新的 AI 模型提供商'}</DialogDescription>
+            <DialogDescription>
+              {isReverseProxy
+                ? '本地代理提供商：由 launcher 通过 SSH 反向隧道注入，模型来自本地 server'
+                : isEditMode ? '配置提供商参数和模型列表' : '配置一个新的 AI 模型提供商'}
+            </DialogDescription>
           </DialogHeader>
           <div className="grid grid-cols-2 gap-8 py-2">
             {/* ── 左列：基本配置 ── */}
@@ -631,6 +667,21 @@ export function ProvidersSection() {
               </div>
               <div className="h-px" style={{ background: 'var(--border)' }} />
 
+              {isReverseProxy ? (
+                <div className="space-y-3 p-3 rounded-lg text-xs" style={{ background: 'var(--bg-elevated-secondary, rgba(255,247,240,0.035))', border: '0.5px solid var(--border)' }}>
+                  <div className="flex items-center gap-1.5" style={{ color: 'var(--icon-accent)' }}>
+                    <span className="font-medium">反向代理</span>
+                  </div>
+                  <p style={{ color: 'var(--fg-secondary)' }}>
+                    此提供商通过 SSH 反向隧道桥接本地 server 的 provider。模型列表由本地配置决定，断开 SSH 连接时自动清理。
+                  </p>
+                  <div className="space-y-1 pt-1" style={{ color: 'var(--fg-tertiary)' }}>
+                    <div>Base URL: <span className="font-mono">{editForm.base_url || '—'}</span></div>
+                    <div>模型数量: {editForm.models.length}</div>
+                  </div>
+                </div>
+              ) : (
+                <>
               <div className="space-y-2">
                 <Label>显示名称</Label>
                 <Input
@@ -783,14 +834,23 @@ export function ProvidersSection() {
             <div className="space-y-4">
               <div className="space-y-2">
                 <Label>模型列表</Label>
-                <div className="flex gap-2">
-                  <Input value={editNewModelInput} onChange={(e) => setEditNewModelInput(e.target.value)} placeholder="输入模型名称" onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleEditAddModel(); } }} className="flex-1" />
-                  <Button variant="outline" onClick={handleEditAddModel}>添加</Button>
-                </div>
-                <Button variant="outline" size="sm" onClick={handleRefreshModels} disabled={editFetchingModels} className="w-full">
-                  {editFetchingModels ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <RefreshCw className="h-4 w-4 mr-1" />}
-                  {editFetchingModels ? '获取中...' : '从 API 获取模型列表'}
-                </Button>
+                {isReverseProxy ? (
+                  <Button variant="outline" size="sm" onClick={handleRefreshModels} disabled={editFetchingModels} className="w-full">
+                    {editFetchingModels ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <RefreshCw className="h-4 w-4 mr-1" />}
+                    {editFetchingModels ? '同步中...' : '同步本地模型'}
+                  </Button>
+                ) : (
+                  <>
+                    <div className="flex gap-2">
+                      <Input value={editNewModelInput} onChange={(e) => setEditNewModelInput(e.target.value)} placeholder="输入模型名称" onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleEditAddModel(); } }} className="flex-1" />
+                      <Button variant="outline" onClick={handleEditAddModel}>添加</Button>
+                    </div>
+                    <Button variant="outline" size="sm" onClick={handleRefreshModels} disabled={editFetchingModels} className="w-full">
+                      {editFetchingModels ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <RefreshCw className="h-4 w-4 mr-1" />}
+                      {editFetchingModels ? '获取中...' : '从 API 获取模型列表'}
+                    </Button>
+                  </>
+                )}
                 {editForm.models.length > 0 ? (
                   <div className="flex flex-col gap-1 mt-2 max-h-[300px] overflow-y-auto p-2 rounded-lg custom-scrollbar" style={{ border: '0.5px solid var(--border)' }}>
                     {editForm.models.map((model) => {
@@ -819,7 +879,9 @@ export function ProvidersSection() {
                     })}
                   </div>
                 ) : (
-                  <p className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>暂无模型，请添加或点击"获取列表"</p>
+                  <p className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>
+                    {isReverseProxy ? '暂无模型，点击"同步本地模型"从本地 server 拉取' : '暂无模型，请添加或点击"获取列表"'}
+                  </p>
                 )}
               </div>
 
@@ -847,7 +909,7 @@ export function ProvidersSection() {
             </div>
           </div>
           <DialogFooter className="flex justify-between">
-            {isEditMode ? (
+            {isEditMode && !isReverseProxy ? (
               <Button
                 variant="ghost"
                 size="sm"

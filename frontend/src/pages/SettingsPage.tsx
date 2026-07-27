@@ -189,7 +189,7 @@ export default function SettingsPage() {
   const openEditDialog = (providerId: string) => {
     const cfg = config?.provider?.[providerId] ?? { ...DEFAULT_PROVIDER_CONFIG, name: providerId };
     setEditProviderId(providerId);
-    setEditForm(sanitizeProviderConfig({ ...cfg, hidden_models: [...(cfg.hidden_models || [])] }));
+    setEditForm(sanitizeProviderConfig({ ...DEFAULT_PROVIDER_CONFIG, ...cfg, hidden_models: [...(cfg.hidden_models || [])] }));
     setEditNewModelInput('');
     setEditDialogOpen(true);
   };
