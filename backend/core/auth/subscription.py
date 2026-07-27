@@ -199,7 +199,8 @@ async def _codex_poll_login(handle: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         },
     )
 
-    account_id = _parse_codex_account_id(tokens.get("id_token", ""))
+    claims = _decode_jwt_claims(tokens.get("id_token", ""))
+    auth_claim = claims.get("https://api.openai.com/auth") or {}
     expires_at = now_ms + int(tokens.get("expires_in", 3600)) * 1000
     return {
         "type": "oauth",
@@ -207,7 +208,13 @@ async def _codex_poll_login(handle: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "access": tokens["access_token"],
         "refresh": tokens.get("refresh_token", ""),
         "expires": expires_at,
-        "account_id": account_id,
+        "account_id": str(
+            auth_claim.get("chatgpt_account_id")
+            or claims.get("chatgpt_account_id")
+            or ""
+        ),
+        "account_name": str(claims.get("name") or claims.get("nickname") or ""),
+        "account_email": str(claims.get("email") or ""),
     }
 
 
@@ -331,6 +338,8 @@ async def _copilot_poll_login(handle: Dict[str, Any]) -> Optional[Dict[str, Any]
         "refresh": github_token,  # GitHub token 作为长期凭证，Copilot token 用它刷新
         "expires": copilot_token["expires_at"],
         "account_id": str(user_info.get("id", "")),
+        "account_name": str(user_info.get("login") or user_info.get("name") or ""),
+        "account_email": str(user_info.get("email") or ""),
         "enterprise_domain": handle.get("enterprise_domain", ""),
     }
 
@@ -400,13 +409,16 @@ def _read_claude_cli_credentials() -> Optional[Dict[str, Any]]:
         oauth = data.get("claudeAiOauth") or data.get("claude.ai_oauth") or {}
         if not oauth.get("accessToken"):
             return None
+        claims = _decode_jwt_claims(oauth["accessToken"])
         return {
             "type": "oauth",
             "subscription": "claude",
             "access": oauth["accessToken"],
             "refresh": oauth.get("refreshToken", ""),
             "expires": int(oauth.get("expiresAt", 0)),
-            "account_id": "",
+            "account_id": str(claims.get("sub") or claims.get("organization_uuid") or ""),
+            "account_name": str(claims.get("name") or ""),
+            "account_email": str(claims.get("email") or ""),
         }
     except Exception as e:
         logger.warning(f"读取 Claude CLI 凭据失败: {e}")
@@ -452,13 +464,21 @@ def _read_codex_cli_credentials() -> Optional[Dict[str, Any]]:
             expires = int((dt + timedelta(days=8)).timestamp() * 1000)
         except Exception:
             expires = int(time.time() * 1000) + 7 * 24 * 3600 * 1000
+        claims = _decode_jwt_claims(tokens.get("id_token", ""))
+        auth_claim = claims.get("https://api.openai.com/auth") or {}
         return {
             "type": "oauth",
             "subscription": "codex",
             "access": tokens["access_token"],
             "refresh": tokens.get("refresh_token", ""),
             "expires": expires,
-            "account_id": tokens.get("account_id", ""),
+            "account_id": tokens.get("account_id", "") or str(
+                auth_claim.get("chatgpt_account_id")
+                or claims.get("chatgpt_account_id")
+                or ""
+            ),
+            "account_name": str(claims.get("name") or claims.get("nickname") or ""),
+            "account_email": str(claims.get("email") or ""),
         }
     except Exception as e:
         logger.warning(f"读取 Codex CLI 凭据失败: {e}")
@@ -484,9 +504,22 @@ async def _read_gemini_cli_credentials() -> Optional[Dict[str, Any]]:
             "refresh": data.get("refresh_token", ""),
             "expires": int(data.get("expiry_date", 0)),
             "account_id": "",
+            "account_name": "",
+            "account_email": "",
         }
         if _should_refresh(auth):
             await _gemini_refresh_token(auth)
+        # 用 access_token 调 Google userinfo API 拿昵称和邮箱
+        try:
+            info = await _http_get_json(
+                "https://www.googleapis.com/oauth2/v2/userinfo",
+                token=auth["access"],
+            )
+            auth["account_id"] = str(info.get("id") or "")
+            auth["account_name"] = str(info.get("name") or info.get("given_name") or "")
+            auth["account_email"] = str(info.get("email") or "")
+        except Exception as e:
+            logger.warning(f"获取 Gemini 用户信息失败: {e}")
         return auth
     except Exception as e:
         logger.warning(f"读取 Gemini CLI 凭据失败: {e}")
@@ -581,27 +614,21 @@ async def _http_get_json(url: str, token: Optional[str] = None, extra_headers: O
     return await loop.run_in_executor(None, _do)
 
 
-def _parse_codex_account_id(id_token: str) -> str:
-    """从 OpenAI id_token JWT claims 解析 chatgpt_account_id。"""
-    if not id_token:
-        return ""
+def _decode_jwt_claims(token: str) -> Dict[str, Any]:
+    """解码 JWT payload（不验签），返回 claims dict；失败返回空 dict。"""
+    if not token:
+        return {}
     try:
-        parts = id_token.split(".")
+        parts = token.split(".")
         if len(parts) < 2:
-            return ""
+            return {}
         payload = parts[1]
-        # base64url → base64
         padded = payload + "=" * (-len(payload) % 4)
         decoded = base64.urlsafe_b64decode(padded)
-        claims = json.loads(decoded)
-        return str(
-            claims.get("https://api.openai.com/auth.chatgpt_account_id")
-            or claims.get("chatgpt_account_id")
-            or ""
-        )
+        return json.loads(decoded)
     except Exception as e:
-        logger.warning(f"解析 id_token 失败: {e}")
-        return ""
+        logger.warning(f"解析 JWT 失败: {e}")
+        return {}
 
 
 def _parse_codex_models(resp: Any) -> list:

@@ -33,6 +33,8 @@ export interface AuthInfo {
   refresh?: string;
   expires?: number;
   account_id?: string;
+  account_name?: string;
+  account_email?: string;
   enterprise_domain?: string;
 }
 

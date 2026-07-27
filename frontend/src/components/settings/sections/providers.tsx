@@ -19,9 +19,10 @@ import {
   DialogDescription,
 } from '@/components/ui/dialog';
 import { Switch } from '@/components/ui/switch';
-import { Settings, Plus, Trash2, Eye, EyeOff, Loader2, ExternalLink, RefreshCw } from 'lucide-react';
+import { Settings, Plus, Trash2, Eye, EyeOff, Loader2, ExternalLink, RefreshCw, CheckCircle2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { configApi, type SubscriptionLoginHandle } from '@/api/config';
+import { useModelStore } from '@/store/modelStore';
 import type {
   ConfigData,
   ModelProviderConfig,
@@ -35,7 +36,14 @@ const API_FORMAT_OPTIONS: { value: APIFormat; label: string; description: string
   { value: 'gemini', label: 'Gemini', description: 'Google Gemini API' },
 ];
 
-// 订阅类型选项；codex/copilot 走 OAuth 登录，claude/gemini 走 CLI 凭据导入
+// 订阅类型 → 自动锁定的 api_format
+const SUBSCRIPTION_FORMAT: Record<string, APIFormat> = {
+  codex: 'responses',
+  copilot: 'chat_completions',
+  claude: 'anthropic',
+  gemini: 'gemini',
+};
+
 const SUBSCRIPTION_OPTIONS: {
   value: '' | 'codex' | 'copilot' | 'claude' | 'gemini';
   label: string;
@@ -68,41 +76,45 @@ function slugify(text: string): string {
     .slice(0, 40);
 }
 
+function formatResetTime(resetAt: unknown): string {
+  if (!resetAt) return '—';
+  const ts = typeof resetAt === 'number' ? resetAt : parseInt(String(resetAt), 10);
+  if (!ts || isNaN(ts)) return String(resetAt);
+  // reset_at 可能是秒或毫秒
+  const ms = ts > 1e12 ? ts : ts * 1000;
+  const diff = ms - Date.now();
+  if (diff <= 0) return '已重置';
+  const hours = Math.floor(diff / 3600000);
+  const mins = Math.floor((diff % 3600000) / 60000);
+  return hours > 0 ? `${hours}小时${mins}分钟后` : `${mins}分钟后`;
+}
+
 export function ProvidersSection() {
   const [config, setConfig] = useState<ConfigData | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Add provider dialog
-  const [addDialogOpen, setAddDialogOpen] = useState(false);
-  const [newProviderName, setNewProviderName] = useState('');
-  const [newProviderId, setNewProviderId] = useState('');
-  const [newProviderFormat, setNewProviderFormat] = useState<APIFormat>('chat_completions');
-  const [newProviderUrl, setNewProviderUrl] = useState('');
-  const [newProviderKey, setNewProviderKey] = useState('');
-  const [newProviderSubscription, setNewProviderSubscription] = useState<'' | 'codex' | 'copilot' | 'claude' | 'gemini'>('');
-  const [adding, setAdding] = useState(false);
-
-  // Edit provider dialog
+  // 统一编辑/新增对话框
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [editProviderId, setEditProviderId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<ModelProviderConfig>({ ...DEFAULT_PROVIDER_CONFIG });
+  const [editNameInput, setEditNameInput] = useState('');
+  const [editIdInput, setEditIdInput] = useState('');
   const [editNewModelInput, setEditNewModelInput] = useState('');
   const [editFetchingModels, setEditFetchingModels] = useState(false);
   const [editSaving, setEditSaving] = useState(false);
 
-  // Delete confirm
+  // 删除确认
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
 
   // 订阅登录流程
   const [loginHandle, setLoginHandle] = useState<SubscriptionLoginHandle | null>(null);
   const [loginPolling, setLoginPolling] = useState(false);
-  const [loginProviderId, setLoginProviderId] = useState<string | null>(null);
   const [loginError, setLoginError] = useState<string | null>(null);
   const [enterpriseDomain, setEnterpriseDomain] = useState('');
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 额度查询
-  const [quotaInfo, setQuotaInfo] = useState<Record<string, unknown> | null>(null);
+  const [quotaInfo, setQuotaInfo] = useState<Record<string, any> | null>(null);
   const [quotaLoading, setQuotaLoading] = useState(false);
 
   const loadConfig = useCallback(async () => {
@@ -110,6 +122,8 @@ export function ProvidersSection() {
       setLoading(true);
       const data = await configApi.get();
       setConfig(data);
+      // 同步刷新全局 modelStore，使聊天侧的模型选择器即时更新
+      useModelStore.getState().loadConfig({ force: true });
     } catch (err) {
       toast.error('加载配置失败');
     } finally {
@@ -173,74 +187,32 @@ export function ProvidersSection() {
     }
   };
 
-  const handleOpenAddDialog = () => {
-    setNewProviderName('');
-    setNewProviderId('');
-    setNewProviderFormat('chat_completions');
-    setNewProviderUrl('');
-    setNewProviderKey('');
-    setNewProviderSubscription('');
-    setAddDialogOpen(true);
-  };
-
-  const handleNameChange = (name: string) => {
-    setNewProviderName(name);
-    if (!newProviderId || newProviderId === slugify(newProviderName)) {
-      setNewProviderId(slugify(name));
+  // ── 统一打开对话框：providerId 为 null 表示新建 ──
+  const openEditDialog = (providerId: string | null) => {
+    if (providerId) {
+      const cfg = config?.provider?.[providerId] ?? { ...DEFAULT_PROVIDER_CONFIG, name: providerId };
+      setEditProviderId(providerId);
+      setEditForm(sanitizeProviderConfig({ ...cfg, hidden_models: [...(cfg.hidden_models || [])] }));
+      setEditNameInput(cfg.name || providerId);
+      setEditIdInput(providerId);
+    } else {
+      setEditProviderId(null);
+      setEditForm({ ...DEFAULT_PROVIDER_CONFIG });
+      setEditNameInput('');
+      setEditIdInput('');
     }
-  };
-
-  const handleAddProvider = async () => {
-    const id = newProviderId.trim();
-    const name = newProviderName.trim();
-    if (!id || !name) { toast.error('请输入提供商名称'); return; }
-    if (config?.provider?.[id]) { toast.error(`ID "${id}" 已存在`); return; }
-
-    const sub = newProviderSubscription;
-    // 订阅类型自动映射 api_format；选了订阅就不再要 api_key
-    const formatMap: Record<string, APIFormat> = {
-      codex: 'responses',
-      copilot: 'chat_completions',
-      claude: 'anthropic',
-      gemini: 'gemini',
-    };
-    const api_format = sub ? formatMap[sub] : newProviderFormat;
-    const auth = sub ? { type: 'oauth' as const, subscription: sub } : undefined;
-
-    try {
-      setAdding(true);
-      await configApi.addProvider({
-        id, name, api_format,
-        base_url: newProviderUrl,
-        api_key: sub ? '' : newProviderKey,
-        auth,
-      });
-      toast.success(`"${name}" 已添加`);
-      setAddDialogOpen(false);
-      await loadConfig();
-      // 选了订阅 → 自动打开编辑对话框让用户完成登录/导入
-      if (sub) {
-        openEditDialog(id, {
-          ...DEFAULT_PROVIDER_CONFIG,
-          name,
-          api_format,
-          base_url: newProviderUrl,
-          auth: { type: 'oauth', subscription: sub },
-        });
-      }
-    } catch (err) {
-      toast.error('添加失败');
-    } finally {
-      setAdding(false);
-    }
-  };
-
-  const openEditDialog = (providerId: string, providerConfig?: ModelProviderConfig) => {
-    const cfg = providerConfig ?? config?.provider?.[providerId] ?? { ...DEFAULT_PROVIDER_CONFIG, name: providerId };
-    setEditProviderId(providerId);
-    setEditForm(sanitizeProviderConfig({ ...cfg, hidden_models: [...(cfg.hidden_models || [])] }));
     setEditNewModelInput('');
+    setQuotaInfo(null);
+    setLoginError(null);
+    setEnterpriseDomain('');
     setEditDialogOpen(true);
+  };
+
+  const handleNameInputChange = (name: string) => {
+    setEditNameInput(name);
+    if (!editProviderId && (!editIdInput || editIdInput === slugify(editNameInput))) {
+      setEditIdInput(slugify(name));
+    }
   };
 
   const handleEditAddModel = () => {
@@ -262,22 +234,39 @@ export function ProvidersSection() {
   };
 
   const handleSaveProvider = async () => {
-    if (!editProviderId) return;
     try {
       setEditSaving(true);
       const providerConfig = sanitizeProviderConfig(editForm);
-      const update = { provider_configs: { [editProviderId]: providerConfig } } as {
-        provider_configs: Record<string, Partial<ModelProviderConfig>>;
-        default_model?: string;
-      };
-      if (config?.default_provider === editProviderId) {
-        const hidden = new Set(providerConfig.hidden_models || []);
-        const visibleModels = (providerConfig.models || []).filter((model) => !hidden.has(model));
-        if (!visibleModels.includes(config.default_model || '')) {
-          update.default_model = visibleModels[0] || '';
+
+      if (editProviderId) {
+        // 编辑现有
+        const update = { provider_configs: { [editProviderId]: providerConfig } } as {
+          provider_configs: Record<string, Partial<ModelProviderConfig>>;
+          default_model?: string;
+        };
+        if (config?.default_provider === editProviderId) {
+          const hidden = new Set(providerConfig.hidden_models || []);
+          const visibleModels = (providerConfig.models || []).filter((model) => !hidden.has(model));
+          if (!visibleModels.includes(config.default_model || '')) {
+            update.default_model = visibleModels[0] || '';
+          }
         }
+        await configApi.update(update);
+      } else {
+        // 新建
+        const id = editIdInput.trim();
+        if (!id) { toast.error('请输入提供商 ID'); return; }
+        if (config?.provider?.[id]) { toast.error(`ID "${id}" 已存在`); return; }
+        providerConfig.name = editNameInput.trim();
+        await configApi.addProvider({
+          id,
+          name: providerConfig.name,
+          api_format: providerConfig.api_format,
+          base_url: providerConfig.base_url,
+          api_key: providerConfig.api_key,
+          auth: providerConfig.auth,
+        });
       }
-      await configApi.update(update);
       toast.success('已保存');
       setEditDialogOpen(false);
       await loadConfig();
@@ -300,56 +289,83 @@ export function ProvidersSection() {
     }
   };
 
+  // 新建模式下先保存 provider 到后端，返回 provider id
+  const ensureProviderSaved = async (): Promise<string | null> => {
+    if (editProviderId) return editProviderId;
+    const id = editIdInput.trim();
+    if (!id || !editNameInput.trim()) {
+      toast.error('请先填写名称和 ID');
+      return null;
+    }
+    if (config?.provider?.[id]) {
+      toast.error(`ID "${id}" 已存在`);
+      return null;
+    }
+    try {
+      const providerConfig = sanitizeProviderConfig(editForm);
+      providerConfig.name = editNameInput.trim();
+      await configApi.addProvider({
+        id,
+        name: providerConfig.name,
+        api_format: providerConfig.api_format,
+        base_url: providerConfig.base_url,
+        api_key: providerConfig.api_key,
+        auth: providerConfig.auth,
+      });
+      setEditProviderId(id);
+      await loadConfig();
+      return id;
+    } catch {
+      toast.error('保存失败');
+      return null;
+    }
+  };
+
   // ── 订阅登录：codex/copilot 走 OAuth 设备码 ──
   const handleStartSubscriptionLogin = async (subscription: 'codex' | 'copilot') => {
-    if (!editProviderId) return;
-    setLoginProviderId(editProviderId);
+    const pid = await ensureProviderSaved();
+    if (!pid) return;
     setLoginError(null);
     setEnterpriseDomain('');
     try {
-      const handle = await configApi.startSubscriptionLogin(
-        editProviderId,
-        subscription,
-      );
+      const handle = await configApi.startSubscriptionLogin(pid, subscription);
       setLoginHandle(handle);
       setLoginPolling(true);
-      // 自动打开浏览器
       window.open(handle.verification_uri, '_blank');
-      // 开始轮询
-      pollLogin(subscription, handle);
+      pollLogin(pid, subscription, handle);
     } catch (e) {
       setLoginError(String(e) || '启动登录失败');
     }
   };
 
-  const pollLogin = async (subscription: string, handle: SubscriptionLoginHandle) => {
-    if (!loginProviderId) return;
+  const pollLogin = async (pid: string, subscription: string, handle: SubscriptionLoginHandle) => {
     try {
-      const result = await configApi.pollSubscriptionLogin(
-        loginProviderId,
-        subscription,
-        handle,
-      );
+      const result = await configApi.pollSubscriptionLogin(pid, subscription, handle);
       if (result.status === 'ok') {
         setLoginPolling(false);
         setLoginHandle(null);
         toast.success('登录成功');
         await loadConfig();
-        // 登录成功后自动拉取模型列表
+        // 同步 editForm.auth（用 pid 直接查找，避免闭包中的 stale state）
+        const updated = await configApi.get();
+        const pc = updated.provider?.[pid];
+        if (pc?.auth) {
+          setEditForm(f => ({ ...f, auth: pc.auth }));
+        }
+        // 自动拉取模型列表
         try {
-          const { models } = await configApi.refreshProviderModels(loginProviderId);
+          const { models } = await configApi.refreshProviderModels(pid);
           if (models?.length) {
+            setEditForm(f => ({ ...f, models }));
             toast.success(`获取到 ${models.length} 个模型`);
             await loadConfig();
           }
         } catch {
           // 模型拉取失败不阻塞
         }
-        // 登录成功后查询额度
-        handleFetchQuota();
+        handleFetchQuota(pid);
       } else {
-        // pending — 继续轮询
-        pollTimerRef.current = setTimeout(() => pollLogin(subscription, handle), (handle.interval || 5) * 1000);
+        pollTimerRef.current = setTimeout(() => pollLogin(pid, subscription, handle), (handle.interval || 5) * 1000);
       }
     } catch (e) {
       setLoginPolling(false);
@@ -367,18 +383,25 @@ export function ProvidersSection() {
     setLoginError(null);
   };
 
-  // ── CLI 凭据导入：claude/gemini ──
+  // ── CLI 凭据导入：claude/gemini/codex ──
   const handleImportCliCredentials = async (subscription: 'claude' | 'gemini' | 'codex') => {
-    if (!editProviderId) return;
+    const pid = await ensureProviderSaved();
+    if (!pid) return;
     try {
-      await configApi.importCliCredentials(editProviderId, subscription);
+      await configApi.importCliCredentials(pid, subscription);
       toast.success('凭据导入成功');
       await loadConfig();
-      // 导入后自动拉取模型列表（codex 订阅才有模型端点）
+      // 同步 editForm.auth（用 pid 直接查找，避免闭包中的 stale state）
+      const updated = await configApi.get();
+      const pc = updated.provider?.[pid];
+      if (pc?.auth) {
+        setEditForm(f => ({ ...f, auth: pc.auth }));
+      }
       if (subscription === 'codex') {
         try {
-          const { models } = await configApi.refreshProviderModels(editProviderId);
+          const { models } = await configApi.refreshProviderModels(pid);
           if (models?.length) {
+            setEditForm(f => ({ ...f, models }));
             toast.success(`获取到 ${models.length} 个模型`);
             await loadConfig();
           }
@@ -386,19 +409,20 @@ export function ProvidersSection() {
           // 模型拉取失败不阻塞
         }
       }
-      // 导入成功后查询额度
-      handleFetchQuota();
-    } catch {
-      toast.error('未找到 CLI 凭据，请先在对应 CLI 工具中登录');
+      handleFetchQuota(pid);
+    } catch (e: any) {
+      const detail = e?.response?.data?.detail || e?.message || String(e);
+      toast.error(detail || '导入失败');
     }
   };
 
   // ── 额度查询 ──
-  const handleFetchQuota = async () => {
-    if (!editProviderId) return;
+  const handleFetchQuota = async (pid?: string) => {
+    const providerId = pid || editProviderId || editIdInput.trim();
+    if (!providerId) return;
     try {
       setQuotaLoading(true);
-      const quota = await configApi.getProviderQuota(editProviderId);
+      const quota = await configApi.getProviderQuota(providerId);
       setQuotaInfo(quota);
     } catch {
       toast.error('额度查询失败');
@@ -409,10 +433,11 @@ export function ProvidersSection() {
 
   // ── 强制刷新模型列表 ──
   const handleRefreshModels = async () => {
-    if (!editProviderId) return;
+    const pid = editProviderId || editIdInput.trim();
+    if (!pid) return;
     try {
       setEditFetchingModels(true);
-      const { models } = await configApi.refreshProviderModels(editProviderId);
+      const { models } = await configApi.refreshProviderModels(pid);
       if (models?.length) {
         setEditForm(f => ({ ...f, models }));
         toast.success(`获取到 ${models.length} 个模型`);
@@ -427,13 +452,12 @@ export function ProvidersSection() {
     }
   };
 
-  // 打开编辑对话框时，若有订阅则自动查询额度
+  // 打开对话框时，若有订阅则自动查询额度
   useEffect(() => {
     if (editDialogOpen && editProviderId) {
       const pc = config?.provider?.[editProviderId];
       if (pc?.auth?.subscription) {
-        setQuotaInfo(null);
-        handleFetchQuota();
+        handleFetchQuota(editProviderId);
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -460,6 +484,10 @@ export function ProvidersSection() {
   const enabledProviders = getEnabledProviders();
   const providerIds = config ? Object.keys(config.provider) : [];
   const defaultProviderModels = config?.default_provider ? getVisibleProviderModels(config.default_provider) : [];
+  const isEditMode = !!editProviderId;
+  const currentSubscription = editForm.auth?.subscription;
+  const isSubscribed = !!currentSubscription;
+  const isLoggedIn = !!editForm.auth?.access;
 
   return (
     <div className="flex flex-col h-full" style={{ fontFamily: 'var(--font-sans)' }}>
@@ -539,7 +567,7 @@ export function ProvidersSection() {
           <button
             className="flex items-center gap-1 text-xs px-2.5 py-1 rounded-lg cursor-pointer transition-colors"
             style={{ background: 'var(--bg-button-secondary, rgba(255,247,240,0.06))', color: 'var(--fg-secondary)', border: 'none' }}
-            onClick={handleOpenAddDialog}
+            onClick={() => openEditDialog(null)}
             onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-secondary-hover, rgba(255,247,240,0.10))'; }}
             onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-secondary, rgba(255,247,240,0.06))'; }}
           >
@@ -587,104 +615,14 @@ export function ProvidersSection() {
       {/* Footer spacer */}
       <div className="flex-shrink-0 h-2" />
 
-      {/* ── Add Provider Dialog ── */}
-      <Dialog open={addDialogOpen} onOpenChange={setAddDialogOpen}>
-        <DialogContent className="max-w-[480px]">
-          <DialogHeader>
-            <DialogTitle>添加提供商</DialogTitle>
-            <DialogDescription>配置一个新的 AI 模型提供商</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4 py-2">
-            <div className="space-y-2">
-              <Label>显示名称</Label>
-              <Input value={newProviderName} onChange={(e) => handleNameChange(e.target.value)} placeholder="例如：My OpenAI" />
-            </div>
-            <div className="space-y-2">
-              <Label>提供商 ID</Label>
-              <Input value={newProviderId} onChange={(e) => setNewProviderId(e.target.value)} placeholder="自动生成" />
-              <p className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>唯一标识，仅限英文、数字和连字符</p>
-            </div>
-            <div className="space-y-2">
-              <Label>订阅类型</Label>
-              <Select
-                value={newProviderSubscription}
-                onValueChange={(v) => {
-                  const sub = v as '' | 'codex' | 'copilot' | 'claude' | 'gemini';
-                  setNewProviderSubscription(sub);
-                  // 选订阅时自动锁定 api_format；切回无订阅时恢复默认
-                  if (sub === 'codex') setNewProviderFormat('responses');
-                  else if (sub === 'copilot') setNewProviderFormat('chat_completions');
-                  else if (sub === 'claude') setNewProviderFormat('anthropic');
-                  else if (sub === 'gemini') setNewProviderFormat('gemini');
-                }}
-              >
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {SUBSCRIPTION_OPTIONS.map(opt => (
-                    <SelectItem key={opt.value || 'none'} value={opt.value || 'none'} textValue={opt.label}>
-                      <div className="flex flex-col">
-                        <span>{opt.label}</span>
-                        <span className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>{opt.description}</span>
-                      </div>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            {!newProviderSubscription && (
-              <div className="space-y-2">
-                <Label>API 格式</Label>
-                <Select value={newProviderFormat} onValueChange={(v) => setNewProviderFormat(v as APIFormat)}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {API_FORMAT_OPTIONS.map(opt => (
-                      <SelectItem key={opt.value} value={opt.value} textValue={opt.label}>
-                        <div className="flex flex-col">
-                          <span>{opt.label}</span>
-                          <span className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>{opt.description}</span>
-                        </div>
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
-            {!newProviderSubscription && (
-              <div className="space-y-2">
-                <Label>Base URL (可选)</Label>
-                <Input value={newProviderUrl} onChange={(e) => setNewProviderUrl(e.target.value)} placeholder="https://api.example.com/v1" />
-              </div>
-            )}
-            {!newProviderSubscription && (
-              <div className="space-y-2">
-                <Label>API Key (可选)</Label>
-                <Input type="password" value={newProviderKey} onChange={(e) => setNewProviderKey(e.target.value)} placeholder="可稍后填写" />
-              </div>
-            )}
-            {newProviderSubscription && (
-              <p className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>
-                添加后将在编辑对话框中完成登录或 CLI 凭据导入。
-              </p>
-            )}
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setAddDialogOpen(false)}>取消</Button>
-            <Button onClick={handleAddProvider} disabled={adding || !newProviderName.trim()}>
-              {adding && <Loader2 className="h-4 w-4 mr-1 animate-spin" />}
-              {adding ? '添加中...' : '确认添加'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* ── Edit Provider Dialog ── */}
+      {/* ── 统一编辑/新增对话框 ── */}
       <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
-        <DialogContent className="max-w-[780px] max-h-[85vh] overflow-y-auto custom-scrollbar">
+        <DialogContent className="sm:max-w-[1120px] max-h-[88vh] overflow-y-auto custom-scrollbar">
           <DialogHeader>
-            <DialogTitle>{editForm.name || editProviderId}</DialogTitle>
-            <DialogDescription>配置提供商参数和模型列表</DialogDescription>
+            <DialogTitle>{isEditMode ? (editForm.name || editProviderId) : '添加提供商'}</DialogTitle>
+            <DialogDescription>{isEditMode ? '配置提供商参数和模型列表' : '配置一个新的 AI 模型提供商'}</DialogDescription>
           </DialogHeader>
-          <div className="grid grid-cols-2 gap-10 py-2">
+          <div className="grid grid-cols-2 gap-8 py-2">
             {/* ── 左列：基本配置 ── */}
             <div className="space-y-4">
               <div className="flex items-center gap-2">
@@ -692,32 +630,38 @@ export function ProvidersSection() {
                 <Label>启用此提供商</Label>
               </div>
               <div className="h-px" style={{ background: 'var(--border)' }} />
+
               <div className="space-y-2">
-                <Label>API 格式</Label>
-                <Select value={editForm.api_format || 'chat_completions'} onValueChange={(v) => setEditForm(f => ({ ...f, api_format: v as APIFormat }))}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {API_FORMAT_OPTIONS.map(opt => (
-                      <SelectItem key={opt.value} value={opt.value} textValue={opt.label}>
-                        <div className="flex flex-col">
-                          <span>{opt.label}</span>
-                          <span className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>{opt.description}</span>
-                        </div>
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <Label>显示名称</Label>
+                <Input
+                  value={editNameInput}
+                  onChange={(e) => handleNameInputChange(e.target.value)}
+                  placeholder="例如：My OpenAI"
+                />
               </div>
-              <div className="h-px" style={{ background: 'var(--border)' }} />
+
+              {!isEditMode && (
+                <div className="space-y-2">
+                  <Label>提供商 ID</Label>
+                  <Input
+                    value={editIdInput}
+                    onChange={(e) => setEditIdInput(e.target.value)}
+                    placeholder="自动生成"
+                  />
+                  <p className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>唯一标识，仅限英文、数字和连字符</p>
+                </div>
+              )}
+
               <div className="space-y-2">
                 <Label>订阅类型</Label>
                 <Select
-                  value={editForm.auth?.subscription || ''}
+                  value={currentSubscription || ''}
                   onValueChange={(v) => {
                     const sub = v as '' | 'codex' | 'copilot' | 'claude' | 'gemini';
                     setEditForm(f => ({
                       ...f,
                       auth: sub ? { type: 'oauth', subscription: sub } : undefined,
+                      api_format: sub ? SUBSCRIPTION_FORMAT[sub] : f.api_format,
                     }));
                     setQuotaInfo(null);
                   }}
@@ -734,75 +678,108 @@ export function ProvidersSection() {
                     ))}
                   </SelectContent>
                 </Select>
-                {editForm.auth?.subscription && (
-                  <div className="space-y-2 pt-1">
-                    {editForm.auth.subscription === 'copilot' && (
-                      <Input
-                        value={enterpriseDomain}
-                        onChange={(e) => setEnterpriseDomain(e.target.value)}
-                        placeholder="企业版域名（可选，如 github.example.com）"
-                      />
-                    )}
-                    {(editForm.auth.subscription === 'codex' || editForm.auth.subscription === 'copilot') && (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="w-full"
-                        onClick={() => handleStartSubscriptionLogin(editForm.auth!.subscription as 'codex' | 'copilot')}
-                        disabled={loginPolling}
-                      >
-                        {loginPolling ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : null}
-                        {loginPolling ? '等待授权...' : '登录'}
-                      </Button>
-                    )}
-                    {(editForm.auth.subscription === 'claude' || editForm.auth.subscription === 'gemini' || editForm.auth.subscription === 'codex') && (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="w-full"
-                        onClick={() => handleImportCliCredentials(editForm.auth!.subscription as 'claude' | 'gemini' | 'codex')}
-                      >
-                        从 CLI 导入凭据
-                      </Button>
-                    )}
-                    {editForm.auth.access && (
-                      <p className="text-xs" style={{ color: 'var(--accent-green)' }}>已登录</p>
-                    )}
-                  </div>
-                )}
               </div>
-              <div className="h-px" style={{ background: 'var(--border)' }} />
-              {!editForm.auth?.subscription && (
-                <div className="space-y-2">
-                  <Label>API Key</Label>
-                  <Input type="password" value={editForm.api_key || ''} onChange={(e) => setEditForm(f => ({ ...f, api_key: e.target.value }))} placeholder="输入 API Key" />
+
+              {/* 订阅登录/导入 + 账号信息 */}
+              {isSubscribed && (
+                <div className="space-y-2 p-3 rounded-lg" style={{ background: 'var(--bg-elevated-secondary, rgba(255,247,240,0.035))', border: '0.5px solid var(--border)' }}>
+                  {currentSubscription === 'copilot' && !isLoggedIn && (
+                    <Input
+                      value={enterpriseDomain}
+                      onChange={(e) => setEnterpriseDomain(e.target.value)}
+                      placeholder="企业版域名（可选，如 github.example.com）"
+                    />
+                  )}
+                  {!isLoggedIn && (currentSubscription === 'codex' || currentSubscription === 'copilot') && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full"
+                      onClick={() => handleStartSubscriptionLogin(currentSubscription as 'codex' | 'copilot')}
+                      disabled={loginPolling}
+                    >
+                      {loginPolling ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : null}
+                      {loginPolling ? '等待授权...' : '登录'}
+                    </Button>
+                  )}
+                  {!isLoggedIn && (currentSubscription === 'claude' || currentSubscription === 'gemini' || currentSubscription === 'codex') && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full"
+                      onClick={() => handleImportCliCredentials(currentSubscription as 'claude' | 'gemini' | 'codex')}
+                    >
+                      从 CLI 导入凭据
+                    </Button>
+                  )}
+                  {isLoggedIn && (
+                    <div className="space-y-1 text-xs" style={{ color: 'var(--accent-green)' }}>
+                      <div className="flex items-center gap-1.5">
+                        <CheckCircle2 className="h-3.5 w-3.5" />
+                        <span>{editForm.auth?.account_name || '已登录'}</span>
+                      </div>
+                      {editForm.auth?.account_email && (
+                        <p className="ml-5" style={{ color: 'var(--fg-tertiary)' }}>{editForm.auth.account_email}</p>
+                      )}
+                    </div>
+                  )}
+                  {loginError && (
+                    <p className="text-xs" style={{ color: 'var(--accent-red)' }}>{loginError}</p>
+                  )}
                 </div>
               )}
-              <div className="space-y-2">
-                <Label>Base URL</Label>
-                <Input value={editForm.base_url || ''} onChange={(e) => setEditForm(f => ({ ...f, base_url: e.target.value }))} placeholder="https://api.example.com/v1" />
-              </div>
-              <div className="space-y-2">
-                <Label>Organization (可选)</Label>
-                <Input value={editForm.organization || ''} onChange={(e) => setEditForm(f => ({ ...f, organization: e.target.value }))} placeholder="组织 ID" />
-              </div>
-              <div className="space-y-2">
-                <Label>Project (可选)</Label>
-                <Input value={editForm.project || ''} onChange={(e) => setEditForm(f => ({ ...f, project: e.target.value }))} placeholder="项目 ID" />
-              </div>
-              <div className="h-px" style={{ background: 'var(--border)' }} />
-              <div className="space-y-2">
-                <Label>模型列表 URL (可选)</Label>
-                <Input value={editForm.models_url_override || ''} onChange={(e) => setEditForm(f => ({ ...f, models_url_override: e.target.value }))} placeholder="留空则按 base_url 自动构造候选" />
-                <p className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>覆写 /v1/models 端点；适用于智谱 /api/coding/paas/v4、Kimi 等非标准路径</p>
-              </div>
-              <div className="space-y-2">
-                <Label>User-Agent (可选)</Label>
-                <Input value={editForm.custom_user_agent || ''} onChange={(e) => setEditForm(f => ({ ...f, custom_user_agent: e.target.value }))} placeholder="部分端点（如 Kimi Coding Plan）需要白名单 UA" />
-              </div>
+
+              {/* 无订阅时显示 API 配置 */}
+              {!isSubscribed && (
+                <>
+                  <div className="h-px" style={{ background: 'var(--border)' }} />
+                  <div className="space-y-2">
+                    <Label>API 格式</Label>
+                    <Select value={editForm.api_format || 'chat_completions'} onValueChange={(v) => setEditForm(f => ({ ...f, api_format: v as APIFormat }))}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {API_FORMAT_OPTIONS.map(opt => (
+                          <SelectItem key={opt.value} value={opt.value} textValue={opt.label}>
+                            <div className="flex flex-col">
+                              <span>{opt.label}</span>
+                              <span className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>{opt.description}</span>
+                            </div>
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>API Key</Label>
+                    <Input type="password" value={editForm.api_key || ''} onChange={(e) => setEditForm(f => ({ ...f, api_key: e.target.value }))} placeholder="输入 API Key" />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Base URL</Label>
+                    <Input value={editForm.base_url || ''} onChange={(e) => setEditForm(f => ({ ...f, base_url: e.target.value }))} placeholder="https://api.example.com/v1" />
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-2">
+                      <Label>Organization</Label>
+                      <Input value={editForm.organization || ''} onChange={(e) => setEditForm(f => ({ ...f, organization: e.target.value }))} placeholder="可选" />
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Project</Label>
+                      <Input value={editForm.project || ''} onChange={(e) => setEditForm(f => ({ ...f, project: e.target.value }))} placeholder="可选" />
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>模型列表 URL (可选)</Label>
+                    <Input value={editForm.models_url_override || ''} onChange={(e) => setEditForm(f => ({ ...f, models_url_override: e.target.value }))} placeholder="留空则自动构造" />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>User-Agent (可选)</Label>
+                    <Input value={editForm.custom_user_agent || ''} onChange={(e) => setEditForm(f => ({ ...f, custom_user_agent: e.target.value }))} placeholder="部分端点需要白名单 UA" />
+                  </div>
+                </>
+              )}
             </div>
 
-            {/* ── 右列：模型管理 ── */}
+            {/* ── 右列：模型管理 + 额度 ── */}
             <div className="space-y-4">
               <div className="space-y-2">
                 <Label>模型列表</Label>
@@ -815,7 +792,7 @@ export function ProvidersSection() {
                   {editFetchingModels ? '获取中...' : '从 API 获取模型列表'}
                 </Button>
                 {editForm.models.length > 0 ? (
-                  <div className="flex flex-col gap-1 mt-2 max-h-[240px] overflow-y-auto p-2 rounded-lg custom-scrollbar" style={{ border: '0.5px solid var(--border)' }}>
+                  <div className="flex flex-col gap-1 mt-2 max-h-[300px] overflow-y-auto p-2 rounded-lg custom-scrollbar" style={{ border: '0.5px solid var(--border)' }}>
                     {editForm.models.map((model) => {
                       const hidden = editForm.hidden_models?.includes(model);
                       return (
@@ -845,42 +822,48 @@ export function ProvidersSection() {
                   <p className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>暂无模型，请添加或点击"获取列表"</p>
                 )}
               </div>
-              {editForm.auth?.subscription && quotaInfo && (
-                <div className="p-3 rounded-lg text-xs space-y-1" style={{ background: 'var(--bg-elevated-secondary, rgba(255,247,240,0.035))', border: '0.5px solid var(--border)' }}>
+
+              {/* 额度显示 */}
+              {isSubscribed && (
+                <div className="p-3 rounded-lg text-xs space-y-2" style={{ background: 'var(--bg-elevated-secondary, rgba(255,247,240,0.035))', border: '0.5px solid var(--border)' }}>
                   <div className="flex items-center justify-between">
-                    <span style={{ color: 'var(--fg-secondary)' }}>订阅额度</span>
+                    <span className="font-medium" style={{ color: 'var(--fg-85)' }}>订阅额度</span>
                     <button
                       className="cursor-pointer"
                       style={{ color: 'var(--icon-accent)', background: 'none', border: 'none' }}
-                      onClick={handleFetchQuota}
+                      onClick={() => handleFetchQuota()}
                       disabled={quotaLoading}
                     >
                       {quotaLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
                     </button>
                   </div>
-                  <pre className="whitespace-pre-wrap break-all" style={{ color: 'var(--fg-tertiary)', fontSize: '11px', margin: 0 }}>
-                    {JSON.stringify(quotaInfo, null, 2)}
-                  </pre>
+                  {quotaInfo ? (
+                    <QuotaDisplay quota={quotaInfo} />
+                  ) : (
+                    <p style={{ color: 'var(--fg-tertiary)' }}>{quotaLoading ? '查询中...' : '未查询'}</p>
+                  )}
                 </div>
               )}
             </div>
           </div>
           <DialogFooter className="flex justify-between">
-            <Button
-              variant="ghost"
-              size="sm"
-              className="text-destructive hover:text-destructive"
-              style={{ color: 'var(--accent-red)' }}
-              onClick={() => editProviderId && setDeleteConfirmId(editProviderId)}
-            >
-              <Trash2 className="h-4 w-4 mr-1" />
-              删除
-            </Button>
+            {isEditMode ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-destructive hover:text-destructive"
+                style={{ color: 'var(--accent-red)' }}
+                onClick={() => editProviderId && setDeleteConfirmId(editProviderId)}
+              >
+                <Trash2 className="h-4 w-4 mr-1" />
+                删除
+              </Button>
+            ) : <div />}
             <div className="flex gap-2">
               <Button variant="outline" onClick={() => setEditDialogOpen(false)}>取消</Button>
-              <Button onClick={handleSaveProvider} disabled={editSaving}>
+              <Button onClick={handleSaveProvider} disabled={editSaving || (!isEditMode && !editNameInput.trim())}>
                 {editSaving && <Loader2 className="h-4 w-4 mr-1 animate-spin" />}
-                保存
+                {isEditMode ? '保存' : '添加'}
               </Button>
             </div>
           </DialogFooter>
@@ -958,5 +941,93 @@ export function ProvidersSection() {
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+// ── 额度格式化显示 ──
+function QuotaDisplay({ quota }: { quota: Record<string, any> }) {
+  const sub = quota.subscription;
+  if (sub === 'codex' && Array.isArray(quota.windows)) {
+    return (
+      <div className="space-y-2">
+        {quota.windows.map((w: any, i: number) => (
+          <div key={i} className="space-y-1">
+            <div className="flex items-center justify-between">
+              <span style={{ color: 'var(--fg-secondary)' }}>{w.tier || '窗口'}</span>
+              <span style={{ color: w.used_percent >= 80 ? 'var(--accent-red)' : 'var(--accent-green)' }}>
+                {w.used_percent}%
+              </span>
+            </div>
+            <div className="h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--bg-elevated, rgba(255,247,240,0.06))' }}>
+              <div
+                className="h-full rounded-full transition-all"
+                style={{
+                  width: `${Math.min(w.used_percent, 100)}%`,
+                  background: w.used_percent >= 80 ? 'var(--accent-red)' : 'var(--accent-green)',
+                }}
+              />
+            </div>
+            <p style={{ color: 'var(--fg-tertiary)' }}>重置: {formatResetTime(w.reset_at)}</p>
+          </div>
+        ))}
+      </div>
+    );
+  }
+  if (sub === 'gemini' && Array.isArray(quota.buckets)) {
+    return (
+      <div className="space-y-2">
+        {quota.buckets.map((b: any, i: number) => (
+          <div key={i} className="flex items-center justify-between">
+            <span style={{ color: 'var(--fg-secondary)' }}>{b.model_id || '未知模型'}</span>
+            <span style={{ color: 'var(--accent-green)' }}>
+              剩余 {Math.round((b.remaining_fraction ?? 0) * 100)}%
+            </span>
+          </div>
+        ))}
+      </div>
+    );
+  }
+  if (sub === 'copilot') {
+    return (
+      <div className="space-y-1">
+        {quota.plan && (
+          <div className="flex items-center justify-between">
+            <span style={{ color: 'var(--fg-secondary)' }}>套餐</span>
+            <span style={{ color: 'var(--fg-85)' }}>{quota.plan}</span>
+          </div>
+        )}
+        {quota.quota_snapshots && Object.keys(quota.quota_snapshots).length > 0 && (
+          <pre className="whitespace-pre-wrap break-all" style={{ color: 'var(--fg-tertiary)', fontSize: '11px', margin: 0 }}>
+            {JSON.stringify(quota.quota_snapshots, null, 2)}
+          </pre>
+        )}
+      </div>
+    );
+  }
+  if (sub === 'claude' && quota.windows) {
+    const windows = quota.windows;
+    const keys = Object.keys(windows);
+    if (keys.length === 0) return <p style={{ color: 'var(--fg-tertiary)' }}>无额度数据</p>;
+    return (
+      <div className="space-y-1">
+        {keys.map(k => {
+          const w = windows[k];
+          if (!w || typeof w !== 'object') return null;
+          const used = w.limit_percent ?? w.percent ?? 0;
+          return (
+            <div key={k} className="flex items-center justify-between">
+              <span style={{ color: 'var(--fg-secondary)' }}>{k}</span>
+              <span style={{ color: used >= 80 ? 'var(--accent-red)' : 'var(--accent-green)' }}>{used}%</span>
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+  // fallback
+  return (
+    <pre className="whitespace-pre-wrap break-all" style={{ color: 'var(--fg-tertiary)', fontSize: '11px', margin: 0 }}>
+      {JSON.stringify(quota, null, 2)}
+    </pre>
   );
 }
