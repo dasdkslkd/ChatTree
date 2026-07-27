@@ -8,12 +8,12 @@ from types import SimpleNamespace
 from pathlib import Path
 
 from backend.core import subprocess_utils
-from backend.core.tools import code_tools
+from backend.core.tools import code as code_tools
 from backend.core.tools.base import BaseTool
 from backend.core.tools.code import common as code_common
 from backend.core.tools.code import python_fallback as code_python_fallback
 from backend.core.tools.code import ripgrep as code_ripgrep
-from backend.core.tools.code_tools import (
+from backend.core.tools.code import (
     ApplyPatchTool,
     CodeToolConfig,
     EditFileTool,

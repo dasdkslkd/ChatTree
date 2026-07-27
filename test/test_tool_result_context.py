@@ -9,10 +9,9 @@ from backend.core.chat.tool_result_format import (
 )
 from backend.core.config.config import cfg
 from backend.core.config.types import Message, Role
-from backend.core.tools import code_tools
 from backend.core.tools.code import python_fallback as code_python_fallback
 from backend.core.tools.code import ripgrep as code_ripgrep
-from backend.core.tools.code_tools import CodeToolConfig, ListFilesTool
+from backend.core.tools.code import CodeToolConfig, ListFilesTool
 from backend.core.tools.security.capabilities import ToolCapability
 
 

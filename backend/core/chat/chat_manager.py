@@ -13,6 +13,7 @@ from .conversation import Conversation
 from .node import NodeManager
 from .canonical_reader import (
     BLOCKING_PLAN_TOOLS,
+    _tool_result_payload,
     compact_metadata_by_node,
     has_blocking_plan_participation_result,
     latest_assistant_answer,
@@ -169,10 +170,6 @@ def _usage_output_tokens(usage_info: Any) -> int:
     return 0
 
 
-def _tool_call_function_name(tool_call: Dict[str, Any]) -> str:
-    return tool_call_function_name(tool_call)
-
-
 class ChatManager:
     """延迟加载模型的聊天管理器"""
     
@@ -234,7 +231,7 @@ class ChatManager:
         nodes = self.chat_repository.list_nodes(conversation_id) if self.chat_repository is not None else []
         workspace = row.get("workspace")
         if workspace is None and row.get("workspace_json"):
-            workspace = self._json_tool_payload(row.get("workspace_json"))
+            workspace = _tool_result_payload(row.get("workspace_json"))
         data = {
             "metadata": {
                 "id": conversation_id,
@@ -1484,7 +1481,7 @@ class ChatManager:
                 round_status = "completed"
                 complete_chunk = None
                 round_tool_calls: List[Dict[str, Any]] = []
-                defer_round_content = await self._has_active_plan_mode(
+                defer_round_content = await self._needs_plan_mode_nudge(
                     conversation_id,
                     new_node.get("tool_permission_mode"),
                 )
@@ -2263,7 +2260,7 @@ class ChatManager:
         mode = normalize_permission_mode(current_mode)
         for message in tool_messages:
             name = str(message.get("name") or "")
-            payload = self._json_tool_payload(message.get("raw_content") or message.get("content"))
+            payload = _tool_result_payload(message.get("raw_content") or message.get("content"))
             if name == "enter_plan_mode" and payload.get("permission_mode") == "plan":
                 mode = "plan"
             elif name == "ask_user_question" and payload.get("status") == "awaiting_question":
@@ -2274,22 +2271,6 @@ class ChatManager:
 
     def _plan_tool_paused_turn(self, tool_messages: list[Message]) -> bool:
         return has_blocking_plan_participation_result(tool_messages)
-
-    @staticmethod
-    def _json_tool_payload(value: Any) -> Dict[str, Any]:
-        if isinstance(value, dict):
-            return value
-        if not isinstance(value, str):
-            return {}
-        try:
-            payload = json.loads(value)
-        except json.JSONDecodeError:
-            return {}
-        return payload if isinstance(payload, dict) else {}
-
-    async def _has_active_plan_mode(self, conversation_id: str, permission_mode: Any) -> bool:
-        needs_nudge = await self._needs_plan_mode_nudge(conversation_id, permission_mode)
-        return needs_nudge
 
     async def _needs_plan_mode_nudge(self, conversation_id: str, permission_mode: Any) -> bool:
         if normalize_permission_mode(permission_mode) != "plan":
@@ -2430,13 +2411,6 @@ class ChatManager:
             filtered.append(tool)
         return filtered
 
-    def _filter_task_tools_for_mode(
-        self,
-        tools: List[Dict[str, Any]],
-        mode: str,
-    ) -> List[Dict[str, Any]]:
-        return filter_task_tools_for_context(tools, mode)
-
     def _filter_tools_for_runtime(
         self,
         tools: List[Dict[str, Any]],
@@ -2447,7 +2421,7 @@ class ChatManager:
     ) -> List[Dict[str, Any]]:
         filtered = self._filter_agent_tools_for_mode(tools, multi_agent_mode)
         filtered = self._filter_plan_tools_for_mode(filtered, permission_mode)
-        return self._filter_task_tools_for_mode(filtered, task_context_mode)
+        return filter_task_tools_for_context(filtered, task_context_mode)
 
     def _refresh_task_turn_context(
         self,
@@ -3447,7 +3421,7 @@ class ChatManager:
         task_turn_context: Optional[TaskTurnContext],
         conversation_id: Optional[str],
     ) -> None:
-        name = _tool_call_function_name(tool_call)
+        name = tool_call_function_name(tool_call)
         arguments = self._parse_tool_arguments((tool_call.get("function") or {}).get("arguments"))
         if not (
             name in TASK_TOOL_NAMES

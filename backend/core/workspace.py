@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping, TypedDict
 
-from .tools.code_tools import default_code_workspace
+from .tools.code import default_code_workspace
 from .tools.security.logical_sandbox import DEFAULT_PROTECTED_PATHS
 
 

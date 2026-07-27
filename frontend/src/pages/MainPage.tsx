@@ -78,7 +78,6 @@ import {
 import { useRunManager } from '../hooks/useRunManager';
 import { streamManager, type StreamState } from '../services/streamManager';
 import { slashRegistry } from '../services/slashRegistry';
-import { getStreamStatusText as getStreamStatusLabel } from '../utils/generationStatus';
 import {
   getStoppableRunIdsForSelectedBranch,
   isDetachedRunView,
@@ -97,7 +96,8 @@ import {
 } from '../utils/sideRunGrouping';
 import {
   SIDE_RUN_KINDS,
-} from '../utils/sideRunSync';
+  createQueuedMessageId,
+} from '../utils/identifiers';
 import {
   createToolPermissionDraft,
   getConfiguredDefaultToolPermissionMode,
@@ -107,7 +107,8 @@ import {
 } from '../utils/toolPermissionDraft';
 import {
   getActiveStreamPollingDelay,
-} from '../utils/activeStreamPolling';
+  getStreamStatusText as getStreamStatusLabel,
+} from '../utils/streaming';
 import { ChatInput } from '../components/ChatInput';
 import { TranscriptList } from '../components/transcript/TranscriptList';
 import TreeView from './TreeView';
@@ -158,8 +159,7 @@ import {
   getBranchToolPermissionMode,
   getBranchTaskContextMode,
 } from '../utils/branchMode';
-import { formatConversationTime } from '../utils/conversationTime';
-import { createQueuedMessageId } from '../utils/queuedMessage';
+import { formatConversationTime } from '../utils/time';
 
 const PROFILE_ID = getProfileContext().profileId;
 const PROFILE_LEFT_SIDEBAR_STORAGE_KEY = profileStorageKey(PROFILE_ID, LEFT_SIDEBAR_STORAGE_KEY);

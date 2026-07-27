@@ -1,4 +1,4 @@
-﻿import json
+import json
 import tempfile
 import unittest
 
@@ -6,7 +6,7 @@ from backend.core.agents.runtime import AgentRuntime
 from backend.core.runs import RunKind, RunManager
 from backend.core.tasks import ActiveTaskService
 from backend.core.tools.agent_tools import SpawnAgentTool, StartSubagentTool, StartWorkflowTool
-from backend.core.tools.code_tools import CodeToolConfig, RunCommandTool
+from backend.core.tools.code import CodeToolConfig, RunCommandTool
 from backend.core.tools.task_contract import TASK_STEP_BINDING_DESCRIPTION
 
 

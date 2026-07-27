@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import json
 import sys
 import tempfile
@@ -15,7 +15,7 @@ from backend.core.persistence.run_repository import SQLiteRunRepository
 from backend.core.runs import RunKind, RunManager, RunStatus
 from backend.core.runs.repository import MemoryRunRepository
 from backend.core.tasks import ActiveTaskService, TaskContextDisabledError
-from backend.core.tools.code_tools import CodeToolConfig, RunCommandTool
+from backend.core.tools.code import CodeToolConfig, RunCommandTool
 from backend.core.tools.tool_manager import ToolManager
 
 

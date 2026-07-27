@@ -5,7 +5,7 @@ import { cn } from '@/lib/utils';
 import MarkdownContent from '../../MarkdownContent';
 import type { AssistantAnswerItem as AssistantAnswerTranscriptItem, TranscriptCopyHandler } from '../../../types/transcript';
 import { getItemText } from './itemText';
-import { getStreamStatusText } from '../../../utils/generationStatus';
+import { getStreamStatusText } from '../../../utils/streaming';
 
 export function AssistantAnswerItem({ item, onCopy }: { item: AssistantAnswerTranscriptItem; onCopy?: TranscriptCopyHandler }) {
   const [copied, setCopied] = useState(false);

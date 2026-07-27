@@ -10,7 +10,7 @@ sys.path.insert(0, ".")
 from backend.api.routes import tool_results as tool_results_route
 from backend.core.persistence.database import SQLitePersistence
 from backend.core.persistence.repository import ChatRepository
-from backend.core.tools.code_tools import CodeToolConfig, ReadFileTool
+from backend.core.tools.code import CodeToolConfig, ReadFileTool
 from backend.core.tools.tool_manager import ToolManager
 
 

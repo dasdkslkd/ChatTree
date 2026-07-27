@@ -2,7 +2,7 @@ import { Fragment, useState, type ReactNode } from 'react';
 import { ChevronRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { TranscriptActionHandlers, TranscriptItem } from '../../types/transcript';
-import { formatProcessedDuration } from '../../utils/assistantTimelineFolding';
+import { formatProcessedDuration } from '../../utils/time';
 import { normalizeTranscriptItems } from '../../utils/transcriptItems';
 import { TranscriptItemRenderer } from './TranscriptItemRenderer';
 

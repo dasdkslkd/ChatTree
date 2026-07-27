@@ -4,7 +4,6 @@ import MarkdownBasic from './markdown/MarkdownBasic';
 import { detectMarkdownFeatures } from '../utils/markdownFeatures';
 
 const MarkdownRich = lazy(() => import('./markdown/MarkdownRich'));
-const MarkdownWithMermaid = lazy(() => import('./markdown/MarkdownWithMermaid'));
 
 interface MarkdownContentProps {
   children: string;
@@ -19,7 +18,7 @@ export default function MarkdownContent({ children, components, enableMermaid = 
   if (shouldLoadMermaid) {
     return (
       <Suspense fallback={<MarkdownBasic components={components}>{children}</MarkdownBasic>}>
-        <MarkdownWithMermaid components={components}>{children}</MarkdownWithMermaid>
+        <MarkdownRich components={components} enableMermaid>{children}</MarkdownRich>
       </Suspense>
     );
   }
