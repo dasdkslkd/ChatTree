@@ -32,6 +32,17 @@ class AnthropicProvider(BaseProvider):
         return base
 
     def _headers(self) -> Dict[str, str]:
+        # Claude 订阅（CLI 凭据复用）走 Bearer + anthropic-beta
+        auth = self.config.get("auth") or {}
+        if auth.get("subscription") == "claude":
+            from ...auth import get_valid_token_sync
+            token, _ = get_valid_token_sync(auth)
+            return {
+                "Authorization": f"Bearer {token}",
+                "anthropic-version": "2023-06-01",
+                "anthropic-beta": "oauth-2025-04-20",
+                "content-type": "application/json",
+            }
         return {
             "x-api-key": self.config.get("api_key", ""),
             "anthropic-version": "2023-06-01",
@@ -404,24 +415,33 @@ class AnthropicProvider(BaseProvider):
 
     # ── 模型列表 ──
     def list_models(self) -> List[str]:
+        # 候选 URL 列表覆盖 Anthropic 兼容子路径（/api/anthropic、/claudecode 等）：
+        # 先按 Bearer 尝试所有候选，再按 x-api-key 兜底。
+        from .model_fetch import fetch_models
+        api_key = self.config.get("api_key", "")
+        kwargs = {
+            "base_url": self._api_base(),
+            "api_key": api_key,
+            "models_url_override": self.config.get("models_url_override"),
+            "custom_user_agent": self.config.get("custom_user_agent"),
+        }
         try:
-            url = self._api_base() + "/v1/models"
-            req = urllib.request.Request(url, headers={
-                "Authorization": f"Bearer {self.config.get('api_key', '')}",
-            })
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode())
-            return [m["id"] for m in data.get("data", [])]
+            models = fetch_models(**kwargs)
+            return [m["id"] for m in models]
         except Exception as e:
-            logger.warning(f"Bearer /v1/models 失败: {e}")
+            logger.warning(f"Bearer 候选列表失败: {e}")
 
+        # x-api-key 兜底：仅当 Bearer 全部失败时
         try:
-            url = self._api_base() + "/v1/models"
-            req = urllib.request.Request(url, headers=self._headers())
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode())
-            return [m["id"] for m in data.get("data", [])]
+            models = fetch_models(
+                base_url=self._api_base(),
+                api_key="",  # 不发 Bearer
+                models_url_override=self.config.get("models_url_override"),
+                custom_user_agent=self.config.get("custom_user_agent"),
+                extra_headers=self._headers(),  # 注入 x-api-key + anthropic-version
+            )
+            return [m["id"] for m in models]
         except Exception as e:
-            logger.warning(f"x-api-key /v1/models 失败: {e}")
+            logger.warning(f"x-api-key 候选列表失败: {e}")
 
         return []

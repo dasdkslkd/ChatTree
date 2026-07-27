@@ -25,6 +25,17 @@ export interface ModelMetadata {
 // 提供商 ID（动态字符串，不再使用枚举）
 export type ModelProvider = string;
 
+// 订阅登录信息（与 api_key 二选一）
+export interface AuthInfo {
+  type?: 'oauth' | 'api';
+  subscription?: 'codex' | 'copilot' | 'claude' | 'gemini' | 'xai';
+  access?: string;
+  refresh?: string;
+  expires?: number;
+  account_id?: string;
+  enterprise_domain?: string;
+}
+
 // 单个提供商配置
 export interface ModelProviderConfig {
   name: string;
@@ -36,6 +47,9 @@ export interface ModelProviderConfig {
   api_format: APIFormat;
   hidden_models: string[];
   enabled: boolean;
+  auth?: AuthInfo;
+  models_url_override?: string;
+  custom_user_agent?: string;
 }
 
 export type McpTransport = 'streamable_http' | 'stdio';
@@ -259,4 +273,5 @@ export interface AddProviderRequest {
   api_format: APIFormat;
   base_url?: string;
   api_key?: string;
+  auth?: AuthInfo;
 }

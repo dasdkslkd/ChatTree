@@ -124,6 +124,12 @@ class ModelProviderConfig(TypedDict, total=False):
     api_format: str  # APIFormat 值: chat_completions, responses, anthropic, gemini
     hidden_models: List[str]  # 被隐藏的模型名称列表
     enabled: bool
+    # 订阅登录（与 api_key 二选一）：codex/copilot 走 OAuth；claude/gemini 走 CLI 凭据复用
+    auth: Dict[str, Any]
+    # 覆写 /v1/models 端点；为空时按 base_url 自动构造候选列表
+    models_url_override: str
+    # 自定义 User-Agent：部分端点（如 Kimi Coding Plan）有 UA 白名单
+    custom_user_agent: str
 
 # class MultiModelConfig(TypedDict, total=False):
 #     """多模型配置"""

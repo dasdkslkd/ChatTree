@@ -58,6 +58,10 @@ class ModelManager:
             if cached_async != is_async:
                 self.provider_instances.pop(provider)
             else:
+                # 同步最新 config（auth 可能被 token 刷新修改或从磁盘重新加载）
+                latest = cfg.get_provider_config(provider) or {}
+                cached.config.update(latest)
+                cached.config['is_async'] = is_async
                 return cached
         return self._create_model_instance(provider, is_async)
 
@@ -98,38 +102,27 @@ class ModelManager:
         return getattr(module, class_name)
 
     def _fetch_models_via_http(self, provider: str) -> List[str]:
-        """HTTP 回退：直接请求 /v1/models 获取模型列表（适用于代理和兼容 API）"""
-        import urllib.request
-        import json as _json
+        """HTTP 回退：通过候选 URL 列表请求 /v1/models（适用于代理和兼容 API）"""
+        from .providers.model_fetch import fetch_models
 
         provider_config = cfg.get_provider_config(provider)
         if provider_config is None:
             return []
 
-        api_key = provider_config.get('api_key', '')
-        base_url = provider_config.get('base_url', '')
-        if not base_url:
-            return []
-
-        url = base_url.rstrip('/')
-        if url.endswith('/v1'):
-            url += '/models'
-        else:
-            url += '/v1/models'
-
         try:
-            req = urllib.request.Request(url, headers={
-                'Authorization': f'Bearer {api_key}',
-            })
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = _json.loads(resp.read().decode())
-            models = [m['id'] for m in data.get('data', [])]
-            if models:
-                self.model_list[provider] = models
-                provider_config['models'] = models
-            return models
+            models = fetch_models(
+                base_url=provider_config.get('base_url', ''),
+                api_key=provider_config.get('api_key', ''),
+                models_url_override=provider_config.get('models_url_override'),
+                custom_user_agent=provider_config.get('custom_user_agent'),
+            )
+            ids = [m["id"] for m in models]
+            if ids:
+                self.model_list[provider] = ids
+                provider_config['models'] = ids
+            return ids
         except Exception as e:
-            logger.error(f"HTTP 回退获取模型列表失败 ({url}): {e}")
+            logger.error(f"HTTP 回退获取模型列表失败: {e}")
             return []
 
     def list_available_models(self, provider: str) -> List[str]:

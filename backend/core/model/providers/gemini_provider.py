@@ -41,10 +41,20 @@ class GeminiProvider(BaseProvider):
         return base + "/v1beta"
 
     def _headers(self, *, stream: bool = False) -> Dict[str, str]:
-        headers = {
-            "Content-Type": "application/json",
-            "x-goog-api-key": self.config.get("api_key", ""),
-        }
+        # Gemini 订阅（CLI 凭据复用）走 Bearer 而非 x-goog-api-key
+        auth = self.config.get("auth") or {}
+        if auth.get("subscription") == "gemini":
+            from ...auth import get_valid_token_sync
+            token, _ = get_valid_token_sync(auth)
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {token}",
+            }
+        else:
+            headers = {
+                "Content-Type": "application/json",
+                "x-goog-api-key": self.config.get("api_key", ""),
+            }
         if stream:
             headers["Accept"] = "text/event-stream"
         return headers

@@ -30,20 +30,50 @@ class OpenAICompatibleProvider(BaseProvider):
     def _api_base(self) -> str:
         return (self.config.get("base_url") or "https://api.openai.com/v1").rstrip("/")
 
+    def _subscription_auth(self):
+        """返回 (token, extra_headers)；无订阅时返回 (None, {})."""
+        auth = self.config.get("auth") or {}
+        if not auth.get("subscription"):
+            return None, {}
+        from ...auth import get_valid_token_sync
+        return get_valid_token_sync(auth)
+
     def _headers(self, *, stream: bool = False) -> Dict[str, str]:
-        headers = {
-            "Authorization": f"Bearer {self.config.get('api_key', 'ollama')}",
-            "Content-Type": "application/json",
-        }
+        headers = {"Content-Type": "application/json"}
+        token, extra = self._subscription_auth()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+            headers.update(extra)
+        else:
+            headers["Authorization"] = f"Bearer {self.config.get('api_key', 'ollama')}"
         if stream:
             headers["Accept"] = "text/event-stream"
         if organization := self.config.get("organization"):
             headers["OpenAI-Organization"] = organization
         if project := self.config.get("project"):
             headers["OpenAI-Project"] = project
+        # Codex 订阅要求 session-id header（codex CLI / opencode 均会发送）
+        auth = self.config.get("auth") or {}
+        if auth.get("subscription") == "codex":
+            import uuid
+            headers["session-id"] = str(uuid.uuid4())
         return headers
 
     def _url(self, path: str) -> str:
+        auth = self.config.get("auth") or {}
+        sub = auth.get("subscription")
+        # Codex 订阅强制走 chatgpt.com 后端（/v1/responses、/v1/chat/completions 都重写）
+        if sub == "codex" and path in ("/responses", "/chat/completions", "/v1/responses", "/v1/chat/completions"):
+            return "https://chatgpt.com/backend-api/codex/responses"
+        # Copilot 订阅强制走 api.githubcopilot.com
+        if sub == "copilot":
+            enterprise = auth.get("enterprise_domain", "")
+            base = (
+                f"https://copilot-api.{enterprise_domain.lower()}"
+                if enterprise
+                else "https://api.githubcopilot.com"
+            )
+            return base + path
         return self._api_base() + path
 
     def _request_json(self, path: str, body: Dict[str, Any], timeout: int = 120) -> Dict[str, Any]:
@@ -926,6 +956,12 @@ class OpenAICompatibleProvider(BaseProvider):
             request_kwargs["tools"] = [self._openai_tool_to_responses_tool(tool) for tool in tools]
             if tool_choice and tool_choice != "auto":
                 request_kwargs["tool_choice"] = tool_choice
+        # Codex 订阅要求 store=false（参考 codex CLI），且不支持 max_output_tokens 和 temperature（参考 opencode）
+        auth = self.config.get("auth") or {}
+        if auth.get("subscription") == "codex":
+            request_kwargs["store"] = False
+            request_kwargs.pop("max_output_tokens", None)
+            request_kwargs.pop("temperature", None)
         return request_kwargs
 
     def _should_retry_responses_without_temperature(self, request_kwargs: Dict[str, Any]) -> bool:
@@ -1083,15 +1119,26 @@ class OpenAICompatibleProvider(BaseProvider):
         return value
 
     def list_models(self) -> List[str]:
+        # 订阅 provider 走 subscription.fetch_models_sync 动态发现
+        auth = self.config.get("auth") or {}
+        if auth.get("subscription"):
+            from ...auth import fetch_models_sync
+            try:
+                models = fetch_models_sync(auth)
+                return [m["id"] for m in models]
+            except Exception as e:
+                logger.error(f"获取订阅模型列表失败: {e}")
+                raise RuntimeError(f"获取订阅模型列表失败: {e}")
+
+        from .model_fetch import fetch_models
         try:
-            req = urllib.request.Request(
-                self._url("/models"),
-                headers=self._headers(),
-                method="GET",
+            models = fetch_models(
+                base_url=self._api_base(),
+                api_key=self.config.get("api_key", ""),
+                models_url_override=self.config.get("models_url_override"),
+                custom_user_agent=self.config.get("custom_user_agent"),
             )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            return [model["id"] for model in data.get("data", []) if model.get("id")]
+            return [m["id"] for m in models]
         except Exception as e:
             logger.error(f"获取模型列表失败: {e}")
             raise RuntimeError(f"获取模型列表失败: {e}")

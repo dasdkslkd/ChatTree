@@ -5,6 +5,7 @@ from typing import Dict, Any, Optional, List
 from pydantic import BaseModel
 from ...core.capabilities.bootstrap import build_runtime_config_with_plugin_mcp
 from ...core.agents import AgentMailbox, AgentRuntime
+from ...core.auth import subscription as sub_mod
 from ...core.config.config import Config, cfg
 from ...core.model.model_manager import ModelManager
 from ...core.projects import normalize_projects_config
@@ -40,6 +41,21 @@ class AddProviderRequest(BaseModel):
     api_format: str = "chat_completions"
     base_url: str = ""
     api_key: str = ""
+    auth: Optional[Dict[str, Any]] = None
+
+
+class SubscriptionLoginRequest(BaseModel):
+    subscription: str
+    enterprise_domain: Optional[str] = None
+
+
+class SubscriptionPollRequest(BaseModel):
+    subscription: str
+    handle: Dict[str, Any]
+
+
+class CliImportRequest(BaseModel):
+    subscription: str
 
 
 def _provider_config_without_default_model(conf: Dict[str, Any]) -> Dict[str, Any]:
@@ -335,12 +351,15 @@ async def add_provider(
         if provider_id in config_manager.data.get('provider', {}):
             raise HTTPException(status_code=409, detail=f"提供商 {provider_id} 已存在")
 
-        config_manager.add_provider(provider_id, {
+        new_config = {
             'name': request.name,
             'api_format': request.api_format,
             'base_url': request.base_url,
             'api_key': request.api_key,
-        })
+        }
+        if request.auth:
+            new_config['auth'] = request.auth
+        config_manager.add_provider(provider_id, new_config)
 
         # 同步
         config_manager.data = config_manager._load_config()
@@ -389,5 +408,117 @@ async def delete_provider(
         return {"message": f"提供商 {provider_id} 已删除"}
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── 订阅式 provider：OAuth 登录、模型发现、额度查询 ────────────────────────
+@router.post("/config/providers/{provider_id}/auth/login")
+async def start_provider_login(
+    provider_id: str,
+    request: SubscriptionLoginRequest,
+    config_manager: Config = Depends(get_config_manager),
+):
+    """启动订阅 OAuth 登录，返回 verification_uri + user_code + handle。"""
+    try:
+        handle = await sub_mod.start_login(
+            request.subscription,
+            enterprise_domain=request.enterprise_domain,
+        )
+        return handle
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/config/providers/{provider_id}/auth/poll")
+async def poll_provider_login(
+    provider_id: str,
+    request: SubscriptionPollRequest,
+    config_manager: Config = Depends(get_config_manager),
+):
+    """轮询登录结果；成功则写入 cfg.data['provider'][id]['auth']。"""
+    try:
+        auth = await sub_mod.poll_login(request.subscription, request.handle)
+        if auth is None:
+            return {"status": "pending"}
+        if provider_id not in config_manager.data.get("provider", {}):
+            raise HTTPException(status_code=404, detail=f"提供商 {provider_id} 不存在")
+        config_manager.data["provider"][provider_id]["auth"] = auth
+        config_manager.save()
+        cfg.data = config_manager.data
+        return {"status": "ok", "auth": auth}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/config/providers/{provider_id}/auth/cli-import")
+async def import_cli_credentials(
+    provider_id: str,
+    request: CliImportRequest,
+    config_manager: Config = Depends(get_config_manager),
+):
+    """从 CLI 工具的本地凭据文件导入（Claude/Codex/Gemini）。"""
+    try:
+        auth = await sub_mod.read_cli_credentials(request.subscription)
+        if auth is None:
+            raise HTTPException(status_code=404, detail="未找到 CLI 凭据")
+        if provider_id not in config_manager.data.get("provider", {}):
+            raise HTTPException(status_code=404, detail=f"提供商 {provider_id} 不存在")
+        config_manager.data["provider"][provider_id]["auth"] = auth
+        config_manager.save()
+        cfg.data = config_manager.data
+        return {"status": "ok", "auth": auth}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/config/providers/{provider_id}/quota")
+async def get_provider_quota(
+    provider_id: str,
+    config_manager: Config = Depends(get_config_manager),
+):
+    """查询订阅 provider 的额度。"""
+    pc = config_manager.data.get("provider", {}).get(provider_id) or {}
+    auth = pc.get("auth") or {}
+    if not auth.get("subscription"):
+        raise HTTPException(status_code=400, detail="非订阅 provider，不支持额度查询")
+    try:
+        return await sub_mod.query_quota(auth)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/config/providers/{provider_id}/models/refresh")
+async def refresh_provider_models(
+    provider_id: str,
+    config_manager: Config = Depends(get_config_manager),
+):
+    """强制刷新 provider 的模型列表（订阅 provider 走 OAuth 模型端点）。"""
+    pc = config_manager.data.get("provider", {}).get(provider_id) or {}
+    auth = pc.get("auth") or {}
+    try:
+        if auth.get("subscription"):
+            models = await sub_mod.fetch_models(auth)
+            ids = [m["id"] for m in models]
+        else:
+            from ...core.model.providers.model_fetch import fetch_models
+            models = fetch_models(
+                base_url=pc.get("base_url", ""),
+                api_key=pc.get("api_key", ""),
+                models_url_override=pc.get("models_url_override"),
+                custom_user_agent=pc.get("custom_user_agent"),
+            )
+            ids = [m["id"] for m in models]
+        if ids:
+            pc["models"] = ids
+            config_manager.save()
+            cfg.data = config_manager.data
+        return {"models": ids}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
