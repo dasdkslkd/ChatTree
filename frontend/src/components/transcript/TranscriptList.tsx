@@ -31,7 +31,7 @@ function ProcessedItemsFold({
   totalDuration: number;
   renderInner: (item: TranscriptItem) => ReactNode;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(true);
   return (
     <div className="w-full flex flex-col items-start" role="listitem">
       <div className={cn('processed-fold', expanded && 'expanded')}>
@@ -45,13 +45,11 @@ function ProcessedItemsFold({
           <ChevronRight className="processed-fold-chevron" />
         </button>
       </div>
-      {expanded && (
-        <div className="processed-blocks-shell expanded">
-          <div className="processed-blocks-inner">
-            {items.map((item) => <Fragment key={item.id}>{renderInner(item)}</Fragment>)}
-          </div>
+      <div className={cn('processed-blocks-shell', expanded && 'expanded')}>
+        <div className="processed-blocks-inner">
+          {items.map((item) => <Fragment key={item.id}>{renderInner(item)}</Fragment>)}
         </div>
-      )}
+      </div>
     </div>
   );
 }

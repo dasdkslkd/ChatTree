@@ -43,7 +43,10 @@ function timelineFromBlocks(item: AssistantProcessTranscriptItem): ProcessRender
     pendingTools = [];
   };
 
-  for (const block of blocks) {
+  const lastIndex = blocks.length - 1;
+  for (let index = 0; index < blocks.length; index++) {
+    const block = blocks[index];
+    const isLast = index === lastIndex;
     if (block.type === 'tool_call') {
       pendingTools.push(toolBlockToRenderItem(block));
       continue;
@@ -54,14 +57,14 @@ function timelineFromBlocks(item: AssistantProcessTranscriptItem): ProcessRender
         type: 'reasoning',
         key: block.id,
         reasoning: block.content || '',
-        streaming: Boolean(block.streaming),
+        streaming: isLast && Boolean(block.streaming),
       });
     } else if (block.type === 'content') {
       timeline.push({
         type: 'content',
         key: block.id,
         content: block.content || '',
-        streaming: Boolean(block.streaming),
+        streaming: isLast && Boolean(block.streaming),
       });
     }
   }

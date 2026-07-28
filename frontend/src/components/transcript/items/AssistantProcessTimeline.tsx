@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ChevronRight, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { TranscriptItem } from '../../../types/transcript';
@@ -34,7 +34,10 @@ export function getStreamStatusLabel(status: AssistantProcessRenderProps['status
 }
 
 function ThoughtBlock({ reasoning, streaming }: { reasoning: string; streaming?: boolean }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(Boolean(streaming));
+  useEffect(() => {
+    if (!streaming) setExpanded(false);
+  }, [streaming]);
   if (!reasoning) return null;
   return (
     <div className={cn('thought', expanded && 'expanded')}>
