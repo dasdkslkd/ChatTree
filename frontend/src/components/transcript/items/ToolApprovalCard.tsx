@@ -1,5 +1,6 @@
 import { Check, Loader2, ShieldQuestion, X } from 'lucide-react';
 import type { ToolApprovalItem, TranscriptToolApprovalActionHandler } from '../../../types/transcript';
+import { ToolCallPreview } from './ToolCallRenderer';
 
 export function ToolApprovalCard({
   item,
@@ -23,6 +24,7 @@ export function ToolApprovalCard({
   const approving = toolApprovalPending === `${item.id}:approve`;
   const rejecting = toolApprovalPending === `${item.id}:reject`;
   const disabled = toolApprovalPending !== null;
+  const hasPreview = Boolean(item.args_preview || item.result_preview);
 
   return (
     <div className="transcript-tool-approval w-full flex flex-col items-start" role="listitem">
@@ -39,8 +41,13 @@ export function ToolApprovalCard({
           <span className="shrink-0">工具审批 · {status}</span>
           <span className="min-w-0 truncate">{item.tool_name || item.tool_call_id || ''}</span>
         </div>
-        {item.args_preview && <pre className="tc-cmd custom-scrollbar">{item.args_preview}</pre>}
-        {item.result_preview && <pre className="tc-output custom-scrollbar">{item.result_preview}</pre>}
+        {hasPreview && (
+          <ToolCallPreview
+            toolName={item.tool_name}
+            argsText={item.args_preview || ''}
+            outputText={item.result_preview}
+          />
+        )}
         {awaiting && (
           <div className="flex flex-wrap items-center gap-2 pt-1">
             <button

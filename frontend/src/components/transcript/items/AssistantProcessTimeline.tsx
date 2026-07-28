@@ -1,8 +1,9 @@
 import { useState } from 'react';
-import { Check, ChevronRight, Loader2, X } from 'lucide-react';
+import { ChevronRight, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { TranscriptItem } from '../../../types/transcript';
 import MarkdownContent from '../../MarkdownContent';
+import { ToolCallCard } from './ToolCallRenderer';
 
 export type ToolRenderItem = {
   key: string;
@@ -55,38 +56,10 @@ function ThoughtBlock({ reasoning, streaming }: { reasoning: string; streaming?:
   );
 }
 
-function GenericToolCallCard({ item }: { item: ToolRenderItem }) {
-  const [expanded, setExpanded] = useState(false);
-
-  return (
-    <div className={cn('tool-call', expanded && 'expanded')}>
-      <button
-        type="button"
-        className="tc-header"
-        aria-expanded={expanded}
-        onClick={() => setExpanded((value) => !value)}
-      >
-        <span className="tc-name">{item.name}</span>
-        <span className="tc-summary">{item.summary}</span>
-        <span className="tc-status" aria-label={item.status === 'done' ? '工具调用完成' : item.status === 'error' ? '工具调用失败' : '工具调用中'}>
-          {item.status === 'done' && <Check className="h-3 w-3" style={{ color: 'var(--icon-accent)' }} />}
-          {item.status === 'error' && <X className="h-3 w-3" style={{ color: 'var(--destructive, #ef4444)' }} />}
-          {item.status === 'running' && <span className="pulsing-dot" />}
-        </span>
-        <ChevronRight className="tc-chevron" />
-      </button>
-      <div className="tc-body">
-        {item.argsText && <pre className="tc-cmd custom-scrollbar">{item.argsText}</pre>}
-        {item.outputText && <pre className="tc-output custom-scrollbar">{item.outputText}</pre>}
-      </div>
-    </div>
-  );
-}
-
 function ToolCallGroup({ items }: { items: ToolRenderItem[] }) {
   const [collapsed, setCollapsed] = useState(false);
   if (items.length === 0) return null;
-  if (items.length === 1) return <GenericToolCallCard item={items[0]} />;
+  if (items.length === 1) return <ToolCallCard item={items[0]} />;
   return (
     <div className={cn('tool-group', collapsed && 'collapsed')}>
       <button
@@ -100,7 +73,7 @@ function ToolCallGroup({ items }: { items: ToolRenderItem[] }) {
         <span className="tg-count">{items.length} 个</span>
       </button>
       <div className="tool-group-body">
-        {items.map((item) => <GenericToolCallCard key={item.key} item={item} />)}
+        {items.map((item) => <ToolCallCard key={item.key} item={item} />)}
       </div>
     </div>
   );

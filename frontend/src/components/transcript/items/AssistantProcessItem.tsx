@@ -8,6 +8,7 @@ import type {
   ProcessRenderBlock,
 } from './AssistantProcessTimeline';
 import { AssistantProcessTimeline } from './AssistantProcessTimeline';
+import { summarizeToolCall } from './ToolCallRenderer';
 
 interface AssistantProcessItemProps {
   item: AssistantProcessTranscriptItem;
@@ -23,13 +24,8 @@ function toolBlockToRenderItem(block: Extract<AssistantProcessBlock, { type: 'to
     argsText,
     outputText,
     status,
-    summary: compactToolSummary(outputText || argsText || (status === 'running' ? '工具运行中' : '工具结果')),
+    summary: summarizeToolCall(block.tool_name || 'tool', argsText, outputText, status),
   };
-}
-
-function compactToolSummary(text: string): string {
-  const normalized = text.replace(/\s+/g, ' ').trim();
-  return normalized.length > 100 ? `${normalized.slice(0, 97)}...` : normalized;
 }
 
 function timelineFromBlocks(item: AssistantProcessTranscriptItem): ProcessRenderBlock[] {
