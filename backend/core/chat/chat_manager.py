@@ -226,6 +226,10 @@ class ChatManager:
             return None
         return self._conversation_from_repository(row)
 
+    def canonical_messages_by_node(self, conversation_id: str, node_ids: List[str]):
+        """获取多个节点的规范化消息列表（公共 API，供路由和子代理调用）。"""
+        return _canonical_messages_by_node(self.chat_repository, conversation_id, node_ids)
+
     def _conversation_from_repository(self, row: Dict[str, Any]) -> Conversation:
         conversation_id = str(row["id"])
         nodes = self.chat_repository.list_nodes(conversation_id) if self.chat_repository is not None else []

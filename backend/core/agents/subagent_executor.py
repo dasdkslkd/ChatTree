@@ -817,7 +817,7 @@ class SubagentExecutor:
         conversation_id = str(((getattr(conversation, "metadata", None) or {}) or {}).get("id") or "")
         node_ids = [str((node or {}).get("id") or "") for node in chain or [] if (node or {}).get("id")]
         messages_by_node = (
-            self.chat_manager._canonical_messages_by_node(conversation_id, node_ids)
+            self.chat_manager.canonical_messages_by_node(conversation_id, node_ids)
             if conversation_id and node_ids
             else {}
         )

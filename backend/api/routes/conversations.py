@@ -1,4 +1,4 @@
-﻿# backend/api/routes/conversations.py
+# backend/api/routes/conversations.py
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
@@ -574,7 +574,7 @@ async def get_conversation_tree(
 
         nodes = []
         node_ids = [str(node_id) for node_id in conv.nodes.keys()]
-        messages_by_node = chat_manager._canonical_messages_by_node(conversation_id, node_ids)
+        messages_by_node = chat_manager.canonical_messages_by_node(conversation_id, node_ids)
         for node_id, node in conv.nodes.items():
             node_messages = messages_by_node.get(str(node_id), [])
             user_message = next(

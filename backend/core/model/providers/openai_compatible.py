@@ -89,6 +89,13 @@ class OpenAICompatibleProvider(BaseProvider):
         except urllib.error.HTTPError as exc:
             error_body = exc.read().decode("utf-8", errors="replace")
             raise ProviderHTTPError(exc.code, error_body, dict(exc.headers or {})) from exc
+        except urllib.error.URLError as exc:
+            reason = str(exc.reason) if exc.reason else str(exc)
+            if "timed out" in reason.lower() or "timeout" in reason.lower():
+                raise ProviderHTTPError(0, f"连接超时：{reason}", {"network": "timeout"}) from exc
+            if "ssl" in reason.lower() or "certificate" in reason.lower():
+                raise ProviderHTTPError(0, f"SSL 握手失败，可能需要配置代理：{reason}", {"network": "ssl"}) from exc
+            raise ProviderHTTPError(0, f"网络错误：{reason}", {"network": "error"}) from exc
 
     def _stream_to_queue(
         self,

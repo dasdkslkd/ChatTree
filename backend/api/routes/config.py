@@ -490,6 +490,8 @@ async def get_provider_quota(
         raise HTTPException(status_code=400, detail="非订阅 provider，不支持额度查询")
     try:
         return await sub_mod.query_quota(auth)
+    except sub_mod.SubscriptionError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -520,5 +522,7 @@ async def refresh_provider_models(
             config_manager.save()
             cfg.data = config_manager.data
         return {"models": ids}
+    except sub_mod.SubscriptionError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

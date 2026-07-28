@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 import math
 import re
+import threading
+import time
 from collections.abc import Mapping
 from http import HTTPStatus
 from uuid import uuid4
@@ -16,6 +18,13 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$", re.ASCII)
 GENERIC_5XX_MESSAGE = "服务暂时不可用，请稍后重试"
+
+# 5xx 错误激增检测：滑动窗口内计数超过阈值时输出 critical 告警
+_5XX_ALERT_WINDOW_SECONDS = 60.0
+_5XX_ALERT_THRESHOLD = 10
+_5xx_timestamps: list[float] = []
+_5xx_lock = threading.Lock()
+_5xx_state: dict[str, bool] = {"alerted": False}
 
 _SAFE_EXCEPTION_HEADERS = frozenset(
     {"allow", "retry-after", "www-authenticate", "etag"}
@@ -218,6 +227,25 @@ def build_error_response(
                 exc_info=(type(cause), cause, cause.__traceback__)
                 if include_traceback and cause is not None
                 else None,
+            )
+        now = time.monotonic()
+        with _5xx_lock:
+            _5xx_timestamps.append(now)
+            cutoff = now - _5XX_ALERT_WINDOW_SECONDS
+            _5xx_timestamps[:] = [t for t in _5xx_timestamps if t > cutoff]
+            count = len(_5xx_timestamps)
+            should_alert = count >= _5XX_ALERT_THRESHOLD and not _5xx_state["alerted"]
+            if should_alert:
+                _5xx_state["alerted"] = True
+            elif count < _5XX_ALERT_THRESHOLD:
+                _5xx_state["alerted"] = False
+        if should_alert and logger is not None:
+            logger.critical(
+                "5xx error surge: %d server errors in last %.0fs "
+                "(threshold=%d), investigate immediately",
+                count,
+                _5XX_ALERT_WINDOW_SECONDS,
+                _5XX_ALERT_THRESHOLD,
             )
         message = GENERIC_5XX_MESSAGE
         details = None

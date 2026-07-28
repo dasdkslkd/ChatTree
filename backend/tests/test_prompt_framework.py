@@ -1886,7 +1886,7 @@ class AgentRolePromptTests(unittest.TestCase):
 class DummyChatManager:
     tool_manager = None
 
-    def _canonical_messages_by_node(self, conversation_id, node_ids):
+    def canonical_messages_by_node(self, conversation_id, node_ids):
         return {
             "node-1": [
                 {"role": Role.USER.value, "content": "父对话问题"},

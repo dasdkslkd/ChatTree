@@ -80,7 +80,7 @@ function getTreeNodePrimaryText(node: TreeNode): string {
 
 export default function TreeView() {
   const containerRef = useRef<HTMLDivElement>(null);
-  const { currentConversation, treeData, loadTree, deleteNode } = useConversationStore();
+  const { currentConversation, treeData, deleteNode } = useConversationStore();
   const { setChatViewMode } = useNavigationStore();
   const runStates = useRunManager(currentConversation?.id ?? null);
 
@@ -109,12 +109,6 @@ export default function TreeView() {
     }
     return ids;
   }, [runStates]);
-
-  useEffect(() => {
-    if (currentConversation) {
-      loadTree(currentConversation.id);
-    }
-  }, [currentConversation?.id]);
 
   useEffect(() => () => {
     if (copiedTimerRef.current != null) {

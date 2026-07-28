@@ -12,12 +12,20 @@ import asyncio
 import base64
 import json
 import time
+import urllib.error
 import urllib.request
 from typing import Any, Dict, Optional, Tuple
 
 from ..utils.logger import setup_logger
 
 logger = setup_logger('Subscription')
+
+
+class SubscriptionError(RuntimeError):
+    def __init__(self, message: str, *, status: int = 0) -> None:
+        super().__init__(message)
+        self.status = status
+
 
 # ─── Codex (ChatGPT Plus/Pro) ───────────────────────────────────────────────
 CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
@@ -575,6 +583,36 @@ def _should_refresh(auth: Dict[str, Any]) -> bool:
     return int(time.time() * 1000) + _EAGER_REFRESH_MS >= expires
 
 
+def _http_request_with_error(req: urllib.request.Request) -> dict:
+    """执行 HTTP 请求，将网络/认证/限流错误转为 SubscriptionError。"""
+    try:
+        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        status = e.code
+        body = ""
+        try:
+            body = e.read().decode("utf-8", errors="replace")[:500]
+        except Exception:
+            pass
+        if status == 401:
+            raise SubscriptionError(f"认证失败，请重新登录 Codex 账号（{status}）", status=status)
+        if status == 403:
+            raise SubscriptionError(f"无权限访问 Codex 服务，请检查订阅状态（{status}）", status=status)
+        if status == 429:
+            raise SubscriptionError(f"Codex 请求过于频繁，请稍后重试（{status}）", status=status)
+        raise SubscriptionError(f"Codex 服务返回错误 {status}：{body or e.reason}", status=status)
+    except urllib.error.URLError as e:
+        reason = str(e.reason) if e.reason else str(e)
+        if "timed out" in reason.lower():
+            raise SubscriptionError("无法连接到 Codex 服务：连接超时，请检查网络或使用代理", status=0)
+        if "SSL" in reason or "ssl" in reason.lower() or "certificate" in reason.lower():
+            raise SubscriptionError("无法连接到 Codex 服务：SSL 握手失败，可能需要配置代理", status=0)
+        if "getaddrinfo" in reason.lower() or "name" in reason.lower():
+            raise SubscriptionError("无法解析 Codex 服务域名，请检查 DNS 设置", status=0)
+        raise SubscriptionError(f"无法连接到 Codex 服务：{reason}", status=0)
+
+
 async def _http_post_json(url: str, body: Dict[str, Any], token: Optional[str] = None, extra_headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """异步 POST JSON。"""
     loop = asyncio.get_event_loop()
@@ -591,8 +629,7 @@ async def _http_post_json(url: str, body: Dict[str, Any], token: Optional[str] =
             headers=headers,
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+        return _http_request_with_error(req)
 
     return await loop.run_in_executor(None, _do)
 
@@ -608,8 +645,7 @@ async def _http_get_json(url: str, token: Optional[str] = None, extra_headers: O
         if extra_headers:
             headers.update(extra_headers)
         req = urllib.request.Request(url, headers=headers, method="GET")
-        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+        return _http_request_with_error(req)
 
     return await loop.run_in_executor(None, _do)
 

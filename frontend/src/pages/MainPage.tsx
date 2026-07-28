@@ -1460,8 +1460,13 @@ export default function ChatPage() {
       if (needsTranscriptCalibration) {
         await scheduleConversationSync(finishedId, {
           reason: 'stream-attach-calibration',
-          include: ['transcript'],
+          include: ['transcript', 'tree'],
           messageRetries: 0,
+        });
+      } else {
+        await scheduleConversationSync(finishedId, {
+          reason: 'stream-finished-usage',
+          include: ['tree'],
         });
       }
       streamManager.cleanupIfController(finishedId, controller, runId);

@@ -1,4 +1,4 @@
-﻿import { create } from 'zustand';
+import { create } from 'zustand';
 import { devtools, persist } from 'zustand/middleware';
 import type {
   Conversation,
@@ -288,10 +288,14 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
           set({ loading: true, error: null });
           try {
             await conversationApi.switchNode(currentConversation.id, nodeId);
-            const branches = await conversationApi.getBranches(currentConversation.id);
+            const [branches, treeData] = await Promise.all([
+              conversationApi.getBranches(currentConversation.id),
+              conversationApi.getTree(currentConversation.id),
+            ]);
 
             set((state) => ({
               branches: branches || {},
+              treeData,
               currentNodeId: nodeId,
               currentConversation: state.currentConversation
                 ? { ...state.currentConversation, current_node_id: nodeId }
@@ -445,9 +449,10 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
         loadTree: async (conversationId: string) => {
           try {
             const data = await conversationApi.getTree(conversationId);
-            set({ treeData: data });
+            set({ treeData: data, error: null });
           } catch (err: any) {
             set({ error: err.message });
+            throw err;
           }
         },
 
