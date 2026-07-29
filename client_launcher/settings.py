@@ -12,7 +12,7 @@ CLIENT_HOME_ENV = "CHATTREE_CLIENT_HOME"
 DEFAULT_CLIENT_HOME_NAME = ".chattree-client"
 DEFAULT_LOCAL_PROFILE_ID = "local"
 DEFAULT_LOCAL_SERVER_PORT = 8001
-DEFAULT_LAUNCHER_PORT = 8000
+DEFAULT_LAUNCHER_PORT = 0
 MAX_CONNECT_TIMEOUT_SECONDS = 60.0
 MAX_START_TIMEOUT_SECONDS = 600.0
 MAX_POLL_INTERVAL_SECONDS = 10.0
@@ -135,7 +135,7 @@ class LauncherSettings:
                 values,
                 "CHATTREE_CLIENT_PORT",
                 DEFAULT_LAUNCHER_PORT,
-                minimum=1,
+                minimum=0,
                 maximum=65535,
             ),
             default_local_server_port=_integer_setting(

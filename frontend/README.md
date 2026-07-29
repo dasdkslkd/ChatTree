@@ -3,6 +3,7 @@
 前端由本地 launcher 绑定到一个不可变的 Profile。先从仓库根目录启动 launcher：
 
 ```powershell
+$env:CHATTREE_CLIENT_PORT='8000'
 python -m client_launcher
 ```
 
@@ -25,3 +26,5 @@ Profile 路径支持对话、节点和运行深链接：
 ```
 
 根路径 `/` 会被有意拒绝。查询参数和 URL hash 不属于深链接契约，也会被拒绝。Vite 只代理到 launcher 的 `8000` 端口，不会直接访问 Profile 后端的 `8001` 端口。
+
+`8000` 只用于上述前端开发组合。Launcher 默认让操作系统分配空闲端口，桌面应用从子进程的就绪消息取得实际地址，不依赖固定端口。

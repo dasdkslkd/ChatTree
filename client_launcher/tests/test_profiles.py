@@ -117,6 +117,19 @@ def test_launcher_settings_from_env_has_local_defaults_and_typed_overrides(
     assert empty_binary_default.server_binary == "chattree-server"
 
 
+def test_launcher_defaults_to_dynamic_port_and_rejects_negative_port(tmp_path: Path):
+    assert LauncherSettings.from_env(project_root=tmp_path, environ={}).port == 0
+    assert LauncherSettings.from_env(
+        project_root=tmp_path,
+        environ={"CHATTREE_CLIENT_PORT": "0"},
+    ).port == 0
+    with pytest.raises(ValueError, match="CHATTREE_CLIENT_PORT"):
+        LauncherSettings.from_env(
+            project_root=tmp_path,
+            environ={"CHATTREE_CLIENT_PORT": "-1"},
+        )
+
+
 @pytest.mark.parametrize(
     ("name", "invalid_value"),
     [

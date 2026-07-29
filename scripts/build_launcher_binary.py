@@ -3,9 +3,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -24,7 +26,7 @@ from build_server_binary import (
 SPEC_PATH = REPO_ROOT / "packaging" / "chattree-launcher.spec"
 DEFAULT_BUILD_ROOT = REPO_ROOT / ".build" / "launcher-binary"
 DEFAULT_DIST_DIR = REPO_ROOT / "dist"
-SMOKE_PORT = 8099
+LAUNCHER_READY_PREFIX = "CHATTREE_LAUNCHER_READY "
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -133,7 +135,7 @@ def smoke_start(binary: Path) -> None:
     try:
         env = os.environ.copy()
         env["CHATTREE_CLIENT_HOME"] = str(home)
-        env["CHATTREE_CLIENT_PORT"] = str(SMOKE_PORT)
+        env["CHATTREE_CLIENT_PORT"] = "0"
         env["CHATTREE_SERVER_BINARY"] = ""
         process = subprocess.Popen(
             [str(binary)],
@@ -146,7 +148,7 @@ def smoke_start(binary: Path) -> None:
             encoding="utf-8",
             errors="replace",
         )
-        _wait_for_status(SMOKE_PORT)
+        _wait_for_status(_wait_for_ready_port(process))
     finally:
         if process is not None:
             process.terminate()
@@ -156,6 +158,41 @@ def smoke_start(binary: Path) -> None:
                 process.kill()
                 process.wait()
         shutil.rmtree(home, ignore_errors=True)
+
+
+def _wait_for_ready_port(process: subprocess.Popen[str]) -> int:
+    if process.stdout is None:
+        raise SystemExit("launcher binary smoke has no stdout")
+    lines: queue.Queue[str] = queue.Queue()
+
+    def read_lines() -> None:
+        for line in process.stdout:
+            lines.put(line)
+
+    threading.Thread(target=read_lines, daemon=True).start()
+    deadline = time.monotonic() + 30
+    captured: list[str] = []
+    while time.monotonic() < deadline:
+        try:
+            line = lines.get(timeout=0.2).strip()
+        except queue.Empty:
+            if process.poll() is not None:
+                break
+            continue
+        captured.append(line)
+        if not line.startswith(LAUNCHER_READY_PREFIX):
+            continue
+        try:
+            ready = json.loads(line.removeprefix(LAUNCHER_READY_PREFIX))
+            host = ready["host"]
+            port = ready["port"]
+        except (KeyError, TypeError, ValueError):
+            break
+        if host == "127.0.0.1" and isinstance(port, int) and 1 <= port <= 65535:
+            return port
+        break
+    tail = "\n".join(captured[-20:])
+    raise SystemExit(f"launcher binary did not report a valid ready endpoint:\n{tail}")
 
 
 def _wait_for_status(port: int) -> None:

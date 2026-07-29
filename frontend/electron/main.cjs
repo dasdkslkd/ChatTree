@@ -3,8 +3,9 @@ const path = require("path");
 const fs = require("fs");
 const { spawn } = require("child_process");
 const http = require("http");
+const { createInterface } = require("readline");
 
-const LAUNCHER_PORT = 8000;
+const LAUNCHER_READY_PREFIX = "CHATTREE_LAUNCHER_READY ";
 const CLIENT_HOME = path.join(app.getPath("userData"), "client");
 const FRONTEND_DIST = path.join(__dirname, "..", "dist");
 const PROJECT_ROOT = path.join(__dirname, "..", "..");
@@ -12,6 +13,7 @@ const LOG_DIR = path.join(app.getPath("userData"), "logs");
 const LOG_FILE = path.join(LOG_DIR, "launcher.log");
 
 let launcherProcess = null;
+let launcherOrigin = null;
 let logStream = null;
 let shellWindow = null;
 const tabs = {};
@@ -56,34 +58,19 @@ function resolveServerBinary() {
 }
 
 function startLauncher() {
-  let cmd, args;
-  try {
-    [cmd, ...args] = resolveLauncherCmd();
-  } catch (err) {
-    console.error(err.message);
-    app.quit();
-    return;
-  }
+  const [cmd, ...args] = resolveLauncherCmd();
 
   const env = {
     ...process.env,
     CHATTREE_CLIENT_HOME: CLIENT_HOME,
-    CHATTREE_CLIENT_PORT: String(LAUNCHER_PORT),
+    CHATTREE_CLIENT_PORT: "0",
     CHATTREE_FRONTEND_DIST: FRONTEND_DIST,
   };
-  try {
-    const serverBinary = resolveServerBinary();
-    if (serverBinary) {
-      env.CHATTREE_SERVER_BINARY = serverBinary;
-    }
-  } catch (err) {
-    console.error(err.message);
-    app.quit();
-    return;
+  const serverBinary = resolveServerBinary();
+  if (serverBinary) {
+    env.CHATTREE_SERVER_BINARY = serverBinary;
   }
 
-  // Open a persistent log file so launcher output survives app exit and can
-  // be inspected for troubleshooting.
   fs.mkdirSync(LOG_DIR, { recursive: true });
   logStream = fs.createWriteStream(LOG_FILE, { flags: "a" });
   logStream.write(`\n--- launcher started ${new Date().toISOString()} ---\n`);
@@ -94,80 +81,102 @@ function startLauncher() {
     stdio: ["ignore", "pipe", "pipe"],
   });
 
-  const writeLog = (prefix, data) => {
+  const writeLog = (data) => {
     const chunk = `[launcher] ${data}`;
     process.stdout.write(chunk);
     if (logStream && !logStream.destroyed) {
       logStream.write(data);
     }
   };
-  launcherProcess.stdout.on("data", (data) => writeLog("stdout", data));
-  launcherProcess.stderr.on("data", (data) => writeLog("stderr", data));
-  launcherProcess.on("error", (err) => {
-    console.error("Failed to start launcher:", err.message);
-    if (logStream && !logStream.destroyed) {
-      logStream.write(`Failed to start launcher: ${err.message}\n`);
-    }
-    app.quit();
-  });
-  launcherProcess.on("exit", () => {
-    if (logStream && !logStream.destroyed) {
-      logStream.end(`--- launcher exited ${new Date().toISOString()} ---\n`);
-    }
+
+  return new Promise((resolve, reject) => {
+    const fail = (error) => {
+      clearTimeout(timeout);
+      if (launcherProcess?.exitCode === null && launcherProcess.signalCode === null) {
+        launcherProcess.kill();
+      }
+      reject(error);
+    };
+
+    const timeout = setTimeout(() => {
+      fail(new Error("Launcher did not report a ready endpoint within 15 seconds"));
+    }, 15000);
+
+    launcherProcess.stdout.on("data", writeLog);
+    createInterface({ input: launcherProcess.stdout }).on("line", (line) => {
+      if (!line.startsWith(LAUNCHER_READY_PREFIX)) return;
+      try {
+        const ready = JSON.parse(line.slice(LAUNCHER_READY_PREFIX.length));
+        if (
+          ready.host !== "127.0.0.1"
+          || !Number.isInteger(ready.port)
+          || ready.port < 1
+          || ready.port > 65535
+        ) {
+          throw new Error("invalid endpoint");
+        }
+        clearTimeout(timeout);
+        launcherOrigin = `http://${ready.host}:${ready.port}`;
+        resolve();
+      } catch {
+        fail(new Error("Launcher reported an invalid ready endpoint"));
+      }
+    });
+    launcherProcess.stderr.on("data", writeLog);
+    launcherProcess.on("error", (error) => {
+      fail(new Error(`Failed to start launcher: ${error.message}`));
+    });
+    launcherProcess.on("exit", (code, signal) => {
+      if (logStream && !logStream.destroyed) {
+        logStream.end(`--- launcher exited ${new Date().toISOString()} ---\n`);
+      }
+      if (!launcherOrigin) {
+        clearTimeout(timeout);
+        reject(new Error(`Launcher exited before ready (${signal || code})`));
+      } else if (!isQuitting) {
+        launcherOrigin = null;
+        dialog.showErrorBox("ChatTree 启动器已退出", "Launcher 意外退出，应用将关闭。");
+        app.quit();
+      }
+    });
   });
 }
 
 async function stopLauncher() {
   if (!launcherProcess) return;
+  const processToStop = launcherProcess;
 
-  // Request graceful shutdown so the launcher can run its lifespan finally
-  // block (sessions.close() -> cascades server termination). Ignore errors
-  // since the launcher may already be gone.
-  try {
-    await launcherApi("/client/v1/shutdown", "POST");
-  } catch (_) {
-    /* ignore */
+  if (processToStop.exitCode === null && launcherOrigin) {
+    try {
+      await launcherApi("/client/v1/shutdown", "POST");
+    } catch (_) {
+      /* ignore */
+    }
   }
 
-  // Wait up to 5s for the launcher process to exit on its own.
-  await new Promise((resolve) => {
-    const onExit = () => resolve();
-    launcherProcess.once("exit", onExit);
-    setTimeout(onExit, 5000);
-  });
+  if (processToStop.exitCode === null && processToStop.signalCode === null) {
+    await new Promise((resolve) => {
+      const onExit = () => resolve();
+      processToStop.once("exit", onExit);
+      setTimeout(onExit, 5000);
+    });
+  }
 
-  // Force kill if still running.
-  if (launcherProcess && launcherProcess.exitCode === null && launcherProcess.signalCode === null) {
-    launcherProcess.kill();
+  if (processToStop.exitCode === null && processToStop.signalCode === null) {
+    processToStop.kill();
   }
   launcherProcess = null;
-}
-
-function waitForLauncher(url, timeoutMs = 15000) {
-  const start = Date.now();
-  return new Promise((resolve, reject) => {
-    const check = () => {
-      http.get(url, (res) => {
-        if (res.statusCode === 200) resolve();
-        else retry();
-      }).on("error", retry);
-    };
-    const retry = () => {
-      if (Date.now() - start > timeoutMs) {
-        reject(new Error(`Launcher not ready after ${timeoutMs}ms`));
-      } else {
-        setTimeout(check, 200);
-      }
-    };
-    check();
-  });
+  launcherOrigin = null;
 }
 
 // ── HTTP helpers ───────────────────────────────────────────────────────
 
 function launcherApi(apiPath, method = "GET", body = null) {
+  if (!launcherOrigin) {
+    return Promise.reject(new Error("Launcher is not ready"));
+  }
   return new Promise((resolve, reject) => {
-    const url = new URL(apiPath, `http://127.0.0.1:${LAUNCHER_PORT}`);
+    const url = new URL(apiPath, launcherOrigin);
     const options = { method, headers: {} };
     if (body) {
       const json = JSON.stringify(body);
@@ -287,7 +296,7 @@ function createTabView(profileId) {
       nodeIntegration: false,
     },
   });
-  view.webContents.loadURL(`http://127.0.0.1:${LAUNCHER_PORT}/s/${encodeURIComponent(profileId)}`);
+  view.webContents.loadURL(`${launcherOrigin}/s/${encodeURIComponent(profileId)}`);
   view.webContents.on("before-input-event", handleShortcut);
   return view;
 }
@@ -479,17 +488,19 @@ function registerIpc() {
 app.whenReady().then(async () => {
   Menu.setApplicationMenu(null);
   registerIpc();
-  startLauncher();
-  await waitForLauncher(`http://127.0.0.1:${LAUNCHER_PORT}/client/v1/profiles/local/status`);
+  await startLauncher();
   createShellWindow();
+}).catch((error) => {
+  console.error(error);
+  dialog.showErrorBox("ChatTree 启动失败", error.message);
+  app.quit();
 });
-
-let isQuitting = false;
 
 app.on("window-all-closed", () => {
   app.quit();
 });
 
+let isQuitting = false;
 app.on("before-quit", async (event) => {
   if (isQuitting) return;
   event.preventDefault();
