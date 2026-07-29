@@ -71,7 +71,7 @@ class StrictRequestModel(BaseModel):
 
 class CreateProfileRequest(StrictRequestModel):
     label: str = Field(min_length=1, max_length=120)
-    auto_connect: bool = True
+    auto_connect: bool = False
     server_home: str = Field(min_length=1)
     server_port: int = Field(
         ge=1,

@@ -357,24 +357,25 @@ def test_real_process_protocol_idempotency_restart_and_stop(tmp_path: Path) -> N
             assert conflict.status_code == 409
             assert conflict.json()["error"]["code"] == "idempotency_key_conflict"
 
-            statuses: list[str] = []
+            patches: list[dict[str, Any]] = []
             with client.stream(
                 "GET",
-                f"/p/local/api/v1/runs/{first_run['run_id']}/attach",
+                f"/p/local/api/v1/runs/{first_run['run_id']}/events?from_event=0",
                 headers=lease_headers_1,
-            ) as attached:
-                attached.raise_for_status()
+            ) as events:
+                events.raise_for_status()
                 done = False
-                for line in attached.iter_lines():
+                for line in events.iter_lines():
                     if not line.startswith("data:"):
                         continue
                     value = line[5:].strip()
                     if value == "[DONE]":
                         done = True
                         break
-                    statuses.append(str(json.loads(value).get("status")))
+                    patches.append(json.loads(value))
             assert done is True
-            assert {"start", "content", "complete"}.issubset(statuses)
+            assert patches
+            assert all(patch["type"] == "transcript_patch" for patch in patches)
 
         second_env = env.copy()
         second_env["CHATTREE_SERVER_PORT"] = str(second_server_port)

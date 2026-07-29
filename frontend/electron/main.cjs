@@ -336,10 +336,12 @@ async function addTab(profileId, label, kind, alias = null, connectFn = null) {
   try {
     const connect = connectFn || (() => connectProfile(profileId));
     const result = await connect();
+    if (tabs[profileId] !== tab) return;
     tab.serverInstanceId = result?.serverInstanceId || null;
     tab.status = "ready";
     emitTabsUpdated();
   } catch (err) {
+    if (tabs[profileId] !== tab) return;
     tab.status = "error";
     tab.error = err.message;
     emitTabsUpdated();
@@ -381,8 +383,6 @@ async function closeTab(profileId) {
   const tab = tabs[profileId];
   if (!tab) return;
 
-  // Capture server instance id before removing the tab so we can request
-  // a cooperative server shutdown (not just a tunnel disconnect).
   const { serverInstanceId } = tab;
 
   if (tab.view) {
@@ -403,8 +403,9 @@ async function closeTab(profileId) {
   }
   emitTabsUpdated();
 
-  // For ready sessions, stop the remote server first (sends shutdown
-  // through the tunnel). For error/connecting sessions, only disconnect.
+  // Local Server belongs to the application session, not to its tab.
+  if (tab.kind === "local") return;
+
   if (serverInstanceId) {
     await launcherApi(
       `/client/v1/profiles/${encodeURIComponent(profileId)}/server/stop`,
@@ -425,7 +426,7 @@ function layoutActiveTab() {
 
 // ── Window creation ────────────────────────────────────────────────────
 
-function createShellWindow() {
+async function createShellWindow() {
   shellWindow = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -438,13 +439,12 @@ function createShellWindow() {
     },
   });
 
-  shellWindow.loadFile(path.join(__dirname, "shell.html"));
-
   shellWindow.webContents.on("before-input-event", handleShortcut);
   shellWindow.on("resize", layoutActiveTab);
   shellWindow.on("closed", () => {
     shellWindow = null;
   });
+  await shellWindow.loadFile(path.join(__dirname, "shell.html"));
 }
 
 // ── IPC handlers ───────────────────────────────────────────────────────
@@ -489,7 +489,8 @@ app.whenReady().then(async () => {
   Menu.setApplicationMenu(null);
   registerIpc();
   await startLauncher();
-  createShellWindow();
+  await createShellWindow();
+  await addTab("local", "Local", "local");
 }).catch((error) => {
   console.error(error);
   dialog.showErrorBox("ChatTree 启动失败", error.message);

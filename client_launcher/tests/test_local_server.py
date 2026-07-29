@@ -14,11 +14,11 @@ import client_launcher.local_server as local_server
 from client_launcher.http_errors import REQUEST_ID_RE
 from client_launcher.local_server import (
     LocalServerConnector,
-    LocalServerBinaryError,
     LocalServerIdentityError,
     LocalServerProtocolError,
     LocalServerResponseError,
     LocalServerShutdownUncertainError,
+    LocalServerSpawnError,
     LocalServerStartExitedError,
     LocalServerStartTimeoutError,
     LocalServerStopTimeoutError,
@@ -153,35 +153,6 @@ class FakePopen:
         return self.process
 
 
-class FakeCaptureProcess(FakeProcess):
-    def __init__(
-        self,
-        return_code: int = 0,
-        *,
-        output: str = "chattree-server 0.1.0\n",
-    ) -> None:
-        super().__init__([return_code])
-        self.output = output
-
-    def communicate(self, timeout=None):
-        return self.output, None
-
-    def wait(self, timeout=None):
-        return self._return_codes[-1]
-
-
-class FakeTimeoutProcess(FakeProcess):
-    def __init__(self) -> None:
-        super().__init__([None])
-
-    def communicate(self, timeout=None):
-        raise subprocess.TimeoutExpired("chattree-server", timeout)
-
-    def wait(self, timeout=None):
-        self._return_codes = [0]
-        return 0
-
-
 class FakeClock:
     def __init__(self) -> None:
         self.now = 0.0
@@ -314,16 +285,15 @@ def test_connection_refusal_spawns_detached_production_server(tmp_path: Path):
     assert kwargs["env"]["PYTHONIOENCODING"] == "utf-8"
     assert kwargs["stdout"].closed
     assert not list((tmp_path / "client" / "logs").glob("*.spawn.pid"))
-    assert phases == ["handshake", "local_version", "local_start", "handshake"]
+    assert phases == ["handshake", "local_start", "handshake"]
     assert process.terminate_calls == 1
     assert process.kill_calls == 0
 
 
-def test_binary_mode_checks_version_then_spawns_chattree_server_binary(
+def test_binary_mode_spawns_chattree_server_serve_directly(
     tmp_path: Path,
 ):
     requests = 0
-    calls: list[list[str]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal requests
@@ -332,21 +302,8 @@ def test_binary_mode_checks_version_then_spawns_chattree_server_binary(
             raise httpx.ConnectError("refused", request=request)
         return _handshake()
 
-    def popen(argv, **kwargs):
-        calls.append(list(argv))
-        if "--version" in argv:
-            assert kwargs["stdout"] is subprocess.PIPE
-            return FakeCaptureProcess(output="chattree-server 0.1.0\n")
-        assert kwargs["stdout"] is subprocess.PIPE
-        return FakeCaptureProcess(
-            output=(
-                '{"status":"started","host":"127.0.0.1",'
-                '"port":18001,"log_path":"'
-                + str(tmp_path / "server.log").replace("\\", "\\\\")
-                + '"}\n'
-            )
-        )
-
+    process = FakeProcess()
+    popen = FakePopen(process)
     connector = LocalServerConnector(
         _settings(
             tmp_path,
@@ -361,130 +318,73 @@ def test_binary_mode_checks_version_then_spawns_chattree_server_binary(
     asyncio.run(connector.close())
 
     assert connected.server_instance_id == SERVER_ID
-    assert calls == [
-        [str(tmp_path / "bin" / "chattree-server"), "--version"],
-        [
-            str(tmp_path / "bin" / "chattree-server"),
-            "start",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            "18001",
-            "--home",
-            str((tmp_path / "server-home").resolve()),
-        ],
+    assert len(popen.calls) == 1
+    argv, kwargs = popen.calls[0]
+    assert argv == [
+        str(tmp_path / "bin" / "chattree-server"),
+        "serve",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "18001",
+        "--home",
+        str((tmp_path / "server-home").resolve()),
     ]
+    assert kwargs["stdout"].closed
+    assert kwargs["env"]["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
+    assert process.terminate_calls == 1
 
 
-def test_binary_mode_rejects_old_local_chattree_server_binary(tmp_path: Path):
+def test_spawned_server_with_old_handshake_is_terminated(tmp_path: Path):
+    requests = 0
+
     def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("refused", request=request)
+        nonlocal requests
+        requests += 1
+        if requests == 1:
+            raise httpx.ConnectError("refused", request=request)
+        return _handshake(server_version="0.0.1")
 
-    def popen(argv, **_kwargs):
-        if "--version" in argv:
-            return FakeCaptureProcess(output="chattree-server 0.0.1\n")
-        raise AssertionError("incompatible binary must not be spawned")
-
+    process = FakeProcess()
+    popen = FakePopen(process)
     connector = LocalServerConnector(
         _settings(tmp_path, server_binary="chattree-server"),
         transport=httpx.MockTransport(handler),
         popen_factory=popen,
     )
 
-    with pytest.raises(LocalServerBinaryError) as exc_info:
+    with pytest.raises(LocalServerProtocolError) as exc_info:
         asyncio.run(connector.connect(_profile(tmp_path), None))
     asyncio.run(connector.close())
 
-    assert exc_info.value.code == "local_server_version_incompatible"
+    assert exc_info.value.code == "local_server_version_mismatch"
     assert exc_info.value.status_code == 409
     assert exc_info.value.details == {
-        "required_server_version": "0.1.0",
+        "minimum_server_version": "0.1.0",
         "observed_server_version": "0.0.1",
     }
+    assert len(popen.calls) == 1
+    assert process.terminate_calls == 1
 
 
-@pytest.mark.parametrize(
-    ("process", "expected_code"),
-    [
-        (
-            FakeCaptureProcess(return_code=17, output="boom\n"),
-            "local_server_version_failed",
-        ),
-        (
-            FakeCaptureProcess(output="not a version\n"),
-            "local_server_version_invalid",
-        ),
-    ],
-)
-def test_binary_mode_reports_local_version_probe_failures(
-    tmp_path: Path,
-    process: FakeCaptureProcess,
-    expected_code: str,
-):
+def test_missing_server_binary_is_reported_as_spawn_failure(tmp_path: Path):
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("refused", request=request)
 
-    def popen(argv, **_kwargs):
-        if "--version" in argv:
-            return process
-        raise AssertionError("failed version probe must not spawn")
+    def fail_popen(*_args, **_kwargs):
+        raise OSError("missing")
 
     connector = LocalServerConnector(
         _settings(tmp_path, server_binary="chattree-server"),
         transport=httpx.MockTransport(handler),
-        popen_factory=popen,
+        popen_factory=fail_popen,
     )
 
-    with pytest.raises(LocalServerBinaryError) as exc_info:
+    with pytest.raises(LocalServerSpawnError) as exc_info:
         asyncio.run(connector.connect(_profile(tmp_path), None))
     asyncio.run(connector.close())
 
-    assert exc_info.value.code == expected_code
-
-
-def test_binary_mode_reports_missing_local_binary(tmp_path: Path):
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("refused", request=request)
-
-    def popen(argv, **_kwargs):
-        if "--version" in argv:
-            raise OSError("missing")
-        raise AssertionError("missing binary must not spawn")
-
-    connector = LocalServerConnector(
-        _settings(tmp_path, server_binary="chattree-server"),
-        transport=httpx.MockTransport(handler),
-        popen_factory=popen,
-    )
-
-    with pytest.raises(LocalServerBinaryError) as exc_info:
-        asyncio.run(connector.connect(_profile(tmp_path), None))
-    asyncio.run(connector.close())
-
-    assert exc_info.value.code == "local_server_binary_not_found"
-
-
-def test_binary_mode_reports_local_version_timeout(tmp_path: Path):
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("refused", request=request)
-
-    def popen(argv, **_kwargs):
-        if "--version" in argv:
-            return FakeTimeoutProcess()
-        raise AssertionError("timed out version probe must not spawn")
-
-    connector = LocalServerConnector(
-        _settings(tmp_path, server_binary="chattree-server"),
-        transport=httpx.MockTransport(handler),
-        popen_factory=popen,
-    )
-
-    with pytest.raises(LocalServerBinaryError) as exc_info:
-        asyncio.run(connector.connect(_profile(tmp_path), None))
-    asyncio.run(connector.close())
-
-    assert exc_info.value.code == "local_server_version_timeout"
-    assert exc_info.value.status_code == 504
+    assert exc_info.value.code == "local_server_spawn_failed"
 
 
 def test_loopback_connect_timeout_still_starts_server(tmp_path: Path):
@@ -747,7 +647,7 @@ def test_child_early_exit_is_reported(tmp_path: Path):
     assert exc_info.value.log_tail in str(exc_info.value)
 
 
-def test_start_timeout_does_not_kill_server(tmp_path: Path):
+def test_start_timeout_terminates_spawned_server(tmp_path: Path):
     requests = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -768,11 +668,11 @@ def test_start_timeout_does_not_kill_server(tmp_path: Path):
 
     with pytest.raises(LocalServerStartTimeoutError) as exc_info:
         asyncio.run(connector.connect(_profile(tmp_path), None))
-    assert process.terminate_calls == 0
+    assert process.terminate_calls == 1
+    assert process.kill_calls == 0
     asyncio.run(connector.close())
 
     assert process.terminate_calls == 1
-    assert process.kill_calls == 0
     assert exc_info.value.log_tail == "startup is still waiting"
     assert exc_info.value.log_tail in str(exc_info.value)
     assert requests == 3
@@ -803,10 +703,10 @@ def test_start_timeout_bounds_a_slow_readiness_probe(tmp_path: Path):
                 connector.connect(_profile(tmp_path), None),
                 timeout=0.25,
             )
-        assert process.terminate_calls == 0
+        assert process.terminate_calls == 1
+        assert requests == 2
         await connector.close()
 
-        assert requests == 2
         assert process.terminate_calls == 1
         assert process.kill_calls == 0
 

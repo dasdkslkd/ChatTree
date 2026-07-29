@@ -503,7 +503,7 @@ def test_profile_write_failure_uses_launcher_error_envelope(
     assert store.list() == before
 
 
-def test_new_local_profile_defaults_to_auto_connect(tmp_path: Path):
+def test_new_local_profile_does_not_auto_connect_by_default(tmp_path: Path):
     app, _, _ = _app(tmp_path)
 
     with TestClient(app) as client:
@@ -517,7 +517,7 @@ def test_new_local_profile_defaults_to_auto_connect(tmp_path: Path):
         )
 
     assert response.status_code == 201
-    assert response.json()["auto_connect"] is True
+    assert response.json()["auto_connect"] is False
 
 
 def test_origin_and_validation_are_rejected_with_launcher_errors(tmp_path: Path):

@@ -132,6 +132,7 @@ def run_pyinstaller(
 def smoke_start(binary: Path) -> None:
     home = Path(tempfile.mkdtemp(prefix="chattree-launcher-smoke-"))
     process: subprocess.Popen | None = None
+    port: int | None = None
     try:
         env = os.environ.copy()
         env["CHATTREE_CLIENT_HOME"] = str(home)
@@ -148,14 +149,24 @@ def smoke_start(binary: Path) -> None:
             encoding="utf-8",
             errors="replace",
         )
-        _wait_for_status(_wait_for_ready_port(process))
+        port = _wait_for_ready_port(process)
+        _wait_for_status(port)
     finally:
         if process is not None:
-            process.terminate()
+            if process.poll() is None and port is not None:
+                try:
+                    request = urllib.request.Request(
+                        f"http://127.0.0.1:{port}/client/v1/shutdown",
+                        data=b"",
+                        method="POST",
+                    )
+                    urllib.request.urlopen(request, timeout=5).close()
+                except OSError:
+                    pass
             try:
                 process.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                process.kill()
+                process.terminate()
                 process.wait()
         shutil.rmtree(home, ignore_errors=True)
 

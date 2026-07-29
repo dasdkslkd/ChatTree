@@ -17,8 +17,7 @@ require.extensions['.ts'] = function loadTs(module, filename) {
   module._compile(output, filename);
 };
 
-const foldingPath = path.join(__dirname, '../src/utils/assistantTimelineFolding.ts');
-const { formatProcessedDuration } = require(foldingPath);
+const { formatProcessedDuration } = require(path.join(__dirname, '../src/utils/time.ts'));
 
 function testFormatsProcessedDurationWithHours() {
   assert.equal(formatProcessedDuration(5_550_000), '1h32m30s');

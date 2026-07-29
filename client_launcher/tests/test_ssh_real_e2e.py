@@ -126,7 +126,7 @@ def test_real_ssh_connect_proxy_and_sse_direct_response(tmp_path: Path):
         run_id = started.json()["run_id"]
 
         stream = client.get(
-            f"/p/{encoded_profile}/api/v1/runs/{run_id}/attach?from_event=0",
+            f"/p/{encoded_profile}/api/v1/runs/{run_id}/events?from_event=0",
             headers=lease_headers,
         )
         assert stream.status_code == 200, stream.text

@@ -21,7 +21,7 @@ const {
   ACTIVE_STREAM_IDLE_POLL_MS,
   ACTIVE_STREAM_VISIBLE_POLL_MS,
   getActiveStreamPollingDelay,
-} = require(path.join(__dirname, '../src/utils/activeStreamPolling.ts'));
+} = require(path.join(__dirname, '../src/utils/streaming.ts'));
 
 function testUsesFastPollingWhenStreamsAreActive() {
   assert.equal(getActiveStreamPollingDelay({ activeStreamCount: 2, documentHidden: false }), ACTIVE_STREAM_VISIBLE_POLL_MS);

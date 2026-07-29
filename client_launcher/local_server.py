@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import json
 import os
 import re
 import shlex
@@ -26,7 +25,6 @@ from client_launcher.server_compat import (
     handshake_protocol_error,
     handshake_protocol_details,
     handshake_version_details,
-    parse_chattree_server_version,
 )
 
 if TYPE_CHECKING:
@@ -126,10 +124,6 @@ class LocalServerIdentityError(LocalServerError):
 
 
 class LocalServerSpawnError(LocalServerError):
-    pass
-
-
-class LocalServerBinaryError(LocalServerError):
     pass
 
 
@@ -268,23 +262,28 @@ class LocalServerConnector:
                 if not self._port_available(port):
                     raise self._transport_error(endpoint, exc) from exc.cause
 
-            await self._emit_phase(phase_callback, "local_version")
-            self._probe_configured_binary_version()
             await self._emit_phase(phase_callback, "local_start")
-            process: subprocess.Popen[Any] | None = None
-            if getattr(self._settings, "server_binary", None):
-                log_path = self._start_server(profile, server_home, port)
-            else:
-                process, log_path = self._spawn(profile, server_home, port)
-                self._track_process(process)
-            return await self._wait_for_ready(
-                endpoint,
-                profile,
-                phase_callback,
-                process,
-                log_path,
-                request_id=request_id,
-            )
+            process, log_path = self._spawn(profile, server_home, port)
+            self._track_process(process)
+            try:
+                return await self._wait_for_ready(
+                    endpoint,
+                    profile,
+                    phase_callback,
+                    process,
+                    log_path,
+                    request_id=request_id,
+                )
+            except BaseException:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        await asyncio.to_thread(process.wait, 5)
+                    except (subprocess.TimeoutExpired, OSError):
+                        process.kill()
+                        await asyncio.to_thread(process.wait)
+                self._spawned_processes.discard(process)
+                raise
 
     async def close(self) -> None:
         reaper = self._reaper_task
@@ -678,6 +677,8 @@ class LocalServerConnector:
                 "PYTHONIOENCODING": "utf-8",
             }
         )
+        if getattr(self._settings, "server_binary", None):
+            env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
         kwargs: dict[str, Any] = {
             "cwd": str(project_root),
             "env": env,
@@ -743,249 +744,6 @@ class LocalServerConnector:
             "main",
         ]
 
-    def _server_cli_base_argv(self) -> list[str]:
-        binary = getattr(self._settings, "server_binary", None)
-        if binary:
-            return _configured_binary_argv(binary)
-        server_python = _configured_python_path(self._settings.server_python)
-        return [
-            str(server_python),
-            "-m",
-            "backend.server_cli",
-        ]
-
-    def _server_start_argv(self, port: int, server_home: Path) -> list[str]:
-        return [
-            *self._server_cli_base_argv(),
-            "start",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port),
-            "--home",
-            str(server_home),
-        ]
-
-    def _server_version_argv(self) -> list[str] | None:
-        if not getattr(self._settings, "server_binary", None):
-            return None
-        return [*self._server_cli_base_argv(), "--version"]
-
-    def _server_command_cwd(self) -> str:
-        if getattr(self._settings, "server_binary", None):
-            return str(Path.cwd())
-        return str(Path(self._settings.project_root).expanduser().resolve())
-
-    def _probe_configured_binary_version(self) -> None:
-        argv = self._server_version_argv()
-        if argv is None:
-            return
-        try:
-            process = self._popen_factory(
-                argv,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                shell=False,
-                close_fds=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                cwd=self._server_command_cwd(),
-            )
-        except OSError as exc:
-            raise LocalServerBinaryError(
-                "local_server_binary_not_found",
-                f"Local chattree-server binary could not be started: {exc}",
-                phase="local_version",
-                retryable=False,
-            ) from exc
-        try:
-            output, _stderr = process.communicate(
-                timeout=float(self._settings.connect_timeout_seconds)
-            )
-        except subprocess.TimeoutExpired as exc:
-            process.kill()
-            try:
-                process.communicate(timeout=5)
-            except (subprocess.TimeoutExpired, OSError):
-                process.wait()
-            raise LocalServerBinaryError(
-                "local_server_version_timeout",
-                "Local chattree-server --version timed out",
-                phase="local_version",
-                retryable=True,
-                status_code=504,
-            ) from exc
-        if process.poll() != 0:
-            raise LocalServerBinaryError(
-                "local_server_version_failed",
-                "Local chattree-server --version failed",
-                phase="local_version",
-                retryable=True,
-                details={"output": str(output or "").strip()},
-            )
-        version = parse_chattree_server_version(str(output or ""))
-        if version is None:
-            raise LocalServerBinaryError(
-                "local_server_version_invalid",
-                "Local chattree-server --version returned an invalid response",
-                phase="local_version",
-                retryable=False,
-                details={"output": str(output or "").strip()},
-            )
-        check = check_server_version(version)
-        if not check.compatible:
-            raise LocalServerBinaryError(
-                "local_server_version_incompatible",
-                (
-                    "Local chattree-server binary is incompatible: "
-                    f"required {MIN_SERVER_VERSION}, got {version}"
-                ),
-                phase="local_version",
-                retryable=False,
-                status_code=409,
-                details={
-                    "required_server_version": check.minimum_version,
-                    "observed_server_version": check.observed_version,
-                },
-            )
-
-    def _start_server(
-        self,
-        profile: ServerProfile,
-        server_home: Path,
-        port: int,
-    ) -> Path:
-        log_path = self._local_log_path(profile)
-        argv = self._server_start_argv(port, server_home)
-        env = os.environ.copy()
-        env.update(
-            {
-                "CHATTREE_HOME": str(server_home),
-                "PYTHONUNBUFFERED": "1",
-                "PYTHONIOENCODING": "utf-8",
-            }
-        )
-        try:
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            raise LocalServerSpawnError(
-                "local_server_log_failed",
-                f"Could not create local server log directory: {exc}",
-                phase="local_start",
-                retryable=False,
-            ) from exc
-        try:
-            process = self._popen_factory(
-                argv,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                env=env,
-                cwd=self._server_command_cwd(),
-                shell=False,
-                close_fds=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-            )
-        except OSError as exc:
-            raise LocalServerSpawnError(
-                "local_server_spawn_failed",
-                f"Could not start local server package: {exc}",
-                phase="local_start",
-                retryable=True,
-            ) from exc
-        try:
-            output, _stderr = process.communicate(
-                timeout=float(self._settings.start_timeout_seconds)
-            )
-        except subprocess.TimeoutExpired as exc:
-            process.kill()
-            try:
-                output, _stderr = process.communicate(timeout=5)
-            except (subprocess.TimeoutExpired, OSError):
-                process.wait()
-                output = ""
-            self._append_log(log_path, str(output or ""))
-            raise LocalServerStartTimeoutError(
-                f"http://127.0.0.1:{port}",
-                log_path,
-                _read_log_tail(log_path),
-            ) from exc
-        self._append_log(log_path, str(output or ""))
-        if process.poll() != 0:
-            tail = _read_log_tail(log_path) or str(output or "").strip()
-            raise LocalServerSpawnError(
-                "local_server_start_failed",
-                _startup_error_message(
-                    "Local chattree-server start failed",
-                    log_path,
-                    tail,
-                ),
-                phase="local_start",
-                retryable=True,
-                details={"log_path": str(log_path), "log_tail": tail},
-            )
-        payload = self._parse_start_output(str(output or ""), log_path)
-        payload_log_path = payload.get("log_path")
-        if isinstance(payload_log_path, str) and payload_log_path.strip():
-            return Path(payload_log_path)
-        return log_path
-
-    def _parse_start_output(
-        self,
-        output: str,
-        log_path: Path,
-    ) -> Mapping[str, Any]:
-        payload: Mapping[str, Any] | None = None
-        for line in reversed(output.splitlines()):
-            stripped = line.strip()
-            if not stripped.startswith("{"):
-                continue
-            try:
-                value = json.loads(stripped)
-            except ValueError:
-                continue
-            if isinstance(value, Mapping):
-                payload = value
-                break
-        if payload is None:
-            raise LocalServerSpawnError(
-                "local_server_start_invalid_json",
-                f"Local chattree-server start did not return JSON; see {log_path}",
-                phase="local_start",
-                retryable=True,
-                details={
-                    "log_path": str(log_path),
-                    "log_tail": _read_log_tail(log_path),
-                },
-            )
-        host = payload.get("host")
-        port = payload.get("port")
-        if host != "127.0.0.1":
-            raise LocalServerSpawnError(
-                "local_server_start_unsupported_host",
-                "Local chattree-server start returned an unsupported host",
-                phase="local_start",
-                retryable=False,
-                details={"payload": dict(payload), "log_path": str(log_path)},
-            )
-        if (
-            isinstance(port, bool)
-            or not isinstance(port, int)
-            or not 1 <= port <= 65535
-        ):
-            raise LocalServerSpawnError(
-                "local_server_start_invalid_json",
-                "Local chattree-server start returned an invalid port",
-                phase="local_start",
-                retryable=False,
-                details={"payload": dict(payload), "log_path": str(log_path)},
-            )
-        return payload
-
     def _local_log_path(self, profile: ServerProfile) -> Path:
         profile_id = str(getattr(profile, "id", "local"))
         safe_profile_id = re.sub(r"[^A-Za-z0-9._-]+", "-", profile_id)
@@ -995,19 +753,6 @@ class LocalServerConnector:
             / "logs"
             / f"local-server-{safe_profile_id}.log"
         )
-
-    @staticmethod
-    def _append_log(log_path: Path, output: str) -> None:
-        if not output:
-            return
-        try:
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            with log_path.open("ab") as handle:
-                handle.write(output.encode("utf-8", errors="replace"))
-                if not output.endswith("\n"):
-                    handle.write(b"\n")
-        except OSError:
-            return
 
     async def _wait_for_ready(
         self,

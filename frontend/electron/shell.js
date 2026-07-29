@@ -24,7 +24,9 @@ function renderOverlay() {
     overlay.classList.remove("error");
     overlayRetry.style.display = "none";
     overlayTitle.textContent = `正在连接 ${active.label}…`;
-    overlaySubtitle.textContent = "正在建立 SSH 隧道并握手，请稍候";
+    overlaySubtitle.textContent = active.kind === "local"
+      ? "正在启动本地 Server 并完成握手，请稍候"
+      : "正在建立 SSH 隧道并握手，请稍候";
     overlay.style.display = "flex";
   } else if (active.status === "error") {
     overlay.classList.add("error");

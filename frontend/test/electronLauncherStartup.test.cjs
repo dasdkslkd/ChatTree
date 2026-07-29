@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const source = fs.readFileSync(path.join(__dirname, '../electron/main.cjs'), 'utf8');
+const shellSource = fs.readFileSync(path.join(__dirname, '../electron/shell.js'), 'utf8');
 
 assert.match(
   source,
@@ -23,4 +24,29 @@ assert.match(
   source,
   /view\.webContents\.loadURL\(`\$\{launcherOrigin\}\/s\//,
   'Profile views should use the reported origin',
+);
+assert.match(
+  source,
+  /async function createShellWindow\(\)[\s\S]*await shellWindow\.loadFile/,
+  'Electron should wait for the shell renderer before publishing the initial tab',
+);
+assert.match(
+  source,
+  /await createShellWindow\(\);\s+await addTab\("local", "Local", "local"\);/,
+  'Electron should open the Local profile as the initial tab',
+);
+assert.match(
+  source,
+  /if \(tabs\[profileId\] !== tab\) return;/,
+  'A tab closed during connection must not be recreated by a late result',
+);
+assert.match(
+  source,
+  /if \(tab\.kind === "local"\) return;/,
+  'Closing a Local tab should keep its application-owned Server session alive',
+);
+assert.match(
+  shellSource,
+  /正在启动本地 Server 并完成握手/,
+  'The Local connection overlay should describe local startup instead of SSH',
 );
