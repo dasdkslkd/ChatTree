@@ -205,7 +205,6 @@ export default function ChatPage() {
   const [resizingSidebar, setResizingSidebar] = useState<SidebarResizeSide | null>(null);
   const [scrollPositions, setScrollPositions] = useState<Record<string, number>>({});
   const [isScrolling, setIsScrolling] = useState(false);
-  const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
   const [editValue, setEditValue] = useState<string | null>(null);
   const [editTargetNodeId, setEditTargetNodeId] = useState<string | null>(null);
   const [editToolPermissionMode, setEditToolPermissionMode] = useState<ToolPermissionMode | null>(null);
@@ -267,12 +266,8 @@ export default function ChatPage() {
   const historyRef = useRef<HTMLDivElement>(null);
   const conversationSearchInputRef = useRef<HTMLInputElement>(null);
   const pendingScrollId = useRef<string | null>(null);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
   const sidebarResizeRef = useRef<SidebarResizeSession | null>(null);
-
-  const userScrollingRef = useRef(false);
-  const scrollEndTimeoutRef = useRef<number | null>(null);
-  const programmaticScrollRef = useRef(false);
+  const autoScrollRef = useRef(true);
   const queuedMessagesRef = useRef<QueuedMessage[]>([]);
   const toolPermissionDraftRef = useRef<ToolPermissionDraft>(toolPermissionDraft);
   const transcriptRequestCoordinatorRef = useRef<TranscriptRequestCoordinator | null>(null);
@@ -427,36 +422,20 @@ export default function ChatPage() {
   const isAtBottom = useCallback(() => {
     if (!historyRef.current) return true;
     const { scrollTop, scrollHeight, clientHeight } = historyRef.current;
-    return scrollHeight - scrollTop - clientHeight < 100;
+    return scrollHeight - scrollTop - clientHeight <= 8;
   }, []);
 
-  const scrollToBottom = useCallback((smooth = true) => {
-    if (historyRef.current) {
-      programmaticScrollRef.current = true;
-      const container = historyRef.current;
-      if (smooth) {
-        container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
-      } else {
-        container.scrollTop = container.scrollHeight;
-      }
-    }
+  const scrollToBottom = useCallback(() => {
+    const container = historyRef.current;
+    if (!container) return;
+    container.scrollTop = container.scrollHeight;
   }, []);
 
   const handleScroll = useCallback(() => {
     setIsScrolling(true);
-    if (programmaticScrollRef.current) {
-      programmaticScrollRef.current = false;
-    } else {
-      userScrollingRef.current = true;
-      const atBottom = isAtBottom();
-      setShouldAutoScroll(atBottom);
-    }
+    autoScrollRef.current = isAtBottom();
     if (scrollTimeoutRef.current) clearTimeout(scrollTimeoutRef.current);
     scrollTimeoutRef.current = window.setTimeout(() => setIsScrolling(false), 1000);
-    if (scrollEndTimeoutRef.current) clearTimeout(scrollEndTimeoutRef.current);
-    scrollEndTimeoutRef.current = window.setTimeout(() => {
-      userScrollingRef.current = false;
-    }, 150);
   }, [isAtBottom]);
 
   const {
@@ -759,21 +738,8 @@ export default function ChatPage() {
     [activeRunStates, currentBranchNodeIds, selectedBranchTipId],
   );
   const currentBranchHasStreamingChat = currentBranchStreamingRunIds.length > 0;
-  const currentBranchStreamActivity = useMemo(
-    () => activeRunStates
-      .filter((run) => isRunBlockingSelectedBranch(run, selectedBranchTipId, currentBranchNodeIds))
-      .map((run) => [
-      run.runId,
-      run.status,
-      run.content.length,
-      run.reasoning.length,
-      run.pendingUserMessage?.length ?? 0,
-    ].join(':')).join('|'),
-    [activeRunStates, currentBranchNodeIds, selectedBranchTipId],
-  );
   const taskPanelItem = useMemo(() => createTaskPanelItem(activeTask), [activeTask]);
   const taskPanelOpenCount = taskPanelItem ? 1 : 0;
-  const currentBranchHasPendingUserMessage = false;
   const displayTranscriptItems = transcriptItems;
 
   useEffect(() => {
@@ -1145,7 +1111,7 @@ export default function ChatPage() {
     }
 
     updateQueuedMessages((messages) => messages.filter((message) => message.id !== nextMessage.id));
-    setShouldAutoScroll(true);
+    autoScrollRef.current = true;
     await startStreaming(
       conversationId,
       {
@@ -1478,20 +1444,11 @@ export default function ChatPage() {
     sendNextQueuedMessage,
   ]);
 
-  const shouldAutoScrollRef = useRef(shouldAutoScroll);
-  shouldAutoScrollRef.current = shouldAutoScroll;
-
-  useEffect(() => {
-    if (currentBranchHasStreamingChat && shouldAutoScrollRef.current && !userScrollingRef.current) {
-      requestAnimationFrame(() => scrollToBottom(false));
+  useLayoutEffect(() => {
+    if (currentBranchHasStreamingChat && autoScrollRef.current) {
+      scrollToBottom();
     }
-  }, [currentBranchStreamActivity, currentBranchHasStreamingChat, scrollToBottom]);
-
-  useEffect(() => {
-    if (currentBranchHasPendingUserMessage) {
-      requestAnimationFrame(() => scrollToBottom(false));
-    }
-  }, [currentBranchHasPendingUserMessage, scrollToBottom]);
+  }, [currentBranchHasStreamingChat, scrollToBottom, transcriptItems]);
 
   useEffect(() => {
     loadConversations();
@@ -1616,9 +1573,9 @@ export default function ChatPage() {
         historyRef.current.scrollTop = historyRef.current.scrollHeight;
       }
       pendingScrollId.current = null;
-      setShouldAutoScroll(true);
+      autoScrollRef.current = isAtBottom();
     }
-  }, [currentConversation, transcriptItems, scrollPositions]);
+  }, [currentConversation, isAtBottom, transcriptItems, scrollPositions]);
 
   // 从树视图双击跳转：等待消息渲染后滚动到目标节点
   useEffect(() => {
@@ -1760,7 +1717,8 @@ export default function ChatPage() {
     multiAgentMode?: MultiAgentMode,
   ) => {
     if (!val.trim()) return;
-    setShouldAutoScroll(true);
+    autoScrollRef.current = true;
+    requestAnimationFrame(scrollToBottom);
 
     let conversationId = currentConversation?.id;
     const importFiles = attachedFiles.map(filename => ({ filename }));
@@ -2593,7 +2551,6 @@ export default function ChatPage() {
                     toolApprovalError={toolApprovalError}
                     renderItem={renderTranscriptItem}
                   />
-                  <div ref={messagesEndRef} />
                 </div>
               </div>
               <div
