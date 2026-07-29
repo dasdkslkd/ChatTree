@@ -92,6 +92,10 @@
       "electron/**/*",
       "package.json"
     ],
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
     "win": {
       "target": "nsis",
       "extraResources": [

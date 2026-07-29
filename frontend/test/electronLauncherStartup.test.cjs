@@ -53,6 +53,10 @@ assert.deepEqual(packageConfig.build.publish, [{
   repo: 'ChatTree',
   releaseType: 'draft',
 }]);
+assert.deepEqual(packageConfig.build.nsis, {
+  oneClick: false,
+  allowToChangeInstallationDirectory: true,
+});
 assert.deepEqual(packageConfig.build.mac.target, ['dmg', 'zip']);
 assert.equal(packageConfig.build.extraResources, undefined);
 assert.deepEqual(packageConfig.build.win.extraResources, [{
