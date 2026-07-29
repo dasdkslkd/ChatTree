@@ -31,6 +31,29 @@ assert.match(
   /env\.CHATTREE_SERVER_BINARY = `"\$\{cmd\}" server`;/,
   'The local Server should reuse the packaged Launcher runtime',
 );
+assert.match(
+  source,
+  /const \{ autoUpdater \} = require\("electron-updater"\)/,
+  'The packaged desktop app should use electron-updater',
+);
+assert.match(
+  source,
+  /autoUpdater\.checkForUpdates\(\)/,
+  'The packaged desktop app should check GitHub Releases on startup',
+);
+assert.match(
+  source,
+  /await stopLauncher\(\);[\s\S]*autoUpdater\.quitAndInstall\(false, true\)/,
+  'Installing an update must stop the Launcher before restarting',
+);
+assert.equal(packageConfig.dependencies['electron-updater'], '6.8.9');
+assert.deepEqual(packageConfig.build.publish, [{
+  provider: 'github',
+  owner: 'dasdkslkd',
+  repo: 'ChatTree',
+  releaseType: 'draft',
+}]);
+assert.deepEqual(packageConfig.build.mac.target, ['dmg', 'zip']);
 assert.equal(packageConfig.build.extraResources, undefined);
 assert.deepEqual(packageConfig.build.win.extraResources, [{
   from: '../dist/chattree-launcher.exe',

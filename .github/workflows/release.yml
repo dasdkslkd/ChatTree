@@ -1,0 +1,187 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Set release version
+        shell: bash
+        run: python scripts/set_release_version.py "${GITHUB_REF_NAME#v}"
+
+      - name: Test Python
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . pytest pytest-asyncio
+          python -m pytest -q \
+            test/test_release_version.py \
+            backend/tests/test_package_metadata.py \
+            backend/tests/test_server_binary_packaging.py \
+            backend/tests/test_server_routes.py \
+            client_launcher/tests/test_app.py \
+            client_launcher/tests/test_local_server.py \
+            client_launcher/tests/test_server_binary.py \
+            client_launcher/tests/test_server_compat.py \
+            client_launcher/tests/test_ssh_connector.py
+
+      - name: Test frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm test
+          npm run build
+
+  prepare-release:
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Create clean draft release
+        shell: bash
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = "true"
+            gh release delete "$GITHUB_REF_NAME" --yes
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            --draft \
+            --verify-tag \
+            --title "ChatTree ${GITHUB_REF_NAME#v}"
+
+  build:
+    needs: prepare-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: win
+          - os: ubuntu-latest
+            target: linux
+          - os: macos-latest
+            target: mac
+    runs-on: ${{ matrix.os }}
+    env:
+      PYTHONUTF8: "1"
+      CSC_LINK: ${{ matrix.target == 'mac' && secrets.MACOS_CSC_LINK || matrix.target == 'win' && secrets.WINDOWS_CSC_LINK || '' }}
+      CSC_KEY_PASSWORD: ${{ matrix.target == 'mac' && secrets.MACOS_CSC_KEY_PASSWORD || matrix.target == 'win' && secrets.WINDOWS_CSC_KEY_PASSWORD || '' }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Set release version
+        shell: bash
+        run: python scripts/set_release_version.py "${GITHUB_REF_NAME#v}"
+
+      - name: Build packaged runtime
+        run: python scripts/build_launcher_binary.py --clean --smoke
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build desktop release
+        working-directory: frontend
+        run: npm run electron:build -- --${{ matrix.target }} --publish never
+
+      - name: Add standalone runtime
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ARCH="$(node -p process.arch)"
+          if [ "${{ matrix.target }}" = "win" ]; then
+            SOURCE="dist/chattree-launcher.exe"
+            ASSET="ChatTree-Runtime-${VERSION}-windows-${ARCH}.exe"
+          elif [ "${{ matrix.target }}" = "mac" ]; then
+            SOURCE="dist/chattree-launcher"
+            ASSET="ChatTree-Runtime-${VERSION}-macos-${ARCH}"
+          else
+            SOURCE="dist/chattree-launcher"
+            ASSET="ChatTree-Runtime-${VERSION}-linux-${ARCH}"
+          fi
+          cp "$SOURCE" "dist-electron/$ASSET"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          if-no-files-found: error
+          path: |
+            dist-electron/*.exe
+            dist-electron/*.blockmap
+            dist-electron/latest*.yml
+            dist-electron/*.dmg
+            dist-electron/*.zip
+            dist-electron/*.AppImage
+            dist-electron/*.zsync
+            dist-electron/ChatTree-Runtime-*
+
+  publish-release:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish release
+        shell: bash
+        run: |
+          gh release upload "$GITHUB_REF_NAME" release-assets/* --clobber
+          gh api \
+            --method POST \
+            "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+            -f "tag_name=$GITHUB_REF_NAME" \
+            -f "target_commitish=$GITHUB_SHA" \
+            --jq .body > release-notes.md
+          RELEASE_FLAGS=(--latest)
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            RELEASE_FLAGS=(--prerelease)
+          fi
+          gh release edit "$GITHUB_REF_NAME" \
+            --draft=false \
+            "${RELEASE_FLAGS[@]}" \
+            --notes-file release-notes.md

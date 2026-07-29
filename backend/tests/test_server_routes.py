@@ -11,7 +11,7 @@ from backend.api.errors import install_error_handlers
 from backend.core.runs import ProducerRegistry
 from backend.core.server.admission import MutationAdmission
 from backend.core.server.identity import ServerIdentity
-from backend.core.server.protocol import PROTOCOL_FEATURES
+from backend.core.server.protocol import PROTOCOL_FEATURES, SERVER_VERSION
 
 
 SERVER_ID = "5fb0d7cc-785e-40c2-875d-218447b15583"
@@ -73,7 +73,7 @@ def test_handshake_returns_exact_protocol_contract():
     payload = response.json()
     assert payload["server_instance_id"] == SERVER_ID
     assert payload["protocol_version"] == 1
-    assert payload["server_version"] == "0.1.0"
+    assert payload["server_version"] == SERVER_VERSION
     assert payload["platform"] in {"windows", "macos", "linux"}
     assert payload["features"] == list(PROTOCOL_FEATURES)
     assert "error_envelope_v1" in payload["features"]

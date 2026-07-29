@@ -1,4 +1,5 @@
 const { app, BrowserWindow, ipcMain, WebContentsView, Menu, dialog } = require("electron");
+const { autoUpdater } = require("electron-updater");
 const path = require("path");
 const fs = require("fs");
 const { spawn } = require("child_process");
@@ -16,6 +17,7 @@ let launcherProcess = null;
 let launcherOrigin = null;
 let logStream = null;
 let shellWindow = null;
+let installUpdateOnQuit = false;
 const tabs = {};
 let activeTabId = null;
 
@@ -23,6 +25,48 @@ let activeTabId = null;
 
 function isDevMode() {
   return !app.isPackaged;
+}
+
+function startAutoUpdater() {
+  if (isDevMode()) return;
+
+  const log = (message) => {
+    const line = `[updater] ${message}\n`;
+    process.stdout.write(line);
+    if (logStream && !logStream.destroyed) {
+      logStream.write(line);
+    }
+  };
+
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.allowPrerelease = app.getVersion().includes("-");
+  autoUpdater.on("error", (error) => log(`error: ${error.message}`));
+  autoUpdater.on("checking-for-update", () => log("checking for update"));
+  autoUpdater.on("update-available", (info) => log(`downloading ${info.version}`));
+  autoUpdater.on("update-not-available", (info) => log(`up to date: ${info.version}`));
+  autoUpdater.on("download-progress", (progress) => {
+    log(`downloaded ${progress.percent.toFixed(1)}%`);
+  });
+  autoUpdater.on("update-downloaded", async (info) => {
+    log(`downloaded ${info.version}`);
+    const { response } = await dialog.showMessageBox(shellWindow, {
+      type: "info",
+      buttons: ["立即重启", "退出时安装"],
+      defaultId: 0,
+      cancelId: 1,
+      message: `ChatTree ${info.version} 已下载`,
+      detail: "立即重启安装，或继续工作并在退出应用时自动安装。",
+    });
+    if (response === 0) {
+      installUpdateOnQuit = true;
+      app.quit();
+    }
+  });
+
+  autoUpdater.checkForUpdates().catch((error) => {
+    log(`check failed: ${error.message}`);
+  });
 }
 
 function resolveLauncherCmd() {
@@ -477,6 +521,7 @@ app.whenReady().then(async () => {
   await startLauncher();
   await createShellWindow();
   await addTab("local", "Local", "local");
+  startAutoUpdater();
 }).catch((error) => {
   console.error(error);
   dialog.showErrorBox("ChatTree 启动失败", error.message);
@@ -493,5 +538,9 @@ app.on("before-quit", async (event) => {
   event.preventDefault();
   isQuitting = true;
   await stopLauncher();
-  app.quit();
+  if (installUpdateOnQuit) {
+    autoUpdater.quitAndInstall(false, true);
+  } else {
+    app.quit();
+  }
 });

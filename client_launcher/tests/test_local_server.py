@@ -25,7 +25,7 @@ from client_launcher.local_server import (
     STARTUP_LOG_TAIL_BYTES,
 )
 from client_launcher.models import LauncherError
-from backend.core.server import ServerHomeInUseError
+from backend.core.server import SERVER_VERSION, ServerHomeInUseError
 
 
 SERVER_ID = "5fb0d7cc-785e-40c2-875d-218447b15583"
@@ -93,7 +93,7 @@ def _handshake(
     server_id: str = SERVER_ID,
     *,
     protocol_version: int = 1,
-    server_version: str = "0.1.0",
+    server_version: str = SERVER_VERSION,
 ) -> httpx.Response:
     return httpx.Response(
         200,
@@ -385,7 +385,7 @@ def test_spawned_server_with_old_handshake_is_terminated(tmp_path: Path):
     assert exc_info.value.code == "local_server_version_mismatch"
     assert exc_info.value.status_code == 409
     assert exc_info.value.details == {
-        "minimum_server_version": "0.1.0",
+        "minimum_server_version": SERVER_VERSION,
         "observed_server_version": "0.0.1",
     }
     assert len(popen.calls) == 1
@@ -586,7 +586,7 @@ def test_server_version_mismatch_fails_without_spawn(tmp_path: Path):
 
     assert exc_info.value.code == "local_server_version_mismatch"
     assert exc_info.value.details == {
-        "minimum_server_version": "0.1.0",
+        "minimum_server_version": SERVER_VERSION,
         "observed_server_version": "0.0.1",
     }
     assert popen.calls == []

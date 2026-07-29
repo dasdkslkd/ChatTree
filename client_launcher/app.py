@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
+from backend.core.server import SERVER_VERSION
 from client_launcher.http_errors import (
     ErrorEnvelope,
     RequestBoundaryMiddleware,
@@ -153,7 +154,7 @@ def create_app(
     app = _LauncherApp(
         allowed_origins=allowed_origins,
         title="ChatTree Client Launcher",
-        version="0.1.0",
+        version=SERVER_VERSION,
         lifespan=lifespan,
         responses={422: {"model": ErrorEnvelope}},
     )

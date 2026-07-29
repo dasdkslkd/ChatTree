@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
+from backend.core.server import SERVER_VERSION
 from ..utils.logger import setup_logger
 
 logger = setup_logger("MCPClient")
@@ -259,7 +260,7 @@ class MCPClient:
             {
                 "protocolVersion": "2025-03-26",
                 "capabilities": {},
-                "clientInfo": {"name": "chattree", "version": "0.1.0"},
+                "clientInfo": {"name": "chattree", "version": SERVER_VERSION},
             },
         )
         try:

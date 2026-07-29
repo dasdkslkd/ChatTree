@@ -2,12 +2,19 @@
   "name": "chattree",
   "private": true,
   "version": "0.1.0",
+  "description": "ChatTree desktop client",
+  "author": "ChatTree contributors",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dasdkslkd/ChatTree.git"
+  },
   "main": "electron/main.cjs",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
+    "test": "node --test \"test/*.test.cjs\" \"test/*.test.mjs\"",
     "preview": "vite preview",
     "electron:dev": "npm run build && electron .",
     "electron:start": "electron .",
@@ -22,6 +29,7 @@
     "clsx": "^2.1.1",
     "dagre": "^0.8.5",
     "dayjs": "^1.11.19",
+    "electron-updater": "6.8.9",
     "katex": "^0.16.27",
     "lucide-react": "^0.575.0",
     "next-themes": "^0.4.6",
@@ -66,6 +74,16 @@
   "build": {
     "appId": "com.chattree.app",
     "productName": "ChatTree",
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
+    "electronUpdaterCompatibility": ">=2.16",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "dasdkslkd",
+        "repo": "ChatTree",
+        "releaseType": "draft"
+      }
+    ],
     "directories": {
       "output": "../dist-electron"
     },
@@ -84,7 +102,10 @@
       ]
     },
     "mac": {
-      "target": "dmg",
+      "target": [
+        "dmg",
+        "zip"
+      ],
       "extraResources": [
         {
           "from": "../dist/chattree-launcher",

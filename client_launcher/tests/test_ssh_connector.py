@@ -7,6 +7,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from backend.core.server import SERVER_VERSION
 from client_launcher.models import LauncherError, ServerProfile, SshTarget
 from client_launcher.settings import LauncherSettings
 from client_launcher.ssh_connector import SshConnectionError, SshServerConnector, _Tunnel
@@ -97,7 +98,10 @@ def test_connect_starts_remote_server_then_tunnel_to_reported_port(
             if "-N" in argv:
                 process = FakeProcess(None)
             elif "--version" in argv:
-                process = FakeProcess(0, output="chattree-server 0.1.0\n")
+                process = FakeProcess(
+                    0,
+                    output=f"chattree-server {SERVER_VERSION}\n",
+                )
             else:
                 process = FakeProcess(
                     0,
@@ -115,7 +119,7 @@ def test_connect_starts_remote_server_then_tunnel_to_reported_port(
                 json={
                     "server_instance_id": SERVER_A,
                     "protocol_version": 1,
-                    "server_version": "0.1.0",
+                    "server_version": SERVER_VERSION,
                     "platform": "linux",
                     "features": [],
                     "provider_configured": True,
@@ -175,7 +179,10 @@ def test_already_running_remote_start_output_is_accepted(tmp_path: Path):
             if "-N" in argv:
                 return FakeProcess(None)
             if "--version" in argv:
-                return FakeProcess(0, output="chattree-server 0.1.0\n")
+                return FakeProcess(
+                    0,
+                    output=f"chattree-server {SERVER_VERSION}\n",
+                )
             return FakeProcess(
                 0,
                 output=(
@@ -190,7 +197,7 @@ def test_already_running_remote_start_output_is_accepted(tmp_path: Path):
                 json={
                     "server_instance_id": SERVER_A,
                     "protocol_version": 1,
-                    "server_version": "0.1.0",
+                    "server_version": SERVER_VERSION,
                     "platform": "linux",
                     "features": [],
                     "provider_configured": True,
@@ -221,7 +228,10 @@ def test_remote_start_rejects_non_ipv4_loopback_host(tmp_path: Path):
         def popen(argv, **_kwargs):
             calls.append(list(argv))
             if "--version" in argv:
-                return FakeProcess(0, output="chattree-server 0.1.0\n")
+                return FakeProcess(
+                    0,
+                    output=f"chattree-server {SERVER_VERSION}\n",
+                )
             return FakeProcess(
                 0,
                 output='{"status":"already_running","host":"::1","port":18083}\n',
@@ -250,7 +260,10 @@ def test_tunnel_exit_maps_to_typed_launcher_error(tmp_path: Path):
             if "-N" in argv:
                 return FakeProcess(255, output="channel 1: open failed")
             if "--version" in argv:
-                return FakeProcess(0, output="chattree-server 0.1.0\n")
+                return FakeProcess(
+                    0,
+                    output=f"chattree-server {SERVER_VERSION}\n",
+                )
             return FakeProcess(
                 0,
                 output='{"status":"started","host":"127.0.0.1","port":18084}\n',
@@ -288,7 +301,10 @@ def test_transient_channel_open_failure_waits_for_remote_server(
             if "-N" in argv:
                 return FakeProcess(None)
             if "--version" in argv:
-                return FakeProcess(0, output="chattree-server 0.1.0\n")
+                return FakeProcess(
+                    0,
+                    output=f"chattree-server {SERVER_VERSION}\n",
+                )
             return FakeProcess(
                 0,
                 output='{"status":"started","host":"127.0.0.1","port":18085}\n',
@@ -307,7 +323,7 @@ def test_transient_channel_open_failure_waits_for_remote_server(
                 json={
                     "server_instance_id": SERVER_A,
                     "protocol_version": 1,
-                    "server_version": "0.1.0",
+                    "server_version": SERVER_VERSION,
                     "platform": "linux",
                     "features": [],
                     "provider_configured": True,
@@ -335,7 +351,10 @@ def test_remote_start_invalid_json_is_typed_error(tmp_path: Path):
     async def scenario() -> None:
         def popen(argv, **_kwargs):
             if "--version" in argv:
-                return FakeProcess(0, output="chattree-server 0.1.0\n")
+                return FakeProcess(
+                    0,
+                    output=f"chattree-server {SERVER_VERSION}\n",
+                )
             return FakeProcess(0, output="not json\n")
 
         connector = SshServerConnector(
@@ -375,7 +394,7 @@ def test_remote_version_mismatch_stops_before_remote_start(tmp_path: Path):
         assert exc_info.value.code == "remote_server_version_incompatible"
         assert exc_info.value.status_code == 409
         assert exc_info.value.details == {
-            "required_server_version": "0.1.0",
+            "required_server_version": SERVER_VERSION,
             "observed_server_version": "0.0.1",
         }
         assert calls == [["ssh", "gpu-box", "chattree-server", "--version"]]
@@ -389,7 +408,10 @@ def test_remote_handshake_version_mismatch_is_typed_error(tmp_path: Path):
             if "-N" in argv:
                 return FakeProcess(None)
             if "--version" in argv:
-                return FakeProcess(0, output="chattree-server 0.1.0\n")
+                return FakeProcess(
+                    0,
+                    output=f"chattree-server {SERVER_VERSION}\n",
+                )
             return FakeProcess(
                 0,
                 output='{"status":"started","host":"127.0.0.1","port":18086}\n',
@@ -422,7 +444,7 @@ def test_remote_handshake_version_mismatch_is_typed_error(tmp_path: Path):
         assert exc_info.value.code == "ssh_server_version_mismatch"
         assert exc_info.value.status_code == 409
         assert exc_info.value.details == {
-            "minimum_server_version": "0.1.0",
+            "minimum_server_version": SERVER_VERSION,
             "observed_server_version": "0.0.1",
         }
 

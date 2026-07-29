@@ -16,13 +16,18 @@ def test_required_server_version_tracks_backend_contract():
 
 
 def test_parse_chattree_server_version_accepts_cli_output():
-    assert parse_chattree_server_version("chattree-server 0.1.0\n") == "0.1.0"
+    assert (
+        parse_chattree_server_version(f"chattree-server {SERVER_VERSION}\n")
+        == SERVER_VERSION
+    )
 
 
 def test_parse_chattree_server_version_scans_surrounding_output():
     assert (
-        parse_chattree_server_version("debug\nchattree-server 0.1.0\n")
-        == "0.1.0"
+        parse_chattree_server_version(
+            f"debug\nchattree-server {SERVER_VERSION}\n"
+        )
+        == SERVER_VERSION
     )
 
 
