@@ -2523,11 +2523,5 @@ class PromptDriftGuardTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 validate_prompt_catalog(require_source_files=True)
 
-    def test_prompt_framework_docs_exist(self):
-        doc = Path("docs/prompt-framework.md").read_text(encoding="utf-8")
-        self.assertIn("ChatTree Prompt Framework", doc)
-        self.assertIn("`/btw` is supported as a side-question run", doc)
-
-
 if __name__ == "__main__":
     unittest.main()

@@ -192,7 +192,7 @@ class ChatManager:
         if chat_repository is None:
             from ..persistence.database import SQLitePersistence
             from ..persistence.repository import ChatRepository
-            storage_dir = Path(getattr(storage, "storage_dir", "."))
+            storage_dir = Path(storage.storage_dir)
             persistence = SQLitePersistence(storage_dir.parent)
             persistence.initialize()
             chat_repository = ChatRepository(persistence)

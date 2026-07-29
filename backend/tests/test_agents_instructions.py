@@ -11,7 +11,8 @@ from backend.core.instructions import load_agents_instructions
 
 
 class FakeStorage:
-    def __init__(self):
+    def __init__(self, storage_dir):
+        self.storage_dir = str(storage_dir)
         self.saved = None
 
     def save(self, data):
@@ -147,7 +148,7 @@ def test_chat_manager_injects_agents_instructions_between_core_and_runtime(tmp_p
 
     manager = ChatManager(
         model_manager=None,
-        storage=FakeStorage(),
+        storage=FakeStorage(home / "conversations"),
         prompts=FakePromptStorage(),
     )
     conversation = manager.create_conversation(
