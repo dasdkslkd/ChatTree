@@ -51,6 +51,7 @@ assert.deepEqual(packageConfig.build.publish, [{
   provider: 'github',
   owner: 'dasdkslkd',
   repo: 'ChatTree',
+  private: true,
   releaseType: 'draft',
 }]);
 assert.deepEqual(packageConfig.build.nsis, {
