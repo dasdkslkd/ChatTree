@@ -33,6 +33,11 @@ assert.match(
 );
 assert.match(
   source,
+  /app\.isPackaged\s+\? path\.join\(process\.resourcesPath, "frontend"\)/,
+  'The packaged Launcher must receive a real frontend directory outside app.asar',
+);
+assert.match(
+  source,
   /const \{ autoUpdater \} = require\("electron-updater"\)/,
   'The packaged desktop app should use electron-updater',
 );
@@ -59,7 +64,11 @@ assert.deepEqual(packageConfig.build.nsis, {
   allowToChangeInstallationDirectory: true,
 });
 assert.deepEqual(packageConfig.build.mac.target, ['dmg', 'zip']);
-assert.equal(packageConfig.build.extraResources, undefined);
+assert.deepEqual(packageConfig.build.extraResources, [{
+  from: 'dist',
+  to: 'frontend',
+}]);
+assert.equal(packageConfig.build.files.includes('dist/**/*'), false);
 assert.deepEqual(packageConfig.build.win.extraResources, [{
   from: '../dist/chattree-launcher.exe',
   to: 'chattree-launcher.exe',

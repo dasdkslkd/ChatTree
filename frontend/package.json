@@ -89,9 +89,14 @@
       "output": "../dist-electron"
     },
     "files": [
-      "dist/**/*",
       "electron/**/*",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "dist",
+        "to": "frontend"
+      }
     ],
     "nsis": {
       "oneClick": false,

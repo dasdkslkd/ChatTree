@@ -12,10 +12,10 @@ import scripts.build_server_binary as build_server_binary
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _load_entry_module():
+def _load_entry_module(name: str = "chattree_server_entry"):
     spec = importlib.util.spec_from_file_location(
-        "chattree_server_entry_for_test",
-        REPO_ROOT / "packaging" / "chattree_server_entry.py",
+        f"{name}_for_test",
+        REPO_ROOT / "packaging" / f"{name}.py",
     )
     assert spec is not None
     assert spec.loader is not None
@@ -36,6 +36,16 @@ def test_packaging_entrypoint_delegates_to_server_cli(monkeypatch):
 
     assert entry.main() == 7
     assert captured == {"called": True}
+
+
+def test_launcher_entrypoint_treats_clean_shutdown_as_success(monkeypatch):
+    entry = _load_entry_module("chattree_launcher_entry")
+    import client_launcher.__main__ as launcher
+
+    monkeypatch.setattr(sys, "argv", ["chattree-launcher"])
+    monkeypatch.setattr(launcher, "main", lambda: None)
+
+    assert entry.main() == 0
 
 
 def test_pyinstaller_spec_collects_required_utf8_runtime_data():

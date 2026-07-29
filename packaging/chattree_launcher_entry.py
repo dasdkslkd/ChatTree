@@ -12,7 +12,8 @@ def main() -> int:
 
     from client_launcher.__main__ import main as launcher_main
 
-    return int(launcher_main())
+    launcher_main()
+    return 0
 
 
 if __name__ == "__main__":

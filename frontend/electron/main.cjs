@@ -8,7 +8,9 @@ const { createInterface } = require("readline");
 
 const LAUNCHER_READY_PREFIX = "CHATTREE_LAUNCHER_READY ";
 const CLIENT_HOME = path.join(app.getPath("userData"), "client");
-const FRONTEND_DIST = path.join(__dirname, "..", "dist");
+const FRONTEND_DIST = app.isPackaged
+  ? path.join(process.resourcesPath, "frontend")
+  : path.join(__dirname, "..", "dist");
 const PROJECT_ROOT = path.join(__dirname, "..", "..");
 const LOG_DIR = path.join(app.getPath("userData"), "logs");
 const LOG_FILE = path.join(LOG_DIR, "launcher.log");
