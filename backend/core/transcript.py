@@ -199,7 +199,7 @@ class TranscriptAssembler:
         stream_status = str(stream.get("status") or "running")
         use_live_stream = stream_status in {"running", "stopping", "finalizing", "stopped", "error"}
         if use_live_stream:
-            for call_id, result in stream.get("results_by_call_id", {}).items():
+            for call_id, result in stream.get("result_overrides_by_call_id", {}).items():
                 result_by_call_id[str(call_id)] = result
         calls = (
             self._merge_live_tool_calls(tool_calls, stream.get("tool_calls", []))
@@ -1059,7 +1059,7 @@ class TranscriptPatchSession:
         entries: list[dict[str, Any]] = []
         reasoning = ""
         tool_calls: list[dict[str, Any]] = []
-        results_by_call_id: dict[str, dict[str, Any]] = {}
+        result_overrides_by_call_id: dict[str, dict[str, Any]] = {}
 
         def upsert_tool_call(call: dict[str, Any]) -> None:
             for existing in tool_calls:
@@ -1136,7 +1136,7 @@ class TranscriptPatchSession:
                     call_status = "waiting_approval"
                     if event_type == "tool_approval_result":
                         call_status = "approved" if approval_status == "approved" else "rejected"
-                        results_by_call_id[tool_call_id] = {
+                        result_overrides_by_call_id[tool_call_id] = {
                             "id": f"approval-result:{tool_call_id}",
                             "tool_call_id": tool_call_id,
                             "output_preview": json.dumps(
@@ -1158,10 +1158,10 @@ class TranscriptPatchSession:
                         "status": call_status,
                         "created_at": approval.get("created_at"),
                     })
-            if event_type in {"tool_result", "tool_progress", "tool_result_delta", "tool_call_error"}:
-                result = self._event_tool_result(event)
+            if event_type == "tool_call_error":
+                result = self._event_tool_error(event)
                 if result:
-                    results_by_call_id[str(result["tool_call_id"])] = result
+                    result_overrides_by_call_id[str(result["tool_call_id"])] = result
 
         flush_reasoning(status == "running")
         flush_process_content(status == "running")
@@ -1183,7 +1183,7 @@ class TranscriptPatchSession:
             "assistant_message_id": assistant_message_id,
             "entries": entries,
             "tool_calls": tool_calls,
-            "results_by_call_id": results_by_call_id,
+            "result_overrides_by_call_id": result_overrides_by_call_id,
             "answer": answer,
         }
 
@@ -1214,19 +1214,17 @@ class TranscriptPatchSession:
             })
         return calls
 
-    def _event_tool_result(self, event: dict[str, Any]) -> dict[str, Any] | None:
+    def _event_tool_error(self, event: dict[str, Any]) -> dict[str, Any] | None:
         call = event.get("tool_call")
         if not isinstance(call, dict):
             return None
         call_id = str(call.get("tool_call_id") or call.get("id") or "")
         if not call_id:
             return None
-        status = "error" if event.get("event_type") == "tool_call_error" or call.get("status") == "error" else "complete"
-        output = str(call.get("content") or call.get("raw_content") or call.get("error") or "")
         return {
-            "id": call.get("tool_result_id") or f"result:{call_id}",
+            "id": f"error:{call_id}",
             "tool_call_id": call_id,
-            "output_preview": output[:4096],
-            "status": status,
+            "output_preview": str(call.get("error") or "")[:4096],
+            "status": "error",
             "metadata": {},
         }

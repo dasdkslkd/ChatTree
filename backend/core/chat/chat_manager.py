@@ -3330,7 +3330,7 @@ class ChatManager:
         result = str(message.get("content") or "")
         raw_result = result
         tool_result_id = None
-        if conversation_id and name != "read_tool_result":
+        if conversation_id:
             persisted = persist_model_visible_tool_result(
                 self.chat_repository,
                 raw_result=result,

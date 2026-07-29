@@ -616,6 +616,43 @@ def test_tool_results_are_written_once_with_run_id_and_transcript_process(tmp_pa
     assert "model_visible_content" not in metadata
 
 
+def test_read_tool_result_output_is_persisted_as_canonical_result(tmp_path: Path):
+    manager, repository, _persistence = _make_manager(tmp_path)
+    conversation = manager.create_conversation("read tool result")
+    conversation_id = conversation.metadata["id"]
+    node_id = conversation.current_node_id
+    repository.add_tool_call(
+        conversation_id,
+        node_id,
+        tool_call_id="call-read-result",
+        name="read_tool_result",
+        arguments={"tool_result_id": "source-result"},
+        status="running",
+    )
+    raw_result = json.dumps({
+        "content": "canonical slice",
+        "read_more": "read next",
+    })
+
+    visible = manager._model_visible_tool_message(
+        Message({
+            "role": Role.TOOL,
+            "content": raw_result,
+            "tool_call_id": "call-read-result",
+        }),
+        name="read_tool_result",
+        conversation_id=conversation_id,
+        node_id=node_id,
+        tool_call_id="call-read-result",
+    )
+
+    stored = repository.get_tool_result_slice(visible["tool_result_id"])
+    assert stored["tool_name"] == "read_tool_result"
+    assert stored["content"] == raw_result
+    assert visible["raw_content"] == raw_result
+    assert visible["content"] != raw_result
+
+
 def test_committed_tool_call_persists_when_tool_execution_fails(tmp_path: Path):
     manager, repository, _persistence = _make_manager(tmp_path)
     manager.tool_manager = FailingToolManager(tmp_path)

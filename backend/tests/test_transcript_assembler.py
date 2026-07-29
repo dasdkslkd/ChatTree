@@ -5,6 +5,7 @@ import json
 
 from backend.api.routes import messages as messages_route
 from backend.api.routes import runs as runs_route
+from backend.core.chat.tool_result_format import persist_model_visible_tool_result
 from backend.core.persistence.database import SQLitePersistence
 from backend.core.persistence.repository import ChatRepository
 from backend.core.persistence.run_repository import SQLiteRunRepository
@@ -1425,6 +1426,109 @@ def test_patch_keeps_tool_before_later_reasoning_after_tool_update(tmp_path):
     ]
     assert process["blocks"][2]["tool_call_id"] == "call-files"
     assert process["blocks"][3]["content"] == "工具后继续分析。"
+
+
+def test_patch_reads_canonical_results_when_live_tool_events_are_slimmed(tmp_path):
+    persistence, repository = _repo(tmp_path)
+    conversation_id, node_id = _conversation(repository)
+    run_id = SQLiteRunRepository(persistence).create_run(
+        conversation_id,
+        kind="chat",
+        target_node_id=node_id,
+        summary="stream",
+    )
+    session = TranscriptAssembler(persistence).patch_session(run_id)
+    cases = [
+        (
+            "call-files",
+            "list_files",
+            json.dumps({"files": ["alpha.ts"], "count": 1}),
+            "files",
+        ),
+        (
+            "call-shell",
+            "shell_command",
+            json.dumps({
+                "command": "Write-Output ready",
+                "cwd": "D:\\Workspace\\ChatTree",
+                "exit_code": 0,
+                "stdout": "ready\n",
+                "stderr": "",
+                "timed_out": False,
+            }),
+            "stdout",
+        ),
+    ]
+
+    for call_index, (call_id, name, raw_result, expected_key) in enumerate(cases):
+        arguments = {"path": "."} if name == "list_files" else {"command": "Write-Output ready"}
+        repository.add_tool_call(
+            conversation_id,
+            node_id,
+            tool_call_id=call_id,
+            name=name,
+            arguments=arguments,
+            call_index=call_index,
+            status="running",
+            run_id=run_id,
+        )
+        session.feed({
+            "status": "content",
+            "conversation_id": conversation_id,
+            "node_id": node_id,
+            "event_type": "tool_calls_committed",
+            "tool_calls": [{
+                "id": call_id,
+                "function": {
+                    "name": name,
+                    "arguments": json.dumps(arguments),
+                },
+            }],
+        })
+        persisted = persist_model_visible_tool_result(
+            repository,
+            raw_result=raw_result,
+            name=name,
+            conversation_id=conversation_id,
+            node_id=node_id,
+            tool_call_id=call_id,
+        )
+        public_event = messages_route.build_stream_chunk_data({
+            "status": StreamStatus.CONTENT,
+            "conversation_id": conversation_id,
+            "node_id": node_id,
+            "run_id": run_id,
+            "event_type": "tool_result",
+            "tool_call": {
+                "tool_call_id": call_id,
+                "name": name,
+                "content": persisted["content"],
+                "raw_content": raw_result,
+                "model_visible_content": persisted["content"],
+                "tool_result_id": persisted["tool_result_id"],
+            },
+        }, conversation_id)
+
+        assert "raw_content" not in public_event["tool_call"]
+        assert "model_visible_content" not in public_event["tool_call"]
+        assert public_event["tool_call"]["content"] != raw_result
+        assert public_event["status"] == "content"
+
+        patch = session.feed(public_event)
+        process = next(
+            operation["item"]
+            for operation in patch["operations"]
+            if operation["op"] == "upsert" and operation["item"]["type"] == "assistant_process"
+        )
+        block = next(
+            block
+            for block in process["blocks"]
+            if block.get("tool_call_id") == call_id
+        )
+
+        assert block["result_preview"] == raw_result
+        assert expected_key in json.loads(block["result_preview"])
+        assert block["status"] == "complete"
 
 
 def test_patch_updates_live_tool_approval_request_and_result_with_stable_id(tmp_path):
