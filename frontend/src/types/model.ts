@@ -24,6 +24,7 @@ export interface ModelMetadata {
 
 // 提供商 ID（动态字符串，不再使用枚举）
 export type ModelProvider = string;
+export type ContextWindowLimit = 200000 | 400000 | 600000 | null;
 
 // 订阅登录信息（与 api_key 二选一）
 export interface AuthInfo {
@@ -256,6 +257,7 @@ export interface ProjectSettingsResponse {
 export interface ConfigData {
   default_provider: string;
   default_model: string;
+  context_window: ContextWindowLimit;
   provider: Record<string, ModelProviderConfig>;
   tools?: ToolsConfig;
   projects?: Record<string, ProjectCapabilityConfig>;
@@ -265,6 +267,7 @@ export interface ConfigData {
 export interface ConfigUpdateRequest {
   default_provider?: string;
   default_model?: string;
+  context_window?: ContextWindowLimit;
   provider_configs?: Record<string, Partial<ModelProviderConfig>>;
   tools?: ToolsConfig;
   projects?: Record<string, ProjectCapabilityConfig>;

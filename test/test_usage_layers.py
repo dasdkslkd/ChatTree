@@ -7,6 +7,7 @@ import tempfile
 sys.path.insert(0, ".")
 
 from backend.core.chat.chat_manager import ChatManager
+from backend.core.chat.conversation import Conversation
 from backend.core.chat.node import NodeManager
 from backend.core.config.types import StreamChunk, StreamController, StreamStatus
 from backend.core.storage.chat_storage import ChatStorage
@@ -88,6 +89,21 @@ def test_new_nodes_start_with_layered_usage():
         assert node["total_tokens"] == 0
 
 
+def test_aggregate_usage_is_not_reused_as_active_context():
+    node = NodeManager.create_node(parent_id="parent", model_id="fake-model")
+    node["usage"] = {
+        "turn_usage": {"total_tokens": 11, "source": "api"},
+        "branch_usage": {"total_tokens": 18, "source": "aggregate"},
+        "active_context_usage": {"total_tokens": 18, "source": "aggregate"},
+        "model_context_window": 200_000,
+    }
+
+    Conversation._ensure_node_usage(node)
+
+    assert node["usage"]["active_context_usage"] == node["usage"]["turn_usage"]
+    assert "model_context_window" not in node["usage"]
+
+
 def test_streaming_updates_each_node_layered_usage_to_that_point():
     tmp = tempfile.mkdtemp(prefix="chattree_usage_layers_")
     try:
@@ -129,7 +145,7 @@ def test_streaming_updates_each_node_layered_usage_to_that_point():
 
         assert second["usage"]["turn_usage"]["total_tokens"] == 11
         assert second["usage"]["branch_usage"]["total_tokens"] == 18
-        assert second["usage"]["active_context_usage"]["total_tokens"] == 18
+        assert second["usage"]["active_context_usage"]["total_tokens"] == 11
         assert second["total_tokens"] == 18
         assert second["branch_usage_info"]["total_tokens"] == 18
 

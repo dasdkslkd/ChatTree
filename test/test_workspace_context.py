@@ -90,7 +90,6 @@ def test_old_conversation_without_workspace_gets_runtime_default(tmp_path):
                 "turn_usage": {"total_tokens": 0},
                 "branch_usage": {"total_tokens": 0},
                 "active_context_usage": {"total_tokens": 0},
-                "model_context_window": None,
             },
         }],
         "root_node_id": "root",

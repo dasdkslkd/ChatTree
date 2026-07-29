@@ -20,7 +20,6 @@ def _root(nid="root"):
             "turn_usage": {"total_tokens": 0},
             "branch_usage": {"total_tokens": 0},
             "active_context_usage": {"total_tokens": 0},
-            "model_context_window": None,
         },
     }
 
@@ -35,7 +34,6 @@ def _child(nid, parent):
             "turn_usage": {"total_tokens": 0},
             "branch_usage": {"total_tokens": 0},
             "active_context_usage": {"total_tokens": 0},
-            "model_context_window": None,
         },
     }
 

@@ -868,6 +868,7 @@ class ChatManager:
             meta = self.model_manager.get_model_metadata(target_provider, target_model)
         else:
             meta = {}
+        context_window = self._effective_context_window(meta.get("context_length"))
 
         if not append_to_existing_node:
             with profiler.span(
@@ -882,7 +883,7 @@ class ChatManager:
                     parent_node_id=requested_parent_node_id,
                     target_model=target_model,
                     target_provider=target_provider,
-                    model_context_window=meta.get("context_length"),
+                    context_window=context_window,
                 )
             if auto_result.get("was_compacted"):
                 compact_node_id = str((auto_result.get("result") or {}).get("node_id") or "")
@@ -935,7 +936,6 @@ class ChatManager:
         requested_parent_node_id: str,
         target_model: str,
         target_provider: str,
-        meta: Dict[str, Any],
         model_content: str,
         user_msg: Optional[Message],
         focus_new_node: bool,
@@ -1019,11 +1019,7 @@ class ChatManager:
                     provider_id=target_provider,
                     model_id=target_model,
                 )
-                self._update_branch_usage_for_node(
-                    conversation,
-                    new_node["id"],
-                    model_context_window=meta.get("context_length"),
-                )
+                self._update_branch_usage_for_node(conversation, new_node["id"])
                 self.chat_repository.save(conversation)
                 if user_msg is not None:
                     self.chat_repository.persist_user_turn(
@@ -1050,7 +1046,6 @@ class ChatManager:
         new_node: Dict[str, Any],
         target_provider: str,
         target_model: str,
-        meta: Dict[str, Any],
         assistant_message_id: str,
         start_time: float,
         tokens_used: int,
@@ -1143,11 +1138,7 @@ class ChatManager:
                     model_id=target_model,
                 )
                 self._update_token_stats_for_conversation(latest, target_provider, tokens_used)
-                self._update_branch_usage_for_node(
-                    latest,
-                    new_node["id"],
-                    model_context_window=meta.get("context_length"),
-                )
+                self._update_branch_usage_for_node(latest, new_node["id"])
                 latest.metadata["updated_at"] = max(
                     int(latest.metadata.get("updated_at") or 0),
                     completion_timestamp,
@@ -1161,7 +1152,6 @@ class ChatManager:
                 new_node["usage"] = self._node_usage_snapshot(
                     turn_usage=usage_info,
                     branch_usage=usage_info,
-                    model_context_window=meta.get("context_length"),
                 )
                 self._set_conversation_model_metadata(
                     conversation,
@@ -1192,11 +1182,7 @@ class ChatManager:
                 async with self._lock_for(conversation_id):
                     latest_with_messages = self.get_conversation(conversation_id)
                     if latest_with_messages is not None and new_node["id"] in latest_with_messages.nodes:
-                        self._update_branch_usage_for_node(
-                            latest_with_messages,
-                            new_node["id"],
-                            model_context_window=meta.get("context_length"),
-                        )
+                        self._update_branch_usage_for_node(latest_with_messages, new_node["id"])
                         self.chat_repository.save(latest_with_messages)
         finally:
             if new_node["id"] in self._active_controllers:
@@ -1329,7 +1315,6 @@ class ChatManager:
             requested_parent_node_id=requested_parent_node_id,
             target_model=target_model,
             target_provider=target_provider,
-            meta=meta,
             model_content=model_content,
             user_msg=user_msg,
             focus_new_node=focus_new_node,
@@ -2080,7 +2065,6 @@ class ChatManager:
                 new_node=new_node,
                 target_provider=target_provider,
                 target_model=target_model,
-                meta=meta,
                 assistant_message_id=assistant_message_id,
                 start_time=start_time,
                 tokens_used=tokens_used,
@@ -2747,8 +2731,8 @@ class ChatManager:
         current = conversation.nodes.get(conversation.current_node_id or "")
         usage = current.get("usage") if current else None
         if usage:
-            active = usage.get("active_context_usage") or usage.get("branch_usage")
-            if active and active.get("total_tokens"):
+            active = usage.get("active_context_usage")
+            if active and active.get("total_tokens") and active.get("source") != "estimate":
                 return int(active.get("total_tokens") or 0)
         return self._rough_token_count_for_messages(self._prepare_messages_for_api_with_conversation(conversation))
 
@@ -2759,9 +2743,9 @@ class ChatManager:
         parent_node_id: str,
         target_model: str,
         target_provider: str,
-        model_context_window: Optional[int],
+        context_window: Optional[int],
     ) -> Dict[str, Any]:
-        if not model_context_window:
+        if not context_window:
             return {"was_compacted": False}
         conversation = self.get_conversation(conversation_id)
         if conversation is None:
@@ -2777,7 +2761,7 @@ class ChatManager:
             return {"was_compacted": False}
 
         token_usage = self._current_context_tokens(conversation)
-        threshold = get_auto_compact_threshold(model_context_window)
+        threshold = get_auto_compact_threshold(context_window)
         if token_usage < threshold:
             return {"was_compacted": False, "token_usage": token_usage, "threshold": threshold}
 
@@ -2884,7 +2868,7 @@ class ChatManager:
             compact_node["usage"] = self._node_usage_snapshot(
                 turn_usage=estimated_usage(tokens_used),
                 branch_usage=estimated_usage(0),
-                model_context_window=self._model_context_window(target_provider, target_model),
+                active_context_usage=estimated_usage(0),
             )
             latest.add_node(compact_node, parent_id=parent_id, focus=focus_new_node)
             latest.metadata["updated_at"] = max(
@@ -3679,23 +3663,20 @@ class ChatManager:
         *,
         turn_usage,
         branch_usage,
-        model_context_window: Optional[int] = None,
+        active_context_usage=None,
     ) -> Dict[str, Any]:
+        """分离本轮调用、分支累计成本和当前有效上下文。"""
         return {
             "turn_usage": turn_usage or estimated_usage(0),
             "branch_usage": branch_usage or estimated_usage(0),
-            "active_context_usage": branch_usage or estimated_usage(0),
-            "model_context_window": model_context_window,
+            "active_context_usage": active_context_usage or turn_usage or estimated_usage(0),
         }
 
-    def _model_context_window(self, provider_id: Optional[str], model_id: Optional[str]) -> Optional[int]:
-        if not provider_id or not model_id or not hasattr(self.model_manager, "get_model_metadata"):
-            return None
-        try:
-            meta = self.model_manager.get_model_metadata(provider_id, model_id)
-        except Exception:
-            return None
-        return meta.get("context_length") if isinstance(meta, dict) else None
+    def _effective_context_window(self, model_limit: Optional[int]) -> Optional[int]:
+        configured_limit = cfg.data.get("context_window")
+        if configured_limit is None:
+            return model_limit
+        return min(configured_limit, model_limit) if model_limit else configured_limit
 
     def _branch_usage_for_node(self, conversation: Conversation, node_id: str):
         usage = None
@@ -3710,7 +3691,6 @@ class ChatManager:
         self,
         conversation: Conversation,
         node_id: str,
-        model_context_window: Optional[int] = None,
     ):
         node = conversation.nodes.get(node_id)
         if not node:
@@ -3722,7 +3702,6 @@ class ChatManager:
         node["usage"] = self._node_usage_snapshot(
             turn_usage=turn_usage,
             branch_usage=branch_usage,
-            model_context_window=model_context_window,
         )
 
     def get_conversation_history(self) -> List[Message]:

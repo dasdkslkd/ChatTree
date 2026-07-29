@@ -25,6 +25,7 @@ import { configApi, type SubscriptionLoginHandle } from '@/api/config';
 import { useModelStore } from '@/store/modelStore';
 import type {
   ConfigData,
+  ContextWindowLimit,
   ModelProviderConfig,
   APIFormat,
 } from '@/types/model';
@@ -183,6 +184,21 @@ export function ProvidersSection() {
       toast.success('默认模型已更新');
     } catch {
       setConfig(c => c ? { ...c, default_model: prev } : c);
+      toast.error('保存失败');
+    }
+  };
+
+  const handleContextWindowChange = async (value: string) => {
+    if (!config) return;
+    const previous = config.context_window ?? null;
+    const contextWindow = (value === 'max' ? null : Number(value)) as ContextWindowLimit;
+    setConfig({ ...config, context_window: contextWindow });
+    try {
+      await configApi.update({ context_window: contextWindow });
+      await useModelStore.getState().loadConfig({ force: true });
+      toast.success('上下文窗口已更新');
+    } catch {
+      setConfig(current => current ? { ...current, context_window: previous } : current);
       toast.error('保存失败');
     }
   };
@@ -512,7 +528,7 @@ export function ProvidersSection() {
         >
           全局设置
         </div>
-        <div className="px-4 py-3 grid gap-4 md:grid-cols-2">
+        <div className="px-4 py-3 grid gap-4 md:grid-cols-3">
           <div className="space-y-2">
             <Label className="text-sm" style={{ color: 'var(--fg-85)' }}>默认提供商</Label>
             {enabledProviders.length > 0 ? (
@@ -546,6 +562,23 @@ export function ProvidersSection() {
             ) : (
               <p className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>默认提供商暂无可见模型</p>
             )}
+          </div>
+          <div className="space-y-2">
+            <Label className="text-sm" style={{ color: 'var(--fg-85)' }}>上下文窗口</Label>
+            <Select
+              value={config?.context_window ? String(config.context_window) : 'max'}
+              onValueChange={handleContextWindowChange}
+            >
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="200000">200K</SelectItem>
+                <SelectItem value="400000">400K</SelectItem>
+                <SelectItem value="600000">600K</SelectItem>
+                <SelectItem value="max">模型最大值</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
         </div>
       </div>

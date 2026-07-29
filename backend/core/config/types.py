@@ -42,7 +42,6 @@ class NodeUsage(TypedDict, total=False):
     turn_usage: UsageInfo
     branch_usage: UsageInfo
     active_context_usage: UsageInfo
-    model_context_window: Optional[int]
 
 class GenerationInfo(TypedDict, total=False):
     """消息生成信息"""

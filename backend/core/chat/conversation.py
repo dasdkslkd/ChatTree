@@ -284,8 +284,11 @@ class Conversation:
         usage = node.get("usage") or {}
         usage["turn_usage"] = usage.get("turn_usage") or estimated_usage(0)
         usage["branch_usage"] = usage.get("branch_usage") or branch_usage
-        usage["active_context_usage"] = usage.get("active_context_usage") or branch_usage
-        usage["model_context_window"] = usage.get("model_context_window")
+        active_context_usage = usage.get("active_context_usage")
+        if not active_context_usage or active_context_usage.get("source") == "aggregate":
+            active_context_usage = usage["turn_usage"]
+        usage["active_context_usage"] = active_context_usage
+        usage.pop("model_context_window", None)
         node["usage"] = usage
 
     @staticmethod

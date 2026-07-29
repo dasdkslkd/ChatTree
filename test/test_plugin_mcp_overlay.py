@@ -220,7 +220,7 @@ def test_update_config_uses_plugin_mcp_runtime_overlay_and_preserves_chat_regist
         request = SimpleNamespace(app=app)
 
         response = await config_route.update_config(
-            config_route.ConfigUpdateRequest(default_provider=""),
+            config_route.ConfigUpdateRequest(tools=config_manager.data["tools"]),
             request,
             config_manager,
         )

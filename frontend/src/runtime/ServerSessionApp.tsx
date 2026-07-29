@@ -104,14 +104,16 @@ export default function ServerSessionApp({
   );
   const tipNodeUsage: NodeUsage | null = tipNode?.usage ?? null;
   const contextUsage = useMemo<{ used: number; usage: UsageInfo | null }>(() => {
-    const active = tipNodeUsage?.active_context_usage ?? tipNodeUsage?.branch_usage ?? null;
+    const active = tipNodeUsage?.active_context_usage ?? null;
     return {
       used: active?.total_tokens ?? 0,
       usage: active,
     };
   }, [tipNodeUsage]);
-  const nodeContextWindow = tipNodeUsage?.model_context_window ?? null;
-  const contextLimit = nodeContextWindow ?? metadataContextLimit;
+  const configuredContextLimit = config?.context_window ?? null;
+  const contextLimit = configuredContextLimit === null
+    ? metadataContextLimit
+    : Math.min(configuredContextLimit, metadataContextLimit ?? configuredContextLimit);
   const contextLoading = Boolean(currentConversation) && !treeData && !treeError;
   const contextUsed = contextUsage.used;
   const contextPercent = contextLimit ? Math.min(100, Math.max(0, (contextUsed / contextLimit) * 100)) : 0;

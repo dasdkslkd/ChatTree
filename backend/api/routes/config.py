@@ -1,7 +1,7 @@
 # backend/api/routes/config.py
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Literal
 from pydantic import BaseModel
 from ...core.capabilities.bootstrap import build_runtime_config_with_plugin_mcp
 from ...core.agents import AgentMailbox, AgentRuntime
@@ -30,6 +30,7 @@ router = APIRouter()
 class ConfigUpdateRequest(BaseModel):
     default_provider: Optional[str] = None
     default_model: Optional[str] = None
+    context_window: Optional[Literal[200_000, 400_000, 600_000]] = None
     provider_configs: Optional[Dict[str, Dict[str, Any]]] = None
     tools: Optional[Dict[str, Any]] = None
     projects: Optional[Dict[str, Dict[str, Any]]] = None
@@ -304,6 +305,11 @@ async def update_config(
 ):
     """更新配置"""
     try:
+        rebuild_runtime = (
+            bool(request.provider_configs)
+            or request.tools is not None
+            or request.projects is not None
+        )
         if request.provider_configs:
             for provider, conf in request.provider_configs.items():
                 config_manager.data['provider'][provider] = _provider_config_without_default_model(conf)
@@ -315,11 +321,16 @@ async def update_config(
             config_manager.data['default_provider'] = request.default_provider
         if request.default_model is not None:
             config_manager.data['default_model'] = request.default_model
+        if 'context_window' in request.model_fields_set:
+            config_manager.data['context_window'] = request.context_window
         config_manager.save()
 
         # 同步全局配置与运行中的模型管理器
         config_manager.data = config_manager._load_config()
         cfg.data = config_manager.data
+
+        if not rebuild_runtime:
+            return {"message": "配置已更新"}
 
         model_manager = ModelManager()
         old_tool_manager = getattr(http_request.app.state, 'tool_manager', None)

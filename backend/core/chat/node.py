@@ -12,7 +12,6 @@ def _empty_node_usage() -> Dict[str, Any]:
         "turn_usage": dict(usage),
         "branch_usage": dict(usage),
         "active_context_usage": dict(usage),
-        "model_context_window": None,
     }
 
 class NodeManager:

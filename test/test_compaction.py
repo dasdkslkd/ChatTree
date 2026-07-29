@@ -11,6 +11,7 @@ from backend.core.chat.canonical_reader import messages_by_node
 from backend.core.chat.compact import get_auto_compact_threshold, microcompact_messages
 from backend.core.chat.conversation import Conversation
 from backend.core.chat.node import NodeManager
+from backend.core.config.config import cfg
 from backend.core.config.types import Message, Role, StreamChunk, StreamController, StreamStatus
 from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
@@ -121,7 +122,17 @@ def _messages_for_node(manager, conversation_id, node_id):
     return messages_by_node(manager.chat_repository, conversation_id, [node_id]).get(node_id, [])
 
 
-def _add_turn(manager, conv, user_content, assistant_content=None, *, import_files=None, parent_id=None, focus=True):
+def _add_turn(
+    manager,
+    conv,
+    user_content,
+    assistant_content=None,
+    *,
+    import_files=None,
+    parent_id=None,
+    focus=True,
+    usage_info=None,
+):
     parent_id = parent_id or conv.current_node_id
     node = NodeManager.create_node(parent_id=parent_id, model_id="fake-model")
     conv.add_node(node, parent_id, focus=focus)
@@ -141,6 +152,7 @@ def _add_turn(manager, conv, user_content, assistant_content=None, *, import_fil
             node["id"],
             role=Role.ASSISTANT.value,
             content=assistant_content,
+            metadata={"generation_info": {"usage_info": usage_info}} if usage_info else None,
         )
     return node
 
@@ -226,6 +238,9 @@ def test_manual_compact_saves_boundary_summary_and_moves_current_node():
         reloaded = manager.get_conversation(conv.metadata["id"])
         current = reloaded.nodes[reloaded.current_node_id]
         assert result["node_id"] == reloaded.current_node_id
+        assert current["usage"]["turn_usage"]["total_tokens"] == 42
+        assert current["usage"]["branch_usage"]["total_tokens"] == 0
+        assert current["usage"]["active_context_usage"]["total_tokens"] == 0
         messages = _messages_for_node(manager, conv.metadata["id"], current["id"])
         boundary = next(message for message in messages if message.get("subtype") == "compact_boundary")
         summary = next(message for message in messages if message.get("subtype") == "compact_summary")
@@ -373,19 +388,37 @@ def test_microcompact_shortens_large_tool_results_without_touching_user_text():
     assert "12000 chars" in compacted[1]["content"]
 
 
-def test_send_message_auto_compacts_when_context_usage_reaches_90_percent():
+def test_send_message_auto_compacts_at_configured_window_threshold(monkeypatch):
     tmp = tempfile.mkdtemp(prefix="chattree_auto_compact_")
     try:
         manager = _manager(tmp)
+        monkeypatch.setitem(cfg.data, "context_window", 200_000)
+        monkeypatch.setattr(
+            manager.model_manager,
+            "get_model_metadata",
+            lambda provider_id, model_name: {"context_length": 1_000_000},
+        )
         conv = manager.create_conversation("auto compact")
         conv.metadata["provider_id"] = "fake"
         conv.metadata["model_id"] = "fake-model"
 
-        old = _add_turn(manager, conv, "old question", "old answer")
-        old["usage"]["active_context_usage"] = {
-            "input_tokens": 179999,
+        old_usage = {
+            "input_tokens": 179_999,
             "output_tokens": 1,
-            "total_tokens": 180000,
+            "total_tokens": 180_000,
+            "source": "api",
+        }
+        old = _add_turn(
+            manager,
+            conv,
+            "old question",
+            "old answer",
+            usage_info=old_usage,
+        )
+        old["usage"]["active_context_usage"] = {
+            "input_tokens": 179_999,
+            "output_tokens": 1,
+            "total_tokens": 180_000,
             "source": "api",
         }
         target_parent_id = old["id"]
@@ -419,7 +452,29 @@ def test_send_message_auto_compacts_when_context_usage_reaches_90_percent():
         )
         assert user_message["content"] == "new question"
         assert chain[-1]["parent_id"] == chain[-2]["id"]
-        assert manager.model_manager.provider.calls
+        assert chain[-1]["usage"]["turn_usage"]["total_tokens"] == 9
+        assert chain[-1]["usage"]["branch_usage"]["total_tokens"] == 180_009
+        assert chain[-1]["usage"]["active_context_usage"]["total_tokens"] == 9
+        assert len(manager.model_manager.provider.calls) == 1
+
+        asyncio.run(_drain(manager.send_message_stream(
+            conv.metadata["id"],
+            "follow-up after compact",
+            model_id="fake-model",
+            parent_node_id=reloaded.current_node_id,
+        )))
+
+        reloaded = manager.get_conversation(conv.metadata["id"])
+        chain = reloaded.get_node_chain(reloaded.current_node_id)
+        compact_nodes = [
+            node for node in chain
+            if any(message.get("subtype") == "compact_boundary" for message in _messages_for_node(manager, conv.metadata["id"], node["id"]))
+        ]
+        assert len(compact_nodes) == 1
+        assert chain[-1]["usage"]["turn_usage"]["total_tokens"] == 9
+        assert chain[-1]["usage"]["branch_usage"]["total_tokens"] == 180_018
+        assert chain[-1]["usage"]["active_context_usage"]["total_tokens"] == 9
+        assert len(manager.model_manager.provider.calls) == 1
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -462,3 +517,19 @@ def test_compact_route_delegates_to_chat_manager():
 def test_auto_compact_threshold_uses_90_percent_of_current_model_window():
     assert get_auto_compact_threshold(200000) == 180000
     assert get_auto_compact_threshold(32000) == 28800
+
+
+def test_context_window_setting_caps_model_limit(monkeypatch):
+    tmp = tempfile.mkdtemp(prefix="chattree_context_window_")
+    try:
+        manager = _manager(tmp)
+        monkeypatch.setitem(cfg.data, "context_window", 400_000)
+        assert manager._effective_context_window(1_000_000) == 400_000
+
+        monkeypatch.setitem(cfg.data, "context_window", None)
+        assert manager._effective_context_window(1_000_000) == 1_000_000
+
+        monkeypatch.setitem(cfg.data, "context_window", 600_000)
+        assert manager._effective_context_window(320_000) == 320_000
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)

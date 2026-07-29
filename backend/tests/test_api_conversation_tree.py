@@ -89,7 +89,7 @@ def test_tree_endpoint_returns_200_with_usage(tmp_path: Path):
         assert "turn_usage" in usage
         assert "branch_usage" in usage
         assert "active_context_usage" in usage
-        assert "model_context_window" in usage
+        assert "model_context_window" not in usage
 
 
 def test_tree_endpoint_404_for_missing_conversation(tmp_path: Path):

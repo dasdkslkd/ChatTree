@@ -413,7 +413,6 @@ class ChatRepository:
                 "turn_usage": turn_usage,
                 "branch_usage": branch_usage,
                 "active_context_usage": active_context_usage,
-                "model_context_window": None,
             }
             node["total_tokens"] = int((branch_usage or {}).get("total_tokens") or 0)
         return nodes

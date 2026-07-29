@@ -61,7 +61,13 @@ class Config:
     @staticmethod
     def _fresh_config() -> Dict[str, Any]:
         """返回空白配置"""
-        return {'provider': {}, 'default_provider': '', 'default_model': '', 'projects': {}}
+        return {
+            'provider': {},
+            'default_provider': '',
+            'default_model': '',
+            'context_window': None,
+            'projects': {},
+        }
 
     def _save_data(self, data: Dict[str, Any]):
         """直接写入指定数据"""

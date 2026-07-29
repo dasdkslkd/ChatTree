@@ -26,7 +26,6 @@ export interface NodeUsage {
   turn_usage?: UsageInfo;
   branch_usage?: UsageInfo;
   active_context_usage?: UsageInfo;
-  model_context_window?: number | null;
 }
 
 export interface Message {

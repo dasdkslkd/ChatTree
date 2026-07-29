@@ -116,13 +116,14 @@ def test_update_config_refreshes_tool_orchestrator_runtime_references(tmp_path, 
     asyncio.run(run())
 
 
-def test_update_config_stores_global_default_model_and_strips_provider_default(tmp_path, monkeypatch):
+def test_update_config_stores_global_defaults_and_strips_provider_default(tmp_path, monkeypatch):
     async def run():
         FakeToolManager.instances = []
         monkeypatch.setattr(config_route, "ToolManager", FakeToolManager)
         monkeypatch.setattr(config_route, "ModelManager", FakeModelManager)
 
         config_manager = Config(str(tmp_path / "config.json"))
+        assert config_manager.data["context_window"] is None
         config_manager.data = {
             "provider": {
                 "demo": {
@@ -148,6 +149,7 @@ def test_update_config_stores_global_default_model_and_strips_provider_default(t
         await config_route.update_config(
             config_route.ConfigUpdateRequest(
                 default_model="alpha",
+                context_window=400_000,
                 provider_configs={
                     "demo": {
                         "name": "Demo",
@@ -162,6 +164,20 @@ def test_update_config_stores_global_default_model_and_strips_provider_default(t
         )
 
         assert config_manager.data["default_model"] == "alpha"
+        assert config_manager.data["context_window"] == 400_000
         assert "default_model" not in config_manager.data["provider"]["demo"]
+
+        current_tool_manager = app.state.tool_manager
+        manager_count = len(FakeToolManager.instances)
+        await config_route.update_config(
+            config_route.ConfigUpdateRequest(context_window=None),
+            SimpleNamespace(app=app),
+            config_manager,
+        )
+
+        assert config_manager.data["context_window"] is None
+        assert app.state.tool_manager is current_tool_manager
+        assert current_tool_manager.closed is False
+        assert len(FakeToolManager.instances) == manager_count
 
     asyncio.run(run())
