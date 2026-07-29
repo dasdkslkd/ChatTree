@@ -11,6 +11,7 @@
 import asyncio
 import base64
 import json
+import os
 import time
 import urllib.error
 import urllib.request
@@ -46,8 +47,6 @@ COPILOT_API_VERSION = "2025-10-01"
 COPILOT_API_BASE_GITHUB_COM = "https://api.githubcopilot.com"
 
 # ─── Gemini (CLI 凭据复用) ─────────────────────────────────────────────────
-GEMINI_CLIENT_ID = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
-GEMINI_CLIENT_SECRET = "REMOVED"
 GEMINI_TOKEN_URL = "https://oauth2.googleapis.com/token"
 
 _EAGER_REFRESH_MS = 5 * 60 * 1000  # 提前 5 分钟主动刷新
@@ -536,13 +535,20 @@ async def _read_gemini_cli_credentials() -> Optional[Dict[str, Any]]:
 
 async def _gemini_refresh_token(auth: Dict[str, Any]) -> None:
     """用 Google OAuth client 刷新 Gemini access_token。"""
+    client_id = os.environ.get("CHATTREE_GEMINI_CLIENT_ID", "")
+    client_secret = os.environ.get("CHATTREE_GEMINI_CLIENT_SECRET", "")
+    if not client_id or not client_secret:
+        raise SubscriptionError(
+            "Gemini 凭据已过期；请重新登录 Gemini CLI，或配置 "
+            "CHATTREE_GEMINI_CLIENT_ID 和 CHATTREE_GEMINI_CLIENT_SECRET"
+        )
     resp = await _http_post_json(
         GEMINI_TOKEN_URL,
         body={
             "grant_type": "refresh_token",
             "refresh_token": auth.get("refresh", ""),
-            "client_id": GEMINI_CLIENT_ID,
-            "client_secret": GEMINI_CLIENT_SECRET,
+            "client_id": client_id,
+            "client_secret": client_secret,
         },
     )
     auth["access"] = resp["access_token"]
