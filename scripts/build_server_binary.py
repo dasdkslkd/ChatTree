@@ -19,8 +19,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SPEC_PATH = REPO_ROOT / "packaging" / "chattree-server.spec"
 DEFAULT_BUILD_ROOT = REPO_ROOT / ".build" / "server-binary"
 DEFAULT_DIST_DIR = REPO_ROOT / "dist"
-PYINSTALLER_VERSION = "6.13.0"
-PYINSTALLER_HOOKS_CONTRIB_VERSION = "2025.4"
+PYINSTALLER_VERSION = "6.21.0"
+PYINSTALLER_HOOKS_CONTRIB_VERSION = "2026.6"
 
 
 def main(argv: Sequence[str] | None = None) -> int:

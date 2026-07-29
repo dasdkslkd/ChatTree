@@ -51,8 +51,8 @@ def test_build_extra_declares_pyinstaller():
     extras = _read_pyproject()["project"]["optional-dependencies"]
 
     assert extras["build"] == [
-        "pyinstaller==6.13.0",
-        "pyinstaller-hooks-contrib==2025.4",
+        "pyinstaller==6.21.0",
+        "pyinstaller-hooks-contrib==2026.6",
     ]
 
 
