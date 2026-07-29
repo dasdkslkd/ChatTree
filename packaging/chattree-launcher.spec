@@ -22,7 +22,7 @@ hiddenimports = []
 hiddenimports += collect_submodules("client_launcher")
 hiddenimports += collect_submodules("chattree_protocol")
 hiddenimports += collect_submodules(
-    "backend.core",
+    "backend",
     filter=lambda name: not name.startswith("backend.tests"),
 )
 hiddenimports += [

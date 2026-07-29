@@ -44,19 +44,6 @@ function resolveLauncherCmd() {
   return [binaryPath];
 }
 
-function resolveServerBinary() {
-  if (isDevMode()) return null;
-  const ext = process.platform === "win32" ? ".exe" : "";
-  const resourcesPath = process.resourcesPath || path.join(__dirname, "..", "..");
-  const binaryPath = path.join(resourcesPath, `chattree-server${ext}`);
-  if (!fs.existsSync(binaryPath)) {
-    throw new Error(
-      `Server binary not found at ${binaryPath}. The app may be improperly installed.`,
-    );
-  }
-  return binaryPath;
-}
-
 function startLauncher() {
   const [cmd, ...args] = resolveLauncherCmd();
 
@@ -66,9 +53,8 @@ function startLauncher() {
     CHATTREE_CLIENT_PORT: "0",
     CHATTREE_FRONTEND_DIST: FRONTEND_DIST,
   };
-  const serverBinary = resolveServerBinary();
-  if (serverBinary) {
-    env.CHATTREE_SERVER_BINARY = serverBinary;
+  if (!isDevMode()) {
+    env.CHATTREE_SERVER_BINARY = `"${cmd}" server`;
   }
 
   fs.mkdirSync(LOG_DIR, { recursive: true });

@@ -194,6 +194,7 @@ def test_existing_server_is_reused_without_spawn(tmp_path: Path):
         _settings(tmp_path),
         transport=httpx.MockTransport(handler),
         popen_factory=popen,
+        port_available=lambda _port: False,
     )
 
     connected = asyncio.run(
@@ -226,6 +227,7 @@ def test_existing_server_is_validated_by_handshake_without_binary_probe(
         _settings(tmp_path, server_binary="chattree-server"),
         transport=httpx.MockTransport(handler),
         popen_factory=fail_popen,
+        port_available=lambda _port: False,
     )
 
     connected = asyncio.run(connector.connect(_profile(tmp_path), None))
@@ -285,7 +287,7 @@ def test_connection_refusal_spawns_detached_production_server(tmp_path: Path):
     assert kwargs["env"]["PYTHONIOENCODING"] == "utf-8"
     assert kwargs["stdout"].closed
     assert not list((tmp_path / "client" / "logs").glob("*.spawn.pid"))
-    assert phases == ["handshake", "local_start", "handshake"]
+    assert phases == ["local_start", "handshake", "handshake"]
     assert process.terminate_calls == 1
     assert process.kill_calls == 0
 
@@ -333,6 +335,29 @@ def test_binary_mode_spawns_chattree_server_serve_directly(
     assert kwargs["stdout"].closed
     assert kwargs["env"]["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
     assert process.terminate_calls == 1
+
+
+def test_binary_mode_reuses_current_pyinstaller_runtime(tmp_path: Path):
+    popen = FakePopen()
+    connector = LocalServerConnector(
+        _settings(
+            tmp_path,
+            server_binary=subprocess.list2cmdline(
+                [local_server.sys.executable, "server"]
+            ),
+        ),
+        popen_factory=popen,
+    )
+
+    connector._spawn(
+        _profile(tmp_path),
+        (tmp_path / "server-home").resolve(),
+        18001,
+    )
+
+    argv, kwargs = popen.calls[0]
+    assert argv[:3] == [local_server.sys.executable, "server", "serve"]
+    assert "PYINSTALLER_RESET_ENVIRONMENT" not in kwargs["env"]
 
 
 def test_spawned_server_with_old_handshake_is_terminated(tmp_path: Path):
@@ -492,6 +517,7 @@ def test_http_response_on_handshake_never_spawns(tmp_path: Path, status_code: in
         _settings(tmp_path),
         transport=httpx.MockTransport(lambda request: httpx.Response(status_code)),
         popen_factory=popen,
+        port_available=lambda _port: False,
     )
 
     with pytest.raises(LocalServerResponseError):
@@ -513,6 +539,7 @@ def test_malformed_handshake_never_spawns(tmp_path: Path):
             )
         ),
         popen_factory=popen,
+        port_available=lambda _port: False,
     )
 
     with pytest.raises(LocalServerResponseError):
@@ -531,6 +558,7 @@ def test_protocol_mismatch_fails_without_spawn(tmp_path: Path):
         _settings(tmp_path),
         transport=httpx.MockTransport(handler),
         popen_factory=popen,
+        port_available=lambda _port: False,
     )
 
     with pytest.raises(LocalServerProtocolError):
@@ -549,6 +577,7 @@ def test_server_version_mismatch_fails_without_spawn(tmp_path: Path):
         _settings(tmp_path),
         transport=httpx.MockTransport(handler),
         popen_factory=popen,
+        port_available=lambda _port: False,
     )
 
     with pytest.raises(LocalServerProtocolError) as exc_info:
@@ -571,6 +600,7 @@ def test_future_protocol_version_fails_without_spawn(tmp_path: Path):
             lambda request: _handshake(protocol_version=2)
         ),
         popen_factory=popen,
+        port_available=lambda _port: False,
     )
 
     with pytest.raises(LocalServerProtocolError) as exc_info:
@@ -675,7 +705,7 @@ def test_start_timeout_terminates_spawned_server(tmp_path: Path):
     assert process.terminate_calls == 1
     assert exc_info.value.log_tail == "startup is still waiting"
     assert exc_info.value.log_tail in str(exc_info.value)
-    assert requests == 3
+    assert requests == 2
 
 
 def test_start_timeout_bounds_a_slow_readiness_probe(tmp_path: Path):
@@ -686,8 +716,6 @@ def test_start_timeout_bounds_a_slow_readiness_probe(tmp_path: Path):
         async def handler(request: httpx.Request) -> httpx.Response:
             nonlocal requests
             requests += 1
-            if requests == 1:
-                raise httpx.ConnectError("refused", request=request)
             await never_ready.wait()
             raise AssertionError("unreachable")
 
@@ -696,15 +724,16 @@ def test_start_timeout_bounds_a_slow_readiness_probe(tmp_path: Path):
             _settings(tmp_path, start_timeout_seconds=0.05),
             transport=httpx.MockTransport(handler),
             popen_factory=FakePopen(process),
+            port_available=lambda _port: True,
         )
 
         with pytest.raises(LocalServerStartTimeoutError):
             await asyncio.wait_for(
                 connector.connect(_profile(tmp_path), None),
                 timeout=0.25,
-            )
+        )
         assert process.terminate_calls == 1
-        assert requests == 2
+        assert requests == 1
         await connector.close()
 
         assert process.terminate_calls == 1

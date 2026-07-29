@@ -5,6 +5,7 @@ import json
 import os
 import queue
 import shutil
+import socket
 import subprocess
 import tempfile
 import threading
@@ -136,8 +137,12 @@ def smoke_start(binary: Path) -> None:
     try:
         env = os.environ.copy()
         env["CHATTREE_CLIENT_HOME"] = str(home)
+        env["CHATTREE_HOME"] = str(home / "server")
         env["CHATTREE_CLIENT_PORT"] = "0"
-        env["CHATTREE_SERVER_BINARY"] = ""
+        env["CHATTREE_SERVER_BINARY"] = f'"{binary}" server'
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            env["CHATTREE_LOCAL_SERVER_PORT"] = str(listener.getsockname()[1])
         process = subprocess.Popen(
             [str(binary)],
             cwd=str(REPO_ROOT),
@@ -215,7 +220,10 @@ def _wait_for_status(port: int) -> None:
             with urllib.request.urlopen(url, timeout=1) as response:
                 if response.status == 200:
                     payload = json.loads(response.read().decode("utf-8"))
-                    if payload.get("profile_id") == "local":
+                    if (
+                        payload.get("profile_id") == "local"
+                        and payload.get("status") == "ready"
+                    ):
                         return
         except BaseException as exc:
             last_error = exc

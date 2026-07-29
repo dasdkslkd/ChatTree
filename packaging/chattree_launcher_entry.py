@@ -1,9 +1,17 @@
 from __future__ import annotations
 
-from client_launcher.__main__ import main as launcher_main
+import sys
 
 
 def main() -> int:
+    if sys.argv[1:2] == ["server"]:
+        del sys.argv[1]
+        from backend.server_cli import main as server_main
+
+        return int(server_main())
+
+    from client_launcher.__main__ import main as launcher_main
+
     return int(launcher_main())
 
 

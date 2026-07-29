@@ -4,6 +4,7 @@ const path = require('node:path');
 
 const source = fs.readFileSync(path.join(__dirname, '../electron/main.cjs'), 'utf8');
 const shellSource = fs.readFileSync(path.join(__dirname, '../electron/shell.js'), 'utf8');
+const packageConfig = JSON.parse(fs.readFileSync(path.join(__dirname, '../package.json'), 'utf8'));
 
 assert.match(
   source,
@@ -24,6 +25,25 @@ assert.match(
   source,
   /view\.webContents\.loadURL\(`\$\{launcherOrigin\}\/s\//,
   'Profile views should use the reported origin',
+);
+assert.match(
+  source,
+  /env\.CHATTREE_SERVER_BINARY = `"\$\{cmd\}" server`;/,
+  'The local Server should reuse the packaged Launcher runtime',
+);
+assert.equal(packageConfig.build.extraResources, undefined);
+assert.deepEqual(packageConfig.build.win.extraResources, [{
+  from: '../dist/chattree-launcher.exe',
+  to: 'chattree-launcher.exe',
+}]);
+assert.deepEqual(packageConfig.build.mac.extraResources, [{
+  from: '../dist/chattree-launcher',
+  to: 'chattree-launcher',
+}]);
+assert.deepEqual(
+  packageConfig.build.linux.extraResources,
+  packageConfig.build.mac.extraResources,
+  'Each platform should package only its shared Launcher runtime',
 );
 assert.match(
   source,

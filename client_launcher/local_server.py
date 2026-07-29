@@ -7,6 +7,7 @@ import re
 import shlex
 import socket
 import subprocess
+import sys
 import time
 import uuid
 from dataclasses import dataclass
@@ -251,15 +252,15 @@ class LocalServerConnector:
         lock = self._locks.setdefault(lock_key, asyncio.Lock())
 
         async with lock:
-            try:
-                return await self._probe(
-                    endpoint,
-                    profile,
-                    phase_callback,
-                    request_id=request_id,
-                )
-            except _EndpointUnavailable as exc:
-                if not self._port_available(port):
+            if not self._port_available(port):
+                try:
+                    return await self._probe(
+                        endpoint,
+                        profile,
+                        phase_callback,
+                        request_id=request_id,
+                    )
+                except _EndpointUnavailable as exc:
                     raise self._transport_error(endpoint, exc) from exc.cause
 
             await self._emit_phase(phase_callback, "local_start")
@@ -677,7 +678,10 @@ class LocalServerConnector:
                 "PYTHONIOENCODING": "utf-8",
             }
         )
-        if getattr(self._settings, "server_binary", None):
+        binary = getattr(self._settings, "server_binary", None)
+        if binary and os.path.normcase(
+            os.path.abspath(argv[0])
+        ) != os.path.normcase(os.path.abspath(sys.executable)):
             env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
         kwargs: dict[str, Any] = {
             "cwd": str(project_root),
@@ -687,7 +691,7 @@ class LocalServerConnector:
             "shell": False,
             "close_fds": True,
         }
-        if getattr(self._settings, "server_binary", None):
+        if binary:
             kwargs["cwd"] = str(Path.cwd())
         else:
             kwargs["cwd"] = str(project_root)

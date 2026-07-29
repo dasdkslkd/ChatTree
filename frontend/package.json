@@ -74,24 +74,32 @@
       "electron/**/*",
       "package.json"
     ],
-    "extraResources": [
-      {
-        "from": "../dist/chattree-server${ext}",
-        "to": "chattree-server${ext}"
-      },
-      {
-        "from": "../dist/chattree-launcher${ext}",
-        "to": "chattree-launcher${ext}"
-      }
-    ],
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "extraResources": [
+        {
+          "from": "../dist/chattree-launcher.exe",
+          "to": "chattree-launcher.exe"
+        }
+      ]
     },
     "mac": {
-      "target": "dmg"
+      "target": "dmg",
+      "extraResources": [
+        {
+          "from": "../dist/chattree-launcher",
+          "to": "chattree-launcher"
+        }
+      ]
     },
     "linux": {
-      "target": "AppImage"
+      "target": "AppImage",
+      "extraResources": [
+        {
+          "from": "../dist/chattree-launcher",
+          "to": "chattree-launcher"
+        }
+      ]
     }
   }
 }
