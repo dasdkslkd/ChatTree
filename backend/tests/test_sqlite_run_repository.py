@@ -553,6 +553,40 @@ def test_run_repository_stores_large_payloads_as_blobs(tmp_path):
     assert BlobStore(persistence).get_text(row["payload_blob_id"]).startswith("{")
     assert runs.read_events(run_id)[0]["payload"]["content"] == content
 
+    runs.finish_run(run_id, "completed")
+
+    with persistence.connect() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM run_events WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM blobs").fetchone()[0] == 0
+    assert "terminal_result" not in runs.read_events(run_id)[0]["payload"]
+
+
+def test_run_repository_keeps_only_semantic_terminal_result(tmp_path):
+    _persistence, _chat, runs, conv_id, node_id = _repositories(tmp_path)
+    run_id = runs.create_run(conv_id, kind="command", target_node_id=node_id)
+    runs.append_event(run_id, {
+        "event_type": "command_exited",
+        "status": "content",
+        "content": "",
+        "exit_code": 0,
+    })
+    runs.append_event(run_id, {
+        "event_type": "text",
+        "status": "content",
+        "content": "trailing noise",
+    })
+
+    runs.finish_run(run_id, "completed")
+
+    events = runs.read_events(run_id)
+    assert len(events) == 1
+    assert events[0]["payload"]["type"] == "run_finished"
+    assert events[0]["payload"]["terminal_result"]["event_type"] == "command_exited"
+    assert events[0]["payload"]["terminal_result"]["exit_code"] == 0
+
 
 def test_run_repository_concurrent_large_payload_events_do_not_leak_blobs(tmp_path):
     persistence, _chat, runs, conv_id, node_id = _repositories(tmp_path)
@@ -584,9 +618,8 @@ def test_run_repository_concurrent_large_payload_events_do_not_leak_blobs(tmp_pa
     )
     assert all(event["payload_blob_id"] for event in stored_events)
     with persistence.connect() as conn:
-        blob_rows = conn.execute("SELECT id, ref_count FROM blobs").fetchall()
+        blob_rows = conn.execute("SELECT id FROM blobs").fetchall()
     assert len(blob_rows) == call_count
-    assert [row["ref_count"] for row in blob_rows] == [1] * call_count
 
 
 def test_run_repository_finish_and_stop_update_status(tmp_path):
@@ -625,14 +658,51 @@ def test_run_manager_uses_optional_repository_backend(tmp_path):
         assert finished.status == RunStatus.COMPLETED
         assert runs.get_run(record.run_id)["status"] == "completed"
         assert [event["payload"].get("type") for event in events] == [
-            "run_started",
-            None,
             "run_finished",
         ]
-        assert events[1]["payload"]["content"] == "hello"
-        assert events[2]["payload"]["status"] == "completed"
+        assert "terminal_result" not in events[0]["payload"]
+        assert events[0]["payload"]["status"] == "completed"
 
     asyncio.run(scenario())
+
+
+def test_run_manager_restores_semantic_terminal_result_after_restart(tmp_path):
+    async def scenario():
+        _persistence, _chat, runs, conv_id, node_id = _repositories(tmp_path)
+        manager = RunManager(repository=runs)
+        record = await manager.create_run(
+            conversation_id=conv_id,
+            kind="subagent",
+            target_node_id=node_id,
+        )
+        await manager.append_event(record.run_id, {
+            "event_type": "subagent_result",
+            "status": "complete",
+            "content": "done",
+            "result": {"ok": True},
+        })
+        await manager.append_event(record.run_id, {
+            "event_type": "text",
+            "status": "content",
+            "content": "trailing noise",
+        })
+        await manager.finish_run(record.run_id, RunStatus.COMPLETED)
+
+        restarted = RunManager(repository=runs)
+        result = await restarted.wait_for_terminal_result(
+            record.run_id,
+            result_event_types={"subagent_result"},
+            error_event_types={"subagent_error"},
+            timeout=1,
+        )
+
+        assert result["message_type"] == "result"
+        assert result["event_type"] == "subagent_result"
+        assert result["content"] == "done"
+        assert result["result"] == {"ok": True}
+
+    asyncio.run(scenario())
+
 
 def test_run_manager_publishes_events_before_background_flush(tmp_path):
     async def scenario():
@@ -690,13 +760,11 @@ def test_run_manager_flushes_pending_events_before_finish(tmp_path):
 
         stored_events = runs.read_events(record.run_id)
         assert finished.status == RunStatus.COMPLETED
-        assert [event["event_index"] for event in stored_events] == [0, 1, 2, 3]
+        assert [event["event_index"] for event in stored_events] == [3]
         assert [event["payload"].get("type") for event in stored_events] == [
-            "run_started",
-            None,
-            None,
             "run_finished",
         ]
+        assert "terminal_result" not in stored_events[0]["payload"]
         assert stored_events[-1]["payload"]["status"] == "completed"
 
     asyncio.run(scenario())

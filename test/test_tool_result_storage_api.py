@@ -185,13 +185,12 @@ def test_tool_result_route_returns_clear_error_for_missing_sqlite_blob(tmp_path)
               path,
               mime_type,
               compression,
-              byte_size,
-              stored_size,
-              char_count,
-              ref_count,
-              created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, strftime('%s', 'now'))
+                  byte_size,
+                  stored_size,
+                  char_count,
+                  created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%s', 'now'))
             """,
             (
                 "missing-blob-id",
@@ -199,10 +198,9 @@ def test_tool_result_route_returns_clear_error_for_missing_sqlite_blob(tmp_path)
                 "text/plain; charset=utf-8",
                 "gzip",
                 128,
-                64,
-                128,
-                1,
-            ),
+                    64,
+                    128,
+                ),
         )
         conn.execute(
             """

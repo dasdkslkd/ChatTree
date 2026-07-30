@@ -21,6 +21,12 @@ from .database import SQLitePersistence
 
 
 FINISHED_STATUSES = {"completed", "failed", "cancelled", "interrupted", "stopped"}
+TERMINAL_RESULT_EVENT_TYPES = {
+    "command": {"command_exited", "command_stopped", "command_error"},
+    "subagent": {"subagent_result", "subagent_error"},
+    "workflow_step": {"subagent_result", "subagent_error"},
+    "workflow": {"workflow_result", "workflow_error", "workflow_cancelled"},
+}
 RUN_COLUMNS = """
 id,
 conversation_id,
@@ -520,6 +526,34 @@ class SQLiteRunRepository:
             if row["status"] in FINISHED_STATUSES:
                 return self._run_from_row(row)
 
+            terminal_result = {}
+            result_event_types = TERMINAL_RESULT_EVENT_TYPES.get(
+                str(row["kind"]),
+                set(),
+            )
+            if result_event_types:
+                placeholders = ",".join("?" for _ in result_event_types)
+                result_event_row = conn.execute(
+                    f"""
+                    SELECT payload_inline, payload_blob_id
+                    FROM run_events
+                    WHERE run_id = ?
+                      AND event_type IN ({placeholders})
+                    ORDER BY event_index DESC
+                    LIMIT 1
+                    """,
+                    (run_id, *sorted(result_event_types)),
+                ).fetchone()
+            else:
+                result_event_row = None
+            if result_event_row is not None:
+                payload_text = result_event_row["payload_inline"]
+                if payload_text is None and result_event_row["payload_blob_id"]:
+                    payload_text = BlobStore(self.persistence).get_text_in_connection(
+                        conn,
+                        str(result_event_row["payload_blob_id"]),
+                    )
+                terminal_result = self._load_json(payload_text) or {}
             metadata = self._load_json(row["metadata_json"]) or {}
             if error:
                 metadata["error"] = error
@@ -551,27 +585,29 @@ class SQLiteRunRepository:
             if finished_row is None:
                 raise KeyError(run_id)
             finished = self._run_from_row(finished_row)
-            self._append_event_in_connection(
-                conn,
-                run_id,
-                {
-                    "type": "run_finished",
-                    "run_id": run_id,
-                    "conversation_id": finished["conversation_id"],
-                    "kind": finished["kind"],
-                    "target_node_id": finished["target_node_id"],
-                    "status": status_value,
-                    "error": error,
-                    "finished_at": finished["finished_at"],
-                },
-            )
+            conn.execute("DELETE FROM run_events WHERE run_id = ?", (run_id,))
+            terminal_event = {
+                "type": "run_finished",
+                "run_id": run_id,
+                "conversation_id": finished["conversation_id"],
+                "kind": finished["kind"],
+                "target_node_id": finished["target_node_id"],
+                "status": status_value,
+                "error": error,
+                "finished_at": finished["finished_at"],
+            }
+            if terminal_result:
+                terminal_event["terminal_result"] = terminal_result
+            self._append_event_in_connection(conn, run_id, terminal_event)
             current_row = conn.execute(
                 f"SELECT {RUN_COLUMNS} FROM runs WHERE id = ?",
                 (run_id,),
             ).fetchone()
             if current_row is None:
                 raise KeyError(run_id)
-            return self._run_from_row(current_row)
+            result = self._run_from_row(current_row)
+        self.persistence.reclaim_blobs()
+        return result
 
     def request_stop(self, run_id: str) -> bool:
         with self.persistence.connect() as conn:
@@ -656,66 +692,23 @@ class SQLiteRunRepository:
     def delete_run(self, run_id: str) -> None:
         with self.persistence.connect() as conn:
             conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
+        self.persistence.reclaim_blobs()
 
     def mark_unfinished_as_interrupted(self) -> list[str]:
         placeholders = ",".join("?" for _ in FINISHED_STATUSES)
         with self.persistence.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
                 f"""
-                SELECT id, summary, metadata_json
+                SELECT id
                 FROM runs
                 WHERE status NOT IN ({placeholders})
                 ORDER BY created_at, id
                 """,
                 tuple(sorted(FINISHED_STATUSES)),
             ).fetchall()
-            run_ids = [row["id"] for row in rows]
-            for row in rows:
-                run_id = row["id"]
-                metadata = self._load_json(row["metadata_json"]) or {}
-                metadata["error"] = "interrupted on startup"
-                if self.task_repository is not None:
-                    task_outcome = self.task_repository.finish_run_binding_in_connection(
-                        conn,
-                        run_id=run_id,
-                        terminal_status="interrupted",
-                        error="interrupted on startup",
-                        summary=str(row["summary"] or ""),
-                    )
-                    if task_outcome is not None:
-                        metadata["task_outcome"] = task_outcome
-                conn.execute(
-                    """
-                    UPDATE runs
-                    SET status = 'interrupted',
-                        metadata_json = ?,
-                        finished_at = strftime('%s', 'now'),
-                        updated_at = strftime('%s', 'now')
-                    WHERE id = ?
-                    """,
-                    (self._json_field(metadata), run_id),
-                )
-                run = conn.execute(
-                    f"SELECT {RUN_COLUMNS} FROM runs WHERE id = ?",
-                    (run_id,),
-                ).fetchone()
-                if run is not None:
-                    snapshot = self._run_from_row(run)
-                    self._append_event_in_connection(
-                        conn,
-                        run_id,
-                        {
-                            "type": "run_finished",
-                            "run_id": run_id,
-                            "conversation_id": snapshot["conversation_id"],
-                            "kind": snapshot["kind"],
-                            "target_node_id": snapshot["target_node_id"],
-                            "status": "interrupted",
-                            "error": "interrupted on startup",
-                            "finished_at": snapshot["finished_at"],
-                        },
-                    )
+        run_ids = [str(row["id"]) for row in rows]
+        for run_id in run_ids:
+            self.finish_run(run_id, "interrupted", "interrupted on startup")
         return run_ids
 
     def _append_event_in_connection(
@@ -881,8 +874,7 @@ class SQLiteRunRepository:
             conn.execute(
                 """
                 UPDATE blobs
-                SET ref_count = ref_count + 1,
-                    last_accessed_at = strftime('%s', 'now')
+                SET last_accessed_at = strftime('%s', 'now')
                 WHERE id = ?
                 """,
                 (blob_id,),
@@ -910,10 +902,9 @@ class SQLiteRunRepository:
                   byte_size,
                   stored_size,
                   char_count,
-                  ref_count,
                   created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, 1, strftime('%s', 'now'))
+                VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%s', 'now'))
                 """,
                 (
                     blob_id,

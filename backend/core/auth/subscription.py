@@ -594,7 +594,10 @@ def _parse_copilot_models(resp: Any) -> list:
             continue
         model_id = entry.get("id") or entry.get("name")
         if model_id:
-            models.append({"id": str(model_id), "owned_by": entry.get("vendor")})
+            models.append({
+                "id": str(model_id),
+                "owned_by": entry.get("vendor"),
+            })
     models.sort(key=lambda m: m["id"])
     return models
 
@@ -620,10 +623,11 @@ def _parse_models_universal(resp: Any) -> list:
         model_id = entry.get("id") or entry.get("slug") or entry.get("model") or entry.get("name")
         if not model_id:
             continue
-        models.append({
+        model = {
             "id": str(model_id).strip(),
             "owned_by": entry.get("owned_by") or entry.get("vendor"),
-        })
+        }
+        models.append(model)
 
     seen = set()
     unique = []

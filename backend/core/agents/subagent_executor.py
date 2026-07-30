@@ -524,7 +524,12 @@ class SubagentExecutor:
             if not target_provider or not target_model:
                 raise ValueError("无法确定 subagent 模型")
 
-            provider = self.chat_manager.model_manager.get_model(target_provider, True)
+            route = self.chat_manager.model_manager.get_route(target_provider, target_model)
+            provider = self.chat_manager.model_manager.get_model(
+                target_provider,
+                target_model,
+                True,
+            )
             if provider is None:
                 raise ValueError(f"无法初始化提供商 {target_provider}")
 
@@ -566,6 +571,7 @@ class SubagentExecutor:
                 round_content = ""
                 round_reasoning = ""
                 round_tool_calls: list[dict[str, Any]] = []
+                round_output_items: list[dict[str, Any]] = []
                 complete_seen = False
 
                 async for chunk in provider.generate_response_stream(
@@ -577,6 +583,16 @@ class SubagentExecutor:
                 ):
                     if await self.run_manager.is_stop_requested(run_id):
                         await controller.stop()
+                    if chunk.get("output_item"):
+                        output_item = dict(chunk["output_item"])
+                        output_item["round_index"] = tool_round
+                        output_item["index"] = len(round_output_items)
+                        if output_item.get("route_id") != route["route_id"]:
+                            raise RuntimeError(
+                                "continuation_invalid: subagent 输出项路由不一致"
+                            )
+                        round_output_items.append(output_item)
+                        continue
                     if chunk.get("reasoning"):
                         text = chunk.get("reasoning") or ""
                         total_reasoning += text
@@ -625,12 +641,21 @@ class SubagentExecutor:
                 if tool_round >= max_tool_rounds:
                     raise RuntimeError(f"工具调用轮数超过上限 {max_tool_rounds}")
                 tool_round += 1
-                assistant_tool_message = {
+                if (
+                    (route.get("reasoning_profile") or {}).get("strict")
+                    and not round_output_items
+                ):
+                    raise RuntimeError(
+                        "continuation_invalid: subagent 适配器未封存工具续接状态"
+                    )
+                messages.append({
                     "role": "assistant",
                     "content": round_content,
+                    "reasoning": round_reasoning or None,
                     "tool_calls": round_tool_calls,
-                }
-                messages.append(assistant_tool_message)
+                    "model_route_id": route["route_id"],
+                    "model_state_items": round_output_items,
+                })
                 approval_events: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
                 run_snapshot = self.run_manager.get_run(run_id) or {}
                 run_metadata = dict(run_snapshot.get("metadata") or {})
@@ -909,7 +934,11 @@ class SubagentExecutor:
             tools = self.chat_manager.tool_manager.get_openai_tools(workspace=workspace)
         if allowed_names == []:
             return []
-        tools = filter_task_tools_for_context(tools, "detached")
+        tools = filter_task_tools_for_context(
+            tools,
+            "detached",
+            has_active_task=False,
+        )
         disallowed = set(disallowed_names or ())
         if disallowed:
             tools = [

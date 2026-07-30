@@ -1,6 +1,3 @@
-// API 格式类型
-export type APIFormat = 'chat_completions' | 'responses' | 'anthropic' | 'gemini';
-
 // 推理强度声明（levels 既是 UI 选项，也是合法档位）
 export interface ReasoningEffortSpec {
   levels: string[];
@@ -16,8 +13,12 @@ export interface ThinkingSpec {
 // 单个模型的统一能力声明（reasoning_effort/thinking 为 null = 不显示对应控件）
 export interface ModelMetadata {
   model_id: string;
+  route_id: string;
+  protocol: 'openai_chat_completions' | 'openai_responses' | 'anthropic_messages' | 'gemini_generate_content';
+  endpoint: string;
   context_length?: number | null;
   supports_vision?: boolean;
+  supports_tools?: boolean;
   reasoning_effort?: ReasoningEffortSpec | null;
   thinking?: ThinkingSpec | null;
 }
@@ -47,7 +48,6 @@ export interface ModelProviderConfig {
   base_url: string;
   organization?: string;
   project?: string;
-  api_format: APIFormat;
   hidden_models: string[];
   enabled: boolean;
   auth?: AuthInfo;
@@ -277,7 +277,6 @@ export interface ConfigUpdateRequest {
 export interface AddProviderRequest {
   id: string;
   name: string;
-  api_format: APIFormat;
   base_url?: string;
   api_key?: string;
   auth?: AuthInfo;

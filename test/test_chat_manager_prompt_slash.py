@@ -24,6 +24,7 @@ from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
 from backend.core.slash import SlashCommandDispatcher, SlashDispatchKind
 from backend.core.tools.orchestrator import ToolOrchestrator
+from model_route_support import fake_model_route
 from backend.core.tools.plan_tools import register_plan_tools
 from backend.core.tools.security.capabilities import ToolCapability, capabilities_for_tool
 from backend.core.tools.security.approval import ApprovalManager
@@ -267,12 +268,15 @@ class CapturingModelManager:
         self.provider = CapturingProvider()
         self.get_model_calls = []
 
-    def get_model(self, provider, is_async=False):
-        self.get_model_calls.append((provider, is_async))
+    def get_route(self, provider, model):
+        return fake_model_route(provider, model)
+
+    def get_model(self, provider, model, is_async=False):
+        self.get_model_calls.append((provider, model, is_async))
         return self.provider
 
     def get_model_metadata(self, provider_id, model_name):
-        return {}
+        return fake_model_route(provider_id, model_name)["capabilities"]
 
 
 class FakeToolManager:
@@ -681,7 +685,7 @@ def test_send_message_stream_removed_side_command_is_plain_message(tmp_path: Pat
     )
 
     assert chunks[-1]["status"] == StreamStatus.COMPLETE
-    assert model_manager.get_model_calls == [("fake", True)]
+    assert model_manager.get_model_calls == [("fake", "fake-model", True)]
     reloaded = manager.get_conversation(conversation.metadata["id"])
     assert len(reloaded.nodes) == 2
     current = reloaded.nodes[reloaded.current_node_id]

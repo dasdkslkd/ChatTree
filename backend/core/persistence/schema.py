@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 4
 
 
 SCHEMA_SQL = """
@@ -19,7 +19,6 @@ CREATE TABLE IF NOT EXISTS blobs (
   byte_size INTEGER NOT NULL,
   stored_size INTEGER NOT NULL,
   char_count INTEGER,
-  ref_count INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
   last_accessed_at INTEGER
 );
@@ -84,6 +83,8 @@ CREATE TABLE IF NOT EXISTS messages (
   preview TEXT NOT NULL DEFAULT '',
   hidden INTEGER NOT NULL DEFAULT 0,
   transcript_only INTEGER NOT NULL DEFAULT 0,
+  model_route_id TEXT,
+  model_round_index INTEGER,
   metadata_json TEXT,
   usage_json TEXT,
   created_at INTEGER NOT NULL,
@@ -97,6 +98,24 @@ CREATE INDEX IF NOT EXISTS idx_messages_conversation_created
   ON messages(conversation_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_messages_blob
   ON messages(content_blob_id);
+CREATE INDEX IF NOT EXISTS idx_messages_model_round
+  ON messages(conversation_id, node_id, model_round_index);
+
+CREATE TABLE IF NOT EXISTS model_state_items (
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  assistant_message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  item_index INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  payload_inline TEXT,
+  payload_blob_id TEXT REFERENCES blobs(id),
+  PRIMARY KEY (conversation_id, assistant_message_id, item_index),
+  FOREIGN KEY (conversation_id, assistant_message_id)
+    REFERENCES messages(conversation_id, id)
+    ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_model_state_items_payload_blob
+  ON model_state_items(payload_blob_id);
 
 CREATE TABLE IF NOT EXISTS tool_calls (
   id TEXT NOT NULL,

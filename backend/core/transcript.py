@@ -12,7 +12,7 @@ PLAN_QUESTION_TOOLS = {"ask_user_question"}
 PLAN_APPROVAL_TOOLS = {"exit_plan_mode"}
 PROCESS_MESSAGE_BLOCKS = {
     "assistant_process_reasoning": "reasoning",
-    "assistant_process_content": "content",
+    "assistant_round": "content",
 }
 
 
@@ -413,9 +413,22 @@ class TranscriptAssembler:
                 "status": self._assistant_answer_status(raw_status),
                 "created_at": None,
             })
-        for message in messages:
-            if self._is_visible_assistant_answer(message):
-                items.append(self._assistant_answer_item(conversation_id, message, run_by_id))
+        visible_answers = [
+            message
+            for message in messages
+            if self._is_visible_assistant_answer(message)
+        ]
+        continued_content = "".join(
+            str(message.get("content") or "")
+            for message in messages
+            if message.get("role") == "assistant"
+            and message.get("subtype") == "assistant_continuation"
+        )
+        for message in visible_answers:
+            item = self._assistant_answer_item(conversation_id, message, run_by_id)
+            if message is visible_answers[-1] and continued_content:
+                item["content"] = continued_content + str(item.get("content") or "")
+            items.append(item)
         return items
 
     def _merge_live_tool_calls(
@@ -512,6 +525,8 @@ class TranscriptAssembler:
         grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for row in rows:
             call = dict(row)
+            if not call.get("args_preview") and call.get("args_inline"):
+                call["args_preview"] = str(call["args_inline"])[:4096]
             grouped[str(call.get("node_id"))].append(call)
         return grouped
 

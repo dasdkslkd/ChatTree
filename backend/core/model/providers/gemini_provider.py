@@ -4,11 +4,13 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
+from copy import deepcopy
 from typing import List, Dict, Any, Optional, AsyncIterator, Tuple
 
 from ..base import BaseProvider, logger
 from ..usage import estimated_usage, usage_from_gemini, usage_total
-from ...config.types import Message, StreamChunk, StreamStatus, StreamController
+from ...config.types import Message, ModelRoute, StreamChunk, StreamStatus, StreamController
 from .retry import RetryPolicy, RetryableHTTPError, classify_retry_error, run_with_retries, sleep_before_retry
 from .sse import iter_decoded_sse_lines
 from .multimodal import to_gemini_parts
@@ -31,8 +33,8 @@ class GeminiProvider(BaseProvider):
         "high": 24576,
     }
 
-    def __init__(self, config: Dict[str, Any]):
-        super().__init__(config)
+    def __init__(self, config: Dict[str, Any], route: ModelRoute):
+        super().__init__(config, route)
 
     def _api_base(self) -> str:
         base = (self.config.get("base_url") or "https://generativelanguage.googleapis.com").rstrip("/")
@@ -117,6 +119,49 @@ class GeminiProvider(BaseProvider):
         gemini_messages: List[Dict[str, Any]] = []
 
         for msg in messages:
+            native_items = [
+                item
+                for item in (msg.get("model_state_items") or [])
+                if item.get("route_id") == self.route["route_id"]
+                and item.get("kind") == "assistant_message"
+                and isinstance(item.get("native_payload"), dict)
+            ]
+            if native_items:
+                layout = (native_items[0]["native_payload"]).get("layout") or []
+                tool_calls = {
+                    str(call.get("id") or ""): call
+                    for call in (msg.get("tool_calls") or [])
+                }
+                parts: List[Dict[str, Any]] = []
+                text_emitted = False
+                for entry in layout:
+                    if not isinstance(entry, dict):
+                        continue
+                    if isinstance(entry.get("state"), dict):
+                        parts.append(deepcopy(entry["state"]))
+                    elif "text" in entry and not text_emitted and msg.get("content"):
+                        parts.extend(to_gemini_parts(msg.get("content") or ""))
+                        text_emitted = True
+                    elif entry.get("tool_call_id") in tool_calls:
+                        call = tool_calls[str(entry["tool_call_id"])]
+                        fn = call.get("function") or {}
+                        try:
+                            args = json.loads(fn.get("arguments") or "{}")
+                        except json.JSONDecodeError:
+                            args = {"arguments": fn.get("arguments") or ""}
+                        function_part = {
+                            "functionCall": {
+                                "name": fn.get("name", ""),
+                                "args": args,
+                            }
+                        }
+                        if entry.get("thoughtSignature"):
+                            function_part["thoughtSignature"] = entry["thoughtSignature"]
+                        parts.append(function_part)
+                if msg.get("content") and not text_emitted:
+                    parts.extend(to_gemini_parts(msg.get("content") or ""))
+                gemini_messages.append({"role": "model", "parts": parts})
+                continue
             role = msg["role"].value if hasattr(msg["role"], "value") else str(msg["role"])
             content = msg.get("content") or ""
             if role == "system":
@@ -151,7 +196,16 @@ class GeminiProvider(BaseProvider):
                 "parts": to_gemini_parts(content),
             })
 
-        return system_prompt.strip() or None, gemini_messages
+        merged_messages: List[Dict[str, Any]] = []
+        for message in gemini_messages:
+            if (
+                merged_messages
+                and merged_messages[-1].get("role") == message.get("role")
+            ):
+                merged_messages[-1]["parts"].extend(message.get("parts") or [])
+            else:
+                merged_messages.append(deepcopy(message))
+        return system_prompt.strip() or None, merged_messages
 
     def _build_generation_config(
         self,
@@ -256,7 +310,10 @@ class GeminiProvider(BaseProvider):
         )
         policy = RetryPolicy.from_config(self.config)
         result = run_with_retries(
-            lambda: self._request_json(f"/models/{model}:generateContent", body),
+            lambda: self._request_json(
+                self.route["endpoint"].format(model=model),
+                body,
+            ),
             policy,
             label="Gemini generateContent",
             logger=logger,
@@ -279,6 +336,8 @@ class GeminiProvider(BaseProvider):
     ) -> AsyncIterator[StreamChunk]:
         total_tokens = 0
         usage_info = None
+        native_parts: List[Dict[str, Any]] = []
+        native_tool_call_ids: List[str] = []
 
         try:
             body = self._build_body(
@@ -298,18 +357,37 @@ class GeminiProvider(BaseProvider):
             tool_call_started = False
             while True:
                 attempt_had_output = False
+                native_parts = []
+                native_tool_call_ids = []
                 try:
                     async for event in self._iter_sse_events(
-                        f"/models/{model}:streamGenerateContent",
+                        self.route["endpoint"].format(model=model).replace(
+                            ":generateContent",
+                            ":streamGenerateContent",
+                        ),
                         body,
                         stream_controller=stream_controller,
                     ):
+                        attempt_had_output = True
+                        for candidate in event.get("candidates") or []:
+                            content = candidate.get("content") or {}
+                            for part in content.get("parts") or []:
+                                if isinstance(part, dict):
+                                    native_parts.append(deepcopy(part))
                         if usage := event.get("usageMetadata"):
                             usage_info = usage_from_gemini(usage)
                             total_tokens = usage_total(usage_info, total_tokens)
 
-                        tool_calls = self._extract_tool_calls(event)
+                        tool_calls = self._extract_tool_calls(
+                            event,
+                            start_index=len(native_tool_call_ids),
+                        )
                         if tool_calls:
+                            native_tool_call_ids.extend(
+                                str(call.get("id"))
+                                for call in tool_calls
+                                if call.get("id") and str(call.get("id")) not in native_tool_call_ids
+                            )
                             if not tool_call_started:
                                 tool_call_started = True
                                 attempt_had_output = True
@@ -423,6 +501,66 @@ class GeminiProvider(BaseProvider):
 
             if usage_info is None:
                 usage_info = estimated_usage(total_tokens)
+            state_layout = []
+            has_state = False
+            tool_position = 0
+            for part in native_parts:
+                if part.get("functionCall"):
+                    tool_call_id = (
+                        native_tool_call_ids[tool_position]
+                        if tool_position < len(native_tool_call_ids)
+                        else ""
+                    )
+                    tool_position += 1
+                    entry = {"tool_call_id": tool_call_id}
+                    if part.get("thoughtSignature"):
+                        entry["thoughtSignature"] = part["thoughtSignature"]
+                        has_state = True
+                    state_layout.append(entry)
+                elif part.get("thought") or part.get("thoughtSignature"):
+                    state_layout.append({"state": part})
+                    has_state = True
+                elif "text" in part:
+                    state_layout.append({"text": True})
+                else:
+                    state_layout.append({"state": part})
+                    has_state = True
+            yield StreamChunk(
+                status=StreamStatus.CONTENT,
+                content=None,
+                node_id=stream_controller.node_id if stream_controller else None,
+                conversation_id=stream_controller.conversation_id if stream_controller else None,
+                error=None,
+                tokens_used=0,
+                event_type="model_output_item",
+                output_item={
+                    "id": str(uuid.uuid4()),
+                    "route_id": self.route["route_id"],
+                    "index": 0,
+                    "round_index": 0,
+                    "kind": "assistant_message",
+                    "display_text": "".join(
+                        str(part.get("text") or "")
+                        for part in native_parts
+                        if not part.get("thought")
+                    ),
+                    "tool_call_ids": native_tool_call_ids,
+                    "native_payload": {
+                        "role": "model",
+                        "parts": native_parts,
+                    },
+                    **(
+                        {
+                            "state_payload": {
+                                "role": "model",
+                                "layout": state_layout,
+                            }
+                        }
+                        if has_state
+                        else {}
+                    ),
+                },
+            )
             yield StreamChunk(
                 status=StreamStatus.COMPLETE,
                 content=None,
@@ -501,7 +639,11 @@ class GeminiProvider(BaseProvider):
                     chunks.append(part["text"])
         return chunks
 
-    def _extract_tool_calls(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _extract_tool_calls(
+        self,
+        payload: Dict[str, Any],
+        start_index: int = 0,
+    ) -> List[Dict[str, Any]]:
         tool_calls: List[Dict[str, Any]] = []
         for candidate in payload.get("candidates") or []:
             content = candidate.get("content") or {}
@@ -514,7 +656,10 @@ class GeminiProvider(BaseProvider):
                     continue
                 args = function_call.get("args")
                 tool_calls.append({
-                    "id": str(function_call.get("id") or f"gemini_call_{len(tool_calls)}"),
+                    "id": str(
+                        function_call.get("id")
+                        or f"gemini_call_{start_index + len(tool_calls)}"
+                    ),
                     "type": "function",
                     "function": {
                         "name": name,

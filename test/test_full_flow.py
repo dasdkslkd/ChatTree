@@ -8,6 +8,7 @@ from backend.core.chat.canonical_reader import messages_by_node
 from backend.core.config.types import Role, StreamChunk, StreamController, StreamStatus
 from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
+from model_route_support import fake_model_route
 
 
 class FullFlowProvider:
@@ -59,8 +60,14 @@ class FullFlowModelManager:
         self.model_list = {"fake": ["fake-model"]}
         self.provider = FullFlowProvider()
 
-    def get_model(self, provider, is_async=False):
+    def get_route(self, provider, model):
+        return fake_model_route(provider, model)
+
+    def get_model(self, provider, model, is_async=False):
         return self.provider
+
+    def get_model_metadata(self, provider, model):
+        return self.get_route(provider, model)["capabilities"]
 
 
 async def _drain(stream):

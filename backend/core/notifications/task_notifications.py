@@ -278,6 +278,9 @@ class TaskNotificationService:
         events = SQLiteRunRepository(self.persistence).read_events(run_id, 0)
         for event in reversed(events):
             payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            terminal_result = payload.get("terminal_result")
+            if isinstance(terminal_result, dict):
+                return terminal_result
             event_type = str(payload.get("event_type") or payload.get("type") or "")
             if event_type in {
                 "subagent_result",

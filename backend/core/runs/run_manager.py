@@ -943,6 +943,17 @@ class RunManager:
                     elif event_type in error_types:
                         error_payload = payload
                     if payload.get("type") == "run_finished":
+                        terminal_result = payload.get("terminal_result")
+                        if isinstance(terminal_result, dict):
+                            terminal_type = str(
+                                terminal_result.get("event_type")
+                                or terminal_result.get("type")
+                                or ""
+                            )
+                            if terminal_type in result_types:
+                                result_payload = terminal_result
+                            elif terminal_type in error_types:
+                                error_payload = terminal_result
                         final_payload = payload
                         break
                 if final_payload is not None:
@@ -964,6 +975,17 @@ class RunManager:
                     elif event_type in error_types:
                         error_payload = payload
                     if payload.get("type") == "run_finished":
+                        terminal_result = payload.get("terminal_result")
+                        if isinstance(terminal_result, dict):
+                            terminal_type = str(
+                                terminal_result.get("event_type")
+                                or terminal_result.get("type")
+                                or ""
+                            )
+                            if terminal_type in result_types:
+                                result_payload = terminal_result
+                            elif terminal_type in error_types:
+                                error_payload = terminal_result
                         final_payload = payload
                         break
 

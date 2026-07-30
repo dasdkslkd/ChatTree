@@ -383,7 +383,6 @@ class SshServerConnector:
             "provider_configs": {
                 REVERSE_PROXY_PROVIDER_ID: {
                     "name": "本地代理",
-                    "api_format": "chat_completions",
                     "base_url": base_url,
                     # base_url 不符合 OpenAI 惯例路径，显式指定模型列表端点
                     "models_url_override": f"{base_url}/models",

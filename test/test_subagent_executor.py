@@ -14,6 +14,7 @@ from backend.core.capabilities.types import (
 )
 from backend.core.config.types import StreamStatus
 from backend.core.runs import RunManager
+from model_route_support import fake_model_route
 
 
 class FakeRegistry:
@@ -52,7 +53,10 @@ class FakeModelManager:
         self.provider = provider
         self.model_list = {"fake-provider": ["fake-model"]}
 
-    def get_model(self, provider_id, stream=False):
+    def get_route(self, provider_id, model_id):
+        return fake_model_route(provider_id, model_id)
+
+    def get_model(self, provider_id, model_id, is_async=False):
         return self.provider
 
 

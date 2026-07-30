@@ -17,6 +17,7 @@ from backend.core.persistence.database import SQLitePersistence
 from backend.core.persistence.repository import ChatRepository
 from backend.core.runs import RunKind, RunManager
 from backend.core.storage.chat_storage import ChatStorage
+from model_route_support import fake_model_route
 from backend.core.storage.prompt_storage import PromptStorage
 from backend.core.slash import SlashCommandDispatcher, SlashDispatchKind
 from backend.api.routes.messages import (
@@ -124,11 +125,16 @@ class PruneModelManager:
         self.provider = PruneProvider()
         self.model_list = {"fake": ["fake-model"]}
 
-    def get_model(self, provider, is_async=False):
+    def get_route(self, provider, model):
+        route = fake_model_route(provider, model)
+        route["capabilities"]["context_length"] = 200000
+        return route
+
+    def get_model(self, provider, model, is_async=False):
         return self.provider
 
     def get_model_metadata(self, provider_id, model_name):
-        return {"context_length": 200000}
+        return self.get_route(provider_id, model_name)["capabilities"]
 
 
 class SlowPruneProvider(PruneProvider):

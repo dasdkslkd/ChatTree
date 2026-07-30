@@ -10,6 +10,7 @@ from backend.core.chat.canonical_reader import messages_by_node
 from backend.core.config.types import StreamChunk, StreamController, StreamStatus
 from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
+from model_route_support import fake_model_route
 
 
 class RaisingProvider:
@@ -34,8 +35,14 @@ class RaisingProvider:
 class FakeModelManager:
     model_list = {"fake-provider": ["fake-model"]}
 
-    def get_model(self, provider, is_async=False):
+    def get_route(self, provider, model):
+        return fake_model_route(provider, model)
+
+    def get_model(self, provider, model, is_async=False):
         return RaisingProvider()
+
+    def get_model_metadata(self, provider, model):
+        return self.get_route(provider, model)["capabilities"]
 
 
 async def _provider_exception_streams_and_persists_real_error(tmp_path):

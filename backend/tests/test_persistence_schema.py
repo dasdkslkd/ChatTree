@@ -13,6 +13,7 @@ REQUIRED_TABLES = {
     "conversations",
     "nodes",
     "messages",
+    "model_state_items",
     "tool_calls",
     "tool_results",
     "runs",
@@ -37,10 +38,30 @@ def test_initialize_creates_database_tables(tmp_path: Path):
             ).fetchall()
         }
         binding_fks = conn.execute("PRAGMA foreign_key_list(task_run_bindings)").fetchall()
+        message_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(messages)")
+        }
+        state_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(model_state_items)")
+        }
         schema_version = conn.execute("PRAGMA user_version").fetchone()[0]
 
     assert REQUIRED_TABLES <= names
-    assert {"tasks", "task_steps", "task_events"}.isdisjoint(names)
+    assert {
+        "tasks",
+        "task_steps",
+        "task_events",
+        "model_output_items",
+    }.isdisjoint(names)
+    assert {"model_route_id", "model_round_index"} <= message_columns
+    assert state_columns == {
+        "conversation_id",
+        "assistant_message_id",
+        "item_index",
+        "kind",
+        "payload_inline",
+        "payload_blob_id",
+    }
     assert {
         (row["table"], row["from"], row["to"], row["on_delete"])
         for row in binding_fks
@@ -124,6 +145,12 @@ def test_initialize_replaces_obsolete_task_schema(tmp_path: Path):
     persistence = SQLitePersistence(tmp_path)
     persistence.initialize()
     with persistence.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO server_metadata (key, value, created_at)
+            VALUES ('server_instance_id', 'stable-server-id', 1)
+            """
+        )
         _insert_conversation(conn, "conversation-a")
         _insert_root_node(conn, "conversation-a", "node-a")
         conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
@@ -138,12 +165,16 @@ def test_initialize_replaces_obsolete_task_schema(tmp_path: Path):
             row[0]
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
+        server_instance_id = conn.execute(
+            "SELECT value FROM server_metadata WHERE key = 'server_instance_id'"
+        ).fetchone()[0]
 
     assert {
         "tasks",
         "task_steps",
         "task_events",
     }.isdisjoint(names)
+    assert server_instance_id == "stable-server-id"
 
 
 def _insert_conversation(conn, conversation_id: str):

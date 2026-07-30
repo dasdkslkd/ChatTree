@@ -27,22 +27,7 @@ import type {
   ConfigData,
   ContextWindowLimit,
   ModelProviderConfig,
-  APIFormat,
 } from '@/types/model';
-
-const API_FORMAT_OPTIONS: { value: APIFormat; label: string; description: string }[] = [
-  { value: 'chat_completions', label: 'Chat Completions', description: 'OpenAI 兼容格式' },
-  { value: 'responses', label: 'Responses API', description: 'OpenAI Responses API' },
-  { value: 'anthropic', label: 'Anthropic', description: 'Anthropic Messages API' },
-  { value: 'gemini', label: 'Gemini', description: 'Google Gemini API' },
-];
-
-// 订阅类型 → 自动锁定的 api_format
-const SUBSCRIPTION_FORMAT: Record<string, APIFormat> = {
-  codex: 'responses',
-  copilot: 'chat_completions',
-  claude: 'anthropic',
-};
 
 const SUBSCRIPTION_OPTIONS: {
   value: '' | 'codex' | 'copilot' | 'claude';
@@ -62,7 +47,6 @@ const DEFAULT_PROVIDER_CONFIG: ModelProviderConfig = {
   base_url: '',
   organization: '',
   project: '',
-  api_format: 'chat_completions',
   hidden_models: [],
   enabled: false,
 };
@@ -151,10 +135,6 @@ export function ProvidersSection() {
   const sanitizeProviderConfig = (provider: ModelProviderConfig): ModelProviderConfig => {
     const { default_model: _ignored, ...rest } = provider as ModelProviderConfig & { default_model?: string };
     return rest;
-  };
-
-  const getApiFormatLabel = (format: string): string => {
-    return API_FORMAT_OPTIONS.find(f => f.value === format)?.label || format;
   };
 
   const handleDefaultProviderChange = async (provider: string) => {
@@ -275,7 +255,6 @@ export function ProvidersSection() {
         await configApi.addProvider({
           id,
           name: providerConfig.name,
-          api_format: providerConfig.api_format,
           base_url: providerConfig.base_url,
           api_key: providerConfig.api_key,
           auth: providerConfig.auth,
@@ -321,7 +300,6 @@ export function ProvidersSection() {
       await configApi.addProvider({
         id,
         name: providerConfig.name,
-        api_format: providerConfig.api_format,
         base_url: providerConfig.base_url,
         api_key: providerConfig.api_key,
         auth: providerConfig.auth,
@@ -629,11 +607,7 @@ export function ProvidersSection() {
                       <span className="text-xs px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(99,179,237,0.15)', color: 'var(--icon-accent)' }}>
                         本地代理
                       </span>
-                    ) : (
-                      <span className="text-xs px-1.5 py-0.5 rounded" style={{ border: '0.5px solid var(--border)', color: 'var(--fg-tertiary)' }}>
-                        {getApiFormatLabel(pc.api_format)}
-                      </span>
-                    )}
+                    ) : null}
                     {pc.enabled && (
                       <span className="text-xs px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(95,185,138,0.15)', color: 'var(--accent-green)' }}>
                         已启用
@@ -743,7 +717,6 @@ export function ProvidersSection() {
                     setEditForm(f => ({
                       ...f,
                       auth: sub ? { type: 'oauth', subscription: sub } : undefined,
-                      api_format: sub ? SUBSCRIPTION_FORMAT[sub] : f.api_format,
                     }));
                     setQuotaInfo(null);
                   }}
@@ -815,22 +788,6 @@ export function ProvidersSection() {
               {!isSubscribed && (
                 <>
                   <div className="h-px" style={{ background: 'var(--border)' }} />
-                  <div className="space-y-2">
-                    <Label>API 格式</Label>
-                    <Select value={editForm.api_format || 'chat_completions'} onValueChange={(v) => setEditForm(f => ({ ...f, api_format: v as APIFormat }))}>
-                      <SelectTrigger><SelectValue /></SelectTrigger>
-                      <SelectContent>
-                        {API_FORMAT_OPTIONS.map(opt => (
-                          <SelectItem key={opt.value} value={opt.value} textValue={opt.label}>
-                            <div className="flex flex-col">
-                              <span>{opt.label}</span>
-                              <span className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>{opt.description}</span>
-                            </div>
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
                   <div className="space-y-2">
                     <Label>API Key</Label>
                     <Input type="password" value={editForm.api_key || ''} onChange={(e) => setEditForm(f => ({ ...f, api_key: e.target.value }))} placeholder="输入 API Key" />

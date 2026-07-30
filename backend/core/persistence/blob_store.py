@@ -47,8 +47,7 @@ class BlobStore:
                 conn.execute(
                     """
                     UPDATE blobs
-                    SET ref_count = ref_count + 1,
-                        last_accessed_at = strftime('%s', 'now')
+                    SET last_accessed_at = strftime('%s', 'now')
                     WHERE id = ?
                     """,
                     (blob_id,),
@@ -76,10 +75,9 @@ class BlobStore:
                       byte_size,
                       stored_size,
                       char_count,
-                      ref_count,
                       created_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 1, strftime('%s', 'now'))
+                    VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%s', 'now'))
                     """,
                     (
                         blob_id,

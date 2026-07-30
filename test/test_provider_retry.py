@@ -1,6 +1,6 @@
 import asyncio
 
-from backend.core.config.types import StreamStatus
+from backend.core.config.types import ModelRoute, StreamStatus
 from backend.core.model.providers.anthropic_provider import AnthropicHTTPError, AnthropicProvider
 from backend.core.model.providers.gemini_provider import GeminiHTTPError, GeminiProvider
 from backend.core.model.providers.openai_compatible import OpenAICompatibleProvider, ProviderHTTPError
@@ -19,8 +19,34 @@ def _retry_config(max_request_retries=2, max_stream_retries=1):
     }
 
 
+def _route(protocol: str) -> ModelRoute:
+    endpoints = {
+        "openai_chat_completions": "/chat/completions",
+        "openai_responses": "/responses",
+        "anthropic_messages": "/v1/messages",
+        "gemini_generate_content": "/models/{model}:generateContent",
+    }
+    return ModelRoute(
+        route_id=f"test:model:{protocol}",
+        provider_id="test",
+        model_id="model",
+        protocol=protocol,
+        endpoint=endpoints[protocol],
+        reasoning_profile={
+            "name": "test",
+            "carrier": "responses_items" if protocol == "openai_responses" else "none",
+            "history_policy": "provider_state" if protocol == "openai_responses" else "drop",
+            "strict": protocol == "openai_responses",
+            "controls": {},
+        },
+    )
+
+
 def test_openai_non_stream_retries_503_then_succeeds(monkeypatch):
-    provider = OpenAICompatibleProvider(_retry_config(max_request_retries=2))
+    provider = OpenAICompatibleProvider(
+        _retry_config(max_request_retries=2),
+        _route("openai_chat_completions"),
+    )
     calls = []
 
     def fake_request_json(path, body, timeout=120):
@@ -39,7 +65,10 @@ def test_openai_non_stream_retries_503_then_succeeds(monkeypatch):
 
 
 def test_openai_non_stream_does_not_retry_400(monkeypatch):
-    provider = OpenAICompatibleProvider(_retry_config(max_request_retries=2))
+    provider = OpenAICompatibleProvider(
+        _retry_config(max_request_retries=2),
+        _route("openai_chat_completions"),
+    )
     calls = []
 
     def fake_request_json(path, body, timeout=120):
@@ -59,7 +88,10 @@ def test_openai_non_stream_does_not_retry_400(monkeypatch):
 
 
 def test_openai_stream_retries_before_any_output(monkeypatch):
-    provider = OpenAICompatibleProvider(_retry_config(max_stream_retries=1))
+    provider = OpenAICompatibleProvider(
+        _retry_config(max_stream_retries=1),
+        _route("openai_chat_completions"),
+    )
     calls = []
 
     async def fake_iter_sse_events(path, body, **kwargs):
@@ -82,12 +114,18 @@ def test_openai_stream_retries_before_any_output(monkeypatch):
     chunks = asyncio.run(run())
 
     assert len(calls) == 2
-    assert [chunk["status"] for chunk in chunks] == [StreamStatus.CONTENT, StreamStatus.COMPLETE]
+    assert [chunk["status"] for chunk in chunks] == [
+        StreamStatus.CONTENT,
+        StreamStatus.COMPLETE,
+    ]
     assert chunks[0]["content"] == "ok"
 
 
 def test_openai_stream_does_not_retry_after_output(monkeypatch):
-    provider = OpenAICompatibleProvider(_retry_config(max_stream_retries=1))
+    provider = OpenAICompatibleProvider(
+        _retry_config(max_stream_retries=1),
+        _route("openai_chat_completions"),
+    )
     calls = []
 
     async def fake_iter_sse_events(path, body, **kwargs):
@@ -115,8 +153,7 @@ def test_openai_stream_does_not_retry_after_output(monkeypatch):
 
 def test_openai_responses_stream_retries_before_any_output(monkeypatch):
     config = _retry_config(max_stream_retries=1)
-    config["api_format"] = "responses"
-    provider = OpenAICompatibleProvider(config)
+    provider = OpenAICompatibleProvider(config, _route("openai_responses"))
     calls = []
 
     async def fake_iter_sse_events(path, body, **kwargs):
@@ -144,7 +181,10 @@ def test_openai_responses_stream_retries_before_any_output(monkeypatch):
 
 
 def test_gemini_non_stream_uses_shared_retry_policy(monkeypatch):
-    provider = GeminiProvider(_retry_config(max_request_retries=1))
+    provider = GeminiProvider(
+        _retry_config(max_request_retries=1),
+        _route("gemini_generate_content"),
+    )
     calls = []
 
     def fake_request_json(path, body, timeout=120):
@@ -166,7 +206,10 @@ def test_gemini_non_stream_uses_shared_retry_policy(monkeypatch):
 
 
 def test_anthropic_non_stream_uses_shared_retry_policy(monkeypatch):
-    provider = AnthropicProvider(_retry_config(max_request_retries=1))
+    provider = AnthropicProvider(
+        _retry_config(max_request_retries=1),
+        _route("anthropic_messages"),
+    )
     calls = []
 
     def fake_http_post(path, body):

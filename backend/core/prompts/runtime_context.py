@@ -193,8 +193,6 @@ def format_task_turn_context_for_prompt(
         return [
             "",
             "Task context is attached; there is no active conversation task.",
-            "",
-            *TASK_RUNTIME_RULES,
         ]
     lines = [""]
     if baseline is not None and not baseline_superseded:

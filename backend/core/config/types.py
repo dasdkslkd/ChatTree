@@ -18,12 +18,50 @@ class Role(str, Enum):
 
 ModelProvider = str  # 自定义提供商ID，不再使用枚举
 
-class APIFormat(str, Enum):
-    """API 格式枚举"""
-    CHAT_COMPLETIONS = "chat_completions"
-    RESPONSES = "responses"
-    ANTHROPIC = "anthropic"
-    GEMINI = "gemini"
+
+class ModelProtocol(str, Enum):
+    """ChatTree 已实现的线协议。"""
+    OPENAI_CHAT_COMPLETIONS = "openai_chat_completions"
+    OPENAI_RESPONSES = "openai_responses"
+    ANTHROPIC_MESSAGES = "anthropic_messages"
+    GEMINI_GENERATE_CONTENT = "gemini_generate_content"
+
+
+class ReasoningProfile(TypedDict, total=False):
+    """模型推理状态在原生协议中的载体与回传规则。"""
+    name: str
+    carrier: str
+    history_policy: str
+    strict: bool
+    controls: Dict[str, Any]
+
+
+class ModelRoute(TypedDict, total=False):
+    """一次模型步骤固定使用的模型级协议路由。"""
+    route_id: Required[str]
+    provider_id: Required[str]
+    model_id: Required[str]
+    protocol: Required[str]
+    endpoint: Required[str]
+    capabilities: Dict[str, Any]
+    reasoning_profile: ReasoningProfile
+
+
+class ModelStateItem(TypedDict, total=False):
+    """仅保存协议无法从消息、推理和工具事实重建的续接状态。"""
+    id: Required[str]
+    route_id: Required[str]
+    index: Required[int]
+    round_index: Required[int]
+    kind: Required[str]
+    native_payload: Required[Dict[str, Any]]
+
+
+class ProviderOutputItem(ModelStateItem, total=False):
+    """适配器在当前流内产生的原生输出及其最小持久化投影。"""
+    display_text: str
+    tool_call_ids: List[str]
+    state_payload: Dict[str, Any]
 
 class UsageInfo(TypedDict, total=False):
     """Unified token usage; raw keeps provider-specific fields."""
@@ -64,7 +102,6 @@ class Message(TypedDict, total=False):
     name: Optional[str]
     tool_calls: Optional[List[Dict[str, Any]]]
     tool_call_id: Optional[str]
-    process_content: Optional[str]  # UI-only process timeline text, not model-visible content
     reasoning: Optional[str]  # 推理/思考轨迹（未来推理模型填充）
     timestamp: Required[int]
     generation_info: Optional[GenerationInfo]  # 生成信息（仅助手消息有，可选）
@@ -75,6 +112,9 @@ class Message(TypedDict, total=False):
     image_refs: Optional[List[Dict[str, Any]]]  # 用户显式引用的图片附件元数据
     tool_permission_mode: Optional[str]  # 所在节点的工具审批模式
     task_context_mode: Optional[str]
+    model_route_id: Optional[str]
+    model_round_index: Optional[int]
+    model_state_items: Optional[List[ModelStateItem]]
 
 class ConversationTreeNode(TypedDict):
     """对话树节点。只保存树结构和 turn 级运行属性，消息事实不写入 node。"""
@@ -113,14 +153,13 @@ class ConversationData(TypedDict):
     root_node_id: Optional[str]
 
 class ModelProviderConfig(TypedDict, total=False):
-    """单个模型配置"""
+    """供应商连接配置。协议由模型路由决定。"""
     name: Optional[str]
     models: List[str]
     api_key: str
     base_url: str
     organization: Optional[str]
     project: Optional[str]
-    api_format: str  # APIFormat 值: chat_completions, responses, anthropic, gemini
     hidden_models: List[str]  # 被隐藏的模型名称列表
     enabled: bool
     # 订阅登录（与 api_key 二选一）：codex/copilot 走 OAuth；claude/gemini 走 CLI 凭据复用
@@ -196,6 +235,7 @@ class StreamChunk(TypedDict, total=False):
     tool_permission_mode: Optional[str]  # 当前节点工具权限模式发生变化时随流同步
     task_context_mode: Optional[str]
     metadata: Optional[Dict[str, Any]]
+    output_item: Optional[ProviderOutputItem]
 
     usage_info: UsageInfo
 

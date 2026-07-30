@@ -52,6 +52,9 @@ class _DummyModelManager:
     def get_model(self, *args, **kwargs):
         return self._inner.get_model(*args, **kwargs)
 
+    def get_route(self, *args, **kwargs):
+        return self._inner.get_route(*args, **kwargs)
+
     def get_model_metadata(self, *args, **kwargs):
         return self._inner.get_model_metadata(*args, **kwargs)
 

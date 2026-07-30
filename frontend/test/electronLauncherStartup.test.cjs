@@ -5,6 +5,10 @@ const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '../electron/main.cjs'), 'utf8');
 const shellSource = fs.readFileSync(path.join(__dirname, '../electron/shell.js'), 'utf8');
 const packageConfig = JSON.parse(fs.readFileSync(path.join(__dirname, '../package.json'), 'utf8'));
+const connectProfileSource = source.slice(
+  source.indexOf('async function connectProfile'),
+  source.indexOf('function sshProfileId'),
+);
 
 assert.match(
   source,
@@ -91,6 +95,21 @@ assert.match(
   source,
   /await createShellWindow\(\);\s+await addTab\("local", "Local", "local"\);/,
   'Electron should open the Local profile as the initial tab',
+);
+assert.match(
+  connectProfileSource,
+  /envelope\?\.code === "server_identity_changed"/,
+  'A changed Local Server identity should enter the explicit rebind flow',
+);
+assert.match(
+  connectProfileSource,
+  /expected_server_instance_id: observed/,
+  'Local rebind must confirm the Server identity reported by the Launcher',
+);
+assert.match(
+  connectProfileSource,
+  /result\.data\.error\.message/,
+  'Local connection failures should read the owned Launcher error envelope',
 );
 assert.match(
   source,

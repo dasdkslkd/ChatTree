@@ -46,20 +46,24 @@ async def _subscribe_sse(
     run = run_manager.get_run(run_id)
     finished_status_values = {status.value for status in FINISHED_RUN_STATUSES}
     finished = bool(run and run.get("status") in finished_status_values)
-    for payload in run_manager.read_events(run_id, 0):
-        if int(payload.get("event_index") or 0) >= max(0, int(from_event or 0)):
-            break
-        patch_session.feed(payload, emit=False)
     if finished:
-        for payload in run_manager.read_events(run_id, from_event):
-            patch = patch_session.feed(payload)
-            if patch is None:
-                continue
+        patch = patch_session.feed({
+            "type": "run_finished",
+            "run_id": run_id,
+            "conversation_id": run.get("conversation_id"),
+            "target_node_id": run.get("target_node_id") or run.get("anchor_node_id"),
+            "status": run.get("status"),
+        })
+        if patch is not None:
             emitted += 1
             yield _format_sse_data(patch)
         profiler.mark("sse.done", run_id=run_id, route="runs", emitted_events=emitted)
         yield _format_sse_data("[DONE]")
         return
+    for payload in run_manager.read_events(run_id, 0):
+        if int(payload.get("event_index") or 0) >= max(0, int(from_event or 0)):
+            break
+        patch_session.feed(payload, emit=False)
     with profiler.span("sse.subscribe", run_id=run_id, from_event=from_event, route="runs"):
         async for payload in run_manager.subscribe(run_id, from_event):
             if first_event:

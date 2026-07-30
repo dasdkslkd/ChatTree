@@ -1,27 +1,42 @@
-# backend/api/routes/openai_proxy.py - 反向代理 OpenAI 兼容端点
-# 暴露本地 provider 能力给远程 server，使其无需配置 API Key 即可复用本地 provider。
+"""本地模型连接的透明反向代理。
+
+代理只解析模型路由并替换认证；请求字段、响应状态与 SSE 字节流不做协议转换。
+"""
 import json
 import os
-import time
-import uuid
-from typing import Any, AsyncIterator, Dict, List, Optional
+import re
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
+import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from ...core.config.config import cfg
-from ...core.config.types import Message, Role, StreamStatus
+from ...core.config.types import ModelProtocol
 from ...core.model.model_manager import ModelManager
+from ...core.model.model_metadata import ModelRouteError
 from ..dependencies import get_model_manager
 
 router = APIRouter(prefix="/proxy")
 
 _PROXY_TOKEN_ENV = "CHATTREE_PROXY_TOKEN"
+_GEMINI_PATH = re.compile(
+    r"^(?:v1beta/)?models/(?P<model>.+):(?P<method>streamGenerateContent|generateContent)$"
+)
+_HOP_BY_HOP = {
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+}
 
 
 def _verify_token(authorization: Optional[str]) -> None:
     expected = os.environ.get(_PROXY_TOKEN_ENV, "").strip()
-    # 未配置 token 时开放访问（开发模式或由 launcher 注入到可信回环链路）
     if not expected:
         return
     if not authorization or not authorization.startswith("Bearer "):
@@ -30,196 +45,71 @@ def _verify_token(authorization: Optional[str]) -> None:
         raise HTTPException(status_code=401, detail="invalid token")
 
 
-def _find_provider_for_model(model_manager: ModelManager, model: str) -> str:
-    for provider_id, models in model_manager.model_list.items():
-        if model in models:
-            return provider_id
-    providers = cfg.get_all_providers()
-    for provider_id, pc in providers.items():
-        if model in (pc.get("models") or []):
-            return provider_id
-    raise HTTPException(
-        status_code=404,
-        detail=f"model {model} not found in any enabled provider",
+def _split_proxy_model(model: str) -> Tuple[str, str]:
+    provider_id, separator, model_id = model.partition("/")
+    if not separator or not provider_id or not model_id:
+        raise HTTPException(
+            status_code=400,
+            detail="proxy model must use provider_id/model_id",
+        )
+    return provider_id, model_id
+
+
+def _request_protocol(path: str) -> str:
+    normalized = path.strip("/")
+    if normalized in {"chat/completions", "v1/chat/completions"}:
+        return ModelProtocol.OPENAI_CHAT_COMPLETIONS.value
+    if normalized in {"responses", "v1/responses"}:
+        return ModelProtocol.OPENAI_RESPONSES.value
+    if normalized in {"messages", "v1/messages"}:
+        return ModelProtocol.ANTHROPIC_MESSAGES.value
+    if _GEMINI_PATH.match(normalized):
+        return ModelProtocol.GEMINI_GENERATE_CONTENT.value
+    raise HTTPException(status_code=404, detail=f"unsupported model protocol path: {path}")
+
+
+def _target_for_adapter(
+    adapter: Any,
+    protocol: str,
+    model_id: str,
+    path: str,
+    request: Request,
+    stream: bool,
+) -> Tuple[str, Dict[str, str]]:
+    if protocol == ModelProtocol.OPENAI_CHAT_COMPLETIONS.value:
+        return adapter._url(adapter.route["endpoint"]), adapter._headers(stream=stream)
+    if protocol == ModelProtocol.OPENAI_RESPONSES.value:
+        return adapter._url(adapter.route["endpoint"]), adapter._headers(stream=stream)
+    if protocol == ModelProtocol.ANTHROPIC_MESSAGES.value:
+        return adapter._api_base() + adapter.route["endpoint"], adapter._headers()
+
+    match = _GEMINI_PATH.match(path.strip("/"))
+    if match is None:
+        raise HTTPException(status_code=404, detail="invalid Gemini path")
+    method = match.group("method")
+    params = {key: value for key, value in request.query_params.items()}
+    return (
+        adapter._url(
+            adapter.route["endpoint"].format(model=model_id).replace(
+                ":generateContent",
+                f":{method}",
+            ),
+            params,
+        ),
+        adapter._headers(stream=method == "streamGenerateContent"),
     )
 
 
-def _to_internal_messages(openai_messages: List[Dict[str, Any]]) -> List[Message]:
-    now = int(time.time() * 1000)
-    converted: List[Message] = []
-    for raw in openai_messages:
-        role_str = str(raw.get("role", "user"))
-        try:
-            role = Role(role_str)
-        except ValueError:
-            role = Role.USER
-        msg: Message = {
-            "id": str(uuid.uuid4()),
-            "role": role,
-            "content": raw.get("content", ""),
-            "timestamp": now,
-        }
-        if raw.get("tool_calls"):
-            msg["tool_calls"] = raw["tool_calls"]
-        if raw.get("tool_call_id"):
-            msg["tool_call_id"] = raw["tool_call_id"]
-        if raw.get("name"):
-            msg["name"] = raw["name"]
-        converted.append(msg)
-    return converted
-
-
-def _sse_chunk(
-    *,
-    chat_id: str,
-    model: str,
-    delta: Dict[str, Any],
-    finish_reason: Optional[str] = None,
-    usage: Optional[Dict[str, Any]] = None,
-) -> str:
-    payload: Dict[str, Any] = {
-        "id": chat_id,
-        "object": "chat.completion.chunk",
-        "created": int(time.time()),
-        "model": model,
-        "choices": [
-            {
-                "index": 0,
-                "delta": delta,
-                "finish_reason": finish_reason,
-            }
-        ],
-    }
-    if usage is not None:
-        payload["usage"] = usage
-    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
-
-async def _stream_openai(
-    model_manager: ModelManager,
-    provider_id: str,
-    model: str,
-    messages: List[Message],
-    body: Dict[str, Any],
-) -> AsyncIterator[str]:
-    chat_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
-    provider = model_manager.get_model(provider_id, is_async=True)
-    if provider is None:
-        yield _sse_chunk(chat_id=chat_id, model=model, delta={}, finish_reason="stop")
-        yield "data: [DONE]\n\n"
-        return
-
-    kwargs: Dict[str, Any] = {}
-    if body.get("max_tokens") is not None:
-        kwargs["max_tokens"] = body["max_tokens"]
-    if body.get("temperature") is not None:
-        kwargs["temperature"] = body["temperature"]
-    if body.get("tools"):
-        kwargs["tools"] = body["tools"]
-    if body.get("tool_choice"):
-        kwargs["tool_choice"] = body["tool_choice"]
-    if body.get("reasoning_effort"):
-        kwargs["reasoning_effort"] = body["reasoning_effort"]
-    if body.get("thinking_enabled") is not None:
-        kwargs["thinking_enabled"] = body["thinking_enabled"]
-
-    # 本地 provider 产出的 tool_calls 是「全量快照」（每次包含已累积的完整 arguments），
-    # 而 OpenAI 流式协议要求「增量 delta」（每次只含新增的 arguments 片段）。
-    # 这里维护每个 index 已发送的 arguments 前缀，把快照转成真正的 delta，避免下游重复拼接。
-    emitted_tool_args: Dict[int, str] = {}
-
+async def _raw_response_body(
+    response: httpx.Response,
+    client: httpx.AsyncClient,
+) -> AsyncIterator[bytes]:
     try:
-        async for chunk in provider.generate_response_stream(
-            model=model,
-            messages=messages,
-            stream_controller=None,
-            **kwargs,
-        ):
-            status = chunk.get("status")
-            if status == StreamStatus.CONTENT:
-                event_type = chunk.get("event_type")
-                if event_type == "reasoning" and chunk.get("reasoning"):
-                    yield _sse_chunk(
-                        chat_id=chat_id,
-                        model=model,
-                        delta={"reasoning_content": chunk["reasoning"]},
-                    )
-                elif event_type in ("tool_call", "tool_call_start") and chunk.get("tool_calls"):
-                    for idx, tc in enumerate(chunk["tool_calls"]):
-                        fn = tc.get("function") or {}
-                        args = fn.get("arguments", "") or ""
-                        prev = emitted_tool_args.get(idx)
-                        if prev is None:
-                            yield _sse_chunk(
-                                chat_id=chat_id,
-                                model=model,
-                                delta={"tool_calls": [{
-                                    "index": idx,
-                                    "id": tc.get("id", ""),
-                                    "type": tc.get("type", "function"),
-                                    "function": {
-                                        "name": fn.get("name", ""),
-                                        "arguments": args,
-                                    },
-                                }]},
-                            )
-                        else:
-                            suffix = args[len(prev):] if args.startswith(prev) else args
-                            if suffix:
-                                yield _sse_chunk(
-                                    chat_id=chat_id,
-                                    model=model,
-                                    delta={"tool_calls": [{
-                                        "index": idx,
-                                        "function": {"arguments": suffix},
-                                    }]},
-                                )
-                        emitted_tool_args[idx] = args
-                elif chunk.get("content"):
-                    yield _sse_chunk(
-                        chat_id=chat_id,
-                        model=model,
-                        delta={"content": chunk["content"]},
-                    )
-            elif status == StreamStatus.COMPLETE:
-                usage_info = chunk.get("usage_info") or {}
-                prompt = int(usage_info.get("input_tokens", 0) or 0)
-                completion = int(usage_info.get("output_tokens", 0) or 0)
-                usage_payload = {
-                    "prompt_tokens": prompt,
-                    "completion_tokens": completion,
-                    "total_tokens": prompt + completion,
-                }
-                yield _sse_chunk(
-                    chat_id=chat_id,
-                    model=model,
-                    delta={},
-                    finish_reason="tool_calls" if emitted_tool_args else "stop",
-                    usage=usage_payload,
-                )
-            elif status == StreamStatus.ERROR:
-                err = chunk.get("error") or "stream error"
-                yield _sse_chunk(
-                    chat_id=chat_id,
-                    model=model,
-                    delta={"content": f"[error] {err}"},
-                    finish_reason="stop",
-                )
-            elif status == StreamStatus.STOPPED:
-                yield _sse_chunk(
-                    chat_id=chat_id,
-                    model=model,
-                    delta={},
-                    finish_reason="stop",
-                )
-    except Exception as exc:
-        yield _sse_chunk(
-            chat_id=chat_id,
-            model=model,
-            delta={"content": f"[error] {exc}"},
-            finish_reason="stop",
-        )
-    yield "data: [DONE]\n\n"
+        async for chunk in response.aiter_raw():
+            yield chunk
+    finally:
+        await response.aclose()
+        await client.aclose()
 
 
 @router.get("/models")
@@ -227,110 +117,126 @@ async def list_proxy_models(
     authorization: Optional[str] = Header(default=None),
     model_manager: ModelManager = Depends(get_model_manager),
 ) -> Dict[str, Any]:
-    """返回本地所有已启用 provider 的模型汇总列表（OpenAI 兼容格式）。"""
     _verify_token(authorization)
     data: List[Dict[str, Any]] = []
-    for provider_id in model_manager.model_list:
-        pc = cfg.get_provider_config(provider_id) or {}
-        if not pc.get("enabled", False):
+    for provider_id, models in model_manager.model_list.items():
+        provider = cfg.get_provider_config(provider_id) or {}
+        if not provider.get("enabled", False):
             continue
-        owner = pc.get("name") or provider_id
-        hidden = set(pc.get("hidden_models") or [])
-        for model_id in model_manager.model_list[provider_id]:
+        hidden = set(provider.get("hidden_models") or [])
+        for model_id in models:
             if model_id in hidden:
                 continue
-            data.append({"id": f"{owner}/{model_id}", "object": "model", "owned_by": owner})
+            try:
+                route = model_manager.get_route(provider_id, model_id)
+            except ModelRouteError:
+                continue
+            data.append({
+                "id": f"{provider_id}/{model_id}",
+                "object": "model",
+                "owned_by": provider.get("name") or provider_id,
+                "routes": [{
+                    "protocol": route["protocol"],
+                    "endpoint": route["endpoint"],
+                    "reasoning_profile": route.get("reasoning_profile") or {},
+                    "capabilities": route.get("capabilities") or {},
+                    "preferred": True,
+                }],
+            })
     return {"object": "list", "data": data}
 
 
-@router.post("/chat/completions")
-async def proxy_chat_completions(
+@router.post("/{path:path}")
+async def proxy_model_protocol(
+    path: str,
     request: Request,
     model_manager: ModelManager = Depends(get_model_manager),
     authorization: Optional[str] = Header(default=None),
 ):
-    """OpenAI 兼容的反向代理端点，按 model 字段路由到本地 provider。"""
     _verify_token(authorization)
-    body = await request.json()
-    model = body.get("model")
-    if not model:
-        raise HTTPException(status_code=400, detail="model is required")
-    # /models 返回 "owner/model" 格式；剥离 owner 前缀以匹配本地 provider 的裸模型名
-    lookup_model = model.split("/", 1)[1] if "/" in model else model
-    provider_id = _find_provider_for_model(model_manager, lookup_model)
-    messages = _to_internal_messages(body.get("messages") or [])
-    stream = bool(body.get("stream", False))
+    protocol = _request_protocol(path)
+    raw_body = await request.body()
+    try:
+        body = json.loads(raw_body or b"{}")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="invalid JSON request body") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="request body must be an object")
 
-    if stream:
-        return StreamingResponse(
-            _stream_openai(model_manager, provider_id, lookup_model, messages, body),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
+    if protocol == ModelProtocol.GEMINI_GENERATE_CONTENT.value:
+        match = _GEMINI_PATH.match(path.strip("/"))
+        proxy_model = match.group("model") if match else ""
+    else:
+        proxy_model = str(body.get("model") or "")
+    provider_id, model_id = _split_proxy_model(proxy_model)
 
-    # 非流式：复用流式实现聚合完整内容
-    chat_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
-    content_parts: List[str] = []
-    tool_call_acc: Dict[int, Dict[str, Any]] = {}
-    had_tool_calls = False
-    usage_payload: Dict[str, Any] = {
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
-        "total_tokens": 0,
-    }
-    async for line in _stream_openai(
-        model_manager, provider_id, lookup_model, messages, {**body, "stream": True}
-    ):
-        if not line.startswith("data: ") or line.strip() == "data: [DONE]":
-            continue
-        try:
-            payload = json.loads(line[6:].strip())
-        except json.JSONDecodeError:
-            continue
-        choices = payload.get("choices") or []
-        if not choices:
-            continue
-        choice = choices[0]
-        delta = choice.get("delta") or {}
-        if delta.get("content"):
-            content_parts.append(delta["content"])
-        for tc in delta.get("tool_calls") or []:
-            idx = int(tc.get("index", 0))
-            current = tool_call_acc.setdefault(
-                idx,
-                {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+    try:
+        route = model_manager.get_route(provider_id, model_id)
+        if route["protocol"] != protocol:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"route protocol mismatch: model uses {route['protocol']}, "
+                    f"request used {protocol}"
+                ),
             )
-            if tc.get("id"):
-                current["id"] = tc["id"]
-            if tc.get("type"):
-                current["type"] = tc["type"]
-            fn = tc.get("function") or {}
-            if fn.get("name"):
-                current["function"]["name"] = fn["name"]
-            if fn.get("arguments"):
-                current["function"]["arguments"] += fn["arguments"]
-            had_tool_calls = True
-        if choice.get("finish_reason") and payload.get("usage"):
-            usage_payload = payload["usage"]
+        adapter = model_manager.get_model(provider_id, model_id, is_async=True)
+    except ModelRouteError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if adapter is None:
+        raise HTTPException(status_code=503, detail="model adapter unavailable")
 
-    tool_calls = [
-        tool_call_acc[i] for i in sorted(tool_call_acc)
-        if tool_call_acc[i].get("function", {}).get("name")
-    ]
-    message: Dict[str, Any] = {"role": "assistant", "content": "".join(content_parts)}
-    if tool_calls:
-        message["tool_calls"] = tool_calls
-    return {
-        "id": chat_id,
-        "object": "chat.completion",
-        "created": int(time.time()),
-        "model": model,
-        "choices": [
-            {
-                "index": 0,
-                "message": message,
-                "finish_reason": "tool_calls" if had_tool_calls else "stop",
-            }
-        ],
-        "usage": usage_payload,
+    if protocol != ModelProtocol.GEMINI_GENERATE_CONTENT.value:
+        body["model"] = model_id
+    target_url, target_headers = _target_for_adapter(
+        adapter,
+        protocol,
+        model_id,
+        path,
+        request,
+        bool(body.get("stream")),
+    )
+    if protocol != ModelProtocol.GEMINI_GENERATE_CONTENT.value and request.query_params:
+        target_url = str(
+            httpx.URL(target_url).copy_merge_params(
+                request.query_params.multi_items()
+            )
+        )
+    forwarded_headers = {
+        key: value
+        for key, value in request.headers.items()
+        if key.lower() not in {
+            *_HOP_BY_HOP,
+            "authorization",
+            "content-length",
+            "host",
+            "x-api-key",
+            "x-goog-api-key",
+        }
     }
+    forwarded_headers.update(target_headers)
+    payload = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    client = httpx.AsyncClient(timeout=httpx.Timeout(300.0))
+    upstream_request = client.build_request(
+        "POST",
+        target_url,
+        headers=forwarded_headers,
+        content=payload,
+    )
+    try:
+        response = await client.send(upstream_request, stream=True)
+    except httpx.HTTPError as exc:
+        await client.aclose()
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    response_headers = {
+        key: value
+        for key, value in response.headers.items()
+        if key.lower() not in _HOP_BY_HOP
+    }
+    return StreamingResponse(
+        _raw_response_body(response, client),
+        status_code=response.status_code,
+        headers=response_headers,
+        media_type=response.headers.get("content-type"),
+    )

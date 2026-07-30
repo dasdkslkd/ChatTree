@@ -671,6 +671,7 @@ class ToolInventoryTool(BaseTool):
             visible_tools = filter_task_tools_for_context(
                 self._manager.get_openai_tools(workspace=workspace if isinstance(workspace, dict) else None),
                 "detached",
+                has_active_task=False,
             )
             inventory["model_visible_tools"] = [
                 tool.get("function", {}).get("name")

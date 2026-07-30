@@ -158,7 +158,7 @@ def _parse_models(data: Any) -> List[Dict[str, Any]]:
         )
         if not model_id or not str(model_id).strip():
             continue
-        models.append({
+        model = {
             "id": str(model_id).strip(),
             "owned_by": (
                 entry.get("owned_by")
@@ -166,7 +166,8 @@ def _parse_models(data: Any) -> List[Dict[str, Any]]:
                 or entry.get("provider")
                 or entry.get("vendor")
             ),
-        })
+        }
+        models.append(model)
 
     # 去重 + 排序
     seen: set = set()

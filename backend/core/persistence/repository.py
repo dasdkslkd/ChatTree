@@ -196,7 +196,10 @@ class ChatRepository:
                 "DELETE FROM conversations WHERE id = ?",
                 (conversation_id,),
             )
-        return cursor.rowcount > 0
+        deleted = cursor.rowcount > 0
+        if deleted:
+            self.persistence.reclaim_blobs(compact=True)
+        return deleted
 
     def create_node(
         self,
@@ -473,6 +476,7 @@ class ChatRepository:
                 """,
                 (conversation_id, node_id),
             )
+        self.persistence.reclaim_blobs(compact=True)
         return True
 
     def add_message(
@@ -484,6 +488,8 @@ class ChatRepository:
         subtype: str | None = None,
         hidden: bool = False,
         transcript_only: bool = False,
+        model_route_id: str | None = None,
+        model_round_index: int | None = None,
         metadata: dict[str, Any] | None = None,
         message_id: str | None = None,
     ) -> str:
@@ -503,10 +509,12 @@ class ChatRepository:
                   preview,
                   hidden,
                   transcript_only,
+                  model_route_id,
+                  model_round_index,
                   metadata_json,
                   created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s', 'now'))
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s', 'now'))
                 ON CONFLICT(id) DO UPDATE SET
                   node_id = excluded.node_id,
                   role = excluded.role,
@@ -516,6 +524,8 @@ class ChatRepository:
                   preview = excluded.preview,
                   hidden = excluded.hidden,
                   transcript_only = excluded.transcript_only,
+                  model_route_id = excluded.model_route_id,
+                  model_round_index = excluded.model_round_index,
                   metadata_json = excluded.metadata_json
                 """,
                 (
@@ -526,13 +536,86 @@ class ChatRepository:
                     subtype,
                     stored.inline,
                     stored.blob_id,
-                    stored.preview,
+                    stored.preview if stored.blob_id else "",
                     1 if hidden else 0,
                     1 if transcript_only else 0,
+                    model_route_id,
+                    model_round_index,
                     self._json_field(metadata),
                 ),
             )
         return message_id
+
+    def mark_assistant_answer_continued(
+        self,
+        conversation_id: str,
+        message_id: str,
+    ) -> None:
+        with self.persistence.connect() as conn:
+            conn.execute(
+                """
+                UPDATE messages
+                SET subtype = 'assistant_continuation',
+                    hidden = 1,
+                    transcript_only = 1
+                WHERE conversation_id = ?
+                  AND id = ?
+                  AND subtype = 'assistant_answer'
+                """,
+                (conversation_id, message_id),
+            )
+
+    def persist_model_state_items(
+        self,
+        conversation_id: str,
+        assistant_message_id: str,
+        *,
+        output_items: List[Dict[str, Any]],
+    ) -> None:
+        """只保存适配器明确标出的、无法从语义事实重建的续接状态。"""
+        prepared_items = []
+        for position, item in enumerate(output_items):
+            payload = item.get("state_payload")
+            if not isinstance(payload, dict):
+                continue
+            prepared_items.append((
+                position,
+                item,
+                store_text_content(
+                    self.persistence,
+                    json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                ),
+            ))
+        with self.persistence.connect() as conn:
+            conn.execute(
+                """
+                DELETE FROM model_state_items
+                WHERE conversation_id = ? AND assistant_message_id = ?
+                """,
+                (conversation_id, assistant_message_id),
+            )
+            for position, item, stored in prepared_items:
+                conn.execute(
+                    """
+                    INSERT INTO model_state_items (
+                      conversation_id,
+                      assistant_message_id,
+                      item_index,
+                      kind,
+                      payload_inline,
+                      payload_blob_id
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        conversation_id,
+                        assistant_message_id,
+                        int(item.get("index", position)),
+                        str(item.get("kind") or "provider_state"),
+                        stored.inline,
+                        stored.blob_id,
+                    ),
+                )
 
     def add_tool_call(
         self,
@@ -607,7 +690,7 @@ class ChatRepository:
                     name,
                     stored.inline,
                     stored.blob_id,
-                    stored.preview,
+                    stored.preview if stored.blob_id else "",
                     status,
                 ),
             )
@@ -1061,11 +1144,12 @@ class ChatRepository:
         model_id: Optional[str],
         run_id: Optional[str],
         tool_messages: List[Dict[str, Any]],
-        tool_calls: List[Dict[str, Any]],
+        rounds: List[Dict[str, Any]],
+        model_route_id: str,
         approval_events: Optional[List[Dict[str, Any]]] = None,
         plan_participation_only: bool = False,
     ) -> None:
-        """持久化助手回合：process parts/reasoning + 最终内容 + 工具元数据。"""
+        """把每个模型轮次拆成语义消息、工具事实与最小续接状态。"""
         conversation_id = conversation.metadata["id"]
         node_id = node["id"]
         self.ensure_branch(
@@ -1076,69 +1160,141 @@ class ChatRepository:
             focus_node_id=conversation.current_node_id,
         )
         content = str(assistant_msg.get("content") or "")
-        assistant_message_id: Optional[str] = None
-        process_message_base_id = str(assistant_msg.get("id") or run_id or uuid.uuid4())
-        process_parts = assistant_msg.get("process_parts")
-        if isinstance(process_parts, list):
-            for part in process_parts:
-                if not isinstance(part, dict):
-                    continue
-                content_text = str(part.get("content") or "")
-                if not content_text:
-                    continue
-                part_type = str(part.get("type") or "")
-                subtype = (
-                    "assistant_process_reasoning"
-                    if part_type == "reasoning"
-                    else "assistant_process_content"
-                )
-                order = int(part.get("order") or 0)
-                metadata = {"run_id": run_id, "order": order} if run_id else {"order": order}
+        base_message_id = str(assistant_msg.get("id") or run_id or uuid.uuid4())
+        final_round = rounds[-1] if rounds and content and not plan_participation_only else None
+        generation_info = assistant_msg.get("generation_info")
+        generation_status = (
+            str(generation_info.get("status") or "completed")
+            if isinstance(generation_info, dict)
+            else "completed"
+        )
+        remaining_tool_messages = list(tool_messages)
+
+        for position, round_data in enumerate(rounds):
+            round_index = int(round_data.get("round_index", position))
+            is_final = round_data is final_round
+            round_message_id = (
+                base_message_id
+                if is_final
+                else f"{base_message_id}:round:{round_index}"
+            )
+            round_content = content if is_final else str(round_data.get("content") or "")
+            metadata = {
+                **(
+                    {
+                        key: value
+                        for key, value in dict(assistant_msg).items()
+                        if key not in {
+                            "id",
+                            "role",
+                            "content",
+                            "tool_calls",
+                            "tool_results",
+                            "approval_events",
+                            "reasoning",
+                        }
+                    }
+                    if is_final
+                    else {}
+                ),
+                **({"run_id": run_id} if run_id else {}),
+                **(
+                    {"order": int(round_data.get("content_order"))}
+                    if not is_final and round_data.get("content_order") is not None
+                    else {}
+                ),
+            }
+            self.add_message(
+                conversation_id,
+                node_id,
+                role=_role_value(assistant_msg.get("role") or "assistant"),
+                content=round_content,
+                subtype="assistant_answer" if is_final else "assistant_round",
+                hidden=not is_final,
+                transcript_only=not is_final,
+                model_route_id=model_route_id,
+                model_round_index=round_index,
+                metadata=metadata,
+                message_id=round_message_id,
+            )
+
+            reasoning = str(round_data.get("reasoning") or "")
+            if reasoning:
                 self.add_message(
                     conversation_id,
                     node_id,
-                    role=_role_value(assistant_msg.get("role") or "assistant"),
-                    content=content_text,
-                    subtype=subtype,
-                    hidden=True,
-                    transcript_only=True,
-                    metadata=metadata,
-                    message_id=f"{process_message_base_id}:{part_type}:{order}",
-                )
-        else:
-            reasoning_content = str(assistant_msg.get("reasoning") or "")
-            if reasoning_content:
-                self.add_message(
-                    conversation_id,
-                    node_id,
-                    role=_role_value(assistant_msg.get("role") or "assistant"),
-                    content=reasoning_content,
+                    role="assistant",
+                    content=reasoning,
                     subtype="assistant_process_reasoning",
                     hidden=True,
                     transcript_only=True,
-                    metadata={"run_id": run_id} if run_id else None,
-                    message_id=f"{process_message_base_id}:reasoning",
+                    model_route_id=model_route_id,
+                    model_round_index=round_index,
+                    metadata={
+                        **({"run_id": run_id} if run_id else {}),
+                        "order": int(
+                            round_data.get("reasoning_order")
+                            if round_data.get("reasoning_order") is not None
+                            else round_index * 100
+                        ),
+                    },
+                    message_id=f"{round_message_id}:reasoning",
                 )
-            process_content = str(assistant_msg.get("process_content") or "")
-            if process_content:
-                self.add_message(
+
+            round_calls = list(round_data.get("tool_calls") or [])
+            call_ids = {
+                str(call.get("id") or "")
+                for call in round_calls
+                if call.get("id")
+            }
+            round_tool_messages = [
+                message
+                for message in remaining_tool_messages
+                if str(message.get("tool_call_id") or "") in call_ids
+            ]
+            remaining_tool_messages = [
+                message
+                for message in remaining_tool_messages
+                if str(message.get("tool_call_id") or "") not in call_ids
+            ]
+            if round_calls or round_tool_messages:
+                self.persist_tool_metadata(
                     conversation_id,
                     node_id,
-                    role=_role_value(assistant_msg.get("role") or "assistant"),
-                    content=process_content,
-                    subtype="assistant_process_content",
-                    hidden=True,
-                    transcript_only=True,
-                    metadata={"run_id": run_id} if run_id else None,
-                    message_id=f"{process_message_base_id}:process-content",
+                    run_id=run_id,
+                    assistant_message_id=round_message_id,
+                    tool_calls=round_calls,
+                    tool_messages=round_tool_messages,
+                    approval_events=list(approval_events or []),
+                    generation_status=generation_status,
                 )
-        if content and not plan_participation_only:
-            assistant_message_id = self.add_message(
+            self.persist_model_state_items(
+                conversation_id,
+                round_message_id,
+                output_items=list(round_data.get("output_items") or []),
+            )
+
+        if remaining_tool_messages:
+            self.persist_tool_metadata(
+                conversation_id,
+                node_id,
+                run_id=run_id,
+                assistant_message_id=None,
+                tool_calls=[],
+                tool_messages=remaining_tool_messages,
+                approval_events=list(approval_events or []),
+                generation_status=generation_status,
+            )
+
+        if not rounds and content and not plan_participation_only:
+            self.add_message(
                 conversation_id,
                 node_id,
                 role=_role_value(assistant_msg.get("role") or "assistant"),
                 content=content,
                 subtype="assistant_answer",
+                model_route_id=model_route_id,
+                model_round_index=0,
                 metadata={
                     **{
                         key: value
@@ -1150,27 +1306,10 @@ class ChatRepository:
                             "tool_calls",
                             "tool_results",
                             "approval_events",
-                            "process_content",
-                            "process_parts",
                             "reasoning",
                         }
                     },
                     **({"run_id": run_id} if run_id else {}),
                 },
-                message_id=assistant_msg.get("id"),
-            )
-        if tool_calls or tool_messages:
-            generation_info = assistant_msg.get("generation_info")
-            generation_status = "completed"
-            if isinstance(generation_info, dict):
-                generation_status = str(generation_info.get("status") or generation_status)
-            self.persist_tool_metadata(
-                conversation_id,
-                node_id,
-                run_id=run_id,
-                assistant_message_id=assistant_message_id,
-                tool_calls=tool_calls,
-                tool_messages=tool_messages,
-                approval_events=list(approval_events or []),
-                generation_status=generation_status,
+                message_id=base_message_id,
             )

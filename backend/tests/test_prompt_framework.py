@@ -28,7 +28,7 @@ from backend.core.capabilities.types import (
 )
 from backend.core.chat.chat_manager import ChatManager
 from backend.core.chat.node import NodeManager
-from backend.core.config.types import Message, Role, StreamStatus
+from backend.core.config.types import Message, ModelRoute, Role, StreamStatus
 from backend.core.prompts import PromptBuilder
 from backend.core.prompts import types as prompt_types
 from backend.core.prompts.runtime_context import (
@@ -687,11 +687,31 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
                 self.provider = provider
                 self.model_list = {"fake": ["model"]}
 
-            def get_model(self, provider_id, stream=False):
+            def get_route(self, provider_id, model_id):
+                return ModelRoute(
+                    route_id=f"{provider_id}:{model_id}:chat",
+                    provider_id=provider_id,
+                    model_id=model_id,
+                    protocol="openai_chat_completions",
+                    endpoint="/chat/completions",
+                    capabilities={"context_length": 1_000_000},
+                    reasoning_profile={
+                        "name": "generic_chat",
+                        "carrier": "none",
+                        "history_policy": "drop",
+                        "strict": False,
+                        "controls": {},
+                    },
+                )
+
+            def get_model(self, provider_id, model_id, is_async=False):
                 return self.provider
 
             def get_model_info(self, provider_id, model_id):
                 return {}
+
+            def get_model_metadata(self, provider_id, model_id):
+                return self.get_route(provider_id, model_id)["capabilities"]
 
         class ToolManager:
             def get_openai_tools(self):
@@ -1222,11 +1242,62 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
         runtime_prompt = _system_text(messages)
 
         self.assertIn("there is no active conversation task", runtime_prompt)
-        self.assertIn("pass `step`", runtime_prompt)
-        self.assertIn("updates the step automatically", runtime_prompt)
-        self.assertIn("do not call `set_task_step` for the same work", runtime_prompt)
-        self.assertIn("without a bound run", runtime_prompt)
-        self.assertIn("Omit `step` for exploration", runtime_prompt)
+        self.assertNotIn("pass `step`", runtime_prompt)
+        self.assertNotIn("Task rules:", runtime_prompt)
+
+    async def test_task_tool_schema_tracks_current_active_task(self):
+        task_service = ActiveTaskService()
+        manager = ChatManager(
+            model_manager=None,
+            storage=self.FakeStorage(),
+            prompts=self.FakePromptStorage(),
+            task_service=task_service,
+        )
+        conversation = manager.create_conversation("title")
+        tools = [
+            {"type": "function", "function": {"name": "create_task", "parameters": {"type": "object"}}},
+            {"type": "function", "function": {"name": "set_task_step", "parameters": {"type": "object"}}},
+            {"type": "function", "function": {"name": "cancel_task", "parameters": {"type": "object"}}},
+            {"type": "function", "function": {"name": "shell", "parameters": {"type": "object", "properties": {"step": {"type": "integer"}, "command": {"type": "string"}}}}},
+        ]
+
+        without_task = manager._filter_tools_for_runtime(
+            tools,
+            multi_agent_mode="proactive",
+            permission_mode="default",
+            task_turn_context=manager._start_task_turn_context(conversation),
+        )
+
+        self.assertEqual(
+            [tool["function"]["name"] for tool in without_task],
+            ["create_task", "shell"],
+        )
+        self.assertNotIn(
+            "step",
+            without_task[-1]["function"]["parameters"]["properties"],
+        )
+
+        await task_service.create_task(
+            conversation_id=conversation.metadata["id"],
+            title="检查实现",
+            steps=[{"title": "执行命令"}],
+            created_by_run_id="run-1",
+        )
+        with_task = manager._filter_tools_for_runtime(
+            tools,
+            multi_agent_mode="proactive",
+            permission_mode="default",
+            task_turn_context=manager._start_task_turn_context(conversation),
+        )
+
+        self.assertEqual(
+            [tool["function"]["name"] for tool in with_task],
+            ["set_task_step", "cancel_task", "shell"],
+        )
+        self.assertIn(
+            "step",
+            with_task[-1]["function"]["parameters"]["properties"],
+        )
 
     async def test_detached_runtime_context_omits_task_and_task_capabilities(self):
         task_service = ActiveTaskService()
@@ -1255,7 +1326,7 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
             tools,
             multi_agent_mode="proactive",
             permission_mode="default",
-            task_context_mode="detached",
+            task_turn_context=TaskTurnContext.start("detached", None),
         )
 
         runtime_prompt = _system_text(messages)
@@ -1424,6 +1495,21 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
             conversation=conversation,
             content="summarize this",
             provider=provider,
+            model_route=ModelRoute(
+                route_id="fake:model:openai_chat_completions",
+                provider_id="fake",
+                model_id="model",
+                protocol="openai_chat_completions",
+                endpoint="/chat/completions",
+                capabilities={},
+                reasoning_profile={
+                    "name": "generic_chat",
+                    "carrier": "none",
+                    "history_policy": "drop",
+                    "strict": False,
+                    "controls": {},
+                },
+            ),
             target_model="model",
             eff_effort=None,
             eff_thinking=None,

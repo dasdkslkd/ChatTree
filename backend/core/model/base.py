@@ -1,7 +1,7 @@
 # model/base.py - 基础提供商接口
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional, AsyncIterator
-from ..config.types import Message, StreamChunk, StreamController
+from ..config.types import Message, ModelRoute, StreamChunk, StreamController
 from ..utils.logger import setup_logger
 
 logger = setup_logger('Provider')
@@ -9,8 +9,9 @@ logger = setup_logger('Provider')
 class BaseProvider(ABC):
     """基础模型提供商接口"""
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], route: ModelRoute):
         self.config = config
+        self.route = route
     
     @abstractmethod
     def generate_response(

@@ -1,6 +1,5 @@
 import asyncio
 import json
-from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -198,7 +197,7 @@ def test_assistant_canonical_write_failure_is_not_swallowed(tmp_path: Path):
 
 
 def test_append_to_existing_node_updates_existing_sqlite_assistant_rows(tmp_path: Path):
-    manager, repository, _persistence = _make_manager(tmp_path)
+    manager, repository, persistence = _make_manager(tmp_path)
     manager.model_manager.provider = StaticProvider(content="first", reasoning="think-1")
     conversation = manager.create_conversation("sqlite continuation")
 
@@ -227,7 +226,7 @@ def test_append_to_existing_node_updates_existing_sqlite_assistant_rows(tmp_path
             SELECT id, subtype, content_inline
             FROM messages
             WHERE conversation_id = ? AND node_id = ? AND role = 'assistant'
-            ORDER BY subtype, id
+            ORDER BY model_round_index, id
             """,
             (conversation.metadata["id"], node_id),
         ).fetchall()
@@ -235,39 +234,18 @@ def test_append_to_existing_node_updates_existing_sqlite_assistant_rows(tmp_path
     by_subtype = {}
     for row in rows:
         by_subtype.setdefault(row["subtype"], []).append(row)
-    assert [row["content_inline"] for row in by_subtype["assistant_answer"]] == ["first+second"]
-    assert [row["content_inline"] for row in by_subtype["assistant_process_reasoning"]] == ["think-1+think-2"]
-
-
-def test_continuation_merge_keeps_process_without_json_tool_history(tmp_path: Path):
-    manager, _repository, _persistence = _make_manager(tmp_path)
-    existing = Message({
-        "id": "assistant",
-        "role": Role.ASSISTANT,
-        "content": "old",
-        "process_parts": [
-            {"type": "reasoning", "content": "old reasoning", "order": 0},
-            {"type": "content", "content": "old content", "order": 1},
-        ],
-        "timestamp": 1,
-    })
-    continuation = Message({
-        "id": "assistant-new",
-        "role": Role.ASSISTANT,
-        "content": "new",
-        "process_parts": [
-            {"type": "reasoning", "content": "new reasoning", "order": 0},
-            {"type": "content", "content": "new content", "order": 1},
-        ],
-        "timestamp": 2,
-    })
-
-    merged = manager._merge_existing_node_assistant_continuation(existing, continuation)
-
-    assert [part["order"] for part in merged["process_parts"]] == [0, 1, 2, 3]
-    assert [part["order"] for part in continuation["process_parts"]] == [2, 3]
-    assert "tool_calls" not in merged
-    assert "tool_results" not in merged
+    assert [row["content_inline"] for row in by_subtype["assistant_continuation"]] == ["first"]
+    assert [row["content_inline"] for row in by_subtype["assistant_answer"]] == ["+second"]
+    assert [row["content_inline"] for row in by_subtype["assistant_process_reasoning"]] == ["think-1", "+think-2"]
+    answer = next(
+        item
+        for item in TranscriptAssembler(persistence).snapshot(
+            conversation.metadata["id"],
+            node_id,
+        )["items"]
+        if item["type"] == "assistant_answer"
+    )
+    assert answer["content"] == "first+second"
 
 
 def test_continuation_sqlite_persists_only_current_run_tool_facts(tmp_path: Path):
@@ -291,10 +269,6 @@ def test_continuation_sqlite_persists_only_current_run_tool_facts(tmp_path: Path
         "id": "assistant",
         "role": Role.ASSISTANT,
         "content": "old",
-        "process_parts": [
-            {"type": "reasoning", "content": "old reasoning", "order": 0},
-            {"type": "content", "content": "old content", "order": 1},
-        ],
         "tool_calls": [
             {"id": "call-old", "function": {"name": "old_tool", "arguments": "{}"}, "call_index": 2},
         ],
@@ -308,24 +282,29 @@ def test_continuation_sqlite_persists_only_current_run_tool_facts(tmp_path: Path
         model_id="fake-model",
         run_id=old_run,
         tool_messages=[],
-        tool_calls=list(old["tool_calls"] or []),
+        rounds=[{
+            "round_index": 0,
+            "content": "old",
+            "reasoning": "old reasoning",
+            "tool_calls": list(old["tool_calls"] or []),
+            "output_items": [],
+        }],
+        model_route_id="fake:fake-model:chat",
     )
     continuation = Message({
         "id": "assistant-new",
         "role": Role.ASSISTANT,
         "content": "new",
-        "process_parts": [
-            {"type": "reasoning", "content": "new reasoning", "order": 0},
-            {"type": "content", "content": "new content", "order": 1},
-        ],
         "tool_calls": [
             {"id": "call-new", "function": {"name": "new_tool", "arguments": "{}"}, "call_index": 2},
         ],
         "timestamp": 2,
     })
-    merged = manager._merge_existing_node_assistant_continuation(old, continuation)
-    transcript_msg = Message(deepcopy(merged))
-    transcript_msg["process_parts"] = continuation.get("process_parts")
+    transcript_msg = Message({
+        **continuation,
+        "id": "assistant",
+        "content": "oldnew",
+    })
 
     repository.persist_assistant_turn(
         conversation=conversation,
@@ -335,7 +314,14 @@ def test_continuation_sqlite_persists_only_current_run_tool_facts(tmp_path: Path
         model_id="fake-model",
         run_id=new_run,
         tool_messages=[],
-        tool_calls=list(continuation.get("tool_calls") or []),
+        rounds=[{
+            "round_index": 1,
+            "content": "new",
+            "reasoning": "old reasoningnew reasoning",
+            "tool_calls": list(continuation.get("tool_calls") or []),
+            "output_items": [],
+        }],
+        model_route_id="fake:fake-model:chat",
     )
 
     with repository.persistence.connect() as conn:
@@ -353,7 +339,7 @@ def test_continuation_sqlite_persists_only_current_run_tool_facts(tmp_path: Path
             SELECT id, metadata_json
             FROM messages
             WHERE conversation_id = ?
-              AND subtype IN ('assistant_process_reasoning', 'assistant_process_content')
+              AND subtype = 'assistant_process_reasoning'
             ORDER BY id
             """,
             (conversation.metadata["id"],),
@@ -367,10 +353,8 @@ def test_continuation_sqlite_persists_only_current_run_tool_facts(tmp_path: Path
         row["id"]: json.loads(row["metadata_json"])
         for row in process_rows
     }
-    assert metadata_by_id["assistant:reasoning:0"]["run_id"] == old_run
-    assert metadata_by_id["assistant:content:1"]["run_id"] == old_run
-    assert metadata_by_id["assistant:reasoning:2"]["run_id"] == new_run
-    assert metadata_by_id["assistant:content:3"]["run_id"] == new_run
+    assert set(metadata_by_id) == {"assistant:reasoning"}
+    assert metadata_by_id["assistant:reasoning"]["run_id"] == new_run
 
 
 def test_compact_conversation_writes_canonical_compact_messages(tmp_path: Path):
@@ -531,6 +515,113 @@ class PreambleToolCallingProvider:
             error=None,
             tokens_used=1,
         )
+
+
+class SpuriousStepProvider:
+    def __init__(self):
+        self.calls = []
+
+    async def generate_response_stream(
+        self,
+        model,
+        messages,
+        stream_controller: StreamController = None,
+        **kwargs,
+    ):
+        self.calls.append({"messages": list(messages), "kwargs": kwargs})
+        if len(self.calls) == 1:
+            yield StreamChunk(
+                status=StreamStatus.CONTENT,
+                content="",
+                node_id=stream_controller.node_id,
+                conversation_id=stream_controller.conversation_id,
+                error=None,
+                tokens_used=1,
+                tool_calls=[{
+                    "id": "call_shell",
+                    "type": "function",
+                    "function": {
+                        "name": "shell",
+                        "arguments": "{\"command\":\"echo ok\",\"step\":1}",
+                    },
+                }],
+            )
+        else:
+            yield StreamChunk(
+                status=StreamStatus.CONTENT,
+                content="done",
+                node_id=stream_controller.node_id,
+                conversation_id=stream_controller.conversation_id,
+                error=None,
+                tokens_used=1,
+            )
+        yield StreamChunk(
+            status=StreamStatus.COMPLETE,
+            content=None,
+            node_id=stream_controller.node_id,
+            conversation_id=stream_controller.conversation_id,
+            error=None,
+            tokens_used=1,
+        )
+
+
+class ShellCaptureToolManager:
+    def __init__(self):
+        self.arguments = []
+
+    def get_openai_tools(self, include_disabled=False):
+        return [{
+            "type": "function",
+            "function": {
+                "name": "shell",
+                "description": "Run a command",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string"},
+                        "step": {"type": "integer"},
+                    },
+                },
+            },
+        }]
+
+    def capabilities_for(self, name, workspace=None):
+        return set()
+
+    async def execute_tool(self, name, arguments, workspace=None, runtime_context=None):
+        self.arguments.append(dict(arguments))
+        return json.dumps({"ok": True}, ensure_ascii=False)
+
+
+def test_no_active_task_removes_spurious_step_before_execution_and_storage(tmp_path: Path):
+    manager, repository, _persistence = _make_manager(tmp_path)
+    provider = SpuriousStepProvider()
+    tool_manager = ShellCaptureToolManager()
+    manager.model_manager.provider = provider
+    manager.tool_manager = tool_manager
+    conversation = manager.create_conversation("no task shell")
+
+    chunks = asyncio.run(collect_chunks(manager.send_message_stream(
+        conversation.metadata["id"],
+        "run shell",
+        model_id="fake-model",
+        parent_node_id=conversation.current_node_id,
+    )))
+
+    assert chunks[-1]["status"] == "complete"
+    exposed_properties = provider.calls[0]["kwargs"]["tools"][0]["function"]["parameters"]["properties"]
+    assert "step" not in exposed_properties
+    assert tool_manager.arguments == [{"command": "echo ok"}]
+    with repository.persistence.connect() as conn:
+        row = conn.execute(
+            """
+            SELECT args_inline
+            FROM tool_calls
+            WHERE conversation_id = ? AND id = 'call_shell'
+            """,
+            (conversation.metadata["id"],),
+        ).fetchone()
+    assert json.loads(row["args_inline"]) == {"command": "echo ok"}
 
 
 class LargeToolManager:
@@ -817,7 +908,7 @@ def test_tool_preamble_content_persists_as_process_content(tmp_path: Path):
             (conversation.metadata["id"], reloaded.current_node_id),
         ).fetchall()
     by_subtype = {row["subtype"]: row["content_inline"] for row in rows}
-    assert by_subtype["assistant_process_content"] == "I will inspect first. "
+    assert by_subtype["assistant_round"] == "I will inspect first. "
     assert by_subtype["assistant_answer"] == "done"
 
 

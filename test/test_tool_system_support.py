@@ -14,7 +14,7 @@ from backend.core.tools.agent_tools import (
     register_agent_management_tools,
 )
 from backend.core.chat.chat_manager import ChatManager
-from backend.core.config.types import Message, Role, StreamStatus
+from backend.core.config.types import Message, ModelRoute, Role, StreamStatus
 from backend.core.model.providers.openai_compatible import OpenAICompatibleProvider
 from backend.core.model.providers.anthropic_provider import AnthropicProvider
 from backend.core.model.providers.gemini_provider import GeminiProvider
@@ -26,6 +26,29 @@ from backend.core.tools.tool_filter import ToolFilter
 from backend.core.tools.security.capabilities import capabilities_for_tool
 from backend.core.tools.web_search import WebSearchTool
 from backend.core.tools.web_search import FetchUrlTool
+
+
+def _route(protocol: str) -> ModelRoute:
+    endpoints = {
+        "openai_chat_completions": "/chat/completions",
+        "openai_responses": "/responses",
+        "anthropic_messages": "/v1/messages",
+        "gemini_generate_content": "/models/{model}:generateContent",
+    }
+    return ModelRoute(
+        route_id=f"test:model:{protocol}",
+        provider_id="test",
+        model_id="model",
+        protocol=protocol,
+        endpoint=endpoints[protocol],
+        reasoning_profile={
+            "name": "test",
+            "carrier": "responses_items" if protocol == "openai_responses" else "none",
+            "history_policy": "provider_state" if protocol == "openai_responses" else "drop",
+            "strict": protocol == "openai_responses",
+            "controls": {},
+        },
+    )
 
 
 def test_tool_filter_allows_aliases_and_denies_disabled():
@@ -545,31 +568,6 @@ def test_stdio_process_prefers_popen_on_windows(monkeypatch):
         assert "startupinfo" in popen_calls[0][1]
 
 
-def test_assistant_continuation_merges_text_process_and_reasoning():
-    manager = ChatManager.__new__(ChatManager)
-
-    merged = manager._merge_existing_node_assistant_continuation(
-        Message({
-            "id": "assistant-old",
-            "role": Role.ASSISTANT,
-            "content": "old answer\n",
-            "process_content": "old process\n",
-            "reasoning": "old reasoning\n",
-        }),
-        Message({
-            "id": "assistant-new",
-            "role": Role.ASSISTANT,
-            "content": "new answer",
-            "process_content": "new process",
-            "reasoning": "new reasoning",
-        }),
-    )
-
-    assert merged["content"] == "old answer\nnew answer"
-    assert merged["process_content"] == "old process\nnew process"
-    assert merged["reasoning"] == "old reasoning\nnew reasoning"
-
-
 def test_execute_tool_calls_returns_tool_messages():
     class FakeToolManager:
         def __init__(self):
@@ -602,7 +600,7 @@ def test_execute_tool_calls_returns_tool_messages():
 
 
 def test_openai_tool_call_delta_aggregation():
-    provider = OpenAICompatibleProvider({"api_key": "test"})
+    provider = OpenAICompatibleProvider({"api_key": "test"}, _route("openai_chat_completions"))
     accumulator = {}
 
     provider._merge_openai_tool_call_delta(
@@ -628,7 +626,7 @@ def test_openai_tool_call_delta_aggregation():
 
 def test_openai_stream_emits_tool_call_start_before_final_tool_call():
     async def run_case():
-        provider = OpenAICompatibleProvider({"api_key": "test"})
+        provider = OpenAICompatibleProvider({"api_key": "test"}, _route("openai_chat_completions"))
 
         async def fake_iter_sse_events(_path, _body, **_kwargs):
             yield {
@@ -673,7 +671,11 @@ def test_openai_stream_emits_tool_call_start_before_final_tool_call():
             chunks.append(dict(chunk))
 
         event_types = [chunk.get("event_type") for chunk in chunks if chunk.get("event_type")]
-        assert event_types == ["tool_call_start", "tool_call", "tool_call"]
+        assert event_types == [
+            "tool_call_start",
+            "tool_call",
+            "tool_call",
+        ]
         tool_call_chunks = [chunk for chunk in chunks if chunk.get("event_type") == "tool_call"]
         assert tool_call_chunks[0]["tool_calls"][0]["function"]["name"] == "web_search"
         assert tool_call_chunks[0]["tool_calls"][0]["function"]["arguments"] == ""
@@ -685,9 +687,9 @@ def test_openai_stream_emits_tool_call_start_before_final_tool_call():
     asyncio.run(run_case())
 
 
-def test_openai_stream_treats_unrequested_reasoning_field_as_content():
+def test_openai_stream_preserves_provider_reasoning_without_user_control():
     async def run_case():
-        provider = OpenAICompatibleProvider({"api_key": "test"})
+        provider = OpenAICompatibleProvider({"api_key": "test"}, _route("openai_chat_completions"))
 
         async def fake_iter_sse_events(_path, _body, **_kwargs):
             yield {
@@ -706,15 +708,15 @@ def test_openai_stream_treats_unrequested_reasoning_field_as_content():
             )
         ]
 
-        assert [chunk.get("content") for chunk in chunks if chunk.get("content")] == ["plain answer"]
-        assert not [chunk for chunk in chunks if chunk.get("reasoning")]
+        assert [chunk.get("reasoning") for chunk in chunks if chunk.get("reasoning")] == ["plain answer"]
+        assert not [chunk for chunk in chunks if chunk.get("content")]
 
     asyncio.run(run_case())
 
 
 def test_openai_stream_preserves_requested_reasoning_field_as_reasoning():
     async def run_case():
-        provider = OpenAICompatibleProvider({"api_key": "test"})
+        provider = OpenAICompatibleProvider({"api_key": "test"}, _route("openai_chat_completions"))
 
         async def fake_iter_sse_events(_path, _body, **_kwargs):
             yield {
@@ -742,7 +744,7 @@ def test_openai_stream_preserves_requested_reasoning_field_as_reasoning():
 
 def test_openai_responses_stream_emits_tool_call_start_before_final_tool_call():
     async def run_case():
-        provider = OpenAICompatibleProvider({"api_key": "test"})
+        provider = OpenAICompatibleProvider({"api_key": "test"}, _route("openai_responses"))
 
         async def fake_iter_sse_events(_path, _body, **_kwargs):
             yield {
@@ -763,6 +765,17 @@ def test_openai_responses_stream_emits_tool_call_start_before_final_tool_call():
                 "output_index": 0,
                 "delta": "{\"query\":\"ChatTree\"}",
             }
+            yield {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "id": "fc-1",
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "web_search",
+                    "arguments": "{\"query\":\"ChatTree\"}",
+                },
+            }
 
         provider._iter_sse_events = fake_iter_sse_events
         chunks = []
@@ -780,7 +793,12 @@ def test_openai_responses_stream_emits_tool_call_start_before_final_tool_call():
             chunks.append(dict(chunk))
 
         event_types = [chunk.get("event_type") for chunk in chunks if chunk.get("event_type")]
-        assert event_types == ["tool_call_start", "tool_call", "tool_call"]
+        assert event_types == [
+            "tool_call_start",
+            "tool_call",
+            "tool_call",
+            "model_output_item",
+        ]
         tool_call_chunks = [chunk for chunk in chunks if chunk.get("event_type") == "tool_call"]
         assert tool_call_chunks[0]["tool_calls"][0]["function"]["name"] == "web_search"
         assert tool_call_chunks[0]["tool_calls"][0]["function"]["arguments"] == ""
@@ -791,7 +809,7 @@ def test_openai_responses_stream_emits_tool_call_start_before_final_tool_call():
 
 def test_openai_responses_completed_payload_supplies_missing_final_text():
     async def run_case():
-        provider = OpenAICompatibleProvider({"api_key": "test", "api_format": "responses"})
+        provider = OpenAICompatibleProvider({"api_key": "test"}, _route("openai_responses"))
 
         async def fake_iter_sse_events(_path, _body, **_kwargs):
             yield {
@@ -818,7 +836,7 @@ def test_openai_responses_completed_payload_supplies_missing_final_text():
 
 
 def test_gemini_build_body_includes_tools_and_normalizes_role_enum():
-    provider = GeminiProvider({"api_key": "test"})
+    provider = GeminiProvider({"api_key": "test"}, _route("gemini_generate_content"))
     headers = provider._headers()
     assert headers["x-goog-api-key"] == "test"
     assert "Authorization" not in headers
@@ -873,7 +891,7 @@ def test_anthropic_stream_tool_call_snapshots_keep_previous_tools():
                     loop.call_soon_threadsafe(queue.put_nowait, "data: " + json.dumps(event))
                 loop.call_soon_threadsafe(queue.put_nowait, anthropic_module._SENTINEL)
 
-        provider = SnapshotProvider({"api_key": "test"})
+        provider = SnapshotProvider({"api_key": "test"}, _route("anthropic_messages"))
         chunks = [
             dict(chunk)
             async for chunk in provider.generate_response_stream(
@@ -910,8 +928,8 @@ def test_searxng_html_result_parser():
     }]
 
 
-def test_enable_thinking_only_for_known_compatible_models():
-    provider = OpenAICompatibleProvider({"api_key": "test"})
+def test_enable_thinking_is_driven_by_route_profile():
+    provider = OpenAICompatibleProvider({"api_key": "test"}, _route("openai_chat_completions"))
 
     deepseek_body = provider._build_chat_request_kwargs(
         model="deepseek-v4-flash-ascend",
@@ -923,12 +941,25 @@ def test_enable_thinking_only_for_known_compatible_models():
         extra_kwargs={},
     )
     assert "extra_body" not in deepseek_body
-    assert not provider._supports_enable_thinking("deepseek-v4-flash-ascend")
-    assert provider._supports_enable_thinking("qwen3.6-chat")
+
+    qwen_route = _route("openai_chat_completions")
+    qwen_route["reasoning_profile"]["controls"] = {"thinking_style": "qwen"}
+    qwen = OpenAICompatibleProvider({"api_key": "test"}, qwen_route)
+    qwen_body = qwen._build_chat_request_kwargs(
+        model="directory-declared-model",
+        messages=[],
+        stream=True,
+        max_tokens=None,
+        temperature=None,
+        top_p=None,
+        extra_kwargs={},
+        thinking_enabled=True,
+    )
+    assert qwen_body["extra_body"]["enable_thinking"] is True
 
 
 def test_responses_input_places_function_output_immediately_after_call():
-    provider = OpenAICompatibleProvider({"api_key": "test", "api_format": "responses"})
+    provider = OpenAICompatibleProvider({"api_key": "test"}, _route("openai_responses"))
 
     _, response_input = provider._convert_messages_to_responses_input([
         Message({"role": "user", "content": "use tool"}),

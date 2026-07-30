@@ -3,10 +3,12 @@ import asyncio
 import json
 import urllib.error
 import urllib.request
+import uuid
+from copy import deepcopy
 from typing import List, Dict, Any, Optional, AsyncIterator
 from ..base import BaseProvider, logger
 from ..usage import estimated_usage, usage_from_anthropic, usage_total
-from ...config.types import Message, StreamChunk, StreamStatus, StreamController
+from ...config.types import Message, ModelRoute, StreamChunk, StreamStatus, StreamController
 from .retry import RetryPolicy, RetryableHTTPError, classify_retry_error, run_with_retries, sleep_before_retry
 from .sse import iter_decoded_sse_lines
 from .multimodal import to_anthropic_content
@@ -22,8 +24,8 @@ class AnthropicHTTPError(RetryableHTTPError):
 class AnthropicProvider(BaseProvider):
     """Anthropic API 提供商 — 纯 HTTP 实现，不依赖 anthropic SDK"""
 
-    def __init__(self, config: Dict[str, Any]):
-        super().__init__(config)
+    def __init__(self, config: Dict[str, Any], route: ModelRoute):
+        super().__init__(config, route)
 
     def _api_base(self) -> str:
         base = self.config.get("base_url", "https://api.anthropic.com").rstrip("/")
@@ -53,6 +55,46 @@ class AnthropicProvider(BaseProvider):
         system_text = ""
         anthropic_messages: List[Dict[str, Any]] = []
         for msg in messages:
+            native_items = [
+                item
+                for item in (msg.get("model_state_items") or [])
+                if item.get("route_id") == self.route["route_id"]
+                and item.get("kind") == "assistant_message"
+                and isinstance(item.get("native_payload"), dict)
+            ]
+            if native_items:
+                layout = (native_items[0]["native_payload"]).get("layout") or []
+                tool_calls = {
+                    str(call.get("id") or ""): call
+                    for call in (msg.get("tool_calls") or [])
+                }
+                blocks: List[Dict[str, Any]] = []
+                text_emitted = False
+                for entry in layout:
+                    if not isinstance(entry, dict):
+                        continue
+                    if isinstance(entry.get("state"), dict):
+                        blocks.append(deepcopy(entry["state"]))
+                    elif "text" in entry and not text_emitted and msg.get("content"):
+                        blocks.append({"type": "text", "text": msg.get("content") or ""})
+                        text_emitted = True
+                    elif entry.get("tool_call_id") in tool_calls:
+                        call = tool_calls[str(entry["tool_call_id"])]
+                        fn = call.get("function") or {}
+                        try:
+                            tool_input = json.loads(fn.get("arguments") or "{}")
+                        except json.JSONDecodeError:
+                            tool_input = {"arguments": fn.get("arguments") or ""}
+                        blocks.append({
+                            "type": "tool_use",
+                            "id": call.get("id"),
+                            "name": fn.get("name", ""),
+                            "input": tool_input,
+                        })
+                if msg.get("content") and not text_emitted:
+                    blocks.append({"type": "text", "text": msg.get("content") or ""})
+                anthropic_messages.append({"role": "assistant", "content": blocks})
+                continue
             role = msg["role"] if isinstance(msg["role"], str) else msg["role"].value
             content = msg.get("content") or ""
             if role == "system":
@@ -159,7 +201,7 @@ class AnthropicProvider(BaseProvider):
         )
         policy = RetryPolicy.from_config(self.config)
         result = run_with_retries(
-            lambda: self._http_post("/v1/messages", body),
+            lambda: self._http_post(self.route["endpoint"], body),
             policy,
             label="Anthropic messages request",
             logger=logger,
@@ -192,12 +234,14 @@ class AnthropicProvider(BaseProvider):
                                     tools=tools, tool_choice=tool_choice)
 
             tool_blocks: Dict[int, Dict[str, Any]] = {}
+            native_blocks: Dict[int, Dict[str, Any]] = {}
             tool_call_started = False
             stream_policy = RetryPolicy.from_config(self.config, stream=True)
             retry_failures = 0
 
             while True:
                 attempt_had_output = False
+                native_blocks = {}
                 queue: asyncio.Queue = asyncio.Queue()
                 loop = asyncio.get_event_loop()
                 loop.run_in_executor(None, self._stream_to_queue, body, queue, loop)
@@ -219,6 +263,7 @@ class AnthropicProvider(BaseProvider):
                             event = json.loads(payload)
                         except json.JSONDecodeError:
                             continue
+                        attempt_had_output = True
 
                         etype = event.get("type", "")
                         if usage := event.get("usage"):
@@ -229,6 +274,9 @@ class AnthropicProvider(BaseProvider):
                             total_tokens = usage_total(usage_info, total_tokens)
                         if etype == "content_block_start":
                             block = event.get("content_block") or {}
+                            index = int(event.get("index", len(native_blocks)))
+                            if isinstance(block, dict):
+                                native_blocks[index] = deepcopy(block)
                             if block.get("type") == "tool_use":
                                 if not tool_call_started:
                                     tool_call_started = True
@@ -240,7 +288,6 @@ class AnthropicProvider(BaseProvider):
                                         error=None, tokens_used=0,
                                         event_type="tool_call_start",
                                     )
-                                index = int(event.get("index", len(tool_blocks)))
                                 tool_blocks[index] = {
                                     "id": block.get("id", f"toolu_{index}"),
                                     "type": "function",
@@ -259,12 +306,24 @@ class AnthropicProvider(BaseProvider):
                                     index,
                                     {"id": f"toolu_{index}", "type": "function", "function": {"name": "", "arguments": ""}},
                                 )
-                                tool_call["function"]["arguments"] += delta.get("partial_json") or ""
+                                partial_json = delta.get("partial_json") or ""
+                                tool_call["function"]["arguments"] += partial_json
+                                native_block = native_blocks.setdefault(
+                                    index,
+                                    {"type": "tool_use", "id": tool_call["id"], "name": tool_call["function"]["name"]},
+                                )
+                                native_block["_partial_json"] = (
+                                    str(native_block.get("_partial_json") or "") + partial_json
+                                )
                                 continue
                             # 思考增量：Anthropic 的 thinking_delta（携带 thinking 文本）
                             if delta.get("type") == "thinking_delta" or "thinking" in delta:
                                 thinking = delta.get("thinking", "")
                                 if thinking:
+                                    native_block = native_blocks.setdefault(index, {"type": "thinking"})
+                                    native_block["thinking"] = (
+                                        str(native_block.get("thinking") or "") + thinking
+                                    )
                                     if stream_controller and await stream_controller.is_stopped():
                                         yield StreamChunk(
                                             status=StreamStatus.STOPPED, content=None,
@@ -282,8 +341,17 @@ class AnthropicProvider(BaseProvider):
                                         event_type="reasoning", reasoning=thinking,
                                     )
                                 continue
+                            if delta.get("type") == "signature_delta" or "signature" in delta:
+                                signature = str(delta.get("signature") or "")
+                                native_block = native_blocks.setdefault(index, {"type": "thinking"})
+                                native_block["signature"] = (
+                                    str(native_block.get("signature") or "") + signature
+                                )
+                                continue
                             text = delta.get("text", "")
                             if text:
+                                native_block = native_blocks.setdefault(index, {"type": "text"})
+                                native_block["text"] = str(native_block.get("text") or "") + text
                                 attempt_had_output = True
                                 total_content += text
                                 token_delta = int(len(text.split()) * 1.3)
@@ -304,6 +372,13 @@ class AnthropicProvider(BaseProvider):
                                 )
                         elif etype == "content_block_stop":
                             index = int(event.get("index", 0))
+                            native_block = native_blocks.get(index)
+                            if native_block and "_partial_json" in native_block:
+                                partial_json = str(native_block.pop("_partial_json") or "")
+                                try:
+                                    native_block["input"] = json.loads(partial_json or "{}")
+                                except json.JSONDecodeError:
+                                    native_block["input"] = {"arguments": partial_json}
                             tool_call = tool_blocks.get(index)
                             if tool_call and tool_call.get("function", {}).get("name"):
                                 if not tool_call["function"]["arguments"]:
@@ -363,6 +438,61 @@ class AnthropicProvider(BaseProvider):
 
             if usage_info is None:
                 usage_info = estimated_usage(total_tokens)
+            ordered_blocks = [
+                block
+                for _, block in sorted(native_blocks.items())
+                if isinstance(block, dict)
+            ]
+            state_layout = []
+            has_state = False
+            for block in ordered_blocks:
+                block_type = str(block.get("type") or "")
+                if block_type in {"thinking", "redacted_thinking"}:
+                    state_layout.append({"state": block})
+                    has_state = True
+                elif block_type == "text":
+                    state_layout.append({"text": True})
+                elif block_type == "tool_use":
+                    state_layout.append({"tool_call_id": str(block.get("id") or "")})
+                else:
+                    state_layout.append({"state": block})
+                    has_state = True
+            yield StreamChunk(
+                status=StreamStatus.CONTENT,
+                content=None,
+                node_id=stream_controller.node_id if stream_controller else None,
+                conversation_id=stream_controller.conversation_id if stream_controller else None,
+                error=None,
+                tokens_used=0,
+                event_type="model_output_item",
+                output_item={
+                    "id": str(uuid.uuid4()),
+                    "route_id": self.route["route_id"],
+                    "index": 0,
+                    "round_index": 0,
+                    "kind": "assistant_message",
+                    "display_text": total_content,
+                    "tool_call_ids": [
+                        str(block.get("id"))
+                        for block in ordered_blocks
+                        if block.get("type") == "tool_use" and block.get("id")
+                    ],
+                    "native_payload": {
+                        "role": "assistant",
+                        "content": ordered_blocks,
+                    },
+                    **(
+                        {
+                            "state_payload": {
+                                "role": "assistant",
+                                "layout": state_layout,
+                            }
+                        }
+                        if has_state
+                        else {}
+                    ),
+                },
+            )
             yield StreamChunk(
                 status=StreamStatus.COMPLETE, content=None,
                 node_id=stream_controller.node_id if stream_controller else None,
@@ -396,7 +526,7 @@ class AnthropicProvider(BaseProvider):
 
     def _stream_to_queue(self, body: Dict[str, Any], queue: asyncio.Queue, loop: asyncio.AbstractEventLoop):
         """线程池中执行：逐行读取 SSE 并放入 asyncio Queue"""
-        url = self._api_base() + "/v1/messages"
+        url = self._api_base() + self.route["endpoint"]
         data = json.dumps(body).encode()
         req = urllib.request.Request(url, data=data, headers=self._headers(), method="POST")
         try:

@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from backend.core.persistence.home import resolve_chattree_home
-from .types import ModelProviderConfig, APIFormat
+from .types import ModelProviderConfig
 
 # 旧的预设提供商ID列表，用于迁移检测
 _LEGACY_PROVIDER_IDS = {
@@ -20,7 +20,6 @@ _DEFAULT_PROVIDER_TEMPLATE: ModelProviderConfig = {
     'base_url': '',
     'organization': '',
     'project': '',
-    'api_format': APIFormat.CHAT_COMPLETIONS,
     'hidden_models': [],
     'enabled': False,
 }

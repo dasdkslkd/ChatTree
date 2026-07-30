@@ -231,13 +231,31 @@ function launcherApi(apiPath, method = "GET", body = null) {
 }
 
 async function connectProfile(profileId) {
-  const result = await launcherApi(`/client/v1/profiles/${profileId}/connect`, "POST");
+  const url = `/client/v1/profiles/${encodeURIComponent(profileId)}/connect`;
+  let result = await launcherApi(url, "POST");
+  const envelope = result.data?.error;
+  const observed = envelope?.details?.observed_server_instance_id;
+  if (result.status === 409 && envelope?.code === "server_identity_changed" && observed) {
+    const { response } = await dialog.showMessageBox(shellWindow, {
+      type: "question",
+      buttons: ["重新绑定并连接", "取消"],
+      defaultId: 0,
+      cancelId: 1,
+      message: "本地 Server 身份已变化（数据目录可能被重建）。\n重新绑定到新的 Server 实例？",
+    });
+    if (response === 0) {
+      result = await launcherApi(url, "POST", {
+        rebind: true,
+        expected_server_instance_id: observed,
+      });
+    }
+  }
   if (result.status === 200) {
     return { serverInstanceId: result.data?.server_instance_id || null };
   }
-  if (result.status === 409 && result.data) {
-    throw Object.assign(new Error(result.data.message || "Server already connected"), {
-      code: result.data.code,
+  if (result.status === 409 && result.data?.error) {
+    throw Object.assign(new Error(result.data.error.message), {
+      code: result.data.error.code,
     });
   }
   const detail = result.data?.error?.message || `HTTP ${result.status}`;

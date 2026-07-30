@@ -24,7 +24,8 @@ def test_repository_creates_conversation_node_and_messages(tmp_path):
     assert conversation["root_node_id"] == root_id
     assert conversation["current_node_id"] == root_id
     assert [m["id"] for m in messages] == [user_id, assistant_id]
-    assert messages[0]["preview"] == "hello"
+    assert messages[0]["content_inline"] == "hello"
+    assert messages[0]["preview"] == ""
 
 
 def test_repository_stores_large_message_as_blob(tmp_path):

@@ -510,7 +510,7 @@ def test_real_process_protocol_idempotency_restart_and_stop(tmp_path: Path) -> N
         assert not list((client_home / "logs").glob("*.spawn.pid"))
 
         with closing(sqlite3.connect(server_home / "chattree.sqlite")) as connection:
-            assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+            assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
             assert connection.execute("PRAGMA quick_check").fetchone()[0] == "ok"
             assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:

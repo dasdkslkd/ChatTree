@@ -93,12 +93,67 @@ def messages_by_node(
             message["is_hidden_from_transcript"] = True
         if row["transcript_only"]:
             message["is_visible_in_transcript_only"] = True
+        if row["model_route_id"]:
+            message["model_route_id"] = str(row["model_route_id"])
+        if row["model_round_index"] is not None:
+            message["model_round_index"] = int(row["model_round_index"])
         message.update({
             key: value
             for key, value in metadata.items()
             if key not in {"id", "role", "content", "subtype", "timestamp", "node_id"}
         })
         grouped.setdefault(str(row["node_id"]), []).append(message)
+    return grouped
+
+
+def model_state_items_by_node(
+    chat_repository,
+    conversation_id: str,
+    node_ids: List[str],
+) -> Dict[str, List[Dict[str, Any]]]:
+    """读取不可重建的协议状态；路由和轮次来自所属助手消息。"""
+    if chat_repository is None or not node_ids:
+        return {}
+    placeholders = ",".join("?" for _ in node_ids)
+    blobs = BlobStore(chat_repository.persistence)
+    with chat_repository.persistence.connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT
+              state.assistant_message_id,
+              state.item_index,
+              state.kind,
+              state.payload_inline,
+              state.payload_blob_id,
+              message.node_id,
+              message.model_route_id,
+              message.model_round_index
+            FROM model_state_items AS state
+            JOIN messages AS message
+              ON message.conversation_id = state.conversation_id
+             AND message.id = state.assistant_message_id
+            WHERE state.conversation_id = ?
+              AND message.node_id IN ({placeholders})
+            ORDER BY message.node_id, message.model_round_index, state.item_index
+            """,
+            (conversation_id, *node_ids),
+        ).fetchall()
+
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        payload_text = row["payload_inline"]
+        if payload_text is None and row["payload_blob_id"]:
+            payload_text = blobs.get_text(str(row["payload_blob_id"]))
+        payload = _tool_result_payload(payload_text or "")
+        grouped.setdefault(str(row["node_id"]), []).append({
+            "id": f"{row['assistant_message_id']}:{row['item_index']}",
+            "assistant_message_id": str(row["assistant_message_id"]),
+            "route_id": str(row["model_route_id"] or ""),
+            "index": int(row["item_index"]),
+            "round_index": int(row["model_round_index"] or 0),
+            "kind": str(row["kind"]),
+            "native_payload": payload,
+        })
     return grouped
 
 
@@ -185,20 +240,6 @@ def latest_assistant_answer(
     return None
 
 
-def process_content_for_node(
-    chat_repository,
-    conversation_id: str,
-    node_id: str,
-    subtype: str,
-) -> str:
-    parts = [
-        str(message.get("content") or "")
-        for message in messages_by_node(chat_repository, conversation_id, [node_id]).get(node_id, [])
-        if message.get("role") == Role.ASSISTANT and message.get("subtype") == subtype
-    ]
-    return "".join(parts)
-
-
 def tool_history_by_node(
     chat_repository,
     conversation_id: str,
@@ -246,8 +287,10 @@ def tool_history_by_node(
             arguments = blobs.get_text(str(row["args_blob_id"]))
         name = str(row["name"] or "")
         tool_call_message = Message({
+            "id": str(row["assistant_message_id"] or f"tool-call:{call_id}"),
             "role": Role.ASSISTANT,
             "content": "",
+            "assistant_message_id": row["assistant_message_id"],
             "tool_calls": [{
                 "id": call_id,
                 "type": "function",

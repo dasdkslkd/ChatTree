@@ -36,26 +36,32 @@ TASK_OBSERVATION_TOOL_NAMES = {
 def filter_task_tools_for_context(
     tools: list[Dict[str, Any]],
     mode: TaskContextMode | str,
+    *,
+    has_active_task: bool,
 ) -> list[Dict[str, Any]]:
-    if normalize_context_mode(mode) == TaskContextMode.ATTACHED:
-        return tools
+    attached = normalize_context_mode(mode) == TaskContextMode.ATTACHED
     filtered: list[Dict[str, Any]] = []
     for tool in tools:
         name = str((tool.get("function") or {}).get("name") or "")
         if name in TASK_TOOL_NAMES:
-            continue
-        if name not in TASK_BOUND_RUN_TOOL_NAMES:
+            if not attached:
+                continue
+            if has_active_task and name == "create_task":
+                continue
+            if not has_active_task and name != "create_task":
+                continue
+        if name not in TASK_BOUND_RUN_TOOL_NAMES or (attached and has_active_task):
             filtered.append(tool)
             continue
-        detached_tool = deepcopy(tool)
-        parameters = (detached_tool.get("function") or {}).get("parameters") or {}
+        filtered_tool = deepcopy(tool)
+        parameters = (filtered_tool.get("function") or {}).get("parameters") or {}
         properties = parameters.get("properties")
         if isinstance(properties, dict):
             properties.pop("step", None)
         required = parameters.get("required")
         if isinstance(required, list):
             parameters["required"] = [item for item in required if item != "step"]
-        filtered.append(detached_tool)
+        filtered.append(filtered_tool)
     return filtered
 
 

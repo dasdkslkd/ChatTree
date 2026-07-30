@@ -3,12 +3,20 @@ import asyncio
 import json
 import urllib.error
 import urllib.request
+import uuid
 from copy import deepcopy
 from typing import List, Dict, Any, Optional, AsyncIterator, Tuple
 
 from ..base import BaseProvider, logger
 from ..usage import estimated_usage, usage_from_openai, usage_total
-from ...config.types import Message, StreamChunk, StreamStatus, StreamController
+from ...config.types import (
+    Message,
+    ModelProtocol,
+    ModelRoute,
+    StreamChunk,
+    StreamStatus,
+    StreamController,
+)
 from .retry import RetryPolicy, RetryableHTTPError, classify_retry_error, run_with_retries, sleep_before_retry
 from .sse import iter_decoded_sse_lines
 from .multimodal import to_openai_responses_content
@@ -24,8 +32,8 @@ class ProviderHTTPError(RetryableHTTPError):
 class OpenAICompatibleProvider(BaseProvider):
     """OpenAI-compatible API provider implemented with urllib."""
 
-    def __init__(self, config: Dict[str, Any]):
-        super().__init__(config)
+    def __init__(self, config: Dict[str, Any], route: ModelRoute):
+        super().__init__(config, route)
 
     def _api_base(self) -> str:
         return (self.config.get("base_url") or "https://api.openai.com/v1").rstrip("/")
@@ -146,20 +154,33 @@ class OpenAICompatibleProvider(BaseProvider):
                 **kwargs,
             )
 
+        thinking_enabled = kwargs.pop("thinking_enabled", None)
+        profile = self.route.get("reasoning_profile") or {}
+        history_policy = str(profile.get("history_policy") or "drop")
+        if (
+            (profile.get("controls") or {}).get("thinking_style")
+            in {"zai", "kimi_keep", "mimo", "type"}
+            and thinking_enabled is False
+        ):
+            history_policy = "drop"
         body = self._build_chat_request_kwargs(
             model=model,
-            messages=self._convert_messages(messages),
+            messages=self._convert_messages(
+                messages,
+                history_policy=history_policy,
+            ),
             stream=False,
             max_tokens=max_tokens,
             temperature=temperature,
             top_p=top_p,
             extra_kwargs=kwargs,
+            thinking_enabled=thinking_enabled,
             tools=tools,
             tool_choice=tool_choice,
         )
         policy = RetryPolicy.from_config(self.config)
         response = run_with_retries(
-            lambda: self._request_json("/chat/completions", body),
+            lambda: self._request_json(self.route["endpoint"], body),
             policy,
             label="OpenAI chat completion",
             logger=logger,
@@ -185,6 +206,7 @@ class OpenAICompatibleProvider(BaseProvider):
         **kwargs
     ) -> AsyncIterator[StreamChunk]:
         total_content = ""
+        total_reasoning = ""
         total_tokens = 0
         usage_info = None
 
@@ -209,7 +231,18 @@ class OpenAICompatibleProvider(BaseProvider):
                     yield chunk
                 return
 
-            api_messages = self._convert_messages(messages)
+            profile = self.route.get("reasoning_profile") or {}
+            history_policy = str(profile.get("history_policy") or "drop")
+            if (
+                (profile.get("controls") or {}).get("thinking_style")
+                in {"zai", "kimi_keep", "mimo", "type"}
+                and thinking_enabled is False
+            ):
+                history_policy = "drop"
+            api_messages = self._convert_messages(
+                messages,
+                history_policy=history_policy,
+            )
             request_kwargs = self._build_chat_request_kwargs(
                 model=model,
                 messages=api_messages,
@@ -219,16 +252,11 @@ class OpenAICompatibleProvider(BaseProvider):
                 top_p=None,
                 extra_kwargs=kwargs,
                 reasoning_effort=reasoning_effort,
+                thinking_enabled=thinking_enabled,
                 tools=tools,
                 tool_choice=tool_choice,
             )
             request_kwargs["stream_options"] = {"include_usage": True}
-            if thinking_enabled is not None and self._supports_enable_thinking(model):
-                request_kwargs["extra_body"] = {
-                    "enable_thinking": thinking_enabled,
-                    "chat_template_kwargs": {"enable_thinking": thinking_enabled},
-                }
-
             attempts = [request_kwargs]
             if self.config.get("base_url") and temperature is not None:
                 retry_kwargs = dict(request_kwargs)
@@ -237,14 +265,6 @@ class OpenAICompatibleProvider(BaseProvider):
             no_stream_usage = dict(attempts[-1])
             no_stream_usage.pop("stream_options", None)
             attempts.append(no_stream_usage)
-            if reasoning_effort or (
-                thinking_enabled is not None and self._supports_enable_thinking(model)
-            ):
-                no_reasoning = dict(attempts[-1])
-                no_reasoning.pop("reasoning_effort", None)
-                no_reasoning.pop("extra_body", None)
-                attempts.append(no_reasoning)
-
             last_error: Optional[Exception] = None
             tool_call_accumulator: Dict[int, Dict[str, Any]] = {}
             last_emitted_tool_calls = ""
@@ -257,10 +277,11 @@ class OpenAICompatibleProvider(BaseProvider):
                     try:
                         tool_call_started = False
                         async for event in self._iter_sse_events(
-                            "/chat/completions",
+                            self.route["endpoint"],
                             current_kwargs,
                             stream_controller=stream_controller,
                         ):
+                            attempt_had_output = True
                             if stream_controller and await stream_controller.is_stopped():
                                 yield StreamChunk(
                                     status=StreamStatus.STOPPED,
@@ -314,6 +335,7 @@ class OpenAICompatibleProvider(BaseProvider):
                             reasoning = delta.get("reasoning_content") or delta.get("reasoning")
                             if reasoning:
                                 attempt_had_output = True
+                                total_reasoning += reasoning
                                 yield StreamChunk(
                                     status=StreamStatus.CONTENT,
                                     content=None,
@@ -442,6 +464,7 @@ class OpenAICompatibleProvider(BaseProvider):
 
             if usage_info is None:
                 usage_info = estimated_usage(total_tokens)
+            final_tool_calls = self._finalize_openai_tool_calls(tool_call_accumulator)
             yield StreamChunk(
                 status=StreamStatus.COMPLETE,
                 content=None,
@@ -490,6 +513,7 @@ class OpenAICompatibleProvider(BaseProvider):
     ) -> AsyncIterator[StreamChunk]:
         total_tokens = 0
         usage_info = None
+        response_output_items: Dict[int, Dict[str, Any]] = {}
         instructions, response_input = self._convert_messages_to_responses_input(messages)
         request_kwargs = self._build_responses_request_kwargs(
             instructions=instructions,
@@ -520,15 +544,17 @@ class OpenAICompatibleProvider(BaseProvider):
             while True:
                 total_content = ""
                 function_calls = {}
+                response_output_items = {}
                 tool_call_started = False
                 last_emitted_tool_calls = ""
                 attempt_had_output = False
                 try:
                     async for event in self._iter_sse_events(
-                        "/responses",
+                        self.route["endpoint"],
                         current_kwargs,
                         stream_controller=stream_controller,
                     ):
+                        attempt_had_output = True
                         if stream_controller and await stream_controller.is_stopped():
                             yield StreamChunk(
                                 status=StreamStatus.STOPPED,
@@ -543,6 +569,9 @@ class OpenAICompatibleProvider(BaseProvider):
                         event_type = event.get("type", "")
                         if event_type == "response.completed":
                             response = event.get("response") or {}
+                            for index, item in enumerate(response.get("output") or []):
+                                if isinstance(item, dict):
+                                    response_output_items[index] = deepcopy(item)
                             if usage := response.get("usage"):
                                 usage_info = usage_from_openai(usage)
                                 total_tokens = usage_total(usage_info, total_tokens)
@@ -671,6 +700,9 @@ class OpenAICompatibleProvider(BaseProvider):
 
                         if event_type == "response.output_item.done":
                             item = event.get("item") or {}
+                            if isinstance(item, dict):
+                                output_index = int(event.get("output_index", len(response_output_items)))
+                                response_output_items[output_index] = deepcopy(item)
                             if item.get("type") == "function_call":
                                 key = str(event.get("output_index", item.get("id") or item.get("call_id") or "0"))
                                 function_calls[key] = {
@@ -812,6 +844,47 @@ class OpenAICompatibleProvider(BaseProvider):
 
         if usage_info is None:
             usage_info = estimated_usage(total_tokens)
+        for index, native_item in sorted(response_output_items.items()):
+            item_type = str(native_item.get("type") or "provider_item")
+            tool_call_ids = []
+            if item_type == "function_call":
+                call_id = native_item.get("call_id") or native_item.get("id")
+                if call_id:
+                    tool_call_ids.append(str(call_id))
+            yield StreamChunk(
+                status=StreamStatus.CONTENT,
+                content=None,
+                node_id=stream_controller.node_id if stream_controller else None,
+                conversation_id=stream_controller.conversation_id if stream_controller else None,
+                error=None,
+                tokens_used=0,
+                event_type="model_output_item",
+                output_item={
+                    "id": str(native_item.get("id") or uuid.uuid4()),
+                    "route_id": self.route["route_id"],
+                    "index": index,
+                    "round_index": 0,
+                    "kind": item_type,
+                    "display_text": self._responses_item_display_text(native_item),
+                    "tool_call_ids": tool_call_ids,
+                    "native_payload": native_item,
+                    **(
+                        {
+                            "state_payload": {
+                                key: value
+                                for key, value in native_item.items()
+                                if key not in {"summary", "content"}
+                            }
+                        }
+                        if item_type == "reasoning"
+                        else (
+                            {"state_payload": native_item}
+                            if item_type not in {"message", "function_call"}
+                            else {}
+                        )
+                    ),
+                },
+            )
         yield StreamChunk(
             status=StreamStatus.COMPLETE,
             content=None,
@@ -851,7 +924,7 @@ class OpenAICompatibleProvider(BaseProvider):
                 logger.warning(f"Invalid SSE payload ignored: {payload[:200]}")
 
     def _use_responses_api(self) -> bool:
-        return self.config.get("api_format") == "responses"
+        return self.route["protocol"] == ModelProtocol.OPENAI_RESPONSES.value
 
     def _generate_response_with_responses_api(
         self,
@@ -878,7 +951,7 @@ class OpenAICompatibleProvider(BaseProvider):
         request_kwargs["model"] = model
         policy = RetryPolicy.from_config(self.config)
         response = run_with_retries(
-            lambda: self._request_json("/responses", request_kwargs),
+            lambda: self._request_json(self.route["endpoint"], request_kwargs),
             policy,
             label="OpenAI responses request",
             logger=logger,
@@ -897,6 +970,7 @@ class OpenAICompatibleProvider(BaseProvider):
         top_p: Optional[float],
         extra_kwargs: Dict[str, Any],
         reasoning_effort: Optional[str] = None,
+        thinking_enabled: Optional[bool] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -912,8 +986,29 @@ class OpenAICompatibleProvider(BaseProvider):
             body["temperature"] = temperature
         if top_p is not None:
             body["top_p"] = top_p
-        if reasoning_effort:
+        controls = (self.route.get("reasoning_profile") or {}).get("controls") or {}
+        if reasoning_effort and controls.get("effort_field") == "reasoning_effort":
             body["reasoning_effort"] = reasoning_effort
+        thinking_style = controls.get("thinking_style")
+        if thinking_enabled is not None and thinking_style == "zai":
+            body["thinking"] = {
+                "type": "enabled" if thinking_enabled else "disabled",
+                "clear_thinking": not thinking_enabled,
+            }
+        elif thinking_enabled is not None and thinking_style == "kimi_keep":
+            body["thinking"] = {
+                "type": "enabled" if thinking_enabled else "disabled",
+                **({"keep": "all"} if thinking_enabled else {}),
+            }
+        elif thinking_enabled is not None and thinking_style in {"mimo", "type"}:
+            body["thinking"] = {
+                "type": "enabled" if thinking_enabled else "disabled",
+            }
+        elif thinking_enabled is not None and thinking_style == "qwen":
+            body["extra_body"] = {
+                "enable_thinking": thinking_enabled,
+                "chat_template_kwargs": {"enable_thinking": thinking_enabled},
+            }
         if tools:
             body["tools"] = tools
             body["tool_choice"] = tool_choice or "auto"
@@ -943,8 +1038,29 @@ class OpenAICompatibleProvider(BaseProvider):
             request_kwargs["temperature"] = temperature
         if top_p is not None:
             request_kwargs["top_p"] = top_p
-        if reasoning_effort:
-            request_kwargs["reasoning"] = {"effort": reasoning_effort}
+        profile = self.route.get("reasoning_profile") or {}
+        controls = profile.get("controls") or {}
+        if profile.get("carrier") == "responses_items" or reasoning_effort:
+            existing_reasoning = request_kwargs.get("reasoning")
+            request_kwargs["reasoning"] = {
+                **(
+                    existing_reasoning
+                    if isinstance(existing_reasoning, dict)
+                    else {}
+                ),
+                **({"effort": reasoning_effort} if reasoning_effort else {}),
+                **({"context": controls["context"]} if controls.get("context") else {}),
+            }
+        if controls.get("include_encrypted_content"):
+            existing_include = request_kwargs.get("include")
+            request_kwargs["include"] = list(dict.fromkeys([
+                *(
+                    existing_include
+                    if isinstance(existing_include, list)
+                    else []
+                ),
+                "reasoning.encrypted_content",
+            ]))
         if tools:
             request_kwargs["tools"] = [self._openai_tool_to_responses_tool(tool) for tool in tools]
             if tool_choice and tool_choice != "auto":
@@ -960,14 +1076,20 @@ class OpenAICompatibleProvider(BaseProvider):
     def _should_retry_responses_without_temperature(self, request_kwargs: Dict[str, Any]) -> bool:
         return bool(self.config.get("base_url") and "temperature" in request_kwargs)
 
-    def _supports_enable_thinking(self, model: str) -> bool:
-        lowered = model.lower()
-        return any(marker in lowered for marker in ("qwen", "qwq"))
-
     def _convert_messages_to_responses_input(self, messages: List[Message]) -> Tuple[Optional[str], List[Dict[str, Any]]]:
         response_input: List[Dict[str, Any]] = []
 
         for msg in messages:
+            native_items = [
+                item
+                for item in (msg.get("model_state_items") or [])
+                if item.get("route_id") == self.route["route_id"]
+                and isinstance(item.get("native_payload"), dict)
+            ]
+            response_input.extend(
+                deepcopy(item["native_payload"])
+                for item in sorted(native_items, key=lambda item: int(item.get("index", 0)))
+            )
             raw_role = msg["role"]
             role = raw_role.value if hasattr(raw_role, "value") else str(raw_role)
             content = msg.get("content") or ""
@@ -1081,9 +1203,35 @@ class OpenAICompatibleProvider(BaseProvider):
                     text_parts.append(text)
         return "".join(text_parts)
 
-    def _convert_messages(self, messages: List[Message]) -> List[Dict[str, Any]]:
+    def _responses_item_display_text(self, item: Dict[str, Any]) -> str:
+        if item.get("type") == "message":
+            return "".join(
+                str(part.get("text") or "")
+                for part in (item.get("content") or [])
+                if isinstance(part, dict) and part.get("type") == "output_text"
+            )
+        if item.get("type") == "reasoning":
+            return "".join(
+                str(part.get("text") or "")
+                for part in (item.get("summary") or [])
+                if isinstance(part, dict)
+            )
+        return ""
+
+    def _convert_messages(
+        self,
+        messages: List[Message],
+        *,
+        history_policy: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         converted: List[Dict[str, Any]] = []
         for msg in messages:
+            profile = self.route.get("reasoning_profile") or {}
+            effective_history_policy = (
+                history_policy
+                if history_policy is not None
+                else profile.get("history_policy")
+            )
             item = {
                 "role": msg["role"].value if hasattr(msg["role"], "value") else str(msg["role"]),
                 "content": msg["content"],
@@ -1091,6 +1239,22 @@ class OpenAICompatibleProvider(BaseProvider):
                 "tool_calls": msg.get("tool_calls"),
                 "tool_call_id": msg.get("tool_call_id"),
             }
+            if (
+                item["role"] == "assistant"
+                and msg.get("reasoning")
+                and (
+                    not msg.get("model_route_id")
+                    or msg.get("model_route_id") == self.route["route_id"]
+                )
+                and (
+                    effective_history_policy == "all_assistant_messages"
+                    or (
+                        effective_history_policy == "tool_assistant_messages"
+                        and msg.get("tool_calls")
+                    )
+                )
+            ):
+                item["reasoning_content"] = msg["reasoning"]
             converted.append(self._clean_payload(item))
         return converted
 

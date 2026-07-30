@@ -16,12 +16,34 @@ from starlette.datastructures import Headers, UploadFile
 from backend.api.routes.conversations import read_import_file, upload_import_file
 from backend.core.chat.chat_manager import ChatManager
 from backend.core.chat.canonical_reader import messages_by_node
-from backend.core.config.types import Message, Role
+from backend.core.config.types import Message, ModelRoute, Role
 from backend.core.model.providers.anthropic_provider import AnthropicProvider
 from backend.core.model.providers.gemini_provider import GeminiProvider
 from backend.core.model.providers.openai_compatible import OpenAICompatibleProvider
 from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
+
+
+def _route(protocol: str) -> ModelRoute:
+    endpoints = {
+        "openai_responses": "/responses",
+        "anthropic_messages": "/v1/messages",
+        "gemini_generate_content": "/models/{model}:generateContent",
+    }
+    return ModelRoute(
+        route_id=f"test:model:{protocol}",
+        provider_id="test",
+        model_id="model",
+        protocol=protocol,
+        endpoint=endpoints[protocol],
+        reasoning_profile={
+            "name": "test",
+            "carrier": "responses_items" if protocol == "openai_responses" else "none",
+            "history_policy": "provider_state" if protocol == "openai_responses" else "drop",
+            "strict": protocol == "openai_responses",
+            "controls": {},
+        },
+    )
 
 
 class _DummyModelManager:
@@ -157,21 +179,21 @@ def test_multimodal_image_blocks_convert_for_provider_formats():
         "timestamp": int(time()),
     })]
 
-    openai = OpenAICompatibleProvider({"api_key": "test", "api_format": "responses"})
+    openai = OpenAICompatibleProvider({"api_key": "test"}, _route("openai_responses"))
     _, responses_input = openai._convert_messages_to_responses_input(messages)
     assert responses_input[0]["content"] == [
         {"type": "input_text", "text": "看看这张图"},
         {"type": "input_image", "image_url": image_url},
     ]
 
-    anthropic = AnthropicProvider({"api_key": "test"})
+    anthropic = AnthropicProvider({"api_key": "test"}, _route("anthropic_messages"))
     _, anthropic_messages = anthropic._convert_messages(messages)
     assert anthropic_messages[0]["content"] == [
         {"type": "text", "text": "看看这张图"},
         {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGVsbG8="}},
     ]
 
-    gemini = GeminiProvider({"api_key": "test"})
+    gemini = GeminiProvider({"api_key": "test"}, _route("gemini_generate_content"))
     _, gemini_messages = gemini._convert_messages(messages)
     assert gemini_messages[0]["parts"] == [
         {"text": "看看这张图"},

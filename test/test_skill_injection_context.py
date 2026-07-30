@@ -11,6 +11,7 @@ from backend.core.chat.canonical_reader import messages_by_node
 from backend.core.config.types import StreamChunk, StreamController, StreamStatus
 from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
+from model_route_support import fake_model_route
 
 
 class CapturingProvider:
@@ -63,11 +64,14 @@ class CapturingModelManager:
         self.model_list = {"ustc": ["deepseek-v4-pro"]}
         self.provider = CapturingProvider()
 
-    def get_model(self, provider, is_async=False):
+    def get_route(self, provider, model):
+        return fake_model_route(provider, model)
+
+    def get_model(self, provider, model, is_async=False):
         return self.provider
 
     def get_model_metadata(self, provider_id, model_name):
-        return {}
+        return self.get_route(provider_id, model_name)["capabilities"]
 
 
 async def drain(stream):

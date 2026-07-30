@@ -1,208 +1,289 @@
-"""模型名 -> 元数据 的解析层。
+"""模型级协议路由与能力目录。
 
-按 (模型名, api_format) 解析出统一的应用层能力声明：上下文长度、图像支持、
-推理强度档位、思考模式开关。前端据此显示/隐藏控件，provider 据此把统一的
-规范参数（reasoning_effort / thinking_enabled）翻译成各自 API 的原生形状。
-
-随 Server 发布的 model_metadata.toml 会在首次启动时复制到 Server Home。
-运行时优先读取 Home 中的副本，文件修改后无需重新安装 Server 即可生效。
-规则是有序的：第一条匹配的规则生效，再与兜底值合并。用户还可在
-config.json 的顶层 model_metadata 字段下提供模型级覆盖。
+运行时只读取 Server Home 中的 ``model_metadata.toml``。随程序发布的文件
+仅用于首次初始化；未知模型统一退回 Chat Completions，不启用 reasoning。
 """
 from functools import lru_cache
+import hashlib
+import json
 from pathlib import Path
 import re
 import shutil
-from typing import List, Optional, Dict, Any
+from typing import Any, Dict, List, Optional
 from typing_extensions import TypedDict
 
+from backend.core.config.types import ModelProtocol, ModelRoute, ReasoningProfile
 from backend.core.persistence.home import resolve_chattree_home
 
 try:
     import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback
+except ModuleNotFoundError:  # pragma: no cover
     import tomli as tomllib  # type: ignore[no-redef]
 
 
+class ModelRouteError(ValueError):
+    """模型元数据包含不可用的协议路由。"""
+
+
 class ReasoningEffortSpec(TypedDict, total=False):
-    """推理强度声明。levels 既用于 UI 展示，也是后端校验的合法档位集合。"""
-    levels: List[str]            # 例如 ["low", "medium", "high"]
-    default: Optional[str]       # 缺省档位；None = 不主动发送
+    levels: List[str]
+    default: Optional[str]
 
 
 class ThinkingSpec(TypedDict, total=False):
-    """思考模式开关声明。"""
-    toggleable: bool             # 是否向用户暴露开关
-    default_enabled: bool        # 缺省是否开启
+    toggleable: bool
+    default_enabled: bool
 
 
 class ModelMetadata(TypedDict, total=False):
-    """单个模型的统一能力声明。
-
-    reasoning_effort / thinking 为 None（或缺失）表示该模型不暴露对应控件。
-    """
     model_id: str
+    route_id: str
+    protocol: str
+    endpoint: str
     context_length: Optional[int]
     supports_vision: bool
+    supports_tools: bool
     reasoning_effort: Optional[ReasoningEffortSpec]
     thinking: Optional[ThinkingSpec]
+    reasoning_profile: ReasoningProfile
 
 
-# 兜底元数据：未匹配任何规则的模型走这里——普通聊天，无推理控件。
 _FALLBACK: ModelMetadata = {
     "context_length": None,
     "supports_vision": False,
+    "supports_tools": True,
     "reasoning_effort": None,
     "thinking": None,
 }
 
-
+_DEFAULT_ENDPOINTS = {
+    ModelProtocol.OPENAI_CHAT_COMPLETIONS.value: "/chat/completions",
+    ModelProtocol.OPENAI_RESPONSES.value: "/responses",
+    ModelProtocol.ANTHROPIC_MESSAGES.value: "/v1/messages",
+    ModelProtocol.GEMINI_GENERATE_CONTENT.value: "/models/{model}:generateContent",
+}
 _BUILTIN_METADATA_FILE = Path(__file__).with_name("model_metadata.toml")
 
 
 def initialize_model_metadata(home: str | Path | None = None) -> Path:
-    """确保 Server Home 拥有可独立更新的模型元数据文件。"""
+    """首次启动时创建可独立更新的 Server Home 模型元数据。"""
     metadata_file = resolve_chattree_home(home) / _BUILTIN_METADATA_FILE.name
-    if metadata_file.is_file():
-        return metadata_file
-    metadata_file.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(_BUILTIN_METADATA_FILE, metadata_file)
+    if not metadata_file.is_file():
+        metadata_file.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(_BUILTIN_METADATA_FILE, metadata_file)
     return metadata_file
 
 
 def _as_string_list(value: Any) -> List[str]:
-    if isinstance(value, list):
-        return [str(v) for v in value]
-    return []
+    return [str(item) for item in value] if isinstance(value, list) else []
 
 
-def _matches(model_name: str, api_format: str, name_patterns: List[str],
-             api_formats: List[str]) -> bool:
-    """命中条件：模型名匹配；未给模型名规则时可只按 api_format 匹配。"""
-    candidate_names = {model_name, model_name.rsplit("/", 1)[-1]}
-    name_match = bool(name_patterns) and any(
-        re.search(p, candidate, flags=re.IGNORECASE)
-        for candidate in candidate_names
-        for p in name_patterns
+def _matches(model_name: str, name_patterns: List[str]) -> bool:
+    candidates = {model_name, model_name.rsplit("/", 1)[-1]}
+    return bool(name_patterns) and any(
+        re.search(pattern, candidate, flags=re.IGNORECASE)
+        for candidate in candidates
+        for pattern in name_patterns
     )
-    lowered_format = api_format.lower()
-    format_match = bool(api_formats) and lowered_format in {
-        f.lower() for f in api_formats
-    }
-    return name_match or (not name_patterns and format_match)
 
 
 @lru_cache(maxsize=8)
-def _load_rules(content: bytes) -> List[Dict[str, Any]]:
-    """解析 TOML 规则表，并按文件内容缓存。"""
+def _load_catalog(content: bytes) -> Dict[str, Any]:
     data = tomllib.loads(content.decode("utf-8"))
-    rules = data.get("rules", [])
-    return rules if isinstance(rules, list) else []
+    profiles = data.get("reasoning_profiles")
+    rules = data.get("rules")
+    return {
+        "reasoning_profiles": profiles if isinstance(profiles, dict) else {},
+        "rules": rules if isinstance(rules, list) else [],
+    }
 
 
-def _metadata_from_rule(rule: Dict[str, Any]) -> ModelMetadata:
+def _catalog() -> Dict[str, Any]:
+    return _load_catalog(initialize_model_metadata().read_bytes())
+
+
+def _reasoning_profile(
+    value: Any,
+    profiles: Dict[str, Any],
+) -> ReasoningProfile:
+    if isinstance(value, str):
+        raw = profiles.get(value) or {}
+        return {
+            "name": value,
+            "carrier": str(raw.get("carrier") or "none"),
+            "history_policy": str(raw.get("history_policy") or "drop"),
+            "strict": bool(raw.get("strict", False)),
+            "controls": dict(raw.get("controls") or {}),
+        }
+    if isinstance(value, dict):
+        return {
+            "name": str(value.get("name") or "custom"),
+            "carrier": str(value.get("carrier") or "none"),
+            "history_policy": str(value.get("history_policy") or "drop"),
+            "strict": bool(value.get("strict", False)),
+            "controls": dict(value.get("controls") or {}),
+        }
+    return {
+        "name": "none",
+        "carrier": "none",
+        "history_policy": "drop",
+        "strict": False,
+        "controls": {},
+    }
+
+
+def _metadata_from_entry(entry: Dict[str, Any], profiles: Dict[str, Any]) -> ModelMetadata:
     meta = dict(_FALLBACK)
-    for key in ("context_length", "supports_vision"):
-        if key in rule:
-            meta[key] = rule[key]
+    for key in ("context_length", "supports_vision", "supports_tools"):
+        if key in entry:
+            meta[key] = entry[key]
 
-    reasoning = rule.get("reasoning_effort")
+    reasoning = entry.get("reasoning_effort")
     if isinstance(reasoning, dict):
-        spec: ReasoningEffortSpec = {
+        meta["reasoning_effort"] = {
             "levels": _as_string_list(reasoning.get("levels")),
             "default": reasoning.get("default"),
         }
-        meta["reasoning_effort"] = spec
-    elif "reasoning_effort" in rule:
+    elif "reasoning_effort" in entry:
         meta["reasoning_effort"] = None
 
-    thinking = rule.get("thinking")
+    thinking = entry.get("thinking")
     if isinstance(thinking, dict):
         meta["thinking"] = {
             "toggleable": bool(thinking.get("toggleable", False)),
             "default_enabled": bool(thinking.get("default_enabled", False)),
         }
-    elif "thinking" in rule:
+    elif "thinking" in entry:
         meta["thinking"] = None
 
+    meta["reasoning_profile"] = _reasoning_profile(
+        entry.get("reasoning_profile"),
+        profiles,
+    )
     return meta  # type: ignore[return-value]
 
 
-def _file_metadata(model_name: str, api_format: str) -> ModelMetadata:
-    """按 Home 规则表解析元数据；Home 尚未初始化时读取内置文件。"""
-    metadata_file = resolve_chattree_home() / _BUILTIN_METADATA_FILE.name
-    if not metadata_file.is_file():
-        metadata_file = _BUILTIN_METADATA_FILE
-    for rule in _load_rules(metadata_file.read_bytes()):
-        name_patterns = _as_string_list(rule.get("name_patterns"))
-        api_formats = _as_string_list(rule.get("api_formats"))
-        if _matches(model_name, api_format, name_patterns, api_formats):
-            return _metadata_from_rule(rule)
-    return dict(_FALLBACK)  # type: ignore[return-value]
-
-
-def _apply_override(meta: ModelMetadata, override: Dict[str, Any]) -> ModelMetadata:
-    """把用户覆盖浅合并到解析结果之上（仅覆盖显式提供的键）。"""
-    merged = dict(meta)
-    for key in ("context_length", "supports_vision", "reasoning_effort", "thinking"):
-        if key in override:
-            merged[key] = override[key]
-    return merged  # type: ignore[return-value]
-
-
-def resolve_metadata(
+def _metadata_entry(
     model_name: str,
-    api_format: str,
-    user_overrides: Optional[Dict[str, Dict[str, Any]]] = None,
-) -> ModelMetadata:
-    """解析单个模型的元数据。
+    catalog: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    for rule in catalog["rules"]:
+        if isinstance(rule, dict) and _matches(
+            model_name,
+            _as_string_list(rule.get("name_patterns")),
+        ):
+            return dict(rule)
+    return None
 
-    Args:
-        model_name: 模型名（如 "claude-opus-4-8"、"gpt-5"、"gemini-2.5-pro"）。
-        api_format: 提供商的 api_format（chat_completions/responses/anthropic/gemini）。
-        user_overrides: config.json 的 model_metadata 字段，model_name -> 部分覆盖。
 
-    Returns:
-        合并后的 ModelMetadata，始终带上 model_id。
-    """
-    meta = _file_metadata(model_name, api_format)
-    if user_overrides and model_name in user_overrides:
-        meta = _apply_override(meta, user_overrides[model_name])
-    meta["model_id"] = model_name
-    return meta
+def _route_from_entry(
+    provider_id: str,
+    model_name: str,
+    entry: Dict[str, Any],
+    profiles: Dict[str, Any],
+) -> ModelRoute:
+    protocol = str(entry.get("protocol") or "")
+    if protocol not in _DEFAULT_ENDPOINTS:
+        raise ModelRouteError(
+            f"模型 {provider_id}/{model_name} 的协议无效: {protocol or '未声明'}"
+        )
+    endpoint = str(entry.get("endpoint") or _DEFAULT_ENDPOINTS[protocol])
+    capabilities = entry.get("capabilities")
+    metadata_entry = {
+        **(capabilities if isinstance(capabilities, dict) else {}),
+        **entry,
+    }
+    metadata = _metadata_from_entry(metadata_entry, profiles)
+    capabilities = {
+        "context_length": metadata.get("context_length"),
+        "supports_vision": bool(metadata.get("supports_vision", False)),
+        "supports_tools": bool(metadata.get("supports_tools", True)),
+        "reasoning_effort": metadata.get("reasoning_effort"),
+        "thinking": metadata.get("thinking"),
+    }
+    reasoning_profile = metadata.get("reasoning_profile") or _reasoning_profile(None, {})
+    fingerprint = hashlib.sha256(json.dumps(
+        {
+            "protocol": protocol,
+            "endpoint": endpoint,
+            "capabilities": capabilities,
+            "reasoning_profile": reasoning_profile,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()[:12]
+    return ModelRoute(
+        route_id=f"{provider_id}:{model_name}:{fingerprint}",
+        provider_id=provider_id,
+        model_id=model_name,
+        protocol=protocol,
+        endpoint=endpoint,
+        capabilities=capabilities,
+        reasoning_profile=reasoning_profile,
+    )
+
+
+def resolve_route(
+    provider_id: str,
+    model_name: str,
+) -> ModelRoute:
+    """从 Server Home 元数据解析路由，未知模型退回普通 Chat 对话。"""
+    catalog = _catalog()
+    entry = _metadata_entry(model_name, catalog)
+    if entry is None or not entry.get("protocol"):
+        entry = {
+            "protocol": ModelProtocol.OPENAI_CHAT_COMPLETIONS.value,
+            "endpoint": _DEFAULT_ENDPOINTS[
+                ModelProtocol.OPENAI_CHAT_COMPLETIONS.value
+            ],
+        }
+    return _route_from_entry(
+        provider_id,
+        model_name,
+        entry,
+        catalog["reasoning_profiles"],
+    )
+
+
+def resolve_metadata(route: ModelRoute) -> ModelMetadata:
+    capabilities = route.get("capabilities") or {}
+    return ModelMetadata(
+        model_id=route["model_id"],
+        route_id=route["route_id"],
+        protocol=route["protocol"],
+        endpoint=route["endpoint"],
+        context_length=capabilities.get("context_length"),
+        supports_vision=bool(capabilities.get("supports_vision", False)),
+        supports_tools=bool(capabilities.get("supports_tools", True)),
+        reasoning_effort=capabilities.get("reasoning_effort"),
+        thinking=capabilities.get("thinking"),
+        reasoning_profile=route.get("reasoning_profile") or _reasoning_profile(None, {}),
+    )
 
 
 def resolve_provider_metadata(
-    models: List[str],
-    api_format: str,
-    user_overrides: Optional[Dict[str, Dict[str, Any]]] = None,
+    routes: List[ModelRoute],
 ) -> Dict[str, ModelMetadata]:
-    """批量解析一个提供商下所有模型的元数据，返回 model_name -> 元数据。"""
-    return {
-        m: resolve_metadata(m, api_format, user_overrides)
-        for m in models
-    }
+    return {route["model_id"]: resolve_metadata(route) for route in routes}
 
 
 def normalize_effort(
     effort: Optional[str],
     meta: ModelMetadata,
 ) -> Optional[str]:
-    """校验请求的推理强度：不被模型支持则丢弃（返回 None）。"""
     if not effort:
         return None
     spec = meta.get("reasoning_effort")
     if not spec:
         return None
-    levels = spec.get("levels") or []
-    return effort if effort in levels else None
+    return effort if effort in (spec.get("levels") or []) else None
 
 
 def normalize_thinking(
     thinking_enabled: Optional[bool],
     meta: ModelMetadata,
 ) -> Optional[bool]:
-    """校验思考开关：模型不支持切换则丢弃（返回 None）。"""
     if thinking_enabled is None:
         return None
     spec = meta.get("thinking")

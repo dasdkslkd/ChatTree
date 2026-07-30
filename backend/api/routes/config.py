@@ -39,7 +39,6 @@ class ConfigUpdateRequest(BaseModel):
 class AddProviderRequest(BaseModel):
     id: str
     name: str
-    api_format: str = "chat_completions"
     base_url: str = ""
     api_key: str = ""
     auth: Optional[Dict[str, Any]] = None
@@ -364,7 +363,6 @@ async def add_provider(
 
         new_config = {
             'name': request.name,
-            'api_format': request.api_format,
             'base_url': request.base_url,
             'api_key': request.api_key,
         }

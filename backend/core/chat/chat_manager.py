@@ -18,7 +18,7 @@ from .canonical_reader import (
     has_blocking_plan_participation_result,
     latest_assistant_answer,
     messages_by_node as _canonical_messages_by_node,
-    process_content_for_node,
+    model_state_items_by_node,
     prune_summaries_by_node,
     tool_context_by_node,
     tool_history_by_node,
@@ -59,10 +59,20 @@ from .tool_result_format import (
     persist_model_visible_tool_result,
     parse_command_tool_result,
 )
-from ..config.types import Message, Role, StreamChunk, StreamStatus, StreamController, GenerationInfo, SCHEMA_VERSION
+from ..config.types import (
+    GenerationInfo,
+    Message,
+    ModelRoute,
+    Role,
+    SCHEMA_VERSION,
+    StreamChunk,
+    StreamController,
+    StreamStatus,
+)
 from ..storage.chat_storage import ChatStorage
 from ..storage.prompt_storage import PromptStorage
 from ..model.model_manager import ModelManager
+from ..model.model_metadata import ModelRouteError
 from ..model.usage import add_usage, estimated_usage, usage_total
 from ..perf import get_profiler
 from ..utils.logger import setup_logger
@@ -642,10 +652,14 @@ class ChatManager:
         skill_names: List[str],
         *,
         task_turn_context: Optional[TaskTurnContext] = None,
+        model_route: Optional[ModelRoute] = None,
     ) -> List[Message]:
         if task_turn_context is None:
             task_turn_context = self._start_task_turn_context(conversation)
-        base_messages = self._prepare_messages_for_api_with_conversation(conversation)
+        base_messages = self._prepare_messages_for_api_with_conversation(
+            conversation,
+            model_route=model_route,
+        )
         custom_prompt, custom_mode = selected_system_prompt(conversation)
         latest_user_content = self._latest_user_content(conversation)
         built_messages = PromptBuilder(self._scoped_capability_registry(conversation)).build(
@@ -679,11 +693,15 @@ class ChatManager:
         content: str,
         provider: Any,
         target_model: str,
+        model_route: ModelRoute,
         eff_effort: Optional[str],
         eff_thinking: Optional[bool],
         run_id: Optional[str],
     ) -> AsyncIterator[StreamChunk]:
-        base_messages = self._prepare_messages_for_api_with_conversation(conversation)
+        base_messages = self._prepare_messages_for_api_with_conversation(
+            conversation,
+            model_route=model_route,
+        )
         custom_prompt, custom_mode = selected_system_prompt(conversation)
         messages = [
             Message(message)
@@ -856,10 +874,26 @@ class ChatManager:
             except ReferContextError as exc:
                 return None, str(exc)
 
-        provider = self.model_manager.get_model(target_provider, True)
+        try:
+            model_route = self.model_manager.get_route(target_provider, target_model)
+            provider = self.model_manager.get_model(target_provider, target_model, True)
+        except ModelRouteError as exc:
+            return None, str(exc)
         if not provider:
             logger.error(f"无法初始化提供商 {target_provider} (is_async=True)")
             return None, f"无法初始化提供商 {target_provider}"
+        if append_to_existing_node:
+            existing_route_ids = {
+                str(message.get("model_route_id") or "")
+                for message in _canonical_messages_by_node(
+                    self.chat_repository,
+                    conversation_id,
+                    [requested_parent_node_id],
+                ).get(requested_parent_node_id, [])
+                if message.get("model_route_id")
+            }
+            if existing_route_ids and existing_route_ids != {model_route["route_id"]}:
+                return None, "continuation_invalid: 追加生成必须使用产生当前模型状态的原路由"
 
         # 解析有效推理参数：请求传入 > 对话 metadata > 模型默认；再按模型元数据校验。
         # metadata 不支持的档位/开关会被规范化为 None（不发送），保护配错的第三方模型。
@@ -924,6 +958,7 @@ class ChatManager:
             "model_content": model_content,
             "refer_bundle": refer_bundle,
             "provider": provider,
+            "model_route": model_route,
             "meta": meta,
             "eff_effort": eff_effort,
             "eff_thinking": eff_thinking,
@@ -1053,13 +1088,11 @@ class ChatManager:
         generation_status: str,
         error_message: Optional[str],
         total_content: str,
-        total_reasoning: str,
         final_content: str,
         persisted_final_content: Optional[str],
-        process_content_parts: list[str],
-        process_parts: list[Dict[str, Any]],
-        all_tool_calls: List[Dict[str, Any]],
         all_tool_messages: List[Message],
+        completed_rounds: List[Dict[str, Any]],
+        model_route: ModelRoute,
         all_approval_events: List[Dict[str, Any]],
         append_to_existing_node: bool,
     ) -> None:
@@ -1082,7 +1115,7 @@ class ChatManager:
             "tokens_used": tokens_used,
             "usage_info": usage_info
         }
-        has_tool_rounds = bool(all_tool_calls or all_tool_messages)
+        has_tool_rounds = any(round_data.get("tool_calls") for round_data in completed_rounds)
         # 助手消息（包含生成信息）
         assistant_msg = Message({
             "id": assistant_message_id,
@@ -1090,42 +1123,45 @@ class ChatManager:
             "content": persisted_final_content if persisted_final_content is not None else (final_content if has_tool_rounds else total_content),
             "name": None,
             "tool_call_id": None,
-            "process_content": "".join(process_content_parts) or None,
-            "process_parts": process_parts or None,
-            "reasoning": total_reasoning or None,
             "timestamp": completion_timestamp,
             "generation_info": generation_info
         })
 
         assistant_msg_for_transcript = assistant_msg
-        persisted_tool_calls = all_tool_calls
+        persisted_rounds = deepcopy(completed_rounds)
+        continued_message_id: Optional[str] = None
         if append_to_existing_node:
+            existing_messages = _canonical_messages_by_node(
+                self.chat_repository,
+                conversation_id,
+                [new_node["id"]],
+            ).get(new_node["id"], [])
+            existing_route_ids = {
+                str(message.get("model_route_id") or "")
+                for message in existing_messages
+                if message.get("model_route_id")
+            }
+            if existing_route_ids:
+                if existing_route_ids != {model_route["route_id"]}:
+                    raise RuntimeError(
+                        "continuation_invalid: 追加生成路由与已封存模型状态不一致"
+                    )
+                next_round = max(
+                    int(message.get("model_round_index") or 0)
+                    for message in existing_messages
+                    if message.get("model_round_index") is not None
+                ) + 1
+                for round_data in persisted_rounds:
+                    round_data["round_index"] = (
+                        int(round_data.get("round_index") or 0) + next_round
+                    )
             existing_answer = latest_assistant_answer(self.chat_repository, conversation_id, new_node["id"])
-            if existing_answer is not None:
-                assistant_msg_for_transcript = Message(deepcopy(assistant_msg))
-                assistant_msg_for_transcript["id"] = str(existing_answer.get("id") or assistant_message_id)
-                assistant_msg_for_transcript["content"] = (
-                    str(existing_answer.get("content") or "")
-                    + str(assistant_msg.get("content") or "")
-                )
-                if assistant_msg.get("reasoning"):
-                    assistant_msg_for_transcript["reasoning"] = (
-                        process_content_for_node(self.chat_repository,
-                            conversation_id,
-                            new_node["id"],
-                            "assistant_process_reasoning",
-                        )
-                        + str(assistant_msg.get("reasoning") or "")
-                    )
-                if assistant_msg.get("process_content"):
-                    assistant_msg_for_transcript["process_content"] = (
-                        process_content_for_node(self.chat_repository,
-                            conversation_id,
-                            new_node["id"],
-                            "assistant_process_content",
-                        )
-                        + str(assistant_msg.get("process_content") or "")
-                    )
+            if (
+                existing_answer is not None
+                and persisted_rounds
+                and assistant_msg.get("content")
+            ):
+                continued_message_id = str(existing_answer.get("id") or "")
         async with self._lock_for(conversation_id):
             latest = self.get_conversation(conversation_id)
             if latest is not None and new_node["id"] in latest.nodes:
@@ -1175,10 +1211,16 @@ class ChatManager:
                     model_id=target_model,
                     run_id=run_id,
                     tool_messages=persisted_tool_messages,
-                    tool_calls=persisted_tool_calls,
+                    rounds=persisted_rounds,
+                    model_route_id=model_route["route_id"],
                     approval_events=all_approval_events,
                     plan_participation_only=has_blocking_plan_participation_result(persisted_tool_messages),
                 )
+                if continued_message_id:
+                    self.chat_repository.mark_assistant_answer_continued(
+                        conversation_id,
+                        continued_message_id,
+                    )
                 async with self._lock_for(conversation_id):
                     latest_with_messages = self.get_conversation(conversation_id)
                     if latest_with_messages is not None and new_node["id"] in latest_with_messages.nodes:
@@ -1244,6 +1286,7 @@ class ChatManager:
         model_content = preload["model_content"]
         refer_bundle = preload["refer_bundle"]
         provider = preload["provider"]
+        model_route = preload["model_route"]
         meta = preload["meta"]
         eff_effort = preload["eff_effort"]
         eff_thinking = preload["eff_thinking"]
@@ -1256,6 +1299,7 @@ class ChatManager:
                 content=model_content,
                 provider=provider,
                 target_model=target_model,
+                model_route=model_route,
                 eff_effort=eff_effort,
                 eff_thinking=eff_thinking,
                 run_id=run_id,
@@ -1377,6 +1421,7 @@ class ChatManager:
                 prompt_conversation,
                 skill_names,
                 task_turn_context=task_turn_context,
+                model_route=model_route,
             )
         self._insert_context_before_history(messages, refer_context_messages)
         if continuation_messages:
@@ -1397,17 +1442,7 @@ class ChatManager:
             permission_mode=new_node.get("tool_permission_mode") or "default",
         )
         available_tools = self._get_openai_tools_for_workspace(workspace_context, exposure_context)
-        tools = self._filter_tools_for_runtime(
-            available_tools,
-            multi_agent_mode=multi_agent_mode,
-            permission_mode=new_node.get("tool_permission_mode") or "default",
-            task_context_mode=(
-                new_node.get("task_context_mode") or TaskContextMode.ATTACHED.value
-            ),
-        )
-        tools = tools or None
-        if slash_result.tool_policy == SlashToolPolicy.DISABLED:
-            tools = None
+        tools = None
         max_tool_rounds = int(cfg.data.get("tools", {}).get("max_rounds", 5)) if isinstance(cfg.data, dict) else 5
         tool_run_context: Dict[str, Any] = {
             "run_id": run_id,
@@ -1428,25 +1463,22 @@ class ChatManager:
             tool_run_context["persistence"] = chat_repository.persistence
 
         total_content = ""
-        total_reasoning = ""
         tokens_used = 0
         usage_info = None
         start_time = time()  # 记录开始时间
         generation_status = "completed"  # 默认状态
         error_message = None
         final_content = ""
-        final_reasoning = ""
         persisted_final_content: Optional[str] = None
-        process_content_parts: list[str] = []
-        process_parts: list[Dict[str, Any]] = []
         process_order = 0
         pending_terminal_chunks: list[StreamChunk] = []
 
         try:
-            all_tool_calls: List[Dict[str, Any]] = []
             all_tool_messages: List[Message] = []
+            completed_rounds: List[Dict[str, Any]] = []
             all_approval_events: List[Dict[str, Any]] = []
             tool_round = 0
+            model_round_index = 0
             plan_guard_nudge_count = 0
             max_plan_guard_nudges = 3
 
@@ -1464,12 +1496,20 @@ class ChatManager:
                         tokens_used=tokens_used,
                     ))
                     break
+                if slash_result.tool_policy != SlashToolPolicy.DISABLED:
+                    tools = self._filter_tools_for_runtime(
+                        available_tools,
+                        multi_agent_mode=multi_agent_mode,
+                        permission_mode=new_node.get("tool_permission_mode") or "default",
+                        task_turn_context=task_turn_context,
+                    ) or None
 
                 round_content = ""
                 round_reasoning = ""
                 round_status = "completed"
                 complete_chunk = None
                 round_tool_calls: List[Dict[str, Any]] = []
+                round_output_items: List[Dict[str, Any]] = []
                 defer_round_content = await self._needs_plan_mode_nudge(
                     conversation_id,
                     new_node.get("tool_permission_mode"),
@@ -1528,6 +1568,16 @@ class ChatManager:
                         thinking_enabled=eff_thinking,
                     ): # type: ignore
                         provider_chunk_count += 1
+                        if chunk.get("output_item"):
+                            output_item = deepcopy(chunk["output_item"])
+                            output_item["round_index"] = model_round_index
+                            output_item["index"] = len(round_output_items)
+                            if output_item.get("route_id") != model_route["route_id"]:
+                                raise RuntimeError(
+                                    "continuation_invalid: 模型输出项路由与当前运行不一致"
+                                )
+                            round_output_items.append(output_item)
+                            continue
                         provider_tool_event = str(chunk.get("event_type") or "") in {
                             "tool_call_start",
                             "tool_call",
@@ -1575,7 +1625,6 @@ class ChatManager:
                                     },
                                 })
                             provider_reasoning_chars += len(str(r))
-                            total_reasoning += r
                             round_reasoning += r
                         if data := chunk.get("content"):
                             if first_token_latency_ms is None:
@@ -1682,10 +1731,34 @@ class ChatManager:
                     tokens_per_minute_est=round(provider_tpm, 3),
                     tool_call_chunks=provider_tool_call_chunks,
                 )
+                if task_turn_context.current_task is None:
+                    for call in round_tool_calls:
+                        if tool_call_function_name(call) not in TASK_BOUND_RUN_TOOL_NAMES:
+                            continue
+                        function = call.get("function")
+                        if not isinstance(function, dict):
+                            continue
+                        arguments = self._parse_tool_arguments(function.get("arguments"))
+                        if "step" in arguments:
+                            arguments.pop("step")
+                            function["arguments"] = json.dumps(
+                                arguments,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            )
+                round_record: Dict[str, Any] = {
+                    "round_index": model_round_index,
+                    "content": round_content,
+                    "reasoning": round_reasoning,
+                    "tool_calls": round_tool_calls,
+                    "tool_messages": [],
+                    "output_items": round_output_items,
+                }
+                completed_rounds.append(round_record)
+                model_round_index += 1
 
                 if round_status != "completed":
                     final_content = round_content
-                    final_reasoning = round_reasoning
                     if complete_chunk:
                         complete_chunk["conversation_id"] = conversation_id
                         complete_chunk["run_id"] = run_id
@@ -1700,6 +1773,13 @@ class ChatManager:
                     )
                     if needs_plan_nudge and tools and plan_guard_nudge_count < max_plan_guard_nudges:
                         plan_guard_nudge_count += 1
+                        messages.append({
+                            "role": "assistant",
+                            "content": round_content,
+                            "reasoning": round_reasoning or None,
+                            "model_route_id": model_route["route_id"],
+                            "model_state_items": round_output_items,
+                        })
                         messages.append({
                             "role": "system",
                             "content": self._plan_mode_nudge(attempt=plan_guard_nudge_count),
@@ -1720,25 +1800,22 @@ class ChatManager:
                             error=None,
                             tokens_used=0,
                         )
-                        final_reasoning = round_reasoning
                         if complete_chunk:
                             complete_chunk["conversation_id"] = conversation_id
                             complete_chunk["run_id"] = run_id
                             complete_chunk["target_node_id"] = new_node["id"]
                             pending_terminal_chunks.append(complete_chunk)
                         break
-                    if round_reasoning and (all_tool_calls or all_tool_messages):
-                        process_parts.append({
-                            "type": "reasoning",
-                            "content": round_reasoning,
-                            "order": process_order,
-                        })
+                    if round_reasoning and any(
+                        prior_round.get("tool_calls")
+                        for prior_round in completed_rounds[:-1]
+                    ):
+                        round_record["reasoning_order"] = process_order
                         process_order += 1
                     for deferred_chunk in deferred_content_chunks:
                         yield deferred_chunk
                     final_content = round_content
                     persisted_final_content = round_content
-                    final_reasoning = round_reasoning
                     if complete_chunk:
                         complete_chunk["conversation_id"] = conversation_id
                         complete_chunk["run_id"] = run_id
@@ -1752,7 +1829,6 @@ class ChatManager:
                         yield deferred_chunk
                     final_content = round_content
                     persisted_final_content = round_content
-                    final_reasoning = round_reasoning
                     if complete_chunk:
                         complete_chunk["conversation_id"] = conversation_id
                         complete_chunk["run_id"] = run_id
@@ -1786,37 +1862,37 @@ class ChatManager:
                         yield deferred_chunk
                 tool_round += 1
                 tool_round_id = f"{run_id or new_node['id']}:tool-round-{tool_round}"
-                assistant_tool_message = {
+                if (
+                    (model_route.get("reasoning_profile") or {}).get("strict")
+                    and (model_route.get("reasoning_profile") or {}).get("carrier")
+                    not in {"none", "chat_reasoning_content"}
+                    and getattr(provider, "route", None)
+                    and not round_output_items
+                ):
+                    raise RuntimeError("continuation_invalid: 适配器未封存工具续接状态")
+                messages.append({
                     "role": "assistant",
                     "content": round_content,
+                    "reasoning": round_reasoning or None,
                     "tool_calls": round_tool_calls,
+                    "model_route_id": model_route["route_id"],
+                    "model_state_items": round_output_items,
                     "tool_round": tool_round,
                     "tool_round_id": tool_round_id,
-                }
-                messages.append(assistant_tool_message)
-                if round_reasoning:
-                    process_parts.append({
-                        "type": "reasoning",
-                        "content": round_reasoning,
-                        "order": process_order,
-                    })
-                    process_order += 1
-                if round_text_is_intermediate and round_content:
-                    process_content_parts.append(round_content)
-                    process_parts.append({
-                        "type": "content",
-                        "content": round_content,
-                        "order": process_order,
-                    })
-                    process_order += 1
+                })
                 if round_text_is_intermediate:
                     for deferred_chunk in deferred_content_chunks:
                         deferred_chunk.setdefault("event_type", "process_content")
                         yield deferred_chunk
+                if round_reasoning:
+                    round_record["reasoning_order"] = process_order
+                    process_order += 1
+                if round_text_is_intermediate and round_content:
+                    round_record["content_order"] = process_order
+                    process_order += 1
                 for call in round_tool_calls:
                     call["call_index"] = process_order
                     process_order += 1
-                all_tool_calls.extend(round_tool_calls)
                 yield StreamChunk(
                     status=StreamStatus.CONTENT,
                     content=None,
@@ -1994,15 +2070,6 @@ class ChatManager:
                                         workspace_context,
                                         exposure_context,
                                     )
-                                    tools = self._filter_tools_for_runtime(
-                                        available_tools,
-                                        multi_agent_mode=multi_agent_mode,
-                                        permission_mode=next_permission_mode,
-                                        task_context_mode=(
-                                            new_node.get("task_context_mode")
-                                            or TaskContextMode.ATTACHED.value
-                                        ),
-                                    ) or None
                             break
                 finally:
                     if not event_get_task.done():
@@ -2022,10 +2089,10 @@ class ChatManager:
                 model_tool_messages = apply_round_tool_result_budget(tool_messages)
                 messages.extend(model_tool_messages)
                 all_tool_messages.extend(tool_messages)
+                round_record["tool_messages"] = tool_messages
                 if has_blocking_plan_participation_result(tool_messages):
                     final_content = ""
                     persisted_final_content = ""
-                    final_reasoning = total_reasoning
                     if complete_chunk:
                         complete_chunk["conversation_id"] = conversation_id
                         complete_chunk["run_id"] = run_id
@@ -2072,13 +2139,11 @@ class ChatManager:
                 generation_status=generation_status,
                 error_message=error_message,
                 total_content=total_content,
-                total_reasoning=total_reasoning,
                 final_content=final_content,
                 persisted_final_content=persisted_final_content,
-                process_content_parts=process_content_parts,
-                process_parts=process_parts,
-                all_tool_calls=all_tool_calls,
                 all_tool_messages=all_tool_messages,
+                completed_rounds=completed_rounds,
+                model_route=model_route,
                 all_approval_events=all_approval_events,
                 append_to_existing_node=append_to_existing_node,
             )
@@ -2191,58 +2256,6 @@ class ChatManager:
                     break
             else:
                 messages.append(Message(replacement))
-
-    def _merge_existing_node_assistant_continuation(
-        self,
-        existing_assistant: Optional[Message],
-        continuation_assistant: Message,
-    ) -> Message:
-        if not existing_assistant:
-            return Message(deepcopy(continuation_assistant))
-
-        merged = Message(deepcopy(continuation_assistant))
-        merged["id"] = existing_assistant.get("id") or continuation_assistant.get("id")
-        for key in ("content", "reasoning", "process_content"):
-            existing_text = str(existing_assistant.get(key) or "")
-            continuation_text = str(continuation_assistant.get(key) or "")
-            merged[key] = (existing_text + continuation_text) or ("" if key == "content" else None)
-        existing_process_parts = [
-            dict(part)
-            for part in (existing_assistant.get("process_parts") or [])
-            if isinstance(part, dict)
-        ]
-        continuation_process_parts = [
-            dict(part)
-            for part in (continuation_assistant.get("process_parts") or [])
-            if isinstance(part, dict)
-        ]
-        if existing_process_parts or continuation_process_parts:
-            ordered_process_parts: list[Dict[str, Any]] = []
-            current_process_parts: list[Dict[str, Any]] = []
-            next_order = 0
-            for is_continuation, parts in (
-                (False, existing_process_parts),
-                (True, continuation_process_parts),
-            ):
-                for part in sorted(parts, key=lambda item: self._numeric_order(item.get("order"))):
-                    part["order"] = next_order
-                    ordered_process_parts.append(part)
-                    if is_continuation:
-                        current_process_parts.append(part)
-                    next_order += 1
-            if ordered_process_parts:
-                merged["process_parts"] = ordered_process_parts
-            continuation_assistant["process_parts"] = current_process_parts or None
-        merged.pop("tool_calls", None)
-        merged.pop("tool_results", None)
-        return merged
-
-    @staticmethod
-    def _numeric_order(value: Any) -> float:
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return 0.0
 
     def _permission_mode_after_plan_tools(self, tool_messages: list[Message], current_mode: str) -> str:
         mode = normalize_permission_mode(current_mode)
@@ -2405,11 +2418,15 @@ class ChatManager:
         *,
         multi_agent_mode: str,
         permission_mode: str,
-        task_context_mode: str,
+        task_turn_context: TaskTurnContext,
     ) -> List[Dict[str, Any]]:
         filtered = self._filter_agent_tools_for_mode(tools, multi_agent_mode)
         filtered = self._filter_plan_tools_for_mode(filtered, permission_mode)
-        return filter_task_tools_for_context(filtered, task_context_mode)
+        return filter_task_tools_for_context(
+            filtered,
+            task_turn_context.mode,
+            has_active_task=task_turn_context.current_task is not None,
+        )
 
     def _refresh_task_turn_context(
         self,
@@ -2799,6 +2816,8 @@ class ChatManager:
         requested_parent_node_id = parent_node_id or conversation.current_node_id
         if not requested_parent_node_id or requested_parent_node_id not in conversation.nodes:
             raise ValueError("父节点不存在")
+        if requested_parent_node_id in self._active_controllers:
+            raise ValueError("当前模型步骤尚未结束，不能压缩其原生续接状态")
         conversation.switch_to_node(requested_parent_node_id)
 
         target_model, target_provider = self._resolve_model_for_conversation(
@@ -2811,13 +2830,15 @@ class ChatManager:
         if not target_provider:
             raise ValueError(f"无法找到模型 {target_model} 对应的提供商")
 
-        provider = self.model_manager.get_model(target_provider, False)
+        model_route = self.model_manager.get_route(target_provider, target_model)
+        provider = self.model_manager.get_model(target_provider, target_model, False)
         if not provider:
             raise ValueError(f"无法初始化提供商 {target_provider}")
 
         messages_to_summarize = self._prepare_messages_for_api_with_conversation(
             conversation,
             include_messages_to_keep=False,
+            model_route=model_route,
         )
         summary_request = {
             "role": "user",
@@ -2939,7 +2960,7 @@ class ChatManager:
         if not target_provider:
             raise ValueError(f"无法找到模型 {target_model} 对应的提供商")
 
-        provider = self.model_manager.get_model(target_provider, False)
+        provider = self.model_manager.get_model(target_provider, target_model, False)
         if not provider:
             raise ValueError(f"无法初始化提供商 {target_provider}")
 
@@ -3107,6 +3128,7 @@ class ChatManager:
         conversation: Conversation,
         *,
         include_messages_to_keep: bool = True,
+        model_route: Optional[ModelRoute] = None,
     ) -> List[Message]:
         """准备API调用的消息列表。历史事实只读 canonical SQLite。"""
         msg_dict = []
@@ -3138,6 +3160,12 @@ class ChatManager:
                 out["tool_call_id"] = msg["tool_call_id"]
             if msg.get("name"):
                 out["name"] = msg["name"]
+            if msg.get("reasoning"):
+                out["reasoning"] = msg["reasoning"]
+            if msg.get("model_route_id"):
+                out["model_route_id"] = msg["model_route_id"]
+            if msg.get("model_state_items"):
+                out["model_state_items"] = msg["model_state_items"]
             msg_dict.append(out)
 
         node_chain = self._model_node_chain(
@@ -3147,6 +3175,11 @@ class ChatManager:
         node_ids = [str(node.get("id")) for node in node_chain if node.get("id")]
         target_chain_ids = set(node_ids)
         canonical_messages = _canonical_messages_by_node(self.chat_repository,conversation.metadata["id"], node_ids)
+        canonical_model_state = model_state_items_by_node(
+            self.chat_repository,
+            conversation.metadata["id"],
+            node_ids,
+        )
         canonical_tool_history = tool_history_by_node(self.chat_repository,
             conversation.metadata["id"],
             node_ids,
@@ -3160,6 +3193,8 @@ class ChatManager:
             messages_for_node = canonical_messages.get(node_id, [])
             is_compact_node = node_id in compact_metadata
             final_assistant_messages: List[Message] = []
+            model_round_messages: List[Message] = []
+            reasoning_by_round: Dict[int, str] = {}
             for message in messages_for_node:
                 role = getattr(message.get("role"), "value", message.get("role"))
                 subtype = str(message.get("subtype") or "")
@@ -3180,7 +3215,14 @@ class ChatManager:
                         "subtype": "compact_summary",
                     }))
                     continue
-                if subtype in {"assistant_process_reasoning", "assistant_process_content", "prune_summary"}:
+                if subtype == "assistant_process_reasoning":
+                    round_index = int(message.get("model_round_index") or 0)
+                    reasoning_by_round[round_index] = (
+                        reasoning_by_round.get(round_index, "")
+                        + str(message.get("content") or "")
+                    )
+                    continue
+                if subtype == "prune_summary":
                     continue
                 if message.get("is_hidden_from_transcript") and not message.get("is_visible_in_transcript_only"):
                     continue
@@ -3198,7 +3240,10 @@ class ChatManager:
                     final_assistant = Message(dict(message))
                     final_assistant.pop("tool_calls", None)
                     final_assistant.pop("tool_results", None)
-                    final_assistant_messages.append(final_assistant)
+                    if message.get("model_round_index") is not None:
+                        model_round_messages.append(final_assistant)
+                    else:
+                        final_assistant_messages.append(final_assistant)
                 elif role == Role.SYSTEM.value:
                     append_message(message)
             if is_compact_node:
@@ -3210,12 +3255,61 @@ class ChatManager:
                         "content": format_restored_file_context(restored_files),
                         "timestamp": int(node.get("timestamp") or time()),
                     }))
-            for tool_call_message, tool_result_message in canonical_tool_history.get(str(node.get("id")), []):
+            node_tool_history = canonical_tool_history.get(node_id, [])
+            tool_history_by_message_id: Dict[str, List[tuple[Message, Message]]] = {}
+            unassigned_tool_history: List[tuple[Message, Message]] = []
+            for pair in node_tool_history:
+                assistant_id = str(pair[0].get("assistant_message_id") or "")
+                if assistant_id:
+                    tool_history_by_message_id.setdefault(assistant_id, []).append(pair)
+                else:
+                    unassigned_tool_history.append(pair)
+            state_by_message_id: Dict[str, List[Dict[str, Any]]] = {}
+            for state in canonical_model_state.get(node_id, []):
+                assistant_id = str(state.get("assistant_message_id") or "")
+                if assistant_id:
+                    state_by_message_id.setdefault(assistant_id, []).append(state)
+
+            if model_round_messages:
+                model_round_messages.sort(
+                    key=lambda message: (
+                        int(message.get("model_round_index") or 0),
+                        int(message.get("timestamp") or 0),
+                    )
+                )
+                for round_message in model_round_messages:
+                    assistant_id = str(round_message.get("id") or "")
+                    round_index = int(round_message.get("model_round_index") or 0)
+                    pairs = tool_history_by_message_id.pop(assistant_id, [])
+                    round_message["tool_calls"] = [
+                        (pair[0].get("tool_calls") or [{}])[0]
+                        for pair in pairs
+                    ] or None
+                    round_message["reasoning"] = reasoning_by_round.get(round_index) or None
+                    round_message["model_state_items"] = [
+                        state
+                        for state in state_by_message_id.get(assistant_id, [])
+                        if model_route is not None
+                        and state.get("route_id") == model_route["route_id"]
+                    ] or None
+                    append_message(round_message)
+                    for _, result_message in pairs:
+                        for tool_msg in apply_round_tool_result_budget([result_message]):
+                            append_message(tool_msg)
+                unassigned_tool_history.extend(
+                    pair
+                    for pairs in tool_history_by_message_id.values()
+                    for pair in pairs
+                )
+            else:
+                unassigned_tool_history.extend(node_tool_history)
+            for tool_call_message, tool_result_message in unassigned_tool_history:
                 append_message(tool_call_message)
                 for tool_msg in apply_round_tool_result_budget([tool_result_message]):
                     append_message(tool_msg)
-            for final_assistant in final_assistant_messages:
-                append_message(final_assistant)
+            if not model_round_messages:
+                for final_assistant in final_assistant_messages:
+                    append_message(final_assistant)
             append_message(self._format_prune_summary_context_message(
                 conversation.metadata["id"],
                 node_id,

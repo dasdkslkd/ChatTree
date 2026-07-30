@@ -19,6 +19,7 @@ from backend.core.tools.security.capabilities import ToolCapability
 from backend.core.tools.security.approval import ApprovalManager
 from backend.core.tools.security.logical_sandbox import LogicalSandbox
 from backend.core.tools.security.permissions import PermissionEngine
+from model_route_support import fake_model_route
 
 
 def make_tool_call(name="web_search", arguments=None):
@@ -333,8 +334,14 @@ class FakeModelManager:
         self.model_list = {"fake-provider": ["fake-model"]}
         self.provider = provider or FakeProvider()
 
-    def get_model(self, provider, is_async=False):
+    def get_route(self, provider, model):
+        return fake_model_route(provider, model)
+
+    def get_model(self, provider, model, is_async=False):
         return self.provider
+
+    def get_model_metadata(self, provider, model):
+        return self.get_route(provider, model)["capabilities"]
 
 
 class FakeStreamingToolManager:

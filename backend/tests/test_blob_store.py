@@ -7,6 +7,7 @@ import pytest
 from backend.core.persistence.blob_store import BlobStore
 from backend.core.persistence.content import INLINE_TEXT_LIMIT, store_text_content
 from backend.core.persistence.database import SQLitePersistence
+from backend.core.persistence.repository import ChatRepository
 
 
 def test_blob_store_deduplicates_large_content(tmp_path: Path):
@@ -22,13 +23,13 @@ def test_blob_store_deduplicates_large_content(tmp_path: Path):
     assert first.byte_size == len(text.encode("utf-8"))
     assert store.get_text(first.blob_id) == text
     with persistence.connect() as conn:
-        row = conn.execute(
-            "SELECT ref_count FROM blobs WHERE id = ?", (first.blob_id,)
-        ).fetchone()
-    assert row["ref_count"] == 2
+        count = conn.execute(
+            "SELECT COUNT(*) FROM blobs WHERE id = ?", (first.blob_id,)
+        ).fetchone()[0]
+    assert count == 1
 
 
-def test_blob_store_concurrent_duplicate_puts_increment_ref_count(tmp_path: Path):
+def test_blob_store_concurrent_duplicate_puts_keep_one_blob(tmp_path: Path):
     persistence = SQLitePersistence(tmp_path)
     persistence.initialize()
     store = BlobStore(persistence)
@@ -45,11 +46,10 @@ def test_blob_store_concurrent_duplicate_puts_increment_ref_count(tmp_path: Path
 
     with persistence.connect() as conn:
         rows = conn.execute(
-            "SELECT id, path, ref_count FROM blobs WHERE id = ?", (blob_id,)
+            "SELECT id, path FROM blobs WHERE id = ?", (blob_id,)
         ).fetchall()
 
     assert len(rows) == 1
-    assert rows[0]["ref_count"] == call_count
     assert gzip.decompress(records[0].path.read_bytes()).decode("utf-8") == text
 
 
@@ -107,10 +107,9 @@ def test_blob_store_rejects_db_paths_outside_home(tmp_path: Path, stored_path):
               byte_size,
               stored_size,
               char_count,
-              ref_count,
               created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 1)
             """,
             (
                 blob_id,
@@ -136,6 +135,29 @@ def test_store_text_content_keeps_short_text_inline(tmp_path: Path):
     assert stored.blob_id is None
     assert stored.preview == "shor"
     assert stored.size == len("short text".encode("utf-8"))
+
+
+def test_delete_conversation_reclaims_unreferenced_blob(tmp_path: Path):
+    persistence = SQLitePersistence(tmp_path)
+    persistence.initialize()
+    repository = ChatRepository(persistence)
+    conversation_id = repository.create_conversation("blob gc")
+    node_id = repository.create_node(conversation_id, None)
+    repository.add_message(
+        conversation_id,
+        node_id,
+        "user",
+        "x" * (INLINE_TEXT_LIMIT + 100),
+    )
+    with persistence.connect() as conn:
+        row = conn.execute("SELECT id, path FROM blobs").fetchone()
+    blob_path = persistence.home / row["path"]
+
+    assert repository.delete_conversation(conversation_id) is True
+
+    with persistence.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM blobs").fetchone()[0] == 0
+    assert not blob_path.exists()
 
 
 def test_store_text_content_moves_large_text_to_blob(tmp_path: Path):

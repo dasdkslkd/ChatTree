@@ -10,6 +10,7 @@ from backend.core.config.config import cfg
 from backend.core.config.types import StreamChunk, StreamController, StreamStatus
 from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
+from model_route_support import fake_model_route
 
 
 class FakeProvider:
@@ -64,12 +65,15 @@ class FakeModelManager:
         self._provider = FakeProvider()
         self.get_model_calls = []
 
-    def get_model(self, provider, is_async=False):
-        self.get_model_calls.append((provider, is_async))
+    def get_route(self, provider, model):
+        return fake_model_route(provider, model)
+
+    def get_model(self, provider, model, is_async=False):
+        self.get_model_calls.append((provider, model, is_async))
         return self._provider
 
     def get_model_metadata(self, provider_id, model_name):
-        return {}
+        return self.get_route(provider_id, model_name)["capabilities"]
 
 
 def make_chat_manager(tmp_path: Path) -> ChatManager:
@@ -144,7 +148,7 @@ def test_stream_respects_request_provider_when_model_name_is_shared(tmp_path):
     assert reloaded is not None
     assert reloaded.metadata["model_id"] == "shared-model"
     assert reloaded.metadata["provider_id"] == "second"
-    assert manager.model_manager.get_model_calls[-1] == ("second", True)
+    assert manager.model_manager.get_model_calls[-1] == ("second", "shared-model", True)
 
 
 def test_stream_persists_tool_permission_mode_per_new_leaf_node(tmp_path):

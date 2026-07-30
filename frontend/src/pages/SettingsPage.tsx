@@ -26,15 +26,7 @@ import { Loader2, Plus, Trash2, Eye, EyeOff, Settings } from 'lucide-react';
 import { toast } from 'sonner';
 import { configApi } from '../api/config';
 import { modelApi } from '../api/model';
-import type { ConfigData, ModelProviderConfig, APIFormat } from '../types/model';
-
-// API 格式选项
-const API_FORMAT_OPTIONS: { value: APIFormat; label: string; description: string }[] = [
-  { value: 'chat_completions', label: 'Chat Completions', description: 'OpenAI 兼容格式' },
-  { value: 'responses', label: 'Responses API', description: 'OpenAI Responses API' },
-  { value: 'anthropic', label: 'Anthropic', description: 'Anthropic Messages API' },
-  { value: 'gemini', label: 'Gemini', description: 'Google Gemini API' },
-];
+import type { ConfigData, ModelProviderConfig } from '../types/model';
 
 // 默认提供商配置模板
 const DEFAULT_PROVIDER_CONFIG: ModelProviderConfig = {
@@ -44,7 +36,6 @@ const DEFAULT_PROVIDER_CONFIG: ModelProviderConfig = {
   base_url: '',
   organization: '',
   project: '',
-  api_format: 'chat_completions',
   hidden_models: [],
   enabled: false,
 };
@@ -65,7 +56,6 @@ export default function SettingsPage() {
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [newProviderName, setNewProviderName] = useState('');
   const [newProviderId, setNewProviderId] = useState('');
-  const [newProviderFormat, setNewProviderFormat] = useState<APIFormat>('chat_completions');
   const [newProviderUrl, setNewProviderUrl] = useState('');
   const [newProviderKey, setNewProviderKey] = useState('');
   const [adding, setAdding] = useState(false);
@@ -116,10 +106,6 @@ export default function SettingsPage() {
     return rest;
   };
 
-  const getApiFormatLabel = (format: string): string => {
-    return API_FORMAT_OPTIONS.find(f => f.value === format)?.label || format;
-  };
-
   // ─── 默认提供商即时保存 ───
   const handleDefaultProviderChange = async (provider: string) => {
     if (!config) return;
@@ -154,7 +140,6 @@ export default function SettingsPage() {
   const handleOpenAddDialog = () => {
     setNewProviderName('');
     setNewProviderId('');
-    setNewProviderFormat('chat_completions');
     setNewProviderUrl('');
     setNewProviderKey('');
     setAddDialogOpen(true);
@@ -174,7 +159,7 @@ export default function SettingsPage() {
     if (config?.provider?.[id]) { toast.error(`ID "${id}" 已存在`); return; }
     try {
       setAdding(true);
-      await configApi.addProvider({ id, name, api_format: newProviderFormat, base_url: newProviderUrl, api_key: newProviderKey });
+      await configApi.addProvider({ id, name, base_url: newProviderUrl, api_key: newProviderKey });
       toast.success(`"${name}" 已添加`);
       setAddDialogOpen(false);
       await loadConfig();
@@ -391,9 +376,6 @@ export default function SettingsPage() {
                           <div className="flex items-center gap-3">
                             <Settings className="h-4 w-4 text-muted-foreground" />
                             <span className="font-medium">{pc.name || pid}</span>
-                            <Badge variant="outline" className="text-xs">
-                              {getApiFormatLabel(pc.api_format)}
-                            </Badge>
                             {pc.enabled && (
                               <Badge variant="secondary" className="text-xs" style={{ background: 'rgba(95,185,138,0.15)', color: 'var(--accent-green)' }}>
                                 已启用
@@ -437,22 +419,6 @@ export default function SettingsPage() {
               <p className="text-xs text-muted-foreground">唯一标识，仅限英文、数字和连字符</p>
             </div>
             <div className="space-y-2">
-              <Label>API 格式</Label>
-              <Select value={newProviderFormat} onValueChange={(v) => setNewProviderFormat(v as APIFormat)}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {API_FORMAT_OPTIONS.map(opt => (
-                    <SelectItem key={opt.value} value={opt.value}>
-                      <div className="flex flex-col">
-                        <span>{opt.label}</span>
-                        <span className="text-xs text-muted-foreground">{opt.description}</span>
-                      </div>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-2">
               <Label>Base URL (可选)</Label>
               <Input value={newProviderUrl} onChange={(e) => setNewProviderUrl(e.target.value)} placeholder="https://api.example.com/v1" />
             </div>
@@ -487,27 +453,6 @@ export default function SettingsPage() {
                 onCheckedChange={(checked) => setEditForm(f => ({ ...f, enabled: checked }))}
               />
               <Label>启用此提供商</Label>
-            </div>
-
-            <Separator />
-
-            {/* API 格式 */}
-            <div className="space-y-2">
-              <Label>API 格式</Label>
-              <Select
-                value={editForm.api_format || 'chat_completions'}
-                onValueChange={(v) => setEditForm(f => ({ ...f, api_format: v as APIFormat }))}
-              >
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {API_FORMAT_OPTIONS.map(opt => (
-                    <SelectItem key={opt.value} value={opt.value}>
-                      <span>{opt.label}</span>
-                      <span className="text-xs text-muted-foreground ml-2">{opt.description}</span>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
             </div>
 
             <Separator />

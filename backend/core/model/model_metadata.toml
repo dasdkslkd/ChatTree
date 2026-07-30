@@ -1,5 +1,7 @@
 # 模型能力元数据
 #
+# 此文件是 Server Home/model_metadata.toml 的首次初始化模板；运行时只读取
+# Server Home 副本，因此可单独替换该副本完成免安装更新。
 # 数据来源优先级：官方模型/定价/迁移文档，其次为供应商官方集成示例。
 # 只在这里维护模型能力；业务代码只负责加载和匹配。
 
@@ -13,10 +15,79 @@ deepseek = "https://api-docs.deepseek.com/quick_start/pricing"
 zai_glm = "https://docs.z.ai/guides/llm/glm-5.2"
 zai_model_switch = "https://docs.z.ai/devpack/latest-model"
 
+[reasoning_profiles.openai_responses_native]
+carrier = "responses_items"
+history_policy = "provider_state"
+strict = true
+controls = { context = "all_turns", include_encrypted_content = true }
+
+[reasoning_profiles.anthropic_thinking]
+carrier = "anthropic_blocks"
+history_policy = "provider_state"
+strict = true
+
+[reasoning_profiles.gemini_signed_thought]
+carrier = "gemini_signature"
+history_policy = "provider_state"
+strict = true
+
+[reasoning_profiles.kimi_preserved_all]
+carrier = "chat_reasoning_content"
+history_policy = "all_assistant_messages"
+strict = true
+controls = { effort_field = "reasoning_effort" }
+
+[reasoning_profiles.kimi_k26]
+carrier = "chat_reasoning_content"
+history_policy = "all_assistant_messages"
+strict = true
+controls = { thinking_style = "kimi_keep" }
+
+[reasoning_profiles.deepseek_tool_reasoning]
+carrier = "chat_reasoning_content"
+history_policy = "tool_assistant_messages"
+strict = true
+controls = { thinking_style = "type", effort_field = "reasoning_effort" }
+
+[reasoning_profiles.mimo_tool_reasoning]
+carrier = "chat_reasoning_content"
+history_policy = "tool_assistant_messages"
+strict = true
+controls = { thinking_style = "mimo" }
+
+[reasoning_profiles.zai_preserved]
+carrier = "chat_reasoning_content"
+history_policy = "all_assistant_messages"
+strict = true
+controls = { thinking_style = "zai", effort_field = "reasoning_effort" }
+
+[reasoning_profiles.qwen_chat_display_only]
+carrier = "chat_reasoning_content"
+history_policy = "drop"
+strict = false
+controls = { thinking_style = "qwen" }
+
+[reasoning_profiles.qwen_preserved_all]
+carrier = "chat_reasoning_content"
+history_policy = "all_assistant_messages"
+strict = true
+
+[[rules]]
+id = "openai-gpt-5.6"
+name_patterns = ["^gpt-5\\.6(?:-.+)?$"]
+protocol = "openai_responses"
+endpoint = "/responses"
+reasoning_profile = "openai_responses_native"
+context_length = 1000000
+supports_vision = true
+reasoning_effort = { levels = ["low", "medium", "high", "xhigh", "max"], default = "medium" }
+
 [[rules]]
 id = "openai-gpt-5.5"
 name_patterns = ["^gpt-5\\.5(?:-.+)?$"]
-api_formats = ["responses", "chat_completions"]
+protocol = "openai_responses"
+endpoint = "/responses"
+reasoning_profile = "openai_responses_native"
 context_length = 1000000
 supports_vision = true
 reasoning_effort = { levels = ["low", "medium", "high", "xhigh"], default = "medium" }
@@ -24,7 +95,9 @@ reasoning_effort = { levels = ["low", "medium", "high", "xhigh"], default = "med
 [[rules]]
 id = "openai-gpt-5.4-pro"
 name_patterns = ["^gpt-5\\.4-pro(?:-.+)?$"]
-api_formats = ["responses"]
+protocol = "openai_responses"
+endpoint = "/responses"
+reasoning_profile = "openai_responses_native"
 context_length = 1050000
 supports_vision = true
 reasoning_effort = { levels = ["medium", "high", "xhigh"], default = "medium" }
@@ -32,7 +105,9 @@ reasoning_effort = { levels = ["medium", "high", "xhigh"], default = "medium" }
 [[rules]]
 id = "openai-gpt-5.4"
 name_patterns = ["^gpt-5\\.4(?:-[0-9].*)?$"]
-api_formats = ["responses", "chat_completions"]
+protocol = "openai_responses"
+endpoint = "/responses"
+reasoning_profile = "openai_responses_native"
 context_length = 1050000
 supports_vision = true
 reasoning_effort = { levels = ["low", "medium", "high", "xhigh"] }
@@ -40,7 +115,9 @@ reasoning_effort = { levels = ["low", "medium", "high", "xhigh"] }
 [[rules]]
 id = "openai-gpt-5.4-mini-nano"
 name_patterns = ["^gpt-5\\.4-(?:mini|nano)(?:-.+)?$"]
-api_formats = ["responses", "chat_completions"]
+protocol = "openai_responses"
+endpoint = "/responses"
+reasoning_profile = "openai_responses_native"
 context_length = 400000
 supports_vision = true
 reasoning_effort = { levels = ["low", "medium", "high", "xhigh"] }
@@ -48,7 +125,9 @@ reasoning_effort = { levels = ["low", "medium", "high", "xhigh"] }
 [[rules]]
 id = "openai-gpt-5.2"
 name_patterns = ["^gpt-5\\.2(?:-.+)?$"]
-api_formats = ["responses", "chat_completions"]
+protocol = "openai_responses"
+endpoint = "/responses"
+reasoning_profile = "openai_responses_native"
 context_length = 400000
 supports_vision = true
 reasoning_effort = { levels = ["low", "medium", "high", "xhigh"] }
@@ -56,7 +135,9 @@ reasoning_effort = { levels = ["low", "medium", "high", "xhigh"] }
 [[rules]]
 id = "openai-gpt-5-family"
 name_patterns = ["^gpt-5(?:-(?:mini|nano|codex|chat).*)?$", "^gpt-5\\.1(?:-.+)?$"]
-api_formats = ["responses", "chat_completions"]
+protocol = "openai_responses"
+endpoint = "/responses"
+reasoning_profile = "openai_responses_native"
 context_length = 400000
 supports_vision = true
 reasoning_effort = { levels = ["minimal", "low", "medium", "high"] }
@@ -64,7 +145,9 @@ reasoning_effort = { levels = ["minimal", "low", "medium", "high"] }
 [[rules]]
 id = "openai-o-series"
 name_patterns = ["^o[134](?:-.+)?$"]
-api_formats = ["responses", "chat_completions"]
+protocol = "openai_responses"
+endpoint = "/responses"
+reasoning_profile = "openai_responses_native"
 context_length = 200000
 supports_vision = true
 reasoning_effort = { levels = ["minimal", "low", "medium", "high"] }
@@ -72,14 +155,18 @@ reasoning_effort = { levels = ["minimal", "low", "medium", "high"] }
 [[rules]]
 id = "openai-gpt-4.1-family"
 name_patterns = ["^gpt-4\\.1(?:-.+)?$"]
-api_formats = ["responses", "chat_completions"]
+protocol = "openai_responses"
+endpoint = "/responses"
+reasoning_profile = "openai_responses_native"
 context_length = 1047576
 supports_vision = true
 
 [[rules]]
 id = "claude-fable-mythos-5"
 name_patterns = ["^claude-(?:fable|mythos)-5(?:-.+)?$"]
-api_formats = ["anthropic"]
+protocol = "anthropic_messages"
+endpoint = "/v1/messages"
+reasoning_profile = "anthropic_thinking"
 context_length = 1000000
 supports_vision = true
 thinking = { toggleable = false, default_enabled = true }
@@ -87,7 +174,9 @@ thinking = { toggleable = false, default_enabled = true }
 [[rules]]
 id = "claude-opus-4.8"
 name_patterns = ["^claude-opus-4-8(?:-.+)?$"]
-api_formats = ["anthropic"]
+protocol = "anthropic_messages"
+endpoint = "/v1/messages"
+reasoning_profile = "anthropic_thinking"
 context_length = 1000000
 supports_vision = true
 reasoning_effort = { levels = ["low", "medium", "high", "xhigh", "max"] }
@@ -96,7 +185,9 @@ thinking = { toggleable = true, default_enabled = false }
 [[rules]]
 id = "claude-opus-4.7"
 name_patterns = ["^claude-opus-4-7(?:-.+)?$"]
-api_formats = ["anthropic"]
+protocol = "anthropic_messages"
+endpoint = "/v1/messages"
+reasoning_profile = "anthropic_thinking"
 context_length = 1000000
 supports_vision = true
 reasoning_effort = { levels = ["low", "medium", "high", "xhigh", "max"] }
@@ -105,7 +196,9 @@ thinking = { toggleable = true, default_enabled = false }
 [[rules]]
 id = "claude-opus-4.6-sonnet-4.6"
 name_patterns = ["^claude-(?:opus-4-6|sonnet-4-6)(?:-.+)?$"]
-api_formats = ["anthropic"]
+protocol = "anthropic_messages"
+endpoint = "/v1/messages"
+reasoning_profile = "anthropic_thinking"
 context_length = 1000000
 supports_vision = true
 reasoning_effort = { levels = ["low", "medium", "high", "max"] }
@@ -114,16 +207,58 @@ thinking = { toggleable = true, default_enabled = false }
 [[rules]]
 id = "claude-current-200k"
 name_patterns = ["^claude-(?:sonnet-4-5|sonnet-4|haiku-4-5|3(?:\\.5|-5)?|3-7|3\\.7)(?:-.+)?$"]
-api_formats = ["anthropic"]
+protocol = "anthropic_messages"
+endpoint = "/v1/messages"
+reasoning_profile = "anthropic_thinking"
 context_length = 200000
 supports_vision = true
 reasoning_effort = { levels = ["low", "medium", "high"] }
 thinking = { toggleable = true, default_enabled = false }
 
 [[rules]]
+id = "kimi-k3"
+name_patterns = ["^kimi-k3(?:-.+)?$", "^kimi-k2\\.7-code(?:-.+)?$", "^k3$"]
+protocol = "openai_chat_completions"
+endpoint = "/chat/completions"
+reasoning_profile = "kimi_preserved_all"
+context_length = 262144
+supports_vision = true
+reasoning_effort = { levels = ["low", "medium", "high"] }
+thinking = { toggleable = false, default_enabled = true }
+
+[[rules]]
+id = "qwen-reasoning-aliases"
+name_patterns = ["^qwen-reasoner$", "^qwen3\\.[56]-(?:thinking|reasoner)$"]
+protocol = "openai_chat_completions"
+endpoint = "/chat/completions"
+reasoning_profile = "qwen_preserved_all"
+
+[[rules]]
+id = "kimi-k2.6"
+name_patterns = ["^kimi-k2\\.6(?:-.+)?$"]
+protocol = "openai_chat_completions"
+endpoint = "/chat/completions"
+reasoning_profile = "kimi_k26"
+context_length = 262144
+supports_vision = true
+thinking = { toggleable = true, default_enabled = true }
+
+[[rules]]
+id = "mimo-tool-reasoning"
+name_patterns = ["^mimo-(?:v2|7b|coder).*$"]
+protocol = "openai_chat_completions"
+endpoint = "/chat/completions"
+reasoning_profile = "mimo_tool_reasoning"
+context_length = 262144
+supports_vision = false
+thinking = { toggleable = true, default_enabled = true }
+
+[[rules]]
 id = "deepseek-v4"
 name_patterns = ["^deepseek-v4-(?:pro|flash)(?:-.+)?$"]
-api_formats = ["chat_completions"]
+protocol = "openai_chat_completions"
+endpoint = "/chat/completions"
+reasoning_profile = "deepseek_tool_reasoning"
 context_length = 1000000
 supports_vision = false
 reasoning_effort = { levels = ["high", "max"], default = "high" }
@@ -132,7 +267,9 @@ thinking = { toggleable = true, default_enabled = true }
 [[rules]]
 id = "deepseek-legacy-aliases"
 name_patterns = ["^deepseek-(?:chat|reasoner)(?:-.+)?$"]
-api_formats = ["chat_completions"]
+protocol = "openai_chat_completions"
+endpoint = "/chat/completions"
+reasoning_profile = "deepseek_tool_reasoning"
 context_length = 1000000
 supports_vision = false
 thinking = { toggleable = true, default_enabled = true }
@@ -140,7 +277,9 @@ thinking = { toggleable = true, default_enabled = true }
 [[rules]]
 id = "deepseek-open-models"
 name_patterns = ["^deepseek-(?:v\\d+(?:\\.\\d+)?|r\\d+)(?:-.+)?$"]
-api_formats = ["chat_completions"]
+protocol = "openai_chat_completions"
+endpoint = "/chat/completions"
+reasoning_profile = "deepseek_tool_reasoning"
 context_length = 131072
 supports_vision = false
 thinking = { toggleable = true, default_enabled = true }
@@ -148,16 +287,19 @@ thinking = { toggleable = true, default_enabled = true }
 [[rules]]
 id = "qwen3-vl"
 name_patterns = ["^qwen3-vl-(?:plus|flash)(?:-.+)?$"]
-api_formats = ["chat_completions"]
+protocol = "openai_chat_completions"
+endpoint = "/chat/completions"
+reasoning_profile = "qwen_chat_display_only"
 context_length = 262144
 supports_vision = true
-reasoning_effort = { levels = ["low", "medium", "high"], default = "medium" }
 thinking = { toggleable = true, default_enabled = true }
 
 [[rules]]
 id = "qwen3-coder"
 name_patterns = ["^qwen3-coder-(?:plus|flash|\\d+b)(?:-.+)?$"]
-api_formats = ["chat_completions"]
+protocol = "openai_chat_completions"
+endpoint = "/chat/completions"
+reasoning_profile = "qwen_chat_display_only"
 context_length = 1000000
 supports_vision = false
 thinking = { toggleable = true, default_enabled = true }
@@ -165,7 +307,9 @@ thinking = { toggleable = true, default_enabled = true }
 [[rules]]
 id = "qwen3-main"
 name_patterns = ["^qwen3(?:\\.[567])?-(?:max|plus|flash)(?:-.+)?$", "^qwen-(?:plus|flash)(?:-.+)?$"]
-api_formats = ["chat_completions"]
+protocol = "openai_chat_completions"
+endpoint = "/chat/completions"
+reasoning_profile = "qwen_chat_display_only"
 context_length = 1000000
 supports_vision = true
 thinking = { toggleable = true, default_enabled = true }
@@ -173,7 +317,9 @@ thinking = { toggleable = true, default_enabled = true }
 [[rules]]
 id = "qwen-open-weight-thinking"
 name_patterns = ["^qwen3-(?:235b|30b|32b|14b|8b|4b|1\\.7b).*(?:thinking|instruct|a3b|a22b).*$", "^qwq(?:-.+)?$"]
-api_formats = ["chat_completions"]
+protocol = "openai_chat_completions"
+endpoint = "/chat/completions"
+reasoning_profile = "qwen_chat_display_only"
 context_length = 131072
 supports_vision = false
 thinking = { toggleable = true, default_enabled = true }
@@ -181,7 +327,9 @@ thinking = { toggleable = true, default_enabled = true }
 [[rules]]
 id = "glm-5.2"
 name_patterns = ["^glm-5\\.2(?:\\[1m\\])?(?:-.+)?$"]
-api_formats = ["chat_completions"]
+protocol = "openai_chat_completions"
+endpoint = "/chat/completions"
+reasoning_profile = "zai_preserved"
 context_length = 1000000
 supports_vision = false
 reasoning_effort = { levels = ["high", "max"], default = "high" }
@@ -190,7 +338,9 @@ thinking = { toggleable = true, default_enabled = true }
 [[rules]]
 id = "glm-5-family"
 name_patterns = ["^glm-5(?:\\.1|-turbo)?(?:\\[1m\\])?(?:-.+)?$"]
-api_formats = ["chat_completions"]
+protocol = "openai_chat_completions"
+endpoint = "/chat/completions"
+reasoning_profile = "zai_preserved"
 context_length = 1000000
 supports_vision = false
 reasoning_effort = { levels = ["high", "max"], default = "high" }
@@ -199,7 +349,9 @@ thinking = { toggleable = true, default_enabled = true }
 [[rules]]
 id = "glm-4.5-plus"
 name_patterns = ["^glm-4\\.[567](?:-.+)?$"]
-api_formats = ["chat_completions"]
+protocol = "openai_chat_completions"
+endpoint = "/chat/completions"
+reasoning_profile = "zai_preserved"
 context_length = 128000
 supports_vision = false
 thinking = { toggleable = true, default_enabled = true }
@@ -207,7 +359,9 @@ thinking = { toggleable = true, default_enabled = true }
 [[rules]]
 id = "glm-vision"
 name_patterns = ["^glm-.*(?:v|vision)(?:-.+)?$"]
-api_formats = ["chat_completions"]
+protocol = "openai_chat_completions"
+endpoint = "/chat/completions"
+reasoning_profile = "zai_preserved"
 context_length = 128000
 supports_vision = true
 thinking = { toggleable = true, default_enabled = true }
@@ -215,7 +369,9 @@ thinking = { toggleable = true, default_enabled = true }
 [[rules]]
 id = "gemini-2.5"
 name_patterns = ["^gemini-2\\.5-(?:pro|flash|flash-lite)(?:-.+)?$"]
-api_formats = ["gemini"]
+protocol = "gemini_generate_content"
+endpoint = "/models/{model}:generateContent"
+reasoning_profile = "gemini_signed_thought"
 context_length = 1048576
 supports_vision = true
 reasoning_effort = { levels = ["dynamic", "low", "medium", "high"] }
@@ -224,7 +380,9 @@ thinking = { toggleable = true, default_enabled = false }
 [[rules]]
 id = "gemini-3"
 name_patterns = ["^gemini-3(?:-.+)?$"]
-api_formats = ["gemini"]
+protocol = "gemini_generate_content"
+endpoint = "/models/{model}:generateContent"
+reasoning_profile = "gemini_signed_thought"
 context_length = 1048576
 supports_vision = true
 reasoning_effort = { levels = ["dynamic", "low", "medium", "high"] }
@@ -233,6 +391,8 @@ thinking = { toggleable = true, default_enabled = false }
 [[rules]]
 id = "gemini-1.5-2.0"
 name_patterns = ["^gemini-(?:1\\.5|2\\.0)(?:-.+)?$"]
-api_formats = ["gemini"]
+protocol = "gemini_generate_content"
+endpoint = "/models/{model}:generateContent"
+reasoning_profile = "gemini_signed_thought"
 context_length = 1048576
 supports_vision = true
