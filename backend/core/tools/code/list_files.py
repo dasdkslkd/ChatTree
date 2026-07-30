@@ -18,6 +18,7 @@ class ListFilesTool(common._CodeTool):
             "Find workspace files with ripgrep-style file listing. Default sort=discovery is optimized for fast paged discovery "
             "and may not know the exact total; continue with next_offset when needed and trust total only when total_known is true. "
             "Use sort=path only when deterministic path order matters, and sort=mtime only for recently modified files because it requires a full scan. "
+            "Patterns are relative to path: `*` and `*.py` match direct children only; use `**/*` or `**/*.py` for recursive matching. "
             "Use `pattern` for one glob, `patterns` for multiple globs, and `path_regex` to match returned paths; do not use a `query` argument. "
             "Use this instead of shell for ls/dir/find/Get-ChildItem/rg --files. Paths are returned relative to the workspace root with / separators."
         )
@@ -28,13 +29,26 @@ class ListFilesTool(common._CodeTool):
             "additionalProperties": False,
             "properties": {
                 "path": {"type": "string", "default": "."},
-                "patterns": {"type": "array", "items": {"type": "string"}, "default": ["**/*"]},
-                "pattern": {"type": "string"},
+                "patterns": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": ["**/*"],
+                    "description": "Globs relative to path. `*` is direct-only; include `**` to recurse.",
+                },
+                "pattern": {
+                    "type": "string",
+                    "description": "One glob relative to path. `*` is direct-only; include `**` to recurse.",
+                },
                 "path_regex": {"type": "string"},
                 "files_only": {"type": "boolean", "default": True},
                 "include_hidden": {"type": "boolean", "default": False},
                 "respect_gitignore": {"type": "boolean", "default": True},
-                "exclude": {"type": "array", "items": {"type": "string"}, "default": []},
+                "exclude": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": [],
+                    "description": "Relative globs to exclude. Include `**` to exclude recursively.",
+                },
                 "sort": {
                     "type": "string",
                     "enum": ["discovery", "path", "mtime"],
@@ -90,7 +104,7 @@ class ListFilesTool(common._CodeTool):
                 "sort": sort,
             },
         )
-        rg_path = ripgrep._resolve_ripgrep_executable(self.config)
+        rg_path = ripgrep._resolve_ripgrep_executable()
         fallback_reason = "ripgrep_not_installed" if rg_path is None else None
         if rg_path is not None:
             rg_result, fallback_reason = ripgrep._glob_files_with_rg(

@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import platform
 import signal
 import shutil
+import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import urllib.request
 import venv
+import zipfile
 from pathlib import Path
 from typing import Sequence
 
@@ -21,6 +26,25 @@ DEFAULT_BUILD_ROOT = REPO_ROOT / ".build" / "server-binary"
 DEFAULT_DIST_DIR = REPO_ROOT / "dist"
 PYINSTALLER_VERSION = "6.21.0"
 PYINSTALLER_HOOKS_CONTRIB_VERSION = "2026.6"
+RIPGREP_VERSION = "15.1.0"
+RIPGREP_ASSETS = {
+    ("win32", "x64"): (
+        "x86_64-pc-windows-msvc.zip",
+        "124510b94b6baa3380d051fdf4650eaa80a302c876d611e9dba0b2e18d87493a",
+    ),
+    ("darwin", "arm64"): (
+        "aarch64-apple-darwin.tar.gz",
+        "378e973289176ca0c6054054ee7f631a065874a352bf43f0fa60ef079b6ba715",
+    ),
+    ("darwin", "x64"): (
+        "x86_64-apple-darwin.tar.gz",
+        "64811cb24e77cac3057d6c40b63ac9becf9082eedd54ca411b475b755d334882",
+    ),
+    ("linux", "x64"): (
+        "x86_64-unknown-linux-musl.tar.gz",
+        "1c9297be4a084eea7ecaedf93eb03d058d6faae29bbc57ecdaf5063921491599",
+    ),
+}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -39,12 +63,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     python = venv_python(venv_dir)
     if not args.skip_install:
         install_build_dependencies(python)
+    ripgrep_binary = prepare_bundled_ripgrep(build_root)
     run_pyinstaller(
         python,
         dist_dir=dist_dir,
         work_dir=work_dir,
         clean=args.clean,
         one_dir=args.one_dir,
+        ripgrep_binary=ripgrep_binary,
     )
 
     binary = binary_path(dist_dir, one_dir=args.one_dir)
@@ -141,6 +167,74 @@ def install_build_dependencies(python: Path) -> None:
     )
 
 
+def prepare_bundled_ripgrep(build_root: Path) -> Path:
+    machine = platform.machine().lower()
+    arch = "arm64" if machine in {"arm64", "aarch64"} else "x64"
+    asset = RIPGREP_ASSETS.get((sys.platform, arch))
+    if asset is None:
+        raise SystemExit(f"unsupported ripgrep build platform: {sys.platform}-{arch}")
+    asset_suffix, expected_sha256 = asset
+    asset_name = f"ripgrep-{RIPGREP_VERSION}-{asset_suffix}"
+    cache_dir = build_root / "ripgrep"
+    archive_path = cache_dir / asset_name
+    executable_name = "rg.exe" if sys.platform == "win32" else "rg"
+    binary_path = cache_dir / executable_name
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    if not archive_path.is_file() or _sha256(archive_path) != expected_sha256:
+        archive_path.unlink(missing_ok=True)
+        request = urllib.request.Request(
+            f"https://github.com/BurntSushi/ripgrep/releases/download/{RIPGREP_VERSION}/{asset_name}",
+            headers={"User-Agent": "ChatTree-build"},
+        )
+        with urllib.request.urlopen(request, timeout=60) as response:
+            with archive_path.open("wb") as output:
+                shutil.copyfileobj(response, output)
+    actual_sha256 = _sha256(archive_path)
+    if actual_sha256 != expected_sha256:
+        raise SystemExit(
+            f"ripgrep archive checksum mismatch: expected {expected_sha256}, got {actual_sha256}"
+        )
+
+    if asset_name.endswith(".zip"):
+        with zipfile.ZipFile(archive_path) as archive:
+            member = next(
+                name
+                for name in archive.namelist()
+                if Path(name).name == executable_name
+            )
+            with archive.open(member) as source, binary_path.open("wb") as output:
+                shutil.copyfileobj(source, output)
+    else:
+        with tarfile.open(archive_path, "r:gz") as archive:
+            member = next(
+                item
+                for item in archive.getmembers()
+                if item.isfile() and Path(item.name).name == executable_name
+            )
+            source = archive.extractfile(member)
+            if source is None:
+                raise SystemExit(f"ripgrep archive member is unreadable: {member.name}")
+            with source, binary_path.open("wb") as output:
+                shutil.copyfileobj(source, output)
+    if sys.platform != "win32":
+        binary_path.chmod(
+            binary_path.stat().st_mode
+            | stat.S_IXUSR
+            | stat.S_IXGRP
+            | stat.S_IXOTH
+        )
+    return binary_path.resolve()
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def run_pyinstaller(
     python: Path,
     *,
@@ -148,11 +242,13 @@ def run_pyinstaller(
     work_dir: Path,
     clean: bool,
     one_dir: bool,
+    ripgrep_binary: Path,
 ) -> None:
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
     env["CHATTREE_REPO_ROOT"] = str(REPO_ROOT)
     env["CHATTREE_PYINSTALLER_ONE_DIR"] = "1" if one_dir else "0"
+    env["CHATTREE_BUNDLED_RIPGREP"] = str(ripgrep_binary)
     command = [
         str(python),
         "-m",

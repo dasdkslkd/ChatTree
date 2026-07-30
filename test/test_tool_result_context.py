@@ -365,7 +365,7 @@ def test_glob_tool_sync_work_runs_off_event_loop(monkeypatch, tmp_path):
             "scanned_entries": 1,
         }
 
-    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda config: None)
+    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda: None)
     monkeypatch.setattr(code_python_fallback, "_glob_files_python", slow_glob_python)
     tool = ListFilesTool(CodeToolConfig.from_dict({
         "workspace_roots": [str(tmp_path)],

@@ -174,7 +174,7 @@ class SearchFilesTool(common._CodeTool):
             },
         )
         fallback_reason: Optional[str] = "ripgrep_not_installed"
-        rg_path = ripgrep._resolve_ripgrep_executable(self.config)
+        rg_path = ripgrep._resolve_ripgrep_executable()
         if rg_path is not None:
             rg_payload, fallback_reason = ripgrep._grep_with_rg(
                 rg_path=rg_path,

@@ -2,10 +2,13 @@ import asyncio
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from backend.core import subprocess_utils
 from backend.core.tools import code as code_tools
@@ -159,7 +162,7 @@ def test_run_command_default_initial_wait_is_120_seconds(tmp_path):
 
 
 def test_glob_lists_workspace_files_and_hides_protected_paths(tmp_path, monkeypatch):
-    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda config: None)
+    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda: None)
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("print('hi')", encoding="utf-8")
     (tmp_path / "empty").mkdir()
@@ -174,7 +177,7 @@ def test_glob_lists_workspace_files_and_hides_protected_paths(tmp_path, monkeypa
 
 
 def test_glob_recursive_listing_is_bounded_by_limit(tmp_path, monkeypatch):
-    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda config: None)
+    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda: None)
     (tmp_path / "src").mkdir()
     (tmp_path / "empty").mkdir()
     for index in range(100):
@@ -193,7 +196,7 @@ def test_glob_recursive_listing_is_bounded_by_limit(tmp_path, monkeypatch):
 
 
 def test_glob_supports_path_regex_and_excludes(tmp_path, monkeypatch):
-    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda config: None)
+    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda: None)
     (tmp_path / ".hidden.py").write_text("print('hi')", encoding="utf-8")
     (tmp_path / "skip.py").write_text("print('skip')", encoding="utf-8")
     (tmp_path / "nested").mkdir()
@@ -225,17 +228,17 @@ def test_glob_uses_ripgrep_by_default_and_documents_parameters(tmp_path, monkeyp
         calls.append((args, kwargs))
         return FakePopen(args, stdout_text="src/app.py\nsrc/skip.txt\n", **kwargs)
 
-    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda config: fake_rg)
+    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda: fake_rg)
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
     tool = ListFilesTool(make_config(tmp_path))
 
     result = load(run(tool.execute(
         path=".",
-        pattern="*.py",
+        pattern="**/*.py",
         path_regex=r"src/",
         respect_gitignore=False,
         include_hidden=True,
-        exclude=["skip.txt"],
+        exclude=["**/skip.txt"],
         limit=10,
     )))
 
@@ -245,8 +248,7 @@ def test_glob_uses_ripgrep_by_default_and_documents_parameters(tmp_path, monkeyp
     assert args[:4] == [str(fake_rg), "--files", "--color", "never"]
     assert "--no-ignore" in args
     assert "--hidden" in args
-    assert ["--glob", "*.py"] == args[args.index("--glob"):args.index("--glob") + 2]
-    assert f"!skip.txt" in args
+    assert "--glob" not in args
     assert kwargs["cwd"] == str(tmp_path)
     assert "do not use a `query` argument" in tool.description
     assert "total_known" in tool.description
@@ -263,7 +265,7 @@ def test_glob_ripgrep_sort_path_uses_rg_sort_and_pages_early(tmp_path, monkeypat
         calls.append((args, kwargs))
         return FakePopen(args, stdout_text="a.py\nb.py\nc.py\n", **kwargs)
 
-    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda config: fake_rg)
+    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda: fake_rg)
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
     tool = ListFilesTool(make_config(tmp_path))
 
@@ -297,7 +299,7 @@ def test_glob_mtime_requires_full_scan_and_reports_known_total(tmp_path, monkeyp
         calls.append((args, kwargs))
         return FakePopen(args, stdout_text="old.py\nnew.py\nmid.py\n", **kwargs)
 
-    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda config: fake_rg)
+    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda: fake_rg)
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
     tool = ListFilesTool(make_config(tmp_path))
 
@@ -320,14 +322,14 @@ def test_glob_ripgrep_matches_workspace_relative_path_patterns(tmp_path, monkeyp
     fake_rg = tmp_path / "rg.exe"
 
     def fake_popen(args, **kwargs):
-        assert ["--glob", "backend/core/tools/*.py"] == args[args.index("--glob"):args.index("--glob") + 2]
+        assert "--glob" not in args
         return FakePopen(
             args,
             stdout_text="backend/core/tools/code_tools.py\nbackend/core/tools/notes.txt\n",
             **kwargs,
         )
 
-    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda config: fake_rg)
+    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda: fake_rg)
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
     tool = ListFilesTool(make_config(tmp_path))
 
@@ -338,7 +340,7 @@ def test_glob_ripgrep_matches_workspace_relative_path_patterns(tmp_path, monkeyp
 
 
 def test_glob_python_fallback_matches_workspace_relative_path_patterns(tmp_path, monkeypatch):
-    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda config: None)
+    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda: None)
     (tmp_path / "backend" / "core" / "tools").mkdir(parents=True)
     (tmp_path / "backend" / "core" / "tools" / "code_tools.py").write_text("x", encoding="utf-8")
     (tmp_path / "backend" / "core" / "tools" / "notes.txt").write_text("x", encoding="utf-8")
@@ -354,7 +356,7 @@ def test_glob_python_fallback_matches_workspace_relative_path_patterns(tmp_path,
 
 
 def test_glob_double_star_matches_root_files_like_ripgrep(tmp_path, monkeypatch):
-    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda config: None)
+    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda: None)
     (tmp_path / "main.py").write_text("root", encoding="utf-8")
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "mod.py").write_text("nested", encoding="utf-8")
@@ -363,6 +365,181 @@ def test_glob_double_star_matches_root_files_like_ripgrep(tmp_path, monkeypatch)
     result = load(run(tool.execute(path=".", pattern="**/*.py", limit=10)))
 
     assert result["files"] == ["main.py", "pkg/mod.py"]
+
+
+def test_glob_star_matches_direct_children_only(tmp_path, monkeypatch):
+    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda: None)
+    (tmp_path / "root.txt").write_text("root", encoding="utf-8")
+    (tmp_path / "nested").mkdir()
+    (tmp_path / "nested" / "deep.txt").write_text("deep", encoding="utf-8")
+    tool = ListFilesTool(make_config(tmp_path))
+    original_resolve = Path.resolve
+
+    def resolve(path, *args, **kwargs):
+        if path.name == "deep.txt":
+            raise AssertionError(f"direct glob traversed a nested directory: {path}")
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+
+    result = load(run(tool.execute(path=".", pattern="*", sort="path", limit=10)))
+
+    assert result["files"] == ["root.txt"]
+
+
+def test_glob_ripgrep_filters_direct_pattern_without_positive_glob(tmp_path, monkeypatch):
+    (tmp_path / "root.txt").write_text("root", encoding="utf-8")
+    (tmp_path / "nested").mkdir()
+    (tmp_path / "nested" / "deep.txt").write_text("deep", encoding="utf-8")
+    fake_rg = tmp_path / "rg.exe"
+    calls = []
+
+    def fake_popen(args, **kwargs):
+        calls.append(args)
+        return FakePopen(args, stdout_text="root.txt\nnested/deep.txt\n", **kwargs)
+
+    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda: fake_rg)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    tool = ListFilesTool(make_config(tmp_path))
+
+    result = load(run(tool.execute(path=".", pattern="*", sort="path", limit=10)))
+
+    assert result["files"] == ["root.txt"]
+    assert "--glob" not in calls[0]
+    assert "--no-ignore" not in calls[0]
+    assert "--no-ignore-dot" in calls[0]
+    assert calls[0][calls[0].index("--max-depth") + 1] == "1"
+
+
+@pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep is not installed")
+def test_glob_real_ripgrep_matches_python_ignore_and_hidden_rules(tmp_path, monkeypatch):
+    (tmp_path / ".git" / "info").mkdir(parents=True)
+    (tmp_path / ".git" / "info" / "exclude").write_text(
+        "local-secret.py\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".gitignore").write_text("ignored/\n", encoding="utf-8")
+    (tmp_path / ".ignore").write_text("global-secret.py\n", encoding="utf-8")
+    (tmp_path / ".hidden.py").write_text("hidden", encoding="utf-8")
+    (tmp_path / "global-secret.py").write_text("not a gitignore rule", encoding="utf-8")
+    (tmp_path / "local-secret.py").write_text("git exclude rule", encoding="utf-8")
+    (tmp_path / "visible.py").write_text("visible", encoding="utf-8")
+    (tmp_path / "nested").mkdir()
+    (tmp_path / "nested" / ".gitignore").write_text(
+        "nested-secret.py\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "nested" / "keep.py").write_text("keep", encoding="utf-8")
+    (tmp_path / "nested" / "nested-secret.py").write_text("skip", encoding="utf-8")
+    (tmp_path / "ignored").mkdir()
+    (tmp_path / "ignored" / "skip.py").write_text("skip", encoding="utf-8")
+    tool = ListFilesTool(make_config(tmp_path))
+
+    rg_result = load(run(tool.execute(
+        path=".",
+        pattern="**/*.py",
+        sort="path",
+        limit=20,
+    )))
+    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda: None)
+    python_result = load(run(tool.execute(
+        path=".",
+        pattern="**/*.py",
+        sort="path",
+        limit=20,
+    )))
+
+    assert rg_result["files"] == [
+        "global-secret.py",
+        "nested/keep.py",
+        "visible.py",
+    ]
+    assert python_result["files"] == rg_result["files"]
+
+
+def test_glob_python_fallback_skips_unresolvable_entries(tmp_path, monkeypatch):
+    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda: None)
+    good = tmp_path / "good.txt"
+    broken = tmp_path / "broken-link"
+    good.write_text("good", encoding="utf-8")
+    broken.write_text("", encoding="utf-8")
+    tool = ListFilesTool(make_config(tmp_path))
+    original_resolve = Path.resolve
+
+    def resolve(path, *args, **kwargs):
+        if path == broken:
+            raise OSError("unresolvable reparse point")
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+
+    result = load(run(tool.execute(path=".", pattern="*", sort="path", limit=10)))
+
+    assert result["files"] == ["good.txt"]
+
+
+def test_glob_python_fallback_prunes_ignored_and_excluded_directories(tmp_path, monkeypatch):
+    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda: None)
+    (tmp_path / ".gitignore").write_text("ignored/\n", encoding="utf-8")
+    (tmp_path / "ignored").mkdir()
+    (tmp_path / "ignored" / "ignored-child.txt").write_text("ignored", encoding="utf-8")
+    (tmp_path / "excluded").mkdir()
+    (tmp_path / "excluded" / "excluded-child.txt").write_text("excluded", encoding="utf-8")
+    (tmp_path / "nested").mkdir()
+    (tmp_path / "nested" / ".gitignore").write_text("secret/\n", encoding="utf-8")
+    (tmp_path / "nested" / "secret").mkdir()
+    (tmp_path / "nested" / "secret" / "nested-secret.txt").write_text(
+        "ignored",
+        encoding="utf-8",
+    )
+    (tmp_path / "good.txt").write_text("good", encoding="utf-8")
+    tool = ListFilesTool(make_config(tmp_path))
+    original_resolve = Path.resolve
+
+    def resolve(path, *args, **kwargs):
+        if path.name in {
+            "ignored-child.txt",
+            "excluded-child.txt",
+            "nested-secret.txt",
+        }:
+            raise AssertionError(f"pruned directory was traversed: {path}")
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+
+    result = load(run(tool.execute(
+        path=".",
+        pattern="**/*",
+        exclude=["excluded/**"],
+        sort="path",
+        limit=10,
+    )))
+
+    assert result["files"] == ["good.txt"]
+
+
+def test_glob_gitignore_star_does_not_cross_directories(tmp_path, monkeypatch):
+    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda: None)
+    (tmp_path / ".git" / "info").mkdir(parents=True)
+    (tmp_path / ".git" / "info" / "exclude").write_text(
+        "local-secret.txt\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".gitignore").write_text("docs/*.txt\n", encoding="utf-8")
+    (tmp_path / "local-secret.txt").write_text("ignored", encoding="utf-8")
+    (tmp_path / "docs" / "sub").mkdir(parents=True)
+    (tmp_path / "docs" / "direct.txt").write_text("ignored", encoding="utf-8")
+    (tmp_path / "docs" / "sub" / "deep.txt").write_text("visible", encoding="utf-8")
+    tool = ListFilesTool(make_config(tmp_path))
+
+    result = load(run(tool.execute(
+        path=".",
+        pattern="**/*.txt",
+        sort="path",
+        limit=10,
+    )))
+
+    assert result["files"] == ["docs/sub/deep.txt"]
 
 
 def test_glob_uses_ripgrep_for_directory_listing(tmp_path, monkeypatch):
@@ -377,7 +554,7 @@ def test_glob_uses_ripgrep_for_directory_listing(tmp_path, monkeypatch):
         calls.append((args, kwargs))
         return FakePopen(args, stdout_text="src/app.py\nREADME.md\n", **kwargs)
 
-    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda config: fake_rg)
+    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda: fake_rg)
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
     tool = ListFilesTool(make_config(tmp_path))
 
@@ -389,7 +566,8 @@ def test_glob_uses_ripgrep_for_directory_listing(tmp_path, monkeypatch):
     assert "README.md" in result["files"]
     assert result["total_known"] is True
     assert calls
-    assert ["--glob", "*"] not in [calls[0][0][index:index + 2] for index in range(len(calls[0][0]) - 1)]
+    assert "--glob" not in calls[0][0]
+    assert calls[0][0][calls[0][0].index("--max-depth") + 1] == "1"
 
 
 def test_glob_streaming_ripgrep_stops_after_page_plus_one(tmp_path, monkeypatch):
@@ -404,7 +582,7 @@ def test_glob_streaming_ripgrep_stops_after_page_plus_one(tmp_path, monkeypatch)
         proc_holder["proc"] = proc
         return proc
 
-    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda config: fake_rg)
+    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda: fake_rg)
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
     tool = ListFilesTool(make_config(tmp_path, command_timeout_seconds=30))
 
@@ -444,7 +622,7 @@ def test_glob_python_fallback_when_ripgrep_times_out(tmp_path, monkeypatch):
             "scanned_entries": 1,
         }
 
-    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda config: fake_rg)
+    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda: fake_rg)
     monkeypatch.setattr(subprocess, "Popen", hanging_popen)
     monkeypatch.setattr(code_python_fallback, "_glob_files_python", fake_python)
     tool = ListFilesTool(make_config(tmp_path, command_timeout_seconds=1))
@@ -458,7 +636,7 @@ def test_glob_python_fallback_when_ripgrep_times_out(tmp_path, monkeypatch):
 
 
 def test_glob_observation_events_do_not_change_result(tmp_path, monkeypatch):
-    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda config: None)
+    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda: None)
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("print('hi')", encoding="utf-8")
     tool = ListFilesTool(make_config(tmp_path))
@@ -487,7 +665,7 @@ def test_tool_manager_preserves_glob_pattern_argument(tmp_path, monkeypatch):
         calls.append((args, kwargs))
         return FakePopen(args, stdout_text="src/app.py\nsrc/app.ts\n", **kwargs)
 
-    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda config: fake_rg)
+    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda: fake_rg)
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
     manager = ToolManager({
         "tools": {
@@ -504,14 +682,14 @@ def test_tool_manager_preserves_glob_pattern_argument(tmp_path, monkeypatch):
 
     result = load(run(manager.execute_tool("glob", {
         "path": ".",
-        "pattern": "*.py",
+        "pattern": "**/*.py",
         "limit": 10,
     })))
 
     assert result["engine"] == "rg"
     assert result["files"] == ["src/app.py"]
     args, _kwargs = calls[0]
-    assert ["--glob", "*.py"] == args[args.index("--glob"):args.index("--glob") + 2]
+    assert "--glob" not in args
 
 
 def test_tool_manager_normalizes_glob_single_argument_wildcard_as_pattern(tmp_path, monkeypatch):
@@ -521,10 +699,10 @@ def test_tool_manager_normalizes_glob_single_argument_wildcard_as_pattern(tmp_pa
 
     def fake_popen(args, **kwargs):
         assert kwargs["cwd"] == str(tmp_path)
-        assert ["--glob", "backend/core/tools/*.py"] == args[args.index("--glob"):args.index("--glob") + 2]
+        assert "--glob" not in args
         return FakePopen(args, stdout_text="backend/core/tools/code_tools.py\n", **kwargs)
 
-    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda config: fake_rg)
+    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda: fake_rg)
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
     manager = ToolManager({
         "tools": {
@@ -610,7 +788,7 @@ def test_read_file_rejects_non_utf8(tmp_path):
 
 
 def test_grep_returns_matching_lines_and_skips_non_utf8(tmp_path, monkeypatch):
-    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda config: None)
+    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda: None)
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("alpha\nneedle here\n", encoding="utf-8")
     (tmp_path / "src" / "other.txt").write_text("no match\n", encoding="utf-8")
@@ -629,10 +807,10 @@ def test_grep_returns_matching_lines_and_skips_non_utf8(tmp_path, monkeypatch):
     assert result["truncated"] is False
 
 
-def test_grep_uses_project_bundled_rg_and_translates_options(tmp_path, monkeypatch):
+def test_grep_uses_ripgrep_and_translates_options(tmp_path, monkeypatch):
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("alpha\nNeedle HERE\n", encoding="utf-8")
-    fake_rg = tmp_path / "data" / "tools" / "ripgrep" / code_tools.DEFAULT_RIPGREP_VERSION / "win32-x64" / "rg.exe"
+    fake_rg = tmp_path / "rg.exe"
     event = {
         "type": "match",
         "data": {
@@ -647,7 +825,7 @@ def test_grep_uses_project_bundled_rg_and_translates_options(tmp_path, monkeypat
         calls.append((args, kwargs))
         return FakePopen(args, stdout_text=json.dumps(event, ensure_ascii=False) + "\n", **kwargs)
 
-    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda config: fake_rg)
+    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda: fake_rg)
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
     tool = SearchFilesTool(make_config(tmp_path))
 
@@ -681,6 +859,20 @@ def test_grep_uses_project_bundled_rg_and_translates_options(tmp_path, monkeypat
     }]
 
 
+def test_ripgrep_resolver_prefers_packaged_binary(tmp_path, monkeypatch):
+    executable_name = "rg.exe" if os.name == "nt" else "rg"
+    bundled = tmp_path / "tools" / "ripgrep" / executable_name
+    bundled.parent.mkdir(parents=True)
+    bundled.write_text("", encoding="utf-8")
+    if os.name != "nt":
+        bundled.chmod(0o755)
+    monkeypatch.setattr(code_ripgrep.sys, "_MEIPASS", str(tmp_path), raising=False)
+
+    resolved = code_ripgrep._resolve_ripgrep_executable()
+
+    assert resolved == bundled
+
+
 def test_grep_ripgrep_normalizes_backslash_glob(tmp_path, monkeypatch):
     (tmp_path / "backend" / "core" / "tools").mkdir(parents=True)
     (tmp_path / "backend" / "core" / "tools" / "code_tools.py").write_text("class ListFilesTool:\n", encoding="utf-8")
@@ -691,7 +883,7 @@ def test_grep_ripgrep_normalizes_backslash_glob(tmp_path, monkeypatch):
         calls.append((args, kwargs))
         return FakePopen(args, stdout_text="backend/core/tools/code_tools.py\n", **kwargs)
 
-    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda config: fake_rg)
+    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda: fake_rg)
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
     tool = SearchFilesTool(make_config(tmp_path))
 
@@ -716,7 +908,7 @@ def test_grep_single_file_matches_workspace_relative_glob(tmp_path, monkeypatch)
     def fake_popen(args, **kwargs):
         return FakePopen(args, stdout_text="code_tools.py\n", **kwargs)
 
-    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda config: fake_rg)
+    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda: fake_rg)
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
     tool = SearchFilesTool(make_config(tmp_path))
 
@@ -773,7 +965,7 @@ def test_grep_single_file_rg_fast_path_deduplicates_context(tmp_path, monkeypatc
     def fail_visibility_check(self, path):
         raise AssertionError("single-file rg events should not repeat workspace visibility checks")
 
-    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda config: fake_rg)
+    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda: fake_rg)
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
     monkeypatch.setattr(code_tools.CodeWorkspace, "is_visible", fail_visibility_check)
     tool = SearchFilesTool(make_config(tmp_path))
@@ -821,7 +1013,7 @@ def test_grep_count_uses_ripgrep_when_available(tmp_path, monkeypatch):
             **kwargs,
         )
 
-    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda config: fake_rg)
+    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda: fake_rg)
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
     tool = SearchFilesTool(make_config(tmp_path))
 
@@ -850,7 +1042,7 @@ def test_grep_python_fallback_when_ripgrep_times_out(tmp_path, monkeypatch):
             "engine": "python",
         }
 
-    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda config: fake_rg)
+    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda: fake_rg)
     monkeypatch.setattr(subprocess, "Popen", hanging_popen)
     monkeypatch.setattr(code_python_fallback, "_grep_python", fake_python)
     tool = SearchFilesTool(make_config(tmp_path, command_timeout_seconds=1))
@@ -864,7 +1056,7 @@ def test_grep_python_fallback_when_ripgrep_times_out(tmp_path, monkeypatch):
 
 
 def test_grep_python_fallback_supports_regex_and_ignore_case(tmp_path, monkeypatch):
-    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda config: None)
+    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda: None)
     (tmp_path / "notes.txt").write_text("Alpha\nneedle-42\n", encoding="utf-8")
     tool = SearchFilesTool(make_config(tmp_path))
 
@@ -1241,24 +1433,6 @@ def test_tool_manager_full_exposure_keeps_write_internal(tmp_path):
 
     assert "edit" in names
     assert "write" not in names
-
-
-def test_tool_manager_passes_top_level_ripgrep_config_to_code_tools(tmp_path):
-    manager = ToolManager({
-        "tools": {
-            "enabled": True,
-            "ripgrep": {"version": "99.0.0", "install_dir": "data/tools/ripgrep"},
-            "builtin": {
-                "web_search": {"enabled": False},
-                "code": {
-                    "enabled": True,
-                    "workspace_roots": [str(tmp_path)],
-                },
-            },
-        }
-    })
-
-    assert manager._code_tools_config["ripgrep"]["version"] == "99.0.0"
 
 
 def test_tool_manager_normalizes_compact_run_command_arguments(tmp_path):

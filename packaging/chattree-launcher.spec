@@ -12,6 +12,7 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 REPO_ROOT = Path(os.environ.get("CHATTREE_REPO_ROOT", SPECPATH)).resolve()
 ONE_DIR = os.environ.get("CHATTREE_PYINSTALLER_ONE_DIR") == "1"
 ENTRYPOINT = REPO_ROOT / "packaging" / "chattree_launcher_entry.py"
+RIPGREP_BINARY = Path(os.environ["CHATTREE_BUNDLED_RIPGREP"]).resolve()
 
 datas = []
 datas += collect_data_files("backend.core.model")
@@ -40,12 +41,13 @@ hiddenimports += [
     "uvicorn.lifespan.on",
 ]
 
+binaries = [(str(RIPGREP_BINARY), "tools/ripgrep")]
 block_cipher = None
 
 a = Analysis(
     [str(ENTRYPOINT)],
     pathex=[str(REPO_ROOT)],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],

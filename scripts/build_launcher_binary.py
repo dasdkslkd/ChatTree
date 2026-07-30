@@ -18,6 +18,7 @@ from build_server_binary import (
     REPO_ROOT,
     ensure_build_venv,
     install_build_dependencies,
+    prepare_bundled_ripgrep,
     _remove_path,
     run_checked,
     venv_python,
@@ -46,12 +47,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     python = venv_python(venv_dir)
     if not args.skip_install:
         install_build_dependencies(python)
+    ripgrep_binary = prepare_bundled_ripgrep(build_root)
     run_pyinstaller(
         python,
         dist_dir=dist_dir,
         work_dir=work_dir,
         clean=args.clean,
         one_dir=args.one_dir,
+        ripgrep_binary=ripgrep_binary,
     )
 
     binary = binary_path(dist_dir, one_dir=args.one_dir)
@@ -109,11 +112,13 @@ def run_pyinstaller(
     work_dir: Path,
     clean: bool,
     one_dir: bool,
+    ripgrep_binary: Path,
 ) -> None:
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
     env["CHATTREE_REPO_ROOT"] = str(REPO_ROOT)
     env["CHATTREE_PYINSTALLER_ONE_DIR"] = "1" if one_dir else "0"
+    env["CHATTREE_BUNDLED_RIPGREP"] = str(ripgrep_binary)
     command = [
         str(python),
         "-m",

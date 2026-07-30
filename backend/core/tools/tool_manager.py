@@ -135,8 +135,6 @@ class ToolManager:
             builtin_config["web_search"] = tools_config["web_search"]
         if "fetch_url" not in builtin_config and "fetch_url" in tools_config:
             builtin_config["fetch_url"] = tools_config["fetch_url"]
-        if "ripgrep" not in builtin_config and "ripgrep" in tools_config:
-            builtin_config["ripgrep"] = tools_config["ripgrep"]
         return builtin_config
 
     def _register_legacy_mcp_tools(self, mcp_config: Dict[str, Any]):
@@ -184,8 +182,6 @@ class ToolManager:
             logger.info("Registered built-in web tool and internal web_search/fetch_url tools")
 
         code_config = dict(tools_config.get("code", {}) or {})
-        if "ripgrep" in tools_config and "ripgrep" not in code_config:
-            code_config["ripgrep"] = tools_config["ripgrep"]
         command_config = tools_config.get("command", {})
         code_enabled = code_config.get("enabled", True)
         command_enabled = command_config.get("enabled", code_enabled)

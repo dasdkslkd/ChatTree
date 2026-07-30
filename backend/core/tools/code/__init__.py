@@ -1,6 +1,5 @@
 from .common import (
     DEFAULT_CODE_WORKSPACE,
-    DEFAULT_RIPGREP_VERSION,
     FINISHED_STATUS_VALUES,
     CodeToolConfig,
     CodeToolError,
@@ -17,7 +16,6 @@ from .apply_patch import ApplyPatchTool
 
 __all__ = [
     "DEFAULT_CODE_WORKSPACE",
-    "DEFAULT_RIPGREP_VERSION",
     "FINISHED_STATUS_VALUES",
     "CodeToolConfig",
     "CodeToolError",

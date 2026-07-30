@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import time
 from pathlib import Path
@@ -18,13 +19,28 @@ def _matches_excluded_glob(
 ) -> bool:
     if not exclude_globs:
         return False
-    return any(common._matches_glob(path, pattern, workspace=workspace, root=root) for pattern in exclude_globs)
+    return any(
+        common._matches_glob(
+            path,
+            pattern,
+            workspace=workspace,
+            root=root,
+            recursive_basename=True,
+        )
+        for pattern in exclude_globs
+    )
 
 
 def _iter_grep_files(root: Path, glob: str, *, workspace: Optional[CodeWorkspace] = None) -> Iterable[Path]:
     glob = common._normalize_glob_pattern(glob)
     if root.is_file():
-        if common._matches_glob(root, glob, workspace=workspace):
+        if common._matches_glob(
+            root,
+            glob,
+            workspace=workspace,
+            root=root,
+            recursive_basename=True,
+        ):
             yield root
         return
     search_glob = common._glob_for_search_root(workspace, root, glob) if workspace is not None else glob
@@ -36,22 +52,71 @@ def _iter_grep_files(root: Path, glob: str, *, workspace: Optional[CodeWorkspace
         yield from root.rglob(search_glob)
 
 
-def _iter_glob_candidates(root: Path, patterns: List[str], workspace: CodeWorkspace) -> Iterable[Path]:
-    seen: set[Path] = set()
-    for pattern in patterns:
-        search_pattern = common._glob_for_search_root(workspace, root, pattern)
-        if common._is_match_all_glob(search_pattern):
-            candidates = root.rglob("*")
-        elif common._glob_has_path_separator(search_pattern):
-            candidates = root.glob(search_pattern)
-        else:
-            candidates = root.rglob(search_pattern)
-        for candidate in candidates:
-            resolved = candidate.resolve()
-            if resolved in seen:
-                continue
-            seen.add(resolved)
-            yield candidate
+def _iter_glob_candidates(
+    root: Path,
+    patterns: List[str],
+    workspace: CodeWorkspace,
+    *,
+    exclude_globs: List[str],
+    include_hidden: bool,
+    respect_gitignore: bool,
+    ignore_matcher: "common._GitIgnoreMatcher",
+) -> Iterable[Path]:
+    patterns = [common._glob_for_search_root(workspace, root, pattern) for pattern in patterns]
+    exclude_globs = [
+        common._glob_for_search_root(workspace, root, pattern)
+        for pattern in exclude_globs
+    ]
+    max_depth = (
+        None
+        if any("**" in pattern for pattern in patterns)
+        else max(len(pattern.split("/")) for pattern in patterns)
+    )
+    for current, dirnames, filenames in os.walk(root, topdown=True):
+        current_path = Path(current)
+        kept_dirs: List[str] = []
+        for names, is_dir in ((dirnames, True), (filenames, False)):
+            for name in names:
+                candidate = current_path / name
+                try:
+                    resolved = candidate.resolve()
+                    depth = len(resolved.relative_to(root).parts)
+                    if not workspace.is_visible(resolved):
+                        continue
+                    if common._should_skip_python_path(
+                        resolved,
+                        root,
+                        hidden=include_hidden,
+                        no_ignore=respect_gitignore is False,
+                        ignore_matcher=ignore_matcher,
+                    ):
+                        continue
+                    if any(
+                        common._matches_glob(
+                            resolved,
+                            pattern,
+                            root=root,
+                        )
+                        for pattern in exclude_globs
+                    ):
+                        continue
+                except (OSError, ValueError):
+                    continue
+                if is_dir and (
+                    max_depth is None
+                    or depth < max_depth
+                ):
+                    kept_dirs.append(name)
+                if any(
+                    common._matches_glob(
+                        resolved,
+                        pattern,
+                        root=root,
+                    )
+                    for pattern in patterns
+                ):
+                    yield resolved
+        dirnames[:] = kept_dirs
 
 
 def _compile_python_matcher(pattern: str, *, fixed_strings: bool, ignore_case: bool):
@@ -85,45 +150,6 @@ def _search_payload(
     if files is not None:
         payload["files"] = sorted(files)
     return payload
-
-
-def _accept_glob_candidate(
-    candidate: Path,
-    *,
-    workspace: CodeWorkspace,
-    root: Path,
-    patterns: List[str],
-    path_regex: Optional[re.Pattern[str]],
-    files_only: bool,
-    include_hidden: bool,
-    exclude_globs: List[str],
-    ignore_matcher: Optional["common._GitIgnoreMatcher"] = None,
-    respect_gitignore: bool = True,
-) -> Optional[Path]:
-    resolved = candidate.resolve()
-    if files_only and not resolved.is_file():
-        return None
-    if not files_only and not (resolved.is_file() or resolved.is_dir()):
-        return None
-    if not workspace.is_visible(resolved):
-        return None
-    search_root = root if root.is_dir() else root.parent
-    if common._should_skip_python_path(
-        resolved,
-        search_root,
-        hidden=include_hidden,
-        no_ignore=respect_gitignore is False,
-        ignore_matcher=ignore_matcher,
-    ):
-        return None
-    if _matches_excluded_glob(resolved, search_root, exclude_globs, workspace=workspace):
-        return None
-    if not any(common._matches_glob(resolved, pattern, workspace=workspace, root=root) for pattern in patterns):
-        return None
-    relative = workspace.relative(resolved)
-    if path_regex and not path_regex.search(relative):
-        return None
-    return resolved
 
 
 def _grep_python(
@@ -250,40 +276,71 @@ def _glob_files_python(
 
     candidates: Iterable[Path]
     if root.is_file():
-        candidates = [root]
+        search_root = root.parent
+        candidates = (
+            [root]
+            if (
+                not common._should_skip_python_path(
+                    root,
+                    search_root,
+                    hidden=include_hidden,
+                    no_ignore=respect_gitignore is False,
+                    ignore_matcher=ignore_matcher,
+                )
+                and not any(
+                    common._matches_glob(
+                        root,
+                        pattern,
+                        workspace=workspace,
+                        root=root,
+                    )
+                    for pattern in exclude_globs
+                )
+                and any(
+                    common._matches_glob(
+                        root,
+                        pattern,
+                        workspace=workspace,
+                        root=root,
+                    )
+                    for pattern in patterns
+                )
+            )
+            else []
+        )
     else:
-        candidates = _iter_glob_candidates(root, patterns, workspace)
+        candidates = _iter_glob_candidates(
+            root,
+            patterns,
+            workspace,
+            exclude_globs=exclude_globs,
+            include_hidden=include_hidden,
+            respect_gitignore=respect_gitignore,
+            ignore_matcher=ignore_matcher,
+        )
 
-    for candidate in candidates:
+    for resolved in candidates:
         scanned_entries += 1
-        resolved = candidate.resolve()
         if resolved in seen:
             continue
         seen.add(resolved)
-        accepted = _accept_glob_candidate(
-            resolved,
-            workspace=workspace,
-            root=root,
-            patterns=patterns,
-            path_regex=path_regex,
-            files_only=files_only,
-            include_hidden=include_hidden,
-            exclude_globs=exclude_globs,
-            ignore_matcher=ignore_matcher,
-            respect_gitignore=respect_gitignore,
-        )
-        if accepted is None:
+        if files_only and not resolved.is_file():
+            continue
+        if not files_only and not (resolved.is_file() or resolved.is_dir()):
+            continue
+        relative = workspace.relative(resolved)
+        if path_regex and not path_regex.search(relative):
             continue
         if early_page:
             observed_count += 1
             if observed_count <= offset:
                 continue
             if len(matches) < limit:
-                matches.append(accepted)
+                matches.append(resolved)
                 continue
             stopped_for_page = True
             break
-        matches.append(accepted)
+        matches.append(resolved)
         observed_count = len(matches)
 
     if sort == "mtime":

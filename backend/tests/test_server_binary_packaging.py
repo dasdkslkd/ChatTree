@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import io
+import os
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -49,19 +53,24 @@ def test_launcher_entrypoint_treats_clean_shutdown_as_success(monkeypatch):
 
 
 def test_pyinstaller_spec_collects_required_utf8_runtime_data():
-    spec_text = (REPO_ROOT / "packaging" / "chattree-server.spec").read_text(
+    for spec_name in ("chattree-server.spec", "chattree-launcher.spec"):
+        spec_text = (REPO_ROOT / "packaging" / spec_name).read_text(encoding="utf-8")
+
+        assert "collect_data_files(\"backend.core.model\")" in spec_text
+        assert "collect_data_files(\"backend.core.prompts\")" in spec_text
+        assert "collect_data_files(\"backend.workers\")" in spec_text
+        assert "CHATTREE_BUNDLED_RIPGREP" in spec_text
+        assert '"tools/ripgrep"' in spec_text
+        assert "binaries=binaries" in spec_text
+        assert "\"main\"" in spec_text
+    server_spec = (REPO_ROOT / "packaging" / "chattree-server.spec").read_text(
         encoding="utf-8"
     )
-
-    assert "collect_data_files(\"backend.core.model\")" in spec_text
-    assert "collect_data_files(\"backend.core.prompts\")" in spec_text
-    assert "collect_data_files(\"backend.workers\")" in spec_text
-    assert "\"main\"" in spec_text
-    assert "\"backend.server_cli\"" in spec_text
-    assert "\"backend.core.model.providers.openai_compatible\"" in spec_text
-    assert "\"backend.core.model.providers.anthropic_provider\"" in spec_text
-    assert "\"backend.core.model.providers.gemini_provider\"" in spec_text
-    assert "\"chattree_protocol.http_errors\"" in spec_text
+    assert "\"backend.server_cli\"" in server_spec
+    assert "\"backend.core.model.providers.openai_compatible\"" in server_spec
+    assert "\"backend.core.model.providers.anthropic_provider\"" in server_spec
+    assert "\"backend.core.model.providers.gemini_provider\"" in server_spec
+    assert "\"chattree_protocol.http_errors\"" in server_spec
 
 
 def test_build_script_constructs_pyinstaller_command(tmp_path, monkeypatch):
@@ -71,6 +80,8 @@ def test_build_script_constructs_pyinstaller_command(tmp_path, monkeypatch):
     )
     python.parent.mkdir(parents=True)
     python.write_text("", encoding="utf-8")
+    ripgrep_binary = tmp_path / ("rg.exe" if os.name == "nt" else "rg")
+    ripgrep_binary.write_text("", encoding="utf-8")
 
     def fake_run(command, **kwargs):
         calls.append((list(command), dict(kwargs)))
@@ -83,6 +94,7 @@ def test_build_script_constructs_pyinstaller_command(tmp_path, monkeypatch):
         work_dir=tmp_path / "work",
         clean=True,
         one_dir=False,
+        ripgrep_binary=ripgrep_binary,
     )
 
     assert len(calls) == 1
@@ -101,6 +113,42 @@ def test_build_script_constructs_pyinstaller_command(tmp_path, monkeypatch):
     env = calls[0][1]["env"]
     assert env["PYTHONIOENCODING"] == "utf-8"
     assert env["CHATTREE_PYINSTALLER_ONE_DIR"] == "0"
+    assert env["CHATTREE_BUNDLED_RIPGREP"] == str(ripgrep_binary)
+
+
+def test_build_script_downloads_verified_ripgrep_archive(tmp_path, monkeypatch):
+    executable_name = "rg.exe" if sys.platform == "win32" else "rg"
+    archive_buffer = io.BytesIO()
+    with zipfile.ZipFile(archive_buffer, "w") as archive:
+        archive.writestr(f"ripgrep-test/{executable_name}", b"bundled-ripgrep")
+    archive_bytes = archive_buffer.getvalue()
+    digest = hashlib.sha256(archive_bytes).hexdigest()
+    arch = "arm64" if build_server_binary.platform.machine().lower() in {"arm64", "aarch64"} else "x64"
+    requests = []
+    monkeypatch.setattr(build_server_binary, "RIPGREP_VERSION", "test-version")
+    monkeypatch.setattr(
+        build_server_binary,
+        "RIPGREP_ASSETS",
+        {(sys.platform, arch): ("test-target.zip", digest)},
+    )
+
+    def fake_urlopen(request, **_kwargs):
+        requests.append(request.full_url)
+        return io.BytesIO(archive_bytes)
+
+    monkeypatch.setattr(
+        build_server_binary.urllib.request,
+        "urlopen",
+        fake_urlopen,
+    )
+
+    binary = build_server_binary.prepare_bundled_ripgrep(tmp_path)
+
+    assert binary.read_bytes() == b"bundled-ripgrep"
+    assert requests == [
+        "https://github.com/BurntSushi/ripgrep/releases/download/test-version/"
+        "ripgrep-test-version-test-target.zip"
+    ]
 
 
 def test_build_script_install_uses_isolated_venv_python(tmp_path, monkeypatch):

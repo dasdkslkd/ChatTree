@@ -9,6 +9,8 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from pathspec import GitIgnoreSpec
+
 from ..base import BaseTool
 from ..security.logical_sandbox import DEFAULT_PROTECTED_PATHS
 from ...persistence.home import resolve_chattree_home
@@ -16,16 +18,11 @@ from ...runs.types import FINISHED_RUN_STATUSES
 
 
 DEFAULT_CODE_WORKSPACE = Path("workspaces") / "default"
-DEFAULT_RIPGREP_VERSION = "15.1.0"
 FINISHED_STATUS_VALUES = {status.value for status in FINISHED_RUN_STATUSES}
 
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parents[4]
-
-
-def _default_ripgrep_install_dir() -> Path:
-    return resolve_chattree_home() / "tools" / "ripgrep"
 
 
 def default_code_workspace() -> Path:
@@ -152,23 +149,12 @@ class CodeToolConfig:
     max_read_chars: int = 20000
     max_output_chars: int = 60000
     allow_parent_dir_creation: bool = False
-    ripgrep_version: str = DEFAULT_RIPGREP_VERSION
-    ripgrep_install_dir: Path = _default_ripgrep_install_dir()
 
     @classmethod
     def from_dict(cls, raw: Optional[Dict[str, Any]] = None) -> "CodeToolConfig":
         cfg = raw or {}
         roots = cfg.get("workspace_roots") or [default_code_workspace()]
         protected = cfg.get("protected_paths") or DEFAULT_PROTECTED_PATHS
-        ripgrep_cfg = cfg.get("ripgrep") if isinstance(cfg.get("ripgrep"), dict) else {}
-        ripgrep_install_dir = (
-            ripgrep_cfg.get("install_dir")
-            or cfg.get("ripgrep_install_dir")
-            or _default_ripgrep_install_dir()
-        )
-        ripgrep_install_path = Path(str(ripgrep_install_dir)).expanduser()
-        if not ripgrep_install_path.is_absolute():
-            ripgrep_install_path = resolve_chattree_home() / ripgrep_install_path
         return cls(
             workspace_roots=[Path(root).expanduser().resolve() for root in roots],
             protected_paths=[Path(path) for path in protected],
@@ -177,12 +163,6 @@ class CodeToolConfig:
             max_read_chars=int(cfg.get("max_read_chars", 20000)),
             max_output_chars=int(cfg.get("max_output_chars", 60000)),
             allow_parent_dir_creation=bool(cfg.get("allow_parent_dir_creation", False)),
-            ripgrep_version=str(
-                ripgrep_cfg.get("version")
-                or cfg.get("ripgrep_version")
-                or DEFAULT_RIPGREP_VERSION
-            ),
-            ripgrep_install_dir=ripgrep_install_path.resolve(),
         )
 
     @classmethod
@@ -233,11 +213,10 @@ class CodeWorkspace:
 
     def is_visible(self, path: Path) -> bool:
         try:
-            resolved = path.resolve()
-            self._check_contained(resolved)
-            self._check_unprotected(resolved)
+            self._check_contained(path)
+            self._check_unprotected(path)
             return True
-        except CodeToolError:
+        except (CodeToolError, OSError):
             return False
 
     def _containing_root(self, target: Path) -> Optional[Path]:
@@ -296,7 +275,7 @@ def _glob_for_search_root(workspace: Optional[CodeWorkspace], root: Path, patter
     normalized = _normalize_glob_pattern(pattern)
     if workspace is None or root.is_file() or _is_match_all_glob(normalized):
         return normalized
-    root_relative = workspace.relative(root.resolve()).replace("\\", "/")
+    root_relative = workspace.relative(root).replace("\\", "/")
     if root_relative and root_relative != ".":
         prefix = root_relative.rstrip("/") + "/"
         if normalized == root_relative:
@@ -306,43 +285,49 @@ def _glob_for_search_root(workspace: Optional[CodeWorkspace], root: Path, patter
     return normalized
 
 
-def _glob_match_texts(path: Path, *, workspace: Optional[CodeWorkspace] = None, root: Optional[Path] = None) -> List[str]:
-    texts = [path.name, path.as_posix()]
-    if workspace is not None:
-        texts.append(workspace.relative(path.resolve()))
-    if root is not None:
-        try:
-            texts.append(path.resolve().relative_to(root.resolve()).as_posix())
-        except ValueError:
-            pass
-    normalized: List[str] = []
-    for text in texts:
-        value = str(text).replace("\\", "/")
-        normalized.append(value)
-        while value.startswith("./"):
-            value = value[2:]
-            normalized.append(value)
-    return list(dict.fromkeys(normalized))
-
-
 def _matches_glob(
     path: Path,
     pattern: str,
     *,
     workspace: Optional[CodeWorkspace] = None,
     root: Optional[Path] = None,
+    recursive_basename: bool = False,
 ) -> bool:
-    normalized = _normalize_glob_pattern(pattern)
-    if _is_match_all_glob(normalized):
-        return True
-    patterns = [normalized]
-    if normalized.startswith("**/"):
-        patterns.append(normalized[3:])
-    return any(
-        fnmatch(text, candidate_pattern)
-        for candidate_pattern in patterns
-        for text in _glob_match_texts(path, workspace=workspace, root=root)
+    normalized = (
+        _glob_for_search_root(workspace, root, pattern)
+        if workspace is not None and root is not None
+        else _normalize_glob_pattern(pattern)
     )
+    if recursive_basename and "/" not in normalized:
+        normalized = f"**/{normalized}"
+    search_root = root.parent if root is not None and root.is_file() else root
+    candidates: List[tuple[str, ...]] = []
+    if search_root is not None:
+        try:
+            candidates.append(path.relative_to(search_root).parts)
+        except ValueError:
+            pass
+    if root is not None and root.is_file() and workspace is not None:
+        candidates.append(tuple(workspace.relative(path).replace("\\", "/").split("/")))
+    if not candidates:
+        candidates.append((path.name,))
+    pattern_parts = tuple(part for part in normalized.split("/") if part)
+
+    for path_parts in candidates:
+        states = [True]
+        for part in pattern_parts:
+            states.append(states[-1] and part == "**")
+        for path_part in path_parts:
+            next_states = [False]
+            for index, pattern_part in enumerate(pattern_parts, start=1):
+                if pattern_part == "**":
+                    next_states.append(next_states[index - 1] or states[index])
+                else:
+                    next_states.append(states[index - 1] and fnmatch(path_part, pattern_part))
+            states = next_states
+        if states[-1]:
+            return True
+    return False
 
 
 def _string_list(value: Any) -> List[str]:
@@ -397,58 +382,67 @@ def _should_skip_python_path(
 
 def _is_hidden_under(path: Path, root: Path) -> bool:
     try:
-        relative = path.resolve().relative_to(root.resolve())
+        relative = path.relative_to(root)
     except ValueError:
         relative = Path(path.name)
     return any(part.startswith(".") for part in relative.parts if part not in {"", "."})
 
 
 class _GitIgnoreMatcher:
-    def __init__(self, root: Path, patterns: List[str]):
-        self.root = root.resolve()
-        self.patterns = patterns
+    def __init__(self, root: Path):
+        self.root = root
+        self.patterns: Dict[Path, GitIgnoreSpec] = {}
 
     @classmethod
     def for_root(cls, root: Path, workspace: CodeWorkspace) -> "_GitIgnoreMatcher":
-        workspace_root = workspace._containing_root(root.resolve()) or workspace.default_root
-        gitignore = workspace_root / ".gitignore"
-        patterns: List[str] = []
-        try:
-            for line in gitignore.read_text(encoding="utf-8").splitlines():
-                stripped = line.strip()
-                if not stripped or stripped.startswith("#"):
-                    continue
-                patterns.append(stripped)
-        except (OSError, UnicodeDecodeError):
-            pass
-        return cls(workspace_root, patterns)
+        workspace_root = workspace._containing_root(root) or workspace.default_root
+        matcher = cls(workspace_root)
+        git_dir = workspace_root / ".git"
+        if git_dir.is_file():
+            try:
+                marker = git_dir.read_text(encoding="utf-8").strip()
+                if marker.startswith("gitdir:"):
+                    git_dir = (workspace_root / marker.split(":", 1)[1].strip()).resolve()
+                    commondir = git_dir / "commondir"
+                    if commondir.is_file():
+                        git_dir = (
+                            git_dir / commondir.read_text(encoding="utf-8").strip()
+                        ).resolve()
+            except (OSError, UnicodeDecodeError):
+                pass
+        lines: List[str] = []
+        for ignore_file in (git_dir / "info" / "exclude", workspace_root / ".gitignore"):
+            try:
+                lines.extend(ignore_file.read_text(encoding="utf-8").splitlines())
+            except (OSError, UnicodeDecodeError):
+                pass
+        matcher.patterns[workspace_root] = GitIgnoreSpec.from_lines(lines)
+        return matcher
 
     def matches(self, path: Path) -> bool:
         try:
-            rel = path.resolve().relative_to(self.root).as_posix()
+            parts = path.relative_to(self.root).parts
         except ValueError:
             return False
-        ignored = False
-        for raw_pattern in self.patterns:
-            negated = raw_pattern.startswith("!")
-            pattern = raw_pattern[1:] if negated else raw_pattern
-            if self._matches_pattern(rel, pattern):
-                ignored = not negated
-        return ignored
-
-    def _matches_pattern(self, rel: str, pattern: str) -> bool:
-        pattern = pattern.strip()
-        if not pattern:
-            return False
-        anchored = pattern.startswith("/")
-        pattern = pattern.lstrip("/")
-        directory_only = pattern.endswith("/")
-        pattern = pattern.rstrip("/")
-        if not pattern:
-            return False
-        if directory_only:
-            return rel == pattern or rel.startswith(pattern + "/")
-        if "/" in pattern or anchored:
-            return fnmatch(rel, pattern) or rel.startswith(pattern + "/")
-        parts = rel.split("/")
-        return any(fnmatch(part, pattern) for part in parts) or fnmatch(rel, pattern)
+        path_is_dir = path.is_dir()
+        for target_depth in range(1, len(parts) + 1):
+            ignored = False
+            for rule_depth in range(target_depth):
+                rule_root = self.root.joinpath(*parts[:rule_depth])
+                if rule_root not in self.patterns:
+                    try:
+                        lines = (rule_root / ".gitignore").read_text(
+                            encoding="utf-8"
+                        ).splitlines()
+                    except (OSError, UnicodeDecodeError):
+                        lines = []
+                    self.patterns[rule_root] = GitIgnoreSpec.from_lines(lines)
+                relative = Path(*parts[rule_depth:target_depth]).as_posix()
+                if target_depth < len(parts) or path_is_dir:
+                    relative += "/"
+                result = self.patterns[rule_root].check_file(relative)
+                if result.include is not None:
+                    ignored = result.include
+            if ignored:
+                return True
+        return False

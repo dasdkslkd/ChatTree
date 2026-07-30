@@ -3,11 +3,11 @@ from __future__ import annotations
 import base64
 import json
 import os
-import platform
 import queue
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from collections import defaultdict
@@ -15,44 +15,21 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from . import common, python_fallback
-from .common import CodeToolConfig, CodeWorkspace
+from .common import CodeWorkspace
 from ...subprocess_utils import subprocess_window_kwargs
 
 
-def _resolve_ripgrep_executable(config: CodeToolConfig) -> Optional[Path]:
+def _resolve_ripgrep_executable() -> Optional[Path]:
     executable = "rg.exe" if os.name == "nt" else "rg"
-    platform_dir = _ripgrep_platform_dir()
-    candidates = [
-        config.ripgrep_install_dir / config.ripgrep_version / platform_dir / executable,
-        config.ripgrep_install_dir / config.ripgrep_version / platform_dir / "rg",
-        config.ripgrep_install_dir / platform_dir / executable,
-        config.ripgrep_install_dir / platform_dir / "rg",
-        config.ripgrep_install_dir / executable,
-        config.ripgrep_install_dir / "rg",
-    ]
-    for candidate in candidates:
-        if not candidate.is_file():
-            continue
-        if os.name != "nt" and not os.access(candidate, os.X_OK):
-            continue
-        return candidate
+    bundle_root = getattr(sys, "_MEIPASS", None)
+    if bundle_root:
+        bundled = Path(bundle_root) / "tools" / "ripgrep" / executable
+        if bundled.is_file() and (os.name == "nt" or os.access(bundled, os.X_OK)):
+            return bundled
     path_executable = shutil.which(executable) or shutil.which("rg")
     if path_executable:
         return Path(path_executable)
     return None
-
-
-def _ripgrep_platform_dir() -> str:
-    system = platform.system().lower()
-    machine = platform.machine().lower()
-    arch = "arm64" if machine in {"arm64", "aarch64"} else "x64"
-    if system == "windows":
-        return f"win32-{arch}"
-    if system == "darwin":
-        return f"darwin-{arch}"
-    if system == "linux":
-        return f"linux-{arch}"
-    return f"{system or 'unknown'}-{arch}"
 
 
 def _rg_json_text(value: Any) -> Optional[str]:
@@ -103,7 +80,13 @@ def _grep_with_rg(
     timeout_seconds: int,
     event_sink: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
-    if root.is_file() and not common._matches_glob(root, glob, workspace=workspace):
+    if root.is_file() and not common._matches_glob(
+        root,
+        glob,
+        workspace=workspace,
+        root=root,
+        recursive_basename=True,
+    ):
         return ({
             "pattern": pattern,
             "matches": [],
@@ -412,7 +395,24 @@ def _glob_files_with_rg(
     event_sink: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
     if root.is_file():
-        if not any(common._matches_glob(root, pattern, workspace=workspace) for pattern in patterns):
+        ignore_matcher = common._GitIgnoreMatcher.for_root(root, workspace)
+        if (
+            common._should_skip_python_path(
+                root,
+                root.parent,
+                hidden=include_hidden,
+                no_ignore=respect_gitignore is False,
+                ignore_matcher=ignore_matcher,
+            )
+            or any(
+                common._matches_glob(root, pattern, workspace=workspace, root=root)
+                for pattern in exclude_globs
+            )
+            or not any(
+                common._matches_glob(root, pattern, workspace=workspace, root=root)
+                for pattern in patterns
+            )
+        ):
             return (common._glob_payload(
                 workspace=workspace,
                 root=root,
@@ -447,16 +447,28 @@ def _glob_files_with_rg(
     argv = [str(rg_path), "--files", "--color", "never", "--no-config"]
     if sort == "path" and files_only:
         argv.extend(["--sort", "path"])
-    if not respect_gitignore:
+    if respect_gitignore:
+        argv.extend([
+            "--no-ignore-dot",
+            "--no-ignore-global",
+            "--no-ignore-parent",
+            "--no-require-git",
+        ])
+    else:
         argv.append("--no-ignore")
     if include_hidden:
         argv.append("--hidden")
+    ignore_matcher = common._GitIgnoreMatcher.for_root(root, workspace)
     rg_patterns = [common._glob_for_search_root(workspace, root, pattern) for pattern in patterns]
-    for pattern in rg_patterns:
-        if pattern and not common._is_match_all_glob(pattern):
-            argv.extend(["--glob", pattern])
-    for exclude_glob in exclude_globs:
-        argv.extend(["--glob", f"!{common._glob_for_search_root(workspace, root, exclude_glob)}"])
+    rg_exclude_globs = [
+        common._glob_for_search_root(workspace, root, pattern)
+        for pattern in exclude_globs
+    ]
+    if all("**" not in pattern for pattern in rg_patterns):
+        argv.extend([
+            "--max-depth",
+            str(max(len(pattern.split("/")) for pattern in rg_patterns)),
+        ])
     argv.extend(["--", "."])
 
     matches: List[Path] = []
@@ -491,33 +503,40 @@ def _glob_files_with_rg(
 
     def add_candidate(candidate: Path) -> bool:
         nonlocal observed_count, stopped_early, stopped_for_page
-        resolved_candidate = candidate.resolve()
-        if resolved_candidate in seen:
+        if candidate in seen:
             return False
-        seen.add(resolved_candidate)
-        accepted = python_fallback._accept_glob_candidate(
-            resolved_candidate,
-            workspace=workspace,
-            root=root,
-            patterns=patterns,
-            path_regex=path_regex,
-            files_only=files_only,
-            include_hidden=include_hidden,
-            exclude_globs=exclude_globs,
-        )
-        if accepted is None:
+        seen.add(candidate)
+        if files_only and not candidate.is_file():
+            return False
+        if not files_only and not (candidate.is_file() or candidate.is_dir()):
+            return False
+        if not workspace.is_visible(candidate):
+            return False
+        if respect_gitignore and ignore_matcher.matches(candidate):
+            return False
+        if any(
+            common._matches_glob(candidate, pattern, root=root)
+            for pattern in rg_exclude_globs
+        ):
+            return False
+        if not any(
+            common._matches_glob(candidate, pattern, root=root)
+            for pattern in rg_patterns
+        ):
+            return False
+        if path_regex and not path_regex.search(workspace.relative(candidate)):
             return False
         if early_page:
             observed_count += 1
             if observed_count <= offset:
                 return False
             if len(matches) < limit:
-                matches.append(accepted)
+                matches.append(candidate)
                 return False
             stopped_early = True
             stopped_for_page = True
             return True
-        matches.append(accepted)
+        matches.append(candidate)
         observed_count = len(matches)
         return False
 
@@ -625,29 +644,12 @@ def _glob_files_with_rg(
                 continue
             scanned_entries += 1
             emit_progress()
-            resolved = (root / relative_text).resolve()
-            if not resolved.is_file() or not workspace.is_visible(resolved):
+            try:
+                resolved = (root / relative_text).resolve()
+            except OSError:
                 continue
-            if not include_hidden and common._is_hidden_under(resolved, root):
-                continue
-            if files_only:
-                if add_candidate(resolved):
-                    break
-                continue
-            ancestors: List[Path] = []
-            parent = resolved.parent
-            while parent != root and root in parent.parents:
-                ancestors.append(parent)
-                parent = parent.parent
-            page_full = False
-            for candidate in reversed(ancestors):
-                if add_candidate(candidate):
-                    page_full = True
-                    break
-            if page_full:
+            if add_candidate(resolved):
                 break
-            else:
-                add_candidate(resolved)
     finally:
         if timed_out or stopped_early:
             stop_reader.set()
@@ -681,19 +683,17 @@ def _glob_files_with_rg(
             return None, _ripgrep_failure_reason("".join(stderr_lines))
 
     if not files_only and root.is_dir() and not stopped_early:
-        ignore_matcher = common._GitIgnoreMatcher.for_root(root, workspace)
-        for candidate in root.rglob("*"):
+        for resolved in python_fallback._iter_glob_candidates(
+            root,
+            patterns,
+            workspace,
+            exclude_globs=exclude_globs,
+            include_hidden=include_hidden,
+            respect_gitignore=respect_gitignore,
+            ignore_matcher=ignore_matcher,
+        ):
             scanned_entries += 1
-            resolved = candidate.resolve()
             if not resolved.is_dir():
-                continue
-            if common._should_skip_python_path(
-                resolved,
-                root,
-                hidden=include_hidden,
-                no_ignore=respect_gitignore is False,
-                ignore_matcher=ignore_matcher,
-            ):
                 continue
             add_candidate(resolved)
             emit_progress()
