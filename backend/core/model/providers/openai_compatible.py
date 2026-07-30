@@ -543,6 +543,7 @@ class OpenAICompatibleProvider(BaseProvider):
             fallback_to_next_params = False
             while True:
                 total_content = ""
+                total_reasoning = ""
                 function_calls = {}
                 response_output_items = {}
                 tool_call_started = False
@@ -575,6 +576,34 @@ class OpenAICompatibleProvider(BaseProvider):
                             if usage := response.get("usage"):
                                 usage_info = usage_from_openai(usage)
                                 total_tokens = usage_total(usage_info, total_tokens)
+                            completed_reasoning = "".join(
+                                self._responses_item_display_text(item)
+                                for item in (response.get("output") or [])
+                                if isinstance(item, dict)
+                                and item.get("type") == "reasoning"
+                            )
+                            if completed_reasoning and completed_reasoning != total_reasoning:
+                                reasoning = (
+                                    completed_reasoning[len(total_reasoning):]
+                                    if total_reasoning
+                                    and completed_reasoning.startswith(total_reasoning)
+                                    else completed_reasoning
+                                    if not total_reasoning
+                                    else ""
+                                )
+                                if reasoning:
+                                    attempt_had_output = True
+                                    total_reasoning += reasoning
+                                    yield StreamChunk(
+                                        status=StreamStatus.CONTENT,
+                                        content=None,
+                                        node_id=stream_controller.node_id if stream_controller else None,
+                                        conversation_id=stream_controller.conversation_id if stream_controller else None,
+                                        error=None,
+                                        tokens_used=0,
+                                        event_type="reasoning",
+                                        reasoning=reasoning,
+                                    )
                             completed_text = self._extract_responses_text(response)
                             if completed_text and completed_text != total_content:
                                 content = (
@@ -719,6 +748,7 @@ class OpenAICompatibleProvider(BaseProvider):
                             reasoning = event.get("delta") or ""
                             if reasoning:
                                 attempt_had_output = True
+                                total_reasoning += reasoning
                                 yield StreamChunk(
                                     status=StreamStatus.CONTENT,
                                     content=None,
@@ -1050,6 +1080,7 @@ class OpenAICompatibleProvider(BaseProvider):
                 ),
                 **({"effort": reasoning_effort} if reasoning_effort else {}),
                 **({"context": controls["context"]} if controls.get("context") else {}),
+                **({"summary": controls["summary"]} if controls.get("summary") else {}),
             }
         if controls.get("include_encrypted_content"):
             existing_include = request_kwargs.get("include")

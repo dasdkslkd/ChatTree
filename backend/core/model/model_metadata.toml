@@ -19,7 +19,7 @@ zai_model_switch = "https://docs.z.ai/devpack/latest-model"
 carrier = "responses_items"
 history_policy = "provider_state"
 strict = true
-controls = { context = "all_turns", include_encrypted_content = true }
+controls = { context = "all_turns", include_encrypted_content = true, summary = "auto" }
 
 [reasoning_profiles.anthropic_thinking]
 carrier = "anthropic_blocks"

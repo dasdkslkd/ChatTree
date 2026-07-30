@@ -46,7 +46,7 @@ def _route(protocol: str) -> ModelRoute:
             "carrier": "responses_items" if protocol == "openai_responses" else "none",
             "history_policy": "provider_state" if protocol == "openai_responses" else "drop",
             "strict": protocol == "openai_responses",
-            "controls": {},
+            "controls": {"summary": "auto"} if protocol == "openai_responses" else {},
         },
     )
 
@@ -807,15 +807,24 @@ def test_openai_responses_stream_emits_tool_call_start_before_final_tool_call():
     asyncio.run(run_case())
 
 
-def test_openai_responses_completed_payload_supplies_missing_final_text():
+def test_openai_responses_completed_payload_supplies_missing_summary_and_final_text():
     async def run_case():
         provider = OpenAICompatibleProvider({"api_key": "test"}, _route("openai_responses"))
 
-        async def fake_iter_sse_events(_path, _body, **_kwargs):
+        async def fake_iter_sse_events(_path, body, **_kwargs):
+            assert body["reasoning"]["summary"] == "auto"
             yield {
                 "type": "response.completed",
                 "response": {
                     "output_text": "completed only answer",
+                    "output": [{
+                        "id": "rs-1",
+                        "type": "reasoning",
+                        "summary": [{
+                            "type": "summary_text",
+                            "text": "completed only summary",
+                        }],
+                    }],
                     "usage": {"input_tokens": 1, "output_tokens": 3, "total_tokens": 4},
                 },
             }
@@ -829,6 +838,9 @@ def test_openai_responses_completed_payload_supplies_missing_final_text():
             )
         ]
 
+        assert [chunk.get("reasoning") for chunk in chunks if chunk.get("reasoning")] == [
+            "completed only summary"
+        ]
         assert [chunk.get("content") for chunk in chunks if chunk.get("content")] == ["completed only answer"]
         assert chunks[-1]["status"] == StreamStatus.COMPLETE
 
