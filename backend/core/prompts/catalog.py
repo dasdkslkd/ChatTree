@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from backend.core.capabilities.skill_loader import strip_frontmatter
+
 TEMPLATE_ROOT = Path(__file__).resolve().parent / "templates"
 _LEADING_HTML_COMMENT_RE = re.compile(r"^\ufeff?\s*<!--.*?-->\s*", re.DOTALL)
 
@@ -64,7 +66,8 @@ PROMPT_SOURCES: dict[str, tuple[str, ...]] = {
 def load_prompt_template(name: str) -> str:
     path = _template_path(name)
     raw = path.read_text(encoding="utf-8")
-    return _LEADING_HTML_COMMENT_RE.sub("", raw, count=1).strip()
+    content = strip_frontmatter(raw)
+    return _LEADING_HTML_COMMENT_RE.sub("", content, count=1).strip()
 
 
 def validate_prompt_catalog(*, require_source_files: bool = False) -> None:

@@ -1,8 +1,12 @@
-<!--
-source:
-- reference/claude-code-cli/tools/AgentTool/prompt.ts
-- reference/claude-code-cli/tools/AgentTool/built-in/planAgent.ts
--->
+---
+name: planner
+description: ChatTree planning agent for implementation design.
+tools:
+  - "*"
+permission_mode: read_only
+max_turns: 500
+timeout_seconds: 86400
+---
 
 # ChatTree Planner Agent Prompt
 

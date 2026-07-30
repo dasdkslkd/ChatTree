@@ -1,9 +1,13 @@
-<!--
-source:
-- reference/claude-code-system-prompts/system-prompts/agent-prompt-workflow-subagent-structured-output.md
-- reference/claude-code-system-prompts/system-prompts/agent-prompt-workflow-subagent-plain-text-output.md
-- reference/claude-code-system-prompts/system-prompts/agent-prompt-worker-fork.md
--->
+---
+name: workflow-worker
+description: ChatTree dynamic workflow worker.
+tools:
+  - "*"
+permission_mode: default
+max_turns: 500
+timeout_seconds: 86400
+runtime: workflow
+---
 
 # ChatTree Workflow Worker Agent Prompt
 

@@ -11,7 +11,18 @@ sys.path.insert(0, ".")
 from backend.api.routes import capabilities as capabilities_route
 from backend.api.routes.capabilities import router
 from backend.core.capabilities.bootstrap import build_capability_registry
+from backend.core.capabilities.types import CapabilitySource
 from backend.core.config.config import Config
+
+
+BUILTIN_AGENT_NAMES = [
+    "explorer",
+    "implementer",
+    "planner",
+    "reviewer",
+    "verifier",
+    "workflow-worker",
+]
 
 
 def write_skill(root: Path, folder: str, name: str, description: str) -> Path:
@@ -125,7 +136,12 @@ def test_build_capability_registry_loads_project_configured_and_active_plugin_ca
     plugin_ids = [plugin["plugin_id"] for plugin in inventory["plugins"]]
 
     assert skill_names == ["project-skill", "extra-skill", "demo-plugin:review"]
-    assert agent_names == ["project-agent", "extra-agent", "demo-plugin:helper"]
+    assert agent_names == [
+        "project-agent",
+        "extra-agent",
+        *BUILTIN_AGENT_NAMES,
+        "demo-plugin:helper",
+    ]
     assert plugin_ids == ["demo-plugin@local"]
     assert registry.get("project-skill").path == default_skill
     assert registry.get("extra-skill").path == extra_skill
@@ -133,9 +149,108 @@ def test_build_capability_registry_loads_project_configured_and_active_plugin_ca
     assert registry.get_agent("project-agent").path == default_agent
     assert registry.get_agent("extra-agent").path == extra_agent
     assert registry.get_agent("demo-plugin:helper").path == plugin_agent
+    assert registry.get_agent("project-agent").source == CapabilitySource.USER
+    assert registry.get_agent("extra-agent").source == CapabilitySource.PROJECT
+    assert registry.get_agent("explorer").source == CapabilitySource.SYSTEM
+    assert registry.get_agent("demo-plugin:helper").source == CapabilitySource.PLUGIN
     assert registry.get("demo-plugin:review").plugin_id == "demo-plugin@local"
     assert registry.get("demo-plugin:review").namespace == "demo-plugin"
     assert registry.get("ignored") is None
+
+
+def test_empty_home_loads_complete_packaged_agent_layer(tmp_path):
+    capability_home = tmp_path / "empty-home"
+
+    registry = build_capability_registry(
+        tmp_path / "project",
+        capability_home=capability_home,
+    )
+
+    assert [agent.name for agent in registry.agents()] == BUILTIN_AGENT_NAMES
+    assert registry.get_agent("general") is None
+    for name in BUILTIN_AGENT_NAMES:
+        agent = registry.get_agent(name)
+        assert agent is not None
+        assert agent.source == CapabilitySource.SYSTEM
+        assert agent.path.parts[-3:] == ("templates", "agents", f"{name}.md")
+        assert agent.tools == ["*"]
+        assert agent.max_turns == 500
+        assert agent.timeout_seconds == 86400
+        assert agent.system_prompt.startswith("# ChatTree")
+        assert not agent.system_prompt.startswith("---")
+    assert registry.get_agent("workflow-worker").metadata["runtime"] == "workflow"
+
+
+def test_user_agent_overrides_system_and_deletion_restores_system(tmp_path):
+    capability_home = tmp_path / "home"
+    override = write_agent(
+        capability_home / "agents",
+        "implementer",
+        "implementer",
+        "User implementation agent",
+    )
+    write_agent(
+        capability_home / "agents",
+        "custom",
+        "custom",
+        "Custom user agent",
+    )
+
+    overridden = build_capability_registry(
+        tmp_path / "project",
+        capability_home=capability_home,
+    )
+
+    assert overridden.get_agent("implementer").source == CapabilitySource.USER
+    assert overridden.get_agent("implementer").description == "User implementation agent"
+    assert overridden.get_agent("implementer").tools is None
+    assert overridden.get_agent("implementer").max_turns is None
+    assert overridden.get_agent("custom").source == CapabilitySource.USER
+    assert len(overridden.agents()) == len(BUILTIN_AGENT_NAMES) + 1
+
+    override.unlink()
+    restored = build_capability_registry(
+        tmp_path / "project",
+        capability_home=capability_home,
+    )
+
+    assert restored.get_agent("implementer").source == CapabilitySource.SYSTEM
+    assert restored.get_agent("implementer").description == "ChatTree implementation agent."
+
+
+def test_agent_layer_priority_is_user_project_system_then_plugin(tmp_path):
+    capability_home = tmp_path / "home"
+    write_agent(
+        capability_home / "agents",
+        "implementer",
+        "implementer",
+        "User implementation agent",
+    )
+    configured_root = capability_home / "configured-agents"
+    write_agent(
+        configured_root,
+        "implementer",
+        "implementer",
+        "Project implementation agent",
+    )
+    write_agent(
+        configured_root,
+        "planner",
+        "planner",
+        "Project planning agent",
+    )
+
+    registry = build_capability_registry(
+        tmp_path / "project",
+        {"capabilities": {"agent_roots": "configured-agents"}},
+        capability_home=capability_home,
+    )
+
+    assert registry.get_agent("implementer").source == CapabilitySource.USER
+    assert registry.get_agent("implementer").description == "User implementation agent"
+    assert registry.get_agent("planner").source == CapabilitySource.PROJECT
+    assert registry.get_agent("planner").description == "Project planning agent"
+    assert registry.get_agent("explorer").source == CapabilitySource.SYSTEM
 
 
 def test_capabilities_api_returns_inventory_and_summary(tmp_path):

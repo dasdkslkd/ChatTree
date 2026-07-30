@@ -761,11 +761,10 @@ class SubagentExecutor:
         if agent is None:
             raise KeyError(agent_name)
         is_workflow_worker = agent.name == "workflow-worker" or agent.metadata.get("runtime") == "workflow"
-        has_workflow_worker_prompt = "Workflow Worker Agent Prompt" in (agent.system_prompt or "")
-        system_parts = [load_prompt_template("fork")]
-        if is_workflow_worker and not has_workflow_worker_prompt:
-            system_parts.append(load_prompt_template("agent:workflow-worker"))
-        system_parts.append(agent.system_prompt or f"You are subagent {agent.name}.")
+        system_parts = [
+            load_prompt_template("fork"),
+            agent.system_prompt or f"You are subagent {agent.name}.",
+        ]
         if parent_node_id:
             system_parts.append(f"Parent conversation node: {parent_node_id}")
         if context_mode == "fork":
@@ -867,7 +866,7 @@ class SubagentExecutor:
                     "",
                     "Runtime mode: workflow worker",
                     "- You are running inside a workflow as a worker subagent.",
-                    "- Return the data or result the workflow requested; it will be consumed by the workflow runtime.",
+                    "- Return the data or result the workflow requested; your final text is returned verbatim to the workflow runtime.",
                     "- Do not write report/output files unless the delegated task explicitly asks for a file artifact.",
                     "- Do not assume your response is a user-facing final answer.",
                 ]),

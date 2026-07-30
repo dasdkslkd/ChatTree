@@ -261,6 +261,16 @@ class PromptCatalogTests(unittest.TestCase):
                     self.assertNotIn("}}", text)
                 self.assertNotRegex(text, r"(?m)^\s*import\s+")
 
+    def test_agent_templates_strip_frontmatter_for_prompt_consumers(self):
+        for name in PROMPT_SOURCES:
+            if not name.startswith("agent:"):
+                continue
+            with self.subTest(name=name):
+                text = load_prompt_template(name)
+                self.assertTrue(text.startswith("# ChatTree"))
+                self.assertNotIn("permission_mode:", text)
+                self.assertNotIn("timeout_seconds:", text)
+
 
 class PromptBuilderFrameworkTests(unittest.TestCase):
     def test_default_core_prompt_injected_when_no_custom_system_prompt(self):
@@ -1864,23 +1874,37 @@ class AgentRolePromptTests(unittest.TestCase):
             agent.name: agent
             for agent in load_agent_roots(
                 [self.AGENT_TEMPLATE_ROOT],
-                source=CapabilitySource.PROJECT,
+                source=CapabilitySource.SYSTEM,
             )
         }
 
-    def test_project_agents_are_role_specific(self):
+    def test_packaged_agents_are_role_specific_definitions(self):
         agents = self._load_template_agents()
         for name in ["explorer", "planner", "implementer", "reviewer", "verifier", "workflow-worker"]:
             with self.subTest(name=name):
                 self.assertIn(name, agents)
                 self.assertIn("ChatTree", agents[name].system_prompt)
                 self.assertGreaterEqual(len(agents[name].system_prompt), 600)
+                self.assertEqual(agents[name].source, CapabilitySource.SYSTEM)
+                self.assertEqual(agents[name].tools, ["*"])
+                self.assertEqual(agents[name].max_turns, 500)
+                self.assertEqual(agents[name].timeout_seconds, 86400)
 
     def test_workflow_worker_returns_data_not_user_facing_message(self):
         agents = self._load_template_agents()
         prompt = agents["workflow-worker"].system_prompt.lower()
         self.assertIn("return value", prompt)
         self.assertIn("workflow", prompt)
+        self.assertEqual(agents["workflow-worker"].metadata["runtime"], "workflow")
+
+    def test_packaged_agent_prompts_only_name_current_code_tools(self):
+        agents = self._load_template_agents()
+        combined = "\n".join(agent.system_prompt for agent in agents.values())
+        for stale_name in ["search_files", "list_files", "read_file", "run_command"]:
+            self.assertNotIn(stale_name, combined)
+        implementer = agents["implementer"].system_prompt
+        for tool_name in ["glob", "grep", "read", "edit", "patch", "shell", "write"]:
+            self.assertIn(f"`{tool_name}`", implementer)
 
 
 class DummyChatManager:
@@ -1941,6 +1965,33 @@ class RuntimePolicyTests(unittest.TestCase):
         self.assertIn("returned verbatim", system_text)
         self.assertIn("workflow", system_text.lower())
         self.assertNotIn("# ChatTree Core Prompt", system_text)
+
+    def test_workflow_worker_definition_is_injected_once(self):
+        registry = CapabilityRegistry()
+        registry.add_agents([
+            next(
+                agent
+                for agent in load_agent_roots(
+                    [AgentRolePromptTests.AGENT_TEMPLATE_ROOT],
+                    source=CapabilitySource.SYSTEM,
+                )
+                if agent.name == "workflow-worker"
+            )
+        ])
+        executor = SubagentExecutor(
+            chat_manager=DummyChatManager(),
+            run_manager=DummyRunManager(),
+            capability_registry=registry,
+        )
+
+        messages = executor._build_messages("workflow-worker", "task", None)
+        system_text = "\n\n".join(
+            message["content"]
+            for message in messages
+            if message["role"] == "system"
+        )
+
+        self.assertEqual(system_text.count("# ChatTree Workflow Worker Agent Prompt"), 1)
 
     def test_subagent_build_messages_include_subagent_runtime_context(self):
         registry = CapabilityRegistry()

@@ -10,6 +10,7 @@ from backend.core.capabilities.registry import CapabilityRegistry
 from backend.core.capabilities.skill_loader import load_skill_roots
 from backend.core.capabilities.types import CapabilitySource
 from backend.core.persistence.home import resolve_chattree_home
+from backend.core.prompts.catalog import PROMPT_SOURCES, TEMPLATE_ROOT
 
 
 def build_capability_registry(
@@ -25,9 +26,9 @@ def build_capability_registry(
         [home / "skills"],
         capabilities_config.get("skill_roots"),
     )
-    agent_roots = _roots_from_config(
+    project_agent_roots = _roots_from_config(
         home,
-        [home / "agents"],
+        [],
         capabilities_config.get("agent_roots"),
     )
     plugin_roots = _roots_from_config(
@@ -40,7 +41,29 @@ def build_capability_registry(
     registry.add_capabilities(
         load_skill_roots(skill_roots, source=CapabilitySource.PROJECT)
     )
-    registry.add_agents(load_agent_roots(agent_roots, source=CapabilitySource.PROJECT))
+    registry.add_agents(
+        load_agent_roots([home / "agents"], source=CapabilitySource.USER)
+    )
+    registry.add_agents(
+        load_agent_roots(project_agent_roots, source=CapabilitySource.PROJECT)
+    )
+    system_agents = load_agent_roots(
+        [TEMPLATE_ROOT / "agents"],
+        source=CapabilitySource.SYSTEM,
+    )
+    required_system_agents = {
+        name.removeprefix("agent:")
+        for name in PROMPT_SOURCES
+        if name.startswith("agent:")
+    }
+    loaded_system_agents = {agent.name for agent in system_agents}
+    if loaded_system_agents != required_system_agents:
+        missing = sorted(required_system_agents - loaded_system_agents)
+        unexpected = sorted(loaded_system_agents - required_system_agents)
+        raise RuntimeError(
+            f"invalid packaged agent set: missing={missing}, unexpected={unexpected}"
+        )
+    registry.add_agents(system_agents)
 
     plugin_outcome = load_plugins_from_roots(plugin_roots)
     active_plugins = plugin_outcome.active_plugins()

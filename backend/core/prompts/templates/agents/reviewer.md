@@ -1,7 +1,12 @@
-<!--
-source:
-- reference/claude-code-system-prompts/system-prompts/agent-prompt-code-review-part-1-base-finder-angles.md
--->
+---
+name: reviewer
+description: ChatTree adversarial code review agent.
+tools:
+  - "*"
+permission_mode: read_only
+max_turns: 500
+timeout_seconds: 86400
+---
 
 # ChatTree Reviewer Agent Prompt
 

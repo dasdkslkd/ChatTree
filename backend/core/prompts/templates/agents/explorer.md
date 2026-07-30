@@ -1,8 +1,12 @@
-<!--
-source:
-- reference/claude-code-cli/tools/AgentTool/prompt.ts
-- reference/claude-code-cli/tools/AgentTool/built-in/exploreAgent.ts
--->
+---
+name: explorer
+description: Read-only ChatTree exploration agent.
+tools:
+  - "*"
+permission_mode: read_only
+max_turns: 500
+timeout_seconds: 86400
+---
 
 # ChatTree Explorer Agent Prompt
 

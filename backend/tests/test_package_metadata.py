@@ -78,6 +78,21 @@ def test_required_assets_are_readable_as_package_resources():
         .joinpath("templates/core.md")
         .read_text(encoding="utf-8")
     )
+    agent_templates = {
+        name: (
+            resources.files("backend.core.prompts")
+            .joinpath(f"templates/agents/{name}.md")
+            .read_text(encoding="utf-8")
+        )
+        for name in (
+            "explorer",
+            "implementer",
+            "planner",
+            "reviewer",
+            "verifier",
+            "workflow-worker",
+        )
+    }
     worker = (
         resources.files("backend.workers")
         .joinpath("workflow_runtime.mjs")
@@ -86,4 +101,5 @@ def test_required_assets_are_readable_as_package_resources():
 
     assert "[[rules]]" in metadata
     assert "You are ChatTree" in core_prompt
+    assert all(f"name: {name}" in text for name, text in agent_templates.items())
     assert "workflow" in worker
