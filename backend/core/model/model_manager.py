@@ -1,5 +1,4 @@
 # model/manager.py - 模型级协议路由与适配器管理
-from importlib import import_module
 from typing import Dict, List, Optional, Tuple
 
 from .base import BaseProvider
@@ -10,6 +9,9 @@ from .model_metadata import (
     resolve_provider_metadata,
     resolve_route,
 )
+from .providers.anthropic_provider import AnthropicProvider
+from .providers.gemini_provider import GeminiProvider
+from .providers.openai_compatible import OpenAICompatibleProvider
 from ..config.config import cfg
 from ..config.types import ModelProtocol, ModelRoute
 from ..utils.logger import setup_logger
@@ -21,22 +23,10 @@ class ModelManager:
     """把供应商连接与具体模型的线协议分开管理。"""
 
     PROTOCOL_ADAPTERS = {
-        ModelProtocol.OPENAI_CHAT_COMPLETIONS.value: (
-            ".providers.openai_compatible",
-            "OpenAICompatibleProvider",
-        ),
-        ModelProtocol.OPENAI_RESPONSES.value: (
-            ".providers.openai_compatible",
-            "OpenAICompatibleProvider",
-        ),
-        ModelProtocol.ANTHROPIC_MESSAGES.value: (
-            ".providers.anthropic_provider",
-            "AnthropicProvider",
-        ),
-        ModelProtocol.GEMINI_GENERATE_CONTENT.value: (
-            ".providers.gemini_provider",
-            "GeminiProvider",
-        ),
+        ModelProtocol.OPENAI_CHAT_COMPLETIONS.value: OpenAICompatibleProvider,
+        ModelProtocol.OPENAI_RESPONSES.value: OpenAICompatibleProvider,
+        ModelProtocol.ANTHROPIC_MESSAGES.value: AnthropicProvider,
+        ModelProtocol.GEMINI_GENERATE_CONTENT.value: GeminiProvider,
     }
 
     def __init__(self):
@@ -91,13 +81,10 @@ class ModelManager:
         provider_config = cfg.get_provider_config(provider)
         if provider_config is None or not provider_config.get("enabled", False):
             return None
-        entry = self.PROTOCOL_ADAPTERS.get(route["protocol"])
-        if entry is None:
+        provider_class = self.PROTOCOL_ADAPTERS.get(route["protocol"])
+        if provider_class is None:
             raise ModelRouteError(f"未实现的模型协议: {route['protocol']}")
 
-        module_path, class_name = entry
-        module = import_module(module_path, package=__package__)
-        provider_class = getattr(module, class_name)
         config = dict(provider_config)
         config["is_async"] = is_async
         instance = provider_class(config, route)
