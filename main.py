@@ -29,6 +29,7 @@ from backend.core.capabilities.bootstrap import (
     build_runtime_config_with_plugin_mcp,
 )
 from backend.core.model.model_manager import ModelManager
+from backend.core.model.model_metadata import initialize_model_metadata
 from backend.core.config.config import Config, cfg
 from backend.core.agents import AgentMailbox, AgentRuntime, SubagentExecutor
 from backend.core.runs import ProducerRegistry, RunManager, RunStartCoordinator
@@ -277,6 +278,7 @@ async def _initialize_server() -> None:
     perf_profiler = configure_profiler(load_perf_config(config_manager.data))
     persistence = SQLitePersistence()
     persistence.initialize()
+    initialize_model_metadata(persistence.home)
     server_identity_store = ServerIdentityStore(persistence)
     server_identity = server_identity_store.get_or_create()
     chat_repository = ChatRepository(persistence)

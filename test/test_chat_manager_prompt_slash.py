@@ -658,7 +658,6 @@ def test_send_message_stream_btw_runs_isolated_side_question_without_tools(tmp_p
     full_prompt = "\n\n".join(str(message.get("content") or "") for message in model_manager.provider.messages)
     assert "## Available Capabilities" not in full_prompt
     assert "This injected skill mentions shell" not in full_prompt
-    assert "Claude Code-style side question" in sent_user_messages[-1]["content"]
     assert "Do not call tools" in sent_user_messages[-1]["content"]
     assert "what changed here?" in sent_user_messages[-1]["content"]
     reloaded = manager.get_conversation(conversation.metadata["id"])

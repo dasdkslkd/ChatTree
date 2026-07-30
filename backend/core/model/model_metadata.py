@@ -4,15 +4,19 @@
 推理强度档位、思考模式开关。前端据此显示/隐藏控件，provider 据此把统一的
 规范参数（reasoning_effort / thinking_enabled）翻译成各自 API 的原生形状。
 
-内置模型数据放在同目录的 model_metadata.toml。规则是有序的：第一条匹配的
-规则生效，再与兜底值合并。用户可在 config.json 的顶层 model_metadata 字段
-下提供覆盖（model_name -> 部分覆盖），合并在内置解析之上。
+随 Server 发布的 model_metadata.toml 会在首次启动时复制到 Server Home。
+运行时优先读取 Home 中的副本，文件修改后无需重新安装 Server 即可生效。
+规则是有序的：第一条匹配的规则生效，再与兜底值合并。用户还可在
+config.json 的顶层 model_metadata 字段下提供模型级覆盖。
 """
 from functools import lru_cache
 from pathlib import Path
 import re
+import shutil
 from typing import List, Optional, Dict, Any
 from typing_extensions import TypedDict
+
+from backend.core.persistence.home import resolve_chattree_home
 
 try:
     import tomllib
@@ -53,7 +57,17 @@ _FALLBACK: ModelMetadata = {
 }
 
 
-_METADATA_FILE = Path(__file__).with_name("model_metadata.toml")
+_BUILTIN_METADATA_FILE = Path(__file__).with_name("model_metadata.toml")
+
+
+def initialize_model_metadata(home: str | Path | None = None) -> Path:
+    """确保 Server Home 拥有可独立更新的模型元数据文件。"""
+    metadata_file = resolve_chattree_home(home) / _BUILTIN_METADATA_FILE.name
+    if metadata_file.is_file():
+        return metadata_file
+    metadata_file.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(_BUILTIN_METADATA_FILE, metadata_file)
+    return metadata_file
 
 
 def _as_string_list(value: Any) -> List[str]:
@@ -78,11 +92,10 @@ def _matches(model_name: str, api_format: str, name_patterns: List[str],
     return name_match or (not name_patterns and format_match)
 
 
-@lru_cache(maxsize=1)
-def _load_rules() -> List[Dict[str, Any]]:
-    """读取 TOML 规则表。TOML 规范固定 UTF-8，tomllib 使用二进制读取。"""
-    with _METADATA_FILE.open("rb") as f:
-        data = tomllib.load(f)
+@lru_cache(maxsize=8)
+def _load_rules(content: bytes) -> List[Dict[str, Any]]:
+    """解析 TOML 规则表，并按文件内容缓存。"""
+    data = tomllib.loads(content.decode("utf-8"))
     rules = data.get("rules", [])
     return rules if isinstance(rules, list) else []
 
@@ -115,9 +128,12 @@ def _metadata_from_rule(rule: Dict[str, Any]) -> ModelMetadata:
     return meta  # type: ignore[return-value]
 
 
-def _builtin_metadata(model_name: str, api_format: str) -> ModelMetadata:
-    """按规则表解析内置元数据；无命中返回兜底。"""
-    for rule in _load_rules():
+def _file_metadata(model_name: str, api_format: str) -> ModelMetadata:
+    """按 Home 规则表解析元数据；Home 尚未初始化时读取内置文件。"""
+    metadata_file = resolve_chattree_home() / _BUILTIN_METADATA_FILE.name
+    if not metadata_file.is_file():
+        metadata_file = _BUILTIN_METADATA_FILE
+    for rule in _load_rules(metadata_file.read_bytes()):
         name_patterns = _as_string_list(rule.get("name_patterns"))
         api_formats = _as_string_list(rule.get("api_formats"))
         if _matches(model_name, api_format, name_patterns, api_formats):
@@ -149,7 +165,7 @@ def resolve_metadata(
     Returns:
         合并后的 ModelMetadata，始终带上 model_id。
     """
-    meta = _builtin_metadata(model_name, api_format)
+    meta = _file_metadata(model_name, api_format)
     if user_overrides and model_name in user_overrides:
         meta = _apply_override(meta, user_overrides[model_name])
     meta["model_id"] = model_name

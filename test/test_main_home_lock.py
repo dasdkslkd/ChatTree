@@ -45,6 +45,7 @@ def test_import_does_not_touch_locked_home(tmp_path: Path):
 
     assert completed.returncode == 0, completed.stderr
     assert json.loads(config_path.read_text(encoding="utf-8")) == legacy_config
+    assert not (tmp_path / "model_metadata.toml").exists()
 
 
 def test_startup_failure_releases_home_lock(monkeypatch, tmp_path: Path):
