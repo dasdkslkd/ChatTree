@@ -42,11 +42,10 @@ const SUBSCRIPTION_FORMAT: Record<string, APIFormat> = {
   codex: 'responses',
   copilot: 'chat_completions',
   claude: 'anthropic',
-  gemini: 'gemini',
 };
 
 const SUBSCRIPTION_OPTIONS: {
-  value: '' | 'codex' | 'copilot' | 'claude' | 'gemini';
+  value: '' | 'codex' | 'copilot' | 'claude';
   label: string;
   description: string;
 }[] = [
@@ -54,7 +53,6 @@ const SUBSCRIPTION_OPTIONS: {
   { value: 'codex', label: 'ChatGPT Plus/Pro', description: 'OAuth 设备码登录' },
   { value: 'copilot', label: 'GitHub Copilot', description: 'OAuth 设备码登录' },
   { value: 'claude', label: 'Claude (Anthropic)', description: '从 Claude CLI 导入' },
-  { value: 'gemini', label: 'Gemini (Google)', description: '从 Gemini CLI 导入' },
 ];
 
 const DEFAULT_PROVIDER_CONFIG: ModelProviderConfig = {
@@ -399,8 +397,8 @@ export function ProvidersSection() {
     setLoginError(null);
   };
 
-  // ── CLI 凭据导入：claude/gemini/codex ──
-  const handleImportCliCredentials = async (subscription: 'claude' | 'gemini' | 'codex') => {
+  // ── CLI 凭据导入：claude/codex ──
+  const handleImportCliCredentials = async (subscription: 'claude' | 'codex') => {
     const pid = await ensureProviderSaved();
     if (!pid) return;
     try {
@@ -741,7 +739,7 @@ export function ProvidersSection() {
                 <Select
                   value={currentSubscription || ''}
                   onValueChange={(v) => {
-                    const sub = v as '' | 'codex' | 'copilot' | 'claude' | 'gemini';
+                    const sub = v as '' | 'codex' | 'copilot' | 'claude';
                     setEditForm(f => ({
                       ...f,
                       auth: sub ? { type: 'oauth', subscription: sub } : undefined,
@@ -786,12 +784,12 @@ export function ProvidersSection() {
                       {loginPolling ? '等待授权...' : '登录'}
                     </Button>
                   )}
-                  {!isLoggedIn && (currentSubscription === 'claude' || currentSubscription === 'gemini' || currentSubscription === 'codex') && (
+                  {!isLoggedIn && (currentSubscription === 'claude' || currentSubscription === 'codex') && (
                     <Button
                       variant="outline"
                       size="sm"
                       className="w-full"
-                      onClick={() => handleImportCliCredentials(currentSubscription as 'claude' | 'gemini' | 'codex')}
+                      onClick={() => handleImportCliCredentials(currentSubscription as 'claude' | 'codex')}
                     >
                       从 CLI 导入凭据
                     </Button>
@@ -1065,20 +1063,6 @@ function QuotaDisplay({ quota }: { quota: Record<string, any> }) {
               />
             </div>
             <p style={{ color: 'var(--fg-tertiary)' }}>重置: {formatResetTime(w.reset_at)}</p>
-          </div>
-        ))}
-      </div>
-    );
-  }
-  if (sub === 'gemini' && Array.isArray(quota.buckets)) {
-    return (
-      <div className="space-y-2">
-        {quota.buckets.map((b: any, i: number) => (
-          <div key={i} className="flex items-center justify-between">
-            <span style={{ color: 'var(--fg-secondary)' }}>{b.model_id || '未知模型'}</span>
-            <span style={{ color: 'var(--accent-green)' }}>
-              剩余 {Math.round((b.remaining_fraction ?? 0) * 100)}%
-            </span>
           </div>
         ))}
       </div>

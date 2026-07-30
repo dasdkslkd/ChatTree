@@ -11,7 +11,6 @@
 import asyncio
 import base64
 import json
-import os
 import time
 import urllib.error
 import urllib.request
@@ -45,9 +44,6 @@ GITHUB_CLIENT_ID_GITHUB_COM = "Iv1.b507a08c87ecfe98"
 GITHUB_CLIENT_ID_GHES = "Ov23li8tweQw6odWQebz"
 COPILOT_API_VERSION = "2025-10-01"
 COPILOT_API_BASE_GITHUB_COM = "https://api.githubcopilot.com"
-
-# ─── Gemini (CLI 凭据复用) ─────────────────────────────────────────────────
-GEMINI_TOKEN_URL = "https://oauth2.googleapis.com/token"
 
 _EAGER_REFRESH_MS = 5 * 60 * 1000  # 提前 5 分钟主动刷新
 _HTTP_TIMEOUT = 15
@@ -85,7 +81,7 @@ async def get_valid_token(auth: Dict[str, Any]) -> Tuple[str, Dict[str, str]]:
         return await _codex_get_valid_token(auth)
     if sub == "copilot":
         return await _copilot_get_valid_token(auth)
-    # claude/gemini 走 CLI 凭据复用，token 由原 CLI 负责刷新
+    # Claude 走 CLI 凭据复用，token 由原 CLI 负责刷新
     token = auth.get("access", "")
     return token, {}
 
@@ -140,8 +136,6 @@ async def query_quota(auth: Dict[str, Any]) -> Dict[str, Any]:
         return await _copilot_query_quota(auth)
     if sub == "claude":
         return await _claude_query_quota(auth)
-    if sub == "gemini":
-        return await _gemini_query_quota(auth)
     raise ValueError(f"Unknown subscription: {sub}")
 
 
@@ -151,8 +145,6 @@ async def read_cli_credentials(subscription: str) -> Optional[Dict[str, Any]]:
         return _read_claude_cli_credentials()
     if subscription == "codex":
         return _read_codex_cli_credentials()
-    if subscription == "gemini":
-        return await _read_gemini_cli_credentials()
     return None
 
 
@@ -443,7 +435,7 @@ async def _claude_query_quota(auth: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Gemini (CLI 凭据复用 + 刷新 + 额度查询)
+# Codex CLI 凭据复用
 # ═══════════════════════════════════════════════════════════════════════════
 def _read_codex_cli_credentials() -> Optional[Dict[str, Any]]:
     """读取 ~/.codex/auth.json，要求 auth_mode=='chatgpt'。
@@ -490,93 +482,6 @@ def _read_codex_cli_credentials() -> Optional[Dict[str, Any]]:
     except Exception as e:
         logger.warning(f"读取 Codex CLI 凭据失败: {e}")
         return None
-
-
-async def _read_gemini_cli_credentials() -> Optional[Dict[str, Any]]:
-    """读取 ~/.gemini/oauth_creds.json；过期时用 Google OAuth 刷新。"""
-    import os
-    path = os.path.expanduser("~/.gemini/oauth_creds.json")
-    if not os.path.exists(path):
-        return None
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        access = data.get("access_token")
-        if not access:
-            return None
-        auth = {
-            "type": "oauth",
-            "subscription": "gemini",
-            "access": access,
-            "refresh": data.get("refresh_token", ""),
-            "expires": int(data.get("expiry_date", 0)),
-            "account_id": "",
-            "account_name": "",
-            "account_email": "",
-        }
-        if _should_refresh(auth):
-            await _gemini_refresh_token(auth)
-        # 用 access_token 调 Google userinfo API 拿昵称和邮箱
-        try:
-            info = await _http_get_json(
-                "https://www.googleapis.com/oauth2/v2/userinfo",
-                token=auth["access"],
-            )
-            auth["account_id"] = str(info.get("id") or "")
-            auth["account_name"] = str(info.get("name") or info.get("given_name") or "")
-            auth["account_email"] = str(info.get("email") or "")
-        except Exception as e:
-            logger.warning(f"获取 Gemini 用户信息失败: {e}")
-        return auth
-    except Exception as e:
-        logger.warning(f"读取 Gemini CLI 凭据失败: {e}")
-        return None
-
-
-async def _gemini_refresh_token(auth: Dict[str, Any]) -> None:
-    """用 Google OAuth client 刷新 Gemini access_token。"""
-    client_id = os.environ.get("CHATTREE_GEMINI_CLIENT_ID", "")
-    client_secret = os.environ.get("CHATTREE_GEMINI_CLIENT_SECRET", "")
-    if not client_id or not client_secret:
-        raise SubscriptionError(
-            "Gemini 凭据已过期；请重新登录 Gemini CLI，或配置 "
-            "CHATTREE_GEMINI_CLIENT_ID 和 CHATTREE_GEMINI_CLIENT_SECRET"
-        )
-    resp = await _http_post_json(
-        GEMINI_TOKEN_URL,
-        body={
-            "grant_type": "refresh_token",
-            "refresh_token": auth.get("refresh", ""),
-            "client_id": client_id,
-            "client_secret": client_secret,
-        },
-    )
-    auth["access"] = resp["access_token"]
-    auth["expires"] = int(time.time() * 1000 + resp.get("expires_in", 3600) * 1000)
-
-
-async def _gemini_query_quota(auth: Dict[str, Any]) -> Dict[str, Any]:
-    """Gemini Cloud Code 配额：先 loadCodeAssist 再 retrieveUserQuota。"""
-    token = auth.get("access", "")
-    if _should_refresh(auth):
-        await _gemini_refresh_token(auth)
-        token = auth["access"]
-
-    # Step 1: loadCodeAssist 拿 user cloudaicompanion id
-    load_resp = await _http_post_json(
-        "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
-        body={"cloudaicompanionProject": ""},
-        token=token,
-    )
-    user_id = load_resp.get("cloudaicompanionUser", {}).get("id", "")
-
-    # Step 2: retrieveUserQuota 拿配额
-    quota_resp = await _http_post_json(
-        "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota",
-        body={"cloudaicompanionProject": "", "cloudaicompanionUserId": user_id},
-        token=token,
-    )
-    return _normalize_gemini_quota(quota_resp)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -781,19 +686,6 @@ def _normalize_claude_quota(resp: Dict[str, Any]) -> Dict[str, Any]:
         "subscription": "claude",
         "windows": resp,  # 直接返回 five_hour/seven_day/seven_day_opus/seven_day_sonnet 等
     }
-
-
-def _normalize_gemini_quota(resp: Dict[str, Any]) -> Dict[str, Any]:
-    """归一化 Gemini retrieveUserQuota 响应。"""
-    buckets = []
-    for bucket in resp.get("buckets") or []:
-        buckets.append({
-            "model_id": bucket.get("modelId"),
-            "tier": _window_label(int(bucket.get("resetTime", 0)) - int(time.time())),
-            "remaining_fraction": bucket.get("remainingFraction"),
-            "reset_at": bucket.get("resetTime"),
-        })
-    return {"subscription": "gemini", "buckets": buckets}
 
 
 def _window_label(seconds: int) -> str:

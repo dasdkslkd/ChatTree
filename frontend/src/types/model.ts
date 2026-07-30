@@ -29,7 +29,7 @@ export type ContextWindowLimit = 200000 | 400000 | 600000 | null;
 // 订阅登录信息（与 api_key 二选一）
 export interface AuthInfo {
   type?: 'oauth' | 'api';
-  subscription?: 'codex' | 'copilot' | 'claude' | 'gemini' | 'xai';
+  subscription?: 'codex' | 'copilot' | 'claude' | 'xai';
   access?: string;
   refresh?: string;
   expires?: number;

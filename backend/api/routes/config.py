@@ -472,7 +472,7 @@ async def import_cli_credentials(
     request: CliImportRequest,
     config_manager: Config = Depends(get_config_manager),
 ):
-    """从 CLI 工具的本地凭据文件导入（Claude/Codex/Gemini）。"""
+    """从 CLI 工具的本地凭据文件导入（Claude/Codex）。"""
     try:
         auth = await sub_mod.read_cli_credentials(request.subscription)
         if auth is None:

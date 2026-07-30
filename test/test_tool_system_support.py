@@ -819,6 +819,10 @@ def test_openai_responses_completed_payload_supplies_missing_final_text():
 
 def test_gemini_build_body_includes_tools_and_normalizes_role_enum():
     provider = GeminiProvider({"api_key": "test"})
+    headers = provider._headers()
+    assert headers["x-goog-api-key"] == "test"
+    assert "Authorization" not in headers
+
     body = provider._build_body(
         messages=[
             Message({"role": Role.ASSISTANT, "content": "", "tool_calls": [{
