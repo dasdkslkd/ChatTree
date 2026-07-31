@@ -37,10 +37,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--duration-seconds", type=float, default=60)
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--prompt-file")
-    parser.add_argument("--conversation-id")
+    session = parser.add_mutually_exclusive_group()
+    session.add_argument("--conversation-id")
+    session.add_argument("--session-file")
     parser.add_argument("--parent-node-id")
     parser.add_argument("--provider-id")
     parser.add_argument("--model-id")
+    parser.add_argument("--reasoning-effort")
+    parser.add_argument("--workspace")
+    parser.add_argument("--tool-permission-mode", default="auto_approve")
     parser.add_argument("--output-dir")
     parser.add_argument("--enable-server-perf", action="store_true")
     return parser
@@ -52,13 +57,14 @@ def _json_request(
     *,
     method: str = "GET",
     payload: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
     timeout: int = 30,
 ) -> Any:
     data = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(
         _api_url(base_url, path),
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", **(headers or {})},
         method=method,
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -74,16 +80,25 @@ def _append_jsonl(path: Path, lock: threading.Lock, event: dict[str, Any]) -> No
             handle.write("\n")
 
 
-def _create_conversation(base_url: str) -> dict[str, Any]:
+def _create_conversation(base_url: str, workspace: str | None) -> dict[str, Any]:
+    payload: dict[str, Any] = {"title": "Performance Trial"}
+    if workspace:
+        resolved = Path(workspace).expanduser().resolve(strict=True)
+        if not resolved.is_dir():
+            raise ValueError(f"Workspace is not a directory: {resolved}")
+        payload["workspace"] = {
+            "cwd": str(resolved),
+            "workspace_roots": [str(resolved)],
+        }
     return _json_request(
         base_url,
         "/conversations",
         method="POST",
-        payload={"title": "Performance Trial"},
+        payload=payload,
     )
 
 
-def _stream_once(
+def _run_once(
     *,
     base_url: str,
     conversation_id: str,
@@ -93,6 +108,8 @@ def _stream_once(
     lock: threading.Lock,
     provider_id: str | None,
     model_id: str | None,
+    reasoning_effort: str | None,
+    tool_permission_mode: str,
     worker_id: int,
     request_index: int,
 ) -> str:
@@ -110,6 +127,9 @@ def _stream_once(
         payload["provider_id"] = provider_id
     if model_id:
         payload["model_id"] = model_id
+    if reasoning_effort:
+        payload["reasoning_effort"] = reasoning_effort
+    payload["tool_permission_mode"] = tool_permission_mode
 
     _append_jsonl(output_path, lock, {
         "type": "mark",
@@ -122,11 +142,21 @@ def _stream_once(
     })
 
     try:
-        request = urllib.request.Request(
-            _api_url(base_url, f"/conversations/{conversation_id}/messages/stream"),
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+        started_run = _json_request(
+            base_url,
+            f"/conversations/{conversation_id}/messages/runs",
             method="POST",
+            payload=payload,
+            headers={"Idempotency-Key": request_id},
+            timeout=600,
+        )
+        run_id = str((started_run or {}).get("run_id") or "")
+        if not run_id:
+            raise ValueError("Run start response did not include run_id")
+        request = urllib.request.Request(
+            _api_url(base_url, f"/runs/{run_id}/events"),
+            headers={"Accept": "text/event-stream"},
+            method="GET",
         )
         with urllib.request.urlopen(request, timeout=600) as response:
             buffer = ""
@@ -155,20 +185,26 @@ def _stream_once(
                         "duration_ms": (time.perf_counter() - event_started) * 1000,
                         "ts": time.time(),
                         "request_id": request_id,
-                        "run_id": parsed.get("run_id"),
+                        "run_id": run_id,
                         "conversation_id": conversation_id,
                         "node_id": last_node_id,
                         "attrs": {
-                            "status": parsed.get("status"),
-                            "event_type": parsed.get("event_type"),
-                            "event_index": parsed.get("event_index"),
+                            "patch_type": parsed.get("type"),
+                            "revision": parsed.get("revision"),
+                            "operation_count": len(parsed.get("operations") or []),
                         },
                     })
                     continue
                 buffer += line
-        status = "completed"
-        error = None
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+        final_run = _json_request(base_url, f"/runs/{run_id}", timeout=30)
+        status = str((final_run or {}).get("status") or "unknown")
+        last_node_id = (
+            (final_run or {}).get("target_node_id")
+            or (final_run or {}).get("anchor_node_id")
+            or last_node_id
+        )
+        error = ((final_run or {}).get("metadata") or {}).get("error")
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError) as exc:
         status = "error"
         error = str(exc)
 
@@ -189,6 +225,8 @@ def _stream_once(
             "request_index": request_index,
         },
     })
+    if status != "completed":
+        raise RuntimeError(error or f"Run finished with status {status}")
     return last_node_id
 
 
@@ -203,13 +241,15 @@ def _worker(
     lock: threading.Lock,
     provider_id: str | None,
     model_id: str | None,
+    reasoning_effort: str | None,
+    tool_permission_mode: str,
     worker_id: int,
-) -> None:
+) -> str:
     deadline = time.monotonic() + duration_seconds
     parent_node_id = initial_parent_node_id
     request_index = 0
-    while time.monotonic() < deadline:
-        parent_node_id = _stream_once(
+    while request_index == 0 or time.monotonic() < deadline:
+        parent_node_id = _run_once(
             base_url=base_url,
             conversation_id=conversation_id,
             parent_node_id=parent_node_id,
@@ -218,14 +258,20 @@ def _worker(
             lock=lock,
             provider_id=provider_id,
             model_id=model_id,
+            reasoning_effort=reasoning_effort,
+            tool_permission_mode=tool_permission_mode,
             worker_id=worker_id,
             request_index=request_index,
         )
         request_index += 1
+    return parent_node_id
 
 
-def main() -> int:
-    args = _build_parser().parse_args()
+def main(argv: list[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
+
+    if args.session_file and args.concurrency != 1:
+        raise SystemExit("--session-file requires --concurrency 1")
 
     perf_run_id = f"trial_{uuid.uuid4().hex[:12]}"
     output_dir = Path(args.output_dir).expanduser() if args.output_dir else resolve_chattree_home() / "perf" / "runs" / perf_run_id
@@ -259,13 +305,18 @@ def main() -> int:
     )
 
     try:
-        if args.conversation_id:
+        session_file = Path(args.session_file).expanduser().resolve() if args.session_file else None
+        if session_file and session_file.is_file():
+            state = json.loads(session_file.read_text(encoding="utf-8"))
+            conversation_id = str(state["conversation_id"])
+            parent_node_id = str(state["parent_node_id"])
+        elif args.conversation_id:
             conversation_id = args.conversation_id
             parent_node_id = args.parent_node_id
             if not parent_node_id:
                 raise SystemExit("--conversation-id requires --parent-node-id for a real stream request")
         else:
-            created = _create_conversation(args.base_url)
+            created = _create_conversation(args.base_url, args.workspace)
             conversation_id = created["id"]
             parent_node_id = created["current_node_id"]
 
@@ -284,13 +335,29 @@ def main() -> int:
                     lock=lock,
                     provider_id=args.provider_id,
                     model_id=args.model_id,
+                    reasoning_effort=args.reasoning_effort,
+                    tool_permission_mode=args.tool_permission_mode,
                     worker_id=index,
                 )
                 for index in range(max(1, args.concurrency))
             ]
             wait(futures)
-            for future in futures:
-                future.result()
+            parent_node_ids = [future.result() for future in futures]
+
+        parent_node_id = parent_node_ids[0]
+        if session_file:
+            session_file.parent.mkdir(parents=True, exist_ok=True)
+            session_file.write_text(
+                json.dumps(
+                    {
+                        "conversation_id": conversation_id,
+                        "parent_node_id": parent_node_id,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
 
         summary = summarize_events([
             output_dir / "backend-events.jsonl",
