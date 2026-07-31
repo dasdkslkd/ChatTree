@@ -76,14 +76,12 @@ function testCanonicalKeysAndCentralKeySets() {
   assert.throws(() => profileStorageKey('profile-a', ''), /non-empty/);
   assert.deepEqual(ALL_PROFILE_STORAGE_KEYS, [
     'conversation-storage',
-    'chattree.manualProjectWorkspaces',
     'chattree.projectOrder',
     'chattree.leftSidebarWidth',
     'chattree.rightPanelWidth',
   ]);
   assert.deepEqual(SERVER_BOUND_PROFILE_STORAGE_KEYS, [
     'conversation-storage',
-    'chattree.manualProjectWorkspaces',
     'chattree.projectOrder',
   ]);
 }
@@ -230,7 +228,7 @@ function testFirstBindSameBindAndExactRebindCleanup() {
       null,
     );
   }
-  for (const logicalKey of ALL_PROFILE_STORAGE_KEYS.slice(3)) {
+  for (const logicalKey of ALL_PROFILE_STORAGE_KEYS.slice(2)) {
     assert.notEqual(
       harness.storage.getItem(profileStorageKey('profile-a', logicalKey)),
       null,

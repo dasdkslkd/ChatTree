@@ -1,12 +1,10 @@
 export const CONVERSATION_STORAGE_KEY = 'conversation-storage';
-export const MANUAL_PROJECTS_STORAGE_KEY = 'chattree.manualProjectWorkspaces';
 export const PROJECT_ORDER_STORAGE_KEY = 'chattree.projectOrder';
 export const LEFT_SIDEBAR_STORAGE_KEY = 'chattree.leftSidebarWidth';
 export const RIGHT_PANEL_STORAGE_KEY = 'chattree.rightPanelWidth';
 
 export const ALL_PROFILE_STORAGE_KEYS = [
   CONVERSATION_STORAGE_KEY,
-  MANUAL_PROJECTS_STORAGE_KEY,
   PROJECT_ORDER_STORAGE_KEY,
   LEFT_SIDEBAR_STORAGE_KEY,
   RIGHT_PANEL_STORAGE_KEY,
@@ -14,7 +12,6 @@ export const ALL_PROFILE_STORAGE_KEYS = [
 
 export const SERVER_BOUND_PROFILE_STORAGE_KEYS = [
   CONVERSATION_STORAGE_KEY,
-  MANUAL_PROJECTS_STORAGE_KEY,
   PROJECT_ORDER_STORAGE_KEY,
 ] as const;
 

@@ -78,13 +78,8 @@ export const conversationApi = {
     return response.data;
   },
 
-  createProjectFolder: async (path: string, label?: string): Promise<WorkspaceContext> => {
-    const response = await apiClient.post('/projects/folders', { path, label: label || null });
-    return response.data;
-  },
-
-  resolveProjectFolder: async (path: string, label?: string): Promise<WorkspaceContext> => {
-    const response = await apiClient.post('/projects/folders/resolve', { path, label: label || null });
+  resolveProjectFolder: async (path: string): Promise<WorkspaceContext> => {
+    const response = await apiClient.post('/projects/folders/resolve', { path });
     return response.data;
   },
 

@@ -34,9 +34,10 @@ import {
 } from '@/components/ui/dropdown-menu';
 import {
   Plus, X, MoreHorizontal, ChevronRight, Square,
-  Check, Pencil, Loader2, Network, MessageSquare, FileText, Download, FolderOpen, FolderPlus, Search, Settings,
+  Check, Pencil, Loader2, Network, MessageSquare, FileText, Download, FolderOpen, Search, Settings,
   PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, ArrowLeft,
 } from 'lucide-react';
+import { toast } from 'sonner';
 import { conversationApi } from '../api/conversation';
 import { configApi } from '../api/config';
 import { messageApi } from '../api/message';
@@ -148,11 +149,8 @@ import { MarkdownView, ThinkingBlock } from '../components/markdown/MarkdownView
 import { SyntaxHighlighter, oneDark } from '../components/markdown/languages';
 import {
   getBrowserStorage,
-  loadManualProjectWorkspaces,
-  saveManualProjectWorkspaces,
   loadProjectOrder,
   saveProjectOrder,
-  mergeManualProjectWorkspace,
 } from '../utils/projectStorage';
 import {
   normalizeTaskContextMode,
@@ -235,14 +233,10 @@ export default function ChatPage() {
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const modelConfig = useModelStore((state) => state.config);
   const defaultToolPermissionMode = getConfiguredDefaultToolPermissionMode(modelConfig);
-  const [manualProjectWorkspaces, setManualProjectWorkspaces] = useState<WorkspaceContext[]>(() => loadManualProjectWorkspaces());
+  const [projectWorkspaces, setProjectWorkspaces] = useState<WorkspaceContext[]>([]);
   const [projectOrder, setProjectOrder] = useState<string[]>(() => loadProjectOrder());
   const [projectConfigs, setProjectConfigs] = useState<Record<string, ProjectCapabilityConfig>>({});
   const [draggingProjectId, setDraggingProjectId] = useState<string | null>(null);
-  const [projectFolderDialogMode, setProjectFolderDialogMode] = useState<'create' | 'existing' | null>(null);
-  const [projectFolderPath, setProjectFolderPath] = useState('');
-  const [projectFolderLabel, setProjectFolderLabel] = useState('');
-  const [projectFolderError, setProjectFolderError] = useState('');
   const [projectFolderSubmitting, setProjectFolderSubmitting] = useState(false);
   const [, refreshImportPreviews] = useState(0);
   const importAssetPreviewCacheRef = useRef<ImportAssetPreviewCache | null>(null);
@@ -480,27 +474,29 @@ export default function ChatPage() {
     setRenameTitle('');
   };
 
-  const loadProjectConfigs = useCallback(async () => {
+  const loadProjects = useCallback(async () => {
     try {
       const data = await configApi.getProjects();
       setProjectConfigs(data.config || {});
+      setProjectWorkspaces(data.projects.map((project) => project.workspace));
     } catch {
       setProjectConfigs({});
+      setProjectWorkspaces([]);
     }
   }, []);
 
   useEffect(() => {
-    void loadProjectConfigs();
-  }, [loadProjectConfigs]);
+    void loadProjects();
+  }, [loadProjects]);
 
   useEffect(() => {
     const reloadProjects = () => {
-      void loadProjectConfigs();
+      void loadProjects();
       void loadConversations();
     };
     window.addEventListener('chattree-projects-updated', reloadProjects);
     return () => window.removeEventListener('chattree-projects-updated', reloadProjects);
-  }, [loadConversations, loadProjectConfigs]);
+  }, [loadConversations, loadProjects]);
 
   const handleRenameCancel = () => {
     setRenameDialogOpen(false);
@@ -796,25 +792,25 @@ export default function ChatPage() {
   const projectGroups = useMemo(
     () => groupConversationsByProject(conversations, {
       defaultWorkspace,
-      extraWorkspaces: manualProjectWorkspaces,
+      extraWorkspaces: projectWorkspaces,
       collapsedProjectIds,
       expandedHistoryProjectIds,
       searchQuery: conversationSearch,
       projectOrder,
       projectVisibility,
     }),
-    [conversations, defaultWorkspace, manualProjectWorkspaces, collapsedProjectIds, expandedHistoryProjectIds, conversationSearch, projectOrder, projectVisibility],
+    [conversations, defaultWorkspace, projectWorkspaces, collapsedProjectIds, expandedHistoryProjectIds, conversationSearch, projectOrder, projectVisibility],
   );
   const allProjectGroups = useMemo(
     () => groupConversationsByProject(conversations, {
       defaultWorkspace,
-      extraWorkspaces: manualProjectWorkspaces,
+      extraWorkspaces: projectWorkspaces,
       collapsedProjectIds,
       expandedHistoryProjectIds,
       projectOrder,
       projectVisibility,
     }),
-    [conversations, defaultWorkspace, manualProjectWorkspaces, collapsedProjectIds, expandedHistoryProjectIds, projectOrder, projectVisibility],
+    [conversations, defaultWorkspace, projectWorkspaces, collapsedProjectIds, expandedHistoryProjectIds, projectOrder, projectVisibility],
   );
   const measureProjectGroupTops = useCallback((skipProjectId?: string) => {
     const tops = new Map<string, number>();
@@ -935,49 +931,23 @@ export default function ChatPage() {
     selectedNewConversationWorkspace.cwd ? selectedNewConversationWorkspace : undefined
   );
 
-  const rememberProjectWorkspace = (workspace: WorkspaceContext) => {
-    const next = mergeManualProjectWorkspace(manualProjectWorkspaces, workspace);
-    setManualProjectWorkspaces(next);
-    saveManualProjectWorkspaces(next);
-    setSelectedProjectId(encodeProjectId(workspace.cwd));
-  };
-
-  const openProjectFolderDialog = (mode: 'create' | 'existing') => {
-    setProjectFolderDialogMode(mode);
-    setProjectFolderPath('');
-    setProjectFolderLabel('');
-    setProjectFolderError('');
-  };
-
-  const closeProjectFolderDialog = () => {
-    if (projectFolderSubmitting) return;
-    setProjectFolderDialogMode(null);
-    setProjectFolderPath('');
-    setProjectFolderLabel('');
-    setProjectFolderError('');
-  };
-
-  const handleProjectFolderSubmit = async () => {
-    const path = projectFolderPath.trim();
-    if (!projectFolderDialogMode || !path) {
-      setProjectFolderError('请输入文件夹路径');
+  const handleAddProjectFolder = async () => {
+    setProjectPickerOpen(false);
+    if (!window.electronAPI) {
+      toast.error('请在桌面客户端中添加项目文件夹');
       return;
     }
     setProjectFolderSubmitting(true);
-    setProjectFolderError('');
     try {
-      const label = projectFolderLabel.trim() || undefined;
-      const workspace = projectFolderDialogMode === 'create'
-        ? await conversationApi.createProjectFolder(path, label)
-        : await conversationApi.resolveProjectFolder(path, label);
-      rememberProjectWorkspace(workspace);
+      const path = await window.electronAPI.selectProjectFolder();
+      if (!path) return;
+      const workspace = await conversationApi.resolveProjectFolder(path);
+      await loadProjects();
+      setSelectedProjectId(encodeProjectId(workspace.cwd));
       setProjectPickerSearch('');
-      setProjectFolderDialogMode(null);
-      setProjectFolderPath('');
-      setProjectFolderLabel('');
     } catch (err: any) {
       const detail = err?.response?.data?.detail || err?.message || '项目文件夹处理失败';
-      setProjectFolderError(String(detail));
+      toast.error(String(detail));
     } finally {
       setProjectFolderSubmitting(false);
     }
@@ -1053,32 +1023,16 @@ export default function ChatPage() {
           <button
             type="button"
             className="new-chat-project-option"
-            onClick={() => {
-              setProjectPickerOpen(false);
-              openProjectFolderDialog('create');
-            }}
+            disabled={projectFolderSubmitting}
+            onClick={() => void handleAddProjectFolder()}
           >
-            <FolderPlus className="h-4 w-4 shrink-0" />
+            {projectFolderSubmitting
+              ? <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+              : <FolderOpen className="h-4 w-4 shrink-0" />}
             <span className="min-w-0 flex-1 text-left">
-              <span className="block truncate text-sm">新建文件夹</span>
+              <span className="block truncate text-sm">添加项目文件夹</span>
               <span className="block truncate text-[11px]" style={{ color: 'var(--fg-tertiary)' }}>
-                创建空项目
-              </span>
-            </span>
-          </button>
-          <button
-            type="button"
-            className="new-chat-project-option"
-            onClick={() => {
-              setProjectPickerOpen(false);
-              openProjectFolderDialog('existing');
-            }}
-          >
-            <FolderOpen className="h-4 w-4 shrink-0" />
-            <span className="min-w-0 flex-1 text-left">
-              <span className="block truncate text-sm">使用现有文件夹</span>
-              <span className="block truncate text-[11px]" style={{ color: 'var(--fg-tertiary)' }}>
-                添加为项目
+                选择或新建文件夹
               </span>
             </span>
           </button>
@@ -2827,63 +2781,6 @@ export default function ChatPage() {
           <DialogFooter>
             <Button variant="outline" onClick={handleRenameCancel}>取消</Button>
             <Button onClick={handleRenameConfirm}>确认</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Project folder dialog */}
-      <Dialog open={projectFolderDialogMode !== null} onOpenChange={(open) => { if (!open) closeProjectFolderDialog(); }}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>
-              {projectFolderDialogMode === 'create' ? '新建文件夹' : '使用现有文件夹'}
-            </DialogTitle>
-          </DialogHeader>
-          <div className="space-y-3">
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium" style={{ color: 'var(--fg-tertiary)' }}>
-                文件夹路径
-              </label>
-              <Input
-                value={projectFolderPath}
-                onChange={(event) => setProjectFolderPath(event.target.value)}
-                placeholder="D:\\Projects\\ChatTree"
-                disabled={projectFolderSubmitting}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') handleProjectFolderSubmit();
-                }}
-              />
-            </div>
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium" style={{ color: 'var(--fg-tertiary)' }}>
-                项目名称
-              </label>
-              <Input
-                value={projectFolderLabel}
-                onChange={(event) => setProjectFolderLabel(event.target.value)}
-                placeholder="留空则使用文件夹名"
-                disabled={projectFolderSubmitting}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') handleProjectFolderSubmit();
-                }}
-              />
-            </div>
-            {projectFolderError && (
-              <div className="rounded-md px-3 py-2 text-xs" style={{
-                color: 'var(--destructive)',
-                background: 'color-mix(in srgb, var(--destructive) 10%, transparent)',
-                border: '0.5px solid color-mix(in srgb, var(--destructive) 28%, transparent)',
-              }}>
-                {projectFolderError}
-              </div>
-            )}
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={closeProjectFolderDialog} disabled={projectFolderSubmitting}>取消</Button>
-            <Button onClick={handleProjectFolderSubmit} disabled={projectFolderSubmitting}>
-              {projectFolderSubmitting && <Loader2 className="h-4 w-4 animate-spin" />}
-              确认
-            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

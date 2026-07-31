@@ -40,7 +40,32 @@ function testNewChatTitleUsesSelectedWorkspaceLabel() {
   );
 }
 
+function testProjectFolderUsesNativePickerWithoutPathInput() {
+  assert.match(
+    source,
+    /window\.electronAPI\.selectProjectFolder\(\)/,
+    'adding a project should open the desktop folder picker',
+  );
+  assert.match(
+    source,
+    /setProjectWorkspaces\(data\.projects\.map\(\(project\) => project\.workspace\)\)/,
+    'project groups should come from Server project metadata',
+  );
+  assert.doesNotMatch(source, /projectFolderPath|请输入文件夹路径|D:\\\\Projects\\\\ChatTree/);
+}
+
+function testDeletingConversationDoesNotReloadProjectCatalog() {
+  assert.match(source, /onClick=\{\(\) => deleteConversation\(c\.id\)\}/);
+  assert.doesNotMatch(
+    source,
+    /deleteConversation\(c\.id\);[\s\S]{0,120}loadProjects\(\)/,
+    'deleting a conversation must not reload the independent project catalog',
+  );
+}
+
 testProjectPickerClosesAfterSelectingProject();
 testNewChatTitleUsesSelectedWorkspaceLabel();
+testProjectFolderUsesNativePickerWithoutPathInput();
+testDeletingConversationDoesNotReloadProjectCatalog();
 
 console.log('PASS newChatProjectPicker');

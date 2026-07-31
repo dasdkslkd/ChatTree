@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const source = fs.readFileSync(path.join(__dirname, '../electron/main.cjs'), 'utf8');
+const preloadSource = fs.readFileSync(path.join(__dirname, '../electron/preload.cjs'), 'utf8');
 const shellSource = fs.readFileSync(path.join(__dirname, '../electron/shell.js'), 'utf8');
 const packageConfig = JSON.parse(fs.readFileSync(path.join(__dirname, '../package.json'), 'utf8'));
 const connectProfileSource = source.slice(
@@ -125,4 +126,14 @@ assert.match(
   shellSource,
   /正在启动本地 Server 并完成握手/,
   'The Local connection overlay should describe local startup instead of SSH',
+);
+assert.match(
+  source,
+  /dialog\.showOpenDialog\(shellWindow,\s*\{[\s\S]*properties: \["openDirectory", "createDirectory"\]/,
+  'Electron should open a native project directory picker',
+);
+assert.match(
+  preloadSource,
+  /selectProjectFolder: \(\) => ipcRenderer\.invoke\("project:select-folder"\)/,
+  'The native directory picker should be exposed to profile views',
 );

@@ -27,7 +27,6 @@ class ConversationCreateRequest(BaseModel):
 
 class ProjectFolderRequest(BaseModel):
     path: str
-    label: Optional[str] = None
 
 class ProjectConfigUpdateRequest(BaseModel):
     path: str
@@ -94,7 +93,7 @@ def _conversation_response(conversation) -> Dict[str, Any]:
         "total_tokens": conversation.metadata.get("total_tokens", {}),
     }
 
-def _workspace_from_project_path(path_value: str, label: Optional[str], create: bool) -> Dict[str, Any]:
+def _workspace_from_project_path(path_value: str) -> Dict[str, Any]:
     path_text = (path_value or "").strip()
     if not path_text:
         raise HTTPException(status_code=400, detail="Project path is required")
@@ -105,24 +104,28 @@ def _workspace_from_project_path(path_value: str, label: Optional[str], create: 
     except OSError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid project path: {exc}") from exc
 
-    if create:
-        if resolved.exists():
-            raise HTTPException(status_code=400, detail="Project folder already exists")
-        parent = resolved.parent
-        if not parent.exists() or not parent.is_dir():
-            raise HTTPException(status_code=400, detail="Parent folder does not exist")
-        try:
-            resolved.mkdir()
-        except OSError as exc:
-            raise HTTPException(status_code=400, detail=f"Failed to create project folder: {exc}") from exc
-    elif not resolved.exists() or not resolved.is_dir():
+    if not resolved.exists() or not resolved.is_dir():
         raise HTTPException(status_code=400, detail="Project folder does not exist")
 
     return normalize_workspace({
         "cwd": str(resolved),
         "workspace_roots": [str(resolved)],
-        "label": label,
     })
+
+
+def _remember_workspace_project(config_manager: Config, workspace: Dict[str, Any] | None) -> None:
+    path = workspace_project_path(workspace)
+    if not path:
+        return
+    projects = normalize_projects_config(config_manager.data.get("projects"))
+    current = projects.get(path, {})
+    projects[path] = {
+        **current,
+        "label": str((workspace or {}).get("label") or current.get("label") or Path(path).name),
+    }
+    config_manager.data["projects"] = normalize_projects_config(projects)
+    config_manager.save()
+    cfg.data = config_manager.data
 
 
 def _project_summary_from_conversation(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -234,6 +237,7 @@ async def delete_project_history(
     request: ProjectHistoryDeleteRequest,
     chat_manager: ChatManager = Depends(get_chat_manager),
     run_manager: RunManager = Depends(get_run_manager),
+    config_manager: Config = Depends(get_config_manager),
 ):
     """批量删除指定项目下的对话历史。"""
     target_path = normalize_project_path(request.path)
@@ -241,10 +245,17 @@ async def delete_project_history(
         raise HTTPException(status_code=400, detail="Project path is required")
     deleted: list[str] = []
     skipped_active: list[str] = []
+    project_remembered = False
     for item in chat_manager.list_conversations():
         workspace = item.get("workspace")
         if workspace_project_path(workspace if isinstance(workspace, dict) else None) != target_path:
             continue
+        if not project_remembered:
+            _remember_workspace_project(
+                config_manager,
+                workspace if isinstance(workspace, dict) else None,
+            )
+            project_remembered = True
         conversation_id = item.get("id")
         if not conversation_id:
             continue
@@ -267,22 +278,22 @@ async def delete_project_history(
     }
 
 
-@router.post("/projects/folders", response_model=Dict[str, Any])
-async def create_project_folder(request: ProjectFolderRequest):
-    """新建项目文件夹并返回对话 workspace 快照。"""
-    return _workspace_from_project_path(request.path, request.label, create=True)
-
-
 @router.post("/projects/folders/resolve", response_model=Dict[str, Any])
-async def resolve_project_folder(request: ProjectFolderRequest):
-    """使用现有项目文件夹并返回对话 workspace 快照。"""
-    return _workspace_from_project_path(request.path, request.label, create=False)
+async def resolve_project_folder(
+    request: ProjectFolderRequest,
+    config_manager: Config = Depends(get_config_manager),
+):
+    """登记项目文件夹并返回对话 workspace 快照。"""
+    workspace = _workspace_from_project_path(request.path)
+    _remember_workspace_project(config_manager, workspace)
+    return workspace
 
 
 @router.post("/conversations", response_model=Dict[str, Any])
 async def create_conversation(
     request: ConversationCreateRequest,
-    chat_manager: ChatManager = Depends(get_chat_manager)
+    chat_manager: ChatManager = Depends(get_chat_manager),
+    config_manager: Config = Depends(get_config_manager),
 ):
     """创建新对话"""
     try:
@@ -294,6 +305,7 @@ async def create_conversation(
             workspace=request.workspace,
             multi_agent_mode=request.multi_agent_mode,
         )
+        _remember_workspace_project(config_manager, conversation.metadata.get("workspace"))
         logger.info(f"对话创建成功并已保存: {conversation.metadata['id']}")
         return _conversation_response(conversation)
     except Exception as e:
@@ -315,10 +327,14 @@ async def list_conversations(chat_manager: ChatManager = Depends(get_chat_manage
 @router.delete("/conversations/{conversation_id}")
 async def delete_conversation(
     conversation_id: str,
-    chat_manager: ChatManager = Depends(get_chat_manager)
+    chat_manager: ChatManager = Depends(get_chat_manager),
+    config_manager: Config = Depends(get_config_manager),
 ):
     """删除对话"""
     try:
+        conversation = chat_manager.get_conversation(conversation_id)
+        if conversation is not None:
+            _remember_workspace_project(config_manager, conversation.metadata.get("workspace"))
         chat_manager.delete_conversation(conversation_id)
         return {"message": "对话已删除"}
     except Exception as e:

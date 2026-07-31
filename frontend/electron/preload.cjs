@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   showNavigator: () => ipcRenderer.invoke("tab:show-navigator"),
   getTabs: () => ipcRenderer.invoke("tab:list"),
   getNavigatorData: () => ipcRenderer.invoke("navigator:get-data"),
+  selectProjectFolder: () => ipcRenderer.invoke("project:select-folder"),
   onTabsUpdated: (callback) => {
     ipcRenderer.on("tabs:updated", (_event, tabs, activeId) => {
       callback(tabs, activeId);

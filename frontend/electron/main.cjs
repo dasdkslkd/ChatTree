@@ -531,6 +531,14 @@ function registerIpc() {
     const sshHosts = await getSshHosts();
     return { sshHosts };
   });
+
+  ipcMain.handle("project:select-folder", async () => {
+    const result = await dialog.showOpenDialog(shellWindow, {
+      title: "选择项目文件夹",
+      properties: ["openDirectory", "createDirectory"],
+    });
+    return result.canceled ? null : result.filePaths[0] || null;
+  });
 }
 
 // ── App lifecycle ──────────────────────────────────────────────────────

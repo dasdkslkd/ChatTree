@@ -47,23 +47,13 @@ function testEveryMainPagePersistenceKeyIsProfileScoped() {
     );
   }
   assert.match(projectStorage, /const PROFILE_ID = getProfileContext\(\)\.profileId;/);
-  for (const key of [
-    'MANUAL_PROJECTS_STORAGE_KEY',
-    'PROJECT_ORDER_STORAGE_KEY',
-  ]) {
-    assert.match(
-      projectStorage,
-      new RegExp(`profileStorageKey\\(PROFILE_ID, ${key}\\)`),
-      `${key} must be scoped by the immutable route Profile`,
-    );
-  }
-  for (const key of [
-    'PROFILE_MANUAL_PROJECTS_STORAGE_KEY',
-    'PROFILE_PROJECT_ORDER_STORAGE_KEY',
-  ]) {
-    assert.match(projectStorage, new RegExp(`localStorage\\.getItem\\(${key}\\)`));
-    assert.match(projectStorage, new RegExp(`localStorage\\.setItem\\(${key},`));
-  }
+  assert.match(
+    projectStorage,
+    /profileStorageKey\(PROFILE_ID, PROJECT_ORDER_STORAGE_KEY\)/,
+    'PROJECT_ORDER_STORAGE_KEY must be scoped by the immutable route Profile',
+  );
+  assert.match(projectStorage, /localStorage\.getItem\(PROFILE_PROJECT_ORDER_STORAGE_KEY\)/);
+  assert.match(projectStorage, /localStorage\.setItem\(PROFILE_PROJECT_ORDER_STORAGE_KEY,/);
   for (const key of [
     'PROFILE_LEFT_SIDEBAR_STORAGE_KEY',
     'PROFILE_RIGHT_PANEL_STORAGE_KEY',
@@ -80,11 +70,11 @@ function testEveryMainPagePersistenceKeyIsProfileScoped() {
   }
   assert.doesNotMatch(
     mainPage,
-    /(?:getItem|setItem)\((?:MANUAL_PROJECTS_STORAGE_KEY|PROJECT_ORDER_STORAGE_KEY)/,
+    /(?:getItem|setItem)\(PROJECT_ORDER_STORAGE_KEY/,
   );
   assert.doesNotMatch(
     projectStorage,
-    /(?:getItem|setItem)\((?:MANUAL_PROJECTS_STORAGE_KEY|PROJECT_ORDER_STORAGE_KEY)/,
+    /(?:getItem|setItem)\(PROJECT_ORDER_STORAGE_KEY/,
   );
 }
 

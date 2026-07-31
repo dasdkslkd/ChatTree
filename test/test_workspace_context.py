@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from backend.api.routes.conversations import router
 from backend.core.chat.chat_manager import ChatManager
 from backend.core.chat.conversation import Conversation
+from backend.core.config.config import Config
 from backend.core.config.types import SCHEMA_VERSION
 from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
@@ -114,6 +115,8 @@ def test_create_conversation_api_accepts_workspace_and_returns_conversation(tmp_
     from fastapi import FastAPI
 
     app = FastAPI()
+    config_manager = Config(str(tmp_path / "config.json"))
+    app.state.config_manager = config_manager
     app.include_router(router)
     app.dependency_overrides[get_chat_manager] = override_manager
     client = TestClient(app)
@@ -129,36 +132,7 @@ def test_create_conversation_api_accepts_workspace_and_returns_conversation(tmp_
     assert body["workspace"]["cwd"] == str(project.resolve())
     assert body["workspace"]["label"] == "API Project"
     assert body["current_node_id"]
-
-
-def test_project_api_creates_new_folder_and_returns_workspace(tmp_path):
-    manager = make_chat_manager(tmp_path)
-
-    from backend.api.dependencies import get_chat_manager
-
-    async def override_manager():
-        return manager
-
-    from fastapi import FastAPI
-
-    app = FastAPI()
-    app.include_router(router)
-    app.dependency_overrides[get_chat_manager] = override_manager
-    client = TestClient(app)
-
-    target = tmp_path / "projects" / "new-project"
-    target.parent.mkdir()
-    response = client.post(
-        "/projects/folders",
-        json={"path": str(target), "label": "New Project"},
-    )
-
-    assert response.status_code == 200
-    assert target.is_dir()
-    body = response.json()
-    assert body["cwd"] == str(target.resolve())
-    assert body["workspace_roots"] == [str(target.resolve())]
-    assert body["label"] == "New Project"
+    assert config_manager.data["projects"][str(project.resolve())]["label"] == "API Project"
 
 
 def test_project_api_resolves_existing_folder_without_creating(tmp_path):
@@ -172,6 +146,8 @@ def test_project_api_resolves_existing_folder_without_creating(tmp_path):
     from fastapi import FastAPI
 
     app = FastAPI()
+    config_manager = Config(str(tmp_path / "config.json"))
+    app.state.config_manager = config_manager
     app.include_router(router)
     app.dependency_overrides[get_chat_manager] = override_manager
     client = TestClient(app)
@@ -187,6 +163,7 @@ def test_project_api_resolves_existing_folder_without_creating(tmp_path):
     body = response.json()
     assert body["cwd"] == str(existing.resolve())
     assert body["label"] == "existing"
+    assert config_manager.data["projects"][str(existing.resolve())]["label"] == "existing"
 
 
 def test_project_api_rejects_missing_existing_folder(tmp_path):
@@ -200,6 +177,7 @@ def test_project_api_rejects_missing_existing_folder(tmp_path):
     from fastapi import FastAPI
 
     app = FastAPI()
+    app.state.config_manager = Config(str(tmp_path / "config.json"))
     app.include_router(router)
     app.dependency_overrides[get_chat_manager] = override_manager
     client = TestClient(app)
@@ -210,3 +188,35 @@ def test_project_api_rejects_missing_existing_folder(tmp_path):
     )
 
     assert response.status_code == 400
+
+
+def test_deleting_last_conversation_keeps_empty_project_visible(tmp_path):
+    project = tmp_path / "retained-project"
+    project.mkdir()
+    manager = make_chat_manager(tmp_path)
+    conversation = manager.create_conversation(
+        "Only conversation",
+        workspace={"cwd": str(project), "label": "Retained Project"},
+    )
+
+    from backend.api.dependencies import get_chat_manager
+
+    async def override_manager():
+        return manager
+
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    app.state.config_manager = Config(str(tmp_path / "config.json"))
+    app.include_router(router)
+    app.dependency_overrides[get_chat_manager] = override_manager
+    client = TestClient(app)
+
+    response = client.delete(f"/conversations/{conversation.metadata['id']}")
+
+    assert response.status_code == 200
+    assert manager.list_conversations() == []
+    projects = client.get("/projects").json()["projects"]
+    assert len(projects) == 1
+    assert projects[0]["path"] == str(project.resolve())
+    assert projects[0]["conversation_count"] == 0
