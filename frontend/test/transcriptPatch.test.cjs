@@ -107,6 +107,9 @@ function testPlanStateRefreshPathIsGone() {
   assert.match(mainPage, /messageApi\.rejectPlan/);
   assert.match(mainPage, /onTranscriptPatch\(\(patch, sourceRun\)/);
   assert.match(mainPage, /shouldPatchRunIntoMainConversation\(sourceRun\)/);
+  assert.match(mainPage, /operation\.item\.parent_node_id === visible\.tipNodeId/);
+  assert.match(mainPage, /if \(!targetLandedFromVisibleNode\) return/);
+  assert.match(mainPage, /transcriptState\.nodeId !== selectedBranchTipId[\s\S]{0,80}return new Set<string>\(\)/);
   assert.match(mainPage, /setCurrentNodeIdLocal\(patch\.node_id\)/);
   assert.match(mainPage, /loadTranscriptSnapshot\(patch\.conversation_id, patch\.node_id\)/);
   assert.match(

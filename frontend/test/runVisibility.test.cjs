@@ -145,7 +145,7 @@ function testDetachedChatRunStaysInMainTranscriptDuringPreTargetPhase() {
   assert.equal(isRunVisibleInMainTranscript(run, 'node-hello', new Set(['node-hello'])), true);
 }
 
-function testPendingChatRunStaysVisibleFromAnchorUntilTargetLands() {
+function testPendingChatRunStopsBlockingAnchorAfterTargetLands() {
   const run = chatRun({
     kind: 'chat',
     status: 'streaming',
@@ -155,70 +155,9 @@ function testPendingChatRunStaysVisibleFromAnchorUntilTargetLands() {
     pendingUserMessage: '新的用户消息',
   });
 
-  assert.equal(isRunVisibleInSelectedTranscript(run, 'node-hello', new Set(['node-hello'])), true);
-  assert.equal(isRunVisibleInMainTranscript(run, 'node-hello', new Set(['node-hello'])), true);
-  assert.equal(isRunBlockingSelectedBranch(run, 'node-hello', new Set(['node-hello'])), true);
-}
-
-function testStoppedChatRunStaysVisibleFromAnchorUntilTargetLands() {
-  const run = chatRun({
-    kind: 'chat',
-    status: 'stopped',
-    anchorNodeId: 'node-hello',
-    nodeId: 'node-new',
-    targetNodeId: 'node-new',
-    pendingUserMessage: '被中断的用户消息',
-  });
-
-  assert.equal(isRunVisibleInSelectedTranscript(run, 'node-hello', new Set(['node-hello'])), true);
-  assert.equal(isRunVisibleInMainTranscript(run, 'node-hello', new Set(['node-hello'])), true);
+  assert.equal(isRunVisibleInSelectedTranscript(run, 'node-hello', new Set(['node-hello'])), false);
+  assert.equal(isRunVisibleInMainTranscript(run, 'node-hello', new Set(['node-hello'])), false);
   assert.equal(isRunBlockingSelectedBranch(run, 'node-hello', new Set(['node-hello'])), false);
-}
-
-function testCompletedChatRunStaysVisibleForFinalPatchUntilTargetLands() {
-  const run = chatRun({
-    kind: 'chat',
-    status: 'completed',
-    anchorNodeId: 'node-hello',
-    nodeId: 'node-new',
-    targetNodeId: 'node-new',
-    pendingUserMessage: '刚完成的用户消息',
-  });
-
-  assert.equal(isRunVisibleInSelectedTranscript(run, 'node-hello', new Set(['node-hello'])), true);
-  assert.equal(isRunVisibleInMainTranscript(run, 'node-hello', new Set(['node-hello'])), true);
-  assert.equal(isRunBlockingSelectedBranch(run, 'node-hello', new Set(['node-hello'])), false);
-}
-
-function testControlChatRunStaysVisibleFromAnchorUntilTargetLands() {
-  const run = chatRun({
-    kind: 'chat',
-    status: 'streaming',
-    anchorNodeId: 'node-hello',
-    nodeId: 'node-new',
-    targetNodeId: 'node-new',
-    pendingUserMessage: null,
-    anchorUntilTargetLands: true,
-  });
-
-  assert.equal(isRunVisibleInSelectedTranscript(run, 'node-hello', new Set(['node-hello'])), true);
-  assert.equal(isRunVisibleInMainTranscript(run, 'node-hello', new Set(['node-hello'])), true);
-  assert.equal(isRunBlockingSelectedBranch(run, 'node-hello', new Set(['node-hello'])), true);
-}
-
-function testPendingRootChatRunStaysVisibleBeforeFirstHistoryRefresh() {
-  const run = chatRun({
-    kind: 'chat',
-    status: 'streaming',
-    anchorNodeId: null,
-    nodeId: 'node-new',
-    targetNodeId: 'node-new',
-    pendingUserMessage: '第一条用户消息',
-  });
-
-  assert.equal(isRunVisibleInSelectedTranscript(run, null, new Set()), true);
-  assert.equal(isRunVisibleInMainTranscript(run, null, new Set()), true);
-  assert.equal(isRunBlockingSelectedBranch(run, null, new Set()), true);
 }
 
 function testDetachedSubagentIsNotStoppedFromSelectedAnchorWithoutOwnership() {
@@ -352,11 +291,7 @@ testDetachedBackgroundRunIsSideViewNotMainTranscript();
 testDirectResponseRunIsSideViewNotMainTranscriptWithoutNode();
 testDirectResponseRunNeverEntersMainTranscriptEvenWithTargetNode();
 testDetachedChatRunStaysInMainTranscriptDuringPreTargetPhase();
-testPendingChatRunStaysVisibleFromAnchorUntilTargetLands();
-testStoppedChatRunStaysVisibleFromAnchorUntilTargetLands();
-testCompletedChatRunStaysVisibleForFinalPatchUntilTargetLands();
-testControlChatRunStaysVisibleFromAnchorUntilTargetLands();
-testPendingRootChatRunStaysVisibleBeforeFirstHistoryRefresh();
+testPendingChatRunStopsBlockingAnchorAfterTargetLands();
 testDetachedSubagentIsNotStoppedFromSelectedAnchorWithoutOwnership();
 testDetachedRunIsVisibleWhenAnchorIsInSelectedBranchHistory();
 testDetachedRunIsHiddenWhenAnchorIsOutsideSelectedBranch();

@@ -15,7 +15,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { ZoomIn, ZoomOut, Maximize2, ArrowDown, ArrowRight, Trash2, Scissors, Loader2, Copy, Check } from 'lucide-react';
 import type { TreeNode } from '../api/conversation';
 import { useRunManager } from '../hooks/useRunManager';
-import { streamManager } from '../services/streamManager';
+import { streamManager, type StreamState } from '../services/streamManager';
 
 interface LayoutNode {
   id: string;
@@ -80,7 +80,7 @@ function getTreeNodePrimaryText(node: TreeNode): string {
 
 export default function TreeView() {
   const containerRef = useRef<HTMLDivElement>(null);
-  const { currentConversation, treeData, deleteNode } = useConversationStore();
+  const { currentConversation, treeData, deleteNode, loadTree } = useConversationStore();
   const { setChatViewMode } = useNavigationStore();
   const runStates = useRunManager(currentConversation?.id ?? null);
 
@@ -93,11 +93,19 @@ export default function TreeView() {
   const panStartRef = useRef({ x: 0, y: 0, tx: 0, ty: 0 });
   const copiedTimerRef = useRef<number | null>(null);
 
-  const activePruneSummaryNodeIds = useMemo(() => {
+  const { activeChatRunsByNode, activePruneSummaryNodeIds } = useMemo(() => {
     const activeStatuses = new Set(['streaming', 'waiting_approval', 'stopping']);
+    const chatRunsByNode = new Map<string, StreamState>();
     const ids = new Set<string>();
     for (const run of runStates) {
       if (!activeStatuses.has(run.status)) continue;
+      const runNodeId = run.targetNodeId || run.nodeId;
+      if (run.kind === 'chat' && runNodeId) {
+        const existing = chatRunsByNode.get(runNodeId);
+        if (!existing || existing.createdAt <= run.createdAt) {
+          chatRunsByNode.set(runNodeId, run);
+        }
+      }
       const metadata = run.metadata || {};
       const slashCommand = metadata.slash_command as { command?: unknown } | undefined;
       const pendingPruneCommand = /^\s*\/(?:prune-summary|prune)\b/i.test(run.pendingUserMessage || '');
@@ -107,8 +115,18 @@ export default function TreeView() {
         : run.anchorNodeId;
       if (targetNodeId) ids.add(targetNodeId);
     }
-    return ids;
+    return {
+      activeChatRunsByNode: chatRunsByNode,
+      activePruneSummaryNodeIds: ids,
+    };
   }, [runStates]);
+  const activeChatTargetKey = [...activeChatRunsByNode.keys()].sort().join(':');
+
+  useEffect(() => {
+    const conversationId = currentConversation?.id;
+    if (!conversationId) return;
+    void loadTree(conversationId).catch(() => {});
+  }, [activeChatTargetKey, currentConversation?.id, loadTree]);
 
   useEffect(() => () => {
     if (copiedTimerRef.current != null) {
@@ -416,6 +434,8 @@ export default function TreeView() {
           const isRoot = isRootNode(node.data);
           const userContent = getTreeUserContent(node.data);
           const primaryText = getTreeNodePrimaryText(node.data);
+          const activeChatRun = activeChatRunsByNode.get(node.id);
+          const assistantContent = activeChatRun?.content || node.data.assistant_content;
           return (
             <div
               key={node.id}
@@ -464,14 +484,32 @@ export default function TreeView() {
                     }
                   `}
                 >
-                  {(userContent || (!node.data.assistant_content && !isRoot)) && (
+                  {activeChatRun && (
+                    <svg
+                      aria-hidden="true"
+                      className="pointer-events-none absolute inset-0 h-full w-full overflow-visible"
+                      viewBox={`0 0 ${NODE_WIDTH} ${NODE_HEIGHT}`}
+                      preserveAspectRatio="none"
+                    >
+                      <rect
+                        className="tree-streaming-border"
+                        x="1.5"
+                        y="1.5"
+                        width={NODE_WIDTH - 3}
+                        height={NODE_HEIGHT - 3}
+                        rx="12"
+                        pathLength="100"
+                      />
+                    </svg>
+                  )}
+                  {(userContent || (!assistantContent && !isRoot)) && (
                     <p className="text-[11px] leading-tight font-medium text-foreground line-clamp-2 mb-1">
                       {truncate(primaryText, 40)}
                     </p>
                   )}
-                  {node.data.assistant_content && (
+                  {assistantContent && (
                     <p className="text-[11px] leading-tight text-muted-foreground line-clamp-2">
-                      {truncate(node.data.assistant_content, 50)}
+                      {truncate(assistantContent, 50)}
                     </p>
                   )}
                   {node.data.model_id && (
@@ -505,6 +543,12 @@ export default function TreeView() {
                     <span className="absolute bottom-1 left-2 inline-flex items-center gap-1 text-[9px] text-muted-foreground">
                       <Loader2 className="h-3 w-3 animate-spin" />
                       摘要中
+                    </span>
+                  )}
+                  {activeChatRun && (
+                    <span className="absolute bottom-1 right-2 inline-flex items-center gap-1 text-[9px] text-muted-foreground">
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      回复中
                     </span>
                   )}
                 </div>

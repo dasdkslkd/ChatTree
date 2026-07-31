@@ -1022,3 +1022,27 @@
 @keyframes blink {
   50% { opacity: 0; }
 }
+
+.tree-streaming-border {
+  fill: none;
+  stroke: var(--primary);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-dasharray: 18 82;
+  vector-effect: non-scaling-stroke;
+  filter: drop-shadow(0 0 3px color-mix(in srgb, var(--primary) 65%, transparent));
+  animation: tree-streaming-border-flow 1.5s linear infinite;
+}
+
+@keyframes tree-streaming-border-flow {
+  to {
+    stroke-dashoffset: -100;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tree-streaming-border {
+    stroke-dasharray: 100 0;
+    animation: none;
+  }
+}

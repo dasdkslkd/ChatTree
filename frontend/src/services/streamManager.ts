@@ -34,7 +34,6 @@ export interface StreamState {
   pendingUserMessage: string | null;
   toolPermissionMode: string | null;
   taskContextMode: 'attached' | 'detached' | null;
-  anchorUntilTargetLands: boolean;
   createdAt: number;
 }
 
@@ -91,10 +90,6 @@ interface FinishInfo {
   controller: AbortController;
 }
 type FinishListener = (info: FinishInfo) => void;
-
-export interface ResumeStreamOptions {
-  anchorUntilTargetLands?: boolean;
-}
 
 function mapRunStatus(status: unknown): 'streaming' | 'waiting_approval' | 'stopping' | 'completed' | 'error' | 'stopped' | null {
   if (status === 'running' || status === 'reconnecting') return 'streaming';
@@ -187,7 +182,6 @@ export class StreamManager {
       state.errorMessage ?? '',
       state.pendingUserMessage ?? '',
       state.toolPermissionMode ?? '',
-      state.anchorUntilTargetLands ? 'anchor' : '',
     ].join(':')).join('|');
     const cached = this.conversationSnapshots.get(conversationId);
     if (cached?.signature === signature) return cached.states;
@@ -412,7 +406,6 @@ export class StreamManager {
       pendingUserMessage,
       toolPermissionMode: null,
       taskContextMode: null,
-      anchorUntilTargetLands: false,
       createdAt: Date.now(),
     };
   }
@@ -457,7 +450,6 @@ export class StreamManager {
     runId?: string,
     anchorNodeId?: string | null,
     kind = 'chat',
-    options: ResumeStreamOptions = {},
   ): Promise<void> {
     const existing = this.getConversationStates(conversationId)
       .find((state) => (runId && state.runId === runId) || (nodeId && state.targetNodeId === nodeId));
@@ -483,7 +475,6 @@ export class StreamManager {
       kind,
       anchorNodeId,
     );
-    state.anchorUntilTargetLands = options.anchorUntilTargetLands ?? false;
     this.streams.set(resolvedRunId, state);
     this.addToConversation(conversationId, resolvedRunId);
     this.notify(conversationId, true);

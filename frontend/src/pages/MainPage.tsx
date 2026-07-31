@@ -618,14 +618,20 @@ export default function ChatPage() {
   const projectGroupRefs = useRef(new Map<string, HTMLDivElement>());
   const projectFlipFirstRef = useRef<Map<string, number> | null>(null);
 
-  const currentBranchNodeIds = useMemo(
-    () => new Set(transcriptItems.flatMap((item) => {
+  const selectedBranchTipId = currentNodeId || currentConversation?.current_node_id || null;
+  const currentBranchNodeIds = useMemo(() => {
+    const transcriptState = transcriptStateRef.current;
+    if (
+      transcriptState.conversationId !== currentConversation?.id
+      || transcriptState.nodeId !== selectedBranchTipId
+    ) {
+      return new Set<string>();
+    }
+    return new Set(transcriptItems.flatMap((item) => {
       const nodeId = getTranscriptItemNodeId(item);
       return nodeId ? [nodeId] : [];
-    })),
-    [transcriptItems],
-  );
-  const selectedBranchTipId = currentNodeId || currentConversation?.current_node_id || null;
+    }));
+  }, [currentConversation?.id, selectedBranchTipId, transcriptItems]);
   const currentBranchToolPermissionMode = useMemo(
     () => getBranchToolPermissionMode(transcriptItems, selectedBranchTipId),
     [transcriptItems, selectedBranchTipId],
@@ -1115,6 +1121,13 @@ export default function ChatPage() {
       if (!visible || visible.conversationId !== patch.conversation_id) return;
       if (!shouldPatchRunIntoMainConversation(sourceRun)) return;
       if (visible.tipNodeId !== patch.node_id) {
+        const targetLandedFromVisibleNode = patch.operations.some((operation) =>
+          operation.op === 'upsert'
+          && operation.item.type === 'user_message'
+          && operation.item.node_id === patch.node_id
+          && operation.item.parent_node_id === visible.tipNodeId
+        );
+        if (!targetLandedFromVisibleNode) return;
         useConversationStore.getState().setCurrentNodeIdLocal(patch.node_id);
         void (async () => {
           await loadTranscriptSnapshot(patch.conversation_id, patch.node_id);
@@ -1246,7 +1259,6 @@ export default function ChatPage() {
         item.run_id,
         item.node_id,
         'chat',
-        { anchorUntilTargetLands: false },
       ).catch((error) => {
         setToolApprovalError(error instanceof Error ? error.message : '工具审批后接收流失败');
       });
