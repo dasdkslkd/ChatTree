@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from backend.core.perf import configure_profiler, get_profiler
-from backend.core.persistence.home import resolve_chattree_home
+from backend.core.home import resolve_chattree_home
 
 router = APIRouter()
 

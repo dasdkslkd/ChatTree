@@ -13,7 +13,7 @@ from pathspec import GitIgnoreSpec
 
 from ..base import BaseTool
 from ..security.logical_sandbox import DEFAULT_PROTECTED_PATHS
-from ...persistence.home import resolve_chattree_home
+from ...home import resolve_chattree_home
 from ...runs.types import FINISHED_RUN_STATUSES
 
 

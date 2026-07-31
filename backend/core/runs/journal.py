@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
-from backend.core.persistence.home import resolve_chattree_home
+from backend.core.home import resolve_chattree_home
 
 
 class RunJournal:

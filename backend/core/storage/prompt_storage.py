@@ -2,7 +2,7 @@ import os
 import json
 from time import time
 from typing import List, Dict, Any, Optional
-from backend.core.persistence.home import resolve_chattree_home
+from backend.core.home import resolve_chattree_home
 from .base import StorageInterface
 from .atomic import atomic_write_json, atomic_write_text
 from ..utils.logger import setup_logger

@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import BinaryIO
 
-from backend.core.persistence.home import resolve_chattree_home
+from backend.core.home import resolve_chattree_home
 
 
 SERVER_HOME_LOCK_FILENAME = ".server.lock"

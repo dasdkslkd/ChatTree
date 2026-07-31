@@ -9,7 +9,7 @@ from backend.core.capabilities.plugin_loader import load_plugins_from_roots
 from backend.core.capabilities.registry import CapabilityRegistry
 from backend.core.capabilities.skill_loader import load_skill_roots
 from backend.core.capabilities.types import CapabilitySource
-from backend.core.persistence.home import resolve_chattree_home
+from backend.core.home import resolve_chattree_home
 from backend.core.prompts.catalog import PROMPT_SOURCES, TEMPLATE_ROOT
 
 

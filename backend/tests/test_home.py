@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from backend.core.persistence import home
+from backend.core import home
 
 
 def test_resolve_chattree_home_prefers_explicit_env(monkeypatch, tmp_path):

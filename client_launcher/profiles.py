@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Iterable
 
-from backend.core.persistence.home import resolve_chattree_home
+from backend.core.home import resolve_chattree_home
 from backend.core.storage.atomic import atomic_write_json
 
 from .models import LauncherError, LocalTarget, ServerProfile, SshTarget, ssh_profile_id

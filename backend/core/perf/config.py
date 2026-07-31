@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from backend.core.persistence.home import resolve_chattree_home
+from backend.core.home import resolve_chattree_home
 
 
 def _truthy(value: Any) -> bool | None:

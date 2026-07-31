@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-from .home import resolve_chattree_home
+from backend.core.home import resolve_chattree_home
 from .schema import CURRENT_SCHEMA_VERSION, SCHEMA_SQL
 
 

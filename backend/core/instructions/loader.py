@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
-from backend.core.persistence.home import resolve_chattree_home
+from backend.core.home import resolve_chattree_home
 
 
 DEFAULT_AGENTS_MD_FILENAME = "AGENTS.md"

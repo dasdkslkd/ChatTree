@@ -1,7 +1,7 @@
 # storage/chat_storage.py - 修改为多文件存储
 import os
 from typing import List, Dict, Any, Optional
-from backend.core.persistence.home import resolve_chattree_home
+from backend.core.home import resolve_chattree_home
 from .atomic import atomic_write_bytes
 from ..utils.logger import setup_logger
 

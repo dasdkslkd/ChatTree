@@ -3,7 +3,7 @@ import os
 import json
 from pathlib import Path
 from typing import Dict, Any, Optional, List
-from backend.core.persistence.home import resolve_chattree_home
+from backend.core.home import resolve_chattree_home
 from .types import ModelProviderConfig
 
 # 旧的预设提供商ID列表，用于迁移检测

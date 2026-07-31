@@ -12,7 +12,7 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any, Sequence
 
-from backend.core.persistence.home import resolve_chattree_home
+from backend.core.home import resolve_chattree_home
 from backend.core.server import (
     SERVER_HOME_LOCK_FILENAME,
     SERVER_VERSION,

@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 from typing_extensions import TypedDict
 
 from backend.core.config.types import ModelProtocol, ModelRoute, ReasoningProfile
-from backend.core.persistence.home import resolve_chattree_home
+from backend.core.home import resolve_chattree_home
 
 try:
     import tomllib

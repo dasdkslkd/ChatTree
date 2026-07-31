@@ -1,7 +1,6 @@
 from .blob_store import BlobStore
 from .content import INLINE_TEXT_LIMIT, StoredText, store_text_content
 from .database import SQLitePersistence
-from .home import resolve_chattree_home
 from .plan_repository import SQLitePlanRepository
 from .repository import ChatRepository
 from .run_repository import SQLiteRunRepository
@@ -16,6 +15,5 @@ __all__ = [
     "SQLiteRunRepository",
     "SQLiteTaskRepository",
     "StoredText",
-    "resolve_chattree_home",
     "store_text_content",
 ]

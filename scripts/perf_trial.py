@@ -17,7 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from backend.core.perf.aggregate import summarize_events, write_reports
-from backend.core.persistence.home import resolve_chattree_home
+from backend.core.home import resolve_chattree_home
 
 
 DEFAULT_API_BASE_URL = "http://127.0.0.1:8001/api/v1"
