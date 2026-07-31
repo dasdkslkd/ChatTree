@@ -24,7 +24,7 @@ class ApplyPatchTool(common._CodeTool):
             "additionalProperties": False,
             "properties": {
                 "patch": {"type": "string"},
-                "cwd": {"type": "string", "default": "."},
+                "cwd": {"type": "string"},
             },
             "required": ["patch"],
         }

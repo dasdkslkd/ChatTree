@@ -34,7 +34,7 @@ class RunCommandTool(common._CodeTool):
             "additionalProperties": False,
             "properties": {
                 "command": {"type": "string"},
-                "cwd": {"type": "string", "default": "."},
+                "cwd": {"type": "string"},
                 "timeout_seconds": {"type": "integer", "minimum": 1},
                 "step": task_step_parameter_schema(),
             },

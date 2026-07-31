@@ -76,7 +76,7 @@ function loadToolCallFormatting() {
 
 function testRegistryContainsAllExpectedTools() {
   const source = readSource('src/components/transcript/items/ToolCallRenderer.tsx');
-  const expectedTools = ['shell', 'grep', 'glob', 'read', 'edit', 'write', 'patch', 'fetch_url', 'web_search', 'enter_plan_mode', 'exit_plan_mode'];
+  const expectedTools = ['shell', 'grep', 'glob', 'read', 'edit', 'web', 'enter_plan_mode', 'exit_plan_mode'];
   for (const tool of expectedTools) {
     assert.match(source, new RegExp(`${tool}\\s*:`), `TOOL_SPECS should register tool: ${tool}`);
   }
@@ -164,18 +164,18 @@ function testSummarizeForReadWithTargets() {
   assert.equal(summary, 'src/bar.ts L1-5');
 }
 
-function testSummarizeForFetchUrl() {
+function testSummarizeForWebFetch() {
   const { summarizeToolCall } = loadToolCallFormatting();
-  const args = JSON.stringify({ url: 'https://example.com/page' });
-  const summary = summarizeToolCall('fetch_url', args, '', 'running');
+  const args = JSON.stringify({ action: 'fetch', url: 'https://example.com/page' });
+  const summary = summarizeToolCall('web', args, '', 'running');
   assert.equal(summary, 'https://example.com/page');
 }
 
 function testSummarizeForWebSearch() {
   const { summarizeToolCall } = loadToolCallFormatting();
-  const args = JSON.stringify({ query: 'how to test react components' });
+  const args = JSON.stringify({ action: 'search', query: 'how to test react components' });
   const result = JSON.stringify({ count: 7, results: [] });
-  const summary = summarizeToolCall('web_search', args, result, 'done');
+  const summary = summarizeToolCall('web', args, result, 'done');
   assert.equal(summary, 'how to test react components · 7 项');
 }
 
@@ -334,7 +334,7 @@ function run() {
   testSummarizeForGlob();
   testSummarizeForReadWithLineRange();
   testSummarizeForReadWithTargets();
-  testSummarizeForFetchUrl();
+  testSummarizeForWebFetch();
   testSummarizeForWebSearch();
   testSummarizeForUnknownToolFallsBackToGeneric();
   testSummarizeForUnknownToolWithEmptyArgs();

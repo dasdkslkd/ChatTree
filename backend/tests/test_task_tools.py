@@ -8,7 +8,7 @@ import pytest
 from backend.api.routes.config import _sync_runtime_managers
 from backend.core.tasks import ActiveTaskService
 from backend.core.tools.security.permissions import PermissionContext, PermissionEngine
-from backend.core.tools.task_tools import TASK_OBSERVATION_TOOL_NAMES, register_task_tools
+from backend.core.tools.task_tools import register_task_tools
 from backend.core.tools.task_contract import SET_TASK_STEP_DESCRIPTION
 from backend.core.tools.tool_manager import ToolInventoryTool, ToolManager
 
@@ -248,13 +248,6 @@ def test_registered_task_tools_are_internal_in_real_tool_manager():
 
     names = {tool["function"]["name"] for tool in tool_manager.get_openai_tools()}
     assert not {"create_task", "set_task_step", "cancel_task"}.intersection(names)
-
-
-def test_task_observation_tools_refresh_the_runtime_task_version():
-    assert TASK_OBSERVATION_TOOL_NAMES == {
-        "list_agents",
-        "wait_agent",
-    }
 
 
 def test_detached_tool_inventory_does_not_reveal_task_tools():

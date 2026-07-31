@@ -86,11 +86,9 @@ export interface McpServerConfig {
 }
 
 export type BuiltinToolExposure = 'minimal' | 'coding' | 'full';
-export type BuiltinCodeToolGroup = 'read' | 'search' | 'edit' | 'shell' | 'write';
 
 export interface BuiltinCodeToolsConfig {
   enabled?: boolean;
-  groups?: BuiltinCodeToolGroup[];
   workspace_roots?: string[];
   protected_paths?: string[];
   command_timeout_seconds?: number;
@@ -121,7 +119,6 @@ export interface WebSearchConfig {
 
 export interface ToolsConfig {
   enabled?: boolean;
-  max_rounds?: number;
   max_result_length?: number;
   default_permission_mode?: 'auto_approve' | 'modify_only' | 'ask_always' | 'plan';
   enabled_tools?: string[] | null;

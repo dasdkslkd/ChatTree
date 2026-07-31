@@ -22,9 +22,9 @@ class WriteFileTool(common._CodeTool):
             "properties": {
                 "path": {"type": "string"},
                 "content": {"type": "string"},
-                "mode": {"type": "string", "enum": ["create", "overwrite"], "default": "create"},
+                "mode": {"type": "string", "enum": ["create", "overwrite"]},
                 "expected_version": {"type": "string"},
-                "create_parents": {"type": "boolean", "default": False},
+                "create_parents": {"type": "boolean"},
             },
             "required": ["path", "content"],
         }

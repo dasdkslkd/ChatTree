@@ -727,7 +727,13 @@ def test_read_file_reads_utf8_line_slice(tmp_path):
     (tmp_path / "notes.txt").write_text("one\ntwo\nthree\nfour\n", encoding="utf-8")
     tool = ReadFileTool(make_config(tmp_path, max_read_chars=200))
 
-    result = load(run(tool.execute(path="notes.txt", start_line=2, line_count=2)))
+    result = load(run(tool.execute(
+        path="notes.txt",
+        targets=[],
+        tool_result_id="",
+        start_line=2,
+        line_count=2,
+    )))
 
     assert result["path"] == "notes.txt"
     assert result["start_line"] == 2
@@ -736,6 +742,16 @@ def test_read_file_reads_utf8_line_slice(tmp_path):
     assert result["total_lines"] == 4
     assert result["version"].startswith("sha256:")
     assert result["truncated"] is True
+
+
+def test_read_file_schema_has_three_unambiguous_inputs(tmp_path):
+    schema = ReadFileTool(make_config(tmp_path)).parameters_schema()
+
+    assert "source" not in schema["properties"]
+    assert "id" not in schema["properties"]
+    assert schema["properties"]["targets"]["minItems"] == 1
+    assert "default" not in schema["properties"]["start_line"]
+    assert "default" not in schema["properties"]["format"]
 
 
 def test_read_file_reads_multiple_files(tmp_path):
@@ -1074,6 +1090,7 @@ def test_edit_file_replaces_unique_match_and_rejects_ambiguous_edit(tmp_path):
     version = load(run(read_tool.execute(path="app.py")))["version"]
 
     ambiguous = load(run(tool.execute(
+        operation="replace",
         path="app.py",
         expected_version=version,
         replacements=[{"old": "old", "new": "new"}],
@@ -1081,6 +1098,7 @@ def test_edit_file_replaces_unique_match_and_rejects_ambiguous_edit(tmp_path):
     assert ambiguous["error"]["type"] == "edit_not_unique"
 
     ok = load(run(tool.execute(
+        operation="replace",
         path="app.py",
         expected_version=version,
         replacements=[{"old": "old\nkeep\n", "new": "new\nkeep\n"}],
@@ -1362,7 +1380,11 @@ def test_tool_manager_returns_structured_error_when_tool_raises_not_implemented(
             return "broken test tool"
 
         def parameters_schema(self):
-            return {"type": "object", "properties": {}}
+            return {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {},
+            }
 
         async def execute(self, **kwargs) -> str:
             raise NotImplementedError()
@@ -1387,7 +1409,7 @@ def test_tool_manager_returns_structured_error_when_tool_raises_not_implemented(
     }
 
 
-def test_tool_manager_coding_exposure_hides_raw_write_file_but_keeps_it_executable(tmp_path):
+def test_tool_manager_registers_only_canonical_code_tools(tmp_path):
     manager = ToolManager({
         "tools": {
             "enabled": True,
@@ -1410,8 +1432,8 @@ def test_tool_manager_coding_exposure_hides_raw_write_file_but_keeps_it_executab
     assert "patch" not in names
     assert "shell" in names
     assert "write" not in names
-    result = load(run(manager.execute_tool("write", {"path": "notes.txt", "content": "ok"})))
-    assert result["path"] == "notes.txt"
+    assert manager.get_tool("write") is None
+    assert manager.get_tool("patch") is None
 
 
 def test_tool_manager_full_exposure_keeps_write_internal(tmp_path):

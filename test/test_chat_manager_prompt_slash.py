@@ -307,7 +307,7 @@ class FakeWorkflowToolManager(FakeToolManager):
             {
                 "type": "function",
                 "function": {
-                    "name": "start_workflow",
+                    "name": "agent",
                     "description": "Start a real workflow",
                     "parameters": {"type": "object", "properties": {}},
                 },
@@ -345,11 +345,12 @@ class WorkflowToolThenFinalProvider(CapturingProvider):
                 tokens_used=1,
                 tool_calls=[
                     {
-                        "id": "call_start_workflow",
+                        "id": "call_agent_workflow",
                         "type": "function",
                         "function": {
-                            "name": "start_workflow",
+                            "name": "agent",
                             "arguments": json.dumps({
+                                "action": "workflow",
                                 "script": "export default async function workflow(ctx) { return 1; }"
                             }),
                         },
@@ -409,11 +410,15 @@ class EnterPlanThenWriteProvider(CapturingProvider):
                         "function": {"name": "enter_plan_mode", "arguments": "{}"},
                     },
                     {
-                        "id": "call_write",
+                        "id": "call_edit",
                         "type": "function",
                         "function": {
-                            "name": "write",
-                            "arguments": json.dumps({"path": "x.txt", "content": "nope"}),
+                            "name": "edit",
+                            "arguments": json.dumps({
+                                "operation": "create",
+                                "path": "x.txt",
+                                "content": "nope",
+                            }),
                         },
                     },
                 ],
@@ -479,11 +484,12 @@ class PlanModeToolManager:
         tools.append({
             "type": "function",
             "function": {
-                "name": "write",
-                "description": "Write a file",
+                "name": "edit",
+                "description": "Edit a file",
                 "parameters": {
                     "type": "object",
                     "properties": {
+                        "operation": {"type": "string"},
                         "path": {"type": "string"},
                         "content": {"type": "string"},
                     },
@@ -528,7 +534,7 @@ def test_send_message_stream_expands_review_slash_prompt(tmp_path: Path):
     assert user_message["slash_command"]["original_input"] == "/review focus on auth"
 
 
-def test_send_message_stream_enter_plan_mode_blocks_same_round_write(tmp_path: Path):
+def test_send_message_stream_enter_plan_mode_blocks_same_round_edit(tmp_path: Path):
     manager, model_manager = make_stream_manager(tmp_path)
     plan_ledger = make_plan_ledger(manager)
     tool_manager = PlanModeToolManager(plan_ledger)
@@ -555,9 +561,9 @@ def test_send_message_stream_enter_plan_mode_blocks_same_round_write(tmp_path: P
     )
 
     tool_results = [chunk["tool_call"] for chunk in chunks if chunk.get("event_type") == "tool_result"]
-    write_result = next(item for item in tool_results if item["name"] == "write")
-    assert "permission_denied" in write_result["content"]
-    assert "plan mode" in write_result["content"]
+    edit_result = next(item for item in tool_results if item["name"] == "edit")
+    assert "permission_denied" in edit_result["content"]
+    assert "plan mode" in edit_result["content"]
     reloaded = manager.get_conversation(conversation.metadata["id"])
     current = reloaded.nodes[reloaded.current_node_id]
     assert current["tool_permission_mode"] == "plan"
@@ -590,7 +596,7 @@ def test_send_message_stream_rejects_manual_plan_permission_without_session(tmp_
     assert all(msg.get("content") != "实现一个清晰的小改动" for msg in visible_messages)
 
 
-def test_send_message_stream_allows_final_after_real_start_workflow(tmp_path: Path):
+def test_send_message_stream_allows_final_after_real_agent_workflow(tmp_path: Path):
     manager, model_manager = make_stream_manager(tmp_path)
     manager.tool_manager = FakeWorkflowToolManager()
     model_manager.provider = WorkflowToolThenFinalProvider()

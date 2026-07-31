@@ -4,14 +4,12 @@ from typing import Any, Dict, List, Optional
 
 from .base import BaseTool
 from .code import (
-    ApplyPatchTool,
     CodeToolConfig,
     EditFileTool,
     ListFilesTool,
     ReadFileTool,
     RunCommandTool,
     SearchFilesTool,
-    WriteFileTool,
 )
 from .connection_manager import ConnectionManager
 from .exposure import (
@@ -40,21 +38,12 @@ from ..utils.logger import setup_logger
 logger = setup_logger("ToolManager")
 
 
-BUILTIN_CODE_TOOL_GROUPS = {
-    "read": {"read"},
-    "search": {"glob", "grep"},
-    "edit": {"edit", "patch"},
-    "shell": {"shell"},
-    "write": {"write"},
-}
 BUILTIN_CODE_TOOL_CLASSES = {
     "glob": ListFilesTool,
     "read": ReadFileTool,
     "grep": SearchFilesTool,
     "edit": EditFileTool,
     "shell": RunCommandTool,
-    "write": WriteFileTool,
-    "patch": ApplyPatchTool,
 }
 
 
@@ -64,19 +53,6 @@ def _tool_exception_error(tool_name: str, exc: Exception) -> Dict[str, str]:
         "message": str(exc),
         "tool_name": tool_name,
     }
-
-
-def _runtime_chat_repository(kwargs: Dict[str, Any]) -> Optional[ChatRepository]:
-    context = kwargs.get("_runtime_context")
-    if not isinstance(context, dict):
-        return None
-    repository = context.get("chat_repository")
-    if isinstance(repository, ChatRepository):
-        return repository
-    persistence = context.get("persistence")
-    if persistence is not None and hasattr(persistence, "connect"):
-        return ChatRepository(persistence)
-    return None
 
 
 class ToolManager:
@@ -105,7 +81,6 @@ class ToolManager:
         self._command_tools_config: Dict[str, Any] = {}
         if self._enabled:
             self._register_tools(self._config)
-            self.register(ReadToolResultTool(tools_config))
             self.register(ToolInventoryTool(self))
 
     def _register_tools(self, config: Dict[str, Any]):
@@ -159,8 +134,6 @@ class ToolManager:
         url_read_tool = MCPUrlReadTool(self._mcp_client, tool_name=url_read_tool_name)
 
         self.register(WebTool(search_tool, url_read_tool))
-        self.register(search_tool)
-        self.register(url_read_tool)
         self._mcp_tools = {
             "web_search": search_tool,
             "fetch_url": url_read_tool,
@@ -177,9 +150,7 @@ class ToolManager:
             search_tool = WebSearchTool(searxng_cfg)
             fetch_tool = FetchUrlTool(crawl_cfg)
             self.register(WebTool(search_tool, fetch_tool))
-            self.register(search_tool)
-            self.register(fetch_tool)
-            logger.info("Registered built-in web tool and internal web_search/fetch_url tools")
+            logger.info("Registered built-in web tool")
 
         code_config = dict(tools_config.get("code", {}) or {})
         command_config = tools_config.get("command", {})
@@ -213,8 +184,6 @@ class ToolManager:
                 ReadFileTool(code_tool_config),
                 SearchFilesTool(code_tool_config),
                 EditFileTool(code_tool_config),
-                WriteFileTool(code_tool_config),
-                ApplyPatchTool(code_tool_config),
             ])
         if include_command:
             tools.extend([
@@ -414,7 +383,7 @@ class ToolManager:
 
     def _tool_for_execution(self, name: str, workspace: Optional[Dict[str, Any]]) -> Optional[BaseTool]:
         if workspace and name in BUILTIN_CODE_TOOL_CLASSES:
-            source_config = self._command_tools_config if name in BUILTIN_CODE_TOOL_GROUPS["shell"] else self._code_tools_config
+            source_config = self._command_tools_config if name == "shell" else self._code_tools_config
             config = CodeToolConfig.for_workspace(source_config, workspace)
             if name == "read":
                 return ReadFileTool(config)
@@ -545,80 +514,6 @@ class ToolManager:
         return name in self._visible_local_tool_names()
 
 
-class ReadToolResultTool(BaseTool):
-    """Read a slice from a persisted full tool result."""
-
-    def __init__(self, tools_config: Dict[str, Any]):
-        self._max_limit = int(tools_config.get("read_tool_result_max_chars", 16000))
-
-    @property
-    def name(self) -> str:
-        return "read_tool_result"
-
-    @property
-    def description(self) -> str:
-        return (
-            "Read a slice of a full persisted tool result by tool_result_id. "
-            "Use this when a previous tool result preview says more content is available."
-        )
-
-    def parameters_schema(self) -> Dict[str, Any]:
-        return {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "tool_result_id": {
-                    "type": "string",
-                    "description": "ID of the persisted tool result to read.",
-                },
-                "offset": {
-                    "type": "integer",
-                    "description": "Zero-based character offset. Defaults to 0.",
-                    "minimum": 0,
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": f"Maximum characters to read. Capped at {self._max_limit}.",
-                    "minimum": 1,
-                },
-            },
-            "required": ["tool_result_id"],
-        }
-
-    async def execute(self, **kwargs) -> str:
-        repository = _runtime_chat_repository(kwargs)
-        if repository is None:
-            return json.dumps({
-                "error": {
-                    "type": "tool_result_unavailable",
-                    "message": "canonical tool result repository is not configured",
-                }
-            }, ensure_ascii=False)
-        tool_result_id = kwargs.get("tool_result_id") or ""
-        if not tool_result_id:
-            return json.dumps({"error": "tool_result_id is required"}, ensure_ascii=False)
-        offset = int(kwargs.get("offset") or 0)
-        requested_limit = int(kwargs.get("limit") or self._max_limit)
-        limit = min(max(1, requested_limit), self._max_limit)
-        try:
-            result = repository.get_tool_result_slice(tool_result_id, offset=offset, limit=limit)
-        except KeyError:
-            result = None
-        if result is None:
-            return json.dumps({
-                "error": "tool result not found",
-                "tool_result_id": tool_result_id,
-            }, ensure_ascii=False)
-        payload = {"content": result.get("content", "")}
-        next_offset = result.get("next_offset")
-        if next_offset is not None:
-            payload["read_more"] = (
-                f'read({{"source":"tool_result","tool_result_id":"{tool_result_id}",'
-                f'"offset":{next_offset}}})'
-            )
-        return json.dumps(payload, ensure_ascii=False)
-
-
 class ToolInventoryTool(BaseTool):
     """Expose the current tool inventory to the model."""
 
@@ -639,6 +534,7 @@ class ToolInventoryTool(BaseTool):
     def parameters_schema(self) -> Dict[str, Any]:
         return {
             "type": "object",
+            "additionalProperties": False,
             "properties": {},
         }
 

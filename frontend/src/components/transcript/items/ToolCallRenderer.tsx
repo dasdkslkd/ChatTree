@@ -5,7 +5,6 @@ import {
   ClipboardList,
   Copy,
   FileText,
-  FilePlus,
   FileSearch,
   Globe,
   Pencil,
@@ -528,19 +527,23 @@ function defaultSpec(): ToolSpec {
   };
 }
 
+const FETCH_URL_SPEC = fetchUrlSpec();
+const WEB_SEARCH_SPEC = webSearchSpec();
+
 const TOOL_SPECS: Record<string, ToolSpec> = {
   shell: shellSpec(),
   grep: grepSpec(),
   glob: globSpec(),
   read: readSpec(),
-  read_file: readSpec(),
   edit: fileEditSpec(Pencil),
-  write: fileEditSpec(FilePlus),
-  write_file: fileEditSpec(FilePlus),
-  patch: fileEditSpec(Pencil),
-  apply_patch: fileEditSpec(Pencil),
-  fetch_url: fetchUrlSpec(),
-  web_search: webSearchSpec(),
+  web: {
+    icon: Globe,
+    detail: (args, result, status) => (
+      args.action === 'fetch' || (args.url && !args.query)
+        ? FETCH_URL_SPEC
+        : WEB_SEARCH_SPEC
+    ).detail(args, result, status),
+  },
   enter_plan_mode: planModeSpec(),
   exit_plan_mode: exitPlanModeSpec(),
 };

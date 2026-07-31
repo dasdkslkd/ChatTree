@@ -51,8 +51,8 @@ def _compact_argument_for_tool(tool_name: str, raw: str) -> Dict[str, Any] | Non
         return {"command": raw}
     if name == "edit":
         return {"operation": "patch", "patch": raw} if raw.lstrip().startswith(("--- ", "diff ")) else None
-    if name in {"web", "tools"}:
-        return {"query": raw}
+    if name == "web":
+        return {"action": "search", "query": raw}
     return None
 
 

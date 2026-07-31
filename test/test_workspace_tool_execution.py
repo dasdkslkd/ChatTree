@@ -114,7 +114,11 @@ def test_orchestrator_enforces_workspace_protected_path_per_call(tmp_path):
     orchestrator = make_orchestrator(manager, global_root)
 
     message = run(orchestrator.execute_tool_call(
-        tool_call("write", {"path": ".git/config", "content": "unsafe"}),
+        tool_call("edit", {
+            "operation": "create",
+            "path": ".git/config",
+            "content": "unsafe",
+        }),
         conversation_id="conv-1",
         node_id="node-1",
         workspace=normalize_workspace({"cwd": str(project), "protected_paths": [".git"]}),

@@ -191,8 +191,6 @@ def _sync_runtime_managers(app, config_data: Dict[str, Any], model_manager, tool
     register_agent_management_tools(
         tool_manager,
         agent_runtime=agent_runtime,
-        subagent_executor=subagent_executor,
-        workflow_manager=workflow_manager,
     )
     register_plan_tools(tool_manager, plan_ledger)
     register_task_tools(tool_manager, task_service)

@@ -26,12 +26,12 @@ class EditFileTool(common._CodeTool):
             "additionalProperties": False,
             "properties": {
                 "path": {"type": "string"},
-                "operation": {"type": "string", "enum": ["replace", "create", "overwrite", "patch"], "default": "replace"},
+                "operation": {"type": "string", "enum": ["replace", "create", "overwrite", "patch"]},
                 "expected_version": {"type": "string"},
                 "content": {"type": "string"},
                 "patch": {"type": "string"},
-                "cwd": {"type": "string", "default": "."},
-                "create_parents": {"type": "boolean", "default": False},
+                "cwd": {"type": "string"},
+                "create_parents": {"type": "boolean"},
                 "replacements": {
                     "type": "array",
                     "items": {
@@ -40,13 +40,14 @@ class EditFileTool(common._CodeTool):
                         "properties": {
                             "old": {"type": "string"},
                             "new": {"type": "string"},
-                            "replace_all": {"type": "boolean", "default": False},
+                            "replace_all": {"type": "boolean"},
                             "expected_count": {"type": "integer", "minimum": 1},
                         },
                         "required": ["old", "new"],
                     },
                 },
             },
+            "required": ["operation"],
         }
 
     async def execute(self, **kwargs) -> str:
@@ -55,12 +56,7 @@ class EditFileTool(common._CodeTool):
     def _execute_sync(self, kwargs: Dict[str, Any]) -> str:
         operation = str(kwargs.get("operation") or "").strip().lower()
         if not operation:
-            if kwargs.get("patch") and not kwargs.get("replacements"):
-                operation = "patch"
-            elif "content" in kwargs:
-                operation = str(kwargs.get("mode") or "create").strip().lower()
-            else:
-                operation = "replace"
+            return common._error("invalid_edit", "operation is required")
         if operation == "patch":
             return ApplyPatchTool(self.config)._execute_sync(kwargs)
         if operation in {"create", "overwrite"}:

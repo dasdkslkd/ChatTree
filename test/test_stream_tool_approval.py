@@ -329,6 +329,54 @@ class ParallelToolSnapshotProvider:
         )
 
 
+class SequentialToolProvider:
+    def __init__(self, tool_rounds):
+        self.calls = 0
+        self.tool_rounds = tool_rounds
+
+    async def generate_response_stream(
+        self,
+        model,
+        messages,
+        stream_controller: StreamController = None,
+        **kwargs,
+    ):
+        self.calls += 1
+        if self.calls <= self.tool_rounds:
+            yield StreamChunk(
+                status=StreamStatus.CONTENT,
+                content=None,
+                node_id=stream_controller.node_id,
+                conversation_id=stream_controller.conversation_id,
+                error=None,
+                tokens_used=0,
+                tool_calls=[make_indexed_tool_call(self.calls)],
+            )
+        else:
+            yield StreamChunk(
+                status=StreamStatus.CONTENT,
+                content="done",
+                node_id=stream_controller.node_id,
+                conversation_id=stream_controller.conversation_id,
+                error=None,
+                tokens_used=0,
+            )
+        yield StreamChunk(
+            status=StreamStatus.COMPLETE,
+            content=None,
+            node_id=stream_controller.node_id,
+            conversation_id=stream_controller.conversation_id,
+            error=None,
+            tokens_used=1,
+            usage_info={
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "total_tokens": 2,
+                "source": "test",
+            },
+        )
+
+
 class FakeModelManager:
     def __init__(self, provider=None):
         self.model_list = {"fake-provider": ["fake-model"]}
@@ -780,6 +828,35 @@ async def _stream_commits_parallel_tool_round_once(tmp_path):
 
 def test_stream_commits_parallel_tool_round_once(tmp_path):
     asyncio.run(_stream_commits_parallel_tool_round_once(tmp_path))
+
+
+async def _main_chat_allows_more_than_five_tool_rounds(tmp_path):
+    provider = SequentialToolProvider(tool_rounds=6)
+    chat_manager = ChatManager(
+        FakeModelManager(provider=provider),
+        ChatStorage(storage_dir=str(tmp_path / "conversations")),
+        PromptStorage(storage_dir=str(tmp_path / "prompts")),
+        tool_manager=FakeStreamingToolManager(),
+    )
+    conversation = chat_manager.create_conversation("long tool loop")
+
+    chunks = [
+        chunk
+        async for chunk in chat_manager.send_message_stream(
+            conversation.metadata["id"],
+            "run six tool rounds",
+            model_id="fake-model",
+            parent_node_id=conversation.current_node_id,
+        )
+    ]
+
+    assert provider.calls == 7
+    assert not any(chunk.get("status") == StreamStatus.ERROR for chunk in chunks)
+    assert any(chunk.get("content") == "done" for chunk in chunks)
+
+
+def test_main_chat_allows_more_than_five_tool_rounds(tmp_path):
+    asyncio.run(_main_chat_allows_more_than_five_tool_rounds(tmp_path))
 
 
 async def _stop_stream_cancels_pending_approval_and_stream_finishes(tmp_path):

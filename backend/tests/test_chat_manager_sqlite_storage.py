@@ -707,7 +707,7 @@ def test_tool_results_are_written_once_with_run_id_and_transcript_process(tmp_pa
     assert "model_visible_content" not in metadata
 
 
-def test_read_tool_result_output_is_persisted_as_canonical_result(tmp_path: Path):
+def test_read_output_is_persisted_as_canonical_result(tmp_path: Path):
     manager, repository, _persistence = _make_manager(tmp_path)
     conversation = manager.create_conversation("read tool result")
     conversation_id = conversation.metadata["id"]
@@ -716,7 +716,7 @@ def test_read_tool_result_output_is_persisted_as_canonical_result(tmp_path: Path
         conversation_id,
         node_id,
         tool_call_id="call-read-result",
-        name="read_tool_result",
+        name="read",
         arguments={"tool_result_id": "source-result"},
         status="running",
     )
@@ -731,14 +731,14 @@ def test_read_tool_result_output_is_persisted_as_canonical_result(tmp_path: Path
             "content": raw_result,
             "tool_call_id": "call-read-result",
         }),
-        name="read_tool_result",
+        name="read",
         conversation_id=conversation_id,
         node_id=node_id,
         tool_call_id="call-read-result",
     )
 
     stored = repository.get_tool_result_slice(visible["tool_result_id"])
-    assert stored["tool_name"] == "read_tool_result"
+    assert stored["tool_name"] == "read"
     assert stored["content"] == raw_result
     assert visible["raw_content"] == raw_result
     assert visible["content"] != raw_result

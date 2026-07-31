@@ -361,8 +361,6 @@ async def _initialize_server() -> None:
     register_agent_management_tools(
         tool_manager,
         agent_runtime=agent_runtime,
-        subagent_executor=subagent_executor,
-        workflow_manager=workflow_manager,
     )
     register_plan_tools(tool_manager, plan_ledger)
     register_task_tools(tool_manager, task_service)

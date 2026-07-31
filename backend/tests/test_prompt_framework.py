@@ -49,7 +49,6 @@ from backend.core.runs import (
     RunStatus,
 )
 from backend.core.runs.journal import RunJournal
-from backend.core.tools.agent_tools import StartSubagentTool, StartWorkflowTool
 from backend.core.plans import PlanLedger
 from backend.core.persistence.database import SQLitePersistence
 from backend.core.persistence.plan_repository import SQLitePlanRepository
@@ -1813,62 +1812,6 @@ class RunLifecycleContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(child_events[0]["payload"]["cancellation_parent_run_id"])
         self.assertEqual(child_events[0]["payload"]["metadata"]["agent_name"], "reviewer")
 
-    async def test_start_subagent_tool_sets_created_by_without_cancellation_parent(self):
-        class FakeSubagentExecutor:
-            def __init__(self):
-                self.kwargs = None
-
-            async def start(self, **kwargs):
-                self.kwargs = kwargs
-                return {"run_id": "run-child", "kind": RunKind.SUBAGENT.value, "status": "running"}
-
-        executor = FakeSubagentExecutor()
-        tool = StartSubagentTool(subagent_executor=executor)
-
-        await tool.execute(
-            task="检查实现",
-            agent_name="reviewer",
-            _runtime_context={
-                "run_id": "run-parent",
-                "run_kind": RunKind.CHAT.value,
-                "conversation_id": "conversation-1",
-                "anchor_node_id": "branch-anchor-1",
-                "node_id": "assistant-node-1",
-            },
-        )
-
-        self.assertEqual(executor.kwargs["created_by_run_id"], "run-parent")
-        self.assertIsNone(executor.kwargs["cancellation_parent_run_id"])
-        self.assertEqual(executor.kwargs["parent_node_id"], "branch-anchor-1")
-
-    async def test_start_workflow_tool_sets_created_by_without_cancellation_parent(self):
-        class FakeWorkflowManager:
-            def __init__(self):
-                self.kwargs = None
-
-            async def start(self, **kwargs):
-                self.kwargs = kwargs
-                return {"run_id": "run-workflow", "kind": RunKind.WORKFLOW.value, "status": "running"}
-
-        manager = FakeWorkflowManager()
-        tool = StartWorkflowTool(workflow_manager=manager)
-
-        await tool.execute(
-            script="log('hello')",
-            _runtime_context={
-                "run_id": "run-parent",
-                "run_kind": RunKind.CHAT.value,
-                "conversation_id": "conversation-1",
-                "anchor_node_id": "branch-anchor-1",
-                "node_id": "assistant-node-1",
-            },
-        )
-
-        self.assertEqual(manager.kwargs["created_by_run_id"], "run-parent")
-        self.assertIsNone(manager.kwargs["cancellation_parent_run_id"])
-        self.assertEqual(manager.kwargs["parent_node_id"], "branch-anchor-1")
-
-
 class DetachedSlashStopRouteTests(unittest.TestCase):
     class FakeChatManager:
         storage = object()
@@ -1986,10 +1929,17 @@ class AgentRolePromptTests(unittest.TestCase):
     def test_packaged_agent_prompts_only_name_current_code_tools(self):
         agents = self._load_template_agents()
         combined = "\n".join(agent.system_prompt for agent in agents.values())
-        for stale_name in ["search_files", "list_files", "read_file", "run_command"]:
-            self.assertNotIn(stale_name, combined)
+        for stale_name in [
+            "search_files",
+            "list_files",
+            "read_file",
+            "run_command",
+            "patch",
+            "write",
+        ]:
+            self.assertNotIn(f"`{stale_name}`", combined)
         implementer = agents["implementer"].system_prompt
-        for tool_name in ["glob", "grep", "read", "edit", "patch", "shell", "write"]:
+        for tool_name in ["glob", "grep", "read", "edit", "shell"]:
             self.assertIn(f"`{tool_name}`", implementer)
 
 

@@ -34,9 +34,9 @@ class WebTool(BaseTool):
                 },
                 "query": {"type": "string", "description": "Search keywords when action is search."},
                 "url": {"type": "string", "description": "URL to fetch when action is fetch."},
-                "num_results": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5},
-                "page": {"type": "integer", "minimum": 1, "default": 1},
-                "language": {"type": "string", "default": "zh-CN"},
+                "num_results": {"type": "integer", "minimum": 1, "maximum": 10},
+                "page": {"type": "integer", "minimum": 1},
+                "language": {"type": "string"},
                 "time_range": {"type": "string", "enum": ["day", "week", "month", "year"]},
             },
             "required": ["action"],
@@ -48,10 +48,6 @@ class WebTool(BaseTool):
             return await self._search_tool.execute(**kwargs)
         if action == "fetch":
             return await self._fetch_tool.execute(**kwargs)
-        if kwargs.get("url") and not kwargs.get("query"):
-            return await self._fetch_tool.execute(**kwargs)
-        if kwargs.get("query"):
-            return await self._search_tool.execute(**kwargs)
         return json.dumps({"error": {"type": "invalid_arguments", "message": "action must be search or fetch"}}, ensure_ascii=False)
 
 
@@ -106,17 +102,14 @@ class WebSearchTool(BaseTool):
                 'num_results': {
                     'type': 'integer',
                     'description': 'Max number of results (1-10). Default is 5.',
-                    'default': 5,
                 },
                 'page': {
                     'type': 'integer',
                     'description': 'Page number for pagination, starting from 1.',
-                    'default': 1,
                 },
                 'language': {
                     'type': 'string',
                     'description': 'Language code such as zh-CN or en-US. Default is zh-CN.',
-                    'default': 'zh-CN',
                 },
                 'time_range': {
                     'type': 'string',

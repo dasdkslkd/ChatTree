@@ -42,11 +42,9 @@ ToolApprovalCard.tsx
 | `shell`               | 命令字符串（截断 80 字符）          | 命令块 + 退出码/cwd/超时 + stdout + stderr       |
 | `grep`                | `pattern @ path · N 处匹配/个文件` | 正则/cwd/模式/匹配数 + 文件列表或匹配列表        |
 | `glob`                | `patterns @ path · N 个文件`       | 模式/cwd/排序/文件数 + 文件路径列表             |
-| `read` / `read_file`  | `path L起-止`                       | 文件路径 + 行范围 + 文件内容                    |
-| `edit` / `patch` / `apply_patch` | `path`                  | 文件名 + 应用状态 + 摘要/hunks/内容             |
-| `write` / `write_file`| `path`                              | 同 edit                                         |
-| `fetch_url`           | URL（截断 80 字符）                 | URL + 状态码 + 标题 + 内容                       |
-| `web_search`          | `query · N 项`                     | 查询词 + 结果列表（标题/URL/摘要）               |
+| `read`                | `path L起-止`                       | 文件路径 + 行范围 + 文件内容                    |
+| `edit`                | `path`                              | 文件名 + 应用状态 + 摘要/hunks/内容             |
+| `web`                 | URL 或 `query · N 项`               | URL 抓取或搜索结果                              |
 | 其他（默认兜底）       | 错误信息 或 `command/pattern/path` 或 "执行中..." | 参数 JSON + 结果 JSON，含复制按钮       |
 
 ### 错误处理

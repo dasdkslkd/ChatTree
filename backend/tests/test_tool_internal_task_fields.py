@@ -5,7 +5,7 @@ import unittest
 from backend.core.agents.runtime import AgentRuntime
 from backend.core.runs import RunKind, RunManager
 from backend.core.tasks import ActiveTaskService
-from backend.core.tools.agent_tools import SpawnAgentTool, StartSubagentTool, StartWorkflowTool
+from backend.core.tools.agent_tools import AgentTool
 from backend.core.tools.code import CodeToolConfig, RunCommandTool
 from backend.core.tools.task_contract import TASK_STEP_BINDING_DESCRIPTION
 
@@ -84,9 +84,7 @@ class ToolInternalTaskFieldTests(unittest.IsolatedAsyncioTestCase):
             config = CodeToolConfig.from_dict({"workspace_roots": [tmpdir]})
             tools = [
                 RunCommandTool(config),
-                SpawnAgentTool(agent_runtime=FakeAgentRuntime()),
-                StartSubagentTool(agent_runtime=FakeAgentRuntime()),
-                StartWorkflowTool(agent_runtime=FakeAgentRuntime()),
+                AgentTool(agent_runtime=FakeAgentRuntime()),
             ]
 
             for tool in tools:
@@ -138,7 +136,8 @@ class ToolInternalTaskFieldTests(unittest.IsolatedAsyncioTestCase):
         }
 
         runtime = FakeAgentRuntime()
-        await SpawnAgentTool(agent_runtime=runtime).execute(
+        await AgentTool(agent_runtime=runtime).execute(
+            action="spawn",
             agent_name="implementer",
             task="do work",
             step=3,
@@ -151,17 +150,8 @@ class ToolInternalTaskFieldTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(REMOVED_FIELDS & set(runtime.spawned))
 
         runtime = FakeAgentRuntime()
-        await StartSubagentTool(agent_runtime=runtime).execute(
-            task="do work",
-            step=3,
-            task_step_id="removed",
-            _runtime_context=context,
-        )
-        self.assertEqual(runtime.spawned["step"], 3)
-        self.assertFalse(REMOVED_FIELDS & set(runtime.spawned))
-
-        runtime = FakeAgentRuntime()
-        await StartWorkflowTool(agent_runtime=runtime).execute(
+        await AgentTool(agent_runtime=runtime).execute(
+            action="workflow",
             script="export default async function workflow(ctx) { return {}; }",
             step=3,
             auto_create_task=False,

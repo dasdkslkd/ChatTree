@@ -47,7 +47,8 @@ def _read_targets(kwargs: Dict[str, Any]) -> List[Dict[str, Any]]:
             path = str(target.get("path") or "")
             if path:
                 normalized.append(dict(target, path=path))
-        return normalized
+        if normalized:
+            return normalized
     path = kwargs.get("path")
     return [{"path": str(path)}] if path else []
 

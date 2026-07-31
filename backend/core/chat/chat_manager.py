@@ -103,10 +103,8 @@ from ..tools.exposure import ToolExposureContext
 from ..tools.perf_attrs import summarize_tool_arguments, summarize_tool_result
 from ..tools.security.permissions import PermissionMode, normalize_permission_mode
 from ..tools.tool_call_scheduler import plan_tool_call_waves, tool_call_function_name
-from ..tools.agent_tools import AGENT_TOOL_NAMES, LEGACY_AGENT_TOOL_NAMES
 from ..tools.task_tools import (
     TASK_BOUND_RUN_TOOL_NAMES,
-    TASK_OBSERVATION_TOOL_NAMES,
     TASK_TOOL_NAMES,
     filter_task_tools_for_context,
 )
@@ -1443,7 +1441,7 @@ class ChatManager:
         )
         available_tools = self._get_openai_tools_for_workspace(workspace_context, exposure_context)
         tools = None
-        max_tool_rounds = int(cfg.data.get("tools", {}).get("max_rounds", 5)) if isinstance(cfg.data, dict) else 5
+        max_tool_rounds = 500
         tool_run_context: Dict[str, Any] = {
             "run_id": run_id,
             "run_kind": "chat",
@@ -2383,15 +2381,13 @@ class ChatManager:
         tools: List[Dict[str, Any]],
         mode: str,
     ) -> List[Dict[str, Any]]:
-        filtered: List[Dict[str, Any]] = []
-        for tool in tools:
-            name = str((tool.get("function") or {}).get("name") or "")
-            if name in LEGACY_AGENT_TOOL_NAMES:
-                continue
-            if (name in AGENT_TOOL_NAMES or name == "agent") and mode == "none":
-                continue
-            filtered.append(tool)
-        return filtered
+        if mode != "none":
+            return tools
+        return [
+            tool
+            for tool in tools
+            if str((tool.get("function") or {}).get("name") or "") != "agent"
+        ]
 
     def _filter_plan_tools_for_mode(
         self,
@@ -3505,10 +3501,15 @@ class ChatManager:
     ) -> None:
         name = tool_call_function_name(tool_call)
         arguments = self._parse_tool_arguments((tool_call.get("function") or {}).get("arguments"))
+        agent_action = str(arguments.get("action") or "") if name == "agent" else ""
         if not (
             name in TASK_TOOL_NAMES
-            or name in TASK_OBSERVATION_TOOL_NAMES
-            or (name in TASK_BOUND_RUN_TOOL_NAMES and arguments.get("step") is not None)
+            or agent_action in {"list", "wait"}
+            or (
+                name in TASK_BOUND_RUN_TOOL_NAMES
+                and agent_action in {"", "spawn", "workflow"}
+                and arguments.get("step") is not None
+            )
         ):
             return
         self._refresh_task_turn_context(

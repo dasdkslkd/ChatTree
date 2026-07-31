@@ -82,7 +82,7 @@ export function summarizeToolCall(
     return count === null ? `${head}${tail}` : `${head}${tail} · ${count} 个文件`;
   }
 
-  if (name === 'read' || name === 'read_file') {
+  if (name === 'read') {
     const targets = asArray(args.targets)
       .map((item) => asObject(item))
       .filter((item): item is Record<string, unknown> => item !== null);
@@ -96,19 +96,17 @@ export function summarizeToolCall(
     return `${truncate(path, 50)}${range}`;
   }
 
-  if (['edit', 'write', 'write_file', 'patch', 'apply_patch'].includes(name)) {
+  if (name === 'edit') {
     return truncate(asString(args.path) || asString(args.file_path) || 'file', 60);
   }
 
-  if (name === 'fetch_url') {
-    const url = asString(args.url);
-    return url ? truncate(url, 80) : 'fetch_url';
-  }
-
-  if (name === 'web_search') {
+  if (name === 'web') {
+    if (asString(args.action) === 'fetch' || (asString(args.url) && !asString(args.query))) {
+      return truncate(asString(args.url), 80) || 'web';
+    }
     const query = asString(args.query);
     const count = result ? asNumber(result.count) : null;
-    return count === null ? truncate(query, 80) || 'web_search' : `${truncate(query, 60)} · ${count} 项`;
+    return count === null ? truncate(query, 80) || 'web' : `${truncate(query, 60)} · ${count} 项`;
   }
 
   if (name === 'enter_plan_mode') {

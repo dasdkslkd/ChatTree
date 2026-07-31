@@ -11,7 +11,6 @@ from backend.api.routes import tool_results as tool_results_route
 from backend.core.persistence.database import SQLitePersistence
 from backend.core.persistence.repository import ChatRepository
 from backend.core.tools.code import CodeToolConfig, ReadFileTool
-from backend.core.tools.tool_manager import ToolManager
 
 
 def _repository(tmp_path):
@@ -125,32 +124,7 @@ def test_tool_result_route_reads_blob_pages_and_returns_404(tmp_path):
     assert missing_response.status_code == 404
 
 
-def test_read_tool_result_tool_uses_repository_and_errors_without_it(tmp_path):
-    _persistence, repository, conversation_id, node_id, call_id = _repository(tmp_path)
-    result_id = repository.add_tool_result(
-        conversation_id,
-        node_id,
-        tool_result_id="result-readable",
-        tool_call_id=call_id,
-        output="abcdef",
-    )
-    manager = ToolManager({"tools": {"builtin": {"enabled": False}}}, chat_repository=repository)
-
-    payload = json.loads(asyncio.run(manager.execute_tool("read_tool_result", {
-        "tool_result_id": result_id,
-        "offset": 2,
-        "limit": 3,
-    })))
-    assert payload == {"content": "cde", "read_more": 'read({"source":"tool_result","tool_result_id":"result-readable","offset":5})'}
-
-    missing_manager = ToolManager({"tools": {"builtin": {"enabled": False}}})
-    error = json.loads(asyncio.run(missing_manager.execute_tool("read_tool_result", {
-        "tool_result_id": result_id,
-    })))
-    assert error["error"]["type"] == "tool_result_unavailable"
-
-
-def test_read_source_tool_result_uses_runtime_repository(tmp_path):
+def test_read_tool_result_uses_runtime_repository(tmp_path):
     _persistence, repository, conversation_id, node_id, call_id = _repository(tmp_path)
     result_id = repository.add_tool_result(
         conversation_id,
@@ -162,7 +136,6 @@ def test_read_source_tool_result_uses_runtime_repository(tmp_path):
     tool = ReadFileTool(CodeToolConfig.from_dict({"workspace_roots": [str(tmp_path)]}))
 
     payload = json.loads(asyncio.run(tool.execute(
-        source="tool_result",
         tool_result_id=result_id,
         offset=1,
         limit=3,
@@ -170,8 +143,13 @@ def test_read_source_tool_result_uses_runtime_repository(tmp_path):
     )))
     assert payload["content"] == "bcd"
     assert payload["next_offset"] == 4
+    assert payload["read_more"] == {
+        "tool_result_id": result_id,
+        "offset": 4,
+        "limit": 3,
+    }
 
-    error = json.loads(asyncio.run(tool.execute(source="tool_result", tool_result_id=result_id)))
+    error = json.loads(asyncio.run(tool.execute(tool_result_id=result_id)))
     assert error["error"]["type"] == "tool_result_unavailable"
 
 

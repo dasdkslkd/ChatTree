@@ -28,11 +28,10 @@ class ListFilesTool(common._CodeTool):
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "path": {"type": "string", "default": "."},
+                "path": {"type": "string"},
                 "patterns": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "default": ["**/*"],
                     "description": "Globs relative to path. `*` is direct-only; include `**` to recurse.",
                 },
                 "pattern": {
@@ -40,23 +39,21 @@ class ListFilesTool(common._CodeTool):
                     "description": "One glob relative to path. `*` is direct-only; include `**` to recurse.",
                 },
                 "path_regex": {"type": "string"},
-                "files_only": {"type": "boolean", "default": True},
-                "include_hidden": {"type": "boolean", "default": False},
-                "respect_gitignore": {"type": "boolean", "default": True},
+                "files_only": {"type": "boolean"},
+                "include_hidden": {"type": "boolean"},
+                "respect_gitignore": {"type": "boolean"},
                 "exclude": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "default": [],
                     "description": "Relative globs to exclude. Include `**` to exclude recursively.",
                 },
                 "sort": {
                     "type": "string",
                     "enum": ["discovery", "path", "mtime"],
-                    "default": "discovery",
                     "description": "discovery is fastest and supports early pagination; path is deterministic; mtime requires a full scan.",
                 },
-                "limit": {"type": "integer", "minimum": 1, "maximum": 2000, "default": 200},
-                "offset": {"type": "integer", "minimum": 0, "default": 0},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 2000},
+                "offset": {"type": "integer", "minimum": 0},
             },
         }
 

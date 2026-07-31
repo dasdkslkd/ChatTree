@@ -2,7 +2,6 @@ import type { ToolsConfig } from '@/types/model';
 
 export const DEFAULT_TOOLS_CONFIG: ToolsConfig = {
   enabled: true,
-  max_rounds: 5,
   max_result_length: 8000,
   default_permission_mode: 'auto_approve',
   wait_agent_timeout_seconds: 30,
@@ -11,7 +10,6 @@ export const DEFAULT_TOOLS_CONFIG: ToolsConfig = {
     exposure: 'coding',
     code: {
       enabled: true,
-      groups: ['read', 'search', 'edit', 'shell'],
       shell_initial_wait_seconds: 120,
     },
   },

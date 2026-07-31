@@ -21,7 +21,7 @@ def round_tool_result_budget_chars() -> int:
 
 def read_tool_result_hint(tool_result_id: str, offset: int = 0) -> str:
     args = json.dumps(
-        {"source": "tool_result", "tool_result_id": tool_result_id, "offset": offset},
+        {"tool_result_id": tool_result_id, "offset": offset},
         ensure_ascii=False,
         separators=(",", ":"),
     )

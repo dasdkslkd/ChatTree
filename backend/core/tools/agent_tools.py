@@ -7,23 +7,6 @@ from .base import BaseTool
 from .task_contract import task_step_parameter_schema
 
 
-AGENT_TOOL_NAMES = {
-    "agent",
-    "spawn_agent",
-    "start_workflow",
-    "wait_agent",
-    "list_agents",
-    "send_message",
-    "send_input",
-    "followup_task",
-    "resume_agent",
-    "close_agent",
-    "interrupt_agent",
-}
-
-LEGACY_AGENT_TOOL_NAMES = {"start_subagent"}
-
-
 def _runtime_context(kwargs: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     value = kwargs.get("_runtime_context")
     return value if isinstance(value, dict) else None
@@ -87,17 +70,6 @@ class AgentRuntimeTool(BaseTool):
 
 
 class AgentTool(AgentRuntimeTool):
-    def __init__(
-        self,
-        *,
-        agent_runtime: Any,
-        subagent_executor: Any = None,
-        workflow_manager: Any = None,
-    ) -> None:
-        super().__init__(agent_runtime=agent_runtime)
-        self._subagent_executor = subagent_executor
-        self._workflow_manager = workflow_manager
-
     @property
     def name(self) -> str:
         return "agent"
@@ -126,7 +98,7 @@ class AgentTool(AgentRuntimeTool):
                 "run_ids": {"type": "array", "items": {"type": "string"}},
                 "timeout_seconds": {"type": "number"},
                 "message": {"type": "string"},
-                "input": {},
+                "input": {"type": "object"},
                 "include_completed": {"type": "boolean"},
                 "script": {"type": "string"},
                 "args": {"type": "object"},
@@ -156,10 +128,30 @@ class AgentTool(AgentRuntimeTool):
         if action == "interrupt":
             return await InterruptAgentTool(agent_runtime=self._agent_runtime).execute(**kwargs)
         if action == "workflow":
-            return await StartWorkflowTool(
-                workflow_manager=self._workflow_manager,
-                agent_runtime=self._agent_runtime,
-            ).execute(**kwargs)
+            context = self._context(kwargs)
+            if context is None:
+                return _missing_context_error()
+            script = str(kwargs.get("script") or "").strip()
+            if not script:
+                return _invalid_arguments("script is required")
+            run = await self._agent_runtime.start_workflow(
+                source=self._source(context),
+                script=script,
+                args=kwargs.get("args") if isinstance(kwargs.get("args"), dict) else {},
+                delivery_policy=str(kwargs.get("delivery") or "auto"),
+                permission_mode=_context_permission_mode(context),
+                step=kwargs.get("step"),
+                task_context_mode=_context_task_mode(context),
+                task_generation_id=_context_task_generation(context),
+                task_revision=_context_task_revision(context),
+            )
+            return json.dumps({
+                "run_id": run.get("run_id"),
+                "kind": run.get("kind", "workflow"),
+                "status": run.get("status"),
+                "step": run.get("step"),
+                "message": "Workflow started. Its result will be delivered back to this conversation when complete.",
+            }, ensure_ascii=False)
         return _invalid_arguments("action must be spawn, wait, list, message, input, followup, resume, close, interrupt, or workflow")
 
 
@@ -359,7 +351,10 @@ class SendInputTool(AgentRuntimeTool):
             "additionalProperties": False,
             "properties": {
                 "run_id": {"type": "string", "description": "Target agent run id."},
-                "input": {"description": "Structured input payload for the agent."},
+                "input": {
+                    "type": "object",
+                    "description": "Structured input payload for the agent.",
+                },
             },
             "required": ["run_id", "input"],
         }
@@ -466,203 +461,10 @@ class InterruptAgentTool(_RunControlTool):
         return "Interrupt an active ChatTree agent run."
 
 
-class StartSubagentTool(BaseTool):
-    def __init__(self, *, subagent_executor: Any = None, agent_runtime: Any = None) -> None:
-        self._subagent_executor = subagent_executor
-        self._agent_runtime = agent_runtime
-
-    @property
-    def name(self) -> str:
-        return "start_subagent"
-
-    @property
-    def description(self) -> str:
-        return (
-            "Start a ChatTree subagent run for internal runtime paths. "
-            "Do not simulate a subagent with shell, file tools, or prose."
-        )
-
-    def parameters_schema(self) -> Dict[str, Any]:
-        return {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "task": {"type": "string", "description": "Complete delegated task brief for the subagent."},
-                "agent_name": {
-                    "type": "string",
-                    "description": "Role agent to use. Common roles: explorer, planner, implementer, reviewer, verifier.",
-                },
-                "step": task_step_parameter_schema(),
-            },
-            "required": ["task"],
-        }
-
-    async def execute(self, **kwargs) -> str:
-        context = _runtime_context(kwargs)
-        if context is None:
-            return _missing_context_error()
-        task = str(kwargs.get("task") or "").strip()
-        if not task:
-            return _invalid_arguments("task is required")
-        agent_name = str(kwargs.get("agent_name") or "implementer").strip() or "implementer"
-        if self._agent_runtime is not None:
-            result = await self._agent_runtime.spawn_agent(
-                source=_source_from_context(context),
-                agent_name=agent_name,
-                task=task,
-                context_mode="fresh",
-                delivery_policy="auto",
-                created_by_run_id=context.get("run_id"),
-                cancellation_parent_run_id=None,
-                provider_id=context.get("provider_id"),
-                model_id=context.get("model_id"),
-                permission_mode=_context_permission_mode(context),
-                workspace=context.get("workspace"),
-                step=kwargs.get("step"),
-                task_context_mode=_context_task_mode(context),
-                task_generation_id=_context_task_generation(context),
-                task_revision=_context_task_revision(context),
-            )
-            return json.dumps(result, ensure_ascii=False)
-        if self._subagent_executor is None:
-            return json.dumps({"error": {"type": "missing_executor", "message": "subagent executor is not configured"}}, ensure_ascii=False)
-        run = await self._subagent_executor.start(
-            conversation_id=str(context.get("conversation_id") or ""),
-            agent_name=agent_name,
-            input_data=task,
-            parent_node_id=context.get("anchor_node_id") or context.get("node_id"),
-            created_by_run_id=context.get("run_id"),
-            cancellation_parent_run_id=None,
-            provider_id=context.get("provider_id"),
-            model_id=context.get("model_id"),
-            permission_mode=_context_permission_mode(context),
-            workspace=context.get("workspace"),
-            delegated_task=task,
-            original_slash_input=None,
-        )
-        return json.dumps({
-            "run_id": run.get("run_id"),
-            "kind": run.get("kind", "subagent"),
-            "status": run.get("status"),
-            "agent_name": agent_name,
-            "task": task,
-            "message": "Subagent started. Its result will be delivered back to this conversation when complete.",
-        }, ensure_ascii=False)
-
-
-class StartWorkflowTool(BaseTool):
-    def __init__(self, *, workflow_manager: Any = None, agent_runtime: Any = None) -> None:
-        self._workflow_manager = workflow_manager
-        self._agent_runtime = agent_runtime
-
-    @property
-    def name(self) -> str:
-        return "start_workflow"
-
-    @property
-    def description(self) -> str:
-        return (
-            "Start a real ChatTree workflow run from a strict JavaScript workflow module. "
-            "When the user explicitly asks for a workflow, call this tool instead of simulating "
-            "a workflow with ordinary command, subagent, or prose steps. The script must be exactly "
-            "`export default async function workflow(ctx) { ... }`; use only ctx.agent, ctx.parallel, "
-            "ctx.pipeline, ctx.phase, ctx.log, ctx.args, and ctx.budget. Return the workflow result "
-            "from that function."
-        )
-
-    def parameters_schema(self) -> Dict[str, Any]:
-        return {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "script": {
-                    "type": "string",
-                    "description": (
-                        "Strict workflow module. Required shape: "
-                        "export default async function workflow(ctx) { ... return result; }"
-                    ),
-                },
-                "args": {"type": "object", "description": "Optional workflow arguments object."},
-                "delivery": {
-                    "type": "string",
-                    "enum": ["auto", "notify", "silent"],
-                    "description": "Result delivery only. Use auto for user-visible workflows; silent only when another runtime consumes the result directly. This does not control cancellation.",
-                },
-                "step": task_step_parameter_schema(),
-            },
-            "required": ["script"],
-        }
-
-    async def execute(self, **kwargs) -> str:
-        context = _runtime_context(kwargs)
-        if context is None:
-            return _missing_context_error()
-        script = str(kwargs.get("script") or "").strip()
-        if not script:
-            return _invalid_arguments("script is required")
-        args = kwargs.get("args") if isinstance(kwargs.get("args"), dict) else {}
-        if self._agent_runtime is not None:
-            run = await self._agent_runtime.start_workflow(
-                source=_source_from_context(context),
-                script=script,
-                args=args,
-                delivery_policy=str(kwargs.get("delivery") or "auto"),
-                permission_mode=_context_permission_mode(context),
-                step=kwargs.get("step"),
-                task_context_mode=_context_task_mode(context),
-                task_generation_id=_context_task_generation(context),
-                task_revision=_context_task_revision(context),
-            )
-        elif self._workflow_manager is not None:
-            run = await self._workflow_manager.start(
-                conversation_id=str(context.get("conversation_id") or ""),
-                script=script,
-                args=args,
-                parent_node_id=context.get("anchor_node_id") or context.get("node_id"),
-                created_by_run_id=context.get("run_id"),
-                cancellation_parent_run_id=None,
-                permission_mode=_context_permission_mode(context),
-                delegated_task=script,
-                original_slash_input=None,
-                delivery_policy=str(kwargs.get("delivery") or "auto"),
-            )
-        else:
-            return json.dumps({"error": {"type": "missing_executor", "message": "workflow manager is not configured"}}, ensure_ascii=False)
-        return json.dumps({
-            "run_id": run.get("run_id"),
-            "kind": run.get("kind", "workflow"),
-            "status": run.get("status"),
-            "step": run.get("step"),
-            "message": "Workflow started. Its result will be delivered back to this conversation when complete.",
-        }, ensure_ascii=False)
-
-
 def register_agent_management_tools(
     tool_manager: Any,
     *,
     agent_runtime: Any = None,
-    subagent_executor: Any = None,
-    workflow_manager: Any = None,
 ) -> None:
     if agent_runtime is not None:
-        tool_manager.register(AgentTool(
-            agent_runtime=agent_runtime,
-            subagent_executor=subagent_executor,
-            workflow_manager=workflow_manager,
-        ))
-        for tool in (
-            SpawnAgentTool(agent_runtime=agent_runtime),
-            WaitAgentTool(agent_runtime=agent_runtime),
-            ListAgentsTool(agent_runtime=agent_runtime),
-            SendMessageTool(agent_runtime=agent_runtime),
-            SendInputTool(agent_runtime=agent_runtime),
-            FollowupTaskTool(agent_runtime=agent_runtime),
-            ResumeAgentTool(agent_runtime=agent_runtime),
-            CloseAgentTool(agent_runtime=agent_runtime),
-            InterruptAgentTool(agent_runtime=agent_runtime),
-        ):
-            tool_manager.register(tool)
-    if subagent_executor is not None or agent_runtime is not None:
-        tool_manager.register(StartSubagentTool(subagent_executor=subagent_executor, agent_runtime=agent_runtime))
-    if workflow_manager is not None or agent_runtime is not None:
-        tool_manager.register(StartWorkflowTool(workflow_manager=workflow_manager, agent_runtime=agent_runtime))
+        tool_manager.register(AgentTool(agent_runtime=agent_runtime))

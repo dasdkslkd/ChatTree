@@ -28,18 +28,21 @@ class FakeToolManager:
         return json.dumps({"ok": True, "name": name}, ensure_ascii=False)
 
 
-def make_tool_call(name="web_search", args=None):
+def make_tool_call(name="web", args=None):
     return {
         "id": "call-1",
         "type": "function",
         "function": {
             "name": name,
-            "arguments": json.dumps(args or {"query": "ChatTree"}, ensure_ascii=False),
+            "arguments": json.dumps(
+                args or {"action": "search", "query": "ChatTree"},
+                ensure_ascii=False,
+            ),
         },
     }
 
 
-def make_raw_tool_call(name="web_search", raw_arguments=""):
+def make_raw_tool_call(name="web", raw_arguments=""):
     return {
         "id": "call-1",
         "type": "function",
@@ -81,17 +84,17 @@ async def _allowed_tool_executes_manager(tmp_path):
     )
 
     message = await orchestrator.execute_tool_call(
-        make_tool_call("web_search", {"query": "中文"}),
+        make_tool_call("web", {"action": "search", "query": "中文"}),
         conversation_id="conv-1",
         node_id="node-1",
     )
 
-    assert tool_manager.calls == [("web_search", {"query": "中文"})]
+    assert tool_manager.calls == [("web", {"action": "search", "query": "中文"})]
     assert message["role"] == Role.TOOL
-    assert message["name"] == "web_search"
+    assert message["name"] == "web"
     assert message["tool_call_id"] == "call-1"
     assert message["tool_calls"] is None
-    assert json.loads(message["content"]) == {"ok": True, "name": "web_search"}
+    assert json.loads(message["content"]) == {"ok": True, "name": "web"}
 
 
 def test_allowed_tool_executes_manager_and_returns_tool_message(tmp_path):
@@ -129,41 +132,6 @@ async def _denied_tool_does_not_execute_manager(tmp_path):
 
 def test_denied_tool_returns_permission_denied_without_manager_call(tmp_path):
     asyncio.run(_denied_tool_does_not_execute_manager(tmp_path))
-
-
-async def _sandbox_violation_does_not_execute_manager(tmp_path):
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    protected_target = workspace / ".git" / "config"
-    orchestrator, tool_manager = make_orchestrator(
-        PermissionEngine(
-            rules=[
-                PermissionRule(
-                    id="allow-writes",
-                    behavior="allow",
-                    target_type="tool",
-                    pattern="write",
-                )
-            ]
-        ),
-        LogicalSandbox(workspace_roots=[workspace], protected_paths=[".git"]),
-    )
-
-    message = await orchestrator.execute_tool_call(
-        make_tool_call("write", {"path": str(protected_target), "content": "x"}),
-        conversation_id="conv-1",
-        node_id="node-1",
-    )
-
-    assert tool_manager.calls == []
-    error = json.loads(message["content"])["error"]
-    assert error["type"] == "permission_denied"
-    assert error["tool_name"] == "write"
-    assert "protected path" in error["reason"]
-
-
-def test_sandbox_protected_write_violation_returns_permission_denied(tmp_path):
-    asyncio.run(_sandbox_violation_does_not_execute_manager(tmp_path))
 
 
 async def _sandbox_violation_for_edit_path_like_args(tmp_path):
@@ -245,7 +213,7 @@ def test_sandbox_protected_write_violation_for_destination_arg(tmp_path):
     asyncio.run(_sandbox_violation_for_destination_arg(tmp_path))
 
 
-async def _invalid_json_arguments_are_preserved_for_tool_manager(tmp_path):
+async def _invalid_json_arguments_are_normalized_for_tool_manager(tmp_path):
     raw_arguments = '{"query": "ChatTree"'
     orchestrator, tool_manager = make_orchestrator(
         PermissionEngine.default(),
@@ -253,17 +221,19 @@ async def _invalid_json_arguments_are_preserved_for_tool_manager(tmp_path):
     )
 
     message = await orchestrator.execute_tool_call(
-        make_raw_tool_call("web_search", raw_arguments),
+        make_raw_tool_call("web", raw_arguments),
         conversation_id="conv-1",
         node_id="node-1",
     )
 
-    assert tool_manager.calls == [("web_search", {"arguments": raw_arguments})]
-    assert json.loads(message["content"]) == {"ok": True, "name": "web_search"}
+    assert tool_manager.calls == [
+        ("web", {"action": "search", "query": raw_arguments})
+    ]
+    assert json.loads(message["content"]) == {"ok": True, "name": "web"}
 
 
-def test_invalid_json_arguments_are_preserved_for_tool_manager(tmp_path):
-    asyncio.run(_invalid_json_arguments_are_preserved_for_tool_manager(tmp_path))
+def test_invalid_json_arguments_are_normalized_for_tool_manager(tmp_path):
+    asyncio.run(_invalid_json_arguments_are_normalized_for_tool_manager(tmp_path))
 
 
 async def _ask_approval_approve_once_executes_manager(tmp_path):
@@ -644,32 +614,6 @@ def test_command_policy_allows_common_shell_to_continue(tmp_path):
     asyncio.run(_command_policy_allows_common_shell_to_continue(tmp_path))
 
 
-async def _builtin_write_relative_path_reaches_manager(tmp_path):
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    orchestrator, tool_manager = make_orchestrator(
-        PermissionEngine(rules=[
-            PermissionRule("allow-write", "allow", "tool", "write")
-        ]),
-        LogicalSandbox(workspace_roots=[workspace], protected_paths=[".git"]),
-    )
-
-    message = await orchestrator.execute_tool_call(
-        make_tool_call("write", {"path": "sample.txt", "content": "x"}),
-        conversation_id="conv-1",
-        node_id="node-1",
-    )
-
-    assert tool_manager.calls == [
-        ("write", {"path": "sample.txt", "content": "x"})
-    ]
-    assert json.loads(message["content"]) == {"ok": True, "name": "write"}
-
-
-def test_builtin_write_relative_path_reaches_manager(tmp_path):
-    asyncio.run(_builtin_write_relative_path_reaches_manager(tmp_path))
-
-
 async def _builtin_edit_relative_path_reaches_manager(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -681,13 +625,24 @@ async def _builtin_edit_relative_path_reaches_manager(tmp_path):
     )
 
     message = await orchestrator.execute_tool_call(
-        make_tool_call("edit", {"path": "sample.txt", "old_string": "a", "new_string": "b"}),
+        make_tool_call("edit", {
+            "operation": "replace",
+            "path": "sample.txt",
+            "replacements": [{"old": "a", "new": "b"}],
+        }),
         conversation_id="conv-1",
         node_id="node-1",
     )
 
     assert tool_manager.calls == [
-        ("edit", {"path": "sample.txt", "old_string": "a", "new_string": "b"})
+        (
+            "edit",
+            {
+                "operation": "replace",
+                "path": "sample.txt",
+                "replacements": [{"old": "a", "new": "b"}],
+            },
+        )
     ]
     assert json.loads(message["content"]) == {"ok": True, "name": "edit"}
 
@@ -727,17 +682,21 @@ def test_compact_shell_arguments_are_normalized_before_policy_and_execution(tmp_
     asyncio.run(_compact_shell_arguments_are_normalized_before_policy_and_execution(tmp_path))
 
 
-async def _builtin_write_outside_workspace_denied(tmp_path):
+async def _builtin_edit_outside_workspace_denied(tmp_path):
     outside = tmp_path.parent / "outside.txt"
     orchestrator, tool_manager = make_orchestrator(
         PermissionEngine(rules=[
-            PermissionRule("allow-write", "allow", "tool", "write")
+            PermissionRule("allow-edit", "allow", "tool", "edit")
         ]),
         LogicalSandbox(workspace_roots=[tmp_path], protected_paths=[".git"]),
     )
 
     message = await orchestrator.execute_tool_call(
-        make_tool_call("write", {"path": str(outside), "content": "x"}),
+        make_tool_call("edit", {
+            "operation": "create",
+            "path": str(outside),
+            "content": "x",
+        }),
         conversation_id="conv-1",
         node_id="node-1",
     )
@@ -746,46 +705,52 @@ async def _builtin_write_outside_workspace_denied(tmp_path):
     assert json.loads(message["content"])["error"]["type"] == "permission_denied"
 
 
-def test_builtin_write_outside_workspace_denied(tmp_path):
-    asyncio.run(_builtin_write_outside_workspace_denied(tmp_path))
+def test_builtin_edit_outside_workspace_denied(tmp_path):
+    asyncio.run(_builtin_edit_outside_workspace_denied(tmp_path))
 
 
-async def _builtin_patch_relative_cwd_reaches_manager(tmp_path):
+async def _builtin_edit_patch_relative_cwd_reaches_manager(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     orchestrator, tool_manager = make_orchestrator(
         PermissionEngine(rules=[
-            PermissionRule("allow-patch", "allow", "tool", "patch")
+            PermissionRule("allow-edit", "allow", "tool", "edit")
         ]),
         LogicalSandbox(workspace_roots=[workspace], protected_paths=[".git"]),
     )
 
     message = await orchestrator.execute_tool_call(
-        make_tool_call("patch", {"cwd": ".", "patch": ""}),
+        make_tool_call("edit", {"operation": "patch", "cwd": ".", "patch": ""}),
         conversation_id="conv-1",
         node_id="node-1",
     )
 
-    assert tool_manager.calls == [("patch", {"cwd": ".", "patch": ""})]
-    assert json.loads(message["content"]) == {"ok": True, "name": "patch"}
+    assert tool_manager.calls == [
+        ("edit", {"operation": "patch", "cwd": ".", "patch": ""})
+    ]
+    assert json.loads(message["content"]) == {"ok": True, "name": "edit"}
 
 
-def test_builtin_patch_relative_cwd_reaches_manager(tmp_path):
-    asyncio.run(_builtin_patch_relative_cwd_reaches_manager(tmp_path))
+def test_builtin_edit_patch_relative_cwd_reaches_manager(tmp_path):
+    asyncio.run(_builtin_edit_patch_relative_cwd_reaches_manager(tmp_path))
 
 
-async def _builtin_patch_cwd_outside_workspace_denied(tmp_path):
+async def _builtin_edit_patch_cwd_outside_workspace_denied(tmp_path):
     outside = tmp_path.parent / "outside"
     outside.mkdir()
     orchestrator, tool_manager = make_orchestrator(
         PermissionEngine(rules=[
-            PermissionRule("allow-patch", "allow", "tool", "patch")
+            PermissionRule("allow-edit", "allow", "tool", "edit")
         ]),
         LogicalSandbox(workspace_roots=[tmp_path], protected_paths=[".git"]),
     )
 
     message = await orchestrator.execute_tool_call(
-        make_tool_call("patch", {"cwd": str(outside), "patch": ""}),
+        make_tool_call("edit", {
+            "operation": "patch",
+            "cwd": str(outside),
+            "patch": "",
+        }),
         conversation_id="conv-1",
         node_id="node-1",
     )
@@ -794,8 +759,8 @@ async def _builtin_patch_cwd_outside_workspace_denied(tmp_path):
     assert json.loads(message["content"])["error"]["type"] == "permission_denied"
 
 
-def test_builtin_patch_cwd_outside_workspace_denied(tmp_path):
-    asyncio.run(_builtin_patch_cwd_outside_workspace_denied(tmp_path))
+def test_builtin_edit_patch_cwd_outside_workspace_denied(tmp_path):
+    asyncio.run(_builtin_edit_patch_cwd_outside_workspace_denied(tmp_path))
 
 
 async def _shell_destructive_command_denied(tmp_path):
@@ -895,7 +860,7 @@ async def _runtime_context_reaches_manager_tool(tmp_path):
     )
 
     await orchestrator.execute_tool_call(
-        make_tool_call("web_search", {"query": "ChatTree"}),
+        make_tool_call("web", {"action": "search", "query": "ChatTree"}),
         conversation_id="conv-1",
         node_id="node-1",
         run_context={

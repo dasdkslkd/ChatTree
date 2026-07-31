@@ -217,21 +217,8 @@ class PermissionEngine:
 def default_permission_rules() -> List[PermissionRule]:
     return [
         PermissionRule("default-allow-web", "allow", "tool", "web", source="default"),
-        PermissionRule("default-allow-web-search", "allow", "tool", "web_search", source="default"),
-        PermissionRule("default-allow-fetch-url", "allow", "tool", "fetch_url", source="default"),
-        PermissionRule("default-allow-read-tool-result", "allow", "tool", "read_tool_result", source="default"),
-        PermissionRule("default-allow-list-tools", "allow", "tool", "list_available_tools", source="default"),
         PermissionRule("default-allow-tools", "allow", "tool", "tools", source="default"),
         PermissionRule("default-allow-agent", "allow", "tool", "agent", source="default"),
-        PermissionRule("default-allow-spawn-agent", "allow", "tool", "spawn_agent", source="default"),
-        PermissionRule("default-allow-wait-agent", "allow", "tool", "wait_agent", source="default"),
-        PermissionRule("default-allow-list-agents", "allow", "tool", "list_agents", source="default"),
-        PermissionRule("default-allow-send-agent-message", "allow", "tool", "send_message", source="default"),
-        PermissionRule("default-allow-send-agent-input", "allow", "tool", "send_input", source="default"),
-        PermissionRule("default-allow-followup-task", "allow", "tool", "followup_task", source="default"),
-        PermissionRule("default-allow-resume-agent", "allow", "tool", "resume_agent", source="default"),
-        PermissionRule("default-allow-close-agent", "allow", "tool", "close_agent", source="default"),
-        PermissionRule("default-allow-interrupt-agent", "allow", "tool", "interrupt_agent", source="default"),
         PermissionRule("default-allow-create-task", "allow", "tool", "create_task", source="default"),
         PermissionRule("default-allow-set-task-step", "allow", "tool", "set_task_step", source="default"),
         PermissionRule("default-allow-cancel-task", "allow", "tool", "cancel_task", source="default"),
@@ -243,8 +230,6 @@ def default_permission_rules() -> List[PermissionRule]:
         PermissionRule("default-allow-grep", "allow", "tool", "grep", source="default"),
         PermissionRule("default-ask-shell", "ask", "tool", "shell", source="default"),
         PermissionRule("default-ask-edit", "ask", "tool", "edit", source="default"),
-        PermissionRule("default-ask-write", "ask", "tool", "write", source="default"),
-        PermissionRule("default-ask-patch", "ask", "tool", "patch", source="default"),
         PermissionRule("default-ask-mcp", "ask", "mcp_tool", "*", source="default"),
     ]
 
@@ -285,25 +270,10 @@ _MUTATING_NAME_TOKENS = {
 
 _DELETE_NAME_TOKENS = {"delete", "remove", "rm", "unlink", "rmdir"}
 _COMMAND_KEYS = {"command", "cmd", "script"}
-_AGENT_MANAGEMENT_TOOLS = {
-    "agent",
-    "spawn_agent",
-    "wait_agent",
-    "list_agents",
-    "send_message",
-    "send_input",
-    "followup_task",
-    "resume_agent",
-    "close_agent",
-    "interrupt_agent",
-}
+_AGENT_MANAGEMENT_TOOLS = {"agent"}
 
 _BUILTIN_READ_TOOLS = {
     "web",
-    "web_search",
-    "fetch_url",
-    "read_tool_result",
-    "list_available_tools",
     "tools",
     "glob",
     "read",
@@ -315,11 +285,7 @@ _PLAN_ALLOWED_TOOLS = {
     "read",
     "grep",
     "web",
-    "list_available_tools",
     "tools",
-    "read_tool_result",
-    "web_search",
-    "fetch_url",
     "enter_plan_mode",
     "ask_user_question",
     "exit_plan_mode",

@@ -26,23 +26,6 @@ DISCOVERY_TOOLS = {"tools"}
 PLAN_MUTATING_TOOLS = {"agent", "edit", "shell"}
 
 INTERNAL_MODEL_TOOL_NAMES = {
-    "read_tool_result",
-    "list_available_tools",
-    "spawn_agent",
-    "wait_agent",
-    "list_agents",
-    "send_message",
-    "send_input",
-    "followup_task",
-    "resume_agent",
-    "close_agent",
-    "interrupt_agent",
-    "start_subagent",
-    "start_workflow",
-    "web_search",
-    "fetch_url",
-    "write",
-    "patch",
     "create_task",
     "set_task_step",
     "cancel_task",
@@ -90,6 +73,53 @@ class ToolRegistry:
         self._descriptors: dict[str, ToolDescriptor] = {}
 
     def register(self, tool: BaseTool, descriptor: Optional[ToolDescriptor] = None) -> None:
+        if tool.name in self._tools:
+            raise ValueError(f"tool '{tool.name}' is already registered")
+        schema = tool.parameters_schema()
+        properties = schema.get("properties")
+        if (
+            schema.get("type") != "object"
+            or schema.get("additionalProperties") is not False
+            or not isinstance(properties, dict)
+        ):
+            raise ValueError(
+                f"tool '{tool.name}' parameters must be an object schema "
+                "with properties and additionalProperties=false"
+            )
+        pending: list[tuple[str, Any]] = [("parameters", schema)]
+        while pending:
+            path, value = pending.pop()
+            if isinstance(value, list):
+                pending.extend((path, item) for item in value)
+                continue
+            if not isinstance(value, dict):
+                continue
+            if "default" in value:
+                raise ValueError(f"tool '{tool.name}' schema '{path}' must not declare default")
+            nested_properties = value.get("properties")
+            if nested_properties is not None:
+                if (
+                    value.get("type") != "object"
+                    or value.get("additionalProperties") is not False
+                    or not isinstance(nested_properties, dict)
+                ):
+                    raise ValueError(f"tool '{tool.name}' schema '{path}' must be a closed object")
+                for property_name, property_schema in nested_properties.items():
+                    if not isinstance(property_schema, dict) or not any(
+                        key in property_schema
+                        for key in ("type", "oneOf", "anyOf", "allOf", "$ref")
+                    ):
+                        raise ValueError(
+                            f"tool '{tool.name}' property '{path}.{property_name}' has no schema type"
+                        )
+                    pending.append((f"{path}.{property_name}", property_schema))
+            if value.get("type") == "array" and "items" not in value:
+                raise ValueError(f"tool '{tool.name}' array '{path}' has no items schema")
+            pending.extend(
+                (path, child)
+                for key, child in value.items()
+                if key != "properties"
+            )
         self._tools[tool.name] = tool
         self._descriptors[tool.name] = descriptor or descriptor_for_tool_name(tool.name)
 

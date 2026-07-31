@@ -64,14 +64,7 @@ def test_explicit_deny_wins_over_allow():
 
 @pytest.mark.parametrize(
     "tool_name",
-    [
-        "web",
-        "web_search",
-        "fetch_url",
-        "read_tool_result",
-        "list_available_tools",
-        "tools",
-    ],
+    ["web", "tools"],
 )
 def test_builtin_read_tools_are_allowed_by_default(tool_name):
     decision = PermissionEngine.default().evaluate(make_context(tool_name=tool_name))
@@ -87,14 +80,14 @@ def test_builtin_code_read_tools_are_allowed_by_default(tool_name):
     assert decision.behavior == "allow"
 
 
-@pytest.mark.parametrize("tool_name", ["edit", "write", "patch", "shell"])
+@pytest.mark.parametrize("tool_name", ["edit", "shell"])
 def test_builtin_code_mutating_tools_ask_by_default(tool_name):
     decision = PermissionEngine.default().evaluate(make_context(tool_name=tool_name))
 
     assert decision.behavior == "ask"
 
 
-@pytest.mark.parametrize("tool_name", ["web_search", "read", "edit", "write", "shell"])
+@pytest.mark.parametrize("tool_name", ["web", "read", "edit", "shell"])
 def test_auto_approve_mode_allows_non_delete_tools(tool_name):
     decision = PermissionEngine.default().evaluate(make_context(tool_name=tool_name, mode="auto_approve"))
 
@@ -118,14 +111,14 @@ def test_auto_approve_mode_still_asks_for_explicit_delete(tool_name, arguments):
     assert "delete" in decision.reason.lower() or "remove" in decision.reason.lower()
 
 
-@pytest.mark.parametrize("tool_name", ["web_search", "read", "grep"])
+@pytest.mark.parametrize("tool_name", ["web", "read", "grep"])
 def test_modify_only_mode_asks_for_read_tools(tool_name):
     decision = PermissionEngine.default().evaluate(make_context(tool_name=tool_name, mode="modify_only"))
 
     assert decision.behavior == "ask"
 
 
-@pytest.mark.parametrize("tool_name", ["edit", "write", "patch", "shell"])
+@pytest.mark.parametrize("tool_name", ["edit", "shell"])
 def test_modify_only_mode_allows_mutating_tools(tool_name):
     decision = PermissionEngine.default().evaluate(make_context(tool_name=tool_name, mode="modify_only"))
 
@@ -147,7 +140,7 @@ def test_modify_only_mode_still_asks_for_explicit_delete(tool_name, arguments):
     assert decision.behavior == "ask"
 
 
-@pytest.mark.parametrize("tool_name", ["web_search", "read", "edit"])
+@pytest.mark.parametrize("tool_name", ["web", "read", "edit"])
 def test_ask_always_mode_asks_for_every_tool(tool_name):
     decision = PermissionEngine.default().evaluate(make_context(tool_name=tool_name, mode="ask_always"))
 
@@ -185,26 +178,14 @@ def test_mcp_route_tools_ask_by_default():
     assert "MCP" in decision.reason
 
 
-@pytest.mark.parametrize("tool_name", [
-    "agent",
-    "spawn_agent",
-    "wait_agent",
-    "list_agents",
-    "send_message",
-    "send_input",
-    "followup_task",
-    "resume_agent",
-    "close_agent",
-    "interrupt_agent",
-])
-def test_agent_management_tools_allowed_by_default(tool_name):
-    decision = PermissionEngine.default().evaluate(make_context(tool_name=tool_name))
+def test_agent_management_tool_allowed_by_default():
+    decision = PermissionEngine.default().evaluate(make_context(tool_name="agent"))
 
     assert decision.behavior == "allow"
 
 
-def test_spawn_agent_allowed_even_in_ask_always_mode():
-    decision = PermissionEngine.default().evaluate(make_context(tool_name="spawn_agent", mode="ask_always"))
+def test_agent_allowed_even_in_ask_always_mode():
+    decision = PermissionEngine.default().evaluate(make_context(tool_name="agent", mode="ask_always"))
 
     assert decision.behavior == "allow"
 
@@ -353,12 +334,8 @@ def test_bypass_does_not_skip_explicit_deny():
 
 
 def test_capabilities_for_builtin_read_tool():
-    assert capabilities_for_tool("web_search") == {
+    assert capabilities_for_tool("web") == {
         ToolCapability.NETWORK_READ,
-        ToolCapability.READ_ONLY,
-        ToolCapability.PARALLEL_SAFE,
-    }
-    assert capabilities_for_tool("list_available_tools") == {
         ToolCapability.READ_ONLY,
         ToolCapability.PARALLEL_SAFE,
     }
@@ -420,8 +397,6 @@ def test_capabilities_for_builtin_code_tools():
     assert capabilities_for_tool("read") == read_caps
     assert capabilities_for_tool("grep") == read_caps
     assert capabilities_for_tool("edit") == write_caps
-    assert capabilities_for_tool("write") == write_caps
-    assert capabilities_for_tool("patch") == write_caps
     assert capabilities_for_tool("shell") == {
         ToolCapability.COMMAND_EXEC,
         ToolCapability.MUTATES_RUNTIME_STATE,

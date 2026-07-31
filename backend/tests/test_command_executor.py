@@ -162,9 +162,9 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             },
         })
 
-        web_search = manager.get_tool("web_search")
-        self.assertIsNotNone(web_search)
-        self.assertEqual(web_search.searxng_url, "http://searxng.example.test")
+        web = manager.get_tool("web")
+        self.assertIsNotNone(web)
+        self.assertEqual(web._search_tool.searxng_url, "http://searxng.example.test")
 
     @unittest.skip("legacy command control tools removed")
     async def test_command_control_tools_wait_read_and_stop(self):

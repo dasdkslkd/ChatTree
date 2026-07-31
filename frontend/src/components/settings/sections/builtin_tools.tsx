@@ -15,7 +15,6 @@ import { Loader2, Save, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 import { configApi } from '@/api/config';
 import type {
-  BuiltinCodeToolGroup,
   BuiltinToolExposure,
   ConfigData,
   ToolsConfig,
@@ -29,14 +28,6 @@ const BUILTIN_EXPOSURE_OPTIONS: { value: BuiltinToolExposure; label: string; des
   { value: 'coding', label: 'Coding', description: '代码读写、搜索、命令和网页工具' },
   { value: 'minimal', label: 'Minimal', description: '仅基础工具和网页工具' },
   { value: 'full', label: 'Full', description: '暴露完整 canonical 工具面' },
-];
-
-const BUILTIN_CODE_GROUP_OPTIONS: { value: BuiltinCodeToolGroup; label: string; description: string }[] = [
-  { value: 'read', label: '读取', description: 'glob, read' },
-  { value: 'search', label: '搜索', description: 'grep' },
-  { value: 'edit', label: '编辑', description: 'edit' },
-  { value: 'shell', label: '命令', description: 'shell' },
-  { value: 'write', label: '写入', description: 'write' },
 ];
 
 const TOOL_PERMISSION_MODE_OPTIONS: { value: ToolPermissionMode; label: string; description: string }[] = [
@@ -120,24 +111,6 @@ export function BuiltinToolsSection() {
         },
       },
     }));
-  };
-
-  const setBuiltinCodeGroup = (group: BuiltinCodeToolGroup, enabled: boolean) => {
-    updateTools(current => {
-      const groups = new Set(current.builtin?.code?.groups || []);
-      if (enabled) groups.add(group);
-      else groups.delete(group);
-      return {
-        ...current,
-        builtin: {
-          ...(current.builtin || {}),
-          code: {
-            ...(current.builtin?.code || {}),
-            groups: Array.from(groups),
-          },
-        },
-      };
-    });
   };
 
   const setWebSearchEnabled = (enabled: boolean) => {
@@ -261,10 +234,6 @@ export function BuiltinToolsSection() {
               </Select>
             </div>
             <div className="space-y-1">
-              <Label className="text-xs">最大轮次</Label>
-              <Input type="number" min={1} value={toolsForm.max_rounds ?? 5} onChange={(e) => updateTools(current => ({ ...current, max_rounds: parseNumber(e.target.value, 5) }))} />
-            </div>
-            <div className="space-y-1">
               <Label className="text-xs">结果上限</Label>
               <Input type="number" min={1000} value={toolsForm.max_result_length ?? 8000} onChange={(e) => updateTools(current => ({ ...current, max_result_length: parseNumber(e.target.value, 8000) }))} />
             </div>
@@ -320,37 +289,12 @@ export function BuiltinToolsSection() {
                 </SelectContent>
               </Select>
             </div>
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <Label className="text-xs">代码工具分组</Label>
-                <Switch
-                  checked={toolsForm.builtin?.code?.enabled !== false}
-                  onCheckedChange={setBuiltinCodeEnabled}
-                />
-              </div>
-              <div className="grid grid-cols-5 gap-2">
-                {BUILTIN_CODE_GROUP_OPTIONS.map(option => {
-                  const enabledGroups = toolsForm.builtin?.code?.groups || [];
-                  const enabled = enabledGroups.includes(option.value);
-                  return (
-                    <TextTooltip key={option.value} content={option.description}>
-                      <button
-                        type="button"
-                        className="rounded-lg px-2 py-2 text-left text-xs transition-colors"
-                        style={{
-                          border: '0.5px solid var(--border)',
-                          color: enabled ? 'var(--fg-85)' : 'var(--fg-tertiary)',
-                          background: enabled ? 'var(--bg-button-secondary)' : 'transparent',
-                        }}
-                        onClick={() => setBuiltinCodeGroup(option.value, !enabled)}
-                      >
-                        <div className="font-medium">{option.label}</div>
-                        <div className="truncate opacity-70">{option.description}</div>
-                      </button>
-                    </TextTooltip>
-                  );
-                })}
-              </div>
+            <div className="flex items-center justify-between">
+              <Label className="text-xs">代码与命令工具</Label>
+              <Switch
+                checked={toolsForm.builtin?.code?.enabled !== false}
+                onCheckedChange={setBuiltinCodeEnabled}
+              />
             </div>
           </div>
         </div>

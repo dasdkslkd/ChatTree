@@ -3,14 +3,11 @@ import json
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 sys.path.insert(0, ".")
 
 from backend.core.tools.agent_tools import (
-    AGENT_TOOL_NAMES,
-    SpawnAgentTool,
-    StartSubagentTool,
-    StartWorkflowTool,
-    WaitAgentTool,
     register_agent_management_tools,
 )
 from backend.core.chat.chat_manager import ChatManager
@@ -82,6 +79,14 @@ def test_tool_manager_keeps_builtin_inventory_when_mcp_servers_configured():
     assert "web_search" not in names
     assert "fetch_url" not in names
     assert "list_available_tools" not in names
+
+
+def test_tool_manager_rejects_duplicate_tool_names():
+    manager = ToolManager({"tools": {"builtin": {"enabled": False}}})
+    tool = manager.get_tool("tools")
+
+    with pytest.raises(ValueError, match="already registered"):
+        manager.register(tool)
 
 
 def test_tool_manager_does_not_auto_start_stdio_mcp_servers_by_default():
@@ -208,7 +213,7 @@ def test_tool_manager_registers_builtin_code_tools():
     assert "patch" not in names
 
 
-def test_tool_manager_full_exposure_keeps_raw_write_internal():
+def test_tool_manager_full_exposure_has_no_raw_write_tool():
     manager = ToolManager({
         "tools": {
             "enabled": True,
@@ -226,6 +231,7 @@ def test_tool_manager_full_exposure_keeps_raw_write_internal():
 
     assert "edit" in names
     assert "write" not in names
+    assert manager.get_tool("write") is None
 
 
 def test_tool_manager_coding_exposure_includes_plan_control_candidates(tmp_path):
@@ -327,22 +333,6 @@ def test_full_builtin_exposure_does_not_make_mcp_visible_by_default():
     assert "demo__lookup" in manager.list_tools(exposure_context=ToolExposureContext(include_mcp=True))
 
 
-def test_legacy_agent_management_tools_are_internal_when_registered():
-    manager = ToolManager({
-        "tools": {
-            "enabled": True,
-            "builtin": {"enabled": False},
-        }
-    })
-    manager.register(StartSubagentTool(subagent_executor=object()))
-    manager.register(StartWorkflowTool(workflow_manager=object()))
-
-    names = [tool["function"]["name"] for tool in manager.get_openai_tools()]
-
-    assert "start_subagent" not in names
-    assert "start_workflow" not in names
-
-
 def test_agent_runtime_tools_expose_single_canonical_agent_tool():
     class FakeAgentRuntime:
         pass
@@ -355,132 +345,16 @@ def test_agent_runtime_tools_expose_single_canonical_agent_tool():
     })
     register_agent_management_tools(manager, agent_runtime=FakeAgentRuntime())
 
-    names = {tool["function"]["name"] for tool in manager.get_openai_tools()}
+    tools = manager.get_openai_tools()
+    names = {tool["function"]["name"] for tool in tools}
 
     assert names == {"agent"}
-    assert "start_subagent" not in names
-    assert "start_workflow" not in names
-    assert not (AGENT_TOOL_NAMES - {"agent"}).intersection(names)
-
-
-def test_spawn_agent_schema_names_delivery_and_forbids_simulation():
-    tool = SpawnAgentTool(agent_runtime=object())
-    schema = tool.to_openai_tool()["function"]
+    schema = tools[0]["function"]
     properties = schema["parameters"]["properties"]
-
-    assert "Do not simulate a subagent" in schema["description"]
+    assert "instead of simulating delegation" in schema["description"]
+    assert "workflow" in properties["action"]["enum"]
     assert properties["context_mode"]["enum"] == ["fresh", "fork"]
     assert properties["delivery"]["enum"] == ["auto", "notify", "silent"]
-    for role in ["explorer", "planner", "implementer", "reviewer", "verifier", "workflow-worker"]:
-        assert role in properties["agent_name"]["description"]
-
-
-def test_wait_agent_schema_uses_run_ids():
-    tool = WaitAgentTool(agent_runtime=object())
-    function = tool.to_openai_tool()["function"]
-    schema = function["parameters"]
-
-    assert "run_ids" in schema["required"]
-    assert schema["properties"]["run_ids"]["type"] == "array"
-    assert "does not mean the run failed" in function["description"]
-    assert "wait duration" in schema["properties"]["timeout_seconds"]["description"]
-
-
-def test_start_subagent_schema_names_common_agent_roles_and_forbids_simulation():
-    tool = StartSubagentTool(subagent_executor=object())
-    schema = tool.to_openai_tool()["function"]
-    agent_description = schema["parameters"]["properties"]["agent_name"]["description"]
-
-    assert "Do not simulate a subagent" in schema["description"]
-    for role in ["explorer", "planner", "implementer", "reviewer", "verifier"]:
-        assert role in agent_description
-
-
-def test_start_workflow_schema_forbids_simulating_workflow():
-    tool = StartWorkflowTool(workflow_manager=object())
-    schema = tool.to_openai_tool()["function"]
-
-    assert "When the user explicitly asks for a workflow" in schema["description"]
-    assert "instead of simulating" in schema["description"]
-    assert "export default async function workflow(ctx)" in schema["description"]
-
-
-def test_tool_manager_preserves_start_workflow_script_argument():
-    class FakeWorkflowManager:
-        def __init__(self):
-            self.kwargs = None
-
-        async def start(self, **kwargs):
-            self.kwargs = kwargs
-            return {"run_id": "workflow-1", "kind": "workflow", "status": "running"}
-
-    fake = FakeWorkflowManager()
-    manager = ToolManager({
-        "tools": {
-            "enabled": True,
-            "builtin": {"enabled": False},
-        }
-    })
-    manager.register(StartWorkflowTool(workflow_manager=fake))
-
-    result = asyncio.run(manager.execute_tool(
-        "start_workflow",
-        {"script": "export default async function workflow(ctx) { await ctx.log('hello'); }"},
-        runtime_context={
-            "conversation_id": "conversation-1",
-            "node_id": "node-1",
-            "run_id": "run-parent",
-        },
-    ))
-
-    payload = json.loads(result)
-    assert payload["run_id"] == "workflow-1"
-    assert fake.kwargs["script"] == "export default async function workflow(ctx) { await ctx.log('hello'); }"
-    assert fake.kwargs["created_by_run_id"] == "run-parent"
-    assert fake.kwargs["cancellation_parent_run_id"] is None
-
-
-def test_start_subagent_tool_requires_runtime_context():
-    tool = StartSubagentTool(subagent_executor=object())
-
-    result = asyncio.run(tool.execute(task="inspect environment"))
-
-    payload = json.loads(result)
-    assert payload["error"]["type"] == "missing_runtime_context"
-
-
-def test_start_subagent_tool_starts_background_run_with_inherited_context():
-    class FakeSubagentExecutor:
-        def __init__(self):
-            self.kwargs = None
-
-        async def start(self, **kwargs):
-            self.kwargs = kwargs
-            return {"run_id": "subagent-1", "kind": "subagent", "status": "running"}
-
-    executor = FakeSubagentExecutor()
-    tool = StartSubagentTool(subagent_executor=executor)
-
-    result = asyncio.run(tool.execute(
-        task="检查本机环境",
-        agent_name="explorer",
-        _runtime_context={
-            "conversation_id": "conversation-1",
-            "node_id": "node-1",
-            "permission_mode": "ask_always",
-            "workspace": {"cwd": "D:\\Workspace\\ChatTree"},
-        },
-    ))
-
-    payload = json.loads(result)
-    assert payload["run_id"] == "subagent-1"
-    assert executor.kwargs["conversation_id"] == "conversation-1"
-    assert executor.kwargs["parent_node_id"] == "node-1"
-    assert executor.kwargs["agent_name"] == "explorer"
-    assert executor.kwargs["input_data"] == "检查本机环境"
-    assert executor.kwargs["permission_mode"] == "ask_always"
-    assert executor.kwargs["workspace"] == {"cwd": "D:\\Workspace\\ChatTree"}
-    assert executor.kwargs["delegated_task"] == "检查本机环境"
 
 
 def test_tool_manager_builtin_enabled_false_hides_builtin_runtime_tools():
@@ -587,16 +461,19 @@ def test_execute_tool_calls_returns_tool_messages():
     tool_calls = [{
         "id": "call-1",
         "type": "function",
-        "function": {"name": "web_search", "arguments": "{\"query\":\"ChatTree\"}"},
+        "function": {"name": "web", "arguments": "{\"action\":\"search\",\"query\":\"ChatTree\"}"},
     }]
     results = asyncio.run(manager._execute_tool_calls(tool_calls, "node-1"))
 
     assert len(results) == 1
     assert results[0]["role"] == Role.TOOL
-    assert results[0]["name"] == "web_search"
+    assert results[0]["name"] == "web"
     assert results[0]["tool_call_id"] == "call-1"
-    assert tool_manager.calls == [("web_search", {"query": "ChatTree"})]
-    assert json.loads(results[0]["content"])["arguments"] == {"query": "ChatTree"}
+    assert tool_manager.calls == [("web", {"action": "search", "query": "ChatTree"})]
+    assert json.loads(results[0]["content"])["arguments"] == {
+        "action": "search",
+        "query": "ChatTree",
+    }
 
 
 def test_openai_tool_call_delta_aggregation():
