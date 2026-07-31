@@ -148,7 +148,6 @@ class CodeToolConfig:
     shell_initial_wait_seconds: float = 120.0
     max_read_chars: int = 20000
     max_output_chars: int = 60000
-    allow_parent_dir_creation: bool = False
 
     @classmethod
     def from_dict(cls, raw: Optional[Dict[str, Any]] = None) -> "CodeToolConfig":
@@ -162,7 +161,6 @@ class CodeToolConfig:
             shell_initial_wait_seconds=float(cfg.get("shell_initial_wait_seconds", 120.0)),
             max_read_chars=int(cfg.get("max_read_chars", 20000)),
             max_output_chars=int(cfg.get("max_output_chars", 60000)),
-            allow_parent_dir_creation=bool(cfg.get("allow_parent_dir_creation", False)),
         )
 
     @classmethod

@@ -95,7 +95,6 @@ export interface BuiltinCodeToolsConfig {
   shell_initial_wait_seconds?: number;
   max_read_chars?: number;
   max_output_chars?: number;
-  allow_parent_dir_creation?: boolean;
 }
 
 export interface BuiltinToolsConfig {

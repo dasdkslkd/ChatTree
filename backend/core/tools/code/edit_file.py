@@ -17,7 +17,8 @@ class EditFileTool(common._CodeTool):
     def description(self) -> str:
         return (
             "Edit UTF-8 workspace files by exact replacements, create/overwrite content, or apply a unified patch. "
-            "Read existing files first and pass expected_version for replacement or overwrite operations."
+            "Create operations make missing parent directories inside the workspace. Read existing files first and "
+            "pass expected_version for replacement or overwrite operations."
         )
 
     def parameters_schema(self) -> Dict[str, Any]:
@@ -31,7 +32,6 @@ class EditFileTool(common._CodeTool):
                 "content": {"type": "string"},
                 "patch": {"type": "string"},
                 "cwd": {"type": "string"},
-                "create_parents": {"type": "boolean"},
                 "replacements": {
                     "type": "array",
                     "items": {

@@ -146,7 +146,6 @@ def make_config(tmp_path: Path, **overrides) -> CodeToolConfig:
         "command_timeout_seconds": 2,
         "max_read_chars": 20,
         "max_output_chars": 200,
-        "allow_parent_dir_creation": False,
     }
     config.update(overrides)
     return CodeToolConfig.from_dict(config)
@@ -1087,6 +1086,7 @@ def test_edit_file_replaces_unique_match_and_rejects_ambiguous_edit(tmp_path):
     (tmp_path / "app.py").write_text("old\nkeep\nold\n", encoding="utf-8")
     read_tool = ReadFileTool(make_config(tmp_path, max_read_chars=200))
     tool = EditFileTool(make_config(tmp_path))
+    assert "create_parents" not in tool.parameters_schema()["properties"]
     version = load(run(read_tool.execute(path="app.py")))["version"]
 
     ambiguous = load(run(tool.execute(
@@ -1109,12 +1109,21 @@ def test_edit_file_replaces_unique_match_and_rejects_ambiguous_edit(tmp_path):
     assert ok["version"].startswith("sha256:")
     assert (tmp_path / "app.py").read_text(encoding="utf-8") == "new\nkeep\nold\n"
 
+    created = load(run(tool.execute(
+        operation="create",
+        path="nested/new.txt",
+        content="hello",
+    )))
+    assert created["path"] == "nested/new.txt"
+    assert (tmp_path / "nested" / "new.txt").read_text(encoding="utf-8") == "hello"
 
-def test_write_file_writes_utf8_and_rejects_parent_creation_by_default(tmp_path):
+
+def test_write_file_writes_utf8_and_creates_missing_parents(tmp_path):
     tool = WriteFileTool(make_config(tmp_path))
 
-    missing_parent = load(run(tool.execute(path="new/file.txt", content="hello")))
-    assert missing_parent["error"]["type"] == "not_found"
+    nested = load(run(tool.execute(path="new/file.txt", content="hello")))
+    assert nested["path"] == "new/file.txt"
+    assert (tmp_path / "new" / "file.txt").read_text(encoding="utf-8") == "hello"
 
     ok = load(run(tool.execute(path="file.txt", content="hello")))
     assert ok["path"] == "file.txt"
