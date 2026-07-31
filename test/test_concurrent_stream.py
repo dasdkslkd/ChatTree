@@ -14,6 +14,7 @@ from backend.core.chat.canonical_reader import messages_by_node
 from backend.core.storage.chat_storage import ChatStorage
 from backend.core.storage.prompt_storage import PromptStorage
 from backend.core.config.types import StreamChunk, StreamStatus, StreamController
+from backend.api.routes.messages import RunEventBatcher
 from model_route_support import fake_model_route
 
 
@@ -129,5 +130,40 @@ def test_concurrent_streams_with_explicit_parent_create_sibling_nodes():
     asyncio.run(run())
 
 
+def test_immediate_event_does_not_cancel_an_inflight_delayed_batch():
+    class BlockingRunManager:
+        def __init__(self):
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.persisted = []
+
+        async def append_events(self, run_id, payloads):
+            self.started.set()
+            await self.release.wait()
+            self.persisted.extend(payloads)
+
+        async def append_event(self, run_id, payload):
+            self.persisted.append(payload)
+
+    async def run():
+        manager = BlockingRunManager()
+        batcher = RunEventBatcher(manager, "run-1")
+
+        await batcher.append({"status": "content", "content": "first"})
+        await asyncio.wait_for(manager.started.wait(), timeout=1)
+
+        immediate = asyncio.create_task(
+            batcher.append({"status": "complete", "content": "last"})
+        )
+        await asyncio.sleep(0)
+        manager.release.set()
+        await immediate
+
+        assert [event["content"] for event in manager.persisted] == ["first", "last"]
+
+    asyncio.run(run())
+
+
 if __name__ == "__main__":
     test_concurrent_streams_with_explicit_parent_create_sibling_nodes()
+    test_immediate_event_does_not_cancel_an_inflight_delayed_batch()

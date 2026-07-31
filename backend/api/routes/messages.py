@@ -103,17 +103,14 @@ class RunEventBatcher:
             await self.flush(now)
 
     async def flush(self, now: float | None = None) -> None:
-        current_task = asyncio.current_task()
-        if self._flush_task is not None and self._flush_task is not current_task and not self._flush_task.done():
-            self._flush_task.cancel()
         async with self._lock:
             if not self.pending:
                 self.last_flush = now if now is not None else asyncio.get_running_loop().time()
                 return
             batch = self.pending
             self.pending = []
-        await self.run_manager.append_events(self.run_id, batch)
-        self.last_flush = now if now is not None else asyncio.get_running_loop().time()
+            await self.run_manager.append_events(self.run_id, batch)
+            self.last_flush = now if now is not None else asyncio.get_running_loop().time()
 
     async def _flush_after_delay(self) -> None:
         try:
