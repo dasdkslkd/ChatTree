@@ -265,6 +265,13 @@ class TranscriptAssembler:
         raw_status = str((stream or {}).get("status") or self._run_status(runs))
         use_live_stream = stream is not None and raw_status in {"running", "stopping", "finalizing", "stopped", "error"}
         stream_run_id = str((stream or {}).get("run_id") or "") or None
+        latest_run = runs[-1] if runs else {}
+        latest_run_metadata = latest_run.get("metadata") if isinstance(latest_run.get("metadata"), dict) else {}
+        error_message = str(
+            (stream or {}).get("error_message")
+            or latest_run_metadata.get("error")
+            or ""
+        ).strip() or None
         process_run_id: str | None = None
 
         def append_process_item() -> None:
@@ -383,8 +390,18 @@ class TranscriptAssembler:
                 call = payload
                 append_tool_call(call)
         append_process_item()
-        if stream and raw_status in {"stopping", "stopped", "error"}:
-            items.append(self._run_status_item(conversation_id, node_id, stream_run_id, raw_status))
+        if (
+            stream and raw_status in {"stopping", "stopped", "error"}
+        ) or (
+            raw_status == "error" and error_message
+        ):
+            items.append(self._run_status_item(
+                conversation_id,
+                node_id,
+                stream_run_id or self._latest_run_id(runs),
+                raw_status,
+                error_message,
+            ))
         for notification in task_notifications:
             items.append(self._task_notification_item(conversation_id, notification))
         live_assistant_message_id = str((stream or {}).get("assistant_message_id") or "")
@@ -715,8 +732,9 @@ class TranscriptAssembler:
         node_id: str,
         run_id: str | None,
         status: str,
+        message: str | None,
     ) -> dict[str, Any]:
-        return {
+        item = {
             "type": "run_status",
             "id": f"run-status:{run_id or node_id}",
             "conversation_id": conversation_id,
@@ -724,6 +742,9 @@ class TranscriptAssembler:
             "run_id": run_id,
             "status": status,
         }
+        if message:
+            item["message"] = message
+        return item
 
     def _plan_question_item(
         self,
@@ -1073,6 +1094,7 @@ class TranscriptPatchSession:
         answer = ""
         entries: list[dict[str, Any]] = []
         reasoning = ""
+        error_message = ""
         tool_calls: list[dict[str, Any]] = []
         result_overrides_by_call_id: dict[str, dict[str, Any]] = {}
 
@@ -1125,6 +1147,8 @@ class TranscriptPatchSession:
                 status = "stopped"
             elif event_status == 'stopping':
                 status = 'stopping'
+            if event.get("error"):
+                error_message = str(event["error"])
 
             if isinstance(event.get("reasoning"), str):
                 reasoning += str(event["reasoning"])
@@ -1200,6 +1224,7 @@ class TranscriptPatchSession:
             "tool_calls": tool_calls,
             "result_overrides_by_call_id": result_overrides_by_call_id,
             "answer": answer,
+            "error_message": error_message or None,
         }
 
     def _event_tool_calls(self, event: dict[str, Any]) -> list[dict[str, Any]]:

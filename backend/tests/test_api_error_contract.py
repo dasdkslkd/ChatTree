@@ -136,7 +136,13 @@ class _StreamingRunManager:
 
 class _FinishedRunManager:
     def get_run(self, run_id: str):
-        return {"run_id": run_id, "status": "completed"}
+        return {
+            "run_id": run_id,
+            "conversation_id": "conv-1",
+            "target_node_id": "node-1",
+            "status": "failed",
+            "metadata": {"error": "upstream quota exceeded"},
+        }
 
     async def subscribe(self, run_id: str, from_event: int):
         raise AssertionError("finished runs must not open an attach stream")
@@ -223,6 +229,7 @@ def test_production_finished_run_events_replays_terminal_body():
     assert response.status_code == 200
     assert response.headers["X-Request-ID"] == "req_finished_events"
     assert response.headers["content-type"].startswith("text/event-stream")
+    assert '"error": "upstream quota exceeded"' in response.text
 
 
 def test_production_attach_race_finished_run_returns_terminal_body(monkeypatch):

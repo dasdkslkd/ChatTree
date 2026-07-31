@@ -842,6 +842,19 @@ def test_openai_responses_completed_payload_supplies_missing_summary_and_final_t
             "completed only summary"
         ]
         assert [chunk.get("content") for chunk in chunks if chunk.get("content")] == ["completed only answer"]
+        output_item = next(
+            chunk["output_item"]
+            for chunk in chunks
+            if chunk.get("event_type") == "model_output_item"
+        )
+        assert output_item["state_payload"] == {
+            "id": "rs-1",
+            "type": "reasoning",
+            "summary": [{
+                "type": "summary_text",
+                "text": "completed only summary",
+            }],
+        }
         assert chunks[-1]["status"] == StreamStatus.COMPLETE
 
     asyncio.run(run_case())

@@ -346,13 +346,17 @@ export class StreamManager {
       .filter((operation) => operation.op === 'upsert')
       .map((operation) => operation.item);
     const nodeId = patch.node_id || state.nodeId;
-    const statusItem = renderedItems.find((item) => item.type === 'run_status' || item.type === 'assistant_process');
+    const statusItem = renderedItems.find((item) => item.type === 'run_status')
+      ?? renderedItems.find((item) => item.type === 'assistant_process');
     const mappedStatus = mapRunStatus(statusItem?.status);
     const answerItem = renderedItems.find((item) => item.type === 'assistant_answer');
     const answerFailureStatus = answerItem?.status === 'error' || answerItem?.status === 'stopped'
       ? mapRunStatus(answerItem.status)
       : null;
     const nextStatus = mappedStatus ?? answerFailureStatus ?? state.status;
+    const nextErrorMessage = nextStatus === 'error' && statusItem && 'message' in statusItem
+      ? statusItem.message?.trim() || state.errorMessage
+      : state.errorMessage;
     const userMessageItem = renderedItems.find((item) => item.type === 'user_message');
     const nextToolPermissionMode = (userMessageItem && 'tool_permission_mode' in userMessageItem)
       ? (userMessageItem as { tool_permission_mode?: string | null }).tool_permission_mode ?? state.toolPermissionMode
@@ -366,6 +370,7 @@ export class StreamManager {
       targetNodeId: nodeId,
       conversationId: patch.conversation_id || state.conversationId,
       reasoningActive: false,
+      errorMessage: nextErrorMessage,
       toolPermissionMode: nextToolPermissionMode,
     };
     this.streams.set(runId, nextState);

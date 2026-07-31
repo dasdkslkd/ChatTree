@@ -899,19 +899,9 @@ class OpenAICompatibleProvider(BaseProvider):
                     "tool_call_ids": tool_call_ids,
                     "native_payload": native_item,
                     **(
-                        {
-                            "state_payload": {
-                                key: value
-                                for key, value in native_item.items()
-                                if key not in {"summary", "content"}
-                            }
-                        }
-                        if item_type == "reasoning"
-                        else (
-                            {"state_payload": native_item}
-                            if item_type not in {"message", "function_call"}
-                            else {}
-                        )
+                        {"state_payload": native_item}
+                        if item_type not in {"message", "function_call"}
+                        else {}
                     ),
                 },
             )

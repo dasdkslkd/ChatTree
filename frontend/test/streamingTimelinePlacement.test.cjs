@@ -23,12 +23,27 @@ function testPatchReducerHasOnlyUpsertRemovePlacement() {
 function testStreamManagerConsumesTranscriptPatchPayloads() {
   assert.match(streamManager, /type !== 'transcript_patch'/);
   assert.match(streamManager, /applyTranscriptPatchChunk/);
+  assert.match(
+    streamManager,
+    /item\.type === 'run_status'\)[\s\S]{0,80}\?\? renderedItems\.find\(\(item\) => item\.type === 'assistant_process'/,
+  );
+  assert.match(streamManager, /statusItem\.message\?\.trim\(\) \|\| state\.errorMessage/);
   assert.doesNotMatch(mainPage, /kind !== 'plan_action'/);
   assert.doesNotMatch(streamManager, /`plan_action_/);
   assert.doesNotMatch(streamManager, new RegExp(`${['plan', 'state'].join('_')}|${['onPlan', 'State'].join('')}`));
 }
 
+function testTranscriptErrorMessageWrapsInsteadOfTruncating() {
+  const renderer = fs.readFileSync(
+    path.join(__dirname, '../src/components/transcript/TranscriptItemRenderer.tsx'),
+    'utf8',
+  );
+  assert.match(renderer, /whitespace-pre-wrap break-words/);
+  assert.doesNotMatch(renderer, /truncate">\{item\.message \|\| label\}/);
+}
+
 testMainTranscriptUsesSnapshotPlusPatchesOnly();
 testPatchReducerHasOnlyUpsertRemovePlacement();
 testStreamManagerConsumesTranscriptPatchPayloads();
+testTranscriptErrorMessageWrapsInsteadOfTruncating();
 console.log('streamingTimelinePlacement tests passed');

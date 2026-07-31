@@ -16,7 +16,7 @@ function UnknownTranscriptItem({ item }: { item: TranscriptItem }) {
   return (
     <div className="transcript-unknown-item w-full flex flex-col items-start" role="listitem">
       <div
-        className="flex max-w-[760px] min-w-0 items-center gap-2 rounded-md px-2.5 py-1.5 text-xs"
+        className="flex max-w-[760px] min-w-0 items-start gap-2 rounded-md px-2.5 py-1.5 text-xs"
         style={{
           border: '0.5px solid var(--border)',
           background: 'var(--bg-button-tertiary-hover)',
@@ -56,7 +56,7 @@ function RunStatusTranscriptItem({ item }: { item: RunStatusItem }) {
         }}
       >
         <Icon className={`h-3.5 w-3.5 shrink-0 ${item.status === 'running' || item.status === 'stopping' || item.status === 'reconnecting' ? 'animate-spin' : ''}`} />
-        <span className="min-w-0 truncate">{item.message || label}</span>
+        <span className="min-w-0 whitespace-pre-wrap break-words">{item.message || label}</span>
       </div>
     </div>
   );

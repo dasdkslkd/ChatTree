@@ -648,10 +648,13 @@ def test_snapshot_restores_assistant_answer_status_from_corresponding_run(tmp_pa
         message_id="assistant-failed",
     )
 
-    answer = _snapshot(persistence, conversation_id, node_id)["items"][0]
+    items = _snapshot(persistence, conversation_id, node_id)["items"]
+    answer = next(item for item in items if item["type"] == "assistant_answer")
+    error = next(item for item in items if item["type"] == "run_status")
 
     assert answer["type"] == "assistant_answer"
     assert answer["status"] == "error"
+    assert error["message"] == "boom"
 
 
 def test_snapshot_does_not_read_removed_projection_tables(tmp_path):
@@ -1689,27 +1692,33 @@ def test_patch_emits_run_status_for_empty_terminal_failure_or_stop(tmp_path):
             summary=terminal_status,
         )
 
-        patch = TranscriptAssembler(persistence).patch_session(run_id).feed({
+        event = {
             "type": "run_finished",
             "status": terminal_status,
             "conversation_id": conversation_id,
             "target_node_id": node_id,
             "run_id": run_id,
-        })
+        }
+        if expected == "error":
+            event["error"] = "upstream quota exceeded"
+        patch = TranscriptAssembler(persistence).patch_session(run_id).feed(event)
 
         items = [
             operation["item"]
             for operation in patch["operations"]
             if operation["op"] == "upsert"
         ]
-        assert items == [{
+        expected_item = {
             "type": "run_status",
             "id": f"run-status:{run_id}",
             "conversation_id": conversation_id,
             "node_id": node_id,
             "run_id": run_id,
             "status": expected,
-        }]
+        }
+        if expected == "error":
+            expected_item["message"] = "upstream quota exceeded"
+        assert items == [expected_item]
         assert patch["operations"][0]["index"] == 0
 
 

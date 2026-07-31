@@ -53,6 +53,7 @@ async def _subscribe_sse(
             "conversation_id": run.get("conversation_id"),
             "target_node_id": run.get("target_node_id") or run.get("anchor_node_id"),
             "status": run.get("status"),
+            "error": (run.get("metadata") or {}).get("error"),
         })
         if patch is not None:
             emitted += 1
