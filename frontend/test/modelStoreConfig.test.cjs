@@ -50,7 +50,6 @@ require.cache[require.resolve(modelModule)] = {
   loaded: true,
   exports: {
     modelApi: {
-      getProviders: async () => [],
       metadata: async () => ({}),
     },
   },

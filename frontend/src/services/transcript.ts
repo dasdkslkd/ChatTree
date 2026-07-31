@@ -1,9 +1,8 @@
 import { apiClient } from '../api/client';
 import type { TranscriptSnapshot } from '../types/transcript';
+import type { AxiosInstance } from 'axios';
 
-type TranscriptApiClient = {
-  get: (url: string, config?: any) => Promise<{ data: TranscriptSnapshot }>;
-};
+type TranscriptApiClient = Pick<AxiosInstance, 'get'>;
 
 export function createTranscriptService(client: TranscriptApiClient) {
   return {
@@ -12,7 +11,7 @@ export function createTranscriptService(client: TranscriptApiClient) {
       tipNodeId: string,
       signal?: AbortSignal,
     ): Promise<TranscriptSnapshot> {
-      const response = await client.get(
+      const response = await client.get<TranscriptSnapshot>(
         `/conversations/${encodeURIComponent(conversationId)}/transcript`,
         { ...(signal ? { signal } : {}), params: { node_id: tipNodeId } },
       );

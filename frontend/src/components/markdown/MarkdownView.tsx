@@ -13,7 +13,7 @@ import { SyntaxHighlighter, oneDark } from './languages';
 
 const MarkdownContent = lazy(() => import('../MarkdownContent'));
 
-export function normalizeCodeLanguage(language: string): string {
+function normalizeCodeLanguage(language: string): string {
   const normalized = language.toLowerCase();
   if (normalized === 'js') return 'javascript';
   if (normalized === 'ts') return 'typescript';
@@ -24,7 +24,7 @@ export function normalizeCodeLanguage(language: string): string {
   return normalized;
 }
 
-export function getCodeBlockPayload(children: ReactNode): { code: string; language: string | null } | null {
+function getCodeBlockPayload(children: ReactNode): { code: string; language: string | null } | null {
   const codeElement = Array.isArray(children)
     ? children.find((child) => isValidElement(child))
     : children;
@@ -106,7 +106,7 @@ export function CodeBlockWrapper({ children, ...props }: HTMLAttributes<HTMLPreE
   );
 }
 
-export const markdownComponents = {
+const markdownComponents = {
   pre: CodeBlockWrapper,
 };
 

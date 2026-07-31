@@ -5,6 +5,7 @@ const ts = require('typescript');
 const Module = require('module');
 
 const rendererPath = path.join(__dirname, '../src/components/transcript/items/ToolCallRenderer.tsx');
+const formattingPath = path.join(__dirname, '../src/components/transcript/items/toolCallFormatting.ts');
 const timelinePath = path.join(__dirname, '../src/components/transcript/items/AssistantProcessTimeline.tsx');
 const approvalPath = path.join(__dirname, '../src/components/transcript/items/ToolApprovalCard.tsx');
 const itemPath = path.join(__dirname, '../src/components/transcript/items/AssistantProcessItem.tsx');
@@ -44,8 +45,8 @@ function createMockLucide() {
   return mock;
 }
 
-function loadToolCallRenderer() {
-  const source = fs.readFileSync(rendererPath, 'utf8');
+function loadToolCallFormatting() {
+  const source = fs.readFileSync(formattingPath, 'utf8');
   const transpiled = ts.transpileModule(source, {
     compilerOptions: {
       module: ts.ModuleKind.CommonJS,
@@ -54,7 +55,7 @@ function loadToolCallRenderer() {
       esModuleInterop: true,
       importsNotUsedAsValues: ts.ImportsNotUsedAsValues.Remove,
     },
-    fileName: rendererPath,
+    fileName: formattingPath,
   }).outputText;
 
   const moduleObj = { exports: {} };
@@ -83,41 +84,41 @@ function testRegistryContainsAllExpectedTools() {
 }
 
 function testSummarizeForEnterPlanMode() {
-  const { summarizeToolCall } = loadToolCallRenderer();
+  const { summarizeToolCall } = loadToolCallFormatting();
   const args = JSON.stringify({ permission_mode: 'plan' });
   const summary = summarizeToolCall('enter_plan_mode', args, '', 'done');
   assert.equal(summary, '计划模式 · plan');
 }
 
 function testSummarizeForEnterPlanModeRunning() {
-  const { summarizeToolCall } = loadToolCallRenderer();
+  const { summarizeToolCall } = loadToolCallFormatting();
   const args = JSON.stringify({ permission_mode: 'plan' });
   const summary = summarizeToolCall('enter_plan_mode', args, '', 'running');
   assert.equal(summary, '进入计划模式（plan）');
 }
 
 function testSummarizeForExitPlanMode() {
-  const { summarizeToolCall } = loadToolCallRenderer();
+  const { summarizeToolCall } = loadToolCallFormatting();
   const args = JSON.stringify({ plan: '1. 修改后端\n2. 运行测试' });
   const summary = summarizeToolCall('exit_plan_mode', args, '', 'done');
   assert.equal(summary, '1. 修改后端');
 }
 
 function testSummarizeForExitPlanModeEmpty() {
-  const { summarizeToolCall } = loadToolCallRenderer();
+  const { summarizeToolCall } = loadToolCallFormatting();
   const summary = summarizeToolCall('exit_plan_mode', '', '', 'running');
   assert.equal(summary, '提交计划中...');
 }
 
 function testSummarizeForShell() {
-  const { summarizeToolCall } = loadToolCallRenderer();
+  const { summarizeToolCall } = loadToolCallFormatting();
   const args = JSON.stringify({ command: 'npm test', cwd: './src' });
   const result = JSON.stringify({ exit_code: 0, stdout: 'ok', stderr: '' });
   assert.equal(summarizeToolCall('shell', args, result, 'done'), 'npm test');
 }
 
 function testSummarizeForShellTruncatesLongCommand() {
-  const { summarizeToolCall } = loadToolCallRenderer();
+  const { summarizeToolCall } = loadToolCallFormatting();
   const longCommand = 'git commit -m "' + 'x'.repeat(120) + '"';
   const args = JSON.stringify({ command: longCommand });
   const summary = summarizeToolCall('shell', args, '', 'running');
@@ -126,7 +127,7 @@ function testSummarizeForShellTruncatesLongCommand() {
 }
 
 function testSummarizeForGrepContent() {
-  const { summarizeToolCall } = loadToolCallRenderer();
+  const { summarizeToolCall } = loadToolCallFormatting();
   const args = JSON.stringify({ pattern: 'function\\s+\\w+', path: './src', output: 'content' });
   const result = JSON.stringify({ count: 5, output: 'content', matches: [] });
   const summary = summarizeToolCall('grep', args, result, 'done');
@@ -134,7 +135,7 @@ function testSummarizeForGrepContent() {
 }
 
 function testSummarizeForGrepFiles() {
-  const { summarizeToolCall } = loadToolCallRenderer();
+  const { summarizeToolCall } = loadToolCallFormatting();
   const args = JSON.stringify({ pattern: 'TODO', path: '.', output: 'files' });
   const result = JSON.stringify({ count: 3, files: [], output: 'files' });
   const summary = summarizeToolCall('grep', args, result, 'done');
@@ -142,7 +143,7 @@ function testSummarizeForGrepFiles() {
 }
 
 function testSummarizeForGlob() {
-  const { summarizeToolCall } = loadToolCallRenderer();
+  const { summarizeToolCall } = loadToolCallFormatting();
   const args = JSON.stringify({ patterns: ['**/*.ts'], path: './src' });
   const result = JSON.stringify({ count: 12, files: [] });
   const summary = summarizeToolCall('glob', args, result, 'done');
@@ -150,28 +151,28 @@ function testSummarizeForGlob() {
 }
 
 function testSummarizeForReadWithLineRange() {
-  const { summarizeToolCall } = loadToolCallRenderer();
+  const { summarizeToolCall } = loadToolCallFormatting();
   const args = JSON.stringify({ path: 'src/foo.ts', start_line: 10, line_count: 50 });
   const summary = summarizeToolCall('read', args, '', 'running');
   assert.equal(summary, 'src/foo.ts L10-59');
 }
 
 function testSummarizeForReadWithTargets() {
-  const { summarizeToolCall } = loadToolCallRenderer();
+  const { summarizeToolCall } = loadToolCallFormatting();
   const args = JSON.stringify({ targets: [{ path: 'src/bar.ts', start_line: 1, line_count: 5 }] });
   const summary = summarizeToolCall('read', args, '', 'done');
   assert.equal(summary, 'src/bar.ts L1-5');
 }
 
 function testSummarizeForFetchUrl() {
-  const { summarizeToolCall } = loadToolCallRenderer();
+  const { summarizeToolCall } = loadToolCallFormatting();
   const args = JSON.stringify({ url: 'https://example.com/page' });
   const summary = summarizeToolCall('fetch_url', args, '', 'running');
   assert.equal(summary, 'https://example.com/page');
 }
 
 function testSummarizeForWebSearch() {
-  const { summarizeToolCall } = loadToolCallRenderer();
+  const { summarizeToolCall } = loadToolCallFormatting();
   const args = JSON.stringify({ query: 'how to test react components' });
   const result = JSON.stringify({ count: 7, results: [] });
   const summary = summarizeToolCall('web_search', args, result, 'done');
@@ -179,20 +180,20 @@ function testSummarizeForWebSearch() {
 }
 
 function testSummarizeForUnknownToolFallsBackToGeneric() {
-  const { summarizeToolCall } = loadToolCallRenderer();
+  const { summarizeToolCall } = loadToolCallFormatting();
   const args = JSON.stringify({ command: 'do something' });
   const summary = summarizeToolCall('unknown_tool', args, '', 'done');
   assert.equal(summary, 'do something');
 }
 
 function testSummarizeForUnknownToolWithEmptyArgs() {
-  const { summarizeToolCall } = loadToolCallRenderer();
+  const { summarizeToolCall } = loadToolCallFormatting();
   const summary = summarizeToolCall('mystery_tool', '', '', 'running');
   assert.equal(summary, '执行中...');
 }
 
 function testSummarizeHandlesErrorResult() {
-  const { summarizeToolCall } = loadToolCallRenderer();
+  const { summarizeToolCall } = loadToolCallFormatting();
   const args = JSON.stringify({ command: 'bad-command' });
   const result = JSON.stringify({ error: { type: 'not_found', message: 'command not found' } });
   const summary = summarizeToolCall('unknown_tool', args, result, 'error');
@@ -200,7 +201,7 @@ function testSummarizeHandlesErrorResult() {
 }
 
 function testSummarizeForShellWithErrorShowsCommand() {
-  const { summarizeToolCall } = loadToolCallRenderer();
+  const { summarizeToolCall } = loadToolCallFormatting();
   const args = JSON.stringify({ command: 'bad-command' });
   const result = JSON.stringify({ error: { type: 'not_found', message: 'command not found' } });
   const summary = summarizeToolCall('shell', args, result, 'error');
@@ -208,7 +209,7 @@ function testSummarizeForShellWithErrorShowsCommand() {
 }
 
 function testSummarizeHandlesInvalidJson() {
-  const { summarizeToolCall } = loadToolCallRenderer();
+  const { summarizeToolCall } = loadToolCallFormatting();
   const summary = summarizeToolCall('shell', 'not valid json', 'also not json', 'done');
   assert.equal(summary, 'shell');
 }
@@ -254,7 +255,7 @@ function testTimelineUsesNewCard() {
 
 function testAssistantProcessItemUsesSummarizeToolCall() {
   const source = readSource('src/components/transcript/items/AssistantProcessItem.tsx');
-  assert.match(source, /import \{ summarizeToolCall \} from '\.\/ToolCallRenderer'/);
+  assert.match(source, /import \{ summarizeToolCall \} from '\.\/toolCallFormatting'/);
   assert.match(source, /summarizeToolCall\(block\.tool_name \|\| 'tool', argsText, outputText, status\)/);
   assert.doesNotMatch(source, /function compactToolSummary/);
 }

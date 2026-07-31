@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { ChevronRight, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { TranscriptItem } from '../../../types/transcript';
@@ -26,7 +26,7 @@ export type AssistantProcessRenderProps = {
   showStatusLabel?: boolean;
 };
 
-export function getStreamStatusLabel(status: AssistantProcessRenderProps['status'], errorMessage: string | null): string | null {
+function getStreamStatusLabel(status: AssistantProcessRenderProps['status'], errorMessage: string | null): string | null {
   if (status === 'error') return errorMessage || '生成失败';
   if (status === 'stopping') return '正在停止...';
   if (status === 'stopped') return '已停止';
@@ -35,9 +35,6 @@ export function getStreamStatusLabel(status: AssistantProcessRenderProps['status
 
 function ThoughtBlock({ reasoning, streaming }: { reasoning: string; streaming?: boolean }) {
   const [expanded, setExpanded] = useState(Boolean(streaming));
-  useEffect(() => {
-    if (!streaming) setExpanded(false);
-  }, [streaming]);
   if (!reasoning) return null;
   return (
     <div className={cn('thought', expanded && 'expanded')}>
@@ -98,7 +95,7 @@ function renderTimelineBlock(block: ProcessRenderBlock) {
   if (block.type === 'reasoning') {
     return (
       <ThoughtBlock
-        key={block.key}
+        key={`${block.key}:${block.streaming}`}
         reasoning={block.reasoning}
         streaming={block.streaming}
       />

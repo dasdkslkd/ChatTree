@@ -8,7 +8,7 @@ import type {
   ProcessRenderBlock,
 } from './AssistantProcessTimeline';
 import { AssistantProcessTimeline } from './AssistantProcessTimeline';
-import { summarizeToolCall } from './ToolCallRenderer';
+import { summarizeToolCall } from './toolCallFormatting';
 
 interface AssistantProcessItemProps {
   item: AssistantProcessTranscriptItem;

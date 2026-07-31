@@ -18,61 +18,22 @@ import {
 import { cn } from '@/lib/utils';
 import MarkdownContent from '../../MarkdownContent';
 import type { ToolRenderItem } from './AssistantProcessTimeline';
-
-type ToolStatus = ToolRenderItem['status'];
-
-type ToolArgs = Record<string, unknown>;
-type ToolResult = Record<string, unknown> | null;
+import {
+  asArray,
+  asNumber,
+  asObject,
+  asString,
+  getErrorMessage,
+  truncate,
+  tryParseJSON,
+  type ToolArgs,
+  type ToolResult,
+  type ToolStatus,
+} from './toolCallFormatting';
 
 interface ToolSpec {
   icon: LucideIcon;
-  summary: (args: ToolArgs, result: ToolResult, status: ToolStatus) => string;
   detail: (args: ToolArgs, result: ToolResult, status: ToolStatus) => ReactNode;
-}
-
-function tryParseJSON(text: string | null | undefined): unknown {
-  if (!text) return null;
-  try {
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
-}
-
-function asObject(value: unknown): ToolResult {
-  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : null;
-}
-
-function asString(value: unknown): string {
-  return typeof value === 'string' ? value : value == null ? '' : String(value);
-}
-
-function asNumber(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
-}
-
-function asArray(value: unknown): unknown[] {
-  return Array.isArray(value) ? value : [];
-}
-
-function truncate(text: string, max: number): string {
-  if (text.length <= max) return text;
-  return `${text.slice(0, max - 1)}…`;
-}
-
-function singleLine(text: string): string {
-  return text.replace(/\s+/g, ' ').trim();
-}
-
-function getErrorMessage(result: ToolResult): string | null {
-  if (!result) return null;
-  const err = result.error;
-  if (typeof err === 'object' && err !== null) {
-    const message = (err as Record<string, unknown>).message;
-    if (typeof message === 'string' && message) return message;
-  }
-  if (typeof err === 'string' && err) return err;
-  return null;
 }
 
 function CopyButton({ text, label, variant = 'default' }: { text: string; label: string; variant?: 'default' | 'subtle' }) {
@@ -129,11 +90,6 @@ function EmptyState({ text }: { text: string }) {
 function shellSpec(): ToolSpec {
   return {
     icon: Terminal,
-    summary: (args) => {
-      const cmd = asString(args.command);
-      if (!cmd) return 'shell';
-      return truncate(singleLine(cmd), 80);
-    },
     detail: (args, result, status) => {
       const command = asString(args.command);
       const cwd = asString(args.cwd);
@@ -196,19 +152,6 @@ function shellSpec(): ToolSpec {
 function grepSpec(): ToolSpec {
   return {
     icon: Search,
-    summary: (args, result) => {
-      const pattern = asString(args.pattern);
-      const path = asString(args.path);
-      const count = result ? asNumber(result.count) : null;
-      const output = asString(args.output) || asString(result?.output) || 'files';
-      const head = pattern ? truncate(singleLine(pattern), 40) : 'grep';
-      const tail = path && path !== '.' ? ` @ ${truncate(path, 30)}` : '';
-      if (count !== null) {
-        const unit = output === 'content' ? '处匹配' : output === 'count' ? '项统计' : '个文件';
-        return `${head}${tail} · ${count} ${unit}`;
-      }
-      return `${head}${tail}`;
-    },
     detail: (args, result, status) => {
       const pattern = asString(args.pattern);
       const path = asString(args.path);
@@ -290,17 +233,6 @@ function grepSpec(): ToolSpec {
 function globSpec(): ToolSpec {
   return {
     icon: FileSearch,
-    summary: (args, result) => {
-      const patterns = asArray(args.patterns).map((item) => asString(item)).filter(Boolean);
-      const singlePattern = asString(args.pattern);
-      const patternText = singlePattern || patterns.join(', ');
-      const path = asString(args.path);
-      const count = result ? asNumber(result.count) : null;
-      const head = patternText ? truncate(singleLine(patternText), 40) : 'glob';
-      const tail = path && path !== '.' ? ` @ ${truncate(path, 30)}` : '';
-      if (count !== null) return `${head}${tail} · ${count} 个文件`;
-      return `${head}${tail}`;
-    },
     detail: (args, result, status) => {
       const patterns = asArray(args.patterns).map((item) => asString(item)).filter(Boolean);
       const singlePattern = asString(args.pattern);
@@ -348,18 +280,6 @@ function globSpec(): ToolSpec {
 function readSpec(): ToolSpec {
   return {
     icon: FileText,
-    summary: (args) => {
-      const targets = asArray(args.targets)
-        .map((item) => asObject(item))
-        .filter((item): item is Record<string, unknown> => item !== null);
-      const targetPaths = targets.map((target) => asString(target.path)).filter(Boolean);
-      const singlePath = asString(args.path);
-      const path = singlePath || targetPaths[0] || 'read';
-      const startLine = asNumber(args.start_line) ?? asNumber(targets[0]?.start_line);
-      const lineCount = asNumber(args.line_count) ?? asNumber(targets[0]?.line_count);
-      const range = startLine !== null && lineCount !== null ? ` L${startLine}-${startLine + lineCount - 1}` : '';
-      return `${truncate(path, 50)}${range}`;
-    },
     detail: (_args, result, status) => {
       const errorMessage = getErrorMessage(result);
       if (errorMessage) {
@@ -403,10 +323,6 @@ function readSpec(): ToolSpec {
 function fileEditSpec(icon: LucideIcon): ToolSpec {
   return {
     icon,
-    summary: (args) => {
-      const path = asString(args.path) || asString(args.file_path) || 'file';
-      return truncate(path, 60);
-    },
     detail: (args, result, status) => {
       const path = asString(args.path) || asString(args.file_path);
       const errorMessage = getErrorMessage(result);
@@ -441,11 +357,6 @@ function fileEditSpec(icon: LucideIcon): ToolSpec {
 function fetchUrlSpec(): ToolSpec {
   return {
     icon: Globe,
-    summary: (args) => {
-      const url = asString(args.url);
-      if (!url) return 'fetch_url';
-      return truncate(url, 80);
-    },
     detail: (args, result, status) => {
       const url = asString(args.url);
       const errorMessage = getErrorMessage(result);
@@ -492,12 +403,6 @@ function fetchUrlSpec(): ToolSpec {
 function webSearchSpec(): ToolSpec {
   return {
     icon: Search,
-    summary: (args, result) => {
-      const query = asString(args.query);
-      const count = result ? asNumber(result.count) : null;
-      if (count !== null) return `${truncate(query, 60)} · ${count} 项`;
-      return truncate(query, 80) || 'web_search';
-    },
     detail: (args, result, status) => {
       const query = asString(args.query);
       const errorMessage = getErrorMessage(result);
@@ -537,11 +442,6 @@ function webSearchSpec(): ToolSpec {
 function planModeSpec(): ToolSpec {
   return {
     icon: ClipboardList,
-    summary: (args, _result, status) => {
-      const permissionMode = asString(args.permission_mode);
-      if (status === 'running') return permissionMode ? `进入计划模式（${permissionMode}）` : '进入计划模式';
-      return permissionMode ? `计划模式 · ${permissionMode}` : '计划模式';
-    },
     detail: (args, _result, status) => {
       const permissionMode = asString(args.permission_mode);
       const errorMessage = getErrorMessage(_result);
@@ -560,12 +460,6 @@ function planModeSpec(): ToolSpec {
 function exitPlanModeSpec(): ToolSpec {
   return {
     icon: ClipboardList,
-    summary: (args, _result, status) => {
-      const plan = asString(args.plan);
-      if (!plan) return status === 'running' ? '提交计划中...' : '计划';
-      const title = plan.split(/\r?\n/).map((line) => line.trim().replace(/^#+\s*/, '')).find(Boolean) || '计划';
-      return truncate(title, 80);
-    },
     detail: (args, result, status) => {
       const plan = asString(args.plan);
       const errorMessage = getErrorMessage(result);
@@ -608,14 +502,6 @@ function exitPlanModeSpec(): ToolSpec {
 function defaultSpec(): ToolSpec {
   return {
     icon: Wrench,
-    summary: (args, result, status) => {
-      const errorMessage = getErrorMessage(result);
-      if (errorMessage) return truncate(singleLine(errorMessage), 80);
-      const candidate = asString(args.command) || asString(args.pattern) || asString(args.path) || asString(args.query) || asString(args.url);
-      if (candidate) return truncate(singleLine(candidate), 80);
-      if (status === 'running' && !result) return '执行中...';
-      return '工具调用';
-    },
     detail: (args, result, status) => {
       const errorMessage = getErrorMessage(result);
       const argsText = Object.keys(args).length > 0 ? JSON.stringify(args, null, 2) : '';
@@ -661,17 +547,6 @@ const TOOL_SPECS: Record<string, ToolSpec> = {
 
 function getToolSpec(name: string): ToolSpec {
   return TOOL_SPECS[name] || defaultSpec();
-}
-
-export function summarizeToolCall(
-  name: string,
-  argsText: string,
-  outputText: string,
-  status: ToolStatus,
-): string {
-  const args = asObject(tryParseJSON(argsText)) || {};
-  const result = asObject(tryParseJSON(outputText));
-  return getToolSpec(name).summary(args, result, status);
 }
 
 export function ToolCallPreview({

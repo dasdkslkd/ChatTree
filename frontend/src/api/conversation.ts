@@ -31,6 +31,13 @@ export interface DeleteNodeOptions {
   force?: boolean;
 }
 
+export interface AvailableBranch {
+  branch_id: string;
+  title: string;
+  fork_node_id: string;
+  message_count: number;
+}
+
 export interface PruneSummaryRecord {
   id: string;
   type: 'prune_summary';
@@ -94,7 +101,7 @@ export const conversationApi = {
   },
 
   // ��ȡ��֧
-  getBranches: async (conversationId: string): Promise<any> => {
+  getBranches: async (conversationId: string): Promise<AvailableBranch[]> => {
     const response = await apiClient.get(`/conversations/${conversationId}/branches`);
     return response.data;
   },

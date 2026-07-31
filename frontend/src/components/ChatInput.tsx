@@ -69,7 +69,6 @@ interface Props {
   conversationId: string | null;
   editValue?: string | null;
   isEditing?: boolean;
-  onEditValueConsumed?: () => void;
   onCancelEdit?: () => void;
   attachedFiles?: string[];
   attachedImages?: Array<{ filename: string; url: string | null }>;
@@ -96,7 +95,6 @@ export function ChatInput({
   conversationId,
   editValue,
   isEditing = false,
-  onEditValueConsumed,
   onCancelEdit,
   attachedFiles = [],
   attachedImages = [],
@@ -118,7 +116,7 @@ export function ChatInput({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const suggestionItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const [value, setValue] = useState('');
+  const [value, setValue] = useState(editValue ?? '');
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const [promptDialogOpen, setPromptDialogOpen] = useState(false);
   const [selectedPromptId, setSelectedPromptId] = useState<string | null>(null);
@@ -130,7 +128,6 @@ export function ChatInput({
   const [slashDismissedForValue, setSlashDismissedForValue] = useState<string | null>(null);
 
   const {
-    providers,
     models,
     currentProvider,
     currentModel,
@@ -163,14 +160,13 @@ export function ChatInput({
   const currentMultiAgentModeOption = MULTI_AGENT_MODE_OPTIONS.find((option) => option.value === currentMultiAgentMode)
     ?? MULTI_AGENT_MODE_OPTIONS[0];
 
-  // 初始加载（loadConfig/loadProviders 已在 App.tsx 中调用）
+  // 初始加载（loadConfig 已由 ServerSessionApp 完成）
   useEffect(() => {
     loadPrompts();
-  }, []);
+  }, [loadPrompts]);
 
   useEffect(() => {
     let cancelled = false;
-    setSlashCommands(slashRegistry.list());
     slashRegistry.refresh()
       .then((commands) => {
         if (!cancelled) setSlashCommands(commands);
@@ -188,13 +184,12 @@ export function ChatInput({
     const onFocus = () => loadConfig();
     window.addEventListener('focus', onFocus);
     return () => window.removeEventListener('focus', onFocus);
-  }, []);
+  }, [loadConfig]);
 
   // 已启用的提供商
-  const enabledProviders = providers.filter((provider) => {
-    if (!config?.provider) return false;
-    return config.provider[provider]?.enabled;
-  });
+  const enabledProviders = Object.entries(config?.provider ?? {})
+    .filter(([, provider]) => provider.enabled)
+    .map(([providerId]) => providerId);
 
   // 对话框中的活跃提供商和模型（pending 优先，否则 current）
   const activeDialogProvider = pendingProvider || currentProvider;
@@ -205,19 +200,7 @@ export function ChatInput({
     if (activeDialogProvider && modelDialogOpen) {
       loadModels(activeDialogProvider);
     }
-  }, [activeDialogProvider, modelDialogOpen]);
-
-  // 外部编辑值
-  useEffect(() => {
-    if (editValue != null) {
-      setValue(editValue);
-      onEditValueConsumed?.();
-      requestAnimationFrame(() => { textareaRef.current?.focus(); });
-    }
-  }, [editValue]);
-
-  // 切换会话清空输入
-  useEffect(() => setValue(''), [conversationId]);
+  }, [activeDialogProvider, loadModels, modelDialogOpen]);
 
   // 自动调整 textarea 高度
   useEffect(() => {
@@ -226,10 +209,6 @@ export function ChatInput({
       textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 200)}px`;
     }
   }, [value]);
-
-  useEffect(() => {
-    setSlashHighlightIndex(0);
-  }, [value, slashCommands]);
 
   const referNodeCompletionState = useMemo(() => getReferNodeCompletionState(value), [value]);
 
@@ -339,13 +318,6 @@ export function ChatInput({
     cancelModelSelection();
     setModelDialogOpen(false);
   };
-
-  // 对话框中提供商变更时加载模型（首次打开也需要）
-  useEffect(() => {
-    if (modelDialogOpen && activeDialogProvider) {
-      loadModels(activeDialogProvider);
-    }
-  }, [modelDialogOpen]);
 
   const handlePromptSelect = async (promptId: string, promptTitle: string) => {
     if (selectedPromptId === promptId) {
@@ -747,10 +719,12 @@ export function ChatInput({
           value={value}
           onChange={(e) => {
             setValue(e.target.value);
+            setSlashHighlightIndex(0);
             if (slashDismissedForValue && slashDismissedForValue !== e.target.value) {
               setSlashDismissedForValue(null);
             }
           }}
+          autoFocus={isEditing}
           onKeyDown={(e) => {
             if (suggestionOpen) {
               if (e.key === 'ArrowDown') {

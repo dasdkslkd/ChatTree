@@ -5,8 +5,8 @@ import type {
   ConversationCreateRequest,
   MultiAgentMode,
 } from '../types/conversation';
-import { conversationApi, type TreeData } from '../api/conversation';
-import { ChatTreeApiError } from '../api/errors';
+import { conversationApi, type AvailableBranch, type TreeData } from '../api/conversation';
+import { ChatTreeApiError, getApiErrorMessage } from '../api/errors';
 import { transcriptService } from '../services/transcript';
 import type { TranscriptItem } from '../types/transcript';
 import { useModelStore } from './modelStore';
@@ -24,7 +24,7 @@ const conversationStorageKey = profileStorageKey(
 interface ConversationState {
   conversations: Conversation[];
   currentConversation: Conversation | null;
-  branches: Record<string, any>;
+  branches: AvailableBranch[];
   treeData: TreeData | null;
   streamingContent: string;
   currentNodeId: string | null;
@@ -69,7 +69,7 @@ function isActiveRunDeleteConflict(err: unknown): boolean {
 async function deleteNodeAllowingActiveRuns(conversationId: string, nodeId: string) {
   try {
     return await conversationApi.deleteNode(conversationId, nodeId);
-  } catch (err: any) {
+  } catch (err) {
     if (!isActiveRunDeleteConflict(err)) throw err;
     return await conversationApi.deleteNode(conversationId, nodeId, { force: true });
   }
@@ -81,7 +81,7 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
       (set, get) => ({
         conversations: [],
         currentConversation: null,
-        branches: {},
+        branches: [],
         treeData: null,
         streamingContent: '',
         currentNodeId: null,
@@ -95,8 +95,8 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
           try {
             const data = await conversationApi.list();
             set({ conversations: data });
-          } catch (err: any) {
-            set({ error: err.message });
+          } catch (err) {
+            set({ error: getApiErrorMessage(err, '加载对话失败') });
           } finally {
             set({ loading: false });
           }
@@ -144,15 +144,15 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
                     : state.currentConversation,
                 }));
                 return updatedConversation;
-              } catch (_) {
+              } catch {
                 // 持久化失败不阻断创建；store 选择仍保留，显示不会串
               }
             } else {
               await ms.resetToDefault();
             }
             return conversation;
-          } catch (err: any) {
-            set({ error: err.message });
+          } catch (err) {
+            set({ error: getApiErrorMessage(err, '创建对话失败') });
             return null;
           } finally {
             set({ loading: false });
@@ -169,7 +169,7 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
               currentConversation: conversation
                 ? { ...conversation, current_node_id: currentNodeId || conversation.current_node_id }
                 : null,
-              branches: branches || {},
+              branches,
               treeData: null,
               streamingContent: '',
               currentNodeId,
@@ -180,8 +180,8 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
               conversation?.provider_id || null,
               conversation?.model_id || null,
             );
-          } catch (err: any) {
-            set({ error: err.message });
+          } catch (err) {
+            set({ error: getApiErrorMessage(err, '选择对话失败') });
           } finally {
             set({ loading: false });
           }
@@ -194,7 +194,7 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
             set((state) => ({
               conversations: state.conversations.filter((c) => c.id !== id),
               currentConversation: isCurrent ? null : state.currentConversation,
-              branches: isCurrent ? {} : state.branches,
+              branches: isCurrent ? [] : state.branches,
               treeData: isCurrent ? null : state.treeData,
               streamingContent: isCurrent ? '' : state.streamingContent,
               currentNodeId: isCurrent ? null : state.currentNodeId,
@@ -203,8 +203,8 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
             if (isCurrent) {
               await useModelStore.getState().resetToDefault();
             }
-          } catch (err: any) {
-            set({ error: err.message });
+          } catch (err) {
+            set({ error: getApiErrorMessage(err, '删除对话失败') });
           }
         },
 
@@ -220,8 +220,8 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
                   ? { ...state.currentConversation, title }
                   : state.currentConversation,
             }));
-          } catch (err: any) {
-            set({ error: err.message });
+          } catch (err) {
+            set({ error: getApiErrorMessage(err, '更新对话标题失败') });
           }
         },
 
@@ -276,8 +276,8 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
                   ? { ...state.currentConversation, multi_agent_mode: mode }
                   : state.currentConversation,
             }));
-          } catch (err: any) {
-            set({ error: err.message });
+          } catch (err) {
+            set({ error: getApiErrorMessage(err, '更新 Agent 模式失败') });
           }
         },
 
@@ -294,7 +294,7 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
             ]);
 
             set((state) => ({
-              branches: branches || {},
+              branches,
               treeData,
               currentNodeId: nodeId,
               currentConversation: state.currentConversation
@@ -308,8 +308,8 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
               streamingContent: '',
               pendingScrollNodeId: nodeId,
             }));
-          } catch (err: any) {
-            set({ error: err.message });
+          } catch (err) {
+            set({ error: getApiErrorMessage(err, '切换节点失败') });
           } finally {
             set({ loading: false });
           }
@@ -379,8 +379,8 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
               }
               // 后端尚未保存完成，稍候重试（保留乐观气泡）
               await new Promise((r) => setTimeout(r, 150));
-            } catch (err: any) {
-              set({ error: err.message });
+            } catch (err) {
+              set({ error: getApiErrorMessage(err, '刷新消息失败') });
               return false;
             }
           }
@@ -392,10 +392,10 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
           try {
             const branches = await conversationApi.getBranches(conversationId);
             if (get().currentConversation?.id !== conversationId) return false;
-            set({ branches: branches || {} });
+            set({ branches });
             return true;
-          } catch (err: any) {
-            set({ error: err.message });
+          } catch (err) {
+            set({ error: getApiErrorMessage(err, '刷新分支失败') });
             return false;
           }
         },
@@ -403,7 +403,7 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
         clearCurrentConversation: () => {
           set({
             currentConversation: null,
-            branches: {},
+            branches: [],
             treeData: null,
             streamingContent: '',
             currentNodeId: null,
@@ -427,7 +427,7 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
             if (get().currentConversation?.id !== currentConversation.id) return;
             const newCurrentNodeId = treeData.current_node_id || result.new_current_node_id;
             set((state) => ({
-              branches: branches || {},
+              branches,
               treeData,
               currentNodeId: newCurrentNodeId,
               currentConversation: state.currentConversation
@@ -439,8 +439,8 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
                   : conversation
               ),
             }));
-          } catch (err: any) {
-            set({ error: err.message });
+          } catch (err) {
+            set({ error: getApiErrorMessage(err, '删除节点失败') });
           } finally {
             set({ loading: false });
           }
@@ -450,8 +450,8 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
           try {
             const data = await conversationApi.getTree(conversationId);
             set({ treeData: data, error: null });
-          } catch (err: any) {
-            set({ error: err.message });
+          } catch (err) {
+            set({ error: getApiErrorMessage(err, '加载对话树失败') });
             throw err;
           }
         },

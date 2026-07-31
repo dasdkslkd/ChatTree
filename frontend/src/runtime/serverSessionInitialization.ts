@@ -1,7 +1,6 @@
 export type ServerSessionStoreInitializer = Readonly<{
   loadConfig(): Promise<void>;
   getConfig(): unknown | null;
-  loadProviders(): Promise<void>;
   getError(): unknown | null;
 }>;
 
@@ -13,7 +12,6 @@ export async function initializeServerSessionStores(
     throw new Error('Frontend config initialization failed');
   }
 
-  await store.loadProviders();
   const storeError = store.getError();
   if (storeError) {
     throw storeError instanceof Error ? storeError : new Error(String(storeError));

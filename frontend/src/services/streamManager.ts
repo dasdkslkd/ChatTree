@@ -417,7 +417,7 @@ export class StreamManager {
     requestNodeId?: string,
     anchorNodeId?: string | null,
   ): Promise<void> {
-    let runId = `client_${Date.now()}_${this.tempSeq++}`;
+    const runId = `client_${Date.now()}_${this.tempSeq++}`;
     const abortController = new AbortController();
     const state = this.createState(
       runId,
@@ -674,7 +674,7 @@ export class StreamManager {
     state.abortController?.abort();
     try {
       await stopRequest;
-    } catch (_) {
+    } catch {
       state.abortController?.abort();
     }
   }

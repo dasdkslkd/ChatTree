@@ -22,6 +22,7 @@ import { Switch } from '@/components/ui/switch';
 import { Settings, Plus, Trash2, Eye, EyeOff, Loader2, ExternalLink, RefreshCw, CheckCircle2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { configApi, type SubscriptionLoginHandle } from '@/api/config';
+import { getApiErrorMessage } from '@/api/errors';
 import { useModelStore } from '@/store/modelStore';
 import type {
   ConfigData,
@@ -97,7 +98,7 @@ export function ProvidersSection() {
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 额度查询
-  const [quotaInfo, setQuotaInfo] = useState<Record<string, any> | null>(null);
+  const [quotaInfo, setQuotaInfo] = useState<Record<string, unknown> | null>(null);
   const [quotaLoading, setQuotaLoading] = useState(false);
 
   const loadConfig = useCallback(async () => {
@@ -107,7 +108,7 @@ export function ProvidersSection() {
       setConfig(data);
       // 同步刷新全局 modelStore，使聊天侧的模型选择器即时更新
       useModelStore.getState().loadConfig({ force: true });
-    } catch (err) {
+    } catch {
       toast.error('加载配置失败');
     } finally {
       setLoading(false);
@@ -130,11 +131,6 @@ export function ProvidersSection() {
     if (!provider) return [];
     const hidden = new Set(provider.hidden_models || []);
     return (provider.models || []).filter((model) => !hidden.has(model));
-  };
-
-  const sanitizeProviderConfig = (provider: ModelProviderConfig): ModelProviderConfig => {
-    const { default_model: _ignored, ...rest } = provider as ModelProviderConfig & { default_model?: string };
-    return rest;
   };
 
   const handleDefaultProviderChange = async (provider: string) => {
@@ -186,7 +182,7 @@ export function ProvidersSection() {
     if (providerId) {
       const cfg = config?.provider?.[providerId] ?? { ...DEFAULT_PROVIDER_CONFIG, name: providerId };
       setEditProviderId(providerId);
-      setEditForm(sanitizeProviderConfig({ ...DEFAULT_PROVIDER_CONFIG, ...cfg, hidden_models: [...(cfg.hidden_models || [])] }));
+      setEditForm({ ...DEFAULT_PROVIDER_CONFIG, ...cfg, hidden_models: [...(cfg.hidden_models || [])] });
       setEditNameInput(cfg.name || providerId);
       setEditIdInput(providerId);
     } else {
@@ -230,7 +226,7 @@ export function ProvidersSection() {
   const handleSaveProvider = async () => {
     try {
       setEditSaving(true);
-      const providerConfig = sanitizeProviderConfig(editForm);
+      const providerConfig = { ...editForm };
 
       if (editProviderId) {
         // 编辑现有
@@ -295,7 +291,7 @@ export function ProvidersSection() {
       return null;
     }
     try {
-      const providerConfig = sanitizeProviderConfig(editForm);
+      const providerConfig = { ...editForm };
       providerConfig.name = editNameInput.trim();
       await configApi.addProvider({
         id,
@@ -402,9 +398,8 @@ export function ProvidersSection() {
         }
       }
       handleFetchQuota(pid);
-    } catch (e: any) {
-      const detail = e?.response?.data?.detail || e?.message || String(e);
-      toast.error(detail || '导入失败');
+    } catch (error) {
+      toast.error(getApiErrorMessage(error, '导入失败'));
     }
   };
 
@@ -997,61 +992,77 @@ export function ProvidersSection() {
 }
 
 // ── 额度格式化显示 ──
-function QuotaDisplay({ quota }: { quota: Record<string, any> }) {
-  const sub = quota.subscription;
+function QuotaDisplay({ quota }: { quota: Record<string, unknown> }) {
+  const sub = typeof quota.subscription === 'string' ? quota.subscription : '';
   if (sub === 'codex' && Array.isArray(quota.windows)) {
     return (
       <div className="space-y-2">
-        {quota.windows.map((w: any, i: number) => (
-          <div key={i} className="space-y-1">
-            <div className="flex items-center justify-between">
-              <span style={{ color: 'var(--fg-secondary)' }}>{w.tier || '窗口'}</span>
-              <span style={{ color: w.used_percent >= 80 ? 'var(--accent-red)' : 'var(--accent-green)' }}>
-                {w.used_percent}%
-              </span>
+        {quota.windows.map((window, index) => {
+          const record = typeof window === 'object' && window !== null
+            ? window as Record<string, unknown>
+            : {};
+          const tier = typeof record.tier === 'string' ? record.tier : '窗口';
+          const usedPercent = typeof record.used_percent === 'number' ? record.used_percent : 0;
+          return (
+            <div key={index} className="space-y-1">
+              <div className="flex items-center justify-between">
+                <span style={{ color: 'var(--fg-secondary)' }}>{tier}</span>
+                <span style={{ color: usedPercent >= 80 ? 'var(--accent-red)' : 'var(--accent-green)' }}>
+                  {usedPercent}%
+                </span>
+              </div>
+              <div className="h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--bg-elevated, rgba(255,247,240,0.06))' }}>
+                <div
+                  className="h-full rounded-full transition-all"
+                  style={{
+                    width: `${Math.min(usedPercent, 100)}%`,
+                    background: usedPercent >= 80 ? 'var(--accent-red)' : 'var(--accent-green)',
+                  }}
+                />
+              </div>
+              <p style={{ color: 'var(--fg-tertiary)' }}>重置: {formatResetTime(record.reset_at)}</p>
             </div>
-            <div className="h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--bg-elevated, rgba(255,247,240,0.06))' }}>
-              <div
-                className="h-full rounded-full transition-all"
-                style={{
-                  width: `${Math.min(w.used_percent, 100)}%`,
-                  background: w.used_percent >= 80 ? 'var(--accent-red)' : 'var(--accent-green)',
-                }}
-              />
-            </div>
-            <p style={{ color: 'var(--fg-tertiary)' }}>重置: {formatResetTime(w.reset_at)}</p>
-          </div>
-        ))}
+          );
+        })}
       </div>
     );
   }
   if (sub === 'copilot') {
+    const plan = typeof quota.plan === 'string' ? quota.plan : '';
+    const snapshots = typeof quota.quota_snapshots === 'object' && quota.quota_snapshots !== null
+      ? quota.quota_snapshots as Record<string, unknown>
+      : null;
     return (
       <div className="space-y-1">
-        {quota.plan && (
+        {plan && (
           <div className="flex items-center justify-between">
             <span style={{ color: 'var(--fg-secondary)' }}>套餐</span>
-            <span style={{ color: 'var(--fg-85)' }}>{quota.plan}</span>
+            <span style={{ color: 'var(--fg-85)' }}>{plan}</span>
           </div>
         )}
-        {quota.quota_snapshots && Object.keys(quota.quota_snapshots).length > 0 && (
+        {snapshots && Object.keys(snapshots).length > 0 && (
           <pre className="whitespace-pre-wrap break-all" style={{ color: 'var(--fg-tertiary)', fontSize: '11px', margin: 0 }}>
-            {JSON.stringify(quota.quota_snapshots, null, 2)}
+            {JSON.stringify(snapshots, null, 2)}
           </pre>
         )}
       </div>
     );
   }
-  if (sub === 'claude' && quota.windows) {
-    const windows = quota.windows;
+  if (sub === 'claude' && typeof quota.windows === 'object' && quota.windows !== null) {
+    const windows = quota.windows as Record<string, unknown>;
     const keys = Object.keys(windows);
     if (keys.length === 0) return <p style={{ color: 'var(--fg-tertiary)' }}>无额度数据</p>;
     return (
       <div className="space-y-1">
         {keys.map(k => {
-          const w = windows[k];
-          if (!w || typeof w !== 'object') return null;
-          const used = w.limit_percent ?? w.percent ?? 0;
+          const value = windows[k];
+          if (!value || typeof value !== 'object') return null;
+          const window = value as Record<string, unknown>;
+          const used = typeof window.limit_percent === 'number'
+            ? window.limit_percent
+            : typeof window.percent === 'number'
+              ? window.percent
+              : 0;
           return (
             <div key={k} className="flex items-center justify-between">
               <span style={{ color: 'var(--fg-secondary)' }}>{k}</span>

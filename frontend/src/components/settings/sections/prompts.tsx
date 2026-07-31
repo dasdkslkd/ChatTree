@@ -24,7 +24,7 @@ export function PromptsSection() {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [promptToDelete, setPromptToDelete] = useState<PromptResponse | null>(null);
 
-  useEffect(() => { loadPrompts(); }, []);
+  useEffect(() => { loadPrompts(); }, [loadPrompts]);
 
   const handleSelectPrompt = async (prompt: PromptResponse) => {
     setIsNew(false);
@@ -35,7 +35,7 @@ export function PromptsSection() {
     if (currentPrompt && !isNew) {
       setEditingPrompt({ ...currentPrompt });
     }
-  }, [currentPrompt]);
+  }, [currentPrompt, isNew]);
 
   const handleCreateNew = () => {
     clearCurrentPrompt();

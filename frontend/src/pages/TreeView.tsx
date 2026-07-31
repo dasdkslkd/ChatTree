@@ -16,6 +16,7 @@ import { ZoomIn, ZoomOut, Maximize2, ArrowDown, ArrowRight, Trash2, Scissors, Lo
 import type { TreeNode } from '../api/conversation';
 import { useRunManager } from '../hooks/useRunManager';
 import { streamManager, type StreamState } from '../services/streamManager';
+import { getApiErrorMessage } from '../api/errors';
 
 interface LayoutNode {
   id: string;
@@ -333,11 +334,11 @@ export default function TreeView() {
         prunePrompt.nodeId,
         prunePrompt.nodeId,
       );
-    } catch (err: any) {
+    } catch (err) {
       setPrunePrompt((current) => current ? {
         ...current,
         isSubmitting: false,
-        error: err?.message || '剪枝摘要启动失败',
+        error: getApiErrorMessage(err, '剪枝摘要启动失败'),
       } : current);
     }
   }, [prunePrompt, currentConversation]);

@@ -66,29 +66,26 @@ async function testStoreSuccessCriteria() {
   await assert.rejects(() => initializeServerSessionStores({
     async loadConfig() { missingConfigCalls.push('loadConfig'); },
     getConfig() { missingConfigCalls.push('getConfig'); return null; },
-    async loadProviders() { missingConfigCalls.push('loadProviders'); },
     getError() { missingConfigCalls.push('getError'); return null; },
   }), /config initialization failed/i);
   assert.deepEqual(missingConfigCalls, ['loadConfig', 'getConfig']);
 
-  const providerErrorCalls = [];
-  const providerError = 'provider transport failed';
+  const configErrorCalls = [];
+  const configError = 'config transport failed';
   await assert.rejects(() => initializeServerSessionStores({
-    async loadConfig() { providerErrorCalls.push('loadConfig'); },
-    getConfig() { providerErrorCalls.push('getConfig'); return {}; },
-    async loadProviders() { providerErrorCalls.push('loadProviders'); },
-    getError() { providerErrorCalls.push('getError'); return providerError; },
-  }), new RegExp(providerError));
-  assert.deepEqual(providerErrorCalls, ['loadConfig', 'getConfig', 'loadProviders', 'getError']);
+    async loadConfig() { configErrorCalls.push('loadConfig'); },
+    getConfig() { configErrorCalls.push('getConfig'); return {}; },
+    getError() { configErrorCalls.push('getError'); return configError; },
+  }), new RegExp(configError));
+  assert.deepEqual(configErrorCalls, ['loadConfig', 'getConfig', 'getError']);
 
   const successCalls = [];
   await initializeServerSessionStores({
     async loadConfig() { successCalls.push('loadConfig'); },
     getConfig() { successCalls.push('getConfig'); return {}; },
-    async loadProviders() { successCalls.push('loadProviders'); },
     getError() { successCalls.push('getError'); return null; },
   });
-  assert.deepEqual(successCalls, ['loadConfig', 'getConfig', 'loadProviders', 'getError']);
+  assert.deepEqual(successCalls, ['loadConfig', 'getConfig', 'getError']);
 }
 
 async function testOwnerIsSingleflightAndStopsAfterSuccess() {

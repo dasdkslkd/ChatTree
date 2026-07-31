@@ -44,7 +44,7 @@ export interface Message {
   timestamp: number;
   generation_info?: GenerationInfo | null;  // 生成信息（仅助手消息有）
   name?: string;
-  tool_calls?: any[];
+  tool_calls?: unknown[];
   tool_call_id?: string;
   reasoning?: string;
   compact_metadata?: {

@@ -40,13 +40,13 @@ export default function ServerSessionApp({
   const initializationOwnerRef = useRef<ServerSessionInitializationOwner | null>(null);
   const [contextHovered, setContextHovered] = useState(false);
   const [treeError, setTreeError] = useState<string | null>(null);
+  const currentConversationId = currentConversation?.id ?? null;
 
   useEffect(() => {
     const owner = new ServerSessionInitializationOwner({
       initialize: () => initializeServerSessionStores({
         loadConfig: () => useModelStore.getState().loadConfig(),
         getConfig: () => useModelStore.getState().config,
-        loadProviders: () => useModelStore.getState().loadProviders(),
         getError: () => useModelStore.getState().error,
       }),
       scheduler: window,
@@ -78,15 +78,17 @@ export default function ServerSessionApp({
   }, [connected, currentProvider, loadMetadata]);
 
   useEffect(() => {
-    if (!currentConversation) return;
+    if (!currentConversationId) return;
     let cancelled = false;
-    setTreeError(null);
-    loadTree(currentConversation.id).catch((err) => {
-      if (cancelled) return;
-      setTreeError(err?.message || '上下文用量加载失败');
-    });
+    loadTree(currentConversationId)
+      .then(() => {
+        if (!cancelled) setTreeError(null);
+      })
+      .catch((err) => {
+        if (!cancelled) setTreeError(err instanceof Error ? err.message : '上下文用量加载失败');
+      });
     return () => { cancelled = true; };
-  }, [currentConversation?.id, loadTree]);
+  }, [currentConversationId, loadTree]);
 
   const isCurrentProxy = currentProvider ? config?.provider?.[currentProvider]?.source === 'reverse_proxy' : false;
   const getModelDisplay = (): string => {

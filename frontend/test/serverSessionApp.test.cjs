@@ -112,7 +112,6 @@ const modelStoreState = {
   config: {},
   error: null,
   async loadConfig() {},
-  async loadProviders() {},
 };
 function useModelStore() {
   return {

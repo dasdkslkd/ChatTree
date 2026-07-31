@@ -1,4 +1,4 @@
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { type Options } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeRaw from 'rehype-raw';
@@ -12,7 +12,11 @@ import type { MarkdownRendererProps } from './MarkdownBasic';
 const katexOptions = { throwOnError: false, trust: false };
 
 export default function MarkdownRich({ children, components, enableMermaid = false }: MarkdownRendererProps & { enableMermaid?: boolean }) {
-  const rehypePlugins: any[] = [rehypeRaw, rehypeSanitize, [rehypeKatex, katexOptions]];
+  const rehypePlugins: NonNullable<Options['rehypePlugins']> = [
+    rehypeRaw,
+    rehypeSanitize,
+    [rehypeKatex, katexOptions],
+  ];
   if (enableMermaid) rehypePlugins.push(rehypeMermaid as never);
   return (
     <ReactMarkdown

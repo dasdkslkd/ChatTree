@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { devtools } from 'zustand/middleware';
 import type { Prompt, PromptResponse } from '../types/prompt';
 import { promptApi } from '../api/prompt';
+import { getApiErrorMessage } from '../api/errors';
 
 interface PromptState {
   prompts: PromptResponse[];         // 提示词列表（轻量数据）
@@ -35,8 +36,8 @@ const usePromptStoreBase = create<PromptState & PromptActions>()(
         try {
           const response = await promptApi.list();
           set({ prompts: response.prompts });
-        } catch (err: any) {
-          set({ error: err.message });
+        } catch (err) {
+          set({ error: getApiErrorMessage(err, '加载提示词失败') });
         } finally {
           set({ loading: false });
         }
@@ -48,8 +49,8 @@ const usePromptStoreBase = create<PromptState & PromptActions>()(
         try {
           const prompt = await promptApi.load(id);
           set({ currentPrompt: prompt });
-        } catch (err: any) {
-          set({ error: err.message });
+        } catch (err) {
+          set({ error: getApiErrorMessage(err, '加载提示词详情失败') });
         } finally {
           set({ loading: false });
         }
@@ -62,8 +63,8 @@ const usePromptStoreBase = create<PromptState & PromptActions>()(
           await promptApi.save(data);
           // 保存成功后刷新列表
           await get().loadPrompts();
-        } catch (err: any) {
-          set({ error: err.message });
+        } catch (err) {
+          set({ error: getApiErrorMessage(err, '保存提示词失败') });
         } finally {
           set({ loading: false });
         }
@@ -80,8 +81,8 @@ const usePromptStoreBase = create<PromptState & PromptActions>()(
           }
           // 删除成功后刷新列表
           await get().loadPrompts();
-        } catch (err: any) {
-          set({ error: err.message });
+        } catch (err) {
+          set({ error: getApiErrorMessage(err, '删除提示词失败') });
           throw err;
         } finally {
           set({ loading: false });

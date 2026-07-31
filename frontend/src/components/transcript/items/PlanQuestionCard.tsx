@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Check, Loader2, MessageSquare } from 'lucide-react';
 import type { PlanQuestionItem, TranscriptPlanQuestionAnswerHandler } from '../../../types/transcript';
 
@@ -17,10 +17,6 @@ export function PlanQuestionCard({
   const answered = item.status === 'answered';
   const options = Array.isArray(item.options) ? item.options : [];
   const answering = planActionPending === 'answer';
-
-  useEffect(() => {
-    setDraftAnswer('');
-  }, [item.id, item.status]);
 
   const submit = async () => {
     const answer = draftAnswer.trim();

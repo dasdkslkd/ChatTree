@@ -1,19 +1,19 @@
 # 工具调用渲染系统
 
-本目录下的 `ToolCallRenderer.tsx` 负责所有工具调用的可视化渲染，替代了过去直接输出原始 JSON 的方式。
+本目录下的 `toolCallFormatting.ts` 负责摘要计算，`ToolCallRenderer.tsx` 负责工具调用的可视化渲染。
 
 ## 架构概览
 
 ```
 AssistantProcessItem.tsx
-  └─ summarizeToolCall()  ← 计算折叠态摘要
+  └─ toolCallFormatting.ts / summarizeToolCall()  ← 计算折叠态摘要
   └─ AssistantProcessTimeline.tsx
        └─ ToolCallCard  ← 统一可折叠容器
 ToolApprovalCard.tsx
   └─ ToolCallPreview     ← 工具审批时的结构化预览
 ```
 
-核心位置：[ToolCallRenderer.tsx](file:///d:/Workspace/ChatTree/frontend/src/components/transcript/items/ToolCallRenderer.tsx)
+核心位置：`toolCallFormatting.ts`、`ToolCallRenderer.tsx`
 
 ## 渲染规则
 

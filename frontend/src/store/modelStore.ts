@@ -3,9 +3,9 @@ import { devtools } from 'zustand/middleware';
 import type { ConfigData, ConfigUpdateRequest, ModelMetadata } from '../types/model';
 import { modelApi } from '../api/model';
 import { configApi } from '../api/config';
+import { getApiErrorMessage } from '../api/errors';
 
 interface ModelState {
-  providers: string[];
   models: Record<string, string[]>;
   /** 每个 provider 的模型元数据缓存：provider -> (model -> 元数据) */
   modelMetadata: Record<string, Record<string, ModelMetadata>>;
@@ -31,7 +31,6 @@ interface ModelState {
 }
 
 interface ModelActions {
-  loadProviders: () => Promise<void>;
   loadModels: (provider: string) => Promise<void>;
   /** 加载指定 provider 的模型元数据（已缓存则跳过） */
   loadMetadata: (provider: string) => Promise<void>;
@@ -102,7 +101,6 @@ let configLoadGeneration = 0;
 
 export const useModelStore = create<ModelState & ModelActions>()(
   devtools((set, get) => ({
-    providers: [],
     models: {} as Record<string, string[]>,
     modelMetadata: {} as Record<string, Record<string, ModelMetadata>>,
     config: null,
@@ -117,23 +115,11 @@ export const useModelStore = create<ModelState & ModelActions>()(
     loading: false,
     error: null,
 
-    loadProviders: async () => {
-      set({ loading: true, error: null });
-      try {
-        const providerList = await modelApi.getProviders();
-        set({ providers: providerList });
-      } catch (err: any) {
-        set({ error: err.message });
-      } finally {
-        set({ loading: false });
-      }
-    },
-
     loadModels: async (provider: string) => {
       // 聊天侧模型列表使用「设置」里已策划的配置（config.provider[provider].models），
       // 不做实时 /v1/models 拉取。否则聚合型网关（如 ustc）的 /v1/models 会返回整张
       // 目录（含 claude-* 等其它供应商的模型名），覆盖用户策划的列表，造成串台。
-      // 实时拉取仅保留在「设置」页的「从 API 获取」按钮（直接调用 modelApi.list）。
+      // 实时拉取仅保留在「设置」页的「从 API 获取」按钮。
       const cfg = get().config;
       const configured = cfg?.provider?.[provider]?.models || [];
       set((state) => ({
@@ -148,8 +134,8 @@ export const useModelStore = create<ModelState & ModelActions>()(
         set((state) => ({
           modelMetadata: { ...state.modelMetadata, [provider]: meta },
         }));
-      } catch (err: any) {
-        set({ error: err.message });
+      } catch (err) {
+        set({ error: getApiErrorMessage(err, '加载模型元数据失败') });
       }
     },
 
@@ -173,8 +159,7 @@ export const useModelStore = create<ModelState & ModelActions>()(
       const generation = ++configLoadGeneration;
       set({ loading: true, error: null });
 
-      let promise!: Promise<void>;
-      promise = (async () => {
+      const promise = (async () => {
         try {
           const config = await configApi.get();
           if (generation !== configLoadGeneration) return;
@@ -186,12 +171,12 @@ export const useModelStore = create<ModelState & ModelActions>()(
           if (needInit) {
             await get().resetToDefault();
           }
-        } catch (err: any) {
+        } catch (err) {
           if (generation === configLoadGeneration) {
-            set({ error: err.message });
+            set({ error: getApiErrorMessage(err, '加载配置失败') });
           }
         } finally {
-          if (configLoadPromise === promise) {
+          if (generation === configLoadGeneration) {
             configLoadPromise = null;
             set({ loading: false });
           }
@@ -207,8 +192,8 @@ export const useModelStore = create<ModelState & ModelActions>()(
       try {
         await configApi.update(configUpdate);
         await get().loadConfig({ force: true });
-      } catch (err: any) {
-        set({ error: err.message });
+      } catch (err) {
+        set({ error: getApiErrorMessage(err, '更新配置失败') });
       } finally {
         set({ loading: false });
       }

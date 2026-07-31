@@ -16,7 +16,7 @@ export function loadProjectOrder(): string[] {
     const raw = window.localStorage.getItem(PROFILE_PROJECT_ORDER_STORAGE_KEY);
     const parsed = raw ? JSON.parse(raw) : [];
     return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
-  } catch (_) {
+  } catch {
     return [];
   }
 }

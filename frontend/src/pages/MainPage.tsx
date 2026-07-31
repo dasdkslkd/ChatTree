@@ -40,6 +40,7 @@ import {
 import { toast } from 'sonner';
 import { conversationApi } from '../api/conversation';
 import { configApi } from '../api/config';
+import { getApiErrorMessage } from '../api/errors';
 import { messageApi } from '../api/message';
 import type { TaskStateSnapshot } from '../api/taskState';
 import { transcriptService } from '../services/transcript';
@@ -59,7 +60,7 @@ import type {
   TaskContextMode,
 } from '../types/message';
 import type { ActiveTaskRecord } from '../types/task';
-import type { PlanApprovalItem, PlanQuestionItem, ToolApprovalItem, TranscriptItem, UserMessageItem } from '../types/transcript';
+import type { PlanApprovalItem, PlanQuestionItem, ToolApprovalItem, TranscriptItem, TranscriptPatch, UserMessageItem } from '../types/transcript';
 import type { MultiAgentMode, WorkspaceContext } from '../types/conversation';
 import type { ProjectCapabilityConfig } from '../types/model';
 import { useConversationStore } from '../store/conversationStore';
@@ -951,9 +952,8 @@ export default function ChatPage() {
       await loadProjects();
       setSelectedProjectId(encodeProjectId(workspace.cwd));
       setProjectPickerSearch('');
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail || err?.message || '项目文件夹处理失败';
-      toast.error(String(detail));
+    } catch (error) {
+      toast.error(getApiErrorMessage(error, '项目文件夹处理失败'));
     } finally {
       setProjectFolderSubmitting(false);
     }
@@ -1176,7 +1176,7 @@ export default function ChatPage() {
   const runPlanActionStream = useCallback(async (
     action: 'answer' | 'approve' | 'reject',
     item: PlanApprovalItem | PlanQuestionItem,
-    openStream: (conversationId: string, signal: AbortSignal) => AsyncGenerator<unknown, void>,
+    openStream: (conversationId: string, signal: AbortSignal) => AsyncGenerator<TranscriptPatch, void>,
   ) => {
     const conversationId = item.conversation_id || currentConversation?.id;
     if (!conversationId || !item.node_id || !item.plan_id) {
@@ -1190,7 +1190,7 @@ export default function ChatPage() {
         conversationId,
         item.node_id,
         action,
-        (signal) => openStream(conversationId, signal) as AsyncGenerator<any, void>,
+        (signal) => openStream(conversationId, signal),
       );
     } catch (error) {
       void scheduleConversationSync(conversationId, {
@@ -1418,7 +1418,7 @@ export default function ChatPage() {
 
   useEffect(() => {
     loadConversations();
-  }, []);
+  }, [loadConversations]);
 
   useEffect(() => {
     const updateLocalStreamingIds = () => {
@@ -1627,8 +1627,8 @@ export default function ChatPage() {
         } else {
           setAttachedFiles(prev => prev.includes(res.filename) ? prev : [...prev, res.filename]);
         }
-      } catch (err: any) {
-        console.error('Upload failed:', err?.response?.data?.detail || err.message);
+      } catch (error) {
+        console.error('Upload failed:', getApiErrorMessage(error, '上传附件失败'));
       }
     }
   };
@@ -1650,7 +1650,10 @@ export default function ChatPage() {
           () => conversationApi.deleteImport(conversationId, filename),
         );
       }
-    } catch (_) {}
+    } catch (error) {
+      toast.error(getApiErrorMessage(error, '删除附件失败'));
+      return;
+    }
     if (!importAssetMutationOwner.owns(mutation)
         || useConversationStore.getState().currentConversation?.id !== conversationId) return;
     setAttachedFiles(prev => prev.filter(f => f !== filename));
@@ -1725,6 +1728,7 @@ export default function ChatPage() {
       const queuedRequest = request;
       clearAttachments();
       setEditTargetNodeId(null);
+      setEditValue(null);
       setEditToolPermissionMode(null);
       setEditReturnNodeId(null);
       setEditProtectedAttachmentNames([]);
@@ -1775,6 +1779,7 @@ export default function ChatPage() {
 
     clearAttachments();
     setEditTargetNodeId(null);
+    setEditValue(null);
     setEditToolPermissionMode(null);
     setEditReturnNodeId(null);
     setEditProtectedAttachmentNames([]);
@@ -2455,6 +2460,7 @@ export default function ChatPage() {
                 <h1 className="new-chat-title">{`我们应该在 ${newChatProjectLabel} 中做些什么？`}</h1>
                 <div className="new-chat-composer-wrap">
                   <ChatInput
+                    key={`new:${editTargetNodeId ?? ''}:${editValue ?? ''}`}
                     variant="composer"
                     settingsSlot={projectSettingsSlot}
                     onSend={handleSend}
@@ -2464,7 +2470,6 @@ export default function ChatPage() {
                     conversationId={null}
                     editValue={editValue}
                     isEditing={Boolean(editTargetNodeId)}
-                    onEditValueConsumed={() => setEditValue(null)}
                     onCancelEdit={handleCancelEdit}
                     attachedFiles={attachedFiles}
                     attachedImages={attachedImageRefs.map(ref => ({
@@ -2528,6 +2533,7 @@ export default function ChatPage() {
               />
               <footer className="absolute bottom-4 left-1/2 -translate-x-1/2 w-[800px] max-w-[calc(100%-48px)] z-10">
                 <ChatInput
+                  key={`${currentConversation?.id ?? 'new'}:${editTargetNodeId ?? ''}:${editValue ?? ''}`}
                   onSend={handleSend}
                   onStop={handleStopStreaming}
                   isStreaming={currentBranchHasStreamingChat}
@@ -2535,7 +2541,6 @@ export default function ChatPage() {
                   conversationId={currentConversation?.id || null}
                   editValue={editValue}
                   isEditing={Boolean(editTargetNodeId)}
-                  onEditValueConsumed={() => setEditValue(null)}
                   onCancelEdit={handleCancelEdit}
                   attachedFiles={attachedFiles}
                   attachedImages={attachedImageRefs.map(ref => ({
