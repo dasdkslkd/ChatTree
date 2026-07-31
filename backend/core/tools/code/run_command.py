@@ -199,7 +199,6 @@ class RunCommandTool(common._CodeTool):
             "command_run_id": run_id,
             "run_id": run_id,
             "status": snapshot.get("status"),
-            "shell": snapshot.get("shell"),
         }
         self._attach_public_task_outcome(payload, snapshot)
         return payload
@@ -224,7 +223,6 @@ class RunCommandTool(common._CodeTool):
             "background": True,
             "managed": True,
             "auto_backgrounded": auto_backgrounded,
-            "shell": snapshot.get("shell"),
             "stdout_tail": snapshot.get("stdout_tail") or "",
             "stderr_tail": snapshot.get("stderr_tail") or "",
             "message": (

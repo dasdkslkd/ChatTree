@@ -90,6 +90,7 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(payload["exit_code"], 0)
             self.assertEqual(len(payload["stdout"]), 20)
             self.assertEqual(len(payload["stderr"]), 20)
+            self.assertNotIn("shell", payload)
 
     async def test_shell_long_managed_command_auto_backgrounds(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -119,6 +120,7 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(payload["auto_backgrounded"], True)
             self.assertIn("command_run_id", payload)
             self.assertNotIn("terminal_run_id", payload)
+            self.assertNotIn("shell", payload)
             run = run_manager.get_run(payload["command_run_id"])
             self.assertTrue((run.get("metadata") or {}).get("shell_auto_backgrounded"))
 

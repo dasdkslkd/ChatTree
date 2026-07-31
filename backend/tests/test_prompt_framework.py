@@ -199,6 +199,9 @@ class PromptCatalogTests(unittest.TestCase):
         self.assertNotIn("start_background_command", text)
         self.assertNotIn("wait_command", text)
         self.assertNotIn("run_command", text)
+        self.assertIn("Plan the complete tool wave before emitting it", text)
+        self.assertIn("use one batched `read` without a preceding `glob`", text)
+        self.assertIn("run one consolidated validation", text)
 
     def test_core_prompt_distinguishes_fresh_subagents_from_forks(self):
         text = load_prompt_template("core")
@@ -860,7 +863,8 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("task -> completed", runtime.content)
         self.assertIsNone(run_context["task_generation_id"])
 
-    async def test_persisted_task_tool_results_use_raw_payload_for_runtime_outcomes(self):
+    @patch("backend.core.chat.tool_result_format.tool_result_preview_chars", return_value=1)
+    async def test_persisted_task_tool_results_use_raw_payload_for_runtime_outcomes(self, _preview_chars):
         task_service = ActiveTaskService()
         class FakeChatRepository:
             persistence = None
