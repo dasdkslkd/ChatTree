@@ -741,7 +741,7 @@ def test_read_output_is_persisted_as_canonical_result(tmp_path: Path):
     assert stored["tool_name"] == "read"
     assert stored["content"] == raw_result
     assert visible["raw_content"] == raw_result
-    assert visible["content"] != raw_result
+    assert visible["content"] == raw_result
 
 
 def test_committed_tool_call_persists_when_tool_execution_fails(tmp_path: Path):
@@ -1173,7 +1173,7 @@ def test_tool_history_is_sqlite_canonical_not_node_json(tmp_path: Path):
     assert tool_call_messages[0]["tool_calls"][0]["id"] == "call_large_tool"
     assert tool_call_messages[0]["tool_calls"][0]["function"]["arguments"] == "{\"value\":\"large\"}"
     assert len(tool_result_messages) == 1
-    assert "tool_result_id" in tool_result_messages[0]["content"]
+    assert tool_result_messages[0]["content"] == "x" * 5000
     assert final_answers and all("tool_calls" not in message for message in final_answers)
     with repository.persistence.connect() as conn:
         assert conn.execute(

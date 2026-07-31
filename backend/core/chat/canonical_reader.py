@@ -311,7 +311,6 @@ def tool_history_by_node(
                 raw_result = blobs.get_text(str(result["output_blob_id"]))
             content = format_persisted_tool_result(
                 raw_result=str(raw_result or ""),
-                name=name,
                 tool_result_id=result_id,
             )
         grouped.setdefault(node_id, []).append((

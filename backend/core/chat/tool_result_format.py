@@ -45,35 +45,29 @@ def format_command_tool_result(*, raw_result: str, tool_result_id: str) -> str:
     parsed = parse_command_tool_result(raw_result)
     if parsed is None:
         return raw_result
-    timed_out = parsed.get("timed_out")
-    if isinstance(timed_out, bool):
-        timed_out_text = str(timed_out).lower()
-    else:
-        timed_out_text = str(timed_out)
     stdout = str(parsed.get("stdout") or "")
     stderr = str(parsed.get("stderr") or "")
-    return "\n".join(
-        [
-            f"Command: {parsed.get('command', '')}",
-            f"Cwd: {parsed.get('cwd', '')}",
-            f"Exit code: {parsed.get('exit_code', '')}",
-            f"Timed out: {timed_out_text}",
-            f"tool_result_id: {tool_result_id}",
-            f"read_more: {read_tool_result_hint(tool_result_id, 0)}",
-            "",
-            "Stdout:",
-            stdout if stdout else "(empty)",
-            "",
-            "Stderr:",
-            stderr if stderr else "(empty)",
-        ]
-    )
+    lines = [f"Exit code: {parsed.get('exit_code', '')}"]
+    if parsed.get("timed_out"):
+        lines.append("Timed out: true")
+    if stdout:
+        lines.extend(["Stdout:", stdout])
+    if stderr:
+        lines.extend(["Stderr:", stderr])
+    content = "\n".join(lines)
+    preview_chars = tool_result_preview_chars()
+    if len(content) <= preview_chars:
+        return content
+    return "\n".join([
+        content[:preview_chars],
+        f"tool_result_id: {tool_result_id}",
+        f"read_more: {read_tool_result_hint(tool_result_id, 0)}",
+    ])
 
 
 def format_persisted_tool_result(
     *,
     raw_result: str,
-    name: str,
     tool_result_id: str,
 ) -> str:
     command_result = parse_command_tool_result(raw_result)
@@ -84,16 +78,16 @@ def format_persisted_tool_result(
         )
 
     preview_chars = tool_result_preview_chars()
+    if len(raw_result) <= preview_chars:
+        return raw_result
     preview = raw_result[:preview_chars]
-    has_more = len(raw_result) > len(preview)
     payload: Dict[str, Any] = {
         "tool_result_id": tool_result_id,
         "total_chars": len(raw_result),
-        "truncated": has_more,
+        "truncated": True,
         "preview": preview,
+        "read_more": read_tool_result_hint(tool_result_id, len(preview)),
     }
-    if has_more:
-        payload["read_more"] = read_tool_result_hint(tool_result_id, len(preview))
     return json.dumps(payload, ensure_ascii=False)
 
 
@@ -128,7 +122,6 @@ def persist_model_visible_tool_result(
     return {
         "content": format_persisted_tool_result(
             raw_result=raw_result,
-            name=name,
             tool_result_id=tool_result_id,
         ),
         "tool_result_id": tool_result_id,

@@ -618,13 +618,7 @@ async def _execute_tool_calls_uses_orchestrator_and_keeps_events_separate():
     assert len(tool_messages) == 1
     assert tool_messages[0]["role"] == Role.TOOL
     assert tool_messages[0]["name"] == "web_search"
-    payload = json.loads(tool_messages[0]["content"])
-    assert payload == {
-        "tool_result_id": "result-1",
-        "total_chars": 23,
-        "truncated": False,
-        "preview": "raw orchestrator result",
-    }
+    assert tool_messages[0]["content"] == "raw orchestrator result"
     assert tool_messages[0]["raw_content"] == "raw orchestrator result"
     assert tool_messages[0]["model_visible_content"] == tool_messages[0]["content"]
     assert tool_messages[0]["tool_result_id"] == "result-1"

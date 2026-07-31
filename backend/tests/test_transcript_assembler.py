@@ -1514,7 +1514,11 @@ def test_patch_reads_canonical_results_when_live_tool_events_are_slimmed(tmp_pat
 
         assert "raw_content" not in public_event["tool_call"]
         assert "model_visible_content" not in public_event["tool_call"]
-        assert public_event["tool_call"]["content"] != raw_result
+        assert public_event["tool_call"]["content"] == persisted["content"]
+        if name == "list_files":
+            assert persisted["content"] == raw_result
+        else:
+            assert persisted["content"] == "Exit code: 0\nStdout:\nready\n"
         assert public_event["status"] == "content"
 
         patch = session.feed(public_event)

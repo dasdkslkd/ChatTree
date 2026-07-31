@@ -87,7 +87,7 @@ def make_manager(tool_manager):
 
 
 def test_command_tool_result_is_model_readable_text(monkeypatch):
-    monkeypatch.setitem(cfg.data, "tools", {"max_result_length": 20})
+    monkeypatch.setitem(cfg.data, "tools", {"max_result_length": 2000})
     raw_result = json.dumps(
         {
             "command": "pytest -q",
@@ -111,26 +111,53 @@ def test_command_tool_result_is_model_readable_text(monkeypatch):
     )
 
     assert not content.lstrip().startswith("{")
-    assert "Command: pytest -q" in content
-    assert "Cwd: D:\\Workspace\\ChatTree" in content
     assert "Exit code: 1" in content
-    assert "Timed out: false" in content
     assert "Stdout:" in content
     assert "first line" in content
     assert "Stderr:" in content
     assert "boom" in content
-    assert "tool_result_id: result-1" in content
-    assert 'read({"tool_result_id":"result-1"' in content
+    assert "Command:" not in content
+    assert "Cwd:" not in content
+    assert "Timed out:" not in content
+    assert "tool_result_id" not in content
+    assert "read_more" not in content
     assert manager.chat_repository.saved[0]["output"] == raw_result
     assert manager.chat_repository.calls[0]["tool_call_id"] == "call-1"
     assert manager.chat_repository.saved[0]["tool_call_id"] == "call-1"
+
+
+def test_large_command_tool_result_exposes_persisted_raw_result(monkeypatch):
+    monkeypatch.setitem(cfg.data, "tools", {"max_result_length": 20})
+    manager = make_manager(FakeToolManager())
+    raw_result = json.dumps({
+        "command": "pytest -q",
+        "cwd": ".",
+        "exit_code": 1,
+        "stdout": "x" * 100,
+        "stderr": "boom",
+        "timed_out": False,
+    })
+
+    content = build_model_visible_tool_result(
+        manager.chat_repository,
+        raw_result=raw_result,
+        name="shell",
+        conversation_id="conv-1",
+        node_id="node-1",
+        tool_call_id="call-1",
+    )
+
+    assert content.startswith("Exit code: 1\nStdout:")
+    assert "x" * 100 not in content
+    assert "tool_result_id: result-1" in content
+    assert 'read({"tool_result_id":"result-1","offset":0})' in content
 
 
 def test_model_visible_tool_result_initial_persistence_binds_tool_call_id(monkeypatch):
     monkeypatch.setitem(cfg.data, "tools", {"max_result_length": 2000})
     manager = make_manager(FakeToolManager())
 
-    build_model_visible_tool_result(
+    content = build_model_visible_tool_result(
         manager.chat_repository,
         raw_result="bound output",
         name="web_search",
@@ -139,6 +166,7 @@ def test_model_visible_tool_result_initial_persistence_binds_tool_call_id(monkey
         tool_call_id="call-bound",
     )
 
+    assert content == "bound output"
     assert manager.chat_repository.calls == [{
         "tool_call_id": "call-bound",
         "name": "web_search",
