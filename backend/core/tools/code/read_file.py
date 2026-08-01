@@ -81,12 +81,7 @@ class ReadFileTool(common._CodeTool):
             return common._error("invalid_path", "path or targets is required")
         output_format = str(kwargs.get("format") or "numbered")
         files: list[Dict[str, Any]] = []
-        common._emit_tool_observation(
-            event_sink,
-            "tool_progress",
-            status="running",
-            progress={"phase": "prepare", "target_count": len(targets)},
-        )
+        observations = common._file_observations(kwargs)
         for target_spec in targets:
             raw_path = target_spec["path"]
             try:
@@ -101,14 +96,21 @@ class ReadFileTool(common._CodeTool):
                 1,
                 min(int(requested_max_chars or self.config.max_read_chars), self.config.max_read_chars),
             )
-            files.append(patch._read_payload(
-                workspace=self.workspace,
-                target=target,
-                start_line=start_line,
-                line_count=int(line_count) if line_count is not None else None,
-                max_chars=max_chars,
-                output_format=output_format,
-            ))
+            with common._path_locks([target]):
+                payload = patch._read_payload(
+                    workspace=self.workspace,
+                    target=target,
+                    start_line=start_line,
+                    line_count=int(line_count) if line_count is not None else None,
+                    max_chars=max_chars,
+                    output_format=output_format,
+                )
+                if "error" not in payload:
+                    if start_line == 1 and not payload["truncated"]:
+                        observations[str(target)] = patch._file_version(target)
+                    elif observations.get(str(target)) not in (None, patch._file_version(target)):
+                        observations.pop(str(target), None)
+            files.append(payload)
             common._emit_tool_observation(
                 event_sink,
                 "tool_progress",
@@ -120,12 +122,6 @@ class ReadFileTool(common._CodeTool):
                     "target_count": len(targets),
                 },
             )
-        common._emit_tool_observation(
-            event_sink,
-            "tool_progress",
-            status="running",
-            progress={"phase": "complete", "completed_files": len(files), "target_count": len(targets)},
-        )
         if len(files) == 1:
             return common._json(files[0])
         return common._json({"files": files})

@@ -1,4 +1,5 @@
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +15,8 @@ from backend.core.capabilities.types import (
 )
 from backend.core.config.types import StreamStatus
 from backend.core.runs import RunManager
+from backend.core.tools.tool_manager import ToolManager
+from backend.core.workspace import normalize_workspace
 from model_route_support import fake_model_route
 
 
@@ -31,6 +34,9 @@ class FakeToolManager:
             {"function": {"name": "read"}},
             {"function": {"name": "shell"}},
         ]
+
+    async def execute_tool(self, _name, _arguments, **_kwargs):
+        return "ok"
 
 
 class FakeProvider:
@@ -80,14 +86,21 @@ class FakeChatManager:
         return [*existing, *incoming]
 
     async def _execute_tool_calls(self, tool_calls, **kwargs):
-        return [
-            {
-                "tool_call_id": call.get("id"),
-                "name": call.get("function", {}).get("name", "tool"),
-                "content": "ok",
-            }
-            for call in tool_calls
-        ]
+        results = []
+        for call in tool_calls:
+            function = call.get("function", {})
+            arguments = function.get("arguments") or {}
+            if isinstance(arguments, str):
+                arguments = json.loads(arguments)
+            name = function.get("name", "tool")
+            content = await self.tool_manager.execute_tool(
+                name,
+                arguments,
+                workspace=kwargs.get("workspace"),
+                runtime_context=kwargs.get("run_context"),
+            )
+            results.append({"tool_call_id": call.get("id"), "name": name, "content": content})
+        return results
 
     def _tool_event_stream_chunk(self, event, node_id, conversation_id):
         return {
@@ -244,6 +257,93 @@ def test_subagent_max_turns_limits_model_rounds():
         assert state["status"] == "failed"
         assert provider.call_count == 1
         assert "max_turns" in state["metadata"]["error"]
+
+    asyncio.run(run())
+
+
+def test_subagent_observations_persist_across_rounds_but_not_runs(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    target = project / "file.txt"
+    target.write_text("old\n", encoding="utf-8")
+    workspace = normalize_workspace({"cwd": str(project)})
+    provider = FakeProvider([
+        [{
+            "status": StreamStatus.COMPLETE,
+            "tool_calls": [{
+                "id": "read-1",
+                "function": {"name": "read", "arguments": json.dumps({"path": "file.txt"})},
+            }],
+        }],
+        [{
+            "status": StreamStatus.COMPLETE,
+            "tool_calls": [{
+                "id": "write-1",
+                "function": {
+                    "name": "edit",
+                    "arguments": json.dumps({
+                        "operation": "overwrite",
+                        "path": "file.txt",
+                        "content": "first\n",
+                    }),
+                },
+            }],
+        }],
+        [{"status": StreamStatus.COMPLETE, "content": "first done"}],
+        [{
+            "status": StreamStatus.COMPLETE,
+            "tool_calls": [{
+                "id": "write-2",
+                "function": {
+                    "name": "edit",
+                    "arguments": json.dumps({
+                        "operation": "overwrite",
+                        "path": "file.txt",
+                        "content": "second\n",
+                    }),
+                },
+            }],
+        }],
+        [{"status": StreamStatus.COMPLETE, "content": "second done"}],
+    ])
+    chat_manager = FakeChatManager(provider)
+    chat_manager.tool_manager = ToolManager({
+        "tools": {
+            "builtin": {
+                "enabled": True,
+                "code": {"enabled": True, "workspace_roots": [str(tmp_path)]},
+                "web_search": {"enabled": False},
+            }
+        }
+    })
+    executor = SubagentExecutor(
+        chat_manager=chat_manager,
+        run_manager=RunManager(),
+        capability_registry=FakeRegistry(AgentDefinition(name="writer", tools=["read", "edit"])),
+    )
+
+    async def run():
+        first = await executor.start(
+            conversation_id="conv",
+            agent_name="writer",
+            input_data="first",
+            workspace=workspace,
+        )
+        first_state, first_events = await wait_terminal(executor.run_manager, "conv", first["run_id"])
+        second = await executor.start(
+            conversation_id="conv",
+            agent_name="writer",
+            input_data="second",
+            workspace=workspace,
+        )
+        second_state, second_events = await wait_terminal(executor.run_manager, "conv", second["run_id"])
+
+        assert first_state["status"] == second_state["status"] == "completed"
+        first_results = [json.loads(event["tool_call"]["content"]) for event in first_events if event.get("event_type") == "tool_result"]
+        second_results = [json.loads(event["tool_call"]["content"]) for event in second_events if event.get("event_type") == "tool_result"]
+        assert "error" not in first_results[-1]
+        assert second_results[0]["error"]["type"] == "stale_file"
+        assert target.read_text(encoding="utf-8") == "first\n"
 
     asyncio.run(run())
 

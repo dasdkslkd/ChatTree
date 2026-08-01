@@ -739,7 +739,7 @@ def test_read_file_reads_utf8_line_slice(tmp_path):
     assert result["content"] == "2\ttwo\n3\tthree"
     assert result["line_count"] == 2
     assert result["total_lines"] == 4
-    assert result["version"].startswith("sha256:")
+    assert "version" not in result
     assert result["truncated"] is True
 
 
@@ -751,6 +751,8 @@ def test_read_file_schema_has_three_unambiguous_inputs(tmp_path):
     assert schema["properties"]["targets"]["minItems"] == 1
     assert "default" not in schema["properties"]["start_line"]
     assert "default" not in schema["properties"]["format"]
+    assert "expected_version" not in EditFileTool(make_config(tmp_path)).parameters_schema()["properties"]
+    assert "expected_version" not in WriteFileTool(make_config(tmp_path)).parameters_schema()["properties"]
 
 
 def test_read_file_reads_multiple_files(tmp_path):
@@ -758,11 +760,15 @@ def test_read_file_reads_multiple_files(tmp_path):
     (tmp_path / "b.txt").write_text("beta\n", encoding="utf-8")
     tool = ReadFileTool(make_config(tmp_path, max_read_chars=200))
 
-    result = load(run(tool.execute(targets=[{"path": "a.txt"}, {"path": "b.txt"}])))
+    context = {"file_observations": {}}
+    result = load(run(tool.execute(
+        targets=[{"path": "a.txt"}, {"path": "b.txt"}], _runtime_context=context,
+    )))
 
     assert [file["path"] for file in result["files"]] == ["a.txt", "b.txt"]
     assert [file["content"] for file in result["files"]] == ["1\talpha", "1\tbeta"]
-    assert all(file["version"].startswith("sha256:") for file in result["files"])
+    assert all("version" not in file for file in result["files"])
+    assert len(context["file_observations"]) == 2
 
 
 def test_read_file_streams_window_without_read_text(tmp_path, monkeypatch):
@@ -1084,15 +1090,12 @@ def test_grep_python_fallback_supports_regex_and_ignore_case(tmp_path, monkeypat
 
 def test_edit_file_replaces_unique_match_and_rejects_ambiguous_edit(tmp_path):
     (tmp_path / "app.py").write_text("old\nkeep\nold\n", encoding="utf-8")
-    read_tool = ReadFileTool(make_config(tmp_path, max_read_chars=200))
     tool = EditFileTool(make_config(tmp_path))
     assert "create_parents" not in tool.parameters_schema()["properties"]
-    version = load(run(read_tool.execute(path="app.py")))["version"]
 
     ambiguous = load(run(tool.execute(
         operation="replace",
         path="app.py",
-        expected_version=version,
         replacements=[{"old": "old", "new": "new"}],
     )))
     assert ambiguous["error"]["type"] == "edit_not_unique"
@@ -1100,13 +1103,12 @@ def test_edit_file_replaces_unique_match_and_rejects_ambiguous_edit(tmp_path):
     ok = load(run(tool.execute(
         operation="replace",
         path="app.py",
-        expected_version=version,
         replacements=[{"old": "old\nkeep\n", "new": "new\nkeep\n"}],
     )))
 
     assert ok["path"] == "app.py"
     assert ok["replacements"] == 1
-    assert ok["version"].startswith("sha256:")
+    assert "version" not in ok
     assert (tmp_path / "app.py").read_text(encoding="utf-8") == "new\nkeep\nold\n"
 
     created = load(run(tool.execute(
@@ -1116,6 +1118,35 @@ def test_edit_file_replaces_unique_match_and_rejects_ambiguous_edit(tmp_path):
     )))
     assert created["path"] == "nested/new.txt"
     assert (tmp_path / "nested" / "new.txt").read_text(encoding="utf-8") == "hello"
+
+
+def test_edit_file_preserves_exact_replacement_guards(tmp_path):
+    target = tmp_path / "app.py"
+    target.write_text("same\nsame\n", encoding="utf-8")
+    tool = EditFileTool(make_config(tmp_path))
+
+    missing = load(run(tool.execute(
+        operation="replace", path="app.py", replacements=[{"old": "absent", "new": "new"}],
+    )))
+    mismatch = load(run(tool.execute(
+        operation="replace",
+        path="app.py",
+        replacements=[{"old": "same", "new": "new", "replace_all": True, "expected_count": 1}],
+    )))
+    numbered = load(run(tool.execute(
+        operation="replace", path="app.py", replacements=[{"old": "1\tsame", "new": "new"}],
+    )))
+    replaced = load(run(tool.execute(
+        operation="replace",
+        path="app.py",
+        replacements=[{"old": "same", "new": "new", "replace_all": True, "expected_count": 2}],
+    )))
+
+    assert missing["error"]["type"] == "edit_not_found"
+    assert mismatch["error"]["type"] == "edit_count_mismatch"
+    assert numbered["error"]["type"] == "invalid_edit"
+    assert replaced["replacements"] == 2
+    assert target.read_text(encoding="utf-8") == "new\nnew\n"
 
 
 def test_write_file_writes_utf8_and_creates_missing_parents(tmp_path):
@@ -1129,6 +1160,127 @@ def test_write_file_writes_utf8_and_creates_missing_parents(tmp_path):
     assert ok["path"] == "file.txt"
     assert ok["bytes_written"] == 5
     assert (tmp_path / "file.txt").read_text(encoding="utf-8") == "hello"
+
+
+@pytest.mark.parametrize("output_format", ["numbered", "raw", "json"])
+def test_complete_read_authorizes_overwrite_and_write_refreshes_observation(tmp_path, output_format):
+    target = tmp_path / "file.txt"
+    target.write_text("old\n", encoding="utf-8")
+    context = {"file_observations": {}}
+    config = make_config(tmp_path, max_read_chars=200)
+
+    read_result = load(run(ReadFileTool(config).execute(
+        path="file.txt", format=output_format, _runtime_context=context,
+    )))
+    first = load(run(WriteFileTool(config).execute(
+        path="file.txt", content="first\n", mode="overwrite", _runtime_context=context,
+    )))
+    second = load(run(WriteFileTool(config).execute(
+        path="file.txt", content="second\n", mode="overwrite", _runtime_context=context,
+    )))
+
+    assert "version" not in read_result
+    assert "version" not in first
+    assert second["mode"] == "overwrite"
+    assert target.read_text(encoding="utf-8") == "second\n"
+
+
+@pytest.mark.parametrize("read_args", [{"start_line": 2}, {"max_chars_per_file": 3}])
+def test_partial_or_truncated_read_does_not_authorize_overwrite(tmp_path, read_args):
+    target = tmp_path / "file.txt"
+    target.write_text("first\nsecond\n", encoding="utf-8")
+    context = {"file_observations": {}}
+    config = make_config(tmp_path, max_read_chars=200)
+
+    load(run(ReadFileTool(config).execute(path="file.txt", _runtime_context=context, **read_args)))
+    result = load(run(WriteFileTool(config).execute(
+        path="file.txt", content="new\n", mode="overwrite", _runtime_context=context,
+    )))
+
+    assert result["error"]["type"] == "stale_file"
+    assert "version" not in json.dumps(result)
+    assert target.read_text(encoding="utf-8") == "first\nsecond\n"
+
+
+def test_partial_read_preserves_only_a_matching_prior_observation(tmp_path):
+    target = tmp_path / "file.txt"
+    target.write_text("first\nsecond\n", encoding="utf-8")
+    context = {"file_observations": {}}
+    tool = ReadFileTool(make_config(tmp_path, max_read_chars=200))
+
+    load(run(tool.execute(path="file.txt", _runtime_context=context)))
+    load(run(tool.execute(path="file.txt", start_line=2, _runtime_context=context)))
+    assert len(context["file_observations"]) == 1
+
+    target.write_text("external\nsecond\n", encoding="utf-8")
+    load(run(tool.execute(path="file.txt", start_line=2, _runtime_context=context)))
+    assert context["file_observations"] == {}
+
+
+def test_overwrite_requires_fresh_same_run_observation(tmp_path):
+    target = tmp_path / "file.txt"
+    target.write_text("old\n", encoding="utf-8")
+    config = make_config(tmp_path, max_read_chars=200)
+    observed = {"file_observations": {}}
+    other_run = {"file_observations": {}}
+
+    unobserved = load(run(WriteFileTool(config).execute(
+        path="file.txt", content="new\n", mode="overwrite", _runtime_context=other_run,
+    )))
+    load(run(ReadFileTool(config).execute(path="file.txt", _runtime_context=observed)))
+    target.write_text("external\n", encoding="utf-8")
+    stale = load(run(WriteFileTool(config).execute(
+        path="file.txt", content="new\n", mode="overwrite", _runtime_context=observed,
+    )))
+
+    assert unobserved["error"]["type"] == "stale_file"
+    assert stale["error"]["type"] == "stale_file"
+    assert "current_version" not in stale["error"]
+    assert target.read_text(encoding="utf-8") == "external\n"
+
+
+def test_overwrite_does_not_recreate_observed_file_deleted_externally(tmp_path):
+    target = tmp_path / "file.txt"
+    target.write_text("old\n", encoding="utf-8")
+    context = {"file_observations": {}}
+    config = make_config(tmp_path, max_read_chars=200)
+
+    load(run(ReadFileTool(config).execute(path="file.txt", _runtime_context=context)))
+    target.unlink()
+    result = load(run(WriteFileTool(config).execute(
+        path="file.txt", content="new\n", mode="overwrite", _runtime_context=context,
+    )))
+
+    assert result["error"]["type"] == "stale_file"
+    assert not target.exists()
+
+
+def test_create_existing_file_fails_without_hash(tmp_path):
+    (tmp_path / "file.txt").write_text("old\n", encoding="utf-8")
+
+    result = load(run(WriteFileTool(make_config(tmp_path)).execute(
+        path="file.txt", content="new\n", mode="create", _runtime_context={"file_observations": {}},
+    )))
+
+    assert result["error"]["type"] == "file_exists"
+    assert "read it completely before overwriting" in result["error"]["message"]
+    assert "version" not in json.dumps(result)
+
+
+def test_successful_create_establishes_observation_for_overwrite(tmp_path):
+    context = {"file_observations": {}}
+    tool = WriteFileTool(make_config(tmp_path))
+
+    created = load(run(tool.execute(
+        path="file.txt", content="first\n", mode="create", _runtime_context=context,
+    )))
+    overwritten = load(run(tool.execute(
+        path="file.txt", content="second\n", mode="overwrite", _runtime_context=context,
+    )))
+
+    assert created["mode"] == "create"
+    assert overwritten["mode"] == "overwrite"
+    assert (tmp_path / "file.txt").read_text(encoding="utf-8") == "second\n"
 
 
 def test_write_file_rejects_protected_path(tmp_path):
@@ -1155,6 +1307,35 @@ def test_apply_patch_updates_existing_file(tmp_path):
     assert result["applied"] is True
     assert result["files_changed"] == ["app.py"]
     assert (tmp_path / "app.py").read_text(encoding="utf-8") == "print('new')\n"
+
+
+@pytest.mark.parametrize("operation", ["replace", "patch"])
+def test_targeted_edits_invalidate_full_file_observation(tmp_path, operation):
+    target = tmp_path / "app.py"
+    target.write_text("old\n", encoding="utf-8")
+    context = {"file_observations": {}}
+    config = make_config(tmp_path, max_read_chars=200)
+    load(run(ReadFileTool(config).execute(path="app.py", _runtime_context=context)))
+
+    if operation == "replace":
+        result = load(run(EditFileTool(config).execute(
+            operation="replace",
+            path="app.py",
+            replacements=[{"old": "old", "new": "new"}],
+            _runtime_context=context,
+        )))
+    else:
+        result = load(run(ApplyPatchTool(config).execute(
+            patch="--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-old\n+new\n",
+            _runtime_context=context,
+        )))
+    overwrite = load(run(WriteFileTool(config).execute(
+        path="app.py", content="whole\n", mode="overwrite", _runtime_context=context,
+    )))
+
+    assert "error" not in result
+    assert overwrite["error"]["type"] == "stale_file"
+    assert target.read_text(encoding="utf-8") == "new\n"
 
 
 def test_apply_patch_offsets_hunk_when_context_matches_uniquely(tmp_path):

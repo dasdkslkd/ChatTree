@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .common import CodeToolError, CodeWorkspace
+from .common import CodeWorkspace
 
 
 @dataclass(frozen=True)
@@ -98,7 +98,6 @@ def _read_payload(
         "start_line": start_line,
         "line_count": len(selected),
         "total_lines": current_line,
-        "version": _file_version(target),
         "truncated": truncated,
     }
     if output_format == "json":
@@ -114,11 +113,8 @@ def _read_payload(
 
 
 def _file_version(target: Path) -> str:
-    digest = hashlib.sha256()
     with target.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return f"sha256:{digest.hexdigest()}"
+        return f"sha256:{hashlib.file_digest(handle, 'sha256').hexdigest()}"
 
 
 def _number_lines(lines: List[str], start_line: int) -> str:
@@ -133,11 +129,9 @@ def _looks_like_numbered_read_line(text: str) -> bool:
     return any(re.match(r"^\s*\d+(?:\t|\u2192)", line) for line in text.splitlines())
 
 
-def _apply_simple_unified_patch(workspace: CodeWorkspace, base: Path, patch: str) -> List[str]:
-    file_patches = _parse_unified_patch(patch)
+def _apply_simple_unified_patch(workspace: CodeWorkspace, file_patches: List[_FilePatch], targets: List[Path]) -> List[str]:
     changed: List[str] = []
-    for file_patch in file_patches:
-        target = workspace.check_write(base / file_patch.path)
+    for file_patch, target in zip(file_patches, targets):
         if not target.exists():
             raise ValueError(f"target file does not exist: {file_patch.path}")
         _apply_file_patch_streaming(target, file_patch)

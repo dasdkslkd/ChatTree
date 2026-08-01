@@ -134,12 +134,13 @@ def test_read_tool_result_uses_runtime_repository(tmp_path):
         output="abcdef",
     )
     tool = ReadFileTool(CodeToolConfig.from_dict({"workspace_roots": [str(tmp_path)]}))
+    observations = {"sentinel": "hash"}
 
     payload = json.loads(asyncio.run(tool.execute(
         tool_result_id=result_id,
         offset=1,
         limit=3,
-        _runtime_context={"chat_repository": repository},
+        _runtime_context={"chat_repository": repository, "file_observations": observations},
     )))
     assert payload["content"] == "bcd"
     assert payload["next_offset"] == 4
@@ -148,6 +149,7 @@ def test_read_tool_result_uses_runtime_repository(tmp_path):
         "offset": 4,
         "limit": 3,
     }
+    assert observations == {"sentinel": "hash"}
 
     error = json.loads(asyncio.run(tool.execute(tool_result_id=result_id)))
     assert error["error"]["type"] == "tool_result_unavailable"

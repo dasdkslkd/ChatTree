@@ -548,6 +548,7 @@ class SubagentExecutor:
             permission = normalize_permission_mode(permission_mode or agent.permission_mode)
             max_tool_rounds = agent.max_tool_rounds or DEFAULT_MAX_TOOL_ROUNDS
             max_turns = agent.max_turns or DEFAULT_MAX_TURNS
+            file_observations: Dict[str, str] = {}
             controller = StreamController(run_id, conversation_id, run_id=run_id)
             self._controllers[run_id] = controller
 
@@ -703,6 +704,7 @@ class SubagentExecutor:
                                 input_data,
                                 limit=160,
                             ),
+                            "file_observations": file_observations,
                         },
                     )
                 )

@@ -41,7 +41,14 @@ class ApplyPatchTool(common._CodeTool):
         except common.CodeToolError as exc:
             return common._error(exc.error_type, str(exc), path=str(kwargs.get("cwd") or "."))
         try:
-            changed = patch._apply_simple_unified_patch(self.workspace, base, patch_text)
+            file_patches = patch._parse_unified_patch(patch_text)
+            targets = [self.workspace.check_write(base / file_patch.path) for file_patch in file_patches]
+            with common._path_locks(targets):
+                try:
+                    changed = patch._apply_simple_unified_patch(self.workspace, file_patches, targets)
+                finally:
+                    for target in targets:
+                        common._file_observations(kwargs).pop(str(target), None)
         except (common.CodeToolError, UnicodeDecodeError, ValueError) as exc:
             message = str(exc) or type(exc).__name__
             return common._error("patch_failed", message)

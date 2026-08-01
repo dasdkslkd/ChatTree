@@ -4,6 +4,8 @@ import json
 import locale
 import os
 import shlex
+import threading
+from contextlib import ExitStack
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
@@ -19,6 +21,7 @@ from ...runs.types import FINISHED_RUN_STATUSES
 
 DEFAULT_CODE_WORKSPACE = Path("workspaces") / "default"
 FINISHED_STATUS_VALUES = {status.value for status in FINISHED_RUN_STATUSES}
+_PATH_LOCKS = tuple(threading.RLock() for _ in range(64))
 
 
 def _project_root() -> Path:
@@ -57,6 +60,17 @@ def _tool_event_sink(kwargs: Dict[str, Any]) -> Optional[Callable[[Dict[str, Any
         return None
     sink = runtime_context.get("tool_event_sink")
     return sink if callable(sink) else None
+
+
+def _file_observations(kwargs: Dict[str, Any]) -> Dict[str, str]:
+    return (kwargs.get("_runtime_context") or {}).get("file_observations", {})
+
+
+def _path_locks(paths: List[Path]) -> ExitStack:
+    stack = ExitStack()
+    for index in sorted({hash(str(path)) % len(_PATH_LOCKS) for path in paths}):
+        stack.enter_context(_PATH_LOCKS[index])
+    return stack
 
 
 def _emit_tool_observation(

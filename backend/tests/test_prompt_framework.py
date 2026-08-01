@@ -202,6 +202,8 @@ class PromptCatalogTests(unittest.TestCase):
         self.assertIn("Plan the complete tool wave before emitting it", text)
         self.assertIn("use one batched `read` without a preceding `glob`", text)
         self.assertIn("run one consolidated validation", text)
+        self.assertNotIn("file versions", text)
+        self.assertNotIn("expected_version", text)
 
     def test_core_prompt_distinguishes_fresh_subagents_from_forks(self):
         text = load_prompt_template("core")

@@ -1454,6 +1454,7 @@ class ChatManager:
             "task_generation_id": task_turn_context.generation_id,
             "task_revision": task_turn_context.revision,
             "workspace": workspace_context,
+            "file_observations": {},
         }
         chat_repository = getattr(self, "chat_repository", None)
         if chat_repository is not None:

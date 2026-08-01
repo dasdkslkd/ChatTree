@@ -15,7 +15,7 @@ class WriteFileTool(common._CodeTool):
     def description(self) -> str:
         return (
             "Create or intentionally overwrite a UTF-8 text file in the workspace, creating missing parent "
-            "directories. Existing files require expected_version."
+            "directories. Read an existing file completely before overwriting it."
         )
 
     def parameters_schema(self) -> Dict[str, Any]:
@@ -26,7 +26,6 @@ class WriteFileTool(common._CodeTool):
                 "path": {"type": "string"},
                 "content": {"type": "string"},
                 "mode": {"type": "string", "enum": ["create", "overwrite"]},
-                "expected_version": {"type": "string"},
             },
             "required": ["path", "content"],
         }
@@ -39,19 +38,24 @@ class WriteFileTool(common._CodeTool):
             target = self.workspace.check_write(kwargs.get("path"))
         except common.CodeToolError as exc:
             return common._error(exc.error_type, str(exc), path=str(kwargs.get("path") or ""))
-        if not target.parent.exists():
-            target.parent.mkdir(parents=True, exist_ok=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
         mode = str(kwargs.get("mode") or "create")
-        exists = target.exists()
-        if mode == "create" and exists:
-            return common._error("file_exists", "file already exists; use edit or overwrite with expected_version", path=self.workspace.relative(target), current_version=patch._file_version(target) if target.is_file() else None)
-        if mode == "overwrite" and exists:
-            expected_version = str(kwargs.get("expected_version") or "")
-            current_version = patch._file_version(target)
-            if not expected_version:
-                return common._error("stale_file", "expected_version is required to overwrite an existing file", path=self.workspace.relative(target), current_version=current_version)
-            if expected_version != current_version:
-                return common._error("stale_file", "file changed since read; read again before overwriting", path=self.workspace.relative(target), current_version=current_version)
         content = str(kwargs.get("content") or "")
-        target.write_text(content, encoding="utf-8")
-        return common._json({"path": self.workspace.relative(target), "bytes_written": len(content.encode("utf-8")), "version": patch._file_version(target), "mode": "overwrite" if exists else "create"})
+        observations = common._file_observations(kwargs)
+        key = str(target)
+        with common._path_locks([target]):
+            exists = target.exists()
+            if mode == "create":
+                try:
+                    with target.open("x", encoding="utf-8") as handle:
+                        handle.write(content)
+                except FileExistsError:
+                    return common._error("file_exists", "file already exists; read it completely before overwriting, or use exact replacement edit", path=self.workspace.relative(target))
+            else:
+                observed = observations.get(key)
+                if (exists and (observed is None or patch._file_version(target) != observed)) or (not exists and observed is not None):
+                    observations.pop(key, None)
+                    return common._error("stale_file", "file changed or was not read completely; read it again before overwriting", path=self.workspace.relative(target))
+                target.write_text(content, encoding="utf-8")
+            observations[key] = patch._file_version(target)
+        return common._json({"path": self.workspace.relative(target), "bytes_written": len(content.encode("utf-8")), "mode": "overwrite" if exists else "create"})
