@@ -1,4 +1,6 @@
 import os
+import shutil
+import subprocess
 import unittest
 
 from backend.core.shell_profile import ShellProfileResolver, render_command_tool_guidance
@@ -16,8 +18,46 @@ class ShellProfileTests(unittest.TestCase):
         self.assertIn("active shell is PowerShell", guidance)
         self.assertIn("Get-ChildItem -Force", guidance)
         self.assertIn("$env:FOO", guidance)
+        self.assertIn("Native pipeline stdin uses UTF-8 without BOM", guidance)
         self.assertIn("Bash control flow", guidance)
         self.assertNotIn("FOO=bar npm test", guidance)
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows PowerShell")
+    def test_windows_native_pipeline_preserves_unicode_and_allows_legacy_override(self):
+        tested = []
+        for shell in ("powershell", "pwsh"):
+            if not shutil.which(shell):
+                continue
+            profile = ShellProfileResolver(platform="windows", shell=shell).resolve()
+            text = "ASCII — 中文 😀"
+            command = f"@'\n{text}\n'@ | python -c \"import sys;print(sys.stdin.buffer.read().hex())\""
+
+            result = subprocess.run(
+                profile.command_argv(command),
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            piped = bytes.fromhex(result.stdout.strip())
+            self.assertEqual(piped.rstrip(b"\r\n"), text.encode("utf-8"))
+            self.assertFalse(piped.startswith(b"\xef\xbb\xbf"))
+
+            command = (
+                "$OutputEncoding = [System.Text.Encoding]::GetEncoding(936); "
+                "@'\n中文\n'@ | python -c \"import sys;print(sys.stdin.buffer.read().hex())\""
+            )
+            result = subprocess.run(
+                profile.command_argv(command),
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            self.assertEqual(bytes.fromhex(result.stdout.strip()).rstrip(b"\r\n"), "中文".encode("gbk"))
+            tested.append(shell)
+
+        self.assertTrue(tested)
 
     def test_posix_profile_guidance_uses_bash_examples(self):
         profile = ShellProfileResolver(platform="linux", shell="bash").resolve()

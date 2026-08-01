@@ -131,14 +131,14 @@ def _profile_for(platform_id: PlatformId, shell_id: ShellId, *, executable: Opti
             platform=platform_id,
             display_name=display,
             executable=exe,
-            args_template=["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "{command}"],
+            args_template=["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); {command}"],
             path_separator="\\",
             line_ending="\r\n",
             highlighter_language="powershell",
             syntax_notes=[
                 "Use PowerShell syntax for variables, quoting, pipes, and control flow.",
                 "Environment variables use $env:NAME and assignment uses $env:NAME = \"value\".",
-                "PowerShell pipes objects; prefer Select-Object, Where-Object, and ForEach-Object for transformations.",
+                "Native pipeline stdin uses UTF-8 without BOM; override $OutputEncoding for legacy tools.",
                 "Use single-quoted here-strings @' ... '@ for multiline literal text.",
             ],
             preferred_examples=[

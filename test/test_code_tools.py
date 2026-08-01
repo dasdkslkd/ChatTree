@@ -1524,7 +1524,9 @@ def test_run_command_non_python_command_keeps_shell_path(tmp_path, monkeypatch):
     result = load(run(tool.execute(command="echo plain shell")))
 
     assert result["stdout"] == "plain shell"
-    assert calls[0]["args"][-1] == "echo plain shell"
+    assert calls[0]["args"][-1] == (
+        "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); echo plain shell"
+    )
     assert calls[0]["shell"] is False
 
 
