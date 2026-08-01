@@ -23,12 +23,29 @@ class ShellProfileTests(unittest.TestCase):
         self.assertNotIn("FOO=bar npm test", guidance)
 
     @unittest.skipUnless(os.name == "nt", "requires Windows PowerShell")
-    def test_windows_native_pipeline_preserves_unicode_and_allows_legacy_override(self):
+    def test_windows_command_contract(self):
         tested = []
         for shell in ("powershell", "pwsh"):
             if not shutil.which(shell):
                 continue
             profile = ShellProfileResolver(platform="windows", shell=shell).resolve()
+            for command, stdout, returncode in (
+                ("param([string]$Name = 'ok')\nWrite-Output $Name", "ok", 0),
+                ("using namespace System.Text\nWrite-Output ([Encoding]::UTF8.WebName)", "utf-8", 0),
+                ("#requires -Version 5.1\nWrite-Output 'requires-ok'", "requires-ok", 0),
+                ("Write-Output 'before-exit'\nexit 7", "before-exit", 7),
+                ("cmd.exe /d /c exit 3", "", 1),
+            ):
+                result = subprocess.run(
+                    profile.command_argv(command),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                )
+                self.assertEqual(result.returncode, returncode)
+                self.assertEqual(result.stdout.strip(), stdout)
+                self.assertEqual(result.stderr, "")
+
             text = "ASCII — 中文 😀"
             command = f"@'\n{text}\n'@ | python -c \"import sys;print(sys.stdin.buffer.read().hex())\""
 

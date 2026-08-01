@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import os
 import platform as platform_module
 import shutil
@@ -35,6 +36,8 @@ class ShellProfile:
     forbidden_examples: list[CommandExample] = field(default_factory=list)
 
     def command_argv(self, command: str) -> list[str]:
+        if self.id in {"powershell", "pwsh"}:
+            command = base64.b64encode(f"{command}\nif (-not $?) {{ exit 1 }}".encode("utf-8")).decode("ascii")
         return [self.executable, *[part.replace("{command}", command) for part in self.args_template]]
 
     def snapshot(self) -> dict[str, Any]:
@@ -131,7 +134,7 @@ def _profile_for(platform_id: PlatformId, shell_id: ShellId, *, executable: Opti
             platform=platform_id,
             display_name=display,
             executable=exe,
-            args_template=["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); {command}"],
+            args_template=["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); . ([scriptblock]::Create([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{command}'))))"],
             path_separator="\\",
             line_ending="\r\n",
             highlighter_language="powershell",
