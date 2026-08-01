@@ -6,6 +6,7 @@ from typing import Any
 
 from .persistence.blob_store import BlobStore
 from .persistence.database import SQLitePersistence
+from .persistence.repository import tool_result_preview
 
 
 PLAN_QUESTION_TOOLS = {"ask_user_question"}
@@ -563,6 +564,18 @@ class TranscriptAssembler:
         results = []
         for row in rows:
             item = dict(row)
+            preview = str(item.get("output_preview") or "")
+            if (
+                item.get("output_blob_id")
+                and preview.lstrip().startswith(("{", "["))
+                and self._load_json(preview) is None
+            ):
+                try:
+                    output = self.blobs.get_text(str(item["output_blob_id"]))
+                except KeyError:
+                    pass
+                else:
+                    item["output_preview"] = tool_result_preview(output)
             item["metadata"] = self._load_json(item.get("metadata_json")) or {}
             results.append(item)
         return results

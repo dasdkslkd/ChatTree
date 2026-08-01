@@ -1892,6 +1892,18 @@ class ChatManager:
                 for call in round_tool_calls:
                     call["call_index"] = process_order
                     process_order += 1
+                    function = call.get("function") if isinstance(call.get("function"), dict) else {}
+                    if call.get("id"):
+                        self.chat_repository.add_tool_call(
+                            conversation_id,
+                            new_node["id"],
+                            tool_call_id=str(call["id"]),
+                            name=str(function.get("name") or ""),
+                            arguments=function.get("arguments"),
+                            call_index=int(call["call_index"]),
+                            status="running",
+                            run_id=run_id,
+                        )
                 yield StreamChunk(
                     status=StreamStatus.CONTENT,
                     content=None,

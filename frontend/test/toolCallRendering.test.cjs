@@ -164,6 +164,48 @@ function testSummarizeForReadWithTargets() {
   assert.equal(summary, 'src/bar.ts L1-5');
 }
 
+function testSummarizeForReadUsesActualResultRange() {
+  const { summarizeToolCall } = loadToolCallFormatting();
+  const args = JSON.stringify({ path: 'src/bar.ts' });
+  const result = JSON.stringify({
+    files: [{ path: 'src/bar.ts', start_line: 20, line_count: 37, content: '...' }],
+  });
+  const summary = summarizeToolCall('read', args, result, 'done');
+  assert.equal(summary, 'src/bar.ts L20-56');
+}
+
+function testSummarizeForBatchReadUsesResultBlocksInOrder() {
+  const { summarizeToolCall } = loadToolCallFormatting();
+  const args = JSON.stringify({
+    path: 'ignored-default.ts',
+    targets: [
+      { path: 'src/a.ts', start_line: 1, line_count: 20 },
+      { path: 'src/b.ts', start_line: 30, line_count: 10 },
+    ],
+  });
+  const result = JSON.stringify({
+    files: [
+      { path: 'src/a.ts', start_line: 1, line_count: 20, content: 'a' },
+      { path: 'src/b.ts', start_line: 30, line_count: 10, content: 'b' },
+    ],
+  });
+  const summary = summarizeToolCall('read', args, result, 'done');
+  assert.equal(summary, '2 个文件 · 30 行');
+  assert.equal(summarizeToolCall('read', args, '', 'running'), '2 个文件 · 30 行');
+}
+
+function testSummarizeForChunkedReadDistinguishesSegments() {
+  const { summarizeToolCall } = loadToolCallFormatting();
+  const result = JSON.stringify({
+    files: [
+      { path: 'src/a.ts', start_line: 1, line_count: 20, content: 'a' },
+      { path: 'src/a.ts', start_line: 21, line_count: 15, content: 'b' },
+    ],
+  });
+  const summary = summarizeToolCall('read', JSON.stringify({ targets: [] }), result, 'done');
+  assert.equal(summary, 'src/a.ts · 2 段 · 35 行');
+}
+
 function testSummarizeForWebFetch() {
   const { summarizeToolCall } = loadToolCallFormatting();
   const args = JSON.stringify({ action: 'fetch', url: 'https://example.com/page' });
@@ -334,6 +376,9 @@ function run() {
   testSummarizeForGlob();
   testSummarizeForReadWithLineRange();
   testSummarizeForReadWithTargets();
+  testSummarizeForReadUsesActualResultRange();
+  testSummarizeForBatchReadUsesResultBlocksInOrder();
+  testSummarizeForChunkedReadDistinguishesSegments();
   testSummarizeForWebFetch();
   testSummarizeForWebSearch();
   testSummarizeForUnknownToolFallsBackToGeneric();

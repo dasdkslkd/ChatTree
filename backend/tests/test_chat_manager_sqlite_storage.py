@@ -989,6 +989,47 @@ class TwoToolManager:
         return json.dumps({"tool": name, "arguments": arguments}, sort_keys=True)
 
 
+def test_committed_tool_calls_are_canonical_before_execution_finishes(tmp_path: Path):
+    manager, repository, _persistence = _make_manager(tmp_path)
+    manager.tool_manager = TwoToolManager(tmp_path)
+    manager.model_manager.provider = TwoToolCallingProvider()
+    conversation = manager.create_conversation("sqlite committed tools")
+
+    async def scenario():
+        stream = manager.send_message_stream(
+            conversation.metadata["id"],
+            "run two tools",
+            model_id="fake-model",
+            parent_node_id=conversation.current_node_id,
+        )
+        try:
+            while True:
+                chunk = await anext(stream)
+                if chunk.get("event_type") != "tool_calls_committed":
+                    continue
+                with repository.persistence.connect() as conn:
+                    rows = conn.execute(
+                        """
+                        SELECT id, run_id, call_index, args_inline, status
+                        FROM tool_calls
+                        WHERE conversation_id = ?
+                        ORDER BY call_index
+                        """,
+                        (conversation.metadata["id"],),
+                    ).fetchall()
+                return chunk["run_id"], [dict(row) for row in rows]
+        finally:
+            await stream.aclose()
+
+    run_id, rows = asyncio.run(scenario())
+
+    assert [row["id"] for row in rows] == ["call_first", "call_second"]
+    assert [row["call_index"] for row in rows] == [0, 1]
+    assert [json.loads(row["args_inline"]) for row in rows] == [{"a": 1}, {"b": 2}]
+    assert {row["run_id"] for row in rows} == {run_id}
+    assert {row["status"] for row in rows} == {"running"}
+
+
 class InterleavedToolCallingProvider:
     def __init__(self):
         self.calls = 0

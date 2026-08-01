@@ -86,10 +86,24 @@ export function summarizeToolCall(
     const targets = asArray(args.targets)
       .map((item) => asObject(item))
       .filter((item): item is Record<string, unknown> => item !== null);
+    const resultFiles = asArray(result?.files)
+      .map((item) => asObject(item))
+      .filter((item): item is Record<string, unknown> => item !== null);
+    const resultFile = resultFiles[0] || result;
     const targetPaths = targets.map((target) => asString(target.path)).filter(Boolean);
-    const path = asString(args.path) || targetPaths[0] || 'read';
-    const startLine = asNumber(args.start_line) ?? asNumber(targets[0]?.start_line);
-    const lineCount = asNumber(args.line_count) ?? asNumber(targets[0]?.line_count);
+    const resultPaths = resultFiles.map((file) => asString(file.path)).filter(Boolean);
+    const path = resultPaths[0] || targetPaths[0] || asString(args.path) || asString(resultFile?.path) || 'read';
+    const startLine = asNumber(resultFile?.start_line) ?? asNumber(args.start_line) ?? asNumber(targets[0]?.start_line);
+    const lineCount = asNumber(resultFile?.line_count) ?? asNumber(args.line_count) ?? asNumber(targets[0]?.line_count);
+    const blocks = resultFiles.length > 0 ? resultFiles : targets;
+    if (blocks.length > 1) {
+      const blockPaths = resultFiles.length > 0 ? resultPaths : targetPaths;
+      const fileCount = new Set(blockPaths).size;
+      const totalLines = blocks.reduce((sum, block) => sum + (asNumber(block.line_count) ?? 0), 0);
+      const head = fileCount > 1 ? `${fileCount} 个文件` : truncate(path, 50);
+      const segments = fileCount === 1 ? ` · ${blocks.length} 段` : '';
+      return `${head}${segments}${totalLines > 0 ? ` · ${totalLines} 行` : ''}`;
+    }
     const range = startLine !== null && lineCount !== null
       ? ` L${startLine}-${startLine + lineCount - 1}`
       : '';

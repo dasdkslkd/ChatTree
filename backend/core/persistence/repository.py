@@ -17,6 +17,49 @@ def _role_value(role: Any) -> str:
     return str(getattr(role, "value", role))
 
 
+def tool_result_preview(output: str, limit: int = 4096) -> str:
+    value = output or ""
+    if len(value) <= limit:
+        return value
+    try:
+        payload = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return value[:limit]
+    if not isinstance(payload, (dict, list)):
+        return value[:limit]
+
+    def compact(item: Any, string_limit: int, item_limit: int) -> Any:
+        if isinstance(item, dict):
+            compacted = {}
+            for key, child in item.items():
+                child_limit = item_limit
+                if key == "files" and isinstance(child, list) and all(isinstance(entry, dict) for entry in child):
+                    child_limit = len(child)
+                compacted[key] = compact(child, string_limit, child_limit)
+            return compacted
+        if isinstance(item, list):
+            return [compact(child, string_limit, item_limit) for child in item[:item_limit]]
+        if isinstance(item, str) and len(item) > string_limit:
+            return f"{item[:max(0, string_limit - 1)]}…"
+        return item
+
+    for string_limit, item_limit in ((1024, 20), (512, 10), (256, 5), (128, 3), (64, 2), (32, 1)):
+        preview = json.dumps(
+            compact(payload, string_limit, item_limit),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        if len(preview) <= limit:
+            return preview
+
+    fallback = {"truncated": True, "preview": value[:limit // 2]}
+    preview = json.dumps(fallback, ensure_ascii=False, separators=(",", ":"))
+    while len(preview) > limit:
+        fallback["preview"] = fallback["preview"][:-(len(preview) - limit)]
+        preview = json.dumps(fallback, ensure_ascii=False, separators=(",", ":"))
+    return preview
+
+
 class ChatRepository:
     def __init__(self, persistence: SQLitePersistence) -> None:
         self.persistence = persistence
@@ -725,7 +768,7 @@ class ChatRepository:
     ) -> str:
         result_id = tool_result_id or str(uuid.uuid4())
         value = output or ""
-        preview = value[:preview_limit]
+        preview = tool_result_preview(value, preview_limit)
         blob_id = self._existing_tool_result_blob_id(result_id, value)
         if blob_id is None and len(value) > len(preview):
             blob_id = BlobStore(self.persistence).put_text(value).blob_id

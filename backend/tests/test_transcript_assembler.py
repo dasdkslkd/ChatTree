@@ -1538,6 +1538,187 @@ def test_patch_reads_canonical_results_when_live_tool_events_are_slimmed(tmp_pat
         assert block["status"] == "complete"
 
 
+def test_parallel_tool_results_keep_committed_order_and_call_boundaries(tmp_path):
+    persistence, repository = _repo(tmp_path)
+    conversation_id, node_id = _conversation(repository)
+    run_id = SQLiteRunRepository(persistence).create_run(
+        conversation_id,
+        kind="chat",
+        target_node_id=node_id,
+        summary="parallel tools",
+    )
+    calls = [
+        ("call-first", "src/first.py"),
+        ("call-second", "src/second.py"),
+    ]
+    for call_index, (call_id, path) in enumerate(calls):
+        repository.add_tool_call(
+            conversation_id,
+            node_id,
+            tool_call_id=call_id,
+            name="read",
+            arguments={"path": path},
+            call_index=call_index,
+            status="running",
+            run_id=run_id,
+        )
+    session = TranscriptAssembler(persistence).patch_session(run_id)
+    session.feed({
+        "status": "content",
+        "conversation_id": conversation_id,
+        "node_id": node_id,
+        "event_type": "tool_calls_committed",
+        "tool_calls": [
+            {
+                "id": call_id,
+                "call_index": call_index,
+                "function": {"name": "read", "arguments": json.dumps({"path": path})},
+            }
+            for call_index, (call_id, path) in enumerate(calls)
+        ],
+    })
+
+    patch = None
+    for call_id, path in reversed(calls):
+        repository.add_tool_result(
+            conversation_id,
+            node_id,
+            tool_call_id=call_id,
+            output=json.dumps({"path": path, "start_line": 1, "line_count": 1, "content": path}),
+            run_id=run_id,
+        )
+        patch = session.feed({
+            "status": "done",
+            "conversation_id": conversation_id,
+            "node_id": node_id,
+            "event_type": "tool_result",
+            "tool_call": {"tool_call_id": call_id},
+        })
+
+    process = next(
+        operation["item"]
+        for operation in patch["operations"]
+        if operation["op"] == "upsert" and operation["item"]["type"] == "assistant_process"
+    )
+    blocks = [block for block in process["blocks"] if block["type"] == "tool_call"]
+    assert [block["tool_call_id"] for block in blocks] == ["call-first", "call-second"]
+    assert [json.loads(block["result_preview"])["path"] for block in blocks] == [
+        "src/first.py",
+        "src/second.py",
+    ]
+
+
+def test_large_structured_tool_result_stays_renderable_in_live_and_saved_transcripts(tmp_path):
+    persistence, repository = _repo(tmp_path)
+    conversation_id, node_id = _conversation(repository)
+    run_id = SQLiteRunRepository(persistence).create_run(
+        conversation_id,
+        kind="chat",
+        target_node_id=node_id,
+        summary="large read",
+    )
+    call_id = "call-large-read"
+    expected_paths = [f"src/large-{index}.py" for index in range(8)]
+    arguments = {
+        "targets": [
+            {"path": path, "start_line": index * 40 + 1, "line_count": 37}
+            for index, path in enumerate(expected_paths)
+        ],
+    }
+    repository.add_tool_call(
+        conversation_id,
+        node_id,
+        tool_call_id=call_id,
+        name="read",
+        arguments=arguments,
+        run_id=run_id,
+    )
+    session = TranscriptAssembler(persistence).patch_session(run_id)
+    session.feed({
+        "status": "content",
+        "conversation_id": conversation_id,
+        "node_id": node_id,
+        "event_type": "tool_calls_committed",
+        "tool_calls": [{
+            "id": call_id,
+            "function": {"name": "read", "arguments": json.dumps(arguments)},
+        }],
+    })
+    raw_result = json.dumps({
+        "files": [
+            {
+                "path": path,
+                "start_line": index * 40 + 1,
+                "line_count": 37,
+                "total_lines": 400,
+                "truncated": True,
+                "content": f"{index * 40 + 1}\t" + (str(index) * 20_000),
+            }
+            for index, path in enumerate(expected_paths)
+        ],
+    })
+    persisted = persist_model_visible_tool_result(
+        repository,
+        raw_result=raw_result,
+        name="read",
+        conversation_id=conversation_id,
+        node_id=node_id,
+        tool_call_id=call_id,
+    )
+
+    with persistence.connect() as conn:
+        row = conn.execute(
+            "SELECT output_preview, output_blob_id FROM tool_results WHERE tool_call_id = ?",
+            (call_id,),
+        ).fetchone()
+        stored_preview = json.loads(row["output_preview"])
+        assert len(row["output_preview"]) <= 4096
+        assert row["output_blob_id"]
+        assert stored_preview["files"][0]["line_count"] == 37
+        assert [file["path"] for file in stored_preview["files"]] == expected_paths
+        conn.execute(
+            "UPDATE tool_results SET output_preview = ? WHERE tool_call_id = ?",
+            (raw_result[:4096], call_id),
+        )
+
+    public_event = messages_route.build_stream_chunk_data({
+        "status": StreamStatus.CONTENT,
+        "conversation_id": conversation_id,
+        "node_id": node_id,
+        "run_id": run_id,
+        "event_type": "tool_result",
+        "tool_call": {
+            "tool_call_id": call_id,
+            "name": "read",
+            "content": persisted["content"],
+            "raw_content": raw_result,
+            "model_visible_content": persisted["content"],
+            "tool_result_id": persisted["tool_result_id"],
+        },
+    }, conversation_id)
+    patch = session.feed(public_event)
+    process = next(
+        operation["item"]
+        for operation in patch["operations"]
+        if operation["op"] == "upsert" and operation["item"]["type"] == "assistant_process"
+    )
+    live_block = next(block for block in process["blocks"] if block.get("tool_call_id") == call_id)
+    live_preview = json.loads(live_block["result_preview"])
+    assert live_preview["files"][0]["line_count"] == 37
+    assert live_preview["files"][0]["content"].endswith("…")
+    assert [file["path"] for file in live_preview["files"]] == expected_paths
+
+    saved_process = next(
+        item
+        for item in _snapshot(persistence, conversation_id, node_id)["items"]
+        if item["type"] == "assistant_process"
+    )
+    saved_preview = json.loads(saved_process["blocks"][0]["result_preview"])
+    assert saved_preview["files"][0]["start_line"] == 1
+    assert saved_preview["files"][0]["line_count"] == 37
+    assert [file["path"] for file in saved_preview["files"]] == expected_paths
+
+
 def test_patch_updates_live_tool_approval_request_and_result_with_stable_id(tmp_path):
     persistence, repository = _repo(tmp_path)
     conversation_id, node_id = _conversation(repository)
