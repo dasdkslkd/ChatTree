@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from typing import Any, Dict, Optional
 
 from . import common, python_fallback, ripgrep
@@ -216,75 +215,31 @@ class SearchFilesTool(common._CodeTool):
                     progress={"phase": "rg_failed", "engine": "rg", "reason": fallback_reason},
                 )
 
-        if not fixed_strings:
-            try:
-                re.compile(pattern, re.IGNORECASE if ignore_case else 0)
-            except re.error as exc:
-                return common._error("invalid_query", f"invalid regex: {exc}")
-
-        if count_mode or multiline:
-            common._emit_tool_observation(
-                event_sink,
-                "tool_progress",
-                status="running",
-                progress={"phase": "python_fallback", "reason": fallback_reason},
-            )
-            payload = python_fallback._grep_files_python(
-                workspace=self.workspace,
-                root=root,
-                pattern=pattern,
-                glob=glob,
-                limit=limit,
-                offset=offset,
-                fixed_strings=fixed_strings,
-                ignore_case=ignore_case,
-                multiline=multiline,
-                no_ignore=no_ignore,
-                hidden=hidden,
-                before_context=before_context,
-                after_context=after_context,
-                output=output,
-                exclude_globs=exclude_globs,
-                event_sink=event_sink,
-            )
-            if fallback_reason and "error" not in payload:
-                payload["fallback_reason"] = fallback_reason
-            common._emit_tool_observation(
-                event_sink,
-                "tool_progress",
-                status="running",
-                progress={
-                    "phase": "complete",
-                    "engine": "python",
-                    "searched_files": payload.get("searched_files"),
-                    "matches": len(payload.get("matches") or []),
-                },
-            )
-            return common._json(payload)
-
         common._emit_tool_observation(
             event_sink,
             "tool_progress",
             status="running",
             progress={"phase": "python_fallback", "reason": fallback_reason},
         )
-        payload = python_fallback._grep_python(
+        payload = python_fallback._grep_files_python(
             workspace=self.workspace,
             root=root,
             pattern=pattern,
             glob=glob,
-            max_results=limit + offset,
+            limit=limit,
+            offset=offset,
             fixed_strings=fixed_strings,
             ignore_case=ignore_case,
+            multiline=multiline,
             no_ignore=no_ignore,
             hidden=hidden,
             before_context=before_context,
             after_context=after_context,
-            files_with_matches=files_with_matches,
+            output=output,
             exclude_globs=exclude_globs,
             event_sink=event_sink,
         )
-        if fallback_reason:
+        if fallback_reason and "error" not in payload:
             payload["fallback_reason"] = fallback_reason
         common._emit_tool_observation(
             event_sink,
@@ -297,4 +252,4 @@ class SearchFilesTool(common._CodeTool):
                 "matches": len(payload.get("matches") or []),
             },
         )
-        return common._json(_shape_grep_payload(payload, output=output, limit=limit, offset=offset))
+        return common._json(payload)

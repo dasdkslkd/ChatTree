@@ -1057,16 +1057,19 @@ def test_grep_python_fallback_when_ripgrep_times_out(tmp_path, monkeypatch):
         fallback_calls.append(kwargs)
         return {
             "pattern": kwargs["pattern"],
-            "matches": [{"path": "fallback.txt", "line": 1, "preview": "needle", "type": "match"}],
+            "output": kwargs["output"],
+            "matches": [{"path": "fallback.txt", "line": 1, "text": "needle", "type": "match"}],
+            "count": 1,
             "searched_files": 1,
             "skipped_non_utf8": [],
             "truncated": False,
+            "next_offset": None,
             "engine": "python",
         }
 
     monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda: fake_rg)
     monkeypatch.setattr(subprocess, "Popen", hanging_popen)
-    monkeypatch.setattr(code_python_fallback, "_grep_python", fake_python)
+    monkeypatch.setattr(code_python_fallback, "_grep_files_python", fake_python)
     tool = SearchFilesTool(make_config(tmp_path, command_timeout_seconds=1))
 
     result = load(run(tool.execute(pattern="needle", path=".", output="content")))
@@ -1087,6 +1090,47 @@ def test_grep_python_fallback_supports_regex_and_ignore_case(tmp_path, monkeypat
     assert result["engine"] == "python"
     assert result["fallback_reason"] == "ripgrep_not_installed"
     assert result["matches"][0]["text"] == "needle-42"
+
+
+def test_grep_python_fallback_preserves_truncated_content_page(tmp_path, monkeypatch):
+    monkeypatch.setattr(code_ripgrep, "_resolve_ripgrep_executable", lambda: None)
+    (tmp_path / "notes.txt").write_text(
+        "before\nneedle one\nmiddle\nneedle two\nafter\n",
+        encoding="utf-8",
+    )
+    tool = SearchFilesTool(make_config(tmp_path))
+
+    first = load(run(tool.execute(
+        pattern="needle",
+        path="notes.txt",
+        regex=False,
+        output="content",
+        context=1,
+        limit=3,
+    )))
+    second = load(run(tool.execute(
+        pattern="needle",
+        path="notes.txt",
+        regex=False,
+        output="content",
+        context=1,
+        limit=3,
+        offset=3,
+    )))
+
+    assert first["matches"] == [
+        {"path": "notes.txt", "line": 1, "text": "before", "type": "context"},
+        {"path": "notes.txt", "line": 2, "text": "needle one", "type": "match"},
+        {"path": "notes.txt", "line": 3, "text": "middle", "type": "context"},
+    ]
+    assert first["truncated"] is True
+    assert first["next_offset"] == 3
+    assert second["matches"] == [
+        {"path": "notes.txt", "line": 4, "text": "needle two", "type": "match"},
+        {"path": "notes.txt", "line": 5, "text": "after", "type": "context"},
+    ]
+    assert second["truncated"] is False
+    assert second["next_offset"] is None
 
 
 def test_edit_file_replaces_unique_match_and_rejects_ambiguous_edit(tmp_path):

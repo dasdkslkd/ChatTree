@@ -119,139 +119,6 @@ def _iter_glob_candidates(
         dirnames[:] = kept_dirs
 
 
-def _compile_python_matcher(pattern: str, *, fixed_strings: bool, ignore_case: bool):
-    if not fixed_strings:
-        flags = re.IGNORECASE if ignore_case else 0
-        compiled = re.compile(pattern, flags)
-        return lambda line: compiled.search(line) is not None
-    if ignore_case:
-        needle = pattern.lower()
-        return lambda line: needle in line.lower()
-    return lambda line: pattern in line
-
-
-def _search_payload(
-    pattern: str,
-    matches: List[Dict[str, Any]],
-    searched_files: int,
-    skipped_files: List[str],
-    truncated: bool,
-    engine: str,
-    files: Optional[set[str]] = None,
-) -> Dict[str, Any]:
-    payload: Dict[str, Any] = {
-        "pattern": pattern,
-        "matches": [] if files is not None else matches,
-        "searched_files": searched_files,
-        "skipped_non_utf8": skipped_files,
-        "truncated": truncated,
-        "engine": engine,
-    }
-    if files is not None:
-        payload["files"] = sorted(files)
-    return payload
-
-
-def _grep_python(
-    *,
-    workspace: CodeWorkspace,
-    root: Path,
-    pattern: str,
-    glob: str,
-    max_results: int,
-    fixed_strings: bool,
-    ignore_case: bool,
-    no_ignore: bool,
-    hidden: bool,
-    before_context: int,
-    after_context: int,
-    files_with_matches: bool,
-    exclude_globs: List[str],
-    event_sink: Optional[Callable[[Dict[str, Any]], None]] = None,
-) -> Dict[str, Any]:
-    matches: List[Dict[str, Any]] = []
-    matched_files: set[str] = set()
-    searched_files = 0
-    skipped_files: List[str] = []
-    matcher = _compile_python_matcher(pattern, fixed_strings=fixed_strings, ignore_case=ignore_case)
-    ignore_matcher = common._GitIgnoreMatcher.for_root(root, workspace)
-    last_progress_at = 0.0
-
-    def emit_progress(*, force: bool = False) -> None:
-        nonlocal last_progress_at
-        now = time.monotonic()
-        if not force and now - last_progress_at < 0.5:
-            return
-        last_progress_at = now
-        common._emit_tool_observation(
-            event_sink,
-            "tool_progress",
-            status="running",
-            progress={
-                "phase": "scan",
-                "engine": "python",
-                "root": workspace.relative(root),
-                "searched_files": searched_files,
-                "matched_files": len(matched_files),
-                "matches": len(matches),
-            },
-        )
-
-    emit_progress(force=True)
-    for file_path in _iter_grep_files(root, glob, workspace=workspace):
-        resolved = file_path.resolve()
-        if (
-            not resolved.is_file()
-            or not workspace.is_visible(resolved)
-            or common._should_skip_python_path(resolved, root, hidden=hidden, no_ignore=no_ignore, ignore_matcher=ignore_matcher)
-            or _matches_excluded_glob(resolved, root, exclude_globs, workspace=workspace)
-        ):
-            continue
-        searched_files += 1
-        emit_progress()
-        try:
-            text = resolved.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            skipped_files.append(workspace.relative(resolved))
-            continue
-        lines = text.splitlines()
-        for index, line in enumerate(lines):
-            if not matcher(line):
-                continue
-            relative_path = workspace.relative(resolved)
-            matched_files.add(relative_path)
-            if files_with_matches:
-                if len(matched_files) >= max_results:
-                    emit_progress(force=True)
-                    return _search_payload(pattern, [], searched_files, skipped_files, True, "python", matched_files)
-                break
-            start = max(0, index - before_context)
-            stop = min(len(lines), index + after_context + 1)
-            for context_index in range(start, stop):
-                matches.append({
-                    "path": relative_path,
-                    "line": context_index + 1,
-                    "preview": lines[context_index].strip(),
-                    "type": "match" if context_index == index else "context",
-                })
-                if len(matches) >= max_results:
-                    emit_progress(force=True)
-                    return _search_payload(pattern, matches, searched_files, skipped_files, True, "python", matched_files)
-            if len(matches) >= max_results:
-                emit_progress(force=True)
-                return {
-                    "pattern": pattern,
-                    "matches": matches,
-                    "searched_files": searched_files,
-                    "skipped_non_utf8": skipped_files,
-                    "truncated": True,
-                    "engine": "python",
-                }
-
-    emit_progress(force=True)
-    return _search_payload(pattern, matches, searched_files, skipped_files, False, "python", matched_files if files_with_matches else None)
-
-
 def _glob_files_python(
     *,
     workspace: CodeWorkspace,
@@ -386,20 +253,22 @@ def _grep_files_python(
     exclude_globs: List[str],
     event_sink: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
-    if not fixed_strings:
-        try:
-            flags = re.IGNORECASE | (re.DOTALL if multiline else 0)
-            compiled = re.compile(pattern, flags)
-        except re.error as exc:
-            return {"error": {"type": "invalid_query", "message": f"invalid regex: {exc}"}}
-    else:
-        compiled = None
+    flags = (re.IGNORECASE if ignore_case else 0) | (re.DOTALL if multiline else 0)
+    try:
+        compiled = re.compile(re.escape(pattern) if fixed_strings else pattern, flags)
+    except re.error as exc:
+        return {"error": {"type": "invalid_query", "message": f"invalid regex: {exc}"}}
     ignore_matcher = common._GitIgnoreMatcher.for_root(root, workspace)
     matches: List[Dict[str, Any]] = []
+    match_index_by_line: dict[tuple[str, int], int] = {}
     files: List[str] = []
     counts: List[Dict[str, Any]] = []
+    matched_files: set[str] = set()
     skipped_files: List[str] = []
     searched_files = 0
+    page_end = offset + limit
+    truncated = False
+    stop_search = False
     last_progress_at = 0.0
 
     def emit_progress(*, force: bool = False) -> None:
@@ -417,7 +286,7 @@ def _grep_files_python(
                 "engine": "python",
                 "root": workspace.relative(root),
                 "searched_files": searched_files,
-                "matched_files": len(files) or len(counts),
+                "matched_files": len(matched_files),
                 "matches": len(matches),
             },
         )
@@ -440,48 +309,78 @@ def _grep_files_python(
         except UnicodeDecodeError:
             skipped_files.append(relative)
             continue
+        lines = text.splitlines()
         file_match_count = 0
         if multiline:
-            found = list(compiled.finditer(text)) if compiled else []
-            file_match_count = len(found)
-            if found and output == "files":
-                files.append(relative)
-            elif output == "content":
-                lines = text.splitlines()
-                for match in found:
-                    line_no = text.count("\n", 0, match.start()) + 1
-                    line_text = lines[line_no - 1] if 0 <= line_no - 1 < len(lines) else ""
-                    matches.append({"path": relative, "line": line_no, "text": line_text, "type": "match"})
+            matching_indexes = (
+                text.count("\n", 0, match.start())
+                for match in compiled.finditer(text)
+            )
         else:
-            lines = text.splitlines()
-            for index, line in enumerate(lines):
-                ok = (compiled.search(line) is not None) if compiled else (
-                    pattern.lower() in line.lower() if ignore_case else pattern in line
-                )
-                if not ok:
-                    continue
-                file_match_count += 1
-                if output == "content":
-                    start = max(0, index - before_context)
-                    stop = min(len(lines), index + after_context + 1)
-                    for context_index in range(start, stop):
-                        matches.append({
-                            "path": relative,
-                            "line": context_index + 1,
-                            "text": lines[context_index],
-                            "type": "match" if context_index == index else "context",
-                        })
-            if file_match_count and output == "files":
+            matching_indexes = (
+                index
+                for index, line in enumerate(lines)
+                if compiled.search(line) is not None
+            )
+        for index in matching_indexes:
+            file_match_count += 1
+            matched_files.add(relative)
+            if output == "files":
                 files.append(relative)
+                if len(files) > page_end:
+                    truncated = True
+                    stop_search = True
+                break
+            if output != "content":
+                continue
+            start = max(0, index - before_context)
+            stop = min(len(lines), index + after_context + 1)
+            for context_index in range(start, stop):
+                key = (relative, context_index + 1)
+                entry = {
+                    "path": relative,
+                    "line": context_index + 1,
+                    "text": lines[context_index],
+                    "type": "match" if context_index == index else "context",
+                }
+                existing_index = match_index_by_line.get(key)
+                if existing_index is not None:
+                    if entry["type"] == "match":
+                        matches[existing_index] = entry
+                    continue
+                match_index_by_line[key] = len(matches)
+                matches.append(entry)
+                if len(matches) > page_end:
+                    truncated = True
+                    stop_search = True
+                    break
+            if stop_search:
+                break
         if output == "count" and file_match_count:
             counts.append({"path": relative, "count": file_match_count})
+            if len(counts) > page_end:
+                truncated = True
+                stop_search = True
+        if stop_search:
+            break
 
     emit_progress(force=True)
     if output == "files":
-        page = files[offset:offset + limit]
-        return {"pattern": pattern, "output": output, "files": page, "count": len(page), "searched_files": searched_files, "skipped_non_utf8": skipped_files, "truncated": offset + limit < len(files), "next_offset": offset + len(page) if offset + limit < len(files) else None, "engine": "python"}
-    if output == "count":
-        page = counts[offset:offset + limit]
-        return {"pattern": pattern, "output": output, "counts": page, "count": len(page), "searched_files": searched_files, "skipped_non_utf8": skipped_files, "truncated": offset + limit < len(counts), "next_offset": offset + len(page) if offset + limit < len(counts) else None, "engine": "python"}
-    page = matches[offset:offset + limit]
-    return {"pattern": pattern, "output": output, "matches": page, "count": len(page), "searched_files": searched_files, "skipped_non_utf8": skipped_files, "truncated": offset + limit < len(matches), "next_offset": offset + len(page) if offset + limit < len(matches) else None, "engine": "python"}
+        result_key, results = "files", files
+    elif output == "count":
+        result_key, results = "counts", counts
+    else:
+        result_key, results = "matches", matches
+    page = results[offset:offset + limit]
+    truncated = truncated or offset + limit < len(results)
+    return {
+        "pattern": pattern,
+        "output": output,
+        result_key: page,
+        "count": len(page),
+        "searched_files": searched_files,
+        "skipped_non_utf8": skipped_files,
+        "truncated": truncated,
+        "next_offset": offset + len(page) if truncated else None,
+        "engine": "python",
+    }
