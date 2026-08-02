@@ -93,11 +93,12 @@ def fetch_models(
     if not candidates:
         return []
 
-    headers: Dict[str, str] = {"Accept": "application/json"}
+    headers: Dict[str, str] = {
+        "Accept": "application/json",
+        "User-Agent": custom_user_agent or "ChatTree",
+    }
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    if custom_user_agent:
-        headers["User-Agent"] = custom_user_agent
     if extra_headers:
         headers.update(extra_headers)
 
