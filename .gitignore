@@ -26,9 +26,9 @@ dist-server-binary-*/
 !.chattree/agents/general.md
 *.lnk
 /.trae/
+/.workbuddy/
 /AGENTS.md
 /CLAUDE.md
 /CAPABILITIES.md
-/ChatTree-Agent软件工程说明.md
 /chattree.sqlite*
 /test.json

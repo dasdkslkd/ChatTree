@@ -30,12 +30,12 @@ import type {
   ModelProviderConfig,
 } from '@/types/model';
 
-const SUBSCRIPTION_OPTIONS: {
-  value: '' | 'codex' | 'copilot' | 'claude';
+const AUTH_OPTIONS: {
+  value: 'api_key' | 'codex' | 'copilot' | 'claude';
   label: string;
   description: string;
 }[] = [
-  { value: '', label: '无（API Key）', description: '使用 API Key 认证' },
+  { value: 'api_key', label: 'API Key', description: '使用 API Key 认证' },
   { value: 'codex', label: 'ChatGPT Plus/Pro', description: 'OAuth 设备码登录' },
   { value: 'copilot', label: 'GitHub Copilot', description: 'OAuth 设备码登录' },
   { value: 'claude', label: 'Claude (Anthropic)', description: '从 Claude CLI 导入' },
@@ -704,11 +704,11 @@ export function ProvidersSection() {
               )}
 
               <div className="space-y-2">
-                <Label>订阅类型</Label>
+                <Label>认证方式</Label>
                 <Select
-                  value={currentSubscription || ''}
+                  value={currentSubscription || 'api_key'}
                   onValueChange={(v) => {
-                    const sub = v as '' | 'codex' | 'copilot' | 'claude';
+                    const sub = v === 'api_key' ? undefined : v as 'codex' | 'copilot' | 'claude';
                     setEditForm(f => ({
                       ...f,
                       auth: sub ? { type: 'oauth', subscription: sub } : undefined,
@@ -718,8 +718,8 @@ export function ProvidersSection() {
                 >
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
-                    {SUBSCRIPTION_OPTIONS.map(opt => (
-                      <SelectItem key={opt.value || 'none'} value={opt.value || 'none'} textValue={opt.label}>
+                    {AUTH_OPTIONS.map(opt => (
+                      <SelectItem key={opt.value} value={opt.value} textValue={opt.label}>
                         <div className="flex flex-col">
                           <span>{opt.label}</span>
                           <span className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>{opt.description}</span>
