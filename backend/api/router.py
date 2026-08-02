@@ -8,6 +8,7 @@ from backend.api.routes import (
     capabilities,
     config,
     conversations,
+    files,
     messages,
     models,
     notifications,
@@ -28,6 +29,7 @@ from backend.api.routes import server as server_routes
 _BUSINESS_ROUTERS = (
     (config.router, ["配置"]),
     (conversations.router, ["对话"]),
+    (files.router, ["文件"]),
     (messages.router, ["消息"]),
     (models.router, ["模型"]),
     (prompts.router, ["提示词"]),
