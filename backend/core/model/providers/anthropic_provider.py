@@ -531,7 +531,7 @@ class AnthropicProvider(BaseProvider):
                 status=StreamStatus.ERROR, content=None,
                 node_id=stream_controller.node_id if stream_controller else None,
                 conversation_id=stream_controller.conversation_id if stream_controller else None,
-                error=str(e), tokens_used=total_tokens,
+                error=str(e) or e.__class__.__name__, tokens_used=total_tokens,
             )
 
     def _openai_tool_to_anthropic_tool(self, tool: Dict[str, Any]) -> Dict[str, Any]:

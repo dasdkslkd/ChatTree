@@ -169,23 +169,6 @@ def create_app(
         request: Request,
         exc: ProxyError,
     ) -> Response:
-        profile_id = getattr(exc, "profile_id", None)
-        connection_epoch = getattr(exc, "connection_epoch", None)
-        if (
-            profile_id
-            and connection_epoch is not None
-            and exc.code == "proxy_upstream_unavailable"
-        ):
-            sessions.mark_error(
-                profile_id,
-                LauncherError(
-                    exc.code,
-                    exc.message,
-                    exc.retryable,
-                    exc.status_code,
-                ),
-                connection_epoch=connection_epoch,
-            )
         response = await launcher_error_response(request, exc)
         connection_lease_id = getattr(exc, "connection_lease_id", None)
         if isinstance(connection_lease_id, str):

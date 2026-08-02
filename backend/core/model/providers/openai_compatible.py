@@ -474,7 +474,7 @@ class OpenAICompatibleProvider(BaseProvider):
                 content=None,
                 node_id=stream_controller.node_id if stream_controller else None,
                 conversation_id=stream_controller.conversation_id if stream_controller else None,
-                error=str(e),
+                error=str(e) or e.__class__.__name__,
                 tokens_used=total_tokens,
             )
 

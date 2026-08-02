@@ -391,10 +391,13 @@ class TranscriptAssembler:
                 call = payload
                 append_tool_call(call)
         append_process_item()
+        stream_usage = (stream or {}).get("usage_info")
         if (
             stream and raw_status in {"stopping", "stopped", "error"}
         ) or (
             raw_status == "error" and error_message
+        ) or (
+            stream and stream_usage and raw_status == "running"
         ):
             items.append(self._run_status_item(
                 conversation_id,
@@ -402,6 +405,7 @@ class TranscriptAssembler:
                 stream_run_id or self._latest_run_id(runs),
                 raw_status,
                 error_message,
+                stream_usage,
             ))
         for notification in task_notifications:
             items.append(self._task_notification_item(conversation_id, notification))
@@ -749,6 +753,7 @@ class TranscriptAssembler:
         run_id: str | None,
         status: str,
         message: str | None,
+        usage: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         item = {
             "type": "run_status",
@@ -760,6 +765,8 @@ class TranscriptAssembler:
         }
         if message:
             item["message"] = message
+        if usage:
+            item["usage"] = usage
         return item
 
     def _plan_question_item(
@@ -1113,6 +1120,7 @@ class TranscriptPatchSession:
         error_message = ""
         tool_calls: list[dict[str, Any]] = []
         result_overrides_by_call_id: dict[str, dict[str, Any]] = {}
+        usage_info: dict[str, Any] | None = None
 
         def upsert_tool_call(call: dict[str, Any]) -> None:
             for existing in tool_calls:
@@ -1165,6 +1173,8 @@ class TranscriptPatchSession:
                 status = 'stopping'
             if event.get("error"):
                 error_message = str(event["error"])
+            if isinstance(event.get("usage_info"), dict):
+                usage_info = event["usage_info"]
 
             if isinstance(event.get("reasoning"), str):
                 reasoning += str(event["reasoning"])
@@ -1241,6 +1251,7 @@ class TranscriptPatchSession:
             "result_overrides_by_call_id": result_overrides_by_call_id,
             "answer": answer,
             "error_message": error_message or None,
+            "usage_info": usage_info,
         }
 
     def _event_tool_calls(self, event: dict[str, Any]) -> list[dict[str, Any]]:

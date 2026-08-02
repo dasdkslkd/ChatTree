@@ -2597,10 +2597,12 @@ class ChatManager:
         return target_model, target_provider
 
     def _rough_token_count_for_messages(self, messages: List[Dict[str, Any]]) -> int:
-        total_chars = 0
+        total_tokens = 0
         for message in messages:
-            total_chars += len(str(message.get("content") or ""))
-        return max(total_chars // 4, len(messages))
+            content = str(message.get("content") or "")
+            cjk = sum(1 for c in content if '\u4e00' <= c <= '\u9fff' or '\u3400' <= c <= '\u4dbf' or '\uf900' <= c <= '\ufaff')
+            total_tokens += cjk + (len(content) - cjk) // 4
+        return max(total_tokens, len(messages))
 
     def _restore_import_file_context(
         self,

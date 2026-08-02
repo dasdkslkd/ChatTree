@@ -1,3 +1,5 @@
+import type { UsageInfo } from './message';
+
 export type TranscriptItemType =
   | 'user_message'
   | 'assistant_process'
@@ -130,6 +132,7 @@ export interface RunStatusItem extends TranscriptItemBase {
   run_id: NullableId;
   status: 'running' | 'stopping' | 'stopped' | 'error' | 'reconnecting';
   message?: string | null;
+  usage?: UsageInfo;
 }
 
 export type TranscriptItem =

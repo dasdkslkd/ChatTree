@@ -60,7 +60,7 @@ import type {
   TaskContextMode,
 } from '../types/message';
 import type { ActiveTaskRecord } from '../types/task';
-import type { PlanApprovalItem, PlanQuestionItem, ToolApprovalItem, TranscriptItem, TranscriptPatch, UserMessageItem } from '../types/transcript';
+import type { PlanApprovalItem, PlanQuestionItem, ToolApprovalItem, TranscriptItem, TranscriptPatch, UserMessageItem, RunStatusItem } from '../types/transcript';
 import type { MultiAgentMode, WorkspaceContext } from '../types/conversation';
 import type { ProjectCapabilityConfig } from '../types/model';
 import { useConversationStore } from '../store/conversationStore';
@@ -1120,6 +1120,25 @@ export default function ChatPage() {
       const visible = getCurrentVisibleTranscriptTip();
       if (!visible || visible.conversationId !== patch.conversation_id) return;
       if (!shouldPatchRunIntoMainConversation(sourceRun)) return;
+      const statusItem = patch.operations
+        .filter(op => op.op === 'upsert')
+        .map(op => op.item)
+        .find(item => item.type === 'run_status') as RunStatusItem | undefined;
+      if (statusItem?.usage) {
+        const storeState = useConversationStore.getState();
+        if (storeState.treeData) {
+          useConversationStore.setState({
+            treeData: {
+              ...storeState.treeData,
+              nodes: storeState.treeData.nodes.map(n =>
+                n.id === patch.node_id
+                  ? { ...n, usage: { ...(n.usage ?? {}), active_context_usage: statusItem.usage } }
+                  : n
+              ),
+            },
+          });
+        }
+      }
       if (visible.tipNodeId !== patch.node_id) {
         const targetLandedFromVisibleNode = patch.operations.some((operation) =>
           operation.op === 'upsert'

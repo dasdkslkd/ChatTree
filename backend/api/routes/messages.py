@@ -395,7 +395,7 @@ async def _produce_chat_run(
                     await event_batcher.append(chunk_data)
                 if chunk_status == "error":
                     final_status = RunStatus.FAILED
-                    final_error = chunk_data.get("error")
+                    final_error = chunk_data.get("error") or "unknown error"
                 elif chunk_status == "stopped":
                     final_status = RunStatus.CANCELLED
     except asyncio.CancelledError:
