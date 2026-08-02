@@ -67,6 +67,7 @@ class ModelManager:
             latest = cfg.get_provider_config(provider) or {}
             cached.config.clear()
             cached.config.update(latest)
+            cached.config["model_transport"] = dict(cfg.data["model_transport"])
             cached.config["is_async"] = is_async
             cached.route = route
             return cached
@@ -86,6 +87,7 @@ class ModelManager:
             raise ModelRouteError(f"未实现的模型协议: {route['protocol']}")
 
         config = dict(provider_config)
+        config["model_transport"] = dict(cfg.data["model_transport"])
         config["is_async"] = is_async
         instance = provider_class(config, route)
         instance._is_async = is_async

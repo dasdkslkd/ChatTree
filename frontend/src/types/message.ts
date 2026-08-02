@@ -4,6 +4,7 @@ export interface GenerationInfo {
   duration_ms: number;  // 生成用时（毫秒）
   status: 'completed' | 'error' | 'stopped';  // 生成状态
   error_message?: string | null;  // 错误信息
+  finish_reason?: string | null;  // 上游结束原因
   tokens_used?: number;  // 使用的token数
   usage_info?: UsageInfo | null;
 }

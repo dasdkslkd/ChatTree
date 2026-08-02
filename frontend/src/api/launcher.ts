@@ -40,6 +40,10 @@ export type LauncherApi = Readonly<{
     profileId: string,
     signal?: AbortSignal,
   ): Promise<LauncherProfileStatus>;
+  connectProfile(
+    profileId: string,
+    signal?: AbortSignal,
+  ): Promise<LauncherProfileStatus>;
   stopLocalServer(
     profileId: string,
     expectedServerInstanceId: string,
@@ -90,6 +94,14 @@ export function createLauncherApi(
       const response = await client.get<LauncherProfileStatus>(
         `/profiles/${encodeURIComponent(profileId)}/status`,
         { signal, timeout: 5000 },
+      );
+      return response.data;
+    },
+    async connectProfile(profileId, signal) {
+      const response = await client.post<LauncherProfileStatus>(
+        `/profiles/${encodeURIComponent(profileId)}/connect`,
+        {},
+        { signal },
       );
       return response.data;
     },

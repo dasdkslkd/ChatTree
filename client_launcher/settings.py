@@ -16,7 +16,6 @@ DEFAULT_LAUNCHER_PORT = 0
 MAX_CONNECT_TIMEOUT_SECONDS = 60.0
 MAX_START_TIMEOUT_SECONDS = 600.0
 MAX_POLL_INTERVAL_SECONDS = 10.0
-MAX_PROXY_IDLE_TIMEOUT_SECONDS = 3600.0
 PROFILES_FILENAME = "profiles.json"
 PROFILES_SCHEMA_VERSION = 2
 
@@ -90,7 +89,6 @@ class LauncherSettings:
     start_timeout_seconds: float = 30.0
     poll_interval_seconds: float = 0.2
     max_request_body_bytes: int = 64 * 1024 * 1024
-    proxy_idle_timeout_seconds: float = 300.0
     frontend_dist: Path | None = None
     allowed_origins: tuple[str, ...] = DEFAULT_ALLOWED_ORIGINS
 
@@ -168,12 +166,6 @@ class LauncherSettings:
                 "CHATTREE_CLIENT_MAX_REQUEST_BODY_BYTES",
                 64 * 1024 * 1024,
                 minimum=1,
-            ),
-            proxy_idle_timeout_seconds=_float_setting(
-                values,
-                "CHATTREE_CLIENT_PROXY_IDLE_TIMEOUT_SECONDS",
-                300.0,
-                maximum=MAX_PROXY_IDLE_TIMEOUT_SECONDS,
             ),
             frontend_dist=frontend_dist,
             allowed_origins=allowed_origins,

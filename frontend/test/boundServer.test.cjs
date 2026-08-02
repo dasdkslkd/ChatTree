@@ -70,6 +70,9 @@ async function testProbeUsesExactlyOneStatusAndOneProxiedHandshake() {
       calls.push(['status', signal]);
       return readyStatus();
     },
+    connect: async () => {
+      throw new Error('ready profiles must not reconnect');
+    },
     getHandshake: async (expectedLeaseId, signal) => {
       calls.push(['handshake', expectedLeaseId, signal]);
       return handshake();
@@ -94,10 +97,40 @@ async function assertProbeRejects(errorType, status, result) {
   await assert.rejects(
     probeBoundServerContext({
       getStatus: async () => status,
+      connect: async () => status,
       getHandshake: async () => result,
     }, PROFILE),
     errorType,
   );
+}
+
+async function testProbeReconnectsNonReadyProfile() {
+  const calls = [];
+  const context = await probeBoundServerContext({
+    getStatus: async () => {
+      calls.push('status');
+      return readyStatus({
+        status: 'error',
+        server_instance_id: null,
+        error: {
+          code: 'proxy_upstream_unavailable',
+          message: 'Server is unavailable',
+          retryable: true,
+        },
+      });
+    },
+    connect: async () => {
+      calls.push('connect');
+      return readyStatus();
+    },
+    getHandshake: async () => {
+      calls.push('handshake');
+      return handshake();
+    },
+  }, PROFILE);
+
+  assert.deepEqual(calls, ['status', 'connect', 'handshake']);
+  assert.equal(context.serverInstanceId, SERVER_ID);
 }
 
 async function testStatusMustBeReadyAndMatchProfile() {
@@ -161,6 +194,9 @@ async function testLauncherTerminalProtocolErrorFailsWithoutRetryingHandshake() 
   await assert.rejects(
     probeBoundServerContext({
       getStatus: async () => status,
+      connect: async () => {
+        throw new Error('terminal profile errors must not reconnect');
+      },
       getHandshake: async () => {
         handshakeCalls += 1;
         return handshake();
@@ -185,6 +221,7 @@ async function testOldServerMissingRequiredFeatureFailsBeforeWorkspaceMounts() {
   await assert.rejects(
     probeBoundServerContext({
       getStatus: async () => readyStatus(),
+      connect: async () => readyStatus(),
       getHandshake: async () => handshake({ features }),
     }, PROFILE),
     (error) => (
@@ -197,6 +234,7 @@ async function testOldServerMissingRequiredFeatureFailsBeforeWorkspaceMounts() {
 
 (async () => {
   await testProbeUsesExactlyOneStatusAndOneProxiedHandshake();
+  await testProbeReconnectsNonReadyProfile();
   await testStatusMustBeReadyAndMatchProfile();
   await testHandshakeMustMatchLeaseIdentityAndProtocol();
   await testLauncherTerminalProtocolErrorFailsWithoutRetryingHandshake();

@@ -12,11 +12,8 @@ from ..base import BaseProvider, logger
 from ..usage import estimated_usage, usage_from_gemini, usage_total
 from ...config.types import Message, ModelRoute, StreamChunk, StreamStatus, StreamController
 from .retry import RetryPolicy, RetryableHTTPError, classify_retry_error, run_with_retries, sleep_before_retry
-from .sse import iter_decoded_sse_lines
+from .sse import StreamStopped, iter_sse_lines
 from .multimodal import to_gemini_parts
-from .stream_queue import StreamStopped, get_queue_item_or_stop
-
-_SENTINEL = object()
 
 
 class GeminiHTTPError(RetryableHTTPError):
@@ -46,6 +43,7 @@ class GeminiProvider(BaseProvider):
         headers = {
             "Content-Type": "application/json",
             "x-goog-api-key": self.config.get("api_key", ""),
+            "User-Agent": self.config.get("custom_user_agent") or "ChatTree",
         }
         if stream:
             headers["Accept"] = "text/event-stream"
@@ -87,32 +85,6 @@ class GeminiProvider(BaseProvider):
         except urllib.error.HTTPError as exc:
             error_body = exc.read().decode("utf-8", errors="replace")
             raise GeminiHTTPError(exc.code, error_body, dict(exc.headers or {})) from exc
-
-    def _stream_to_queue(
-        self,
-        path: str,
-        body: Dict[str, Any],
-        queue: asyncio.Queue,
-        loop: asyncio.AbstractEventLoop,
-    ):
-        req = urllib.request.Request(
-            self._url(path, {"alt": "sse"}),
-            data=json.dumps(self._clean_payload(body)).encode("utf-8"),
-            headers=self._headers(stream=True),
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=300) as resp:
-                for line in iter_decoded_sse_lines(resp):
-                    if line:
-                        loop.call_soon_threadsafe(queue.put_nowait, line)
-        except urllib.error.HTTPError as exc:
-            error_body = exc.read().decode("utf-8", errors="replace")
-            loop.call_soon_threadsafe(queue.put_nowait, GeminiHTTPError(exc.code, error_body, dict(exc.headers or {})))
-        except Exception as exc:
-            loop.call_soon_threadsafe(queue.put_nowait, exc)
-        finally:
-            loop.call_soon_threadsafe(queue.put_nowait, _SENTINEL)
 
     def _convert_messages(self, messages: List[Message]) -> Tuple[Optional[str], List[Dict[str, Any]]]:
         system_prompt = ""
@@ -338,6 +310,7 @@ class GeminiProvider(BaseProvider):
         usage_info = None
         native_parts: List[Dict[str, Any]] = []
         native_tool_call_ids: List[str] = []
+        finish_reason: Optional[str] = None
 
         try:
             body = self._build_body(
@@ -352,13 +325,14 @@ class GeminiProvider(BaseProvider):
                 tool_choice=tool_choice,
             )
 
-            stream_policy = RetryPolicy.from_config(self.config, stream=True)
+            stream_policy = RetryPolicy.from_config(self.config)
             retry_failures = 0
             tool_call_started = False
             while True:
                 attempt_had_output = False
                 native_parts = []
                 native_tool_call_ids = []
+                finish_reason = None
                 try:
                     async for event in self._iter_sse_events(
                         self.route["endpoint"].format(model=model).replace(
@@ -368,8 +342,14 @@ class GeminiProvider(BaseProvider):
                         body,
                         stream_controller=stream_controller,
                     ):
-                        attempt_had_output = True
                         for candidate in event.get("candidates") or []:
+                            observed_finish_reason = candidate.get("finishReason")
+                            if observed_finish_reason:
+                                raw_finish_reason = str(observed_finish_reason).strip().lower()
+                                finish_reason = {
+                                    "stop": "stop",
+                                    "max_tokens": "length",
+                                }.get(raw_finish_reason, raw_finish_reason)
                             content = candidate.get("content") or {}
                             for part in content.get("parts") or []:
                                 if isinstance(part, dict):
@@ -501,6 +481,8 @@ class GeminiProvider(BaseProvider):
 
             if usage_info is None:
                 usage_info = estimated_usage(total_tokens)
+            if native_tool_call_ids and finish_reason in {None, "stop"}:
+                finish_reason = "tool_calls"
             state_layout = []
             has_state = False
             tool_position = 0
@@ -569,6 +551,7 @@ class GeminiProvider(BaseProvider):
                 error=None,
                 tokens_used=total_tokens,
                 usage_info=usage_info,
+                metadata={"finish_reason": finish_reason or "unknown"},
             )
 
         except asyncio.CancelledError:
@@ -598,17 +581,14 @@ class GeminiProvider(BaseProvider):
         *,
         stream_controller: Optional[StreamController] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
-        queue: asyncio.Queue = asyncio.Queue()
-        loop = asyncio.get_event_loop()
-        loop.run_in_executor(None, self._stream_to_queue, path, body, queue, loop)
-
-        while True:
-            item = await get_queue_item_or_stop(queue, stream_controller)
-            if item is _SENTINEL:
-                break
-            if isinstance(item, Exception):
-                raise item
-            line = str(item)
+        async for line in iter_sse_lines(
+            self._url(path, {"alt": "sse"}),
+            self._clean_payload(body),
+            self._headers(stream=True),
+            self.config,
+            GeminiHTTPError,
+            stream_controller,
+        ):
             if not line.startswith("data: "):
                 continue
             payload = line[6:].strip()

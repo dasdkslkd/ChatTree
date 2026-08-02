@@ -71,9 +71,10 @@ class FailingAssistantMessageRepository(ChatRepository):
 
 
 class StaticProvider:
-    def __init__(self, *, content: str, reasoning: str = ""):
+    def __init__(self, *, content: str, reasoning: str = "", finish_reason: str = "stop"):
         self.content = content
         self.reasoning = reasoning
+        self.finish_reason = finish_reason
 
     async def generate_response_stream(
         self,
@@ -107,6 +108,7 @@ class StaticProvider:
             conversation_id=stream_controller.conversation_id,
             error=None,
             tokens_used=1,
+            metadata={"finish_reason": self.finish_reason},
         )
 
 
@@ -145,6 +147,71 @@ def test_send_message_stream_writes_canonical_rows_for_transcript_assembler(tmp_
         ("user_message", "hello sqlite"),
         ("assistant_answer", "ok"),
     ]
+
+
+def test_incomplete_finish_reason_is_persisted_and_rendered_as_error(tmp_path: Path):
+    manager, repository, persistence = _make_manager(tmp_path)
+    manager.model_manager.provider = StaticProvider(
+        content="partial answer",
+        finish_reason="length",
+    )
+    conversation = manager.create_conversation("incomplete finish")
+
+    chunks = asyncio.run(collect_chunks(manager.send_message_stream(
+        conversation.metadata["id"],
+        "write the file",
+        model_id="fake-model",
+        parent_node_id=conversation.current_node_id,
+    )))
+
+    assert chunks[-1]["status"] == StreamStatus.ERROR
+    assert chunks[-1]["metadata"]["finish_reason"] == "length"
+    assert "finish_reason=length" in chunks[-1]["error"]
+    with repository.persistence.connect() as conn:
+        row = conn.execute(
+            """
+            SELECT metadata_json
+            FROM messages
+            WHERE conversation_id = ? AND subtype = 'assistant_answer'
+            """,
+            (conversation.metadata["id"],),
+        ).fetchone()
+    generation = json.loads(row["metadata_json"])["generation_info"]
+    assert generation["status"] == "error"
+    assert generation["finish_reason"] == "length"
+    answer = next(
+        item
+        for item in _items(
+            persistence,
+            conversation.metadata["id"],
+            manager.get_conversation(conversation.metadata["id"]).current_node_id,
+        )
+        if item["type"] == "assistant_answer"
+    )
+    assert answer["status"] == "error"
+    assert answer["finish_reason"] == "length"
+
+
+def test_missing_finish_reason_is_rejected_as_unknown(tmp_path: Path):
+    manager, repository, _persistence = _make_manager(tmp_path)
+    manager.model_manager.provider = StaticProvider(content="partial", finish_reason=None)
+    conversation = manager.create_conversation("missing finish")
+
+    chunks = asyncio.run(collect_chunks(manager.send_message_stream(
+        conversation.metadata["id"],
+        "respond",
+        model_id="fake-model",
+        parent_node_id=conversation.current_node_id,
+    )))
+
+    assert chunks[-1]["status"] == StreamStatus.ERROR
+    assert chunks[-1]["metadata"]["finish_reason"] == "unknown"
+    with repository.persistence.connect() as conn:
+        row = conn.execute(
+            "SELECT metadata_json FROM messages WHERE conversation_id = ? AND role = 'assistant'",
+            (conversation.metadata["id"],),
+        ).fetchone()
+    assert json.loads(row["metadata_json"])["generation_info"]["finish_reason"] == "unknown"
 
 
 def test_user_canonical_write_failure_aborts_stream(tmp_path: Path):
@@ -458,6 +525,7 @@ class ToolCallingProvider:
             conversation_id=stream_controller.conversation_id,
             error=None,
             tokens_used=1,
+            metadata={"finish_reason": "tool_calls" if self.calls == 1 else "stop"},
         )
 
 
@@ -514,6 +582,7 @@ class PreambleToolCallingProvider:
             conversation_id=stream_controller.conversation_id,
             error=None,
             tokens_used=1,
+            metadata={"finish_reason": "tool_calls" if self.calls == 1 else "stop"},
         )
 
 
@@ -562,6 +631,7 @@ class SpuriousStepProvider:
             conversation_id=stream_controller.conversation_id,
             error=None,
             tokens_used=1,
+            metadata={"finish_reason": "tool_calls" if len(self.calls) == 1 else "stop"},
         )
 
 
@@ -932,6 +1002,7 @@ class TwoToolCallingProvider:
                 conversation_id=stream_controller.conversation_id,
                 error=None,
                 tokens_used=1,
+                metadata={"finish_reason": "stop"},
             )
             yield StreamChunk(
                 status=StreamStatus.COMPLETE,
@@ -961,6 +1032,7 @@ class TwoToolCallingProvider:
             conversation_id=stream_controller.conversation_id,
             error=None,
             tokens_used=1,
+            metadata={"finish_reason": "tool_calls"},
         )
 
 
@@ -1120,6 +1192,7 @@ class InterleavedToolCallingProvider:
             conversation_id=stream_controller.conversation_id,
             error=None,
             tokens_used=1,
+            metadata={"finish_reason": "tool_calls" if self.calls < 3 else "stop"},
         )
 
 

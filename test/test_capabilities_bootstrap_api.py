@@ -306,7 +306,12 @@ def test_capabilities_reload_rebuilds_registry_from_disk(tmp_path, monkeypatch):
         "Initial skill",
     )
     config_manager = Config(str(tmp_path / "config.json"))
-    config_manager.data = {"provider": {}, "default_provider": "", "tools": {}}
+    config_manager.data = {
+        **config_manager.data,
+        "provider": {},
+        "default_provider": "",
+        "tools": {},
+    }
     config_manager.save()
     registry = build_capability_registry(
         project_root,

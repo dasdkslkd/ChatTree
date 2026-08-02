@@ -126,7 +126,6 @@ def test_proxy_preserves_http_semantics_and_filters_hop_by_hop_headers() -> None
                 resolve_endpoint,
                 http_client=upstream_client,
                 connect_timeout=1.25,
-                read_timeout=9.5,
             )
         )
         app.add_middleware(RequestBoundaryMiddleware)
@@ -175,7 +174,7 @@ def test_proxy_preserves_http_semantics_and_filters_hop_by_hop_headers() -> None
         assert "proxy-authorization" not in seen["headers"]
         assert seen["timeout"] == {
             "connect": 1.25,
-            "read": 9.5,
+            "read": None,
             "write": 1.25,
             "pool": 1.25,
         }

@@ -59,6 +59,7 @@ export interface AssistantAnswerItem extends TranscriptItemBase {
   message_id: string;
   content: string;
   status: 'complete' | 'stopped' | 'error';
+  finish_reason?: string | null;
 }
 
 export interface PlanQuestionOption {

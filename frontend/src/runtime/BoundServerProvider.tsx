@@ -61,6 +61,10 @@ export function BoundServerProvider({
               profile.profileId,
               signal,
             ),
+            connect: (signal) => launcher.connectProfile(
+              profile.profileId,
+              signal,
+            ),
             getHandshake: server.handshake,
           }, profile, controller.signal);
           onInitialContext?.(context);

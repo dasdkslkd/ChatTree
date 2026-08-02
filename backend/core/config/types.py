@@ -86,6 +86,7 @@ class GenerationInfo(TypedDict, total=False):
     duration_ms: int  # 生成用时（毫秒）
     status: str  # 生成状态：completed, error, stopped
     error_message: Optional[str]  # 错误信息
+    finish_reason: Optional[str]  # 上游结束原因
     tokens_used: int  # 使用的token数
 
 

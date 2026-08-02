@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -15,6 +17,7 @@ from backend.api.dependencies import (
 )
 from backend.core.agents import SubagentExecutor
 from backend.core.chat.chat_manager import ChatManager
+from backend.core.config.config import cfg
 from backend.core.perf import get_profiler
 from backend.core.runs import RunManager
 from backend.core.runs.types import FINISHED_RUN_STATUSES
@@ -65,16 +68,38 @@ async def _subscribe_sse(
         if int(payload.get("event_index") or 0) >= max(0, int(from_event or 0)):
             break
         patch_session.feed(payload, emit=False)
+    heartbeat_seconds = float(cfg.data["model_transport"]["sse_heartbeat_seconds"])
     with profiler.span("sse.subscribe", run_id=run_id, from_event=from_event, route="runs"):
-        async for payload in run_manager.subscribe(run_id, from_event):
-            if first_event:
-                profiler.mark("sse.first_event", run_id=run_id, route="runs")
-                first_event = False
-            patch = patch_session.feed(payload)
-            if patch is None:
-                continue
-            emitted += 1
-            yield _format_sse_data(patch)
+        subscription = run_manager.subscribe(run_id, from_event)
+        pending: asyncio.Task | None = None
+        try:
+            while True:
+                if pending is None:
+                    pending = asyncio.create_task(anext(subscription))
+                done, _ = await asyncio.wait({pending}, timeout=heartbeat_seconds)
+                if not done:
+                    yield ": keepalive\n\n"
+                    continue
+                try:
+                    payload = pending.result()
+                except StopAsyncIteration:
+                    break
+                finally:
+                    pending = None
+                if first_event:
+                    profiler.mark("sse.first_event", run_id=run_id, route="runs")
+                    first_event = False
+                patch = patch_session.feed(payload)
+                if patch is None:
+                    continue
+                emitted += 1
+                yield _format_sse_data(patch)
+        finally:
+            if pending is not None and not pending.done():
+                pending.cancel()
+                with suppress(asyncio.CancelledError):
+                    await pending
+            await subscription.aclose()
     if first_event:
         run = run_manager.get_run(run_id)
         if run and run.get("status") in finished_status_values:

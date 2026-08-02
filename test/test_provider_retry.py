@@ -9,12 +9,12 @@ from backend.core.model.providers.openai_compatible import OpenAICompatibleProvi
 def _retry_config(max_request_retries=2, max_stream_retries=1):
     return {
         "api_key": "test",
-        "retry": {
+        "model_transport": {
             "max_request_retries": max_request_retries,
             "max_stream_retries": max_stream_retries,
-            "base_delay_seconds": 0,
-            "max_delay_seconds": 0,
-            "jitter_fraction": 0,
+            "retry_base_delay_seconds": 0,
+            "retry_max_delay_seconds": 0,
+            "retry_jitter_fraction": 0,
         },
     }
 

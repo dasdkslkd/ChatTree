@@ -137,6 +137,7 @@ class FakeProvider:
             conversation_id=stream_controller.conversation_id,
             error=None,
             tokens_used=1,
+            metadata={"finish_reason": "tool_calls"},
             usage_info={
                 "input_tokens": 1,
                 "output_tokens": 0,
@@ -192,6 +193,7 @@ class ApprovalPersistenceProvider:
             conversation_id=stream_controller.conversation_id,
             error=None,
             tokens_used=1,
+            metadata={"finish_reason": "tool_calls" if self.calls == 1 else "stop"},
             usage_info={
                 "input_tokens": 1,
                 "output_tokens": 1,
@@ -232,6 +234,7 @@ class PlainAssistantProvider:
             conversation_id=stream_controller.conversation_id,
             error=None,
             tokens_used=1,
+            metadata={"finish_reason": "stop"},
             usage_info={
                 "input_tokens": 1,
                 "output_tokens": 1,
@@ -320,6 +323,7 @@ class ParallelToolSnapshotProvider:
             conversation_id=stream_controller.conversation_id,
             error=None,
             tokens_used=1,
+            metadata={"finish_reason": "tool_calls" if self.calls == 1 else "stop"},
             usage_info={
                 "input_tokens": 1,
                 "output_tokens": 1,
@@ -368,6 +372,9 @@ class SequentialToolProvider:
             conversation_id=stream_controller.conversation_id,
             error=None,
             tokens_used=1,
+            metadata={
+                "finish_reason": "tool_calls" if self.calls <= self.tool_rounds else "stop"
+            },
             usage_info={
                 "input_tokens": 1,
                 "output_tokens": 1,
@@ -459,6 +466,7 @@ class StopAwareApprovalProvider:
             conversation_id=stream_controller.conversation_id,
             error=None,
             tokens_used=1,
+            metadata={"finish_reason": "tool_calls"},
             usage_info={
                 "input_tokens": 1,
                 "output_tokens": 0,

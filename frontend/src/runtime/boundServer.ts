@@ -22,6 +22,7 @@ export const REQUIRED_SERVER_FEATURES = Object.freeze([
 
 export type BoundServerProbeDependencies = Readonly<{
   getStatus(signal?: AbortSignal): Promise<LauncherProfileStatus>;
+  connect(signal?: AbortSignal): Promise<LauncherProfileStatus>;
   getHandshake(
     expectedLeaseId: string,
     signal?: AbortSignal,
@@ -33,9 +34,23 @@ export async function probeBoundServerContext(
   profile: ProfileContext,
   signal?: AbortSignal,
 ): Promise<BoundServerContext> {
-  const status = await deps.getStatus(signal);
+  let status = await deps.getStatus(signal);
   if (status.profile_id !== profile.profileId) {
     throw new BoundServerIdentityError('Launcher returned a different Profile');
+  }
+  if (status.status === 'error' && status.error && !status.error.retryable) {
+    throw new BoundServerStatusError(
+      status.error.code,
+      status.error.message,
+      status.error.retryable,
+      status.error.details,
+    );
+  }
+  if (status.status !== 'ready') {
+    status = await deps.connect(signal);
+    if (status.profile_id !== profile.profileId) {
+      throw new BoundServerIdentityError('Launcher connected a different Profile');
+    }
   }
   if (status.status === 'error' && status.error) {
     throw new BoundServerStatusError(

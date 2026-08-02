@@ -1,4 +1,7 @@
+import json
 from pathlib import Path
+
+import pytest
 
 from backend.core import home
 
@@ -48,3 +51,21 @@ def test_default_config_uses_chattree_home(monkeypatch, tmp_path):
     config = Config()
 
     assert Path(config.config_path) == configured_home / "config.json"
+
+
+def test_existing_config_requires_complete_model_transport(tmp_path):
+    from backend.core.config.config import Config
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps({
+            "provider": {},
+            "default_provider": "",
+            "default_model": "",
+            "model_transport": {"request_deadline_seconds": 1},
+        }),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="字段不完整"):
+        Config(str(config_path))

@@ -1,6 +1,7 @@
 import asyncio
 import json
 from copy import deepcopy
+from unittest.mock import MagicMock
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -9,7 +10,7 @@ from backend.api.dependencies import get_model_manager
 from backend.api.routes import openai_proxy
 from backend.core.chat.canonical_reader import model_state_items_by_node
 from backend.core.chat.chat_manager import ChatManager
-from backend.core.config.config import cfg
+from backend.core.config.config import DEFAULT_MODEL_TRANSPORT, cfg
 from backend.core.config.types import (
     ModelProtocol,
     ModelRoute,
@@ -18,6 +19,7 @@ from backend.core.config.types import (
 )
 from backend.core.model.model_manager import ModelManager
 from backend.core.model.model_metadata import initialize_model_metadata
+from backend.core.model.providers import model_fetch
 from backend.core.model.providers.anthropic_provider import AnthropicProvider
 from backend.core.model.providers.gemini_provider import GeminiProvider
 from backend.core.model.providers.openai_compatible import OpenAICompatibleProvider
@@ -63,6 +65,7 @@ def test_one_connection_routes_each_model_from_server_home_metadata(
     monkeypatch.setenv("CHATTREE_HOME", str(tmp_path))
     initialize_model_metadata(tmp_path)
     monkeypatch.setattr(cfg, "data", {
+        "model_transport": DEFAULT_MODEL_TRANSPORT,
         "provider": {
             "gateway": {
                 "name": "Gateway",
@@ -99,6 +102,7 @@ def test_unknown_model_uses_plain_chat_fallback(monkeypatch, tmp_path):
     monkeypatch.setenv("CHATTREE_HOME", str(tmp_path))
     initialize_model_metadata(tmp_path)
     monkeypatch.setattr(cfg, "data", {
+        "model_transport": DEFAULT_MODEL_TRANSPORT,
         "provider": {
             "gateway": {
                 "enabled": True,
@@ -114,6 +118,47 @@ def test_unknown_model_uses_plain_chat_fallback(monkeypatch, tmp_path):
     assert isinstance(model, OpenAICompatibleProvider)
     assert model.route["protocol"] == "openai_chat_completions"
     assert model.route["reasoning_profile"]["carrier"] == "none"
+
+
+def test_provider_requests_send_default_or_configured_user_agent():
+    providers = [
+        OpenAICompatibleProvider(
+            {"api_key": "test"},
+            route(ModelProtocol.OPENAI_CHAT_COMPLETIONS.value),
+        ),
+        AnthropicProvider(
+            {"api_key": "test"},
+            route(ModelProtocol.ANTHROPIC_MESSAGES.value),
+        ),
+        GeminiProvider(
+            {"api_key": "test"},
+            route(ModelProtocol.GEMINI_GENERATE_CONTENT.value),
+        ),
+    ]
+
+    for provider in providers:
+        assert provider._headers()["User-Agent"] == "ChatTree"
+        provider.config["custom_user_agent"] = "custom-client/1.0"
+        assert provider._headers()["User-Agent"] == "custom-client/1.0"
+
+
+def test_model_discovery_sends_default_or_configured_user_agent(monkeypatch):
+    response = MagicMock()
+    response.__enter__.return_value.read.return_value = b'{"data":[{"id":"model"}]}'
+    urlopen = MagicMock(return_value=response)
+    monkeypatch.setattr(model_fetch.urllib.request, "urlopen", urlopen)
+
+    assert model_fetch.fetch_models("https://example.test/v1", "test") == [
+        {"id": "model", "owned_by": None},
+    ]
+    assert urlopen.call_args.args[0].get_header("User-agent") == "ChatTree"
+
+    assert model_fetch.fetch_models(
+        "https://example.test/v1",
+        "test",
+        custom_user_agent="custom-client/1.0",
+    )
+    assert urlopen.call_args.args[0].get_header("User-agent") == "custom-client/1.0"
 
 
 def test_native_continuation_payloads_keep_private_state_and_order():

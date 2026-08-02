@@ -1,38 +1,96 @@
-import sys
+import asyncio
 
-sys.path.insert(0, ".")
+import pytest
 
-from backend.core.model.providers.sse import iter_decoded_sse_lines
-
-
-class ChunkedResponse:
-    def __init__(self, chunks):
-        self.chunks = list(chunks)
-
-    def read(self, _size):
-        if not self.chunks:
-            return b""
-        return self.chunks.pop(0)
+from backend.core.model.providers.retry import RetryableHTTPError
+from backend.core.model.providers.sse import iter_sse_lines
 
 
-def test_iter_decoded_sse_lines_preserves_split_utf8_characters():
-    text = 'data: {"content":"你好🙂"}\n\n'
-    raw = text.encode("utf-8")
-    first_split = raw.index("你".encode("utf-8")) + 1
-    second_split = raw.index("🙂".encode("utf-8")) + 2
-    chunks = [
-        raw[:first_split],
-        raw[first_split:second_split],
-        raw[second_split:],
-    ]
+class FakeResponse:
+    status_code = 200
+    headers = {}
 
-    lines = list(iter_decoded_sse_lines(ChunkedResponse(chunks)))
+    def __init__(self, lines):
+        self.lines = lines
 
-    assert lines == ['data: {"content":"你好🙂"}', ""]
-    assert "�" not in "".join(lines)
+    def aiter_lines(self):
+        return self.lines()
+
+    async def aclose(self):
+        pass
 
 
-def test_iter_decoded_sse_lines_flushes_final_line_without_newline():
-    lines = list(iter_decoded_sse_lines(ChunkedResponse([b"data: ", "尾行".encode("utf-8")])))
+class FakeClient:
+    response = None
 
-    assert lines == ["data: 尾行"]
+    def __init__(self, **_kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        pass
+
+    def build_request(self, *_args, **_kwargs):
+        return object()
+
+    async def send(self, *_args, **_kwargs):
+        return self.response
+
+
+def _config(**overrides):
+    return {
+        "model_transport": {
+            "connect_timeout_seconds": 1,
+            "first_event_timeout_seconds": 1,
+            "stream_idle_timeout_seconds": 1,
+            **overrides,
+        }
+    }
+
+
+def test_first_sse_event_uses_its_own_timeout(monkeypatch):
+    async def lines():
+        await asyncio.sleep(3600)
+        yield ""
+
+    FakeClient.response = FakeResponse(lines)
+    monkeypatch.setattr("backend.core.model.providers.sse.httpx.AsyncClient", FakeClient)
+
+    async def run():
+        stream = iter_sse_lines(
+            "https://example.test/stream",
+            {},
+            {},
+            _config(first_event_timeout_seconds=0.01),
+            RetryableHTTPError,
+        )
+        with pytest.raises(TimeoutError, match="first SSE event"):
+            await anext(stream)
+
+    asyncio.run(run())
+
+
+def test_sse_switches_to_idle_timeout_after_first_line(monkeypatch):
+    async def lines():
+        yield 'data: {"ok":true}'
+        await asyncio.sleep(3600)
+        yield ""
+
+    FakeClient.response = FakeResponse(lines)
+    monkeypatch.setattr("backend.core.model.providers.sse.httpx.AsyncClient", FakeClient)
+
+    async def run():
+        stream = iter_sse_lines(
+            "https://example.test/stream",
+            {},
+            {},
+            _config(stream_idle_timeout_seconds=0.01),
+            RetryableHTTPError,
+        )
+        assert await anext(stream) == 'data: {"ok":true}'
+        with pytest.raises(TimeoutError, match="SSE idle"):
+            await anext(stream)
+
+    asyncio.run(run())

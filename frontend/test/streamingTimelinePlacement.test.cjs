@@ -5,6 +5,10 @@ const path = require('node:path');
 const mainPage = fs.readFileSync(path.join(__dirname, '../src/pages/MainPage.tsx'), 'utf8');
 const transcriptItems = fs.readFileSync(path.join(__dirname, '../src/utils/transcriptItems.ts'), 'utf8');
 const streamManager = fs.readFileSync(path.join(__dirname, '../src/services/streamManager.ts'), 'utf8');
+const assistantAnswer = fs.readFileSync(
+  path.join(__dirname, '../src/components/transcript/items/AssistantAnswerItem.tsx'),
+  'utf8',
+);
 
 function testMainTranscriptUsesSnapshotPlusPatchesOnly() {
   assert.match(mainPage, /items=\{displayTranscriptItems\}/);
@@ -42,8 +46,14 @@ function testTranscriptErrorMessageWrapsInsteadOfTruncating() {
   assert.doesNotMatch(renderer, /truncate">\{item\.message \|\| label\}/);
 }
 
+function testIncompleteAnswerDisplaysProviderFinishReason() {
+  assert.match(assistantAnswer, /item\.status === 'error' && item\.finish_reason/);
+  assert.match(assistantAnswer, /生成未完成：\$\{item\.finish_reason\}/);
+}
+
 testMainTranscriptUsesSnapshotPlusPatchesOnly();
 testPatchReducerHasOnlyUpsertRemovePlacement();
 testStreamManagerConsumesTranscriptPatchPayloads();
 testTranscriptErrorMessageWrapsInsteadOfTruncating();
+testIncompleteAnswerDisplaysProviderFinishReason();
 console.log('streamingTimelinePlacement tests passed');

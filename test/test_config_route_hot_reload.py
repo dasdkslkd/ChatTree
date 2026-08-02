@@ -44,6 +44,7 @@ def test_update_config_refreshes_tool_orchestrator_runtime_references(tmp_path, 
 
         config_manager = Config(str(config_path))
         config_manager.data = {
+            **config_manager.data,
             "provider": {},
             "default_provider": "",
             "tools": {
@@ -125,6 +126,7 @@ def test_update_config_stores_global_defaults_and_strips_provider_default(tmp_pa
         config_manager = Config(str(tmp_path / "config.json"))
         assert config_manager.data["context_window"] is None
         config_manager.data = {
+            **config_manager.data,
             "provider": {
                 "demo": {
                     "name": "Demo",
@@ -150,6 +152,10 @@ def test_update_config_stores_global_defaults_and_strips_provider_default(tmp_pa
             config_route.ConfigUpdateRequest(
                 default_model="alpha",
                 context_window=400_000,
+                model_transport={
+                    "first_event_timeout_seconds": 1200,
+                    "sse_heartbeat_seconds": 10,
+                },
                 provider_configs={
                     "demo": {
                         "name": "Demo",
@@ -165,6 +171,9 @@ def test_update_config_stores_global_defaults_and_strips_provider_default(tmp_pa
 
         assert config_manager.data["default_model"] == "alpha"
         assert config_manager.data["context_window"] == 400_000
+        assert config_manager.data["model_transport"]["first_event_timeout_seconds"] == 1200
+        assert config_manager.data["model_transport"]["stream_idle_timeout_seconds"] == 300
+        assert config_manager.data["model_transport"]["sse_heartbeat_seconds"] == 10
         assert "default_model" not in config_manager.data["provider"]["demo"]
 
         current_tool_manager = app.state.tool_manager

@@ -11,6 +11,7 @@ from backend.core.tools.agent_tools import (
     register_agent_management_tools,
 )
 from backend.core.chat.chat_manager import ChatManager
+from backend.core.config.config import DEFAULT_MODEL_TRANSPORT
 from backend.core.config.types import Message, ModelRoute, Role, StreamStatus
 from backend.core.model.providers.openai_compatible import OpenAICompatibleProvider
 from backend.core.model.providers.anthropic_provider import AnthropicProvider
@@ -46,6 +47,10 @@ def _route(protocol: str) -> ModelRoute:
             "controls": {"summary": "auto"} if protocol == "openai_responses" else {},
         },
     )
+
+
+def _provider_config():
+    return {"api_key": "test", "model_transport": DEFAULT_MODEL_TRANSPORT}
 
 
 def test_tool_filter_allows_aliases_and_denies_disabled():
@@ -477,7 +482,7 @@ def test_execute_tool_calls_returns_tool_messages():
 
 
 def test_openai_tool_call_delta_aggregation():
-    provider = OpenAICompatibleProvider({"api_key": "test"}, _route("openai_chat_completions"))
+    provider = OpenAICompatibleProvider(_provider_config(), _route("openai_chat_completions"))
     accumulator = {}
 
     provider._merge_openai_tool_call_delta(
@@ -503,7 +508,7 @@ def test_openai_tool_call_delta_aggregation():
 
 def test_openai_stream_emits_tool_call_start_before_final_tool_call():
     async def run_case():
-        provider = OpenAICompatibleProvider({"api_key": "test"}, _route("openai_chat_completions"))
+        provider = OpenAICompatibleProvider(_provider_config(), _route("openai_chat_completions"))
 
         async def fake_iter_sse_events(_path, _body, **_kwargs):
             yield {
@@ -560,13 +565,14 @@ def test_openai_stream_emits_tool_call_start_before_final_tool_call():
         tool_call_index = next(i for i, chunk in enumerate(chunks) if chunk.get("event_type") == "tool_call")
         start_index = next(i for i, chunk in enumerate(chunks) if chunk.get("event_type") == "tool_call_start")
         assert start_index < tool_call_index
+        assert chunks[-1]["metadata"]["finish_reason"] == "tool_calls"
 
     asyncio.run(run_case())
 
 
 def test_openai_stream_preserves_provider_reasoning_without_user_control():
     async def run_case():
-        provider = OpenAICompatibleProvider({"api_key": "test"}, _route("openai_chat_completions"))
+        provider = OpenAICompatibleProvider(_provider_config(), _route("openai_chat_completions"))
 
         async def fake_iter_sse_events(_path, _body, **_kwargs):
             yield {
@@ -587,13 +593,49 @@ def test_openai_stream_preserves_provider_reasoning_without_user_control():
 
         assert [chunk.get("reasoning") for chunk in chunks if chunk.get("reasoning")] == ["plain answer"]
         assert not [chunk for chunk in chunks if chunk.get("content")]
+        assert chunks[-1]["metadata"]["finish_reason"] == "stop"
+
+    asyncio.run(run_case())
+
+
+def test_openai_stream_preserves_incomplete_finish_reason():
+    async def run_case():
+        provider = OpenAICompatibleProvider(_provider_config(), _route("openai_chat_completions"))
+
+        async def fake_iter_sse_events(_path, _body, **_kwargs):
+            yield {
+                "choices": [{
+                    "delta": {
+                        "content": "partial",
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call-partial",
+                            "type": "function",
+                            "function": {"name": "edit", "arguments": "{"},
+                        }],
+                    },
+                    "finish_reason": "length",
+                }],
+            }
+
+        provider._iter_sse_events = fake_iter_sse_events
+        chunks = [
+            dict(chunk)
+            async for chunk in provider.generate_response_stream(
+                model="compatible-test",
+                messages=[],
+            )
+        ]
+
+        assert chunks[-1]["status"] == StreamStatus.COMPLETE
+        assert chunks[-1]["metadata"]["finish_reason"] == "length"
 
     asyncio.run(run_case())
 
 
 def test_openai_stream_preserves_requested_reasoning_field_as_reasoning():
     async def run_case():
-        provider = OpenAICompatibleProvider({"api_key": "test"}, _route("openai_chat_completions"))
+        provider = OpenAICompatibleProvider(_provider_config(), _route("openai_chat_completions"))
 
         async def fake_iter_sse_events(_path, _body, **_kwargs):
             yield {
@@ -621,7 +663,7 @@ def test_openai_stream_preserves_requested_reasoning_field_as_reasoning():
 
 def test_openai_responses_stream_emits_tool_call_start_before_final_tool_call():
     async def run_case():
-        provider = OpenAICompatibleProvider({"api_key": "test"}, _route("openai_responses"))
+        provider = OpenAICompatibleProvider(_provider_config(), _route("openai_responses"))
 
         async def fake_iter_sse_events(_path, _body, **_kwargs):
             yield {
@@ -686,7 +728,7 @@ def test_openai_responses_stream_emits_tool_call_start_before_final_tool_call():
 
 def test_openai_responses_completed_payload_supplies_missing_summary_and_final_text():
     async def run_case():
-        provider = OpenAICompatibleProvider({"api_key": "test"}, _route("openai_responses"))
+        provider = OpenAICompatibleProvider(_provider_config(), _route("openai_responses"))
 
         async def fake_iter_sse_events(_path, body, **_kwargs):
             assert body["reasoning"]["summary"] == "auto"
@@ -733,12 +775,42 @@ def test_openai_responses_completed_payload_supplies_missing_summary_and_final_t
             }],
         }
         assert chunks[-1]["status"] == StreamStatus.COMPLETE
+        assert chunks[-1]["metadata"]["finish_reason"] == "stop"
+
+    asyncio.run(run_case())
+
+
+def test_openai_responses_preserves_incomplete_reason():
+    async def run_case():
+        provider = OpenAICompatibleProvider(_provider_config(), _route("openai_responses"))
+
+        async def fake_iter_sse_events(_path, _body, **_kwargs):
+            yield {"type": "response.output_text.delta", "delta": "partial"}
+            yield {
+                "type": "response.incomplete",
+                "response": {
+                    "incomplete_details": {"reason": "max_output_tokens"},
+                    "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+                },
+            }
+
+        provider._iter_sse_events = fake_iter_sse_events
+        chunks = [
+            dict(chunk)
+            async for chunk in provider.generate_response_stream(
+                model="responses-test",
+                messages=[],
+            )
+        ]
+
+        assert chunks[-1]["status"] == StreamStatus.COMPLETE
+        assert chunks[-1]["metadata"]["finish_reason"] == "max_output_tokens"
 
     asyncio.run(run_case())
 
 
 def test_gemini_build_body_includes_tools_and_normalizes_role_enum():
-    provider = GeminiProvider({"api_key": "test"}, _route("gemini_generate_content"))
+    provider = GeminiProvider(_provider_config(), _route("gemini_generate_content"))
     headers = provider._headers()
     assert headers["x-goog-api-key"] == "test"
     assert "Authorization" not in headers
@@ -771,11 +843,9 @@ def test_gemini_build_body_includes_tools_and_normalizes_role_enum():
 
 def test_anthropic_stream_tool_call_snapshots_keep_previous_tools():
     async def run_case():
-        import backend.core.model.providers.anthropic_provider as anthropic_module
-
         class SnapshotProvider(AnthropicProvider):
-            def _stream_to_queue(self, _body, queue, loop):
-                events = [
+            async def _iter_sse_events(self, *_args, **_kwargs):
+                for event in [
                     {
                         "type": "content_block_start",
                         "index": 0,
@@ -788,12 +858,10 @@ def test_anthropic_stream_tool_call_snapshots_keep_previous_tools():
                         "content_block": {"type": "tool_use", "id": "toolu_2", "name": "second", "input": {"b": 2}},
                     },
                     {"type": "content_block_stop", "index": 1},
-                ]
-                for event in events:
-                    loop.call_soon_threadsafe(queue.put_nowait, "data: " + json.dumps(event))
-                loop.call_soon_threadsafe(queue.put_nowait, anthropic_module._SENTINEL)
+                ]:
+                    yield event
 
-        provider = SnapshotProvider({"api_key": "test"}, _route("anthropic_messages"))
+        provider = SnapshotProvider(_provider_config(), _route("anthropic_messages"))
         chunks = [
             dict(chunk)
             async for chunk in provider.generate_response_stream(
@@ -805,6 +873,66 @@ def test_anthropic_stream_tool_call_snapshots_keep_previous_tools():
 
         tool_chunks = [chunk for chunk in chunks if chunk.get("event_type") == "tool_call"]
         assert [call["function"]["name"] for call in tool_chunks[-1]["tool_calls"]] == ["first", "second"]
+        assert chunks[-1]["metadata"]["finish_reason"] == "tool_calls"
+
+    asyncio.run(run_case())
+
+
+def test_anthropic_stream_normalizes_max_tokens_finish_reason():
+    async def run_case():
+        class IncompleteProvider(AnthropicProvider):
+            async def _iter_sse_events(self, *_args, **_kwargs):
+                yield {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": "partial"},
+                }
+                yield {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "max_tokens"},
+                    "usage": {"output_tokens": 1},
+                }
+
+        provider = IncompleteProvider(_provider_config(), _route("anthropic_messages"))
+        chunks = [
+            dict(chunk)
+            async for chunk in provider.generate_response_stream(
+                model="claude-test",
+                messages=[],
+            )
+        ]
+
+        assert chunks[-1]["metadata"]["finish_reason"] == "length"
+
+    asyncio.run(run_case())
+
+
+def test_gemini_stream_normalizes_max_tokens_finish_reason():
+    async def run_case():
+        class IncompleteProvider(GeminiProvider):
+            async def _iter_sse_events(self, *_args, **_kwargs):
+                yield {
+                    "candidates": [{
+                        "finishReason": "MAX_TOKENS",
+                        "content": {"parts": [{"text": "partial"}]},
+                    }],
+                    "usageMetadata": {
+                        "promptTokenCount": 1,
+                        "candidatesTokenCount": 1,
+                        "totalTokenCount": 2,
+                    },
+                }
+
+        provider = IncompleteProvider(_provider_config(), _route("gemini_generate_content"))
+        chunks = [
+            dict(chunk)
+            async for chunk in provider.generate_response_stream(
+                model="gemini-test",
+                messages=[],
+            )
+        ]
+
+        assert chunks[-1]["metadata"]["finish_reason"] == "length"
 
     asyncio.run(run_case())
 
@@ -831,7 +959,7 @@ def test_searxng_html_result_parser():
 
 
 def test_enable_thinking_is_driven_by_route_profile():
-    provider = OpenAICompatibleProvider({"api_key": "test"}, _route("openai_chat_completions"))
+    provider = OpenAICompatibleProvider(_provider_config(), _route("openai_chat_completions"))
 
     deepseek_body = provider._build_chat_request_kwargs(
         model="deepseek-v4-flash-ascend",
@@ -846,7 +974,7 @@ def test_enable_thinking_is_driven_by_route_profile():
 
     qwen_route = _route("openai_chat_completions")
     qwen_route["reasoning_profile"]["controls"] = {"thinking_style": "qwen"}
-    qwen = OpenAICompatibleProvider({"api_key": "test"}, qwen_route)
+    qwen = OpenAICompatibleProvider(_provider_config(), qwen_route)
     qwen_body = qwen._build_chat_request_kwargs(
         model="directory-declared-model",
         messages=[],
@@ -861,7 +989,7 @@ def test_enable_thinking_is_driven_by_route_profile():
 
 
 def test_responses_input_places_function_output_immediately_after_call():
-    provider = OpenAICompatibleProvider({"api_key": "test"}, _route("openai_responses"))
+    provider = OpenAICompatibleProvider(_provider_config(), _route("openai_responses"))
 
     _, response_input = provider._convert_messages_to_responses_input([
         Message({"role": "user", "content": "use tool"}),

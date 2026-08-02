@@ -673,6 +673,8 @@ class TranscriptAssembler:
         message: dict[str, Any],
         run_by_id: dict[str, dict[str, Any]],
     ) -> dict[str, Any]:
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        generation = metadata.get("generation_info") if isinstance(metadata.get("generation_info"), dict) else {}
         return {
             "type": "assistant_answer",
             "id": f"message:{message['id']}",
@@ -681,6 +683,7 @@ class TranscriptAssembler:
             "message_id": message.get("id"),
             "content": message.get("content") or "",
             "status": self._message_answer_status(message, run_by_id),
+            "finish_reason": generation.get("finish_reason"),
             "created_at": message.get("created_at"),
         }
 

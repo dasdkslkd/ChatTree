@@ -122,7 +122,7 @@ async function testRunsOrderlyEofWithoutDoneFailsClosed() {
 
 async function testRunsAcceptsFinalDoneWithoutTrailingDelimiter() {
   nextResponse = sseResponse([
-    `${patchEvent}data:[DONE]`,
+    `: keepalive\n\n${patchEvent}: keepalive\n\ndata:[DONE]`,
   ]);
   const events = await collect(runsApi.attach('run-2', {}));
   assert.deepEqual(events, [patchPayload]);

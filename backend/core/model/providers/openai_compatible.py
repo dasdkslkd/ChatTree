@@ -18,11 +18,8 @@ from ...config.types import (
     StreamController,
 )
 from .retry import RetryPolicy, RetryableHTTPError, classify_retry_error, run_with_retries, sleep_before_retry
-from .sse import iter_decoded_sse_lines
+from .sse import StreamStopped, iter_sse_lines
 from .multimodal import to_openai_responses_content
-from .stream_queue import StreamStopped, get_queue_item_or_stop
-
-_SENTINEL = object()
 
 
 class ProviderHTTPError(RetryableHTTPError):
@@ -47,7 +44,10 @@ class OpenAICompatibleProvider(BaseProvider):
         return get_valid_token_sync(auth)
 
     def _headers(self, *, stream: bool = False) -> Dict[str, str]:
-        headers = {"Content-Type": "application/json"}
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": self.config.get("custom_user_agent") or "ChatTree",
+        }
         token, extra = self._subscription_auth()
         if token:
             headers["Authorization"] = f"Bearer {token}"
@@ -104,32 +104,6 @@ class OpenAICompatibleProvider(BaseProvider):
             if "ssl" in reason.lower() or "certificate" in reason.lower():
                 raise ProviderHTTPError(0, f"SSL 握手失败，可能需要配置代理：{reason}", {"network": "ssl"}) from exc
             raise ProviderHTTPError(0, f"网络错误：{reason}", {"network": "error"}) from exc
-
-    def _stream_to_queue(
-        self,
-        path: str,
-        body: Dict[str, Any],
-        queue: asyncio.Queue,
-        loop: asyncio.AbstractEventLoop,
-    ):
-        req = urllib.request.Request(
-            self._url(path),
-            data=json.dumps(self._clean_payload(body)).encode("utf-8"),
-            headers=self._headers(stream=True),
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=300) as resp:
-                for line in iter_decoded_sse_lines(resp):
-                    if line:
-                        loop.call_soon_threadsafe(queue.put_nowait, line)
-        except urllib.error.HTTPError as exc:
-            error_body = exc.read().decode("utf-8", errors="replace")
-            loop.call_soon_threadsafe(queue.put_nowait, ProviderHTTPError(exc.code, error_body, dict(exc.headers or {})))
-        except Exception as exc:
-            loop.call_soon_threadsafe(queue.put_nowait, exc)
-        finally:
-            loop.call_soon_threadsafe(queue.put_nowait, _SENTINEL)
 
     def generate_response(
         self,
@@ -268,7 +242,8 @@ class OpenAICompatibleProvider(BaseProvider):
             last_error: Optional[Exception] = None
             tool_call_accumulator: Dict[int, Dict[str, Any]] = {}
             last_emitted_tool_calls = ""
-            stream_policy = RetryPolicy.from_config(self.config, stream=True)
+            finish_reason: Optional[str] = None
+            stream_policy = RetryPolicy.from_config(self.config)
             for attempt_index, current_kwargs in enumerate(attempts):
                 retry_failures = 0
                 fallback_to_next_params = False
@@ -281,7 +256,6 @@ class OpenAICompatibleProvider(BaseProvider):
                             current_kwargs,
                             stream_controller=stream_controller,
                         ):
-                            attempt_had_output = True
                             if stream_controller and await stream_controller.is_stopped():
                                 yield StreamChunk(
                                     status=StreamStatus.STOPPED,
@@ -361,7 +335,9 @@ class OpenAICompatibleProvider(BaseProvider):
                                     error=None,
                                     tokens_used=token_delta,
                                 )
-                            finish_reason = choice.get("finish_reason")
+                            observed_finish_reason = choice.get("finish_reason")
+                            if observed_finish_reason is not None:
+                                finish_reason = str(observed_finish_reason).strip().lower()
                             if finish_reason == "tool_calls" and tool_call_accumulator:
                                 tool_calls = self._finalize_openai_tool_calls(tool_call_accumulator)
                                 serialized_tool_calls = json.dumps(tool_calls, ensure_ascii=False, sort_keys=True)
@@ -465,6 +441,8 @@ class OpenAICompatibleProvider(BaseProvider):
             if usage_info is None:
                 usage_info = estimated_usage(total_tokens)
             final_tool_calls = self._finalize_openai_tool_calls(tool_call_accumulator)
+            if final_tool_calls and finish_reason in {None, "stop"}:
+                finish_reason = "tool_calls"
             yield StreamChunk(
                 status=StreamStatus.COMPLETE,
                 content=None,
@@ -473,6 +451,7 @@ class OpenAICompatibleProvider(BaseProvider):
                 error=None,
                 tokens_used=total_tokens,
                 usage_info=usage_info,
+                metadata={"finish_reason": finish_reason or "unknown"},
             )
 
         except asyncio.CancelledError:
@@ -514,6 +493,7 @@ class OpenAICompatibleProvider(BaseProvider):
         total_tokens = 0
         usage_info = None
         response_output_items: Dict[int, Dict[str, Any]] = {}
+        finish_reason: Optional[str] = None
         instructions, response_input = self._convert_messages_to_responses_input(messages)
         request_kwargs = self._build_responses_request_kwargs(
             instructions=instructions,
@@ -537,7 +517,7 @@ class OpenAICompatibleProvider(BaseProvider):
 
         function_calls: Dict[str, Dict[str, Any]] = {}
         last_emitted_tool_calls = ""
-        stream_policy = RetryPolicy.from_config(self.config, stream=True)
+        stream_policy = RetryPolicy.from_config(self.config)
         for attempt_index, current_kwargs in enumerate(attempts):
             retry_failures = 0
             fallback_to_next_params = False
@@ -549,13 +529,13 @@ class OpenAICompatibleProvider(BaseProvider):
                 tool_call_started = False
                 last_emitted_tool_calls = ""
                 attempt_had_output = False
+                finish_reason = None
                 try:
                     async for event in self._iter_sse_events(
                         self.route["endpoint"],
                         current_kwargs,
                         stream_controller=stream_controller,
                     ):
-                        attempt_had_output = True
                         if stream_controller and await stream_controller.is_stopped():
                             yield StreamChunk(
                                 status=StreamStatus.STOPPED,
@@ -570,6 +550,7 @@ class OpenAICompatibleProvider(BaseProvider):
                         event_type = event.get("type", "")
                         if event_type == "response.completed":
                             response = event.get("response") or {}
+                            finish_reason = "stop"
                             for index, item in enumerate(response.get("output") or []):
                                 if isinstance(item, dict):
                                     response_output_items[index] = deepcopy(item)
@@ -628,6 +609,7 @@ class OpenAICompatibleProvider(BaseProvider):
                                     )
                             completed_tool_calls = self._extract_responses_tool_calls(response)
                             if completed_tool_calls:
+                                finish_reason = "tool_calls"
                                 function_calls.clear()
                                 serialized_tool_calls = json.dumps(completed_tool_calls, ensure_ascii=False, sort_keys=True)
                                 if serialized_tool_calls != last_emitted_tool_calls:
@@ -644,6 +626,20 @@ class OpenAICompatibleProvider(BaseProvider):
                                         tool_call={"tool_calls": completed_tool_calls},
                                         tool_calls=completed_tool_calls,
                                     )
+                            continue
+
+                        if event_type in {"response.incomplete", "response.failed"}:
+                            response = event.get("response") or {}
+                            if usage := response.get("usage"):
+                                usage_info = usage_from_openai(usage)
+                                total_tokens = usage_total(usage_info, total_tokens)
+                            details = response.get("incomplete_details") or {}
+                            error = response.get("error") or {}
+                            finish_reason = str(
+                                details.get("reason")
+                                or error.get("code")
+                                or ("incomplete" if event_type == "response.incomplete" else "failed")
+                            ).strip().lower()
                             continue
 
                         if event_type == "response.output_item.added":
@@ -858,6 +854,8 @@ class OpenAICompatibleProvider(BaseProvider):
         if function_calls:
             tool_calls = self._finalize_response_function_calls(function_calls)
             if tool_calls:
+                if finish_reason in {None, "stop"}:
+                    finish_reason = "tool_calls"
                 serialized_tool_calls = json.dumps(tool_calls, ensure_ascii=False, sort_keys=True)
                 if serialized_tool_calls != last_emitted_tool_calls:
                     yield StreamChunk(
@@ -913,6 +911,7 @@ class OpenAICompatibleProvider(BaseProvider):
             error=None,
             tokens_used=total_tokens,
             usage_info=usage_info,
+            metadata={"finish_reason": finish_reason or "unknown"},
         )
 
     async def _iter_sse_events(
@@ -922,17 +921,14 @@ class OpenAICompatibleProvider(BaseProvider):
         *,
         stream_controller: Optional[StreamController] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
-        queue: asyncio.Queue = asyncio.Queue()
-        loop = asyncio.get_event_loop()
-        loop.run_in_executor(None, self._stream_to_queue, path, body, queue, loop)
-
-        while True:
-            item = await get_queue_item_or_stop(queue, stream_controller)
-            if item is _SENTINEL:
-                break
-            if isinstance(item, Exception):
-                raise item
-            line = str(item)
+        async for line in iter_sse_lines(
+            self._url(path),
+            self._clean_payload(body),
+            self._headers(stream=True),
+            self.config,
+            ProviderHTTPError,
+            stream_controller,
+        ):
             if not line.startswith("data: "):
                 continue
             payload = line[6:].strip()

@@ -3,6 +3,7 @@ import json
 
 from backend.api.routes import messages as messages_route
 from backend.api.routes import runs as runs_route
+from backend.core.config.config import cfg
 from backend.core.config.types import StreamChunk, StreamStatus
 from backend.core.runs import RunKind, RunManager
 from backend.core.slash import SlashCommandDispatcher, SlashDispatchKind
@@ -154,6 +155,26 @@ class FailingChatManager:
         raise AssertionError("chat stream must not run for direct responses")
 
 
+class IncompleteChatManager:
+    async def send_message_stream(self, **kwargs):
+        yield StreamChunk(
+            status=StreamStatus.CONTENT,
+            content="partial",
+            node_id="node-incomplete",
+            conversation_id=kwargs["conversation_id"],
+            tokens_used=1,
+        )
+        yield StreamChunk(
+            status=StreamStatus.ERROR,
+            content=None,
+            node_id="node-incomplete",
+            conversation_id=kwargs["conversation_id"],
+            error="模型输出未完整结束（finish_reason=length）",
+            tokens_used=1,
+            metadata={"finish_reason": "length"},
+        )
+
+
 def test_subscriber_disconnect_does_not_cancel_the_message_producer():
     async def scenario():
         manager = FakeChatManager()
@@ -206,6 +227,28 @@ def test_run_event_subscription_replays_then_continues_live():
     asyncio.run(scenario())
 
 
+def test_run_event_subscription_sends_heartbeat_while_idle():
+    async def scenario():
+        run_manager = RunManager()
+        run = await run_manager.create_run(
+            conversation_id="conv-1",
+            kind="chat",
+            anchor_node_id="node-anchor",
+        )
+        previous = dict(cfg.data.get("model_transport") or {})
+        cfg.data["model_transport"] = {**previous, "sse_heartbeat_seconds": 0.01}
+        stream = runs_route._subscribe_sse(run_manager, PatchAssembler(), run.run_id)
+        try:
+            for _ in range(run_manager.get_run(run.run_id)["event_count"]):
+                assert parse_sse(await anext(stream))["type"] == "transcript_patch"
+            assert await asyncio.wait_for(anext(stream), timeout=0.1) == ": keepalive\n\n"
+        finally:
+            await stream.aclose()
+            cfg.data["model_transport"] = previous
+
+    asyncio.run(scenario())
+
+
 def test_side_question_run_does_not_bind_a_target_node():
     async def scenario():
         run_manager = RunManager()
@@ -248,6 +291,28 @@ def test_direct_response_run_never_calls_the_chat_stream():
         assert events[0]["kind"] == "direct_response"
         assert any("ChatTree" in str(event.get("content") or "") for event in events)
         assert run_manager.get_run(run.run_id)["target_node_id"] is None
+
+    asyncio.run(scenario())
+
+
+def test_incomplete_model_output_marks_run_failed():
+    async def scenario():
+        run_manager = RunManager()
+        request = messages_route.SendMessageRequest(
+            content="write the file",
+            parent_node_id="node-anchor",
+            model_id="fake-model",
+        )
+        run, producer = await _start_test_producer(
+            request,
+            IncompleteChatManager(),
+            run_manager,
+        )
+        await producer
+
+        finished = run_manager.get_run(run.run_id)
+        assert finished["status"] == "failed"
+        assert finished["metadata"]["error"] == "模型输出未完整结束（finish_reason=length）"
 
     asyncio.run(scenario())
 

@@ -185,6 +185,7 @@ def test_update_config_uses_plugin_mcp_runtime_overlay_and_preserves_chat_regist
         config_path = tmp_path / "config.json"
         config_manager = config_route.Config(str(config_path))
         config_manager.data = {
+            **config_manager.data,
             "provider": {},
             "default_provider": "",
             "tools": {
@@ -261,6 +262,7 @@ def test_provider_config_mutations_use_plugin_mcp_runtime_overlay(tmp_path, monk
         config_path = tmp_path / "config.json"
         config_manager = config_route.Config(str(config_path))
         config_manager.data = {
+            **config_manager.data,
             "provider": {"old": {"name": "Old"}} if operation == "delete_provider" else {},
             "default_provider": "",
             "tools": {

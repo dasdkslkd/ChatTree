@@ -10,7 +10,9 @@ import { getStreamStatusText } from '../../../utils/streaming';
 export function AssistantAnswerItem({ item, onCopy }: { item: AssistantAnswerTranscriptItem; onCopy?: TranscriptCopyHandler }) {
   const [copied, setCopied] = useState(false);
   const text = getItemText(item);
-  const statusLabel = getStreamStatusText(item.status || '', null);
+  const statusLabel = item.status === 'error' && item.finish_reason
+    ? `生成未完成：${item.finish_reason}`
+    : getStreamStatusText(item.status || '', null);
   if (!text) return null;
 
   const handleCopy = async () => {

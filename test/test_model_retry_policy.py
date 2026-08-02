@@ -1,5 +1,6 @@
 import socket
 
+from backend.core.config.config import DEFAULT_MODEL_TRANSPORT
 from backend.core.model.providers.retry import (
     RetryPolicy,
     RetryableHTTPError,
@@ -9,7 +10,7 @@ from backend.core.model.providers.retry import (
 
 
 def test_retry_matrix_marks_transient_errors_retryable():
-    policy = RetryPolicy()
+    policy = RetryPolicy.from_config({"model_transport": DEFAULT_MODEL_TRANSPORT})
 
     retryable = [
         RetryableHTTPError(408, "request timeout"),
@@ -31,7 +32,7 @@ def test_retry_matrix_marks_transient_errors_retryable():
 
 
 def test_retry_matrix_rejects_permanent_errors():
-    policy = RetryPolicy()
+    policy = RetryPolicy.from_config({"model_transport": DEFAULT_MODEL_TRANSPORT})
 
     permanent = [
         RetryableHTTPError(400, "invalid request"),
@@ -49,6 +50,8 @@ def test_retry_matrix_rejects_permanent_errors():
 
 def test_retry_delay_uses_exponential_backoff_with_cap_and_retry_after():
     policy = RetryPolicy(
+        max_request_retries=3,
+        max_stream_retries=1,
         base_delay_seconds=0.5,
         max_delay_seconds=2.0,
         jitter_fraction=0.0,

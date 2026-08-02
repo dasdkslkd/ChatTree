@@ -4,11 +4,13 @@ import type {
 import type { TranscriptItem, TranscriptPatch } from '../types/transcript';
 import { messageApi } from '../api/message';
 import { runsApi } from '../api/runs';
+import { ChatTreeApiError } from '../api/errors';
 import { slashRegistry } from './slashRegistry';
 import { flushPerfEvents } from '../perf/client';
 import { perfNow, recordMark, recordSpan } from '../perf/marks';
 
 export const STREAM_DURATION_UPDATE_MS = 1000;
+const STREAM_RECONNECT_DELAYS_MS = [1000, 2000, 5000, 10000];
 
 export interface StreamState {
   runId: string;
@@ -122,6 +124,23 @@ function getRequestRunKind(request: SendMessageRequest): string {
 
 function normalizeTaskContextMode(value: unknown): 'attached' | 'detached' | null {
   return value === 'attached' || value === 'detached' ? value : null;
+}
+
+function waitForReconnect(delay: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    return Promise.reject(new DOMException('Aborted', 'AbortError'));
+  }
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      window.clearTimeout(handle);
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    const handle = window.setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, delay);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 function getTranscriptItemRunId(item: TranscriptItem): string | null {
@@ -417,7 +436,7 @@ export class StreamManager {
     requestNodeId?: string,
     anchorNodeId?: string | null,
   ): Promise<void> {
-    const runId = `client_${Date.now()}_${this.tempSeq++}`;
+    let runId = `client_${Date.now()}_${this.tempSeq++}`;
     const abortController = new AbortController();
     const state = this.createState(
       runId,
@@ -437,11 +456,40 @@ export class StreamManager {
       parent_node_id: requestNodeId ?? request.parent_node_id ?? null,
       focus_new_node: request.focus_new_node ?? true,
     };
-    await this.consume(runId, () => messageApi.stream(
-      conversationId,
-      payload,
-      { nodeId: requestNodeId, signal: abortController.signal },
-    ));
+    const idempotencyKey = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `message-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    try {
+      const started = await messageApi.startRun(
+        conversationId,
+        payload,
+        idempotencyKey,
+        abortController.signal,
+      );
+      runId = this.replaceRunId(runId, started.run_id);
+      await this.consume(runId, () => runsApi.attach(runId, { signal: abortController.signal }));
+    } catch (err) {
+      const status = err instanceof Error && err.name === 'AbortError' ? 'stopped' : 'error';
+      const state = this.streams.get(runId);
+      if (!state) return;
+      const finalState = {
+        ...state,
+        status,
+        errorMessage: status === 'error' && err instanceof Error ? err.message : state.errorMessage,
+        reasoningActive: false,
+      } as StreamState;
+      this.streams.set(runId, finalState);
+      this.notify(finalState.conversationId, true);
+      this.notifyFinish({
+        conversationId: finalState.conversationId,
+        runId,
+        status,
+        drained: false,
+        nodeId: finalState.nodeId,
+        targetNodeId: finalState.targetNodeId,
+        controller: abortController,
+      });
+    }
   }
 
   async resumeStream(
@@ -529,25 +577,57 @@ export class StreamManager {
     this.durationTimers.set(runId, timer);
 
     try {
-      for await (const chunk of openStream()) {
-        const applyStarted = perfNow();
-        if (chunk?.type !== 'transcript_patch') {
-          throw new Error('Unexpected stream event: expected transcript_patch');
+      let streamFactory = openStream;
+      let reconnectAttempt = 0;
+      while (true) {
+        try {
+          for await (const chunk of streamFactory()) {
+            const applyStarted = perfNow();
+            if (chunk?.type !== 'transcript_patch') {
+              throw new Error('Unexpected stream event: expected transcript_patch');
+            }
+            runId = this.applyTranscriptPatchChunk(runId, chunk);
+            recordSpan('stream_manager.apply_chunk', applyStarted, {
+              run_id: runId,
+              revision: chunk.revision,
+              operation_count: chunk.operations.length,
+            });
+            const state = this.streams.get(runId);
+            const mappedStatus = state?.status ?? null;
+            if (mappedStatus === 'error') finishStatus = 'error';
+            else if (mappedStatus === 'stopped') finishStatus = 'stopped';
+            else if (mappedStatus === 'completed') finishStatus = 'completed';
+            if (!state || state.abortController?.signal.aborted) break;
+          }
+          drained = true;
+          break;
+        } catch (err) {
+          const state = this.streams.get(runId);
+          const signal = state?.abortController?.signal;
+          if (
+            !state
+            || signal?.aborted
+            || runId.startsWith('client_')
+            || runId.startsWith('attach_')
+            || (err instanceof ChatTreeApiError && !err.retryable)
+          ) {
+            throw err;
+          }
+          try {
+            await runsApi.get(runId);
+          } catch (statusError) {
+            if (statusError instanceof ChatTreeApiError && !statusError.retryable) {
+              throw err;
+            }
+          }
+          const delay = STREAM_RECONNECT_DELAYS_MS[
+            Math.min(reconnectAttempt, STREAM_RECONNECT_DELAYS_MS.length - 1)
+          ];
+          reconnectAttempt += 1;
+          await waitForReconnect(delay, signal!);
+          streamFactory = () => runsApi.attach(runId, { signal });
         }
-        runId = this.applyTranscriptPatchChunk(runId, chunk);
-        recordSpan('stream_manager.apply_chunk', applyStarted, {
-          run_id: runId,
-          revision: chunk.revision,
-          operation_count: chunk.operations.length,
-        });
-        const state = this.streams.get(runId);
-        const mappedStatus = state?.status ?? null;
-        if (mappedStatus === 'error') finishStatus = 'error';
-        else if (mappedStatus === 'stopped') finishStatus = 'stopped';
-        else if (mappedStatus === 'completed') finishStatus = 'completed';
-        if (!state || state.abortController?.signal.aborted) break;
       }
-      drained = true;
     } catch (err) {
       finishStatus = err instanceof Error && err.name === 'AbortError' ? 'stopped' : 'error';
       const state = this.streams.get(runId);

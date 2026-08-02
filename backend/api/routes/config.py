@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from ...core.capabilities.bootstrap import build_runtime_config_with_plugin_mcp
 from ...core.agents import AgentMailbox, AgentRuntime
 from ...core.auth import subscription as sub_mod
-from ...core.config.config import Config, cfg
+from ...core.config.config import Config, cfg, normalize_model_transport
 from ...core.model.model_manager import ModelManager
 from ...core.projects import normalize_projects_config
 from ...core.persistence import SQLitePersistence, SQLitePlanRepository, SQLiteTaskRepository
@@ -31,6 +31,7 @@ class ConfigUpdateRequest(BaseModel):
     default_provider: Optional[str] = None
     default_model: Optional[str] = None
     context_window: Optional[Literal[200_000, 400_000, 600_000]] = None
+    model_transport: Optional[Dict[str, float]] = None
     provider_configs: Optional[Dict[str, Dict[str, Any]]] = None
     tools: Optional[Dict[str, Any]] = None
     projects: Optional[Dict[str, Dict[str, Any]]] = None
@@ -314,6 +315,11 @@ async def update_config(
             config_manager.data['tools'] = request.tools
         if request.projects is not None:
             config_manager.data['projects'] = normalize_projects_config(request.projects)
+        if request.model_transport is not None:
+            config_manager.data['model_transport'] = normalize_model_transport({
+                **config_manager.data['model_transport'],
+                **request.model_transport,
+            })
         if request.default_provider is not None:
             config_manager.data['default_provider'] = request.default_provider
         if request.default_model is not None:

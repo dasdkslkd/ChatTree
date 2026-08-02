@@ -96,7 +96,6 @@ def test_launcher_settings_from_env_has_local_defaults_and_typed_overrides(
     assert settings.start_timeout_seconds > 0
     assert settings.poll_interval_seconds > 0
     assert settings.max_request_body_bytes > 0
-    assert settings.proxy_idle_timeout_seconds > 0
     assert settings.allowed_origins == ("http://one.test", "http://two.test")
 
     monkeypatch.delenv("CHATTREE_SERVER_PYTHON")
@@ -142,9 +141,6 @@ def test_launcher_defaults_to_dynamic_port_and_rejects_negative_port(tmp_path: P
         ("CHATTREE_CLIENT_POLL_INTERVAL_SECONDS", "nan"),
         ("CHATTREE_CLIENT_POLL_INTERVAL_SECONDS", "inf"),
         ("CHATTREE_CLIENT_POLL_INTERVAL_SECONDS", "10.1"),
-        ("CHATTREE_CLIENT_PROXY_IDLE_TIMEOUT_SECONDS", "nan"),
-        ("CHATTREE_CLIENT_PROXY_IDLE_TIMEOUT_SECONDS", "inf"),
-        ("CHATTREE_CLIENT_PROXY_IDLE_TIMEOUT_SECONDS", "3600.1"),
     ],
 )
 def test_launcher_settings_reject_non_finite_or_excessive_float_timeouts(
@@ -166,14 +162,12 @@ def test_launcher_settings_accept_normal_float_timeouts(tmp_path: Path):
             "CHATTREE_CLIENT_CONNECT_TIMEOUT_SECONDS": "5.5",
             "CHATTREE_CLIENT_START_TIMEOUT_SECONDS": "120",
             "CHATTREE_CLIENT_POLL_INTERVAL_SECONDS": "1.5",
-            "CHATTREE_CLIENT_PROXY_IDLE_TIMEOUT_SECONDS": "900",
         },
     )
 
     assert settings.connect_timeout_seconds == 5.5
     assert settings.start_timeout_seconds == 120.0
     assert settings.poll_interval_seconds == 1.5
-    assert settings.proxy_idle_timeout_seconds == 900.0
 
 
 def test_missing_store_seeds_and_persists_default_local_profile(tmp_path: Path):

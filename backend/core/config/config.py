@@ -6,6 +6,45 @@ from typing import Dict, Any, Optional, List
 from backend.core.home import resolve_chattree_home
 from .types import ModelProviderConfig
 
+
+DEFAULT_MODEL_TRANSPORT = {
+    'connect_timeout_seconds': 10.0,
+    'first_event_timeout_seconds': 900.0,
+    'stream_idle_timeout_seconds': 300.0,
+    'sse_heartbeat_seconds': 15.0,
+    'max_request_retries': 3,
+    'max_stream_retries': 1,
+    'retry_base_delay_seconds': 2.0,
+    'retry_max_delay_seconds': 15.0,
+    'retry_jitter_fraction': 0.2,
+}
+
+
+def normalize_model_transport(value: Dict[str, Any]) -> Dict[str, float | int]:
+    if set(value) != set(DEFAULT_MODEL_TRANSPORT):
+        raise ValueError('模型传输配置字段不完整或包含未知字段')
+    normalized: Dict[str, float | int] = {}
+    for key, default in DEFAULT_MODEL_TRANSPORT.items():
+        candidate = value[key]
+        normalized[key] = int(candidate) if isinstance(default, int) else float(candidate)
+
+    positive = (
+        'connect_timeout_seconds',
+        'first_event_timeout_seconds',
+        'stream_idle_timeout_seconds',
+        'sse_heartbeat_seconds',
+    )
+    if any(float(normalized[key]) <= 0 for key in positive):
+        raise ValueError('模型传输超时和心跳必须大于 0')
+    if int(normalized['max_request_retries']) < 0 or int(normalized['max_stream_retries']) < 0:
+        raise ValueError('模型请求重试次数不能小于 0')
+    if float(normalized['retry_base_delay_seconds']) < 0 or float(normalized['retry_max_delay_seconds']) < 0:
+        raise ValueError('模型重试延迟不能小于 0')
+    jitter = float(normalized['retry_jitter_fraction'])
+    if jitter < 0 or jitter > 1:
+        raise ValueError('模型重试抖动比例必须在 0 到 1 之间')
+    return normalized
+
 # 旧的预设提供商ID列表，用于迁移检测
 _LEGACY_PROVIDER_IDS = {
     'openai', 'azure', 'gemini', 'ollama', 'deepseek',
@@ -49,6 +88,7 @@ class Config:
             if self._is_legacy_config(data):
                 data = self._fresh_config()
                 self._save_data(data)
+            data['model_transport'] = normalize_model_transport(data['model_transport'])
             return data
         return self._fresh_config()
 
@@ -65,6 +105,7 @@ class Config:
             'default_provider': '',
             'default_model': '',
             'context_window': None,
+            'model_transport': dict(DEFAULT_MODEL_TRANSPORT),
             'projects': {},
         }
 

@@ -28,25 +28,22 @@ class RetryableHTTPError(RuntimeError):
 
 @dataclass(frozen=True)
 class RetryPolicy:
-    max_request_retries: int = 3
-    max_stream_retries: int = 2
-    base_delay_seconds: float = 0.5
-    max_delay_seconds: float = 32.0
-    jitter_fraction: float = 0.1
+    max_request_retries: int
+    max_stream_retries: int
+    base_delay_seconds: float
+    max_delay_seconds: float
+    jitter_fraction: float
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any], *, stream: bool = False) -> "RetryPolicy":
-        retry_config = config.get("retry") or {}
-        if not isinstance(retry_config, dict):
-            retry_config = {}
-        policy = cls(
-            max_request_retries=int(retry_config.get("max_request_retries", cls.max_request_retries)),
-            max_stream_retries=int(retry_config.get("max_stream_retries", cls.max_stream_retries)),
-            base_delay_seconds=float(retry_config.get("base_delay_seconds", cls.base_delay_seconds)),
-            max_delay_seconds=float(retry_config.get("max_delay_seconds", cls.max_delay_seconds)),
-            jitter_fraction=float(retry_config.get("jitter_fraction", cls.jitter_fraction)),
+    def from_config(cls, config: Dict[str, Any]) -> "RetryPolicy":
+        transport = config["model_transport"]
+        return cls(
+            max_request_retries=int(transport["max_request_retries"]),
+            max_stream_retries=int(transport["max_stream_retries"]),
+            base_delay_seconds=float(transport["retry_base_delay_seconds"]),
+            max_delay_seconds=float(transport["retry_max_delay_seconds"]),
+            jitter_fraction=float(transport["retry_jitter_fraction"]),
         )
-        return policy
 
     def max_retries(self, *, stream: bool = False) -> int:
         return self.max_stream_retries if stream else self.max_request_retries

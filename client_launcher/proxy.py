@@ -20,7 +20,6 @@ from client_launcher.models import EndpointLease
 
 DEFAULT_MAX_BODY_BYTES = 64 * 1024 * 1024
 DEFAULT_CONNECT_TIMEOUT = 5.0
-DEFAULT_READ_TIMEOUT = 60.0
 CONNECTION_LEASE_HEADER = "X-ChatTree-Connection-Lease-ID"
 _CONNECTION_LEASE_HEADER_BYTES = CONNECTION_LEASE_HEADER.lower().encode("ascii")
 
@@ -177,15 +176,12 @@ class ProxyHandler:
         *,
         max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
         connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
-        read_timeout: float = DEFAULT_READ_TIMEOUT,
         require_connection_lease: bool = False,
     ) -> None:
         if max_body_bytes < 0:
             raise ValueError("max_body_bytes must be non-negative")
         if connect_timeout <= 0:
             raise ValueError("connect_timeout must be positive")
-        if read_timeout <= 0:
-            raise ValueError("read_timeout must be positive")
         if not isinstance(require_connection_lease, bool):
             raise ValueError("require_connection_lease must be a boolean")
 
@@ -195,7 +191,7 @@ class ProxyHandler:
         self._require_connection_lease = require_connection_lease
         self._timeout = httpx.Timeout(
             connect=connect_timeout,
-            read=read_timeout,
+            read=None,
             write=connect_timeout,
             pool=connect_timeout,
         )
@@ -325,14 +321,12 @@ def create_proxy_router(
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
     *,
     connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
-    read_timeout: float = DEFAULT_READ_TIMEOUT,
 ) -> APIRouter:
     handler = ProxyHandler(
         resolve_endpoint,
         http_client,
         max_body_bytes=max_body_bytes,
         connect_timeout=connect_timeout,
-        read_timeout=read_timeout,
         require_connection_lease=True,
     )
     router = APIRouter()

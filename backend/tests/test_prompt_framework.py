@@ -447,7 +447,12 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
 
         async def generate_response_stream(self, **kwargs):
             self.messages = kwargs["messages"]
-            yield {"status": StreamStatus.COMPLETE, "content": "", "tokens_used": 0}
+            yield {
+                "status": StreamStatus.COMPLETE,
+                "content": "",
+                "tokens_used": 0,
+                "metadata": {"finish_reason": "stop"},
+            }
 
     def test_main_chat_builds_main_runtime_context(self):
         manager = ChatManager(
@@ -460,6 +465,7 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
         messages = manager._build_prompt_messages(conversation, [])
 
         self.assertIn("# ChatTree Core Prompt", messages[0]["content"])
+        self.assertIn("do not stop at a proposal or defer action", messages[0]["content"])
         runtime_prompt = _system_text(messages)
         self.assertIn("Runtime mode: main chat", runtime_prompt)
         self.assertNotIn("start_subagent", runtime_prompt)
@@ -681,10 +687,16 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
                             },
                         }],
                         "tokens_used": 0,
+                        "metadata": {"finish_reason": "tool_calls"},
                     }
                     return
                 yield {"status": StreamStatus.CONTENT, "content": "全部完成", "tokens_used": 1}
-                yield {"status": StreamStatus.COMPLETE, "content": "", "tokens_used": 1}
+                yield {
+                    "status": StreamStatus.COMPLETE,
+                    "content": "",
+                    "tokens_used": 1,
+                    "metadata": {"finish_reason": "stop"},
+                }
 
         class ModelManager:
             def __init__(self, provider):

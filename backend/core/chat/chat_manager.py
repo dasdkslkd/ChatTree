@@ -1085,6 +1085,7 @@ class ChatManager:
         usage_info: Optional[Dict[str, Any]],
         generation_status: str,
         error_message: Optional[str],
+        finish_reason: Optional[str],
         total_content: str,
         final_content: str,
         persisted_final_content: Optional[str],
@@ -1110,6 +1111,7 @@ class ChatManager:
             "duration_ms": duration_ms,
             "status": generation_status,
             "error_message": error_message,
+            "finish_reason": finish_reason,
             "tokens_used": tokens_used,
             "usage_info": usage_info
         }
@@ -1467,6 +1469,7 @@ class ChatManager:
         start_time = time()  # 记录开始时间
         generation_status = "completed"  # 默认状态
         error_message = None
+        finish_reason = None
         final_content = ""
         persisted_final_content: Optional[str] = None
         process_order = 0
@@ -1506,6 +1509,7 @@ class ChatManager:
                 round_content = ""
                 round_reasoning = ""
                 round_status = "completed"
+                round_finish_reason = None
                 complete_chunk = None
                 round_tool_calls: List[Dict[str, Any]] = []
                 round_output_items: List[Dict[str, Any]] = []
@@ -1669,6 +1673,10 @@ class ChatManager:
                             if embedded.get("tool_calls"):
                                 round_tool_calls = self._merge_tool_call_lists(round_tool_calls, embedded.get("tool_calls") or [])
 
+                        chunk_metadata = chunk.get("metadata")
+                        if isinstance(chunk_metadata, dict) and chunk_metadata.get("finish_reason"):
+                            round_finish_reason = str(chunk_metadata["finish_reason"]).strip().lower()
+
                         chunk_status = chunk.get("status")
                         if chunk_status == StreamStatus.START:
                             continue
@@ -1683,7 +1691,22 @@ class ChatManager:
                             tokens_used = chunk.get("tokens_used", tokens_used) or tokens_used
                             usage_info = chunk.get("usage_info") or usage_info
                             tokens_used = usage_total(usage_info, tokens_used)
-                            complete_chunk = chunk
+                            complete_chunk = dict(chunk)
+                            if round_finish_reason is None:
+                                round_finish_reason = "unknown"
+                            complete_chunk["metadata"] = {
+                                **(complete_chunk.get("metadata") or {}),
+                                "finish_reason": round_finish_reason,
+                            }
+                            if round_finish_reason not in {"stop", "tool_calls"}:
+                                generation_status = "error"
+                                round_status = "error"
+                                error_message = (
+                                    "模型输出未完整结束"
+                                    f"（finish_reason={round_finish_reason}）"
+                                )
+                                complete_chunk["status"] = StreamStatus.ERROR
+                                complete_chunk["error"] = error_message
                             continue
 
                         chunk["conversation_id"] = conversation_id
@@ -1695,6 +1718,17 @@ class ChatManager:
                             deferred_content_chunks.append(dict(chunk))
                         else:
                             yield chunk
+                finish_reason = round_finish_reason
+                if round_finish_reason == "tool_calls" and not round_tool_calls:
+                    generation_status = "error"
+                    round_status = "error"
+                    error_message = (
+                        "上游声明工具调用结束，但没有返回可执行的工具调用"
+                        "（finish_reason=tool_calls）"
+                    )
+                    if complete_chunk:
+                        complete_chunk["status"] = StreamStatus.ERROR
+                        complete_chunk["error"] = error_message
                 provider_duration_ms = (perf_counter() - provider_started) * 1000.0
                 provider_content_tokens = _estimate_stream_tokens(round_content)
                 provider_reasoning_tokens = _estimate_stream_tokens(round_reasoning)
@@ -1729,6 +1763,7 @@ class ChatManager:
                     tokens_per_minute_source="usage" if provider_usage_output_tokens else "estimate",
                     tokens_per_minute_est=round(provider_tpm, 3),
                     tool_call_chunks=provider_tool_call_chunks,
+                    finish_reason=round_finish_reason,
                 )
                 if task_turn_context.current_task is None:
                     for call in round_tool_calls:
@@ -2149,6 +2184,7 @@ class ChatManager:
                 usage_info=usage_info,
                 generation_status=generation_status,
                 error_message=error_message,
+                finish_reason=finish_reason,
                 total_content=total_content,
                 final_content=final_content,
                 persisted_final_content=persisted_final_content,

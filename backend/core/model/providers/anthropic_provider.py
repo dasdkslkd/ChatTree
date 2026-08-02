@@ -10,11 +10,8 @@ from ..base import BaseProvider, logger
 from ..usage import estimated_usage, usage_from_anthropic, usage_total
 from ...config.types import Message, ModelRoute, StreamChunk, StreamStatus, StreamController
 from .retry import RetryPolicy, RetryableHTTPError, classify_retry_error, run_with_retries, sleep_before_retry
-from .sse import iter_decoded_sse_lines
+from .sse import StreamStopped, iter_sse_lines
 from .multimodal import to_anthropic_content
-from .stream_queue import StreamStopped, get_queue_item_or_stop
-
-_SENTINEL = object()  # 队列结束标记
 
 
 class AnthropicHTTPError(RetryableHTTPError):
@@ -33,6 +30,30 @@ class AnthropicProvider(BaseProvider):
             base = base[:-3]
         return base
 
+    async def _iter_sse_events(
+        self,
+        body: Dict[str, Any],
+        *,
+        stream_controller: Optional[StreamController] = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        async for line in iter_sse_lines(
+            self._api_base() + self.route["endpoint"],
+            body,
+            self._headers(),
+            self.config,
+            AnthropicHTTPError,
+            stream_controller,
+        ):
+            if not line.startswith("data: "):
+                continue
+            payload = line[6:].strip()
+            if not payload or payload == "[DONE]":
+                continue
+            try:
+                yield json.loads(payload)
+            except json.JSONDecodeError:
+                logger.warning(f"Invalid Anthropic SSE payload ignored: {payload[:200]}")
+
     def _headers(self) -> Dict[str, str]:
         # Claude 订阅（CLI 凭据复用）走 Bearer + anthropic-beta
         auth = self.config.get("auth") or {}
@@ -44,11 +65,13 @@ class AnthropicProvider(BaseProvider):
                 "anthropic-version": "2023-06-01",
                 "anthropic-beta": "oauth-2025-04-20",
                 "content-type": "application/json",
+                "User-Agent": self.config.get("custom_user_agent") or "ChatTree",
             }
         return {
             "x-api-key": self.config.get("api_key", ""),
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
+            "User-Agent": self.config.get("custom_user_agent") or "ChatTree",
         }
 
     def _convert_messages(self, messages: List[Message]):
@@ -227,6 +250,7 @@ class AnthropicProvider(BaseProvider):
         total_content = ""
         total_tokens = 0
         usage_info = None
+        finish_reason: Optional[str] = None
         try:
             system_text, api_messages = self._convert_messages(messages)
             body = self._build_body(model, api_messages, system_text, max_tokens or 4096, temperature, stream=True,
@@ -236,35 +260,17 @@ class AnthropicProvider(BaseProvider):
             tool_blocks: Dict[int, Dict[str, Any]] = {}
             native_blocks: Dict[int, Dict[str, Any]] = {}
             tool_call_started = False
-            stream_policy = RetryPolicy.from_config(self.config, stream=True)
+            stream_policy = RetryPolicy.from_config(self.config)
             retry_failures = 0
 
             while True:
                 attempt_had_output = False
                 native_blocks = {}
-                queue: asyncio.Queue = asyncio.Queue()
-                loop = asyncio.get_event_loop()
-                loop.run_in_executor(None, self._stream_to_queue, body, queue, loop)
                 try:
-                    while True:
-                        item = await get_queue_item_or_stop(queue, stream_controller)
-                        if item is _SENTINEL:
-                            break
-                        if isinstance(item, Exception):
-                            raise item
-
-                        line = item
-                        if not line.startswith("data: "):
-                            continue
-                        payload = line[6:].strip()
-                        if payload == "[DONE]":
-                            break
-                        try:
-                            event = json.loads(payload)
-                        except json.JSONDecodeError:
-                            continue
-                        attempt_had_output = True
-
+                    async for event in self._iter_sse_events(
+                        body,
+                        stream_controller=stream_controller,
+                    ):
                         etype = event.get("type", "")
                         if usage := event.get("usage"):
                             usage_info = usage_from_anthropic(usage)
@@ -399,6 +405,15 @@ class AnthropicProvider(BaseProvider):
                                     tool_calls=tool_calls,
                                 )
                         elif etype == "message_delta":
+                            observed_finish_reason = (event.get("delta") or {}).get("stop_reason")
+                            if observed_finish_reason:
+                                raw_finish_reason = str(observed_finish_reason).strip().lower()
+                                finish_reason = {
+                                    "end_turn": "stop",
+                                    "stop_sequence": "stop",
+                                    "tool_use": "tool_calls",
+                                    "max_tokens": "length",
+                                }.get(raw_finish_reason, raw_finish_reason)
                             usage = event.get("usage", {})
                             if usage.get("output_tokens"):
                                 usage_info = usage_from_anthropic(usage)
@@ -438,6 +453,8 @@ class AnthropicProvider(BaseProvider):
 
             if usage_info is None:
                 usage_info = estimated_usage(total_tokens)
+            if tool_blocks and finish_reason in {None, "stop"}:
+                finish_reason = "tool_calls"
             ordered_blocks = [
                 block
                 for _, block in sorted(native_blocks.items())
@@ -498,6 +515,7 @@ class AnthropicProvider(BaseProvider):
                 node_id=stream_controller.node_id if stream_controller else None,
                 conversation_id=stream_controller.conversation_id if stream_controller else None,
                 error=None, tokens_used=total_tokens, usage_info=usage_info,
+                metadata={"finish_reason": finish_reason or "unknown"},
             )
 
         except asyncio.CancelledError:
@@ -523,25 +541,6 @@ class AnthropicProvider(BaseProvider):
             "description": fn.get("description", ""),
             "input_schema": fn.get("parameters", {"type": "object", "properties": {}}),
         }
-
-    def _stream_to_queue(self, body: Dict[str, Any], queue: asyncio.Queue, loop: asyncio.AbstractEventLoop):
-        """线程池中执行：逐行读取 SSE 并放入 asyncio Queue"""
-        url = self._api_base() + self.route["endpoint"]
-        data = json.dumps(body).encode()
-        req = urllib.request.Request(url, data=data, headers=self._headers(), method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=300) as resp:
-                for line in iter_decoded_sse_lines(resp):
-                    if line:
-                        loop.call_soon_threadsafe(queue.put_nowait, line)
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode("utf-8", errors="replace")
-            loop.call_soon_threadsafe(queue.put_nowait, AnthropicHTTPError(e.code, error_body, dict(e.headers or {})))
-        except Exception as e:
-            logger.error(f"Anthropic HTTP error: {type(e).__name__}: {e}")
-            loop.call_soon_threadsafe(queue.put_nowait, e)
-        finally:
-            loop.call_soon_threadsafe(queue.put_nowait, _SENTINEL)
 
     # ── 模型列表 ──
     def list_models(self) -> List[str]:

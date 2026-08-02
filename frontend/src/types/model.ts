@@ -254,6 +254,7 @@ export interface ConfigData {
   default_provider: string;
   default_model: string;
   context_window: ContextWindowLimit;
+  model_transport: ModelTransportConfig;
   provider: Record<string, ModelProviderConfig>;
   tools?: ToolsConfig;
   projects?: Record<string, ProjectCapabilityConfig>;
@@ -264,9 +265,22 @@ export interface ConfigUpdateRequest {
   default_provider?: string;
   default_model?: string;
   context_window?: ContextWindowLimit;
+  model_transport?: Partial<ModelTransportConfig>;
   provider_configs?: Record<string, Partial<ModelProviderConfig>>;
   tools?: ToolsConfig;
   projects?: Record<string, ProjectCapabilityConfig>;
+}
+
+export interface ModelTransportConfig {
+  connect_timeout_seconds: number;
+  first_event_timeout_seconds: number;
+  stream_idle_timeout_seconds: number;
+  sse_heartbeat_seconds: number;
+  max_request_retries: number;
+  max_stream_retries: number;
+  retry_base_delay_seconds: number;
+  retry_max_delay_seconds: number;
+  retry_jitter_fraction: number;
 }
 
 // 添加提供商请求

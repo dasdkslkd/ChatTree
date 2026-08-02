@@ -259,6 +259,7 @@ class CapturingProvider:
                 "source": "test",
                 "raw": {},
             },
+            metadata={"finish_reason": "stop"},
         )
 
 
@@ -380,6 +381,7 @@ class WorkflowToolThenFinalProvider(CapturingProvider):
                 "source": "test",
                 "raw": {},
             },
+            metadata={"finish_reason": "tool_calls" if len(self.calls) == 1 else "stop"},
         )
 
 
@@ -440,6 +442,7 @@ class EnterPlanThenWriteProvider(CapturingProvider):
             error=None,
             tokens_used=1,
             usage_info={"input_tokens": 1, "output_tokens": 0, "total_tokens": 1, "source": "test", "raw": {}},
+            metadata={"finish_reason": "tool_calls" if call_number == 1 else "stop"},
         )
 
 

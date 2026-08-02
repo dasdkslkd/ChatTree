@@ -37,12 +37,6 @@ export interface ActiveStreamInfo {
   updated_at: number;
 }
 
-export type MessageStreamOptions = {
-  signal?: AbortSignal;
-  nodeId?: string;
-  idempotencyKey?: string;
-};
-
 export type MessageAttachStreamOptions = {
   signal?: AbortSignal;
 };
@@ -250,50 +244,19 @@ export const messageApi = {
     idempotencyKey: string,
     signal?: AbortSignal,
   ): Promise<MessageRunStartResponse> => {
-    const response = await apiClient.post<MessageRunStartResponse>(
+    const submit = () => apiClient.post<MessageRunStartResponse>(
       `/conversations/${encodeURIComponent(conversationId)}/messages/runs`,
       data,
-      {
-        headers: { 'Idempotency-Key': idempotencyKey },
-        signal,
-      },
+      { headers: { 'Idempotency-Key': idempotencyKey }, signal },
     );
-    return response.data;
-  },
-
-  // Start is idempotent; attach is a separate replayable GET.
-  stream: async function* (
-    conversationId: string,
-    data: SendMessageRequest,
-    options: MessageStreamOptions,
-  ): AsyncGenerator<TranscriptPatch, void> {
-    const { nodeId, signal } = options;
-    const idempotencyKey = options.idempotencyKey ?? (
-      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-        ? crypto.randomUUID()
-        : `message-${Date.now()}-${Math.random().toString(36).slice(2)}`
-    );
-    const payload = {
-      ...data,
-      parent_node_id: nodeId ?? data.parent_node_id,
-      focus_new_node: data.focus_new_node ?? true,
-    };
-    const started = perfNow();
-    let start: MessageRunStartResponse;
     try {
-      start = await messageApi.startRun(conversationId, payload, idempotencyKey, signal);
+      return (await submit()).data;
     } catch (error) {
       if (!(error instanceof ChatTreeApiError) || !error.retryable || signal?.aborted) {
         throw error;
       }
-      start = await messageApi.startRun(conversationId, payload, idempotencyKey, signal);
+      return (await submit()).data;
     }
-    recordSpan('stream.fetch', started, {
-      conversation_id: conversationId,
-      run_id: start.run_id,
-      route: 'messages.start',
-    });
-    yield* runsApi.attach(start.run_id, { signal });
   },
 
   getActiveStreams: async (conversationId: string): Promise<ActiveStreamInfo[]> => {

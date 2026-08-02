@@ -431,7 +431,6 @@ def create_app(
             upstream_client,
             resolved_settings.max_request_body_bytes,
             connect_timeout=resolved_settings.connect_timeout_seconds,
-            read_timeout=resolved_settings.proxy_idle_timeout_seconds,
         )
     )
     _mount_frontend(app, resolved_settings)
