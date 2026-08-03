@@ -56,8 +56,28 @@ def test_open_file_uses_open_command_on_macos(monkeypatch, tmp_path):
     assert calls == [["open", str(target.resolve())]]
 
 
-def test_open_file_rejects_relative_path():
-    response = _client().post("/api/v1/files/open", json={"path": "src/main.py"})
+def test_open_file_resolves_relative_path_against_cwd(monkeypatch, tmp_path):
+    target = tmp_path / "sub" / "notes.md"
+    target.parent.mkdir()
+    target.write_text("hello", encoding="utf-8")
+    opened: list[str] = []
+
+    def fake_startfile(path: str) -> None:
+        opened.append(path)
+
+    monkeypatch.setattr(files_routes.sys, "platform", "win32")
+    monkeypatch.setattr(files_routes.os, "startfile", fake_startfile)
+    monkeypatch.chdir(tmp_path)
+
+    response = _client().post("/api/v1/files/open", json={"path": "sub/notes.md"})
+
+    assert response.status_code == 200
+    assert response.json() == {"path": str(target.resolve())}
+    assert opened == [str(target.resolve())]
+
+
+def test_open_file_rejects_non_path_text():
+    response = _client().post("/api/v1/files/open", json={"path": "plain text"})
 
     assert response.status_code == 400
 

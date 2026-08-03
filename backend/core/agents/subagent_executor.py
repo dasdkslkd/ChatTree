@@ -644,6 +644,9 @@ class SubagentExecutor:
                 tool_round += 1
                 if (
                     (route.get("reasoning_profile") or {}).get("strict")
+                    and (route.get("reasoning_profile") or {}).get("carrier")
+                    not in {"none", "chat_reasoning_content"}
+                    and getattr(provider, "route", None)
                     and not round_output_items
                 ):
                     raise RuntimeError(

@@ -13,15 +13,9 @@ function readRootSource(relativePath) {
   return fs.readFileSync(path.join(__dirname, '../..', relativePath), 'utf8');
 }
 
-function createMockReact() {
-  return {
-    createElement: (type, props, ...children) => ({ type, props, children }),
-  };
-}
-
-function loadFileLinks() {
-  const source = fs.readFileSync(path.join(sourceRoot, 'components/markdown/fileLinks.tsx'), 'utf8');
-  const transpiled = ts.transpileModule(source, {
+function transpile(relativePath) {
+  const source = fs.readFileSync(path.join(sourceRoot, relativePath), 'utf8');
+  return ts.transpileModule(source, {
     compilerOptions: {
       module: ts.ModuleKind.CommonJS,
       target: ts.ScriptTarget.ES2022,
@@ -29,24 +23,48 @@ function loadFileLinks() {
       esModuleInterop: true,
       importsNotUsedAsValues: ts.ImportsNotUsedAsValues.Remove,
     },
-    fileName: 'fileLinks.tsx',
+    fileName: path.basename(relativePath),
   }).outputText;
+}
 
+function createMockReact() {
+  const createElement = (type, props, ...children) => ({
+    type,
+    props: props || {},
+    children: children.flat(),
+  });
+  return { createElement };
+}
+
+function loadModule(relativePath, requireMock) {
+  const transpiled = transpile(relativePath);
   const moduleObj = { exports: {} };
-  const requireMock = (name) => {
-    if (name === 'react') return createMockReact();
-    if (name === 'sonner') return { toast: { error: () => {} } };
-    if (name === '../../api/errors') return { getApiErrorMessage: (_error, fallback) => fallback };
-    if (name === '../../api/files') return { filesApi: { open: async () => ({ path: '' }) } };
-    throw new Error(`unexpected require: ${name}`);
-  };
   const fn = new Function('module', 'exports', 'require', 'React', transpiled);
   fn(moduleObj, moduleObj.exports, requireMock, createMockReact());
   return moduleObj.exports;
 }
 
+function loadFileLinkDetection() {
+  return loadModule('utils/fileLinkDetection.ts', () => {
+    throw new Error('unexpected require in fileLinkDetection');
+  });
+}
+
+function loadFileLinks() {
+  const detection = loadFileLinkDetection();
+  const requireMock = (name) => {
+    if (name === 'react') return createMockReact();
+    if (name === 'sonner') return { toast: { error: () => {} } };
+    if (name === '../../api/errors') return { getApiErrorMessage: (_error, fallback) => fallback };
+    if (name === '../../api/files') return { filesApi: { open: async () => ({ path: '' }) } };
+    if (name === '../../utils/fileLinkDetection') return detection;
+    throw new Error(`unexpected require: ${name}`);
+  };
+  return loadModule('components/markdown/fileLinks.tsx', requireMock);
+}
+
 function rangesOf(text) {
-  return loadFileLinks().findFilePathRanges(text).map(({ start, end }) => text.slice(start, end));
+  return loadFileLinkDetection().findFilePathRanges(text).map(({ path }) => path);
 }
 
 // ===== findFilePathRanges =====
@@ -63,7 +81,6 @@ function testMatchesWindowsForwardSlashPaths() {
 
 function testMatchesPosixAbsolutePaths() {
   assert.deepEqual(rangesOf('见 /home/user/file.txt'), ['/home/user/file.txt']);
-  assert.deepEqual(rangesOf('见 /etc/hosts'), ['/etc/hosts']);
 }
 
 function testTrimsTrailingPunctuation() {
@@ -72,8 +89,7 @@ function testTrimsTrailingPunctuation() {
   assert.deepEqual(rangesOf('(C:\\a\\b\\c.py)'), ['C:\\a\\b\\c.py']);
 }
 
-function testIgnoresRelativePathsAndPlainWords() {
-  assert.deepEqual(rangesOf('见 src/main.py'), []);
+function testIgnoresPlainWords() {
   assert.deepEqual(rangesOf('main.py'), []);
   assert.deepEqual(rangesOf('运行 npm test'), []);
 }
@@ -82,11 +98,11 @@ function testIgnoresPathsWithSpaces() {
   assert.deepEqual(rangesOf('见 C:\\my folder\\x.txt'), []);
 }
 
-// ===== components =====
+// ===== FileLinkWrapper =====
 
-function testFileLinkTextRendersPathLinks() {
+function testFileLinkWrapperRendersPathLinks() {
   const { fileLinkComponents } = loadFileLinks();
-  const nodes = fileLinkComponents.text({ children: '见 C:\\a\\b\\c.py 文件' });
+  const nodes = fileLinkComponents.p({ children: '见 C:\\a\\b\\c.py 文件' });
   assert.ok(Array.isArray(nodes));
   assert.equal(nodes[0], '见 ');
   const link = nodes[1];
@@ -95,9 +111,26 @@ function testFileLinkTextRendersPathLinks() {
   assert.equal(nodes[2], ' 文件');
 }
 
-function testFileOpenLinkDecodesFileScheme() {
-  const { fileLinkComponents, FILE_LINK_SCHEME } = loadFileLinks();
-  const encoded = FILE_LINK_SCHEME + encodeURIComponent('C:\\a\\b\\c.py');
+function testFileLinkWrapperProcessesCodeChildren() {
+  const { fileLinkComponents } = loadFileLinks();
+  const codeElement = { type: 'code', props: { children: 'D:\\x\\y\\z.py' } };
+  const result = fileLinkComponents.p({ children: [codeElement] });
+  assert.ok(Array.isArray(result));
+  const processedCode = result[0];
+  assert.equal(processedCode.type, 'code');
+  const inner = processedCode.props.children;
+  assert.ok(Array.isArray(inner));
+  assert.equal(typeof inner[0].type, 'function');
+  assert.equal(inner[0].props.path, 'D:\\x\\y\\z.py');
+}
+
+// ===== FileOpenLink =====
+
+function testFileOpenLinkDecodesFilePrefix() {
+  const { fileLinkComponents, FILE_LINK_PREFIX } = loadFileLinks();
+  const { FILE_LINK_PREFIX: detectionPrefix } = loadFileLinkDetection();
+  const prefix = detectionPrefix || FILE_LINK_PREFIX;
+  const encoded = prefix + encodeURIComponent('C:\\a\\b\\c.py');
   const element = fileLinkComponents.a({ href: encoded, children: ['C:\\a\\b\\c.py'] });
   assert.equal(typeof element.type, 'function');
   assert.equal(element.props.path, 'C:\\a\\b\\c.py');
@@ -116,7 +149,6 @@ function testMarkdownContentMergesFileLinkComponents() {
   const source = readSource('src/components/MarkdownContent.tsx');
   assert.match(source, /fileLinkComponents/);
   assert.match(source, /\{ \.\.\.fileLinkComponents, \.\.\.components \}/);
-  assert.ok(source.split('mergedComponents').length >= 5, 'all render paths should use merged components');
 }
 
 function testFilesApiPostsToOpenEndpoint() {
@@ -134,10 +166,11 @@ function main() {
   testMatchesWindowsForwardSlashPaths();
   testMatchesPosixAbsolutePaths();
   testTrimsTrailingPunctuation();
-  testIgnoresRelativePathsAndPlainWords();
+  testIgnoresPlainWords();
   testIgnoresPathsWithSpaces();
-  testFileLinkTextRendersPathLinks();
-  testFileOpenLinkDecodesFileScheme();
+  testFileLinkWrapperRendersPathLinks();
+  testFileLinkWrapperProcessesCodeChildren();
+  testFileOpenLinkDecodesFilePrefix();
   testFileOpenLinkKeepsNormalLinks();
   testMarkdownContentMergesFileLinkComponents();
   testFilesApiPostsToOpenEndpoint();

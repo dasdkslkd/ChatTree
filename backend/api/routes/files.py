@@ -28,8 +28,14 @@ class OpenFileResponse(BaseModel):
 def open_file(body: OpenFileRequest) -> OpenFileResponse:
     """用系统默认软件打开一个本地文件或目录。"""
     raw = body.path.strip()
-    if not os.path.isabs(raw) and not _WINDOWS_ABSOLUTE.match(raw):
-        raise ApiError(400, "invalid_file_path", "File path must be absolute", False)
+    if not (
+        os.path.isabs(raw)
+        or _WINDOWS_ABSOLUTE.match(raw)
+        or "/" in raw
+        or "\\" in raw
+    ):
+        raise ApiError(400, "invalid_file_path", "Path must be absolute or contain a separator", False)
+    # 相对路径按服务器工作目录解析
     path = Path(raw).expanduser().resolve()
     if not path.exists():
         raise ApiError(
