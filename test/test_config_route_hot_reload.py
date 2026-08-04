@@ -172,7 +172,7 @@ def test_update_config_stores_global_defaults_and_strips_provider_default(tmp_pa
         assert config_manager.data["default_model"] == "alpha"
         assert config_manager.data["context_window"] == 400_000
         assert config_manager.data["model_transport"]["first_event_timeout_seconds"] == 1200
-        assert config_manager.data["model_transport"]["stream_idle_timeout_seconds"] == 300
+        assert config_manager.data["model_transport"]["stream_idle_timeout_seconds"] == 900
         assert config_manager.data["model_transport"]["sse_heartbeat_seconds"] == 10
         assert "default_model" not in config_manager.data["provider"]["demo"]
 

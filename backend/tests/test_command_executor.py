@@ -477,6 +477,27 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("failing command", snapshot["error"])
             self.assertIn(str(Path(tmpdir).resolve()), snapshot["error"])
 
+    async def test_command_nonzero_exit_without_stderr_attributes_exit_message_to_command(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_manager = RunManager()
+            command_executor = CommandExecutor(run_manager)
+            command = f'{sys.executable} -c "import sys; sys.exit(1)"'
+
+            run = await command_executor.start(
+                conversation_id="conv_1",
+                command=command,
+                cwd=tmpdir,
+                anchor_node_id="node_1",
+            )
+            await command_executor.wait(run["run_id"], timeout=5)
+
+            snapshot = command_executor.snapshot(run["run_id"])
+            self.assertEqual(snapshot["status"], RunStatus.FAILED.value)
+            self.assertEqual(snapshot["exit_code"], 1)
+            self.assertEqual(snapshot["stderr"], "")
+            self.assertIn("command exited with code 1", snapshot["error"])
+            self.assertIn(command, snapshot["error"])
+
     async def test_stop_run_tree_recursively_stops_cancellation_children(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_manager = RunManager()

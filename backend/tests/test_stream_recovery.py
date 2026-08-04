@@ -193,12 +193,7 @@ def test_chat_completions_stops_after_max_retries():
     """重试耗尽后应抛出异常。"""
 
     error = TimeoutError("idle timeout")
-    sequences = [
-        ([_cc_delta("partial")], error),
-        ([], error),
-        ([], error),
-        ([], error),  # 第4次（超过 max_stream_retries=3）
-    ]
+    sequences = [([], error)] * 6
 
     class Provider(_FaultyStreamProvider, object):
         pass
@@ -214,7 +209,16 @@ def test_chat_completions_stops_after_max_retries():
     )
 
     provider = FaultyProvider(
-        _provider_config(), _route("openai_chat_completions"), sse_sequences=sequences
+        _provider_config(extra={
+            "model_transport": {
+                **DEFAULT_MODEL_TRANSPORT,
+                "retry_base_delay_seconds": 0,
+                "retry_max_delay_seconds": 0,
+                "retry_jitter_fraction": 0,
+            },
+        }),
+        _route("openai_chat_completions"),
+        sse_sequences=sequences,
     )
 
     error_chunks = []
@@ -228,8 +232,8 @@ def test_chat_completions_stops_after_max_retries():
 
     asyncio.run(run())
 
-    # 初始尝试 + 3 次重试 = 4 次调用
-    assert provider._sse_call_count == 4
+    # 初始尝试 + 5 次重试 = 6 次调用（max_stream_retries=5）
+    assert provider._sse_call_count == 6
     assert len(error_chunks) == 1
     assert "idle timeout" in error_chunks[0]["error"]
 

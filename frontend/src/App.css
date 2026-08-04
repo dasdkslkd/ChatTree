@@ -364,11 +364,6 @@
   margin-bottom: 150px;
 }
 
-.chat-message-row {
-  content-visibility: auto;
-  contain-intrinsic-size: 1px 180px;
-}
-
 /* ====== Assistant processed fold separator ====== */
 .processed-fold {
   width: min(100%, 760px);

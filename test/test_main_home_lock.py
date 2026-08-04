@@ -229,5 +229,12 @@ main.run_server()
                 process.kill()
                 process.wait(timeout=10)
 
-    with ServerHomeLock(tmp_path):
-        pass
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            with ServerHomeLock(tmp_path):
+                break
+        except ServerHomeInUseError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.1)

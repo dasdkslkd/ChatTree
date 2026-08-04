@@ -386,6 +386,7 @@ class OpenAICompatibleProvider(BaseProvider):
                         if (
                             not decision.retryable
                             or retry_failures >= stream_policy.max_retries(stream=True)
+                            or attempt_had_output
                         ):
                             raise
                         retry_failures += 1
@@ -814,6 +815,7 @@ class OpenAICompatibleProvider(BaseProvider):
                     if (
                         not decision.retryable
                         or retry_failures >= stream_policy.max_retries(stream=True)
+                        or attempt_had_output
                     ):
                         raise
                     retry_failures += 1
@@ -1262,22 +1264,26 @@ class OpenAICompatibleProvider(BaseProvider):
                 "tool_calls": msg.get("tool_calls"),
                 "tool_call_id": msg.get("tool_call_id"),
             }
-            if (
-                item["role"] == "assistant"
-                and msg.get("reasoning")
-                and (
+            if item["role"] == "assistant":
+                route_match = (
                     not msg.get("model_route_id")
                     or msg.get("model_route_id") == self.route["route_id"]
                 )
-                and (
-                    effective_history_policy == "all_assistant_messages"
-                    or (
-                        effective_history_policy == "tool_assistant_messages"
-                        and msg.get("tool_calls")
+                if msg.get("tool_calls") and effective_history_policy in {
+                    "all_assistant_messages",
+                    "tool_assistant_messages",
+                }:
+                    # 思考模式下带 tool_calls 的 assistant 消息必须回传 reasoning_content，
+                    # reasoning 缺失或路由不一致时补空串，否则 DeepSeek 等上游返回 400。
+                    item["reasoning_content"] = (
+                        msg["reasoning"] if msg.get("reasoning") and route_match else ""
                     )
-                )
-            ):
-                item["reasoning_content"] = msg["reasoning"]
+                elif (
+                    msg.get("reasoning")
+                    and route_match
+                    and effective_history_policy == "all_assistant_messages"
+                ):
+                    item["reasoning_content"] = msg["reasoning"]
             converted.append(self._clean_payload(item))
         return converted
 

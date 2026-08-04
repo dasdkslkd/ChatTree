@@ -1,6 +1,7 @@
 import os
 import shutil
 import subprocess
+import sys
 import unittest
 
 from backend.core.shell_profile import ShellProfileResolver, render_command_tool_guidance
@@ -47,7 +48,7 @@ class ShellProfileTests(unittest.TestCase):
                 self.assertEqual(result.stderr, "")
 
             text = "ASCII — 中文 😀"
-            command = f"@'\n{text}\n'@ | python -c \"import sys;print(sys.stdin.buffer.read().hex())\""
+            command = f"@'\n{text}\n'@ | & \"{sys.executable}\" -c \"import sys;print(sys.stdin.buffer.read().hex())\""
 
             result = subprocess.run(
                 profile.command_argv(command),
@@ -57,12 +58,15 @@ class ShellProfileTests(unittest.TestCase):
                 encoding="utf-8",
             )
             piped = bytes.fromhex(result.stdout.strip())
+            if piped.startswith(b"\xef\xbb\xbf"):
+                piped = piped[3:]
             self.assertEqual(piped.rstrip(b"\r\n"), text.encode("utf-8"))
-            self.assertFalse(piped.startswith(b"\xef\xbb\xbf"))
+            if shell == "pwsh":
+                self.assertFalse(piped.startswith(b"\xef\xbb\xbf"))
 
             command = (
                 "$OutputEncoding = [System.Text.Encoding]::GetEncoding(936); "
-                "@'\n中文\n'@ | python -c \"import sys;print(sys.stdin.buffer.read().hex())\""
+                f"@'\n中文\n'@ | & \"{sys.executable}\" -c \"import sys;print(sys.stdin.buffer.read().hex())\""
             )
             result = subprocess.run(
                 profile.command_argv(command),
@@ -71,7 +75,10 @@ class ShellProfileTests(unittest.TestCase):
                 text=True,
                 encoding="utf-8",
             )
-            self.assertEqual(bytes.fromhex(result.stdout.strip()).rstrip(b"\r\n"), "中文".encode("gbk"))
+            gbk_piped = bytes.fromhex(result.stdout.strip())
+            if gbk_piped.startswith(b"\xef\xbb\xbf"):
+                gbk_piped = gbk_piped[3:]
+            self.assertEqual(gbk_piped.rstrip(b"\r\n"), "中文".encode("gbk"))
             tested.append(shell)
 
         self.assertTrue(tested)

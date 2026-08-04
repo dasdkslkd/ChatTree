@@ -371,6 +371,18 @@ def test_chat_reasoning_profiles_control_history_and_native_fields():
     assert "reasoning_content" not in converted_tool_reasoning[0]
     assert converted_tool_reasoning[1]["reasoning_content"] == "private"
 
+    # 带 tool_calls 但 reasoning 缺失/路由不一致时，必须回传空 reasoning_content，
+    # 否则 DeepSeek 思考模式上游返回 400。
+    degraded_messages = deepcopy(messages[1:])
+    degraded_messages[0]["model_route_id"] = tool_reasoning_route["route_id"]
+    degraded_messages[0]["reasoning"] = None
+    converted_degraded = tool_reasoning._convert_messages(degraded_messages)
+    assert converted_degraded[0]["reasoning_content"] == ""
+    degraded_messages[0]["model_route_id"] = "gateway:other:chat"
+    degraded_messages[0]["reasoning"] = "private"
+    converted_degraded = tool_reasoning._convert_messages(degraded_messages)
+    assert converted_degraded[0]["reasoning_content"] == ""
+
     qwen_route = route(
         "openai_chat_completions",
         route_id="gateway:qwen:chat",

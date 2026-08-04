@@ -134,7 +134,7 @@ def _profile_for(platform_id: PlatformId, shell_id: ShellId, *, executable: Opti
             platform=platform_id,
             display_name=display,
             executable=exe,
-            args_template=["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); . ([scriptblock]::Create([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{command}'))))"],
+            args_template=["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); . ([scriptblock]::Create([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{command}'))))"],
             path_separator="\\",
             line_ending="\r\n",
             highlighter_language="powershell",

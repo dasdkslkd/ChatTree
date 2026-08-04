@@ -1980,3 +1980,64 @@ def test_snapshot_assembles_task_notification_from_canonical_table(tmp_path):
     assert notification["source_run_kind"] == "workflow"
     assert notification["summary"] == "工作流完成"
     assert notification["content"] == "产物已生成"
+
+
+def test_patch_on_child_node_after_error_keeps_user_message_at_branch_index(tmp_path):
+    """出错后续发"继续"：子节点流式 patch 必须把用户消息插在分支正确位置，而非回退到末尾。"""
+    persistence, repository = _repo(tmp_path)
+    conversation_id, root_id = _conversation(repository)
+    repository.add_message(conversation_id, root_id, "user", "first question")
+    child_id = repository.create_node(conversation_id, parent_id=root_id, child_order=0)
+    repository.add_message(conversation_id, child_id, "user", "继续")
+    run_id = SQLiteRunRepository(persistence).create_run(
+        conversation_id,
+        kind="chat",
+        target_node_id=child_id,
+        summary="continue after error",
+    )
+    session = TranscriptAssembler(persistence).patch_session(run_id)
+    patch = session.feed({
+        "status": "content",
+        "conversation_id": conversation_id,
+        "node_id": child_id,
+        "content": "retry answer",
+    })
+    assert patch is not None
+
+    upserts = [
+        (operation["item"], operation["index"])
+        for operation in patch["operations"]
+        if operation["op"] == "upsert"
+    ]
+    types = [item["type"] for item, _ in upserts]
+    assert "user_message" in types
+    assert "assistant_process" in types
+
+    user_item, user_index = next(
+        (item, idx) for item, idx in upserts if item["type"] == "user_message"
+    )
+    _, process_index = next(
+        (item, idx) for item, idx in upserts if item["type"] == "assistant_process"
+    )
+    # 用户消息"继续"必须在 assistant_process 之前
+    assert user_item["content"] == "继续"
+    assert user_index < process_index
+
+    # index 必须来自 index_by_id（分支绝对位置），不能回退到 len(snapshot_items)
+    stream = session._stream_state()
+    stream["node_id"] = child_id
+    stream["target_node_id"] = child_id
+    snapshot_items = TranscriptAssembler(persistence).snapshot(
+        conversation_id, child_id, active_streams=[stream],
+    )["items"]
+    index_by_id = {
+        str(item.get("id") or ""): idx
+        for idx, item in enumerate(snapshot_items)
+        if item.get("id")
+    }
+    for item, index in upserts:
+        item_id = str(item.get("id") or "")
+        assert item_id in index_by_id, f"item {item_id} missing from snapshot"
+        assert index == index_by_id[item_id], (
+            f"item {item_id} patch index {index} != snapshot index {index_by_id[item_id]}"
+        )

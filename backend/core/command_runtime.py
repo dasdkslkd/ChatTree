@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import locale
@@ -604,7 +604,7 @@ class CommandExecutor:
                 final_status = RunStatus.COMPLETED if exit_code == 0 else RunStatus.FAILED
             if final_status == RunStatus.FAILED and not error:
                 stderr_tail = self._tail_text(run_id, "stderr").strip()
-                error = stderr_tail or f"command exited with code {exit_code}"
+                error = stderr_tail or f"command exited with code {exit_code}: {command}"
             await self.run_manager.append_event(run_id, {
                 "event_type": "command_stopped" if final_status == RunStatus.CANCELLED else "command_exited",
                 "status": "stopped" if final_status == RunStatus.CANCELLED else "content",
@@ -755,7 +755,7 @@ class CommandExecutor:
             final_status = RunStatus.COMPLETED if exit_code == 0 else RunStatus.FAILED
         if final_status == RunStatus.FAILED and not error:
             stderr_tail = self._tail_text(run_id, "stderr").strip()
-            error = stderr_tail or f"command exited with code {exit_code}"
+            error = stderr_tail or f"command exited with code {exit_code}: {command}"
         await self.run_manager.append_event(run_id, {
             "event_type": "command_stopped" if final_status == RunStatus.CANCELLED else "command_exited",
             "status": "stopped" if final_status == RunStatus.CANCELLED else "content",
