@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Dict, Optional, TypeVar
 
+import httpx
+
 
 RETRYABLE_HTTP_STATUSES = {408, 409, 429, 500, 502, 503, 504, 529}
 
@@ -81,6 +83,10 @@ def classify_retry_error(error: BaseException, policy: RetryPolicy) -> RetryDeci
     if isinstance(error, urllib.error.URLError):
         return RetryDecision(True, "network")
     if isinstance(error, (ConnectionError, ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+        return RetryDecision(True, "network")
+    if isinstance(error, httpx.TimeoutException):
+        return RetryDecision(True, "timeout")
+    if isinstance(error, httpx.RequestError):
         return RetryDecision(True, "network")
 
     return RetryDecision(False, "unknown")

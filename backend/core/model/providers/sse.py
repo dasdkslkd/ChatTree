@@ -103,7 +103,3 @@ async def iter_sse_lines(
                 await response.aclose()
     except StreamStopped:
         raise
-    except httpx.TimeoutException as exc:
-        raise TimeoutError(str(exc)) from exc
-    except httpx.RequestError as exc:
-        raise ConnectionError(str(exc)) from exc
