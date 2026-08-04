@@ -6,6 +6,9 @@ import { filesApi } from '../../api/files';
 import { useConversationStore } from '../../store/conversationStore';
 import { FILE_LINK_PREFIX, findLinkRanges } from '../../utils/fileLinkDetection';
 
+// 本文件同时导出链接组件与供 MarkdownContent/测试复用的组件映射表，属合理结构
+/* eslint-disable react-refresh/only-export-components */
+
 const ABSOLUTE_PATH = /^[A-Za-z]:[\\/]|^[/~]/;
 // URL 中不允许出现的字符：GFM autolink 会把紧随的中文吞进链接，在此截断修正
 const URL_UNSAFE = /[\s<>"\u3000-\u303f\u3400-\u9fff\uff00-\uffef]/;
@@ -30,7 +33,7 @@ export function FilePathLink({ path }: { path: string }) {
   );
 }
 
-export function renderLinkNodes(text: string): ReactNode {
+function renderLinkNodes(text: string): ReactNode {
   const ranges = findLinkRanges(text);
   if (ranges.length === 0) return text;
   const nodes: ReactNode[] = [];

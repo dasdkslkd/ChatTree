@@ -2722,7 +2722,7 @@ class ChatManager:
     ) -> Optional[Message]:
         parts = [
             "<system-reminder>",
-            "The user attached the following file references. These may or may not be related to the current task.",
+            "The user attached the following files. Each file's content is inlined below and its absolute on-disk path is given; read the path yourself if you need the raw file.",
         ]
         added = 0
         for file_ref in import_files:
@@ -2734,11 +2734,13 @@ class ChatManager:
                 parts.append(f"\nUser attached file `{filename}`, but it is no longer available.")
                 added += 1
                 continue
+            file_path = self.storage._safe_import_path(conversation_id, filename)
+            location = f" (absolute path: {file_path})" if file_path else ""
             truncated = len(content) > POST_COMPACT_MAX_CHARS_PER_FILE
             visible_content = content[:POST_COMPACT_MAX_CHARS_PER_FILE]
             suffix = " (truncated)" if truncated else ""
             parts.append(
-                f"\nUser attached file `{filename}`{suffix}:\n"
+                f"\nUser attached file `{filename}`{location}{suffix}:\n"
                 f"<file name=\"{filename}\">\n{visible_content}\n</file>"
             )
             if truncated:

@@ -355,6 +355,8 @@ class OpenAICompatibleProvider(BaseProvider):
                                         tool_call={"tool_calls": tool_calls},
                                         tool_calls=tool_calls,
                                     )
+                        if finish_reason is None and not attempt_had_output:
+                            raise ConnectionError("upstream stream ended without finish_reason or output")
                         break
                     except StreamStopped:
                         yield StreamChunk(
@@ -780,6 +782,8 @@ class OpenAICompatibleProvider(BaseProvider):
                             error=None,
                             tokens_used=token_delta,
                         )
+                    if finish_reason is None and not attempt_had_output:
+                        raise ConnectionError("upstream stream ended without finish_reason or output")
                     break
                 except StreamStopped:
                     yield StreamChunk(
