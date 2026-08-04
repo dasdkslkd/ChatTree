@@ -1,7 +1,7 @@
 {
   "name": "chattree",
   "private": true,
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "ChatTree desktop client",
   "author": "ChatTree contributors",
   "repository": {
