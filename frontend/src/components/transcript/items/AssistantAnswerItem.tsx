@@ -23,9 +23,9 @@ export function AssistantAnswerItem({ item, onCopy }: { item: AssistantAnswerTra
 
   return (
     <div className={cn('w-full flex flex-col group items-start')} role="listitem">
-      <div className="flex flex-col max-w-full items-start w-full">
+      <div className="flex flex-col max-w-full min-w-0 items-start w-full">
         <div
-          className="max-w-full px-3 py-2 rounded-2xl leading-relaxed prose prose-sm max-w-none [&_p]:m-0 [&_p:not(:last-child)]:mb-2"
+          className="max-w-full min-w-0 break-words px-3 py-2 rounded-2xl leading-relaxed prose prose-sm [&_p]:m-0 [&_p:not(:last-child)]:mb-2"
           style={{
             color: 'var(--fg-secondary)',
             fontSize: 'var(--codex-chat-font-size)',

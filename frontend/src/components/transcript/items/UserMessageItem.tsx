@@ -44,9 +44,9 @@ export function UserMessageItem({
 
   return (
     <div className="w-full flex flex-col group items-end" role="listitem">
-      <div className="flex flex-col max-w-full items-end">
+      <div className="flex flex-col max-w-full min-w-0 items-end">
         <div
-          className="max-w-full px-3 py-2 rounded-2xl rounded-br-sm leading-relaxed prose prose-sm prose-invert max-w-none [&_p]:m-0 [&_p:not(:last-child)]:mb-2"
+          className="max-w-full min-w-0 break-words px-3 py-2 rounded-2xl rounded-br-sm leading-relaxed prose prose-sm prose-invert [&_p]:m-0 [&_p:not(:last-child)]:mb-2"
           style={{
             background: 'linear-gradient(160deg, rgba(217,119,87,0.16), rgba(217,119,87,0.08))',
             border: '0.5px solid rgba(217,119,87,0.28)',
