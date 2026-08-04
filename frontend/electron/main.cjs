@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, WebContentsView, Menu, dialog } = require("electron");
+const { app, BrowserWindow, ipcMain, WebContentsView, Menu, dialog, shell } = require("electron");
 const { autoUpdater } = require("electron-updater");
 const path = require("path");
 const fs = require("fs");
@@ -542,6 +542,23 @@ function registerIpc() {
 }
 
 // ── App lifecycle ──────────────────────────────────────────────────────
+
+// 外链一律交给系统浏览器，应用视图不被导航走
+function isExternalUrl(url) {
+  return /^https?:\/\//i.test(url);
+}
+
+app.on("web-contents-created", (_event, contents) => {
+  contents.setWindowOpenHandler(({ url }) => {
+    if (isExternalUrl(url)) shell.openExternal(url);
+    return { action: "deny" };
+  });
+  contents.on("will-navigate", (event, url) => {
+    if (launcherOrigin && url.startsWith(launcherOrigin)) return;
+    event.preventDefault();
+    if (isExternalUrl(url)) shell.openExternal(url);
+  });
+});
 
 app.whenReady().then(async () => {
   Menu.setApplicationMenu(null);
