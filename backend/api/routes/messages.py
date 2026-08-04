@@ -402,13 +402,46 @@ async def _produce_chat_run(
         final_status = RunStatus.CANCELLED
         await event_batcher.flush()
     except Exception as exc:
-        logger.exception("Message producer failed for conversation %s", conversation_id)
+        logger.exception(
+        "Message producer failed for conversation %s model=%s provider=%s",
+        conversation_id, request.model_id, request.provider_id,
+    )
         final_status = RunStatus.FAILED
         final_error = str(exc) or exc.__class__.__name__
         await event_batcher.flush()
     finally:
         await event_batcher.flush()
         await run_manager.finish_run(run.run_id, final_status, final_error)
+        # --- 自动续写：流中断后注入隐藏"继续"消息 ---
+        if final_status == RunStatus.FAILED and final_error and bound_node_id:
+            retryable = ("timeout", "timed out", "connection", "reset", "broken pipe", "eof")
+            if any(p in final_error.lower() for p in retryable):
+                logger.info(
+                    "Auto-continuing failed run %s node=%s model=%s: %s",
+                    run.run_id, bound_node_id,
+                    request.model_id or "?", final_error,
+                )
+                try:
+                    async for _chunk in chat_manager.send_message_stream(
+                        conversation_id=conversation_id,
+                        content="Continue from where you left off.",
+                        model_id=request.model_id,
+                        provider_id=request.provider_id,
+                        parent_node_id=bound_node_id,
+                        focus_new_node=False,
+                        reasoning_effort=request.reasoning_effort,
+                        thinking_enabled=request.thinking_enabled,
+                        import_files=request.import_files,
+                        image_refs=request.image_refs,
+                        tool_permission_mode=request.tool_permission_mode,
+                        task_context_mode=request.task_context_mode,
+                        hidden_user_message=True,
+                        suppress_user_message=True,
+                        append_to_existing_node=True,
+                    ):
+                        pass
+                except Exception:
+                    logger.exception("Auto-continue failed for run %s", run.run_id)
 
 
 async def _produce_direct_response(

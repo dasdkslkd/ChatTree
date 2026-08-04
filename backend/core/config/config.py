@@ -10,10 +10,10 @@ from .types import ModelProviderConfig
 DEFAULT_MODEL_TRANSPORT = {
     'connect_timeout_seconds': 10.0,
     'first_event_timeout_seconds': 900.0,
-    'stream_idle_timeout_seconds': 300.0,
+    'stream_idle_timeout_seconds': 900.0,
     'sse_heartbeat_seconds': 15.0,
-    'max_request_retries': 3,
-    'max_stream_retries': 1,
+    'max_request_retries': 5,
+    'max_stream_retries': 5,
     'retry_base_delay_seconds': 2.0,
     'retry_max_delay_seconds': 15.0,
     'retry_jitter_fraction': 0.2,

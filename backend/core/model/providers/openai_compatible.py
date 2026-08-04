@@ -384,8 +384,7 @@ class OpenAICompatibleProvider(BaseProvider):
                             break
                         decision = classify_retry_error(exc, stream_policy)
                         if (
-                            attempt_had_output
-                            or not decision.retryable
+                            not decision.retryable
                             or retry_failures >= stream_policy.max_retries(stream=True)
                         ):
                             raise
@@ -396,8 +395,8 @@ class OpenAICompatibleProvider(BaseProvider):
                             decision,
                         )
                         logger.warning(
-                            f"OpenAI stream failed before output; retrying "
-                            f"{retry_failures}/{stream_policy.max_retries(stream=True)} "
+                            f"Chat stream failed [{decision.category}] model={model} "
+                            f"retry {retry_failures}/{stream_policy.max_retries(stream=True)} "
                             f"in {delay:.2f}s: {exc}"
                         )
                         continue
@@ -414,8 +413,7 @@ class OpenAICompatibleProvider(BaseProvider):
                             return
                         decision = classify_retry_error(exc, stream_policy)
                         if (
-                            attempt_had_output
-                            or not decision.retryable
+                            not decision.retryable
                             or retry_failures >= stream_policy.max_retries(stream=True)
                         ):
                             raise
@@ -426,8 +424,8 @@ class OpenAICompatibleProvider(BaseProvider):
                             decision,
                         )
                         logger.warning(
-                            f"OpenAI stream failed before output; retrying "
-                            f"{retry_failures}/{stream_policy.max_retries(stream=True)} "
+                            f"Chat stream failed [{decision.category}] model={model} "
+                            f"retry {retry_failures}/{stream_policy.max_retries(stream=True)} "
                             f"in {delay:.2f}s: {exc}"
                         )
                         continue
@@ -465,9 +463,8 @@ class OpenAICompatibleProvider(BaseProvider):
             )
         except Exception as e:
             logger.error(
-                f"Stream error: {e} - Conversation: "
-                f"{stream_controller.conversation_id if stream_controller else None} - "
-                f"Node: {stream_controller.node_id if stream_controller else None}"
+                f"Stream error [{self.route['protocol']}] model={model} "
+                f"provider={self.route['provider_id']}: {e}"
             )
             yield StreamChunk(
                 status=StreamStatus.ERROR,
@@ -521,6 +518,7 @@ class OpenAICompatibleProvider(BaseProvider):
         for attempt_index, current_kwargs in enumerate(attempts):
             retry_failures = 0
             fallback_to_next_params = False
+            last_response_id: Optional[str] = None
             while True:
                 total_content = ""
                 total_reasoning = ""
@@ -548,6 +546,12 @@ class OpenAICompatibleProvider(BaseProvider):
                             return
 
                         event_type = event.get("type", "")
+                        if event_type == "response.created":
+                            response = event.get("response") or {}
+                            if response_id := response.get("id"):
+                                last_response_id = response_id
+                            continue
+
                         if event_type == "response.completed":
                             response = event.get("response") or {}
                             finish_reason = "stop"
@@ -808,16 +812,17 @@ class OpenAICompatibleProvider(BaseProvider):
                         break
                     decision = classify_retry_error(exc, stream_policy)
                     if (
-                        attempt_had_output
-                        or not decision.retryable
+                        not decision.retryable
                         or retry_failures >= stream_policy.max_retries(stream=True)
                     ):
                         raise
                     retry_failures += 1
+                    if last_response_id:
+                        current_kwargs["previous_response_id"] = last_response_id
                     delay = await sleep_before_retry(retry_failures, stream_policy, decision)
                     logger.warning(
-                        f"Responses stream failed before output; retrying "
-                        f"{retry_failures}/{stream_policy.max_retries(stream=True)} "
+                        f"Responses stream failed [{decision.category}] model={model} "
+                        f"retry {retry_failures}/{stream_policy.max_retries(stream=True)} "
                         f"in {delay:.2f}s: {exc}"
                     )
                     continue
@@ -834,16 +839,17 @@ class OpenAICompatibleProvider(BaseProvider):
                         return
                     decision = classify_retry_error(exc, stream_policy)
                     if (
-                        attempt_had_output
-                        or not decision.retryable
+                        not decision.retryable
                         or retry_failures >= stream_policy.max_retries(stream=True)
                     ):
                         raise
                     retry_failures += 1
+                    if last_response_id:
+                        current_kwargs["previous_response_id"] = last_response_id
                     delay = await sleep_before_retry(retry_failures, stream_policy, decision)
                     logger.warning(
-                        f"Responses stream failed before output; retrying "
-                        f"{retry_failures}/{stream_policy.max_retries(stream=True)} "
+                        f"Responses stream failed [{decision.category}] model={model} "
+                        f"retry {retry_failures}/{stream_policy.max_retries(stream=True)} "
                         f"in {delay:.2f}s: {exc}"
                     )
                     continue

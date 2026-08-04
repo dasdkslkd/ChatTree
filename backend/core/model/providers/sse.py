@@ -5,6 +5,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable, TypeVar
 import httpx
 
 from ...config.types import StreamController
+from ..base import logger
 
 
 class StreamStopped(Exception):
@@ -64,6 +65,10 @@ async def iter_sse_lines(
                     first_event_deadline,
                 )
             except TimeoutError as exc:
+                url_short = url.rsplit("/", 1)[-1] if "/" in url else url
+                logger.warning(
+                    "SSE headers timeout after %gs: %s", first_event_timeout, url_short,
+                )
                 raise TimeoutError(
                     f"Provider response headers timed out after {first_event_timeout:g}s"
                 ) from exc
@@ -95,6 +100,10 @@ async def iter_sse_lines(
                     except TimeoutError as exc:
                         phase = "first SSE event" if first_line else "SSE idle"
                         limit = first_event_timeout if first_line else idle_timeout
+                        url_short = url.rsplit("/", 1)[-1] if "/" in url else url
+                        logger.warning(
+                            "SSE %s timeout after %gs: %s", phase, limit, url_short,
+                        )
                         raise TimeoutError(f"Provider {phase} timed out after {limit:g}s") from exc
                     if line:
                         first_line = False
