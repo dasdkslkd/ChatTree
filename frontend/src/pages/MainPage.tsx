@@ -1435,6 +1435,18 @@ export default function ChatPage() {
     }
   }, [currentBranchHasStreamingChat, scrollToBottom, transcriptItems]);
 
+  // 内容异步增高（懒加载 Markdown/公式/代码高亮等）时，若处于底部则继续贴底
+  useEffect(() => {
+    const container = historyRef.current;
+    const content = container?.firstElementChild;
+    if (!container || !content) return;
+    const observer = new ResizeObserver(() => {
+      if (autoScrollRef.current) container.scrollTop = container.scrollHeight;
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [currentConversation?.id]);
+
   useEffect(() => {
     loadConversations();
   }, [loadConversations]);
@@ -1823,7 +1835,7 @@ export default function ChatPage() {
   };
 
   const parseFileMention = (content: string): { fileNames: string[]; cleanContent: string } | null => {
-    const match = content.match(/^'''USER MENTIONED FILES:\s+(.*?)\s+'''\n\n[\s\S]*?\n---\n\n/s);
+    const match = content.match(/^'''USER MENTIONED FILES:\s+(.*?)\s+'''\u000A\u000A[\s\S]*?\u000A---\u000A\u000A/s);
     if (!match) return null;
     const fileNames = match[1].split(/\s+/).filter(Boolean);
     const cleanContent = content.slice(match[0].length);

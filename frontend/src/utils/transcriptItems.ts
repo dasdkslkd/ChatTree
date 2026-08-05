@@ -157,6 +157,12 @@ export function applyTranscriptPatch(
     upserts.push({ item, index });
   }
   upserts.sort((left, right) => left.index - right.index);
+  // 同索引项按操作顺序顺延，保证先到者（如用户消息）不被后到者插到自己前面
+  for (let position = 1; position < upserts.length; position += 1) {
+    if (upserts[position].index <= upserts[position - 1].index) {
+      upserts[position].index = upserts[position - 1].index + 1;
+    }
+  }
   const upsertIds = new Set(upserts.map(({ item }) => item.id));
   nextItems = nextItems.filter((item) => !upsertIds.has(item.id));
   for (const { item, index } of upserts) {

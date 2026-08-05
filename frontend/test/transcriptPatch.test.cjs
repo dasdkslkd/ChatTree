@@ -134,9 +134,36 @@ function testPlanStateRefreshPathIsGone() {
   );
 }
 
+function testEqualIndexUpsertsKeepOperationOrder() {
+  const state = stateFromTranscriptSnapshot({
+    conversation_id: 'conv-1',
+    node_id: 'node-1',
+    revision: 1,
+    items: [{ id: 'message:root', type: 'user_message', content: 'root' }],
+  });
+
+  const result = applyTranscriptPatch(state, {
+    type: 'transcript_patch',
+    conversation_id: 'conv-1',
+    node_id: 'node-1',
+    revision: 2,
+    operations: [
+      { op: 'upsert', item: { id: 'message:continue', type: 'user_message', content: 'continue' }, index: 1 },
+      { op: 'upsert', item: { id: 'process:node-1:0', type: 'assistant_process', blocks: [] }, index: 1 },
+    ],
+  });
+
+  assert.equal(result.status, 'applied');
+  assert.deepEqual(
+    result.state.items.map((item) => item.id),
+    ['message:root', 'message:continue', 'process:node-1:0'],
+  );
+}
+
 testTargetMismatchNeedsSnapshot();
 testInitialTargetMismatchDiscardsPatchAndNeedsSnapshot();
 testTargetMismatchDiscardsPatchAndNeedsSnapshot();
+testEqualIndexUpsertsKeepOperationOrder();
 testAppendDeltaIsNotPartOfContract();
 testPlanStateRefreshPathIsGone();
 console.log('transcriptPatch tests passed');

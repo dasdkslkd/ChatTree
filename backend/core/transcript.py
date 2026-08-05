@@ -1071,19 +1071,33 @@ class TranscriptPatchSession:
             for index, item in enumerate(snapshot_items)
             if item.get("id")
         }
+        # snapshot 中缺失项的插入位置：放在同节点已知项之前，避免用户消息追加到流式内容末尾
+        fallback_index = next(
+            (
+                index
+                for index, candidate in enumerate(snapshot_items)
+                if str(candidate.get("node_id") or "") == str(self.node_id)
+            ),
+            len(snapshot_items),
+        )
         current_ids = {str(item.get("id") or "") for item in items if item.get("id")}
         remove_ids = self.emitted_ids - current_ids
         operations = [{"op": "remove", "id": item_id} for item_id in sorted(remove_ids)]
+        fallback_offset = 0
         for item in items:
             item_id = str(item.get("id") or "")
             if not item_id:
                 continue
             serialized = json.dumps(item, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
             if self.emitted_items.get(item_id) != serialized:
+                index = index_by_id.get(item_id)
+                if index is None:
+                    index = fallback_index + fallback_offset
+                    fallback_offset += 1
                 operations.append({
                     "op": "upsert",
                     "item": item,
-                    "index": index_by_id.get(item_id, len(snapshot_items)),
+                    "index": index,
                 })
         self.emitted_ids = current_ids
         self.emitted_items = {

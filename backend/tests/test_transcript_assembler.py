@@ -2041,3 +2041,51 @@ def test_patch_on_child_node_after_error_keeps_user_message_at_branch_index(tmp_
         assert index == index_by_id[item_id], (
             f"item {item_id} patch index {index} != snapshot index {index_by_id[item_id]}"
         )
+
+
+def test_patch_fallback_anchors_user_message_before_stream_items(tmp_path):
+    """snapshot 因时序竞态缺少用户消息时，patch 也不得把它排到流式内容之后。"""
+    persistence, repository = _repo(tmp_path)
+    conversation_id, root_id = _conversation(repository)
+    repository.add_message(conversation_id, root_id, "user", "first question")
+    child_id = repository.create_node(conversation_id, parent_id=root_id, child_order=0)
+    repository.add_message(conversation_id, child_id, "user", "继续")
+    run_id = SQLiteRunRepository(persistence).create_run(
+        conversation_id,
+        kind="chat",
+        target_node_id=child_id,
+        summary="fallback ordering",
+    )
+    assembler = TranscriptAssembler(persistence)
+    original_snapshot = assembler.snapshot
+
+    def snapshot_without_user_messages(*args, **kwargs):
+        result = original_snapshot(*args, **kwargs)
+        result["items"] = [
+            item for item in result["items"] if item.get("type") != "user_message"
+        ]
+        return result
+
+    assembler.snapshot = snapshot_without_user_messages
+    session = assembler.patch_session(run_id)
+    patch = session.feed({
+        "status": "content",
+        "conversation_id": conversation_id,
+        "node_id": child_id,
+        "content": "answer",
+    })
+    assert patch is not None
+
+    upserts = [
+        (operation["item"], operation["index"])
+        for operation in patch["operations"]
+        if operation["op"] == "upsert"
+    ]
+    user_index = next(
+        idx for item, idx in upserts if item["type"] == "user_message"
+    )
+    process_index = next(
+        idx for item, idx in upserts if item["type"] == "assistant_process"
+    )
+    # 同索引时前端按操作顺序顺延，此处只需保证用户消息不在流式内容之后
+    assert user_index <= process_index
