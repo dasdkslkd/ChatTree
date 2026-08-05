@@ -25,6 +25,7 @@ from ..run_start import (
     run_start_response,
 )
 from ...core.config.types import StreamChunk
+from ...core.model.providers.retry import classify_retry_error
 from ...core.perf import get_profiler
 from ...core.runs import (
     RunIdempotency,
@@ -352,6 +353,7 @@ async def _produce_chat_run(
     profiler = get_profiler()
     final_status = RunStatus.COMPLETED
     final_error: str | None = None
+    final_retryable = False
     bound_node_id: str | None = None
     event_batcher = RunEventBatcher(run_manager, run.run_id)
     try:
@@ -396,6 +398,7 @@ async def _produce_chat_run(
                 if chunk_status == "error":
                     final_status = RunStatus.FAILED
                     final_error = chunk_data.get("error") or "unknown error"
+                    final_retryable = bool((chunk_data.get("metadata") or {}).get("retryable"))
                 elif chunk_status == "stopped":
                     final_status = RunStatus.CANCELLED
     except asyncio.CancelledError:
@@ -408,40 +411,39 @@ async def _produce_chat_run(
     )
         final_status = RunStatus.FAILED
         final_error = str(exc) or exc.__class__.__name__
+        final_retryable = classify_retry_error(exc).retryable
         await event_batcher.flush()
     finally:
         await event_batcher.flush()
         await run_manager.finish_run(run.run_id, final_status, final_error)
-        # --- 自动续写：流中断后注入隐藏"继续"消息 ---
-        if final_status == RunStatus.FAILED and final_error and bound_node_id:
-            retryable = ("timeout", "timed out", "connection", "reset", "broken pipe", "eof")
-            if any(p in final_error.lower() for p in retryable):
-                logger.info(
-                    "Auto-continuing failed run %s node=%s model=%s: %s",
-                    run.run_id, bound_node_id,
-                    request.model_id or "?", final_error,
-                )
-                try:
-                    async for _chunk in chat_manager.send_message_stream(
-                        conversation_id=conversation_id,
-                        content="Continue from where you left off.",
-                        model_id=request.model_id,
-                        provider_id=request.provider_id,
-                        parent_node_id=bound_node_id,
-                        focus_new_node=False,
-                        reasoning_effort=request.reasoning_effort,
-                        thinking_enabled=request.thinking_enabled,
-                        import_files=request.import_files,
-                        image_refs=request.image_refs,
-                        tool_permission_mode=request.tool_permission_mode,
-                        task_context_mode=request.task_context_mode,
-                        hidden_user_message=True,
-                        suppress_user_message=True,
-                        append_to_existing_node=True,
-                    ):
-                        pass
-                except Exception:
-                    logger.exception("Auto-continue failed for run %s", run.run_id)
+        # --- 自动续写：流因可恢复网络错误中断后，注入隐藏"继续"消息 ---
+        if final_status == RunStatus.FAILED and bound_node_id and final_retryable:
+            logger.info(
+                "Auto-continuing failed run %s node=%s model=%s: %s",
+                run.run_id, bound_node_id,
+                request.model_id or "?", final_error,
+            )
+            try:
+                async for _chunk in chat_manager.send_message_stream(
+                    conversation_id=conversation_id,
+                    content="Continue from where you left off.",
+                    model_id=request.model_id,
+                    provider_id=request.provider_id,
+                    parent_node_id=bound_node_id,
+                    focus_new_node=False,
+                    reasoning_effort=request.reasoning_effort,
+                    thinking_enabled=request.thinking_enabled,
+                    import_files=request.import_files,
+                    image_refs=request.image_refs,
+                    tool_permission_mode=request.tool_permission_mode,
+                    task_context_mode=request.task_context_mode,
+                    hidden_user_message=True,
+                    suppress_user_message=True,
+                    append_to_existing_node=True,
+                ):
+                    pass
+            except Exception:
+                logger.exception("Auto-continue failed for run %s", run.run_id)
 
 
 async def _produce_direct_response(

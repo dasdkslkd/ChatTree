@@ -2,6 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
+import asyncio
 import logging
 from pathlib import Path
 
@@ -536,9 +537,10 @@ async def delete_node(
         conv = chat_manager.get_conversation(conversation_id)
         if not conv:
             raise HTTPException(status_code=404, detail="对话不存在")
+        subtree_node_ids = [str(node) for node in conv.get_descendant_node_ids(node_id)]
         active_runs = run_manager.active_runs_for_targets(
             conversation_id=conversation_id,
-            target_node_ids=conv.get_descendant_node_ids(node_id),
+            target_node_ids=subtree_node_ids,
         )
     except HTTPException:
         raise
@@ -562,9 +564,27 @@ async def delete_node(
                 await run_manager.request_stop(str(run["run_id"]))
                 if run.get("target_node_id"):
                     await chat_manager.stop_stream(str(run["target_node_id"]))
+            # 等待被停止的 run 落入终态，确保下方清理能一并删除；
+            # 超时不阻塞删除，残留的悬空 run 会在下次删除分支时被清扫。
+            for run in active_runs:
+                try:
+                    await asyncio.wait_for(
+                        run_manager.wait_for_terminal_result(
+                            str(run["run_id"]), result_event_types=(),
+                        ),
+                        timeout=10,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Timed out waiting for run %s to terminate before node deletion",
+                        run["run_id"],
+                    )
         result = await chat_manager.delete_node(conversation_id, node_id)
         if result is None:
             raise HTTPException(status_code=404, detail="对话不存在")
+        run_manager.repository.delete_runs_for_deleted_nodes(
+            conversation_id, subtree_node_ids,
+        )
         return {
             "message": "节点已删除",
             "deleted_node_id": result["deleted_node_id"],

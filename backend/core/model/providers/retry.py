@@ -62,7 +62,7 @@ class RetryDecision:
 T = TypeVar("T")
 
 
-def classify_retry_error(error: BaseException, policy: RetryPolicy) -> RetryDecision:
+def classify_retry_error(error: BaseException, policy: RetryPolicy | None = None) -> RetryDecision:
     status = getattr(error, "status", None)
     if isinstance(status, int):
         retry_after = _retry_after_seconds(getattr(error, "headers", None))

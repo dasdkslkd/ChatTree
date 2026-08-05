@@ -422,6 +422,7 @@ class OpenAICompatibleProvider(BaseProvider):
                         if (
                             not decision.retryable
                             or retry_failures >= stream_policy.max_retries(stream=True)
+                            or attempt_had_output
                         ):
                             raise
                         retry_failures += 1
@@ -482,6 +483,7 @@ class OpenAICompatibleProvider(BaseProvider):
                 error=str(e) or e.__class__.__name__,
                 tokens_used=total_tokens,
                 usage_info=usage_info,
+                metadata={"retryable": classify_retry_error(e).retryable},
             )
 
     async def _stream_responses_api(

@@ -538,6 +538,7 @@ class AnthropicProvider(BaseProvider):
                 conversation_id=stream_controller.conversation_id if stream_controller else None,
                 error=str(e) or e.__class__.__name__, tokens_used=total_tokens,
                 usage_info=usage_info,
+                metadata={"retryable": classify_retry_error(e).retryable},
             )
 
     def _openai_tool_to_anthropic_tool(self, tool: Dict[str, Any]) -> Dict[str, Any]:

@@ -917,3 +917,39 @@ def test_run_manager_startup_interrupts_are_visible_after_restart(tmp_path):
         assert events[-1]["status"] == "interrupted"
 
     asyncio.run(scenario())
+
+
+def test_delete_runs_for_deleted_nodes_cleans_subtree_and_orphans(tmp_path):
+    _persistence, chat, runs, conv_id, node_id = _repositories(tmp_path)
+    child_id = chat.create_node(conv_id, parent_id=node_id)
+
+    # 终态 run：落点在待删子树内 → 应删除（含其事件）
+    subtree_run = runs.create_run(
+        conv_id, kind="chat", anchor_node_id=node_id, target_node_id=child_id,
+    )
+    runs.append_event(subtree_run, {"status": "content", "content": "x"})
+    runs.finish_run(subtree_run, RunStatus.FAILED.value, "ReadError")
+
+    # 历史孤儿 run：落点早已被删（悬空）的终态 run → 应一并清扫
+    orphan_run = runs.create_run(conv_id, kind="chat", anchor_node_id=node_id)
+    runs.finish_run(orphan_run, RunStatus.FAILED.value, "ConnectTimeout")
+
+    # 活跃 run：落点在子树内但未终态 → 不受影响
+    active_run = runs.create_run(
+        conv_id, kind="chat", anchor_node_id=node_id, target_node_id=child_id,
+    )
+
+    # 子树外的终态 run → 保留
+    outside_run = runs.create_run(
+        conv_id, kind="chat", anchor_node_id=node_id, target_node_id=node_id,
+    )
+    runs.finish_run(outside_run, RunStatus.COMPLETED.value)
+
+    deleted = runs.delete_runs_for_deleted_nodes(conv_id, [child_id])
+
+    assert deleted == 2
+    assert runs.get_run(subtree_run) is None
+    assert runs.read_events(subtree_run) == []
+    assert runs.get_run(orphan_run) is None
+    assert runs.get_run(active_run) is not None
+    assert runs.get_run(outside_run) is not None

@@ -2,6 +2,9 @@
 
 import asyncio
 
+import httpx
+import pytest
+
 from backend.core.config.config import DEFAULT_MODEL_TRANSPORT
 from backend.core.config.types import (
     Message,
@@ -142,11 +145,11 @@ def _resp_chunks(*args):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Layer 1a — Chat Completions：有输出后 TimeoutError 仍应重试
+# Layer 1a — Chat Completions：无续传能力，有输出后立即失败
 # ═══════════════════════════════════════════════════════════════════════
 
-def test_chat_completions_retries_after_timeout_with_output():
-    """模拟输出到一半断流，应自动重试并拿到完整内容。"""
+def test_chat_completions_fails_fast_after_output():
+    """模拟输出到一半断流：Chat Completions 无续传能力，不得重试，应立即失败交由上层续写。"""
 
     sequences = [
         ([_cc_delta("Hello")], TimeoutError("idle timeout")),
@@ -184,9 +187,12 @@ def test_chat_completions_retries_after_timeout_with_output():
 
     asyncio.run(run())
 
-    assert provider._sse_call_count == 2
-    assert not error_chunks, f"unexpected error: {error_chunks}"
-    assert "".join(collected) == "Hello world"
+    assert provider._sse_call_count == 1
+    assert "".join(collected) == "Hello"
+    assert len(error_chunks) == 1
+    assert "idle timeout" in error_chunks[0]["error"]
+    # 终结 ERROR chunk 必须携带错误类型分类，供上层自动续写判定
+    assert error_chunks[0]["metadata"]["retryable"] is True
 
 
 def test_chat_completions_stops_after_max_retries():
@@ -377,8 +383,12 @@ class _FakeRunRepository(MemoryRunRepository):
         return super().finish_run(run_id, status, error)
 
 
-def test_auto_continue_triggers_on_stream_timeout():
-    """当 send_message_stream 因 TimeoutError 失败且有已绑定节点时，
+@pytest.mark.parametrize("failure", [
+    TimeoutError("idle timeout"),
+    httpx.ReadError("", request=httpx.Request("POST", "http://test/v1")),
+])
+def test_auto_continue_triggers_on_recoverable_stream_error(failure):
+    """当 send_message_stream 因可恢复网络错误失败且有已绑定节点时，
     _produce_chat_run 应自动调用 send_message_stream 注入隐藏"继续"消息。"""
 
     CHUNK_ACTIVE = StreamChunk(
@@ -402,9 +412,9 @@ def test_auto_continue_triggers_on_stream_timeout():
 
             async def _gen():
                 if idx == 0:
-                    # 第一次调用：产出一些内容后抛 TimeoutError
+                    # 第一次调用：产出一些内容后抛出可恢复网络错误
                     yield CHUNK_ACTIVE
-                    raise TimeoutError("idle timeout")
+                    raise failure
                 else:
                     # auto-continue 调用：正常完成
                     yield StreamChunk(
@@ -520,6 +530,78 @@ def test_auto_continue_skips_on_non_retryable_error():
     assert len(chat_manager.calls) == 1, (
         f"expected 1 call, got {len(chat_manager.calls)}"
     )
+
+
+def test_auto_continue_triggers_on_error_chunk_with_retryable_metadata():
+    """provider 以 ERROR chunk 报告可恢复网络错误时（异常未抛到路由层），
+    应依据 chunk metadata.retryable 触发自动续写。"""
+
+    class FakeChatManager:
+        def __init__(self):
+            self.calls = []
+            self._call_index = 0
+
+        def send_message_stream(self, **kwargs):
+            self.calls.append(dict(kwargs))
+            idx = self._call_index
+            self._call_index += 1
+
+            async def _gen():
+                if idx == 0:
+                    yield StreamChunk(
+                        status=StreamStatus.CONTENT,
+                        content="hi",
+                        node_id="node-target",
+                        conversation_id="conv-1",
+                        error=None,
+                        tokens_used=0,
+                    )
+                    yield StreamChunk(
+                        status=StreamStatus.ERROR,
+                        content=None,
+                        node_id="node-target",
+                        conversation_id="conv-1",
+                        error="ReadError",
+                        tokens_used=0,
+                        metadata={"retryable": True},
+                    )
+                else:
+                    yield StreamChunk(
+                        status=StreamStatus.COMPLETE,
+                        content=None,
+                        node_id="node-target",
+                        conversation_id="conv-1",
+                        error=None,
+                        tokens_used=0,
+                    )
+
+            return _gen()
+
+    chat_manager = FakeChatManager()
+    repository = _FakeRunRepository()
+    run_manager = RunManager(repository=repository)
+
+    async def scenario():
+        run = await run_manager.create_run(
+            conversation_id="conv-1", kind=RunKind.CHAT
+        )
+        request = SendMessageRequest(
+            content="hello",
+            parent_node_id="node-parent",
+        )
+        await _produce_chat_run(
+            run=run,
+            conversation_id="conv-1",
+            request=request,
+            chat_manager=chat_manager,
+            run_manager=run_manager,
+        )
+
+    asyncio.run(scenario())
+
+    assert len(chat_manager.calls) == 2
+    assert chat_manager.calls[1]["content"] == "Continue from where you left off."
+    assert chat_manager.calls[1]["append_to_existing_node"] is True
 
 
 def test_auto_continue_skips_when_no_bound_node():

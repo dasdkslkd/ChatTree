@@ -578,6 +578,7 @@ class GeminiProvider(BaseProvider):
                 error=str(e) or e.__class__.__name__,
                 tokens_used=total_tokens,
                 usage_info=usage_info,
+                metadata={"retryable": classify_retry_error(e).retryable},
             )
 
     async def _iter_sse_events(

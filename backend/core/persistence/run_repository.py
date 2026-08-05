@@ -428,6 +428,45 @@ class SQLiteRunRepository:
             ).fetchall()
         return [self._run_from_row(row) for row in rows]
 
+    def delete_runs_for_deleted_nodes(
+        self,
+        conversation_id: str,
+        node_ids: list[str],
+    ) -> int:
+        """节点子树被删除后清理对应 run：锚点/落点在子树内的终态 run，
+        以及历史上因节点删除而落点悬空的终态 run。活跃 run 不受影响；
+        run_events 与 task_notifications 随外键级联删除。"""
+        status_placeholders = ",".join("?" for _ in FINISHED_STATUSES)
+        statuses = sorted(FINISHED_STATUSES)
+        deleted = 0
+        with self.persistence.connect() as conn:
+            if node_ids:
+                node_placeholders = ",".join("?" for _ in node_ids)
+                deleted += conn.execute(
+                    f"""
+                    DELETE FROM runs
+                    WHERE conversation_id = ?
+                      AND status IN ({status_placeholders})
+                      AND (
+                        target_node_id IN ({node_placeholders})
+                        OR anchor_node_id IN ({node_placeholders})
+                      )
+                    """,
+                    (conversation_id, *statuses, *node_ids, *node_ids),
+                ).rowcount
+            deleted += conn.execute(
+                f"""
+                DELETE FROM runs
+                WHERE conversation_id = ?
+                  AND status IN ({status_placeholders})
+                  AND target_node_id IS NULL
+                """,
+                (conversation_id, *statuses),
+            ).rowcount
+        if deleted:
+            self.persistence.reclaim_blobs(compact=True)
+        return deleted
+
     def append_event(self, run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         with self.persistence.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
