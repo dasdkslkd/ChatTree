@@ -68,8 +68,6 @@ import { useModelStore } from '../store/modelStore';
 import { useNavigationStore } from '../store/navigationStore';
 import { getProfileContext } from '../runtime/profileContext';
 import {
-  ImportAssetMutationOwner,
-  ImportAssetMutationQueue,
   ImportAssetPreviewCache,
 } from '../runtime/importAssetPreview';
 import {
@@ -141,7 +139,6 @@ import {
   getTranscriptItemNodeId,
   getTranscriptItemMessageId,
   getEditableUserMessageAttachmentRefs,
-  userMessageItemReferencesAttachment,
   type TranscriptState,
   type TranscriptScrollTarget,
 } from '../utils/transcriptItems';
@@ -208,7 +205,6 @@ export default function ChatPage() {
   const [editTargetNodeId, setEditTargetNodeId] = useState<string | null>(null);
   const [editToolPermissionMode, setEditToolPermissionMode] = useState<ToolPermissionMode | null>(null);
   const [editReturnNodeId, setEditReturnNodeId] = useState<string | null>(null);
-  const [editProtectedAttachmentNames, setEditProtectedAttachmentNames] = useState<string[]>([]);
   const [attachedFiles, setAttachedFiles] = useState<string[]>([]);
   const [attachedImageRefs, setAttachedImageRefs] = useState<Array<{ filename: string; mime_type?: string }>>([]);
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([]);
@@ -241,22 +237,15 @@ export default function ChatPage() {
   const [projectFolderSubmitting, setProjectFolderSubmitting] = useState(false);
   const [, refreshImportPreviews] = useState(0);
   const importAssetPreviewCacheRef = useRef<ImportAssetPreviewCache | null>(null);
-  const importAssetMutationOwnerRef = useRef<ImportAssetMutationOwner | null>(null);
-  const importAssetMutationQueueRef = useRef<ImportAssetMutationQueue | null>(null);
   if (!importAssetPreviewCacheRef.current) {
     importAssetPreviewCacheRef.current = new ImportAssetPreviewCache(
       conversationApi.fetchImportBlob,
     );
   }
-  if (!importAssetMutationOwnerRef.current) {
-    importAssetMutationOwnerRef.current = new ImportAssetMutationOwner();
-  }
-  if (!importAssetMutationQueueRef.current) {
-    importAssetMutationQueueRef.current = new ImportAssetMutationQueue();
-  }
   const importAssetPreviewCache = importAssetPreviewCacheRef.current;
-  const importAssetMutationOwner = importAssetMutationOwnerRef.current;
-  const importAssetMutationQueue = importAssetMutationQueueRef.current;
+  // 发送前暂存的本地附件：待上传的 File 副本与图片预览对象 URL。
+  const pendingImportFilesRef = useRef(new Map<string, File>());
+  const pendingImageUrlsRef = useRef(new Map<string, string>());
   const scrollTimeoutRef = useRef<number | null>(null);
   const historyRef = useRef<HTMLDivElement>(null);
   const conversationSearchInputRef = useRef<HTMLInputElement>(null);
@@ -443,10 +432,9 @@ export default function ChatPage() {
   useEffect(() => {
     setPreviewImage(null);
     return () => {
-      importAssetMutationOwner.clear();
       importAssetPreviewCache.clear();
     };
-  }, [currentConversation?.id, importAssetMutationOwner, importAssetPreviewCache]);
+  }, [currentConversation?.id, importAssetPreviewCache]);
 
   useEffect(() => {
     const conversationId = currentConversation?.id;
@@ -1052,7 +1040,6 @@ export default function ChatPage() {
     setEditTargetNodeId(null);
     setEditToolPermissionMode(null);
     setEditReturnNodeId(null);
-    setEditProtectedAttachmentNames([]);
     clearCurrentConversation();
   };
   const sendNextQueuedMessage = useCallback(async (conversationId: string): Promise<boolean> => {
@@ -1302,15 +1289,10 @@ export default function ChatPage() {
     if (!parentNodeId) return;
     const inheritedToolPermissionMode = liveBranchToolPermissionMode ?? currentBranchToolPermissionMode ?? null;
     const attachmentRefs = getEditableUserMessageAttachmentRefs(item);
-    const protectedAttachmentNames = [
-      ...attachmentRefs.importFiles,
-      ...attachmentRefs.imageRefs.map((file) => file.filename),
-    ];
     setEditValue(text);
     setEditTargetNodeId(parentNodeId);
     setEditToolPermissionMode(inheritedToolPermissionMode);
     setEditReturnNodeId(selectedBranchTipId);
-    setEditProtectedAttachmentNames(protectedAttachmentNames);
     setAttachedFiles(attachmentRefs.importFiles);
     setAttachedImageRefs(attachmentRefs.imageRefs);
     await switchNode(parentNodeId);
@@ -1330,7 +1312,6 @@ export default function ChatPage() {
     setEditTargetNodeId(null);
     setEditToolPermissionMode(null);
     setEditReturnNodeId(null);
-    setEditProtectedAttachmentNames([]);
     setAttachedFiles([]);
     setAttachedImageRefs([]);
     if (conversationId && returnNodeId) {
@@ -1561,7 +1542,6 @@ export default function ChatPage() {
     setEditTargetNodeId(null);
     setEditToolPermissionMode(null);
     setEditReturnNodeId(null);
-    setEditProtectedAttachmentNames([]);
     const selected = conversations.find((conversation) => conversation.id === id);
     if (selected?.workspace?.cwd) {
       const group = allProjectGroups.find((item) => item.path === selected.workspace?.cwd);
@@ -1637,80 +1617,51 @@ export default function ChatPage() {
     URL.revokeObjectURL(url);
   };
 
-  const handleFilesPicked = async (files: File[]) => {
-    let convId = currentConversation?.id;
-    if (!convId) {
-      const newConv = await createConversation({
-        title: files[0]?.name?.slice(0, 20) || 'New',
-        workspace: workspaceForCreateRequest(),
-        multi_agent_mode: newConversationMultiAgentMode,
-      });
-      if (!newConv) return;
-      convId = newConv.id;
-    }
+  const handleFilesPicked = (files: File[]) => {
     for (const file of files) {
-      const mutation = importAssetMutationOwner.begin(convId, file.name);
-      try {
-        const res = await importAssetMutationQueue.run(
-          convId,
-          file.name,
-          () => conversationApi.uploadImport(convId, file),
-        );
-        const claimed = importAssetMutationOwner.claim(mutation, convId, res.filename);
-        if (!claimed || !importAssetMutationOwner.owns(claimed)) continue;
-        if (useConversationStore.getState().currentConversation?.id !== convId) continue;
-        if (res.kind === 'image') {
-          importAssetPreviewCache.installFile(convId, res.filename, file);
-          setAttachedImageRefs(prev => prev.some(ref => ref.filename === res.filename)
-            ? prev
-            : [...prev, { filename: res.filename, mime_type: res.mime_type ?? file.type }]);
-        } else {
-          setAttachedFiles(prev => prev.includes(res.filename) ? prev : [...prev, res.filename]);
-        }
-      } catch (error) {
-        console.error('Upload failed:', getApiErrorMessage(error, '上传附件失败'));
+      // 延迟上传：此处只暂存本地 File，不创建对话、不写后端副本。
+      pendingImportFilesRef.current.set(file.name, file);
+      const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase();
+      const isImage = [
+        'image/png', 'image/jpeg', 'image/gif', 'image/webp',
+      ].includes(file.type) || ['.png', '.jpg', '.jpeg', '.gif', '.webp'].includes(ext);
+      if (isImage) {
+        const previousUrl = pendingImageUrlsRef.current.get(file.name);
+        if (previousUrl) URL.revokeObjectURL(previousUrl);
+        pendingImageUrlsRef.current.set(file.name, URL.createObjectURL(file));
+        setAttachedImageRefs(prev => prev.some(ref => ref.filename === file.name)
+          ? prev
+          : [...prev, { filename: file.name, mime_type: file.type }]);
+      } else {
+        setAttachedFiles(prev => prev.includes(file.name) ? prev : [...prev, file.name]);
       }
     }
   };
 
-  const handleRemoveFile = async (filename: string) => {
-    if (!currentConversation) return;
-    const conversationId = currentConversation.id;
-    const mutation = importAssetMutationOwner.begin(conversationId, filename);
-    importAssetPreviewCache.remove(conversationId, filename);
-    const isReferencedByHistory = transcriptItems.some((item) =>
-      item.type === 'user_message' && userMessageItemReferencesAttachment(item, filename)
-    );
-    const isProtectedEditAttachment = editProtectedAttachmentNames.includes(filename);
-    try {
-      if (!isReferencedByHistory && !isProtectedEditAttachment) {
-        await importAssetMutationQueue.run(
-          conversationId,
-          filename,
-          () => conversationApi.deleteImport(conversationId, filename),
-        );
-      }
-    } catch (error) {
-      toast.error(getApiErrorMessage(error, '删除附件失败'));
-      return;
+  const handleRemoveFile = (filename: string) => {
+    const conversationId = currentConversation?.id;
+    if (conversationId) importAssetPreviewCache.remove(conversationId, filename);
+    const pendingUrl = pendingImageUrlsRef.current.get(filename);
+    if (pendingUrl) {
+      URL.revokeObjectURL(pendingUrl);
+      pendingImageUrlsRef.current.delete(filename);
     }
-    if (!importAssetMutationOwner.owns(mutation)
-        || useConversationStore.getState().currentConversation?.id !== conversationId) return;
+    pendingImportFilesRef.current.delete(filename);
     setAttachedFiles(prev => prev.filter(f => f !== filename));
     setAttachedImageRefs(prev => prev.filter(ref => ref.filename !== filename));
-    setEditProtectedAttachmentNames(prev => prev.filter(name => name !== filename));
   };
 
   const getImportAssetPreviewUrl = (filename: string, conversationId = currentConversation?.id) => {
+    const pendingUrl = pendingImageUrlsRef.current.get(filename);
+    if (pendingUrl) return pendingUrl;
     if (!conversationId) return '';
     return importAssetPreviewCache.peek(conversationId, filename) ?? '';
   };
 
   const handlePreviewImage = async (filename: string) => {
     const conversationId = currentConversation?.id;
-    if (!conversationId) return;
     const url = getImportAssetPreviewUrl(filename, conversationId)
-      || await importAssetPreviewCache.load(conversationId, filename);
+      || (conversationId ? await importAssetPreviewCache.load(conversationId, filename) : '');
     if (!url) return;
     if (useConversationStore.getState().currentConversation?.id !== conversationId) return;
     setPreviewImage({ name: filename, url });
@@ -1732,7 +1683,13 @@ export default function ChatPage() {
     let conversationId = currentConversation?.id;
     const importFiles = attachedFiles.map(filename => ({ filename }));
     const imageRefs = attachedImageRefs.map(({ filename, mime_type }) => ({ filename, mime_type }));
+    const hasPendingAttachments = pendingImportFilesRef.current.size > 0;
     const clearAttachments = () => {
+      if (hasPendingAttachments) {
+        for (const url of pendingImageUrlsRef.current.values()) URL.revokeObjectURL(url);
+        pendingImageUrlsRef.current.clear();
+        pendingImportFilesRef.current.clear();
+      }
       if (importFiles.length > 0) setAttachedFiles([]);
       if (imageRefs.length > 0) setAttachedImageRefs([]);
     };
@@ -1750,18 +1707,53 @@ export default function ChatPage() {
       import_files: importFiles.length > 0 ? importFiles : undefined,
       image_refs: imageRefs.length > 0 ? imageRefs : undefined,
     });
-    let sendNodeId = resolveSendNodeId({
+    // 新对话与附件副本都推迟到发送时才创建/上传：不导入文件就不会产生空对话。
+    let createdConversationId: string | null = null;
+    let createdConversationNodeId: string | null = null;
+    if (!conversationId) {
+      const newConv = await createConversation({
+        title: val.slice(0, 20),
+        prompt_id: promptId || undefined,
+        prompt_mode: promptId ? promptMode : undefined,
+        workspace: workspaceForCreateRequest(),
+        multi_agent_mode: multiAgentMode ?? newConversationMultiAgentMode,
+      });
+      if (!newConv) {
+        console.error('Failed to create conversation');
+        return;
+      }
+      conversationId = newConv.id;
+      createdConversationId = newConv.id;
+      createdConversationNodeId = newConv.current_node_id;
+    }
+    if (hasPendingAttachments) {
+      try {
+        for (const file of pendingImportFilesRef.current.values()) {
+          await conversationApi.uploadImport(conversationId, file);
+        }
+      } catch (error) {
+        // 上传失败回退到发送前状态：若本次新建了对话则删除，附件暂存保留以便重试。
+        if (createdConversationId) {
+          await deleteConversation(createdConversationId).catch(() => {});
+        }
+        toast.error(getApiErrorMessage(error, '上传附件失败'));
+        return;
+      }
+    }
+    const sendNodeId = resolveSendNodeId({
       editTargetNodeId,
       currentNodeId,
-      conversationCurrentNodeId: currentConversation?.current_node_id,
+      // 新对话是发送内 await 创建的，闭包里的 currentConversation 仍是本次 render 快照（null），
+      // 须用创建返回值中的 current_node_id 作父节点，否则新对话首条消息无法解析发送目标。
+      conversationCurrentNodeId: createdConversationNodeId ?? currentConversation?.current_node_id,
     });
     const slashMatch = slashRegistry.match(val);
     const slashCommand = slashMatch?.command ?? null;
-    let streamNodeId = resolveSlashStreamNodeId({
+    const streamNodeId = resolveSlashStreamNodeId({
       sendNodeId,
       streamTargetPolicy: slashCommand?.stream_target_policy,
     });
-    let request = sendNodeId ? buildRequest(sendNodeId) : null;
+    const request = sendNodeId ? buildRequest(sendNodeId) : null;
 
     if (conversationId && request && shouldQueueForMainThread({ currentBranchHasStreamingChat, slashCommand })) {
       const queuedConversationId = conversationId;
@@ -1771,7 +1763,6 @@ export default function ChatPage() {
       setEditValue(null);
       setEditToolPermissionMode(null);
       setEditReturnNodeId(null);
-      setEditProtectedAttachmentNames([]);
       updateQueuedMessages((messages) => [
         ...messages,
         {
@@ -1787,31 +1778,6 @@ export default function ChatPage() {
       return;
     }
 
-    if (!conversationId) {
-      const newConv = await createConversation({
-        title: val.slice(0, 20),
-        prompt_id: promptId || undefined,
-        prompt_mode: promptId ? promptMode : undefined,
-        workspace: workspaceForCreateRequest(),
-        multi_agent_mode: multiAgentMode ?? newConversationMultiAgentMode,
-      });
-      if (!newConv) {
-        console.error('Failed to create conversation');
-        return;
-      }
-      conversationId = newConv.id;
-      sendNodeId = resolveSendNodeId({
-        editTargetNodeId: null,
-        currentNodeId: null,
-        conversationCurrentNodeId: newConv.current_node_id,
-      });
-      streamNodeId = resolveSlashStreamNodeId({
-        sendNodeId,
-        streamTargetPolicy: slashCommand?.stream_target_policy,
-      });
-      request = sendNodeId ? buildRequest(sendNodeId) : null;
-    }
-
     if (!conversationId || !sendNodeId || !request) {
       console.error('无法确定消息父节点');
       return;
@@ -1822,7 +1788,6 @@ export default function ChatPage() {
     setEditValue(null);
     setEditToolPermissionMode(null);
     setEditReturnNodeId(null);
-    setEditProtectedAttachmentNames([]);
     // 第三个参数是乐观渲染的用户气泡文本（显示用户输入的原文）。
     // 推理设置从 modelStore 的当前值读取（已确认值），随请求透传。
     void startStreaming(

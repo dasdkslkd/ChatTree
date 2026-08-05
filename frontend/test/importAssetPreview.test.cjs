@@ -15,8 +15,6 @@ require.extensions['.ts'] = function loadTs(module, filename) {
 };
 
 const {
-  ImportAssetMutationOwner,
-  ImportAssetMutationQueue,
   ImportAssetPreviewCache,
 } = require('../src/runtime/importAssetPreview.ts');
 
@@ -101,67 +99,9 @@ async function testRemovingPendingAssetAbortsAndSuppressesLateResult() {
   assert.deepEqual(urls.created, []);
 }
 
-function testInstallRemoveAndClearRevokeOwnedUrls() {
-  const urls = objectUrlFixture();
-  const cache = new ImportAssetPreviewCache(async () => new Blob(), urls.api);
-  cache.installFile('conv-1', 'first.png', new Blob(['first']));
-  cache.installFile('conv-1', 'first.png', new Blob(['replacement']));
-  cache.installFile('conv-1', 'second.png', new Blob(['second']));
-
-  assert.deepEqual(urls.revoked, ['blob:preview-1']);
-  cache.remove('conv-1', 'first.png');
-  assert.deepEqual(urls.revoked, ['blob:preview-1', 'blob:preview-2']);
-  cache.clear();
-  assert.deepEqual(
-    urls.revoked,
-    ['blob:preview-1', 'blob:preview-2', 'blob:preview-3'],
-  );
-}
-
-function testMutationOwnerPreventsOlderRenameFromReclaimingAsset() {
-  const owner = new ImportAssetMutationOwner();
-  const first = owner.begin('conv-1', 'old.png');
-  const newer = owner.begin('conv-1', 'old.png');
-
-  assert.equal(owner.owns(first), false);
-  assert.equal(owner.claim(first, 'conv-1', 'new.png'), null);
-  const claimed = owner.claim(newer, 'conv-1', 'new.png');
-  assert.ok(claimed);
-  assert.equal(owner.owns(claimed), true);
-  owner.clear();
-  assert.equal(owner.owns(claimed), false);
-}
-
-async function testMutationQueueSerializesOnlySameAsset() {
-  const queue = new ImportAssetMutationQueue();
-  const firstBlocked = deferred();
-  const calls = [];
-  const first = queue.run('conv-1', 'same.png', async () => {
-    calls.push('first:start');
-    await firstBlocked.promise;
-    calls.push('first:end');
-  });
-  const second = queue.run('conv-1', 'same.png', async () => {
-    calls.push('second');
-  });
-  const independent = queue.run('conv-1', 'other.png', async () => {
-    calls.push('other');
-  });
-
-  await Promise.resolve();
-  await Promise.resolve();
-  assert.deepEqual(calls, ['first:start', 'other']);
-  firstBlocked.resolve();
-  await Promise.all([first, second, independent]);
-  assert.deepEqual(calls, ['first:start', 'other', 'first:end', 'second']);
-}
-
 (async () => {
   await testCacheCoalescesSameAssetAndPublishesObjectUrl();
   await testRemovingPendingAssetAbortsAndSuppressesLateResult();
-  testInstallRemoveAndClearRevokeOwnedUrls();
-  testMutationOwnerPreventsOlderRenameFromReclaimingAsset();
-  await testMutationQueueSerializesOnlySameAsset();
   console.log('importAssetPreview tests passed');
 })().catch((error) => {
   console.error(error);

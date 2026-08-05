@@ -16,67 +16,6 @@ function assetKey(conversationId: string, filename: string): string {
   return JSON.stringify([conversationId, filename]);
 }
 
-export type ImportAssetMutation = Readonly<{
-  key: string;
-  generation: number;
-}>;
-
-export class ImportAssetMutationOwner {
-  private readonly generations = new Map<string, number>();
-  private nextGeneration = 0;
-
-  begin(conversationId: string, filename: string): ImportAssetMutation {
-    const key = assetKey(conversationId, filename);
-    const generation = ++this.nextGeneration;
-    this.generations.set(key, generation);
-    return Object.freeze({ key, generation });
-  }
-
-  claim(
-    mutation: ImportAssetMutation,
-    conversationId: string,
-    filename: string,
-  ): ImportAssetMutation | null {
-    if (!this.owns(mutation)) return null;
-    const key = assetKey(conversationId, filename);
-    const latest = this.generations.get(key);
-    if (latest !== undefined && latest > mutation.generation) return null;
-    this.generations.set(key, mutation.generation);
-    return Object.freeze({ key, generation: mutation.generation });
-  }
-
-  owns(mutation: ImportAssetMutation): boolean {
-    return this.generations.get(mutation.key) === mutation.generation;
-  }
-
-  clear(): void {
-    this.generations.clear();
-  }
-}
-
-export class ImportAssetMutationQueue {
-  private readonly tails = new Map<string, Promise<void>>();
-
-  run<T>(
-    conversationId: string,
-    filename: string,
-    operation: () => Promise<T>,
-  ): Promise<T> {
-    const key = assetKey(conversationId, filename);
-    const previous = this.tails.get(key) ?? Promise.resolve();
-    const result = previous.then(operation);
-    const tail = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    this.tails.set(key, tail);
-    void tail.then(() => {
-      if (this.tails.get(key) === tail) this.tails.delete(key);
-    });
-    return result;
-  }
-}
-
 export class ImportAssetPreviewCache {
   private readonly entries = new Map<string, PreviewEntry>();
   private readonly listeners = new Set<() => void>();
@@ -132,21 +71,6 @@ export class ImportAssetPreviewCache {
     entry.promise = promise;
     this.entries.set(key, entry);
     return promise;
-  }
-
-  installFile(conversationId: string, filename: string, file: File): string {
-    const key = assetKey(conversationId, filename);
-    const existing = this.entries.get(key);
-    if (existing) this.releaseEntry(key, existing, false);
-
-    const url = this.objectUrls.createObjectURL(file);
-    this.entries.set(key, {
-      controller: null,
-      promise: null,
-      url,
-    });
-    this.notify();
-    return url;
   }
 
   remove(conversationId: string, filename: string): void {

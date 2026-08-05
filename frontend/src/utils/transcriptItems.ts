@@ -77,13 +77,6 @@ export function getEditableUserMessageAttachmentRefs(
   };
 }
 
-export function userMessageItemReferencesAttachment(item: UserMessageItem, filename: string): boolean {
-  return Boolean(
-    item.import_files?.some((file) => file.filename === filename)
-    || item.image_refs?.some((file) => file.filename === filename)
-  );
-}
-
 export type TranscriptPatchResult =
   | { status: 'applied'; state: TranscriptState }
   | { status: 'ignored'; state: TranscriptState }
