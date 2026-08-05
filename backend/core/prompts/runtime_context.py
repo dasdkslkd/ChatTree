@@ -1,14 +1,15 @@
 """运行时提示上下文构建：将对话状态转换为模型可见的 prompt 段落。"""
 from __future__ import annotations
 
-from typing import Any, List, Optional
+from typing import Any, List, Mapping, Optional
 
 from ..config.config import cfg
 from ..instructions import build_agents_instruction_section
+from ..projects import resolve_dev_environment
 from ..tasks import TaskContextMode, TaskOutcome, TaskTurnContext
 from ..tools.task_contract import TASK_RUNTIME_RULES
 from ..workspace import build_default_workspace, normalize_workspace
-from .types import RuntimePromptContext
+from .types import PromptSection, RuntimePromptContext
 
 
 def normalize_selected_system_prompt_mode(mode: str) -> str:
@@ -80,6 +81,34 @@ def plan_mode_runtime_lines(permission_mode: str, plan_ledger) -> list[str]:
     ]
 
 
+def build_dev_environment_section(
+    workspace: Mapping[str, Any] | None,
+    config_data: Mapping[str, Any] | None,
+) -> Optional[PromptSection]:
+    if not isinstance(workspace, Mapping) or not workspace.get("cwd"):
+        return None
+    resolved = resolve_dev_environment(config_data, str(workspace.get("cwd")))
+    parallel = resolved["parallel_environments"]
+    if not parallel or not resolved["default_python"]:
+        return None
+    content = "\n".join([
+        "## Python Virtual Environments (pre-configured)",
+        "",
+        f"- Default environment `{resolved['default_environment']}`: {resolved['default_python']} (on PATH; bare `python` resolves to it)",
+        "- Parallel environments (invoke by absolute path):",
+        *[f"  - {name}: {path}" for name, path in parallel.items()],
+        "",
+        "Use these exact paths directly. Do NOT probe PATH, detect interpreters, or check virtual environments.",
+    ])
+    return PromptSection(
+        name="dev_environment",
+        role="system",
+        content=content,
+        priority=11,
+        metadata={"dev_environment": resolved},
+    )
+
+
 def agents_instruction_sections(conversation) -> list[Any]:
     if conversation is None:
         return []
@@ -87,11 +116,15 @@ def agents_instruction_sections(conversation) -> list[Any]:
         conversation.metadata.get("workspace"),
         build_default_workspace(cfg.data if isinstance(cfg.data, dict) else None),
     )
-    section = build_agents_instruction_section(
-        workspace,
-        cfg.data if isinstance(cfg.data, dict) else None,
-    )
-    return [section] if section is not None else []
+    config_data = cfg.data if isinstance(cfg.data, dict) else None
+    sections: list[Any] = []
+    section = build_agents_instruction_section(workspace, config_data)
+    if section is not None:
+        sections.append(section)
+    dev_section = build_dev_environment_section(workspace, config_data)
+    if dev_section is not None:
+        sections.append(dev_section)
+    return sections
 
 
 def compact_task_text(value: Any, max_chars: int) -> str:

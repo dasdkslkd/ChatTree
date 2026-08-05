@@ -106,6 +106,7 @@ class Config:
             'default_model': '',
             'context_window': None,
             'model_transport': dict(DEFAULT_MODEL_TRANSPORT),
+            'dev_environment': {},
             'projects': {},
         }
 

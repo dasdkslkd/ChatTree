@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { configApi } from '@/api/config';
+import { DevEnvironmentEditor } from './dev_environment';
 import type {
   CapabilityInventory,
   ToolInventoryStatus,
@@ -74,6 +75,7 @@ export function ProjectsSection() {
       enabled_skills: cloneOptionalList(selectedProject.config?.enabled_skills),
       enabled_mcp_servers: cloneOptionalList(selectedProject.config?.enabled_mcp_servers),
       enabled_agents: cloneOptionalList(selectedProject.config?.enabled_agents),
+      dev_environment: selectedProject.config?.dev_environment || {},
     });
   }, [selectedProject]);
 
@@ -247,6 +249,19 @@ export function ProjectsSection() {
                   onToggle={(name, enabled) => setAllowlistItem('enabled_agents', agentNames, name, enabled)}
                   onSetAll={(enabled) => setAllowlistAll('enabled_agents', agentNames, enabled)}
                 />
+
+                <div className="rounded-xl p-4" style={{ border: '0.5px solid var(--border)' }}>
+                  <div className="mb-3">
+                    <div className="text-sm font-medium" style={{ color: 'var(--fg-85)' }}>开发环境</div>
+                    <div className="mt-1 text-xs" style={{ color: 'var(--fg-tertiary)' }}>
+                      项目级覆盖：修改 python 即切换该项目默认解释器（如 conda 其它环境），未填写的项沿用全局配置
+                    </div>
+                  </div>
+                  <DevEnvironmentEditor
+                    value={draft.dev_environment || {}}
+                    onChange={(next) => updateDraft(current => ({ ...current, dev_environment: next }))}
+                  />
+                </div>
 
                 <div className="rounded-xl p-4" style={{ border: '0.5px solid var(--destructive, #ef4444)' }}>
                   <div className="flex items-center justify-between gap-4">

@@ -11,6 +11,8 @@ from pathlib import Path
 from time import time
 from typing import Any, Deque, Dict, Optional
 
+from .config.config import cfg
+from .projects import resolve_dev_environment
 from .subprocess_utils import subprocess_window_kwargs
 from .runs import RunKind, RunManager, RunStatus
 from .runs.public import public_run_dict
@@ -39,10 +41,19 @@ def _decode_bytes(value: bytes) -> str:
     return value.decode("utf-8", errors="replace")
 
 
-def _command_env() -> Dict[str, str]:
+def _command_env(cwd: str) -> Dict[str, str]:
     env = os.environ.copy()
     env.setdefault("PYTHONIOENCODING", "utf-8")
     env.setdefault("PYTHONUTF8", "1")
+    path_dirs = resolve_dev_environment(
+        cfg.data if isinstance(cfg.data, dict) else None,
+        cwd,
+    )["path_dirs"]
+    if path_dirs:
+        path_key = next((key for key in env if key.upper() == "PATH"), "PATH")
+        separator = ";" if os.name == "nt" else ":"
+        existing = env.get(path_key, "")
+        env[path_key] = separator.join([*path_dirs, existing]) if existing else separator.join(path_dirs)
     return env
 
 
@@ -541,7 +552,7 @@ class CommandExecutor:
                 process = await asyncio.create_subprocess_exec(
                     *argv,
                     cwd=cwd,
-                    env=_command_env(),
+                    env=_command_env(cwd),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     **_subprocess_group_kwargs(),
@@ -699,7 +710,7 @@ class CommandExecutor:
         process = subprocess.Popen(
             argv,
             cwd=cwd,
-            env=_command_env(),
+            env=_command_env(cwd),
             shell=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

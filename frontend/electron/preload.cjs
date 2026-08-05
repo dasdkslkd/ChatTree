@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 contextBridge.exposeInMainWorld("electronAPI", {
   connectLocal: () => ipcRenderer.invoke("tab:connect-local"),
@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getTabs: () => ipcRenderer.invoke("tab:list"),
   getNavigatorData: () => ipcRenderer.invoke("navigator:get-data"),
   selectProjectFolder: () => ipcRenderer.invoke("project:select-folder"),
+  getPathForFile: (file) => webUtils.getPathForFile(file),
   onTabsUpdated: (callback) => {
     ipcRenderer.on("tabs:updated", (_event, tabs, activeId) => {
       callback(tabs, activeId);

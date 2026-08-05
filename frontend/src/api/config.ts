@@ -24,6 +24,12 @@ export const configApi = {
     return response.data;
   },
 
+  // 检测系统 PATH 中的常用开发工具
+  getDevEnvironmentDetected: async (): Promise<Record<string, string | null>> => {
+    const response = await apiClient.get('/config/dev-environment/detected');
+    return response.data;
+  },
+
   // 添加提供商
   addProvider: async (data: AddProviderRequest): Promise<{ message: string }> => {
     const response = await apiClient.post('/config/providers', data);

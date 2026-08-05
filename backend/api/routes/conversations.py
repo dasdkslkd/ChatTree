@@ -10,7 +10,7 @@ from backend.api.dependencies import get_chat_manager, get_config_manager, get_r
 from backend.api.errors import ApiError, ErrorEnvelope
 from backend.core.chat.chat_manager import ChatManager
 from backend.core.config.config import Config, cfg
-from backend.core.projects import normalize_project_path, normalize_projects_config, workspace_project_path
+from backend.core.projects import normalize_dev_environment, normalize_project_path, normalize_projects_config, workspace_project_path
 from backend.core.runs import RunManager
 from backend.core.transcript import TranscriptAssembler
 from backend.core.workspace import normalize_workspace
@@ -36,6 +36,7 @@ class ProjectConfigUpdateRequest(BaseModel):
     enabled_skills: Optional[List[str]] = None
     enabled_mcp_servers: Optional[List[str]] = None
     enabled_agents: Optional[List[str]] = None
+    dev_environment: Optional[Dict[str, Any]] = None
 
 class ProjectHistoryDeleteRequest(BaseModel):
     path: str
@@ -191,6 +192,7 @@ async def list_projects(
                 "enabled_skills": None,
                 "enabled_mcp_servers": None,
                 "enabled_agents": None,
+                "dev_environment": {"tools": {}, "environments": {}, "default_environment": ""},
             })
 
         return {
@@ -223,6 +225,11 @@ async def update_project_config(
         "enabled_skills": payload.enabled_skills,
         "enabled_mcp_servers": payload.enabled_mcp_servers,
         "enabled_agents": payload.enabled_agents,
+        "dev_environment": (
+            normalize_dev_environment(payload.dev_environment)
+            if payload.dev_environment is not None
+            else projects.get(path, {}).get("dev_environment"),
+        ),
     }
     config_manager.data["projects"] = normalize_projects_config(projects)
     config_manager.save()

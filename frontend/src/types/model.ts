@@ -222,12 +222,19 @@ export interface CapabilityInventory {
   plugins: CapabilityPlugin[];
 }
 
+export interface DevEnvironmentConfig {
+  tools?: Record<string, string>;
+  environments?: Record<string, string>;
+  default_environment?: string;
+}
+
 export interface ProjectCapabilityConfig {
   label?: string;
   visible?: boolean;
   enabled_skills?: string[] | null;
   enabled_mcp_servers?: string[] | null;
   enabled_agents?: string[] | null;
+  dev_environment?: DevEnvironmentConfig;
 }
 
 export interface ProjectSettingsItem {
@@ -257,6 +264,7 @@ export interface ConfigData {
   model_transport: ModelTransportConfig;
   provider: Record<string, ModelProviderConfig>;
   tools?: ToolsConfig;
+  dev_environment?: DevEnvironmentConfig;
   projects?: Record<string, ProjectCapabilityConfig>;
 }
 
@@ -268,6 +276,7 @@ export interface ConfigUpdateRequest {
   model_transport?: Partial<ModelTransportConfig>;
   provider_configs?: Record<string, Partial<ModelProviderConfig>>;
   tools?: ToolsConfig;
+  dev_environment?: DevEnvironmentConfig;
   projects?: Record<string, ProjectCapabilityConfig>;
 }
 

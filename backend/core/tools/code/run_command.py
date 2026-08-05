@@ -7,6 +7,7 @@ from typing import Any, Dict
 
 from . import common
 from ..task_contract import task_step_parameter_schema
+from ...command_runtime import _command_env
 from ...shell_profile import ShellProfileResolver, render_command_tool_guidance
 from ...subprocess_utils import subprocess_window_kwargs
 
@@ -75,7 +76,7 @@ class RunCommandTool(common._CodeTool):
                 args=python_c_args or profile.command_argv(command),
                 shell=False,
                 cwd=str(cwd),
-                env=common._shell_env(),
+                env=_command_env(str(cwd)),
                 capture_output=True,
                 timeout=timeout,
                 **subprocess_window_kwargs(),

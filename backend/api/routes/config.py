@@ -8,7 +8,7 @@ from ...core.agents import AgentMailbox, AgentRuntime
 from ...core.auth import subscription as sub_mod
 from ...core.config.config import Config, cfg, normalize_model_transport
 from ...core.model.model_manager import ModelManager
-from ...core.projects import normalize_projects_config
+from ...core.projects import detect_tool_path, normalize_dev_environment, normalize_projects_config
 from ...core.persistence import SQLitePersistence, SQLitePlanRepository, SQLiteTaskRepository
 from ...core.plans import PlanLedger
 from ...core.notifications import TaskNotificationService
@@ -35,6 +35,7 @@ class ConfigUpdateRequest(BaseModel):
     provider_configs: Optional[Dict[str, Dict[str, Any]]] = None
     tools: Optional[Dict[str, Any]] = None
     projects: Optional[Dict[str, Dict[str, Any]]] = None
+    dev_environment: Optional[Dict[str, Any]] = None
 
 
 class AddProviderRequest(BaseModel):
@@ -315,6 +316,8 @@ async def update_config(
             config_manager.data['tools'] = request.tools
         if request.projects is not None:
             config_manager.data['projects'] = normalize_projects_config(request.projects)
+        if request.dev_environment is not None:
+            config_manager.data['dev_environment'] = normalize_dev_environment(request.dev_environment)
         if request.model_transport is not None:
             config_manager.data['model_transport'] = normalize_model_transport({
                 **config_manager.data['model_transport'],
@@ -347,6 +350,15 @@ async def update_config(
         return {"message": "配置已更新"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+DEV_ENVIRONMENT_DETECT_TOOLS = ("python", "node", "npm", "git", "java", "go", "cargo", "uv")
+
+
+@router.get("/config/dev-environment/detected", response_model=Dict[str, Any])
+async def get_dev_environment_detected():
+    """检测系统 PATH 中已存在的常用开发工具，作为配置默认值。"""
+    return {tool: detect_tool_path(tool) or None for tool in DEV_ENVIRONMENT_DETECT_TOOLS}
 
 
 @router.post("/config/providers", response_model=Dict[str, str])

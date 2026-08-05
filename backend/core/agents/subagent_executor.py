@@ -15,6 +15,7 @@ from backend.core.config.types import Message, Role, StreamController, StreamSta
 from backend.core.instructions import build_agents_instruction_section
 from backend.core.projects import filter_capability_registry_for_workspace
 from backend.core.prompts import PromptBuilder, PromptBuildRequest
+from backend.core.prompts.runtime_context import build_dev_environment_section
 from backend.core.prompts.catalog import load_prompt_template
 from backend.core.prompts.types import RuntimePromptContext
 from backend.core.runs import (
@@ -827,11 +828,15 @@ class SubagentExecutor:
         ]
 
     def _agents_instruction_sections(self, workspace: Optional[dict[str, Any]]) -> list[Any]:
-        section = build_agents_instruction_section(
-            workspace,
-            cfg.data if isinstance(cfg.data, dict) else None,
-        )
-        return [section] if section is not None else []
+        config_data = cfg.data if isinstance(cfg.data, dict) else None
+        sections: list[Any] = []
+        section = build_agents_instruction_section(workspace, config_data)
+        if section is not None:
+            sections.append(section)
+        dev_section = build_dev_environment_section(workspace, config_data)
+        if dev_section is not None:
+            sections.append(dev_section)
+        return sections
 
     def _format_parent_context(self, conversation: Any, parent_node_id: Optional[str]) -> str:
         if conversation is None or not parent_node_id:

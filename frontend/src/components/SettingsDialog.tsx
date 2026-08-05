@@ -7,7 +7,7 @@ import {
 } from '@/components/ui/dialog';
 import {
   Settings, StickyNote, Server, Wrench, Link2,
-  Sparkles, Bot, Package, MessageSquare, FolderOpen,
+  Sparkles, Bot, Package, MessageSquare, FolderOpen, Terminal,
 } from 'lucide-react';
 import { useNavigationStore } from '../store/navigationStore';
 import { SshHostsSection } from './settings/sections/ssh';
@@ -15,16 +15,18 @@ import { ProvidersSection } from './settings/sections/providers';
 import { ProjectsSection } from './settings/sections/projects';
 import { CapabilitiesSection } from './settings/sections/capabilities';
 import { BuiltinToolsSection } from './settings/sections/builtin_tools';
+import { DevEnvironmentSection } from './settings/sections/dev_environment';
 import { McpSection } from './settings/sections/mcp';
 import { PromptsSection } from './settings/sections/prompts';
 
-type SettingsSection = 'providers' | 'projects' | 'ssh' | 'prompts' | 'builtin_tools' | 'skills' | 'mcp' | 'agents' | 'plugins';
+type SettingsSection = 'providers' | 'projects' | 'ssh' | 'prompts' | 'builtin_tools' | 'dev_environment' | 'skills' | 'mcp' | 'agents' | 'plugins';
 
 const SETTINGS_NAV: { key: SettingsSection; label: string; icon: typeof Settings; group: string }[] = [
   { key: 'providers', label: '供应商', icon: Server, group: '应用' },
   { key: 'projects', label: '项目', icon: FolderOpen, group: '应用' },
   { key: 'ssh', label: 'SSH Hosts', icon: Link2, group: '应用' },
   { key: 'builtin_tools', label: '内置工具', icon: Wrench, group: '工具与能力' },
+  { key: 'dev_environment', label: '开发环境', icon: Terminal, group: '工具与能力' },
   { key: 'skills', label: 'Skill', icon: Sparkles, group: '工具与能力' },
   { key: 'mcp', label: 'MCP', icon: Link2, group: '工具与能力' },
   { key: 'agents', label: 'Agent', icon: Bot, group: '工具与能力' },
@@ -116,6 +118,7 @@ export function SettingsPageView({ defaultSection = 'providers' }: { defaultSect
         {section === 'projects' && <ProjectsSection />}
         {section === 'ssh' && <SshHostsSection />}
         {section === 'builtin_tools' && <BuiltinToolsSection />}
+        {section === 'dev_environment' && <DevEnvironmentSection />}
         {section === 'skills' && <CapabilitiesSection view="skills" />}
         {section === 'mcp' && <McpSection />}
         {section === 'agents' && <CapabilitiesSection view="agents" />}

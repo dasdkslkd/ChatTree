@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -31,6 +32,7 @@ def normalize_project_config(raw: Any) -> dict[str, Any]:
     result: dict[str, Any] = {
         "label": str(source.get("label") or ""),
         "visible": source.get("visible", True) is not False,
+        "dev_environment": normalize_dev_environment(source.get("dev_environment")),
     }
     for key in ("enabled_skills", "enabled_mcp_servers", "enabled_agents"):
         result[key] = _normalize_optional_string_list(source.get(key))
@@ -172,3 +174,101 @@ def _normalize_optional_string_list(value: Any) -> Optional[list[str]]:
             seen.add(text)
             result.append(text)
     return result
+
+
+def _normalize_tool_path(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        return str(Path(text).expanduser().resolve(strict=False))
+    except OSError:
+        return text
+
+
+def normalize_dev_environment(raw: Any) -> dict[str, Any]:
+    source = raw if isinstance(raw, Mapping) else {}
+    tools: dict[str, str] = {}
+    raw_tools = source.get("tools")
+    if isinstance(raw_tools, Mapping):
+        for name, value in raw_tools.items():
+            path = _normalize_tool_path(value)
+            if path:
+                tools[str(name or "").strip().lower()] = path
+    environments: dict[str, str] = {}
+    raw_environments = source.get("environments")
+    if isinstance(raw_environments, Mapping):
+        for name, value in raw_environments.items():
+            path = _normalize_tool_path(value)
+            if path:
+                environments[str(name or "").strip()] = path
+    return {
+        "tools": tools,
+        "environments": environments,
+        "default_environment": str(source.get("default_environment") or "").strip(),
+    }
+
+
+def detect_tool_path(name: str) -> str:
+    """检测系统 PATH 中的工具；Windows 下 PATHEXT 为大写时把扩展名归一为小写。"""
+    path = shutil.which(name)
+    if not path:
+        return ""
+    candidate = Path(path)
+    return str(candidate.with_suffix(candidate.suffix.lower())) if candidate.suffix else path
+
+
+def _off_path_tool_dir(name: str, path: str) -> str:
+    """配置路径与系统 PATH 检测不一致时返回需注入的目录，否则返回空串。"""
+    candidate = Path(path)
+    if not candidate.exists():
+        return ""
+    detected = detect_tool_path(name)
+    if detected and candidate.is_file() and candidate.samefile(detected):
+        return ""
+    return str(candidate.parent) if candidate.is_file() else str(candidate)
+
+
+def resolve_dev_environment(
+    config_data: Mapping[str, Any] | None,
+    cwd: str | None,
+) -> dict[str, Any]:
+    """合并全局与项目级 dev_environment，产出需注入 PATH 的目录与并列虚拟环境。"""
+    data = config_data if isinstance(config_data, Mapping) else {}
+    merged_global = normalize_dev_environment(data.get("dev_environment"))
+    project = project_config_for_workspace(data, {"cwd": cwd}) if cwd else None
+    merged_project = normalize_dev_environment((project or {}).get("dev_environment"))
+    tools = {**merged_global["tools"], **merged_project["tools"]}
+    environments = {
+        name: path
+        for name, path in {**merged_global["environments"], **merged_project["environments"]}.items()
+        if Path(path).exists()
+    }
+    default_environment = merged_project["default_environment"] or merged_global["default_environment"]
+    if default_environment not in environments and environments:
+        default_environment = next(iter(environments))
+    default_python = (
+        environments.get(default_environment)
+        or tools.get("python")
+        or detect_tool_path("python")
+    )
+    if default_python and not Path(default_python).exists():
+        default_python = ""
+    effective_tools = dict(tools)
+    if default_python:
+        effective_tools["python"] = default_python
+    path_dirs: list[str] = []
+    for name, path in effective_tools.items():
+        directory = _off_path_tool_dir(name, path)
+        if directory and directory not in path_dirs:
+            path_dirs.append(directory)
+    return {
+        "default_python": default_python,
+        "default_environment": default_environment if default_environment in environments else "",
+        "path_dirs": path_dirs,
+        "parallel_environments": {
+            name: path
+            for name, path in environments.items()
+            if name != default_environment
+        },
+    }
