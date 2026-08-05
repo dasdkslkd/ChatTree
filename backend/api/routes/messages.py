@@ -342,6 +342,61 @@ def _persist_route_answer(
     )
 
 
+async def _consume_chat_stream(
+    *,
+    run: RunRecord,
+    conversation_id: str,
+    chat_manager: ChatManager,
+    run_manager: RunManager,
+    stream_kwargs: Dict[str, Any],
+) -> tuple[RunStatus, Optional[str], bool, Optional[str]]:
+    """消费 send_message_stream 并把 chunk 写入 run 事件流。
+    返回 (终态, 错误信息, 是否可恢复网络错误, 已绑定节点)。"""
+    final_status = RunStatus.COMPLETED
+    final_error: str | None = None
+    final_retryable = False
+    bound_node_id: str | None = None
+    event_batcher = RunEventBatcher(run_manager, run.run_id)
+    try:
+        async for chunk in chat_manager.send_message_stream(**stream_kwargs):
+            chunk_data = build_stream_chunk_data(chunk, conversation_id)
+            node_id = chunk_data.get("node_id")
+            if node_id and node_id != bound_node_id:
+                bound_node_id = node_id
+                await run_manager.bind_target_node(run.run_id, node_id)
+                chunk_data["target_node_id"] = node_id
+                if await run_manager.is_stop_requested(run.run_id):
+                    await chat_manager.stop_stream(node_id)
+            chunk_status = str(_enum_value(chunk_data.get("status")) or "")
+            has_stream_node = bool(chunk_data.get("node_id") or bound_node_id)
+            if (
+                chunk_status not in _CHAT_TERMINAL_CHUNK_STATUSES
+                or not has_stream_node
+            ):
+                await event_batcher.append(chunk_data)
+            if chunk_status == "error":
+                final_status = RunStatus.FAILED
+                final_error = chunk_data.get("error") or "unknown error"
+                final_retryable = bool((chunk_data.get("metadata") or {}).get("retryable"))
+            elif chunk_status == "stopped":
+                final_status = RunStatus.CANCELLED
+    except asyncio.CancelledError:
+        final_status = RunStatus.CANCELLED
+        await event_batcher.flush()
+    except Exception as exc:
+        logger.exception(
+            "Chat stream consumer failed for conversation %s run=%s",
+            conversation_id, run.run_id,
+        )
+        final_status = RunStatus.FAILED
+        final_error = str(exc) or exc.__class__.__name__
+        final_retryable = classify_retry_error(exc).retryable
+        await event_batcher.flush()
+    finally:
+        await event_batcher.flush()
+    return final_status, final_error, final_retryable, bound_node_id
+
+
 async def _produce_chat_run(
     *,
     run: RunRecord,
@@ -351,99 +406,79 @@ async def _produce_chat_run(
     run_manager: RunManager,
 ) -> None:
     profiler = get_profiler()
-    final_status = RunStatus.COMPLETED
-    final_error: str | None = None
-    final_retryable = False
-    bound_node_id: str | None = None
-    event_batcher = RunEventBatcher(run_manager, run.run_id)
-    try:
-        with profiler.span(
-            "message.run.produce",
+    with profiler.span(
+        "message.run.produce",
+        conversation_id=conversation_id,
+        run_id=run.run_id,
+        kind=run.kind.value,
+        provider_id=request.provider_id,
+        model_id=request.model_id,
+    ):
+        final_status, final_error, final_retryable, bound_node_id = await _consume_chat_stream(
+            run=run,
             conversation_id=conversation_id,
-            run_id=run.run_id,
-            kind=run.kind.value,
-            provider_id=request.provider_id,
-            model_id=request.model_id,
-        ):
-            async for chunk in chat_manager.send_message_stream(
+            chat_manager=chat_manager,
+            run_manager=run_manager,
+            stream_kwargs={
+                "conversation_id": conversation_id,
+                "content": request.content,
+                "model_id": request.model_id,
+                "provider_id": request.provider_id,
+                "parent_node_id": request.parent_node_id,
+                "focus_new_node": request.focus_new_node,
+                "reasoning_effort": request.reasoning_effort,
+                "thinking_enabled": request.thinking_enabled,
+                "import_files": request.import_files,
+                "image_refs": request.image_refs,
+                "tool_permission_mode": request.tool_permission_mode,
+                "task_context_mode": request.task_context_mode,
+                "run_id": run.run_id,
+            },
+        )
+    await run_manager.finish_run(run.run_id, final_status, final_error)
+    # --- 自动续写：流因可恢复网络错误中断后，创建子 run 注入隐藏"继续"消息；
+    # 子 run 的事件正常广播，前端可实时接入，恢复后错误徽章由最新 run 状态覆盖 ---
+    if final_status == RunStatus.FAILED and bound_node_id and final_retryable:
+        logger.info(
+            "Auto-continuing failed run %s node=%s model=%s: %s",
+            run.run_id, bound_node_id,
+            request.model_id or "?", final_error,
+        )
+        try:
+            continue_run = await run_manager.create_run(
                 conversation_id=conversation_id,
-                content=request.content,
-                model_id=request.model_id,
-                provider_id=request.provider_id,
-                parent_node_id=request.parent_node_id,
-                focus_new_node=request.focus_new_node,
-                reasoning_effort=request.reasoning_effort,
-                thinking_enabled=request.thinking_enabled,
-                import_files=request.import_files,
-                image_refs=request.image_refs,
-                tool_permission_mode=request.tool_permission_mode,
-                task_context_mode=request.task_context_mode,
-                run_id=run.run_id,
-            ):
-                chunk_data = build_stream_chunk_data(chunk, conversation_id)
-                node_id = chunk_data.get("node_id")
-                if node_id and node_id != bound_node_id:
-                    bound_node_id = node_id
-                    await run_manager.bind_target_node(run.run_id, node_id)
-                    chunk_data["target_node_id"] = node_id
-                    if await run_manager.is_stop_requested(run.run_id):
-                        await chat_manager.stop_stream(node_id)
-                chunk_status = str(_enum_value(chunk_data.get("status")) or "")
-                has_stream_node = bool(chunk_data.get("node_id") or bound_node_id)
-                if (
-                    chunk_status not in _CHAT_TERMINAL_CHUNK_STATUSES
-                    or not has_stream_node
-                ):
-                    await event_batcher.append(chunk_data)
-                if chunk_status == "error":
-                    final_status = RunStatus.FAILED
-                    final_error = chunk_data.get("error") or "unknown error"
-                    final_retryable = bool((chunk_data.get("metadata") or {}).get("retryable"))
-                elif chunk_status == "stopped":
-                    final_status = RunStatus.CANCELLED
-    except asyncio.CancelledError:
-        final_status = RunStatus.CANCELLED
-        await event_batcher.flush()
-    except Exception as exc:
-        logger.exception(
-        "Message producer failed for conversation %s model=%s provider=%s",
-        conversation_id, request.model_id, request.provider_id,
-    )
-        final_status = RunStatus.FAILED
-        final_error = str(exc) or exc.__class__.__name__
-        final_retryable = classify_retry_error(exc).retryable
-        await event_batcher.flush()
-    finally:
-        await event_batcher.flush()
-        await run_manager.finish_run(run.run_id, final_status, final_error)
-        # --- 自动续写：流因可恢复网络错误中断后，注入隐藏"继续"消息 ---
-        if final_status == RunStatus.FAILED and bound_node_id and final_retryable:
-            logger.info(
-                "Auto-continuing failed run %s node=%s model=%s: %s",
-                run.run_id, bound_node_id,
-                request.model_id or "?", final_error,
+                kind=RunKind.CHAT,
+                anchor_node_id=bound_node_id,
+                created_by_run_id=run.run_id,
+                summary="自动续写",
             )
-            try:
-                async for _chunk in chat_manager.send_message_stream(
-                    conversation_id=conversation_id,
-                    content="Continue from where you left off.",
-                    model_id=request.model_id,
-                    provider_id=request.provider_id,
-                    parent_node_id=bound_node_id,
-                    focus_new_node=False,
-                    reasoning_effort=request.reasoning_effort,
-                    thinking_enabled=request.thinking_enabled,
-                    import_files=request.import_files,
-                    image_refs=request.image_refs,
-                    tool_permission_mode=request.tool_permission_mode,
-                    task_context_mode=request.task_context_mode,
-                    hidden_user_message=True,
-                    suppress_user_message=True,
-                    append_to_existing_node=True,
-                ):
-                    pass
-            except Exception:
-                logger.exception("Auto-continue failed for run %s", run.run_id)
+            continue_status, continue_error, _retryable, _node_id = await _consume_chat_stream(
+                run=continue_run,
+                conversation_id=conversation_id,
+                chat_manager=chat_manager,
+                run_manager=run_manager,
+                stream_kwargs={
+                    "conversation_id": conversation_id,
+                    "content": "Continue from where you left off.",
+                    "model_id": request.model_id,
+                    "provider_id": request.provider_id,
+                    "parent_node_id": bound_node_id,
+                    "focus_new_node": False,
+                    "reasoning_effort": request.reasoning_effort,
+                    "thinking_enabled": request.thinking_enabled,
+                    "import_files": request.import_files,
+                    "image_refs": request.image_refs,
+                    "tool_permission_mode": request.tool_permission_mode,
+                    "task_context_mode": request.task_context_mode,
+                    "hidden_user_message": True,
+                    "suppress_user_message": True,
+                    "append_to_existing_node": True,
+                    "run_id": continue_run.run_id,
+                },
+            )
+            await run_manager.finish_run(continue_run.run_id, continue_status, continue_error)
+        except Exception:
+            logger.exception("Auto-continue failed for run %s", run.run_id)
 
 
 async def _produce_direct_response(

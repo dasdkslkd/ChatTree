@@ -487,6 +487,19 @@ def test_auto_continue_triggers_on_recoverable_stream_error(failure):
     assert len(finished) == 1
     assert finished[0][1] == RunStatus.FAILED.value
 
+    # 续写必须是真实子 run：事件正常广播，前端可实时接入；
+    # 子 run 完成后 transcript 取节点最新 run 状态，错误徽章随之消失
+    children = [
+        item for item in run_manager.repository.list_runs("conv-1")
+        if str(item.get("created_by_run_id") or "") == run.run_id
+    ]
+    assert len(children) == 1
+    child = children[0]
+    assert child["anchor_node_id"] == "node-target"
+    assert child["target_node_id"] == "node-target"
+    assert child["status"] == "completed"
+    assert run_manager.read_events(child["run_id"], 0)
+
 
 def test_auto_continue_skips_on_non_retryable_error():
     """非网络错误的失败不应触发自动续写。"""
@@ -602,6 +615,13 @@ def test_auto_continue_triggers_on_error_chunk_with_retryable_metadata():
     assert len(chat_manager.calls) == 2
     assert chat_manager.calls[1]["content"] == "Continue from where you left off."
     assert chat_manager.calls[1]["append_to_existing_node"] is True
+    children = [
+        item for item in run_manager.repository.list_runs("conv-1")
+        if item.get("created_by_run_id")
+    ]
+    assert len(children) == 1
+    assert children[0]["status"] == "completed"
+    assert run_manager.read_events(children[0]["run_id"], 0)
 
 
 def test_auto_continue_skips_when_no_bound_node():

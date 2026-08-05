@@ -1531,11 +1531,20 @@ export default function ChatPage() {
       void syncBackendActiveStreams();
     };
 
+    // 流出错终止后后端可能已启动自动续写子 run，稍候立即同步一次以尽快接入续写流
+    const unsubscribeFinish = streamManager.onFinish((info) => {
+      if (info.status !== 'error' || info.conversationId !== currentConversationIdRef.current) return;
+      window.setTimeout(() => {
+        if (!cancelled) void syncBackendActiveStreams();
+      }, 1000);
+    });
+
     void syncBackendActiveStreams();
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => {
       cancelled = true;
       clearTimer();
+      unsubscribeFinish();
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, []);
