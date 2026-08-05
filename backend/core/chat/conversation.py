@@ -262,6 +262,17 @@ class Conversation:
         conv.nodes = nodes
         conv.root_node_id = root_node_id
 
+        # 修复历史失败轮（如连接超时）导致的上下文归零：继承最近祖先的有效上下文
+        for node_id, node in nodes.items():
+            usage = node.get("usage") or {}
+            if usage_total(usage.get("turn_usage")) or not usage_total(usage.get("branch_usage")):
+                continue
+            for ancestor in reversed(conv.get_node_chain(node_id)[:-1]):
+                inherited = (ancestor.get("usage") or {}).get("active_context_usage")
+                if usage_total(inherited):
+                    usage["active_context_usage"] = inherited
+                    break
+
         current = data.get("current_node_id")
         if not current or current not in nodes or current in skipped:
             if current is not None:

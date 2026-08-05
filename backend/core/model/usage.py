@@ -124,6 +124,25 @@ def estimated_usage(total_tokens: int, output_tokens: Optional[int] = None) -> U
     )
 
 
+def cache_hit_rate(usage_info: Optional[UsageInfo]) -> Optional[float]:
+    """缓存命中率：命中 token 占输入上下文的比例。
+
+    OpenAI 的 input_tokens 已含 cached_tokens；Anthropic 的输入上下文为
+    input_tokens + cache_creation + cache_read，命中部分为 cache_read。
+    """
+    if not usage_info:
+        return None
+    hit = _int_value(usage_info.get("cached_tokens")) + _int_value(usage_info.get("cache_read_input_tokens"))
+    context = (
+        _int_value(usage_info.get("input_tokens"))
+        + _int_value(usage_info.get("cache_creation_input_tokens"))
+        + _int_value(usage_info.get("cache_read_input_tokens"))
+    )
+    if context <= 0 or hit <= 0:
+        return None
+    return hit / context
+
+
 def usage_total(usage_info: Optional[UsageInfo], fallback: int = 0) -> int:
     if not usage_info:
         return _int_value(fallback)

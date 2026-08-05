@@ -158,3 +158,117 @@ def test_streaming_updates_each_node_layered_usage_to_that_point():
 
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TimeoutAfterSuccessProvider:
+    """首轮正常完成，次轮连接超时（未获得任何用量）。"""
+
+    def __init__(self):
+        self.calls = 0
+
+    async def generate_response_stream(
+        self,
+        model,
+        messages,
+        stream_controller: StreamController = None,
+        **kwargs,
+    ):
+        self.calls += 1
+        yield StreamChunk(
+            status=StreamStatus.START,
+            content=None,
+            node_id=stream_controller.node_id,
+            conversation_id=stream_controller.conversation_id,
+            error=None,
+            tokens_used=0,
+        )
+        if self.calls > 1:
+            yield StreamChunk(
+                status=StreamStatus.ERROR,
+                content=None,
+                node_id=stream_controller.node_id,
+                conversation_id=stream_controller.conversation_id,
+                error="ConnectTimeout",
+                tokens_used=0,
+            )
+            return
+        yield StreamChunk(
+            status=StreamStatus.CONTENT,
+            content="ok",
+            node_id=stream_controller.node_id,
+            conversation_id=stream_controller.conversation_id,
+            error=None,
+            tokens_used=1,
+        )
+        yield StreamChunk(
+            status=StreamStatus.COMPLETE,
+            content=None,
+            node_id=stream_controller.node_id,
+            conversation_id=stream_controller.conversation_id,
+            error=None,
+            tokens_used=7,
+            usage_info={
+                "input_tokens": 3,
+                "output_tokens": 4,
+                "total_tokens": 7,
+                "source": "api",
+                "raw": {},
+            },
+        )
+
+
+class TimeoutAfterSuccessModelManager:
+    def __init__(self):
+        self.model_list = {"fake": ["fake-model"]}
+        self._provider = TimeoutAfterSuccessProvider()
+
+    def get_route(self, provider, model):
+        return fake_model_route(provider, model)
+
+    def get_model(self, provider, model, is_async=False):
+        return self._provider
+
+    def get_model_metadata(self, provider, model):
+        return self.get_route(provider, model)["capabilities"]
+
+
+def test_failed_turn_inherits_ancestor_active_context():
+    """连接超时等未产生用量的轮次，上下文用量继承祖先而非归零。"""
+    tmp = tempfile.mkdtemp(prefix="chattree_usage_timeout_")
+    try:
+        storage = ChatStorage(storage_dir=os.path.join(tmp, "conversations"))
+        prompts = PromptStorage(storage_dir=os.path.join(tmp, "prompts"))
+        cm = ChatManager(TimeoutAfterSuccessModelManager(), storage, prompts)
+        conv = cm.create_conversation("timeout inheritance")
+        cid = conv.metadata["id"]
+
+        async def run():
+            await drain(cm.send_message_stream(
+                cid,
+                "first",
+                model_id="fake-model",
+                parent_node_id=conv.root_node_id,
+            ))
+            current = cm.get_conversation(cid)
+            assert current is not None
+            await drain(cm.send_message_stream(
+                cid,
+                "second",
+                model_id="fake-model",
+                parent_node_id=current.current_node_id,
+            ))
+
+        asyncio.run(run())
+
+        reloaded = cm.get_conversation(cid)
+        chain = reloaded.get_node_chain(reloaded.current_node_id)
+        non_root = [node for node in chain if node["id"] != reloaded.root_node_id]
+        assert len(non_root) == 2
+
+        first, second = non_root
+        assert first["usage"]["active_context_usage"]["total_tokens"] == 7
+        assert second["usage"]["turn_usage"]["total_tokens"] == 0
+        assert second["usage"]["active_context_usage"]["total_tokens"] == 7
+
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)

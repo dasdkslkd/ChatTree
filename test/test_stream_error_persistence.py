@@ -128,6 +128,81 @@ def test_provider_exception_streams_and_persists_real_error(tmp_path):
     asyncio.run(_provider_exception_streams_and_persists_real_error(tmp_path))
 
 
+class ErrorWithUsageProvider:
+    """模拟流中途异常中断：终结 ERROR 块携带上游已报告的用量。"""
+
+    async def generate_response_stream(
+        self,
+        model,
+        messages,
+        stream_controller: StreamController = None,
+        **kwargs,
+    ):
+        yield StreamChunk(
+            status=StreamStatus.START,
+            content=None,
+            node_id=stream_controller.node_id,
+            conversation_id=stream_controller.conversation_id,
+            error=None,
+            tokens_used=0,
+        )
+        yield StreamChunk(
+            status=StreamStatus.CONTENT,
+            content="partial",
+            node_id=stream_controller.node_id,
+            conversation_id=stream_controller.conversation_id,
+            error=None,
+            tokens_used=5,
+        )
+        yield StreamChunk(
+            status=StreamStatus.ERROR,
+            content=None,
+            node_id=stream_controller.node_id,
+            conversation_id=stream_controller.conversation_id,
+            error="connection lost",
+            tokens_used=120,
+            usage_info={
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "total_tokens": 120,
+                "cache_read_input_tokens": 40,
+                "source": "api",
+                "raw": {},
+            },
+        )
+
+
+async def _abnormal_termination_persists_usage(tmp_path):
+    """流式输出非正常结束时，节点用量不得丢失为 0。"""
+    chat_manager = ChatManager(
+        FakeModelManager(ErrorWithUsageProvider()),
+        ChatStorage(storage_dir=str(tmp_path / "conversations")),
+        PromptStorage(storage_dir=str(tmp_path / "prompts")),
+    )
+    conversation = chat_manager.create_conversation("usage on error")
+
+    node_id = None
+    async for chunk in chat_manager.send_message_stream(
+        conversation.metadata["id"],
+        "hello",
+        model_id="fake-model",
+        parent_node_id=conversation.current_node_id,
+    ):
+        if chunk.get("node_id"):
+            node_id = chunk["node_id"]
+    assert node_id
+
+    node = chat_manager.get_conversation(conversation.metadata["id"]).nodes[node_id]
+    turn_usage = node["usage"]["turn_usage"]
+    assert turn_usage["total_tokens"] == 120
+    assert turn_usage.get("cache_read_input_tokens") == 40
+    assert node["usage"]["active_context_usage"]["total_tokens"] == 120
+
+
+def test_abnormal_termination_persists_usage(tmp_path):
+    asyncio.run(_abnormal_termination_persists_usage(tmp_path))
+
+
 async def _continue_after_error_keeps_user_message_before_retry_answer(tmp_path):
     """出错后续发“继续”：用户消息必须位于错误节点与重试回答之间。"""
     from backend.core.transcript import TranscriptAssembler

@@ -73,7 +73,7 @@ from ..storage.chat_storage import ChatStorage
 from ..storage.prompt_storage import PromptStorage
 from ..model.model_manager import ModelManager
 from ..model.model_metadata import ModelRouteError
-from ..model.usage import add_usage, estimated_usage, usage_total
+from ..model.usage import add_usage, cache_hit_rate, estimated_usage, usage_total
 from ..perf import get_profiler
 from ..utils.logger import setup_logger
 from ..config.config import cfg
@@ -1680,6 +1680,10 @@ class ChatManager:
                         chunk_status = chunk.get("status")
                         if chunk_status == StreamStatus.START:
                             continue
+                        if chunk_status in {StreamStatus.ERROR, StreamStatus.STOPPED, StreamStatus.COMPLETE}:
+                            tokens_used = chunk.get("tokens_used") or tokens_used
+                            usage_info = chunk.get("usage_info") or usage_info
+                            tokens_used = usage_total(usage_info, tokens_used)
                         if chunk_status == StreamStatus.ERROR:
                             generation_status = "error"
                             error_message = chunk.get("error")
@@ -1688,9 +1692,6 @@ class ChatManager:
                             generation_status = "stopped"
                             round_status = "stopped"
                         if chunk_status == StreamStatus.COMPLETE:
-                            tokens_used = chunk.get("tokens_used", tokens_used) or tokens_used
-                            usage_info = chunk.get("usage_info") or usage_info
-                            tokens_used = usage_total(usage_info, tokens_used)
                             complete_chunk = dict(chunk)
                             if round_finish_reason is None:
                                 round_finish_reason = "unknown"
@@ -1764,6 +1765,9 @@ class ChatManager:
                     tokens_per_minute_est=round(provider_tpm, 3),
                     tool_call_chunks=provider_tool_call_chunks,
                     finish_reason=round_finish_reason,
+                    cache_hit_rate=(
+                        round(rate, 4) if (rate := cache_hit_rate(usage_info)) is not None else None
+                    ),
                 )
                 if task_turn_context.current_task is None:
                     for call in round_tool_calls:
@@ -3845,11 +3849,20 @@ class ChatManager:
             return
         turn_usage = turn_usage_for_node(self.chat_repository,conversation.metadata["id"], node_id) or estimated_usage(0)
         branch_usage = self._branch_usage_for_node(conversation, node_id)
+        # 本轮未产生真实用量（如连接超时）但分支已有累计时，继承最近祖先节点的有效上下文，避免用量显示归零
+        active_context_usage = None
+        if not usage_total(turn_usage) and usage_total(branch_usage):
+            for ancestor in reversed(conversation.get_node_chain(node_id)[:-1]):
+                inherited = (ancestor.get("usage") or {}).get("active_context_usage")
+                if usage_total(inherited):
+                    active_context_usage = inherited
+                    break
         node["branch_usage_info"] = branch_usage
         node["total_tokens"] = usage_total(branch_usage)
         node["usage"] = self._node_usage_snapshot(
             turn_usage=turn_usage,
             branch_usage=branch_usage,
+            active_context_usage=active_context_usage,
         )
 
     def get_conversation_history(self) -> List[Message]:

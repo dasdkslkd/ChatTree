@@ -402,6 +402,7 @@ class GeminiProvider(BaseProvider):
                                     conversation_id=stream_controller.conversation_id,
                                     error="用户手动终止",
                                     tokens_used=total_tokens,
+                                    usage_info=usage_info,
                                 )
                                 return
                             attempt_had_output = True
@@ -431,6 +432,7 @@ class GeminiProvider(BaseProvider):
                                 conversation_id=stream_controller.conversation_id,
                                 error="用户手动终止",
                                 tokens_used=total_tokens,
+                                usage_info=usage_info,
                             )
                             return
 
@@ -451,6 +453,7 @@ class GeminiProvider(BaseProvider):
                         conversation_id=stream_controller.conversation_id if stream_controller else None,
                         error="用户手动终止",
                         tokens_used=total_tokens,
+                        usage_info=usage_info,
                     )
                     return
                 except Exception as exc:
@@ -462,6 +465,7 @@ class GeminiProvider(BaseProvider):
                             conversation_id=stream_controller.conversation_id,
                             error="用户手动终止",
                             tokens_used=total_tokens,
+                            usage_info=usage_info,
                         )
                         return
                     decision = classify_retry_error(exc, stream_policy)
@@ -562,6 +566,7 @@ class GeminiProvider(BaseProvider):
                 conversation_id=stream_controller.conversation_id if stream_controller else None,
                 error="任务被取消",
                 tokens_used=total_tokens,
+                usage_info=usage_info,
             )
         except Exception as e:
             logger.error(f"Gemini stream error: {e}")
@@ -572,6 +577,7 @@ class GeminiProvider(BaseProvider):
                 conversation_id=stream_controller.conversation_id if stream_controller else None,
                 error=str(e) or e.__class__.__name__,
                 tokens_used=total_tokens,
+                usage_info=usage_info,
             )
 
     async def _iter_sse_events(

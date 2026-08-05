@@ -144,6 +144,15 @@ export default function ServerSessionApp({
     return segments;
   }, [contextBarColor, contextUsage.usage, contextUsed]);
   const contextLevel = contextPercent >= 90 ? 'danger' : contextPercent >= 80 ? 'warn' : 'ok';
+  const cacheHitRate = useMemo(() => {
+    const usage = contextUsage.usage;
+    const hit = (usage?.cached_tokens ?? 0) + (usage?.cache_read_input_tokens ?? 0);
+    const inputContext = (usage?.input_tokens ?? 0)
+      + (usage?.cache_creation_input_tokens ?? 0)
+      + (usage?.cache_read_input_tokens ?? 0);
+    if (inputContext <= 0 || hit <= 0) return null;
+    return hit / inputContext;
+  }, [contextUsage.usage]);
   const contextFlag = contextLevel === 'danger' ? '临界' : contextLevel === 'warn' ? '偏高' : '健康';
   const contextFlagStyle = contextLevel === 'danger'
     ? { color: 'var(--accent-red)', background: 'rgba(255,103,100,0.14)' }
@@ -408,6 +417,30 @@ export default function ServerSessionApp({
                             {contextLimit ? ` · ${((contextFree / contextLimit) * 100).toFixed(1)}%` : ''}
                           </span>
                         </div>
+                        {cacheHitRate !== null && (
+                          <div
+                            style={{
+                              display: 'grid',
+                              gridTemplateColumns: '11px 1fr auto',
+                              alignItems: 'center',
+                              gap: '8px',
+                              fontSize: 'var(--text-xs)',
+                            }}
+                          >
+                            <span
+                              style={{
+                                width: '9px',
+                                height: '9px',
+                                borderRadius: '2px',
+                                background: 'var(--fg-tertiary)',
+                              }}
+                            />
+                            <span style={{ color: 'var(--fg-secondary)' }}>缓存命中率</span>
+                            <span style={{ color: 'var(--fg-tertiary)' }}>
+                              {(cacheHitRate * 100).toFixed(1)}%
+                            </span>
+                          </div>
+                        )}
                       </div>
                     </>
                   )}

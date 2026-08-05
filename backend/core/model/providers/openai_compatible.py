@@ -199,9 +199,9 @@ class OpenAICompatibleProvider(BaseProvider):
                 ):
                     if chunk["status"] == StreamStatus.CONTENT and chunk.get("content"):
                         total_content += chunk["content"] or ""
-                    if chunk["status"] == StreamStatus.COMPLETE:
-                        usage_info = chunk.get("usage_info")
-                        total_tokens = chunk.get("tokens_used", total_tokens)
+                    if chunk["status"] in {StreamStatus.COMPLETE, StreamStatus.ERROR, StreamStatus.STOPPED}:
+                        usage_info = chunk.get("usage_info") or usage_info
+                        total_tokens = chunk.get("tokens_used") or total_tokens
                     yield chunk
                 return
 
@@ -264,6 +264,7 @@ class OpenAICompatibleProvider(BaseProvider):
                                     conversation_id=stream_controller.conversation_id,
                                     error="用户手动终止",
                                     tokens_used=total_tokens,
+                                    usage_info=usage_info,
                                 )
                                 return
 
@@ -366,6 +367,7 @@ class OpenAICompatibleProvider(BaseProvider):
                             conversation_id=stream_controller.conversation_id if stream_controller else None,
                             error="用户手动终止",
                             tokens_used=total_tokens,
+                            usage_info=usage_info,
                         )
                         return
                     except ProviderHTTPError as exc:
@@ -378,6 +380,7 @@ class OpenAICompatibleProvider(BaseProvider):
                                 conversation_id=stream_controller.conversation_id,
                                 error="用户手动终止",
                                 tokens_used=total_tokens,
+                                usage_info=usage_info,
                             )
                             return
                         if attempt_index + 1 < len(attempts) and exc.status == 400 and not attempt_had_output:
@@ -412,6 +415,7 @@ class OpenAICompatibleProvider(BaseProvider):
                                 conversation_id=stream_controller.conversation_id,
                                 error="用户手动终止",
                                 tokens_used=total_tokens,
+                                usage_info=usage_info,
                             )
                             return
                         decision = classify_retry_error(exc, stream_policy)
@@ -463,6 +467,7 @@ class OpenAICompatibleProvider(BaseProvider):
                 conversation_id=stream_controller.conversation_id if stream_controller else None,
                 error="任务被取消",
                 tokens_used=total_tokens,
+                usage_info=usage_info,
             )
         except Exception as e:
             logger.error(
@@ -476,6 +481,7 @@ class OpenAICompatibleProvider(BaseProvider):
                 conversation_id=stream_controller.conversation_id if stream_controller else None,
                 error=str(e) or e.__class__.__name__,
                 tokens_used=total_tokens,
+                usage_info=usage_info,
             )
 
     async def _stream_responses_api(
@@ -545,6 +551,7 @@ class OpenAICompatibleProvider(BaseProvider):
                                 conversation_id=stream_controller.conversation_id,
                                 error="用户手动终止",
                                 tokens_used=total_tokens,
+                                usage_info=usage_info,
                             )
                             return
 
@@ -793,6 +800,7 @@ class OpenAICompatibleProvider(BaseProvider):
                         conversation_id=stream_controller.conversation_id if stream_controller else None,
                         error="用户手动终止",
                         tokens_used=total_tokens,
+                        usage_info=usage_info,
                     )
                     return
                 except ProviderHTTPError as exc:
@@ -804,6 +812,7 @@ class OpenAICompatibleProvider(BaseProvider):
                             conversation_id=stream_controller.conversation_id,
                             error="用户手动终止",
                             tokens_used=total_tokens,
+                            usage_info=usage_info,
                         )
                         return
                     if (
@@ -841,6 +850,7 @@ class OpenAICompatibleProvider(BaseProvider):
                             conversation_id=stream_controller.conversation_id,
                             error="用户手动终止",
                             tokens_used=total_tokens,
+                            usage_info=usage_info,
                         )
                         return
                     decision = classify_retry_error(exc, stream_policy)
