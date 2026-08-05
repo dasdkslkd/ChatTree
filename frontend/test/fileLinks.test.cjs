@@ -175,8 +175,9 @@ function testMultipleLinksStayIndependent() {
 
 function testFileLinkWrapperRendersPathLinks() {
   const { fileLinkComponents } = loadFileLinks();
-  const nodes = fileLinkComponents.p({ children: '见 C:\\a\\b\\c.py 文件' });
-  assert.ok(Array.isArray(nodes));
+  const wrapped = fileLinkComponents.p({ children: '见 C:\\a\\b\\c.py 文件' });
+  assert.equal(wrapped.type, 'p');
+  const nodes = wrapped.children;
   assert.equal(nodes[0], '见 ');
   const link = nodes[1];
   assert.equal(typeof link.type, 'function');
@@ -186,7 +187,9 @@ function testFileLinkWrapperRendersPathLinks() {
 
 function testFileLinkWrapperRendersUrlLinks() {
   const { fileLinkComponents } = loadFileLinks();
-  const nodes = fileLinkComponents.p({ children: '访问 https://example.com/x 吧' });
+  const wrapped = fileLinkComponents.p({ children: '访问 https://example.com/x 吧' });
+  assert.equal(wrapped.type, 'p');
+  const nodes = wrapped.children;
   assert.equal(nodes[0], '访问 ');
   const link = nodes[1];
   assert.equal(link.type, 'a');
@@ -196,12 +199,20 @@ function testFileLinkWrapperRendersUrlLinks() {
   assert.equal(nodes[2], ' 吧');
 }
 
+function testBlockComponentsPreserveTheirTag() {
+  const { fileLinkComponents } = loadFileLinks();
+  for (const tag of ['h1', 'h2', 'td', 'th', 'li', 'blockquote']) {
+    const wrapped = fileLinkComponents[tag]({ children: tag });
+    assert.equal(wrapped.type, tag, `expected ${tag} preserved`);
+  }
+}
+
 function testFileLinkWrapperProcessesInlineCodeChildren() {
   const { fileLinkComponents } = loadFileLinks();
   const codeElement = { type: 'code', props: { children: 'D:\\x\\y\\z.py' } };
   const result = fileLinkComponents.p({ children: [codeElement] });
-  assert.ok(Array.isArray(result));
-  const processedCode = result[0];
+  assert.equal(result.type, 'p');
+  const processedCode = result.children[0];
   assert.equal(processedCode.type, 'code');
   const inner = processedCode.props.children;
   assert.ok(Array.isArray(inner));
@@ -213,7 +224,8 @@ function testFileLinkWrapperProcessesFencedCodeBlocks() {
   const { fileLinkComponents } = loadFileLinks();
   const codeElement = { type: 'code', props: { children: '见 https://example.com/x 与 D:\\a\\b\\c.py' } };
   const result = fileLinkComponents.pre({ children: [codeElement] });
-  const processedCode = result[0];
+  assert.equal(result.type, 'pre');
+  const processedCode = result.children[0];
   assert.equal(processedCode.type, 'code');
   const inner = processedCode.props.children;
   assert.ok(Array.isArray(inner));
@@ -338,6 +350,7 @@ function main() {
   testMultipleLinksStayIndependent();
   testFileLinkWrapperRendersPathLinks();
   testFileLinkWrapperRendersUrlLinks();
+  testBlockComponentsPreserveTheirTag();
   testFileLinkWrapperProcessesInlineCodeChildren();
   testFileLinkWrapperProcessesFencedCodeBlocks();
   testFileOpenLinkDecodesFilePrefix();

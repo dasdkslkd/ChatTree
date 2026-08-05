@@ -1,4 +1,4 @@
-import type { MouseEvent, ReactNode } from 'react';
+import { createElement, type MouseEvent, type ReactNode } from 'react';
 import type { Components } from 'react-markdown';
 import { toast } from 'sonner';
 import { getApiErrorMessage } from '../../api/errors';
@@ -77,9 +77,19 @@ function walkChildrenForFileLinks(node: ReactNode): ReactNode {
   return node;
 }
 
-export function FileLinkWrapper({ children }: { children?: ReactNode }) {
-  return walkChildrenForFileLinks(children);
-}
+const BLOCK_TAGS = ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'td', 'th', 'blockquote', 'pre'] as const;
+
+// 保留块级标签本身，仅在其子节点上做文件链接识别，
+// 避免覆盖组件返回裸数组导致标题/表格单元格失去块级结构
+export const fileLinkComponents: Components = {
+  a: FileOpenLink,
+  ...Object.fromEntries(
+    BLOCK_TAGS.map((tag) => [
+      tag,
+      (props: { children?: ReactNode }) => createElement(tag, null, walkChildrenForFileLinks(props.children)),
+    ]),
+  ) as Components,
+};
 
 export function FileOpenLink({
   href,
@@ -122,19 +132,3 @@ export function FileOpenLink({
     </a>
   );
 }
-
-export const fileLinkComponents: Components = {
-  a: FileOpenLink,
-  p: FileLinkWrapper as unknown as Components['p'],
-  h1: FileLinkWrapper as unknown as Components['h1'],
-  h2: FileLinkWrapper as unknown as Components['h2'],
-  h3: FileLinkWrapper as unknown as Components['h3'],
-  h4: FileLinkWrapper as unknown as Components['h4'],
-  h5: FileLinkWrapper as unknown as Components['h5'],
-  h6: FileLinkWrapper as unknown as Components['h6'],
-  li: FileLinkWrapper as unknown as Components['li'],
-  td: FileLinkWrapper as unknown as Components['td'],
-  th: FileLinkWrapper as unknown as Components['th'],
-  blockquote: FileLinkWrapper as unknown as Components['blockquote'],
-  pre: FileLinkWrapper as unknown as Components['pre'],
-};
