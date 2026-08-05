@@ -52,7 +52,7 @@ class TranscriptAssembler:
                 return {
                     "conversation_id": conversation_id,
                     "node_id": None,
-                    "revision": 0,
+                    "revision": self._revision_by_node.get((conversation_id, ""), 0),
                     "items": [],
                 }
             branch = self._load_branch(conn, conversation_id, str(tip_node_id))
@@ -117,7 +117,9 @@ class TranscriptAssembler:
         return {
             "conversation_id": conversation_id,
             "node_id": str(tip_node_id),
-            "revision": 0,
+            # 返回当前 patch revision 前沿：快照重载后前端仍能接续 SSE patch 链，
+            # 否则 revision 归零会让流式期间的所有 patch 被拒并陷入无限校准
+            "revision": self._revision_by_node.get((conversation_id, str(tip_node_id)), 0),
             "items": items,
         }
 

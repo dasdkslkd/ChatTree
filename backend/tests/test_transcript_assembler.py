@@ -2089,3 +2089,39 @@ def test_patch_fallback_anchors_user_message_before_stream_items(tmp_path):
     )
     # 同索引时前端按操作顺序顺延，此处只需保证用户消息不在流式内容之后
     assert user_index <= process_index
+
+
+def test_snapshot_revision_continues_patch_chain_after_reload(tmp_path):
+    """流式期间重载快照后，revision 必须停留在 patch 前沿，
+    否则前端会因 revision !== state.revision + 1 拒绝后续所有 patch。"""
+    persistence, repository = _repo(tmp_path)
+    conversation_id, root_id = _conversation(repository)
+    repository.add_message(conversation_id, root_id, "user", "继续")
+    run_id = SQLiteRunRepository(persistence).create_run(
+        conversation_id,
+        kind="chat",
+        target_node_id=root_id,
+        summary="revision frontier",
+    )
+    assembler = TranscriptAssembler(persistence)
+    session = assembler.patch_session(run_id)
+    patch = session.feed({
+        "status": "content",
+        "conversation_id": conversation_id,
+        "node_id": root_id,
+        "content": "answer",
+    })
+    assert patch is not None
+
+    snapshot = assembler.snapshot(conversation_id, root_id)
+    assert snapshot["revision"] == patch["revision"]
+
+    # 前端重载快照后，下一个 patch 恰好是 revision + 1，可以继续应用
+    next_patch = session.feed({
+        "status": "content",
+        "conversation_id": conversation_id,
+        "node_id": root_id,
+        "content": "answer more",
+    })
+    assert next_patch is not None
+    assert next_patch["revision"] == snapshot["revision"] + 1
