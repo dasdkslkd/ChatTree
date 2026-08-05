@@ -726,6 +726,7 @@ export function ChatInput({
           }}
           autoFocus={isEditing}
           onKeyDown={(e) => {
+            if (e.key === 'Enter' && e.nativeEvent.isComposing) return;
             if (suggestionOpen) {
               if (e.key === 'ArrowDown') {
                 e.preventDefault();
@@ -737,7 +738,7 @@ export function ChatInput({
                 setSlashHighlightIndex((index) => (index - 1 + suggestionItems.length) % suggestionItems.length);
                 return;
               }
-              if ((e.key === 'Enter' || e.key === 'Tab') && highlightedSuggestion) {
+              if (e.key === 'Tab' && highlightedSuggestion) {
                 e.preventDefault();
                 completeSuggestion(highlightedSuggestion);
                 return;
@@ -748,9 +749,26 @@ export function ChatInput({
                 return;
               }
             }
-            if (e.key === 'Enter' && !e.ctrlKey && !e.shiftKey) {
-              e.preventDefault();
-              handleSend();
+            if (e.key === 'Enter') {
+              if (e.ctrlKey || e.shiftKey) {
+                e.preventDefault();
+                const el = e.currentTarget;
+                const start = el.selectionStart ?? value.length;
+                const end = el.selectionEnd ?? start;
+                const nextValue = value.slice(0, start) + '\n' + value.slice(end);
+                setValue(nextValue);
+                setSlashHighlightIndex(0);
+                requestAnimationFrame(() => {
+                  el.focus();
+                  const position = start + 1;
+                  el.setSelectionRange(position, position);
+                });
+                return;
+              }
+              if (!e.ctrlKey && !e.shiftKey) {
+                e.preventDefault();
+                handleSend();
+              }
             }
           }}
           disabled={inputDisabled}
