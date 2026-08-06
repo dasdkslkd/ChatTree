@@ -101,6 +101,9 @@ export function ProvidersSection() {
   const [quotaInfo, setQuotaInfo] = useState<Record<string, unknown> | null>(null);
   const [quotaLoading, setQuotaLoading] = useState(false);
 
+  // 默认模型的元数据（用于判断是否渲染思考/推理控件）
+  const modelMetadata = useModelStore((s) => s.modelMetadata);
+
   const loadConfig = useCallback(async () => {
     try {
       setLoading(true);
@@ -116,6 +119,12 @@ export function ProvidersSection() {
   }, []);
 
   useEffect(() => { loadConfig(); }, [loadConfig]);
+
+  // 默认提供商变更时加载其模型元数据
+  useEffect(() => {
+    const pid = config?.default_provider;
+    if (pid) void useModelStore.getState().loadMetadata(pid);
+  }, [config?.default_provider]);
 
   const getEnabledProviders = (): string[] => {
     if (!config) return [];
@@ -142,6 +151,7 @@ export function ProvidersSection() {
     setConfig({ ...config, default_provider: provider, default_model: nextModel });
     try {
       await configApi.update({ default_provider: provider, default_model: nextModel });
+      await useModelStore.getState().loadConfig({ force: true });
       toast.success('默认提供商已更新');
     } catch {
       setConfig(c => c ? { ...c, default_provider: prev, default_model: prevModel } : c);
@@ -155,6 +165,7 @@ export function ProvidersSection() {
     setConfig({ ...config, default_model: model });
     try {
       await configApi.update({ default_model: model });
+      await useModelStore.getState().loadConfig({ force: true });
       toast.success('默认模型已更新');
     } catch {
       setConfig(c => c ? { ...c, default_model: prev } : c);
@@ -173,6 +184,36 @@ export function ProvidersSection() {
       toast.success('上下文窗口已更新');
     } catch {
       setConfig(current => current ? { ...current, context_window: previous } : current);
+      toast.error('保存失败');
+    }
+  };
+
+  // 默认模型的思考模式/推理强度：写入 config，供新对话继承
+  const handleDefaultThinkingChange = async (enabled: boolean) => {
+    if (!config) return;
+    const prev = config.default_thinking_enabled ?? null;
+    setConfig({ ...config, default_thinking_enabled: enabled });
+    try {
+      await configApi.update({ default_thinking_enabled: enabled });
+      await useModelStore.getState().loadConfig({ force: true });
+      toast.success('默认思考模式已更新');
+    } catch {
+      setConfig(c => c ? { ...c, default_thinking_enabled: prev } : c);
+      toast.error('保存失败');
+    }
+  };
+
+  const handleDefaultEffortChange = async (level: string) => {
+    if (!config) return;
+    const prev = config.default_reasoning_effort ?? null;
+    const next = config.default_reasoning_effort === level ? null : level;
+    setConfig({ ...config, default_reasoning_effort: next });
+    try {
+      await configApi.update({ default_reasoning_effort: next });
+      await useModelStore.getState().loadConfig({ force: true });
+      toast.success('默认推理强度已更新');
+    } catch {
+      setConfig(c => c ? { ...c, default_reasoning_effort: prev } : c);
       toast.error('保存失败');
     }
   };
@@ -471,6 +512,12 @@ export function ProvidersSection() {
   const enabledProviders = getEnabledProviders();
   const providerIds = config ? Object.keys(config.provider) : [];
   const defaultProviderModels = config?.default_provider ? getVisibleProviderModels(config.default_provider) : [];
+  const defaultMeta = config?.default_provider
+    ? modelMetadata[config.default_provider]?.[config.default_model || '']
+    : undefined;
+  const defaultEffortSpec = defaultMeta?.reasoning_effort;
+  const defaultThinkingSpec = defaultMeta?.thinking;
+  const effectiveDefaultThinking = config?.default_thinking_enabled ?? defaultThinkingSpec?.default_enabled ?? false;
   const isEditMode = !!editProviderId;
   const currentSubscription = editForm.auth?.subscription;
   const isSubscribed = !!currentSubscription;
@@ -499,7 +546,8 @@ export function ProvidersSection() {
         >
           全局设置
         </div>
-        <div className="px-4 py-3 grid gap-4 md:grid-cols-3">
+        <div className="px-4 py-3 space-y-4">
+          <div className="grid gap-4 md:grid-cols-3">
           <div className="space-y-2">
             <Label className="text-sm" style={{ color: 'var(--fg-85)' }}>默认提供商</Label>
             {enabledProviders.length > 0 ? (
@@ -551,6 +599,46 @@ export function ProvidersSection() {
               </SelectContent>
             </Select>
           </div>
+          </div>
+
+          {/* 默认模型的思考模式与推理强度 */}
+          {(defaultThinkingSpec?.toggleable || (defaultEffortSpec && defaultEffortSpec.levels?.length > 0)) && (
+            <div className="flex flex-wrap items-center gap-x-8 gap-y-4 pt-1">
+              {defaultThinkingSpec?.toggleable && (
+                <div className="flex items-center gap-3">
+                  <Label className="text-sm" style={{ color: 'var(--fg-85)' }}>默认思考模式</Label>
+                  <Switch
+                    checked={effectiveDefaultThinking}
+                    onCheckedChange={handleDefaultThinkingChange}
+                  />
+                </div>
+              )}
+              {defaultEffortSpec && defaultEffortSpec.levels?.length > 0 && (
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-sm" style={{ color: 'var(--fg-85)' }}>默认推理强度</span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {defaultEffortSpec.levels.map((level) => {
+                      const active = (config?.default_reasoning_effort ?? null) === level;
+                      return (
+                        <button
+                          key={level}
+                          className="px-2.5 py-1 rounded-full text-xs cursor-pointer transition-colors"
+                          style={{
+                            background: active ? 'var(--accent-soft)' : 'transparent',
+                            color: active ? 'var(--icon-accent)' : 'var(--fg-tertiary)',
+                            border: `0.5px solid ${active ? 'var(--icon-accent)' : 'var(--border)'}`,
+                          }}
+                          onClick={() => handleDefaultEffortChange(level)}
+                        >
+                          {level}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
 

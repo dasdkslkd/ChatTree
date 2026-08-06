@@ -30,6 +30,8 @@ router = APIRouter()
 class ConfigUpdateRequest(BaseModel):
     default_provider: Optional[str] = None
     default_model: Optional[str] = None
+    default_reasoning_effort: Optional[str] = None
+    default_thinking_enabled: Optional[bool] = None
     context_window: Optional[Literal[200_000, 400_000, 600_000]] = None
     model_transport: Optional[Dict[str, float]] = None
     provider_configs: Optional[Dict[str, Dict[str, Any]]] = None
@@ -327,6 +329,10 @@ async def update_config(
             config_manager.data['default_provider'] = request.default_provider
         if request.default_model is not None:
             config_manager.data['default_model'] = request.default_model
+        if 'default_reasoning_effort' in request.model_fields_set:
+            config_manager.data['default_reasoning_effort'] = request.default_reasoning_effort
+        if 'default_thinking_enabled' in request.model_fields_set:
+            config_manager.data['default_thinking_enabled'] = request.default_thinking_enabled
         if 'context_window' in request.model_fields_set:
             config_manager.data['context_window'] = request.context_window
         config_manager.save()

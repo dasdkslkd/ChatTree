@@ -70,16 +70,22 @@ interface ModelActions {
   clearError: () => void;
 }
 
-/** 按模型元数据推导默认推理设置（无控件时为 null）。 */
-function defaultsFromMeta(meta: ModelMetadata | undefined): {
+/** 按模型元数据推导默认推理设置（无控件时为 null）。override 优先且仅在模型声明该能力时生效。 */
+function defaultsFromMeta(
+  meta: ModelMetadata | undefined,
+  override?: { effort: string | null; thinking: boolean | null },
+): {
   effort: string | null;
   thinking: boolean | null;
 } {
   const effortSpec = meta?.reasoning_effort;
   const thinkingSpec = meta?.thinking;
   return {
-    effort: effortSpec?.default ?? null,
-    thinking: thinkingSpec?.toggleable ? (thinkingSpec.default_enabled ?? false) : null,
+    effort: effortSpec ? (override?.effort ?? effortSpec.default ?? null) : null,
+    thinking:
+      thinkingSpec?.toggleable
+        ? (override?.thinking ?? thinkingSpec.default_enabled ?? false)
+        : null,
   };
 }
 
@@ -272,8 +278,18 @@ export const useModelStore = create<ModelState & ModelActions>()(
         : selectVisibleDefaultModel(config.default_model, visibleModels);
 
       // 推理设置：对话保存值优先；缺省回退到所选模型元数据的默认。
+      // 所选模型恰为全局默认模型时，继承 config 中保存的思考/推理默认值。
       const meta = get().getMetadata(pId, mId);
-      const defs = defaultsFromMeta(meta);
+      const isDefaultModel = pId === config.default_provider && mId === config.default_model;
+      const defs = defaultsFromMeta(
+        meta,
+        isDefaultModel
+          ? {
+            effort: config.default_reasoning_effort ?? null,
+            thinking: config.default_thinking_enabled ?? null,
+          }
+          : undefined,
+      );
       set({
         currentProvider: pId,
         currentModel: mId,
@@ -298,7 +314,10 @@ export const useModelStore = create<ModelState & ModelActions>()(
         const hiddenModels = config.provider?.[pId]?.hidden_models || [];
         const visibleModels = providerModels.filter(m => !hiddenModels.includes(m));
         const mId = selectVisibleDefaultModel(config.default_model, visibleModels);
-        const defs = defaultsFromMeta(get().getMetadata(pId, mId));
+        const defs = defaultsFromMeta(get().getMetadata(pId, mId), {
+          effort: config.default_reasoning_effort ?? null,
+          thinking: config.default_thinking_enabled ?? null,
+        });
         set({
           currentProvider: pId,
           currentModel: mId,

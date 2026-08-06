@@ -260,6 +260,10 @@ export interface ProjectSettingsResponse {
 export interface ConfigData {
   default_provider: string;
   default_model: string;
+  /** 默认模型的推理强度档位（null=未配置，按模型元数据默认） */
+  default_reasoning_effort?: string | null;
+  /** 默认模型的思考模式开关（null=未配置，按模型元数据默认） */
+  default_thinking_enabled?: boolean | null;
   context_window: ContextWindowLimit;
   model_transport: ModelTransportConfig;
   provider: Record<string, ModelProviderConfig>;
@@ -272,6 +276,8 @@ export interface ConfigData {
 export interface ConfigUpdateRequest {
   default_provider?: string;
   default_model?: string;
+  default_reasoning_effort?: string | null;
+  default_thinking_enabled?: boolean | null;
   context_window?: ContextWindowLimit;
   model_transport?: Partial<ModelTransportConfig>;
   provider_configs?: Record<string, Partial<ModelProviderConfig>>;

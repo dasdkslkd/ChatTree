@@ -104,6 +104,8 @@ class Config:
             'provider': {},
             'default_provider': '',
             'default_model': '',
+            'default_reasoning_effort': None,
+            'default_thinking_enabled': None,
             'context_window': None,
             'model_transport': dict(DEFAULT_MODEL_TRANSPORT),
             'dev_environment': {},

@@ -429,6 +429,36 @@ export default function ChatPage() {
     clearCurrentConversation, updateConversationTitle, refreshMessages, refreshBranches,
   } = useConversationStore();
 
+  // 新对话页（无对话时）跟随全局默认设置变更：默认提供商/模型/思考/推理强度改变后，
+  // 立即重新推导，避免停留在旧的默认值。仅当当前仍展示旧的默认值时重算，不覆盖手动改选。
+  const prevDefaultRef = useRef<{
+    provider: string;
+    model: string;
+    effort: string | null;
+    thinking: boolean | null;
+  } | null>(null);
+  useEffect(() => {
+    if (!modelConfig) return;
+    const next = {
+      provider: modelConfig.default_provider,
+      model: modelConfig.default_model,
+      effort: modelConfig.default_reasoning_effort ?? null,
+      thinking: modelConfig.default_thinking_enabled ?? null,
+    };
+    const prev = prevDefaultRef.current;
+    prevDefaultRef.current = next;
+    const changed = !prev
+      || prev.provider !== next.provider
+      || prev.model !== next.model
+      || prev.effort !== next.effort
+      || prev.thinking !== next.thinking;
+    if (currentConversation || !prev || !changed) return;
+    const ms = useModelStore.getState();
+    if (!ms.currentProvider || (ms.currentProvider === prev.provider && ms.currentModel === prev.model)) {
+      void ms.resetToDefault();
+    }
+  }, [modelConfig, currentConversation]);
+
   useEffect(() => {
     setPreviewImage(null);
     return () => {
