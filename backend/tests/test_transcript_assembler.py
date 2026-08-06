@@ -2125,3 +2125,61 @@ def test_snapshot_revision_continues_patch_chain_after_reload(tmp_path):
     })
     assert next_patch is not None
     assert next_patch["revision"] == snapshot["revision"] + 1
+
+
+def test_continuation_session_clears_stale_run_status_error(tmp_path):
+    """同一节点上失败 run 残留的 run_status 错误项，必须被续写子 run 的首帧 diff 清除，
+    无需刷新快照（回归：跨 run 会话共享节点基线）。"""
+    persistence, repository = _repo(tmp_path)
+    conversation_id, node_id = _conversation(repository)
+    repository.add_message(conversation_id, node_id, "user", "生成内容")
+    run_repository = SQLiteRunRepository(persistence)
+
+    failed_run = run_repository.create_run(
+        conversation_id, kind="chat", target_node_id=node_id, summary="原始"
+    )
+    run_repository.finish_run(failed_run, "failed", "ConnectTimeout")
+
+    assembler = TranscriptAssembler(persistence)
+    # 失败 run 自身会话：落一条 run_status 错误项
+    failed_patch = assembler.patch_session(failed_run).feed({
+        "type": "run_finished",
+        "run_id": failed_run,
+        "status": "failed",
+        "error": "ConnectTimeout",
+        "conversation_id": conversation_id,
+        "target_node_id": node_id,
+    })
+    error_item = next(
+        operation["item"] for operation in failed_patch["operations"]
+        if operation["op"] == "upsert" and operation["item"]["type"] == "run_status"
+    )
+    assert error_item["status"] == "error"
+    assert error_item["message"] == "ConnectTimeout"
+
+    with persistence.connect() as conn:
+        conn.execute("UPDATE runs SET created_at = 10 WHERE id = ?", (failed_run,))
+
+    # 续写子 run 在同一节点：首帧即应将该陈旧错误项作为 remove 发回
+    continue_run = run_repository.create_run(
+        conversation_id,
+        kind="chat",
+        target_node_id=node_id,
+        summary="自动续写",
+        created_by_run_id=failed_run,
+    )
+    with persistence.connect() as conn:
+        conn.execute("UPDATE runs SET created_at = 20 WHERE id = ?", (continue_run,))
+    continue_session = assembler.patch_session(continue_run)
+    continue_patch = continue_session.feed({
+        "status": "content",
+        "run_id": continue_run,
+        "conversation_id": conversation_id,
+        "target_node_id": node_id,
+        "content": "续写内容",
+    })
+    removed = [
+        operation for operation in continue_patch["operations"]
+        if operation["op"] == "remove"
+    ]
+    assert {operation["id"] for operation in removed} == {f"run-status:{failed_run}"}

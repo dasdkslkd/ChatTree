@@ -22,6 +22,10 @@ class TranscriptAssembler:
         self.persistence = persistence
         self.blobs = BlobStore(persistence)
         self._revision_by_node: dict[tuple[str, str], int] = {}
+        # 每个节点"已推送给前端"的项基线（id -> 序列化值）。按节点共享，
+        # 使同一节点的跨 run 会话（如失败 run 的续写子 run）能以它为基础做差量
+        # 校正，从而 diff 掉陈旧项（例如失败 run 残留的 run_status 错误项）。
+        self._emitted_by_node: dict[tuple[str, str], dict[str, str]] = {}
 
     def next_revision(self, conversation_id: str, node_id: str | None, floor: int = 0) -> int:
         key = (conversation_id, str(node_id or ""))
@@ -1049,8 +1053,6 @@ class TranscriptPatchSession:
         self.conversation_id: str | None = None
         self.node_id: str | None = None
         self.events: list[dict[str, Any]] = []
-        self.emitted_ids: set[str] = set()
-        self.emitted_items: dict[str, str] = {}
 
     def feed(self, event: dict[str, Any], *, emit: bool = True) -> dict[str, Any] | None:
         payload = dict(event.get("payload") if isinstance(event.get("payload"), dict) else event)
@@ -1083,7 +1085,8 @@ class TranscriptPatchSession:
             len(snapshot_items),
         )
         current_ids = {str(item.get("id") or "") for item in items if item.get("id")}
-        remove_ids = self.emitted_ids - current_ids
+        emitted = self.assembler._emitted_by_node.setdefault((self.conversation_id, self.node_id), {})
+        remove_ids = set(emitted) - current_ids
         operations = [{"op": "remove", "id": item_id} for item_id in sorted(remove_ids)]
         fallback_offset = 0
         for item in items:
@@ -1091,7 +1094,7 @@ class TranscriptPatchSession:
             if not item_id:
                 continue
             serialized = json.dumps(item, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-            if self.emitted_items.get(item_id) != serialized:
+            if emitted.get(item_id) != serialized:
                 index = index_by_id.get(item_id)
                 if index is None:
                     index = fallback_index + fallback_offset
@@ -1101,12 +1104,12 @@ class TranscriptPatchSession:
                     "item": item,
                     "index": index,
                 })
-        self.emitted_ids = current_ids
-        self.emitted_items = {
+        emitted.clear()
+        emitted.update({
             str(item.get("id") or ""): json.dumps(item, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
             for item in items
             if item.get("id")
-        }
+        })
         is_terminal_event = (
             payload.get("type") == "run_finished"
             or str(payload.get("status") or "") in {"complete", "completed", "error", "failed", "stopped", "cancelled", "interrupted"}
