@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
-import { Check, Copy, FileText, Loader2, Pencil, Trash2 } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { Check, ChevronRight, Copy, FileText, Loader2, Pencil, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { TextTooltip } from '@/components/ui/text-tooltip';
+import { cn } from '@/lib/utils';
 import MarkdownContent from '../../MarkdownContent';
 import { conversationApi } from '../../../api/conversation';
 import type {
@@ -34,6 +35,9 @@ export function UserMessageItem({
   const [preview, setPreview] = useState<PreviewTarget | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewText, setPreviewText] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const textRef = useRef<HTMLDivElement>(null);
+  const [overflowing, setOverflowing] = useState(false);
 
   const text = getItemText(item);
   const importFiles = (item.import_files ?? []).map((file) => file.filename).filter(Boolean);
@@ -62,6 +66,20 @@ export function UserMessageItem({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [item.conversation_id, imageKey]);
+
+  // 长消息折叠：内容超过 5 行时展示展开/收起按钮，并随懒加载内容尺寸变化重新判定
+  useEffect(() => {
+    const el = textRef.current;
+    if (!el) return;
+    const measure = () => {
+      const lineHeight = parseFloat(getComputedStyle(el).lineHeight) || 24;
+      setOverflowing(el.scrollHeight > lineHeight * 5);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [text]);
 
   const openPreview = async (target: PreviewTarget) => {
     setPreview(target);
@@ -155,7 +173,31 @@ export function UserMessageItem({
               lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
             }}
           >
-            <MarkdownContent enableMermaid>{text}</MarkdownContent>
+            <div
+              ref={textRef}
+              className={overflowing && !expanded ? 'overflow-hidden' : undefined}
+              style={overflowing && !expanded
+                ? {
+                    maxHeight: 'calc((var(--codex-chat-font-size) + 9px) * 6)',
+                    maskImage: 'linear-gradient(180deg, black calc(100% - var(--codex-chat-font-size) - 9px), transparent 100%)',
+                    WebkitMaskImage: 'linear-gradient(180deg, black calc(100% - var(--codex-chat-font-size) - 9px), transparent 100%)',
+                  }
+                : undefined}
+            >
+              <MarkdownContent enableMermaid>{text}</MarkdownContent>
+            </div>
+            {overflowing && (
+              <button
+                type="button"
+                className="flex items-center gap-0.5 p-0 text-[11px] leading-4 cursor-pointer transition-opacity hover:opacity-75"
+                style={{ color: 'var(--icon-accent)' }}
+                onClick={() => setExpanded((value) => !value)}
+                aria-expanded={expanded}
+              >
+                <ChevronRight className={cn('h-2.5 w-2.5 transition-transform', expanded && 'rotate-90')} />
+                {expanded ? '收起' : '展开'}
+              </button>
+            )}
           </div>
         ) : null}
         {hasActions && (

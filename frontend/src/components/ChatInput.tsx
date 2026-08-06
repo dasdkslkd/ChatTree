@@ -724,7 +724,7 @@ export function ChatInput({
               setSlashDismissedForValue(null);
             }
           }}
-          autoFocus={isEditing}
+          autoFocus
           onKeyDown={(e) => {
             if (e.key === 'Enter' && e.nativeEvent.isComposing) return;
             if (suggestionOpen) {
