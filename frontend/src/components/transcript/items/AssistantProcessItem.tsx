@@ -8,16 +8,20 @@ import type {
   ProcessRenderBlock,
 } from './AssistantProcessTimeline';
 import { AssistantProcessTimeline } from './AssistantProcessTimeline';
-import { summarizeToolCall } from './toolCallFormatting';
+import { asObject, getErrorMessage, summarizeToolCall, tryParseJSON } from './toolCallFormatting';
 
 interface AssistantProcessItemProps {
   item: AssistantProcessTranscriptItem;
 }
 
 function toolBlockToRenderItem(block: Extract<AssistantProcessBlock, { type: 'tool_call' }>): ToolRenderItem {
-  const status = block.status === 'error' ? 'error' : block.status === 'running' ? 'running' : 'done';
   const outputText = block.result_preview || '';
   const argsText = block.args_preview || '';
+  const status = block.status === 'running'
+    ? 'running'
+    : block.status === 'error' || getErrorMessage(asObject(tryParseJSON(outputText))) !== null
+      ? 'error'
+      : 'done';
   return {
     key: block.id,
     name: block.tool_name || 'tool',

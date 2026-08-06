@@ -102,6 +102,39 @@ def test_snapshot_assembles_assistant_process_tool_blocks(tmp_path):
     ]
 
 
+def test_snapshot_marks_failed_tool_call_block_as_error(tmp_path):
+    persistence, repository = _repo(tmp_path)
+    conversation_id, node_id = _conversation(repository)
+    run_id = SQLiteRunRepository(persistence).create_run(
+        conversation_id,
+        kind="chat",
+        target_node_id=node_id,
+        summary="tools",
+    )
+    repository.add_tool_call(
+        conversation_id,
+        node_id,
+        tool_call_id="call-fail",
+        name="read",
+        arguments={"path": "missing.txt"},
+        run_id=run_id,
+    )
+    repository.add_tool_result(
+        conversation_id,
+        node_id,
+        tool_result_id="result-fail",
+        tool_call_id="call-fail",
+        output=json.dumps({"error": {"type": "not_found", "message": "file not found"}}, ensure_ascii=False),
+        run_id=run_id,
+    )
+
+    process = next(item for item in _snapshot(persistence, conversation_id, node_id)["items"] if item["type"] == "assistant_process")
+    block = next(block for block in process["blocks"] if block["tool_call_id"] == "call-fail")
+
+    assert block["status"] == "error"
+    assert block["result_preview"] == json.dumps({"error": {"type": "not_found", "message": "file not found"}}, ensure_ascii=False)
+
+
 def test_snapshot_restores_process_reasoning_and_content_from_canonical_messages(tmp_path):
     persistence, repository = _repo(tmp_path)
     conversation_id, node_id = _conversation(repository)

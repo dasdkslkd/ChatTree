@@ -19,6 +19,10 @@ require.extensions['.ts'] = function loadTs(module, filename) {
 
 const { formatProcessedDuration } = require(path.join(__dirname, '../src/utils/time.ts'));
 
+function readSource(relativePath) {
+  return fs.readFileSync(path.join(__dirname, '..', relativePath), 'utf8');
+}
+
 function testFormatsProcessedDurationWithHours() {
   assert.equal(formatProcessedDuration(5_550_000), '1h32m30s');
   assert.equal(formatProcessedDuration(4_202_000), '1h10m2s');
@@ -27,5 +31,14 @@ function testFormatsProcessedDurationWithHours() {
   assert.equal(formatProcessedDuration(null), null);
 }
 
+function testProcessedFoldTracksStreaming() {
+  const source = readSource('src/components/transcript/TranscriptList.tsx');
+  assert.match(source, /items\.some\(\(item\) => \(item as \{ status\?: string \}\)\.status === 'running'\)/);
+  assert.match(source, /useState\(streaming\)/);
+  assert.match(source, /if \(!streaming\) setExpanded\(false\)/);
+  assert.match(source, /useEffect\(\(\) =>/);
+}
+
 testFormatsProcessedDurationWithHours();
+testProcessedFoldTracksStreaming();
 console.log('assistantTimelineFolding tests passed');

@@ -1,4 +1,4 @@
-import { Fragment, useState, type ReactNode } from 'react';
+import { Fragment, useEffect, useState, type ReactNode } from 'react';
 import { ChevronRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { TranscriptActionHandlers, TranscriptItem } from '../../types/transcript';
@@ -31,7 +31,11 @@ function ProcessedItemsFold({
   totalDuration: number;
   renderInner: (item: TranscriptItem) => ReactNode;
 }) {
-  const [expanded, setExpanded] = useState(true);
+  const streaming = items.some((item) => (item as { status?: string }).status === 'running');
+  const [expanded, setExpanded] = useState(streaming);
+  useEffect(() => {
+    if (!streaming) setExpanded(false);
+  }, [streaming]);
   return (
     <div className="w-full flex flex-col items-start" role="listitem">
       <div className={cn('processed-fold', expanded && 'expanded')}>

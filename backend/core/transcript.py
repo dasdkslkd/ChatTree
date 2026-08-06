@@ -700,7 +700,12 @@ class TranscriptAssembler:
     def _tool_block(self, call: dict[str, Any], result: dict[str, Any] | None) -> dict[str, Any]:
         status = "running"
         if result is not None:
-            status = "error" if result.get("status") == "error" else "complete"
+            payload = self._load_json(result.get("output_preview") or "")
+            status = (
+                "error"
+                if result.get("status") == "error" or (isinstance(payload, dict) and payload.get("error"))
+                else "complete"
+            )
         elif call.get("status") in {"complete", "done"}:
             status = "complete"
         return {

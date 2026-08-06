@@ -297,9 +297,15 @@ function testTimelineUsesNewCard() {
 
 function testAssistantProcessItemUsesSummarizeToolCall() {
   const source = readSource('src/components/transcript/items/AssistantProcessItem.tsx');
-  assert.match(source, /import \{ summarizeToolCall \} from '\.\/toolCallFormatting'/);
+  assert.match(source, /import \{ [^}]*summarizeToolCall[^}]*\} from '\.\/toolCallFormatting'/);
   assert.match(source, /summarizeToolCall\(block\.tool_name \|\| 'tool', argsText, outputText, status\)/);
   assert.doesNotMatch(source, /function compactToolSummary/);
+}
+
+function testToolBlockToRenderItemMarksResultErrorAsFailed() {
+  const source = readSource('src/components/transcript/items/AssistantProcessItem.tsx');
+  assert.match(source, /getErrorMessage\(asObject\(tryParseJSON\(outputText\)\)\)/);
+  assert.match(source, /block\.status === 'error' \|\| getErrorMessage\(/);
 }
 
 function testToolApprovalCardUsesPreview() {
@@ -391,6 +397,7 @@ function run() {
   testCopyButtonIsRenderedWithClipboardWrite();
   testTimelineUsesNewCard();
   testAssistantProcessItemUsesSummarizeToolCall();
+  testToolBlockToRenderItemMarksResultErrorAsFailed();
   testToolApprovalCardUsesPreview();
   testCssDefinesAllRequiredClasses();
   testCssUsesMountAnimationForExpand();
