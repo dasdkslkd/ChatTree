@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import { AlertCircle, Loader2, RotateCw, Square } from 'lucide-react';
 import type { RunStatusItem, TranscriptActionHandlers, TranscriptItem } from '../../types/transcript';
 import { AssistantAnswerItem } from './items/AssistantAnswerItem';
@@ -62,21 +63,22 @@ function RunStatusTranscriptItem({ item }: { item: RunStatusItem }) {
   );
 }
 
-export function TranscriptItemRenderer({
-  item,
-  onApprovePlan,
-  onRejectPlan,
-  onAnswerPlanQuestion,
-  onApproveTool,
-  onRejectTool,
-  onCopyItem,
-  onEditUserMessage,
-  onDeleteUserMessage,
-  planActionPending,
-  planError,
-  toolApprovalPending,
-  toolApprovalError,
-}: TranscriptItemRendererProps) {
+export const TranscriptItemRenderer = memo(
+  function TranscriptItemRenderer({
+    item,
+    onApprovePlan,
+    onRejectPlan,
+    onAnswerPlanQuestion,
+    onApproveTool,
+    onRejectTool,
+    onCopyItem,
+    onEditUserMessage,
+    onDeleteUserMessage,
+    planActionPending,
+    planError,
+    toolApprovalPending,
+    toolApprovalError,
+  }: TranscriptItemRendererProps) {
   switch (item.type) {
     case 'user_message':
       return (
@@ -131,4 +133,13 @@ export function TranscriptItemRenderer({
     default:
       return <UnknownTranscriptItem item={item} />;
   }
-}
+  },
+  (prevProps, nextProps) => {
+    // 行组件按 item 内容跳过重渲染：未变化的历史消息不再重建 Markdown/折叠等 DOM
+    return prevProps.item === nextProps.item
+      && prevProps.planActionPending === nextProps.planActionPending
+      && prevProps.planError === nextProps.planError
+      && prevProps.toolApprovalPending === nextProps.toolApprovalPending
+      && prevProps.toolApprovalError === nextProps.toolApprovalError;
+  },
+);
