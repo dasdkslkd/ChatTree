@@ -72,7 +72,7 @@ class SearxngRuntime:
         self._outgoing_proxies = self._parse_proxies(config.get("outgoing_proxies"))
         self._binary = Path(binary).expanduser().resolve() if binary else None
         self._home = (home or resolve_chattree_home()).resolve()
-        self._port = self._managed_port()
+        self._external = urlparse(self._searxng_url).hostname not in {"127.0.0.1", "localhost", "::1"}
         self._process: Optional[subprocess.Popen[Any]] = None
         self._managed_url: Optional[str] = None
         self._http_client: Optional[httpx.AsyncClient] = None
@@ -92,22 +92,16 @@ class SearxngRuntime:
         return f"http://{proxy}"
 
     async def restart(self) -> str:
-        """Restart the managed SearXNG child with current settings. When the
-        configured instance is already reachable, no managed child is spawned."""
+        """Restart the SearXNG child with current settings. An external configured
+        URL (non-loopback) is reused when reachable; otherwise a fresh managed
+        instance is spawned on a private port so latest settings always apply."""
         self._unavailable = False
         async with self._start_lock:
             self._terminate()
             self._managed_url = None
-            if await self._probe(self._searxng_url):
+            if self._external and await self._probe(self._searxng_url):
                 return self._searxng_url
             return await self._start_managed()
-
-    def _managed_port(self) -> int:
-        """Managed instance binds the configured URL's port when it is loopback."""
-        parsed = urlparse(self._searxng_url)
-        if parsed.hostname in {"127.0.0.1", "localhost", "::1"} and parsed.port:
-            return parsed.port
-        return DEFAULT_SEARXNG_PORT
 
     async def ensure_url(self) -> str:
         """Return the effective SearXNG base URL, starting a managed instance if needed."""
@@ -118,11 +112,8 @@ class SearxngRuntime:
             )
         if self._managed_url is not None and self._process is not None and self._process.poll() is None:
             return self._managed_url
-        if await self._probe(self._searxng_url):
+        if self._external and await self._probe(self._searxng_url):
             return self._searxng_url
-        target = f"http://127.0.0.1:{self._port}"
-        if target != self._searxng_url and await self._probe(target):
-            return target
         async with self._start_lock:
             if self._managed_url is not None and self._process is not None and self._process.poll() is None:
                 return self._managed_url
@@ -148,23 +139,17 @@ class SearxngRuntime:
                 "SearXNG binary not found (expected bundled tools/searxng or on PATH); "
                 "web_search is unavailable"
             )
-        ports = [self._port, self._free_port()]
-        if ports[1] == ports[0]:
-            ports.pop()
-        last_error: Optional[Exception] = None
-        for port in ports:
-            settings_path = self._write_settings(port)
-            self._spawn(binary, settings_path)
-            target = f"http://127.0.0.1:{port}"
-            try:
-                await self._wait_ready(target, self._process)
-            except SearxngUnavailableError as exc:
-                last_error = exc
-                self._terminate()
-                continue
-            self._managed_url = target
-            return target
-        raise SearxngUnavailableError(f"SearXNG failed to start: {last_error}")
+        port = self._free_port()
+        settings_path = self._write_settings(port)
+        self._spawn(binary, settings_path)
+        target = f"http://127.0.0.1:{port}"
+        try:
+            await self._wait_ready(target, self._process)
+        except SearxngUnavailableError:
+            self._terminate()
+            raise
+        self._managed_url = target
+        return target
 
     def _write_settings(self, port: int) -> Path:
         settings_dir = self._home / "searxng"
