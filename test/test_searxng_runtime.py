@@ -141,6 +141,12 @@ def test_settings_file_writes_proxy_when_configured(tmp_path):
     assert "- http://127.0.0.1:7890" in settings
 
 
+def test_proxy_url_without_scheme_is_normalized(tmp_path):
+    runtime = SearxngRuntime({"outgoing_proxies": "127.0.0.1:7890"}, home=tmp_path)
+    settings = runtime._write_settings(8888).read_text(encoding="utf-8")
+    assert "- http://127.0.0.1:7890" in settings
+
+
 def test_settings_file_omits_proxy_when_blank(tmp_path):
     runtime = SearxngRuntime({"outgoing_proxies": "  "}, home=tmp_path)
     settings = runtime._write_settings(8888).read_text(encoding="utf-8")

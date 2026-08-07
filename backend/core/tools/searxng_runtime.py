@@ -81,11 +81,15 @@ class SearxngRuntime:
 
     def _parse_proxies(self, value: Any) -> List[str]:
         """Normalize the proxy setting into a list of proxy URLs."""
-        if isinstance(value, str):
-            return [value] if value.strip() else []
-        if isinstance(value, list):
-            return [str(item).strip() for item in value if str(item).strip()]
-        return []
+        items = [value] if isinstance(value, str) else value if isinstance(value, list) else []
+        return [self._normalize_proxy(str(item).strip()) for item in items if str(item).strip()]
+
+    @staticmethod
+    def _normalize_proxy(proxy: str) -> str:
+        """Ensure the proxy URL carries a scheme; default to http."""
+        if "://" in proxy:
+            return proxy
+        return f"http://{proxy}"
 
     async def restart(self) -> str:
         """Restart the managed SearXNG child with current settings. When the
