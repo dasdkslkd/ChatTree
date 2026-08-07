@@ -113,6 +113,7 @@ export interface WebSearchConfig {
     language?: string;
     max_results?: number;
     timeout?: number;
+    outgoing_proxies?: string;
   };
 }
 

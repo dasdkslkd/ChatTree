@@ -11,7 +11,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
-import { Loader2, Save, RefreshCw } from 'lucide-react';
+import { Loader2, Save, RefreshCw, RotateCw } from 'lucide-react';
 import { toast } from 'sonner';
 import { configApi } from '@/api/config';
 import type {
@@ -45,6 +45,7 @@ export function BuiltinToolsSection() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [checkingWeb, setCheckingWeb] = useState(false);
+  const [restartingWeb, setRestartingWeb] = useState(false);
 
   const updateTools = (updater: (current: ToolsConfig) => ToolsConfig) => {
     setToolsForm(current => normalizeToolsConfig(updater(normalizeToolsConfig(current))));
@@ -143,7 +144,7 @@ export function BuiltinToolsSection() {
     }));
   };
 
-  const setSearxngField = (key: 'searxng_url' | 'language' | 'engines' | 'max_results' | 'timeout', value: string | number) => {
+  const setSearxngField = (key: 'searxng_url' | 'language' | 'engines' | 'max_results' | 'timeout' | 'outgoing_proxies', value: string | number) => {
     updateTools(current => ({
       ...current,
       web_search: {
@@ -185,6 +186,22 @@ export function BuiltinToolsSection() {
       toast.error('检查失败: ' + (err instanceof Error ? err.message : ''));
     } finally {
       setCheckingWeb(false);
+    }
+  };
+
+  const handleRestartWeb = async () => {
+    try {
+      setRestartingWeb(true);
+      const committedTools = normalizeToolsConfig(toolsForm);
+      await configApi.update({ tools: committedTools });
+      setToolsForm(committedTools);
+      await configApi.restartBuiltinWeb();
+      toast.success('SearXNG 已重启，代理配置已生效');
+      await loadConfig();
+    } catch (err) {
+      toast.error('重启失败: ' + (err instanceof Error ? err.message : ''));
+    } finally {
+      setRestartingWeb(false);
     }
   };
 
@@ -340,6 +357,14 @@ export function BuiltinToolsSection() {
               <Label>超时秒数</Label>
               <Input type="number" min={1} value={searxng.timeout ?? 15} onChange={(e) => setSearxngField('timeout', parseNumber(e.target.value, 15))} />
             </div>
+            <div className="space-y-2 col-span-2">
+              <Label>代理（出站 outgoing.proxies，留空不启用）</Label>
+              <Input
+                value={searxng.outgoing_proxies || ''}
+                onChange={(e) => setSearxngField('outgoing_proxies', e.target.value)}
+                placeholder="http://127.0.0.1:7890"
+              />
+            </div>
             {webStatus?.error && (
               <TextTooltip content={webStatus.error}>
                 <div className="col-span-2 truncate text-xs" style={{ color: webStatus.available ? 'var(--fg-tertiary)' : 'var(--destructive, #ef4444)' }}>
@@ -356,6 +381,10 @@ export function BuiltinToolsSection() {
         <Button variant="outline" onClick={handleCheckWeb} disabled={saving || checkingWeb || !config}>
           {checkingWeb ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <RefreshCw className="h-4 w-4 mr-1" />}
           检查联网
+        </Button>
+        <Button variant="outline" onClick={handleRestartWeb} disabled={saving || restartingWeb || !config}>
+          {restartingWeb ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <RotateCw className="h-4 w-4 mr-1" />}
+          重启 SearXNG
         </Button>
         <Button onClick={handleSave} disabled={saving || !config}>
           {saving ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Save className="h-4 w-4 mr-1" />}

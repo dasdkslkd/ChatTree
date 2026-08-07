@@ -31,6 +31,7 @@ from .security.capabilities import (
 from .tool_arguments import normalize_tool_arguments
 from .tool_filter import ToolFilter
 from .web_search import FetchUrlTool, WebSearchTool, WebTool
+from .searxng_runtime import SearxngRuntime, SearxngUnavailableError
 from ..persistence.repository import ChatRepository
 from ..projects import allowed_project_names
 from ..utils.logger import setup_logger
@@ -79,6 +80,7 @@ class ToolManager:
         self._exposure_resolver = ToolExposureResolver(tools_config)
         self._code_tools_config: Dict[str, Any] = {}
         self._command_tools_config: Dict[str, Any] = {}
+        self._searxng_runtime: Optional[SearxngRuntime] = None
         if self._enabled:
             self._register_tools(self._config)
             self.register(ToolInventoryTool(self))
@@ -147,7 +149,9 @@ class ToolManager:
         if search_config.get("enabled", True):
             searxng_cfg = search_config.get("searxng", search_config.get("searxng_config", {}))
             crawl_cfg = search_config.get("crawl4ai", tools_config.get("fetch_url", {}))
-            search_tool = WebSearchTool(searxng_cfg)
+            runtime = SearxngRuntime(searxng_cfg)
+            self._searxng_runtime = runtime
+            search_tool = WebSearchTool(searxng_cfg, runtime=runtime)
             fetch_tool = FetchUrlTool(crawl_cfg)
             self.register(WebTool(search_tool, fetch_tool))
             logger.info("Registered built-in web tool")
@@ -495,8 +499,32 @@ class ToolManager:
         await self._connection_manager.remove_server(name)
         return await self.describe_inventory_async()
 
+    async def restart_web_search(self) -> bool:
+        """Restart the managed SearXNG child process with current settings.
+        Returns False only when no managed runtime is configured."""
+        runtime = self._searxng_runtime
+        if runtime is None:
+            return False
+        await runtime.restart()
+        return True
+
+    async def resolve_web_search_url(self) -> Optional[str]:
+        """Resolve the effective SearXNG base URL, starting a managed instance if
+        needed. Returns None when web search is unavailable."""
+        runtime = self._searxng_runtime
+        if runtime is None:
+            return None
+        try:
+            return await runtime.ensure_url()
+        except SearxngUnavailableError:
+            return None
+
     async def close(self):
         """Clean up resources."""
+        runtime = self._searxng_runtime
+        self._searxng_runtime = None
+        if runtime is not None:
+            await runtime.close()
         for tool in self._tools.values():
             if hasattr(tool, "close"):
                 await tool.close()  # type: ignore[attr-defined]

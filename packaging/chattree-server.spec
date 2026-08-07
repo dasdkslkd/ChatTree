@@ -13,11 +13,15 @@ REPO_ROOT = Path(os.environ.get("CHATTREE_REPO_ROOT", SPECPATH)).resolve()
 ONE_DIR = os.environ.get("CHATTREE_PYINSTALLER_ONE_DIR") == "1"
 ENTRYPOINT = REPO_ROOT / "packaging" / "chattree_server_entry.py"
 RIPGREP_BINARY = Path(os.environ["CHATTREE_BUNDLED_RIPGREP"]).resolve()
+SEARXNG_BINARY = os.environ.get("CHATTREE_BUNDLED_SEARXNG")
 
 datas = []
 datas += collect_data_files("backend.core.model")
 datas += collect_data_files("backend.core.prompts")
 datas += collect_data_files("backend.workers")
+datas.append(
+    (str(REPO_ROOT / "packaging" / "third_party" / "SEARXNG_NOTICE.txt"), "tools/searxng")
+)
 
 unicodedata_binary = Path(sys.base_prefix) / "DLLs" / "unicodedata.pyd"
 
@@ -51,6 +55,8 @@ hiddenimports += [
 ]
 
 binaries = [(str(RIPGREP_BINARY), "tools/ripgrep")]
+if SEARXNG_BINARY:
+    binaries.append((str(Path(SEARXNG_BINARY).resolve()), "tools/searxng"))
 block_cipher = None
 
 a = Analysis(

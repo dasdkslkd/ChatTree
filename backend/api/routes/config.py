@@ -231,7 +231,10 @@ async def get_mcp_status(tool_manager: ToolManager = Depends(get_tool_manager)):
 
 
 @router.get("/tools/builtin/web/status", response_model=Dict[str, Any])
-async def get_builtin_web_status(config_manager: Config = Depends(get_config_manager)):
+async def get_builtin_web_status(
+    config_manager: Config = Depends(get_config_manager),
+    tool_manager: ToolManager = Depends(get_tool_manager),
+):
     """获取内置联网工具配置和 SearXNG 可用性"""
     tools = config_manager.data.get("tools") or {}
     builtin = tools.get("builtin") or {}
@@ -242,10 +245,10 @@ async def get_builtin_web_status(config_manager: Config = Depends(get_config_man
         and builtin.get("enabled", True) is not False
         and web_search.get("enabled", True) is not False
     )
-    searxng_url = str(searxng.get("searxng_url") or "http://localhost:8888").rstrip("/")
+    configured_url = str(searxng.get("searxng_url") or "http://localhost:8888").rstrip("/")
     result: Dict[str, Any] = {
         "enabled": enabled,
-        "searxng_url": searxng_url,
+        "searxng_url": configured_url,
         "available": False,
         "status_code": None,
         "error": None,
@@ -253,21 +256,29 @@ async def get_builtin_web_status(config_manager: Config = Depends(get_config_man
     if not enabled:
         result["error"] = "web_search is disabled"
         return result
-    try:
-        import httpx
-        async with httpx.AsyncClient(timeout=3) as client:
-            response = await client.get(
-                f"{searxng_url}/search",
-                params={"q": "ChatTree", "format": "json", "language": searxng.get("language") or "zh-CN"},
-                headers={"Accept": "application/json"},
-            )
-        result["status_code"] = response.status_code
-        result["available"] = response.status_code < 400
-        if not result["available"]:
-            result["error"] = f"HTTP {response.status_code}"
-    except Exception as e:
-        result["error"] = str(e)
+    url = await tool_manager.resolve_web_search_url()
+    if url is None:
+        result["error"] = (
+            f"SearXNG 不可用：{configured_url} 不可达，且未在 bundled tools/searxng 或 PATH 找到可启动的实例"
+        )
+        return result
+    result["searxng_url"] = url
+    result["available"] = True
     return result
+
+
+@router.post("/tools/builtin/web/restart", response_model=Dict[str, Any])
+async def restart_builtin_web(
+    tool_manager: ToolManager = Depends(get_tool_manager),
+):
+    """重启内置联网工具的 SearXNG 子进程（读最新代理/配置生效）"""
+    try:
+        restarted = await tool_manager.restart_web_search()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    if not restarted:
+        raise HTTPException(status_code=409, detail="未发现被管理的 SearXNG 实例")
+    return {"restarted": True}
 
 
 @router.post("/tools/mcp/servers/{server_name}/connect", response_model=Dict[str, Any])

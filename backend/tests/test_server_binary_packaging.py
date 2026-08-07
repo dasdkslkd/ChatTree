@@ -61,6 +61,8 @@ def test_pyinstaller_spec_collects_required_utf8_runtime_data():
         assert "collect_data_files(\"backend.workers\")" in spec_text
         assert "CHATTREE_BUNDLED_RIPGREP" in spec_text
         assert '"tools/ripgrep"' in spec_text
+        assert "CHATTREE_BUNDLED_SEARXNG" in spec_text
+        assert '"tools/searxng"' in spec_text
         assert "binaries=binaries" in spec_text
         assert "\"main\"" in spec_text
     server_spec = (REPO_ROOT / "packaging" / "chattree-server.spec").read_text(
@@ -149,6 +151,69 @@ def test_build_script_downloads_verified_ripgrep_archive(tmp_path, monkeypatch):
         "https://github.com/BurntSushi/ripgrep/releases/download/test-version/"
         "ripgrep-test-version-test-target.zip"
     ]
+
+
+def test_build_script_downloads_verified_searxng_binary(tmp_path, monkeypatch):
+    payload = b"bundled-searxng"
+    digest = hashlib.sha256(payload).hexdigest()
+    arch = "arm64" if build_server_binary.platform.machine().lower() in {"arm64", "aarch64"} else "x64"
+    requests = []
+    monkeypatch.setattr(build_server_binary, "SEARXNG_VERSION", "test-version")
+    monkeypatch.setattr(
+        build_server_binary,
+        "SEARXNG_ASSETS",
+        {(sys.platform, arch): ("test-asset.exe", digest)},
+    )
+
+    def fake_urlopen(request, **_kwargs):
+        requests.append(request.full_url)
+        return io.BytesIO(payload)
+
+    monkeypatch.setattr(build_server_binary.urllib.request, "urlopen", fake_urlopen)
+
+    binary = build_server_binary.prepare_bundled_searxng(tmp_path)
+
+    assert binary.read_bytes() == payload
+    executable_name = "searxng-server.exe" if sys.platform == "win32" else "searxng-server"
+    assert binary.name == executable_name
+    assert requests == [
+        "https://github.com/dasdkslkd/searxng/releases/download/test-version/test-asset.exe"
+    ]
+
+
+def test_build_script_rejects_unsupported_searxng_platform(tmp_path, monkeypatch):
+    monkeypatch.setattr(build_server_binary, "SEARXNG_ASSETS", {})
+
+    with pytest.raises(SystemExit, match="unsupported searxng"):
+        build_server_binary.prepare_bundled_searxng(tmp_path)
+
+
+def test_run_pyinstaller_bundles_searxng_when_provided(tmp_path, monkeypatch):
+    calls: list[tuple[list[str], dict]] = []
+    python = tmp_path / "python.exe"
+    python.write_text("", encoding="utf-8")
+    ripgrep_binary = tmp_path / ("rg.exe" if os.name == "nt" else "rg")
+    searxng_binary = tmp_path / ("searxng-server.exe" if os.name == "nt" else "searxng-server")
+
+    def fake_run(command, **kwargs):
+        calls.append((list(command), dict(kwargs)))
+
+    monkeypatch.setattr(build_server_binary.subprocess, "run", fake_run)
+
+    build_server_binary.run_pyinstaller(
+        python,
+        dist_dir=tmp_path / "dist",
+        work_dir=tmp_path / "work",
+        clean=False,
+        one_dir=True,
+        ripgrep_binary=ripgrep_binary,
+        searxng_binary=searxng_binary,
+    )
+
+    env = calls[0][1]["env"]
+    assert env["CHATTREE_PYINSTALLER_ONE_DIR"] == "1"
+    assert env["CHATTREE_BUNDLED_RIPGREP"] == str(ripgrep_binary)
+    assert env["CHATTREE_BUNDLED_SEARXNG"] == str(searxng_binary)
 
 
 def test_build_script_install_uses_isolated_venv_python(tmp_path, monkeypatch):

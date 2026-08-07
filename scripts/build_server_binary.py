@@ -45,6 +45,22 @@ RIPGREP_ASSETS = {
         "1c9297be4a084eea7ecaedf93eb03d058d6faae29bbc57ecdaf5063921491599",
     ),
 }
+SEARXNG_VERSION = "latest"
+SEARXNG_BASE_URL = "https://github.com/dasdkslkd/searxng/releases/download"
+SEARXNG_ASSETS = {
+    ("win32", "x64"): (
+        "searxng-windows-x64.exe",
+        "0f8971917f0425680247c8b3c2bfe18303732bfc7dbd3b511b09ac6d3a7741b7",
+    ),
+    ("linux", "x64"): (
+        "searxng-linux-x64",
+        "f8b71f58111ee79fe80f51c61861a2374d43152221d44c95a8fbb32dad001167",
+    ),
+    ("darwin", "arm64"): (
+        "searxng-macos-arm64",
+        "cba456ebde3dbf67ffdda1221455863af1dbed153b50339de42392f80fdb6294",
+    ),
+}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -64,6 +80,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not args.skip_install:
         install_build_dependencies(python)
     ripgrep_binary = prepare_bundled_ripgrep(build_root)
+    searxng_binary = prepare_bundled_searxng(build_root)
     run_pyinstaller(
         python,
         dist_dir=dist_dir,
@@ -71,6 +88,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         clean=args.clean,
         one_dir=args.one_dir,
         ripgrep_binary=ripgrep_binary,
+        searxng_binary=searxng_binary,
     )
 
     binary = binary_path(dist_dir, one_dir=args.one_dir)
@@ -235,6 +253,48 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def prepare_bundled_searxng(build_root: Path) -> Path:
+    """Download and verify the bundled SearXNG binary for the current platform.
+
+    The binary is a separate AGPL-licensed program published by the SearXNG fork;
+    it is bundled alongside ripgrep under tools/searxng and never imported by
+    ChatTree code (only spawned as a child process).
+    """
+    machine = platform.machine().lower()
+    arch = "arm64" if machine in {"arm64", "aarch64"} else "x64"
+    asset = SEARXNG_ASSETS.get((sys.platform, arch))
+    if asset is None:
+        raise SystemExit(f"unsupported searxng build platform: {sys.platform}-{arch}")
+    asset_name, expected_sha256 = asset
+    cache_dir = build_root / "searxng"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    executable_name = "searxng-server.exe" if sys.platform == "win32" else "searxng-server"
+    binary_path = cache_dir / executable_name
+
+    if not binary_path.is_file() or _sha256(binary_path) != expected_sha256:
+        binary_path.unlink(missing_ok=True)
+        request = urllib.request.Request(
+            f"{SEARXNG_BASE_URL}/{SEARXNG_VERSION}/{asset_name}",
+            headers={"User-Agent": "ChatTree-build"},
+        )
+        with urllib.request.urlopen(request, timeout=120) as response:
+            with binary_path.open("wb") as output:
+                shutil.copyfileobj(response, output)
+    actual_sha256 = _sha256(binary_path)
+    if actual_sha256 != expected_sha256:
+        raise SystemExit(
+            f"searxng binary checksum mismatch: expected {expected_sha256}, got {actual_sha256}"
+        )
+    if sys.platform != "win32":
+        binary_path.chmod(
+            binary_path.stat().st_mode
+            | stat.S_IXUSR
+            | stat.S_IXGRP
+            | stat.S_IXOTH
+        )
+    return binary_path.resolve()
+
+
 def run_pyinstaller(
     python: Path,
     *,
@@ -243,12 +303,15 @@ def run_pyinstaller(
     clean: bool,
     one_dir: bool,
     ripgrep_binary: Path,
+    searxng_binary: Path | None = None,
 ) -> None:
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
     env["CHATTREE_REPO_ROOT"] = str(REPO_ROOT)
     env["CHATTREE_PYINSTALLER_ONE_DIR"] = "1" if one_dir else "0"
     env["CHATTREE_BUNDLED_RIPGREP"] = str(ripgrep_binary)
+    if searxng_binary is not None:
+        env["CHATTREE_BUNDLED_SEARXNG"] = str(searxng_binary)
     command = [
         str(python),
         "-m",

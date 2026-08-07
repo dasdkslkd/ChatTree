@@ -2,8 +2,9 @@ import json
 import html
 import re
 from urllib.parse import urljoin
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from .base import BaseTool
+from .searxng_runtime import SearxngRuntime, SearxngUnavailableError
 from ..utils.logger import setup_logger
 
 logger = setup_logger('WebSearch')
@@ -53,12 +54,13 @@ class WebTool(BaseTool):
 
 class WebSearchTool(BaseTool):
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], runtime: Optional[SearxngRuntime] = None):
         self.searxng_url = config.get('searxng_url', 'http://localhost:8888')
         self.default_engines = config.get('engines', '')
         self.default_language = config.get('language', 'zh-CN')
         self.max_results = config.get('max_results', 10)
         self.timeout = config.get('timeout', 15)
+        self._runtime = runtime
         self._http_client = None
 
     async def _get_client(self):
@@ -139,6 +141,17 @@ class WebSearchTool(BaseTool):
             params["engines"] = self.default_engines
         if time_range:
             params["time_range"] = time_range
+
+        if self._runtime is not None:
+            try:
+                self.searxng_url = await self._runtime.ensure_url()
+            except SearxngUnavailableError as exc:
+                logger.warning(f"SearXNG unavailable: {exc}")
+                return json.dumps({
+                    "error": str(exc),
+                    "query": query,
+                    "hint": "Start a local SearXNG instance or install the bundled SearXNG binary",
+                }, ensure_ascii=False)
 
         url = f"{self.searxng_url.rstrip('/')}/search"
         logger.info(f"SearXNG search: query='{query}' page={page}, url={url}")

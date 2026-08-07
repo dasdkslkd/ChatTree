@@ -1,0 +1,10 @@
+ChatTree bundles the SearXNG web search engine as a separate standalone binary
+under tools/searxng. SearXNG is licensed under the GNU Affero General Public
+License version 3 (AGPL-3.0).
+
+- Project: https://github.com/searxng/searxng
+- Bundled build & source (fork): https://github.com/dasdkslkd/searxng
+- License text: https://www.gnu.org/licenses/agpl-3.0.txt
+
+SearXNG runs as its own separate process and is never linked into or imported
+by ChatTree code; the two programs communicate over HTTP.

@@ -106,6 +106,11 @@ export const configApi = {
     return response.data;
   },
 
+  restartBuiltinWeb: async (): Promise<{ restarted: boolean }> => {
+    const response = await apiClient.post('/tools/builtin/web/restart');
+    return response.data;
+  },
+
   getCapabilities: async (): Promise<CapabilityInventory> => {
     const response = await apiClient.get('/capabilities');
     return response.data;
