@@ -6,7 +6,7 @@ from typing import Any
 
 
 PROTOCOL_VERSION = 1
-SERVER_VERSION = "0.1.13"
+SERVER_VERSION = "0.1.14"
 PROTOCOL_FEATURES = (
     "conversations",
     "runs",
