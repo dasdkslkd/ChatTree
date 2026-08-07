@@ -114,6 +114,7 @@ export interface WebSearchConfig {
     max_results?: number;
     timeout?: number;
     outgoing_proxies?: string;
+    use_proxies?: boolean;
   };
 }
 

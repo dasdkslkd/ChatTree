@@ -144,7 +144,7 @@ export function BuiltinToolsSection() {
     }));
   };
 
-  const setSearxngField = (key: 'searxng_url' | 'language' | 'engines' | 'max_results' | 'timeout' | 'outgoing_proxies', value: string | number) => {
+  const setSearxngField = (key: 'searxng_url' | 'language' | 'engines' | 'max_results' | 'timeout' | 'outgoing_proxies' | 'use_proxies', value: string | number | boolean) => {
     updateTools(current => ({
       ...current,
       web_search: {
@@ -358,12 +358,17 @@ export function BuiltinToolsSection() {
               <Input type="number" min={1} value={searxng.timeout ?? 15} onChange={(e) => setSearxngField('timeout', parseNumber(e.target.value, 15))} />
             </div>
             <div className="space-y-2 col-span-2">
-              <Label>代理（出站 outgoing.proxies，留空不启用）</Label>
-              <Input
-                value={searxng.outgoing_proxies || ''}
-                onChange={(e) => setSearxngField('outgoing_proxies', e.target.value)}
-                placeholder="http://127.0.0.1:7890"
-              />
+              <div className="flex items-center justify-between gap-2">
+                <Label>出站代理（本地代理出网）</Label>
+                <Switch checked={searxng.use_proxies !== false} onCheckedChange={(v) => setSearxngField('use_proxies', v)} />
+              </div>
+              {searxng.use_proxies !== false && (
+                <Input
+                  value={searxng.outgoing_proxies || ''}
+                  onChange={(e) => setSearxngField('outgoing_proxies', e.target.value)}
+                  placeholder="http://127.0.0.1:7890，留空则远程自行直连"
+                />
+              )}
             </div>
             {webStatus?.error && (
               <TextTooltip content={webStatus.error}>

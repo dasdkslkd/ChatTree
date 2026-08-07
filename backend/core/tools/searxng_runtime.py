@@ -30,6 +30,7 @@ DEFAULT_SEARXNG_PORT = 8888
 HEALTH_PATH = "/healthz"
 READY_TIMEOUT_SECONDS = 20.0
 PROBE_TIMEOUT_SECONDS = 3.0
+ENGINE_TIMEOUT_SECONDS = 15.0
 
 
 class SearxngUnavailableError(RuntimeError):
@@ -67,6 +68,7 @@ class SearxngRuntime:
     ):
         config = config or {}
         self._searxng_url = str(config.get("searxng_url") or f"http://127.0.0.1:{DEFAULT_SEARXNG_PORT}").rstrip("/")
+        self._use_proxies = bool(config.get("use_proxies", True))
         self._outgoing_proxies = self._parse_proxies(config.get("outgoing_proxies"))
         self._binary = Path(binary).expanduser().resolve() if binary else None
         self._home = (home or resolve_chattree_home()).resolve()
@@ -164,15 +166,12 @@ class SearxngRuntime:
         settings_dir = self._home / "searxng"
         settings_dir.mkdir(parents=True, exist_ok=True)
         settings_path = settings_dir / "settings.yml"
-        outgoing = ""
-        if self._outgoing_proxies:
-            proxies = "\n".join(f"        - {proxy}" for proxy in self._outgoing_proxies)
-            outgoing = (
-                "outgoing:\n"
-                "  proxies:\n"
-                "    all://:\n"
-                f"{proxies}\n"
-            )
+        outgoing = ["outgoing:", f"  request_timeout: {ENGINE_TIMEOUT_SECONDS}"]
+        if self._use_proxies and self._outgoing_proxies:
+            outgoing.append("  proxies:")
+            outgoing.append("    all://:")
+            for proxy in self._outgoing_proxies:
+                outgoing.append(f"        - {proxy}")
         settings_path.write_text(
             "use_default_settings: true\n"
             "general:\n"
@@ -182,8 +181,8 @@ class SearxngRuntime:
             f"  secret_key: {secrets.token_hex(32)}\n"
             "  bind_address: 127.0.0.1\n"
             f"  port: {port}\n"
-            + outgoing
-            + "search:\n"
+            + "\n".join(outgoing)
+            + "\nsearch:\n"
             "  formats:\n"
             "    - html\n"
             "    - json\n",

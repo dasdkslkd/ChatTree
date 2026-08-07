@@ -126,7 +126,7 @@ def test_settings_file_contains_secret_port_and_json(tmp_path):
     assert "secret_key:" in settings
     assert "port: 8888" in settings
     assert "- json" in settings
-    assert "outgoing:" not in settings
+    assert "request_timeout:" in settings
 
 
 def test_settings_file_writes_proxy_when_configured(tmp_path):
@@ -144,7 +144,18 @@ def test_settings_file_writes_proxy_when_configured(tmp_path):
 def test_settings_file_omits_proxy_when_blank(tmp_path):
     runtime = SearxngRuntime({"outgoing_proxies": "  "}, home=tmp_path)
     settings = runtime._write_settings(8888).read_text(encoding="utf-8")
-    assert "outgoing:" not in settings
+    assert "request_timeout:" in settings
+    assert "proxies:" not in settings
+
+
+def test_settings_file_omits_proxy_when_disabled(tmp_path):
+    runtime = SearxngRuntime(
+        {"outgoing_proxies": "http://127.0.0.1:7890", "use_proxies": False},
+        home=tmp_path,
+    )
+    settings = runtime._write_settings(8888).read_text(encoding="utf-8")
+    assert "request_timeout:" in settings
+    assert "proxies:" not in settings
 
 
 def test_restart_spawns_new_process(tmp_path, monkeypatch):
