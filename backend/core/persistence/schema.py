@@ -343,4 +343,17 @@ CREATE INDEX IF NOT EXISTS idx_task_notifications_conversation_status
 CREATE INDEX IF NOT EXISTS idx_task_notifications_delivery_node
   ON task_notifications(delivery_node_id, updated_at);
 
+CREATE TABLE IF NOT EXISTS usage_stats (
+  model_id TEXT NOT NULL,
+  day TEXT NOT NULL,
+  calls INTEGER NOT NULL DEFAULT 0,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  total_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_hit_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_context_tokens INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (model_id, day)
+);
+
 """

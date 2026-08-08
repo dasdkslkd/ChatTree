@@ -22,6 +22,7 @@ from backend.api.routes import (
     tasks,
     tool_approvals,
     tool_results,
+    usage,
     workflows,
 )
 from backend.api.routes import server as server_routes
@@ -47,6 +48,7 @@ _BUSINESS_ROUTERS = (
     (agents.router, ["Agent"]),
     (workflows.router, ["Workflow"]),
     (openai_proxy.router, ["反向代理"]),
+    (usage.router, ["用量统计"]),
 )
 
 def _build_business_router() -> APIRouter:

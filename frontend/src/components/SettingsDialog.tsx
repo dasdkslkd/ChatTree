@@ -7,7 +7,7 @@ import {
 } from '@/components/ui/dialog';
 import {
   Settings, StickyNote, Server, Wrench, Link2,
-  Sparkles, Bot, Package, MessageSquare, FolderOpen, Terminal, HardDrive,
+  Sparkles, Bot, Package, MessageSquare, FolderOpen, Terminal, HardDrive, Coins,
 } from 'lucide-react';
 import { useNavigationStore } from '../store/navigationStore';
 import { SshHostsSection } from './settings/sections/ssh';
@@ -19,8 +19,9 @@ import { DevEnvironmentSection } from './settings/sections/dev_environment';
 import { McpSection } from './settings/sections/mcp';
 import { PromptsSection } from './settings/sections/prompts';
 import { StorageSection } from './settings/sections/storage';
+import { UsageStatsSection } from './settings/sections/usage_stats';
 
-type SettingsSection = 'providers' | 'projects' | 'ssh' | 'prompts' | 'builtin_tools' | 'dev_environment' | 'skills' | 'mcp' | 'agents' | 'plugins' | 'storage';
+type SettingsSection = 'providers' | 'projects' | 'ssh' | 'prompts' | 'builtin_tools' | 'dev_environment' | 'skills' | 'mcp' | 'agents' | 'plugins' | 'storage' | 'usage_stats';
 
 const SETTINGS_NAV: { key: SettingsSection; label: string; icon: typeof Settings; group: string }[] = [
   { key: 'providers', label: '供应商', icon: Server, group: '应用' },
@@ -34,6 +35,7 @@ const SETTINGS_NAV: { key: SettingsSection; label: string; icon: typeof Settings
   { key: 'plugins', label: '插件', icon: Package, group: '工具与能力' },
   { key: 'prompts', label: '提示词', icon: StickyNote, group: '应用' },
   { key: 'storage', label: '存储', icon: HardDrive, group: '应用' },
+  { key: 'usage_stats', label: '用量统计', icon: Coins, group: '应用' },
 ];
 
 interface SettingsDialogProps {
@@ -127,6 +129,7 @@ export function SettingsPageView({ defaultSection = 'providers' }: { defaultSect
         {section === 'plugins' && <CapabilitiesSection view="plugins" />}
         {section === 'prompts' && <PromptsSection />}
         {section === 'storage' && <StorageSection />}
+        {section === 'usage_stats' && <UsageStatsSection />}
       </div>
     </div>
   );

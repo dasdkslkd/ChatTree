@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 
 type ChatViewMode = 'chat' | 'tree';
-type SettingsSection = 'providers' | 'prompts' | 'ssh' | 'builtin_tools' | 'skills' | 'mcp' | 'agents' | 'plugins' | 'storage';
+type SettingsSection = 'providers' | 'prompts' | 'ssh' | 'builtin_tools' | 'skills' | 'mcp' | 'agents' | 'plugins' | 'storage' | 'usage_stats';
 type AppPage = 'chat' | 'settings';
 
 interface NavigationState {

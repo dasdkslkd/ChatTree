@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from contextlib import suppress
 from typing import Any, Dict, List, Optional
@@ -945,6 +946,62 @@ class ChatRepository:
         except json.JSONDecodeError:
             return {}
         return loaded if isinstance(loaded, dict) else {}
+
+    def record_model_usage(
+        self,
+        *,
+        model_id: str,
+        usage_info: dict[str, Any] | None,
+        total_tokens: int,
+        created_at: int,
+    ) -> None:
+        """按 (model_id, day) 增量累计 Token 用量。
+
+        独立于 conversations/messages 持久化，删除会话或消息不影响历史累计。
+        """
+        def _v(key: str) -> int:
+            try:
+                return int((usage_info or {}).get(key) or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        input_tokens = _v("input_tokens")
+        output_tokens = _v("output_tokens")
+        cache_hit = _v("cache_read_input_tokens") + _v("cached_tokens")
+        cache_context = (
+            input_tokens
+            + _v("cache_creation_input_tokens")
+            + _v("cache_read_input_tokens")
+        )
+        day = time.strftime("%Y-%m-%d", time.gmtime(created_at))
+        with self.persistence.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO usage_stats (
+                  model_id, day, calls, input_tokens, output_tokens,
+                  total_tokens, cache_hit_tokens, cache_context_tokens, created_at
+                )
+                VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(model_id, day) DO UPDATE SET
+                  calls = calls + 1,
+                  input_tokens = input_tokens + excluded.input_tokens,
+                  output_tokens = output_tokens + excluded.output_tokens,
+                  total_tokens = total_tokens + excluded.total_tokens,
+                  cache_hit_tokens = cache_hit_tokens + excluded.cache_hit_tokens,
+                  cache_context_tokens = cache_context_tokens + excluded.cache_context_tokens,
+                  created_at = excluded.created_at
+                """,
+                (
+                    model_id,
+                    day,
+                    input_tokens,
+                    output_tokens,
+                    total_tokens,
+                    cache_hit,
+                    cache_context,
+                    created_at,
+                ),
+            )
 
     def _existing_tool_result_blob_id(self, result_id: str, output: str) -> str | None:
         with self.persistence.connect() as conn:

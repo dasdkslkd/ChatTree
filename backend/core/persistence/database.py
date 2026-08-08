@@ -29,6 +29,9 @@ class SQLitePersistence:
             version = int(conn.execute("PRAGMA user_version").fetchone()[0])
             if version != CURRENT_SCHEMA_VERSION:
                 self._reset_current_schema(conn)
+            else:
+                # 幂等补齐新增表（如 usage_stats）：不递增版本号、不清空数据。
+                conn.executescript(SCHEMA_SQL)
             self._apply_storage_pragmas(conn)
         finally:
             conn.close()

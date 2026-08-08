@@ -1105,6 +1105,12 @@ class ChatManager:
         if usage_info is None:
             usage_info = estimated_usage(tokens_used)
         tokens_used = usage_total(usage_info, tokens_used)
+        self.chat_repository.record_model_usage(
+            model_id=str(model_route.get("model_id") or target_model),
+            usage_info=usage_info,
+            total_tokens=tokens_used,
+            created_at=int(time()),
+        )
         completion_timestamp = int(time())
         # 创建生成信息（tokens_used 来自流中捕获的最终值）
         generation_info: GenerationInfo = {
