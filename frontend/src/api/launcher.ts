@@ -66,6 +66,7 @@ export type LauncherApi = Readonly<{
     hostAlias: string,
     signal?: AbortSignal,
   ): Promise<SshHostSessionResponse>;
+  shutdown(): Promise<{ status: string }>;
 }>;
 
 export function createLauncherApi(
@@ -162,6 +163,14 @@ export function createLauncherApi(
       const response = await client.get<SshHostSessionResponse>(
         `/ssh/hosts/${encodeURIComponent(hostAlias)}/status`,
         { signal, timeout: 5000 },
+      );
+      return response.data;
+    },
+    async shutdown() {
+      const response = await client.post<{ status: string }>(
+        '/shutdown',
+        {},
+        { timeout: 5000 },
       );
       return response.data;
     },

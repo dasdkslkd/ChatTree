@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getTabs: () => ipcRenderer.invoke("tab:list"),
   getNavigatorData: () => ipcRenderer.invoke("navigator:get-data"),
   selectProjectFolder: () => ipcRenderer.invoke("project:select-folder"),
+  quitApp: () => ipcRenderer.invoke("app:quit"),
   getPathForFile: (file) => webUtils.getPathForFile(file),
   onTabsUpdated: (callback) => {
     ipcRenderer.on("tabs:updated", (_event, tabs, activeId) => {

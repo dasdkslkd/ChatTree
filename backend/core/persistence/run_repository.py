@@ -464,7 +464,7 @@ class SQLiteRunRepository:
                 (conversation_id, *statuses),
             ).rowcount
         if deleted:
-            self.persistence.reclaim_blobs(compact=True)
+            self.persistence.reclaim_blobs()
         return deleted
 
     def append_event(self, run_id: str, payload: dict[str, Any]) -> dict[str, Any]:

@@ -539,6 +539,9 @@ function registerIpc() {
     });
     return result.canceled ? null : result.filePaths[0] || null;
   });
+  ipcMain.handle("app:quit", () => {
+    app.quit();
+  });
 }
 
 // ── App lifecycle ──────────────────────────────────────────────────────

@@ -241,7 +241,8 @@ class ChatRepository:
             )
         deleted = cursor.rowcount > 0
         if deleted:
-            self.persistence.reclaim_blobs(compact=True)
+            # 仅回收孤立 Blob；全量 VACUUM 由显式手动 compact 流程触发（需独占锁且结束退出服务）。
+            self.persistence.reclaim_blobs()
         return deleted
 
     def create_node(
@@ -519,7 +520,7 @@ class ChatRepository:
                 """,
                 (conversation_id, node_id),
             )
-        self.persistence.reclaim_blobs(compact=True)
+        self.persistence.reclaim_blobs()
         return True
 
     def add_message(

@@ -613,3 +613,46 @@ def test_tool_call_primary_key_is_scoped_by_conversation(tmp_path: Path):
         ).fetchall()
 
     assert [row["conversation_id"] for row in remaining] == ["conversation-a"]
+
+
+def test_reclaim_blobs_compact_reclaims_free_pages(tmp_path):
+    """回归：compact 用全量 VACUUM 真正回收散布的空闲页（此前 incremental_vacuum 几乎无效）。"""
+    from backend.core.persistence.repository import ChatRepository
+
+    persistence = SQLitePersistence(tmp_path)
+    persistence.initialize()
+    repo = ChatRepository(persistence)
+    conversation_id = repo.create_conversation("blob gc")
+    node_id = repo.create_node(conversation_id, None)
+    # 写入若干大消息制造占用，再删除以产生空闲页
+    for i in range(20):
+        repo.add_message(
+            conversation_id,
+            node_id,
+            "assistant",
+            "x" * (16 * 1024 - 100),
+        )
+
+    before = persistence.stats()
+    assert before["freelist_bytes"] >= 0
+    with persistence.connect() as conn:
+        conn.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
+    fragmentation = persistence.stats()["freelist_bytes"]
+
+    persistence.reclaim_blobs(compact=True)
+
+    after_frag = persistence.stats()["freelist_bytes"]
+    assert after_frag < fragmentation, (
+        f"compact 未回收空闲页: before={fragmentation} after={after_frag}"
+    )
+
+
+def test_stats_reports_storage_bytes(tmp_path):
+    persistence = SQLitePersistence(tmp_path)
+    persistence.initialize()
+    stats = persistence.stats()
+    assert stats["db_file_bytes"] > 0
+    assert stats["logical_bytes"] > 0
+    assert stats["freelist_bytes"] >= 0
+    assert stats["blobs_bytes"] >= 0
+    assert stats["blobs_count"] >= 0

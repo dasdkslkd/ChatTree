@@ -180,7 +180,7 @@ async def performance_middleware(request: Request, call_next):
 async def mutation_admission_middleware(request: Request, call_next):
     if (
         request.method not in {"POST", "PUT", "PATCH", "DELETE"}
-        or request.url.path == "/api/v1/server/shutdown"
+        or request.url.path in {"/api/v1/server/shutdown", "/api/v1/storage/compact"}
     ):
         return await call_next(request)
     admission = getattr(request.app.state, "mutation_admission", None)

@@ -127,7 +127,33 @@ class SQLitePersistence:
                 pass
 
         if compact:
-            with self.connect() as conn:
-                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                conn.execute("PRAGMA incremental_vacuum")
+            # 全量 VACUUM 真正回收散布的空闲页（incremental_vacuum 只能回收文件末尾的连续空闲页，实测无效）。
+            # VACUUM 不能在事务内执行，须用独立连接，且要求无其他活跃写连接。
+            vacuum_conn = sqlite3.connect(self.db_path)
+            try:
+                vacuum_conn.execute("VACUUM")
+                vacuum_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            finally:
+                vacuum_conn.close()
         return len(stale)
+
+    def stats(self) -> dict:
+        """返回存储占用统计（字节）。freelist 为可回收的空闲页字节。"""
+        db_bytes = 0
+        page_size = freelist_pages = logical_pages = 0
+        if self.db_path.exists():
+            db_bytes = self.db_path.stat().st_size
+            with self.connect() as conn:
+                page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
+                freelist_pages = int(conn.execute("PRAGMA freelist_count").fetchone()[0])
+                logical_pages = int(conn.execute("PRAGMA page_count").fetchone()[0])
+        return {
+            "db_file_bytes": db_bytes,
+            "logical_bytes": logical_pages * page_size,
+            "freelist_bytes": freelist_pages * page_size,
+            "blobs_bytes": sum(
+                path.stat().st_size
+                for path in self.blobs_dir.rglob("*.gz")
+            ),
+            "blobs_count": sum(1 for _ in self.blobs_dir.rglob("*.gz")),
+        }
