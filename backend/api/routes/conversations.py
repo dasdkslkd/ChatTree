@@ -198,8 +198,7 @@ async def list_projects(
         return {
             "projects": sorted(
                 projects_by_path.values(),
-                key=lambda item: (item.get("latest_updated_at") or 0, item.get("label") or ""),
-                reverse=True,
+                key=lambda item: item.get("label") or "",
             ),
             "config": configured,
         }

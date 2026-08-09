@@ -87,8 +87,6 @@ export function groupConversationsByProject(
     if (aOrder !== undefined || bOrder !== undefined) {
       return (aOrder ?? Number.MAX_SAFE_INTEGER) - (bOrder ?? Number.MAX_SAFE_INTEGER);
     }
-    const latestDiff = latestUpdatedAt(b) - latestUpdatedAt(a);
-    if (latestDiff !== 0) return latestDiff;
     return a.label.localeCompare(b.label);
   });
   return groups;
@@ -168,10 +166,6 @@ function workspaceMatches(workspace: WorkspaceContext, query: string): boolean {
 
 function sortByUpdatedAtDesc(a: Conversation, b: Conversation): number {
   return (b.updated_at || 0) - (a.updated_at || 0);
-}
-
-function latestUpdatedAt(group: ProjectGroup): number {
-  return group.conversations[0]?.updated_at || 0;
 }
 
 function labelFromPath(path: string): string {

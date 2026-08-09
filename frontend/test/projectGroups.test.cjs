@@ -45,7 +45,7 @@ function conv(id, title, updatedAt, cwd, label) {
   };
 }
 
-function testGroupsByWorkspaceAndSortsByRecentConversation() {
+function testGroupsByWorkspaceAndSortsConversationsByRecentConversation() {
   const groups = groupConversationsByProject([
     conv('old-a', 'Old A', 1, 'D:/Projects/A', 'A'),
     conv('new-b', 'New B', 10, 'D:/Projects/B', 'B'),
@@ -151,8 +151,8 @@ function testNewConversationWorkspaceFallsBackInPriorityOrder() {
     conv('older', 'Older', 1, 'D:/Projects/Older', 'Older'),
   ], { defaultWorkspace });
 
-  assert.equal(getWorkspaceForNewConversation(groups, groups[1].id, defaultWorkspace).cwd, 'D:/Projects/Older');
-  assert.equal(getWorkspaceForNewConversation(groups, 'missing', defaultWorkspace).cwd, 'D:/Projects/Recent');
+  assert.equal(getWorkspaceForNewConversation(groups, groups[1].id, defaultWorkspace).cwd, 'D:/Projects/Recent');
+  assert.equal(getWorkspaceForNewConversation(groups, 'missing', defaultWorkspace).cwd, 'D:/Projects/Older');
   assert.equal(getWorkspaceForNewConversation([], null, defaultWorkspace).cwd, 'D:/Default');
 }
 
@@ -201,7 +201,7 @@ function testProjectVisibilityNormalizesSlashAndCase() {
   assert.equal(isProjectVisible('D:/Projects/Visible', { 'd:\\projects\\hidden\\': false }), true);
 }
 
-testGroupsByWorkspaceAndSortsByRecentConversation();
+testGroupsByWorkspaceAndSortsConversationsByRecentConversation();
 testProjectOrderOverridesRecentConversationSort();
 testUnknownProjectsSinkAfterSavedOrder();
 testDefaultVisibleHistoryCountAndExpansion();
