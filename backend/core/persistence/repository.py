@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from .blob_store import BlobStore
 from .content import store_text_content
 from .database import SQLitePersistence
+from ..chat.tool_result_format import _strip_diff_snapshot
 
 
 _UNSET = object()
@@ -890,7 +891,7 @@ class ChatRepository:
         total_chars = len(content)
         if not total_chars and row["output_size"]:
             total_chars = int(row["output_size"])
-        return {
+        payload: dict[str, Any] = {
             "tool_result_id": tool_result_id,
             "tool_name": row["tool_name"] or metadata.get("tool_name"),
             "offset": offset,
@@ -900,6 +901,9 @@ class ChatRepository:
             "has_more": next_offset < total_chars,
             "content": chunk,
         }
+        if metadata.get("diff_before"):
+            payload["diff_before"] = metadata["diff_before"]
+        return payload
 
     def get_message(self, message_id: str) -> dict[str, Any]:
         with self.persistence.connect() as conn:
@@ -1221,18 +1225,33 @@ class ChatRepository:
                     assistant_message_id=assistant_message_id,
                 )
             result_id = message.get("tool_result_id")
+            metadata: dict[str, Any] = {
+                "tool_name": message.get("name"),
+                "tool_result_id": message.get("tool_result_id"),
+            }
+            if tool_call_id:
+                with self.persistence.connect() as conn:
+                    row = conn.execute(
+                        """
+                        SELECT metadata_json
+                        FROM tool_results
+                        WHERE conversation_id = ? AND tool_call_id = ?
+                        """,
+                        (conversation_id, str(tool_call_id)),
+                    ).fetchone()
+                if row is not None:
+                    existing = self._json_object(row["metadata_json"])
+                    if isinstance(existing, dict) and existing.get("diff_before"):
+                        metadata["diff_before"] = existing["diff_before"]
             self.add_tool_result(
                 conversation_id,
                 node_id,
                 tool_result_id=result_id,
                 tool_call_id=tool_call_id,
-                output=raw_output,
+                output=_strip_diff_snapshot(raw_output),
                 status="complete",
                 run_id=run_id,
-                metadata={
-                    "tool_name": message.get("name"),
-                    "tool_result_id": message.get("tool_result_id"),
-                },
+                metadata=metadata,
             )
 
     def persist_assistant_turn(

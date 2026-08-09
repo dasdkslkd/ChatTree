@@ -91,6 +91,50 @@ def format_persisted_tool_result(
     return json.dumps(payload, ensure_ascii=False)
 
 
+def _parse_json_object(raw_result: str) -> Optional[Dict[str, Any]]:
+    try:
+        parsed = json.loads(raw_result)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _extract_diff_snapshot(raw_result: str) -> Optional[Dict[str, Any]]:
+    """从写类工具的原始结果提取内容快照：{绝对路径: {before, existed, after?}}。"""
+    parsed = _parse_json_object(raw_result)
+    if parsed is None or "before" not in parsed:
+        return None
+
+    def entry(p: Any) -> Dict[str, Any]:
+        item: Dict[str, Any] = {"before": str(p.get("before") or ""), "existed": bool(p.get("existed"))}
+        if "after" in p:
+            item["after"] = str(p.get("after") or "")
+        return item
+
+    before_path = parsed.get("before_path")
+    if isinstance(before_path, str):
+        return {before_path: entry(parsed)}
+    if isinstance(parsed.get("before"), dict):
+        before_map = parsed["before"]
+        existed_map = parsed.get("existed") or {}
+        after_map = parsed.get("after") if isinstance(parsed.get("after"), dict) else {}
+        return {
+            str(file_path): {"before": str(content or ""), "existed": bool(existed_map.get(file_path)), **({"after": str(after_map[file_path])} if file_path in after_map else {})}
+            for file_path, content in before_map.items()
+        }
+    return None
+
+
+def _strip_diff_snapshot(raw_result: str) -> str:
+    """从原始结果中去掉内容快照字段；无快照时原样返回，避免改动其格式化。"""
+    parsed = _parse_json_object(raw_result)
+    if parsed is None or not any(key in parsed for key in ("before", "existed", "before_path", "after")):
+        return raw_result
+    for key in ("before", "existed", "before_path", "after"):
+        parsed.pop(key, None)
+    return json.dumps(parsed, ensure_ascii=False)
+
+
 def persist_model_visible_tool_result(
     chat_repository,
     *,
@@ -112,16 +156,22 @@ def persist_model_visible_tool_result(
             arguments=None,
             status="running",
         )
+    metadata: Dict[str, Any] = {"tool_name": name}
+    content = raw_result
+    diff_before = _extract_diff_snapshot(raw_result)
+    if diff_before is not None:
+        metadata["diff_before"] = diff_before
+        content = _strip_diff_snapshot(raw_result)
     tool_result_id = chat_repository.add_tool_result(
         conversation_id=conversation_id,
         node_id=node_id,
         tool_call_id=tool_call_id,
-        output=raw_result,
-        metadata={"tool_name": name},
+        output=content,
+        metadata=metadata,
     )
     return {
         "content": format_persisted_tool_result(
-            raw_result=raw_result,
+            raw_result=content,
             tool_result_id=tool_result_id,
         ),
         "tool_result_id": tool_result_id,

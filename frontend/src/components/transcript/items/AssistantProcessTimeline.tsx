@@ -11,6 +11,7 @@ export type ToolRenderItem = {
   summary: string;
   argsText: string;
   outputText: string;
+  toolResultId?: string;
   status: 'done' | 'error' | 'running';
 };
 

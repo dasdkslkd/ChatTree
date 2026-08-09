@@ -42,6 +42,7 @@ export type AssistantProcessBlock =
       tool_name: string;
       args_preview: string;
       result_preview: string | null;
+      tool_result_id?: string;
       status: 'running' | 'complete' | 'error';
     };
 

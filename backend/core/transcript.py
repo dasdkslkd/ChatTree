@@ -708,7 +708,7 @@ class TranscriptAssembler:
             )
         elif call.get("status") in {"complete", "done"}:
             status = "complete"
-        return {
+        block: dict[str, Any] = {
             "type": "tool_call",
             "id": f"tool-call:{call['id']}",
             "tool_call_id": call.get("id"),
@@ -717,6 +717,9 @@ class TranscriptAssembler:
             "result_preview": result.get("output_preview") if result else None,
             "status": status,
         }
+        if result and (result.get("metadata") or {}).get("diff_before"):
+            block["tool_result_id"] = result["id"]
+        return block
 
     def _is_tool_approval_call(self, call: dict[str, Any], result: dict[str, Any] | None) -> bool:
         if str(call.get("status") or "") in {"waiting_approval", "approved", "rejected"}:

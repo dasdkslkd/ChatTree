@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import MarkdownContent from '../../MarkdownContent';
+import { FileDiffView } from './FileDiffView';
 import type { ToolRenderItem } from './AssistantProcessTimeline';
 import {
   asArray,
@@ -32,7 +33,7 @@ import {
 
 interface ToolSpec {
   icon: LucideIcon;
-  detail: (args: ToolArgs, result: ToolResult, status: ToolStatus) => ReactNode;
+  detail: (args: ToolArgs, result: ToolResult, status: ToolStatus, toolResultId?: string) => ReactNode;
 }
 
 function CopyButton({ text, label, variant = 'default' }: { text: string; label: string; variant?: 'default' | 'subtle' }) {
@@ -319,10 +320,10 @@ function readSpec(): ToolSpec {
   };
 }
 
-function fileEditSpec(icon: LucideIcon): ToolSpec {
+function fileDiffSpec(icon: LucideIcon): ToolSpec {
   return {
     icon,
-    detail: (args, result, status) => {
+    detail: (args, result, status, toolResultId) => {
       const path = asString(args.path) || asString(args.file_path);
       const errorMessage = getErrorMessage(result);
       if (errorMessage) {
@@ -333,21 +334,22 @@ function fileEditSpec(icon: LucideIcon): ToolSpec {
           </>
         );
       }
-      const content = asString(result?.content);
-      const hunks = asArray(result?.hunks);
-      const applied = result ? Boolean(result.applied ?? result.success) : null;
-      const summary = result ? asString(result.summary) : '';
+      if (!toolResultId) {
+        const content = asString(result?.content);
+        const summary = result ? asString(result.summary) : '';
+        const applied = result ? Boolean(result.applied ?? result.success) : null;
+        return (
+          <>
+            {path && <MetaRow items={[{ label: '文件', value: truncate(path, 80) }, { label: '状态', value: applied === true ? '已应用' : applied === false ? '未应用' : '', tone: applied === false ? 'error' : 'default' }]} />}
+            {status === 'running' && !result && <EmptyState text="执行中..." />}
+            {summary && <PreBlock variant="output">{summary}</PreBlock>}
+            {content && <PreBlock variant="output">{content}</PreBlock>}
+            {result && !content && !summary && <PreBlock variant="output">{JSON.stringify(result, null, 2)}</PreBlock>}
+          </>
+        );
+      }
       return (
-        <>
-          {path && <MetaRow items={[{ label: '文件', value: truncate(path, 80) }, { label: '状态', value: applied === true ? '已应用' : applied === false ? '未应用' : '', tone: applied === false ? 'error' : 'default' }]} />}
-          {status === 'running' && !result && <EmptyState text="执行中..." />}
-          {summary && <PreBlock variant="output">{summary}</PreBlock>}
-          {hunks.length > 0 && (
-            <PreBlock variant="output">{hunks.map((hunk) => asString(asObject(hunk)?.text || asObject(hunk)?.content)).join('\n')}</PreBlock>
-          )}
-          {content && <PreBlock variant="output">{content}</PreBlock>}
-          {result && !content && !summary && hunks.length === 0 && !errorMessage && <PreBlock variant="output">{JSON.stringify(result, null, 2)}</PreBlock>}
-        </>
+        <FileDiffView path={path} toolResultId={toolResultId} args={args} />
       );
     },
   };
@@ -535,7 +537,8 @@ const TOOL_SPECS: Record<string, ToolSpec> = {
   grep: grepSpec(),
   glob: globSpec(),
   read: readSpec(),
-  edit: fileEditSpec(Pencil),
+  edit: fileDiffSpec(Pencil),
+  write: fileDiffSpec(Pencil),
   web: {
     icon: Globe,
     detail: (args, result, status) => (
@@ -597,7 +600,7 @@ export function ToolCallCard({ item }: { item: ToolRenderItem }) {
       {expanded && (
         <div className="tc-body">
           <div className="tc-body-inner">
-            {spec.detail(args, result, item.status)}
+            {spec.detail(args, result, item.status, item.toolResultId)}
           </div>
         </div>
       )}

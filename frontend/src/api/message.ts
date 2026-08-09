@@ -15,6 +15,7 @@ import {
 export type ToolResultSlice = {
   tool_result_id: string;
   tool_name?: string | null;
+  diff_before?: Record<string, { before: string; existed: boolean; after?: string }> | null;
   offset: number;
   limit: number;
   next_offset?: number | null;
@@ -343,6 +344,14 @@ export const messageApi = {
     const response = await apiClient.get(`/tool-results/${encodeURIComponent(toolResultId)}`, {
       params: { offset, limit },
     });
+    return response.data;
+  },
+
+  // 回退写文件工具造成的变更
+  revertToolResult: async (
+    toolResultId: string,
+  ): Promise<{ tool_result_id: string; reverted: string[] }> => {
+    const response = await apiClient.post(`/tool-results/${encodeURIComponent(toolResultId)}/revert`);
     return response.data;
   },
 

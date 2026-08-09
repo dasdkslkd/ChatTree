@@ -27,6 +27,7 @@ function toolBlockToRenderItem(block: Extract<AssistantProcessBlock, { type: 'to
     name: block.tool_name || 'tool',
     argsText,
     outputText,
+    toolResultId: block.tool_result_id,
     status,
     summary: summarizeToolCall(block.tool_name || 'tool', argsText, outputText, status),
   };

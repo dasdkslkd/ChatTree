@@ -45,6 +45,7 @@ class WriteFileTool(common._CodeTool):
         key = str(target)
         with common._path_locks([target]):
             exists = target.exists()
+            before = ""
             if mode == "create":
                 try:
                     with target.open("x", encoding="utf-8") as handle:
@@ -56,6 +57,17 @@ class WriteFileTool(common._CodeTool):
                 if (exists and (observed is None or patch._file_version(target) != observed)) or (not exists and observed is not None):
                     observations.pop(key, None)
                     return common._error("stale_file", "file changed or was not read completely; read it again before overwriting", path=self.workspace.relative(target))
+                try:
+                    before = target.read_text(encoding="utf-8")
+                except UnicodeDecodeError:
+                    return common._error("not_utf8", "file is not valid UTF-8 text", path=self.workspace.relative(target))
                 target.write_text(content, encoding="utf-8")
             observations[key] = patch._file_version(target)
-        return common._json({"path": self.workspace.relative(target), "bytes_written": len(content.encode("utf-8")), "mode": "overwrite" if exists else "create"})
+        return common._json({
+            "path": self.workspace.relative(target),
+            "bytes_written": len(content.encode("utf-8")),
+            "mode": "overwrite" if exists else "create",
+            "before_path": str(target),
+            "before": before,
+            "existed": exists,
+        })

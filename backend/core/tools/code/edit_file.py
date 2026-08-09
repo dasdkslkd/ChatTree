@@ -78,6 +78,7 @@ class EditFileTool(common._CodeTool):
                 updated = target.read_text(encoding="utf-8")
             except UnicodeDecodeError:
                 return common._error("not_utf8", "file is not valid UTF-8 text", path=self.workspace.relative(target))
+            before = updated
             applied = 0
             for index, replacement in enumerate(replacements):
                 if not isinstance(replacement, dict):
@@ -111,4 +112,8 @@ class EditFileTool(common._CodeTool):
             "path": self.workspace.relative(target),
             "replacements": applied,
             "bytes_written": len(updated.encode("utf-8")),
+            "before_path": str(target),
+            "before": before,
+            "after": updated,
+            "existed": True,
         })
