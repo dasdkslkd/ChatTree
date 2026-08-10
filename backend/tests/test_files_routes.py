@@ -15,6 +15,19 @@ def _client() -> TestClient:
     return TestClient(app)
 
 
+def _project_client(project_roots):
+    app = FastAPI()
+    install_error_handlers(app)
+    app.include_router(files_routes.router, prefix="/api/v1")
+    config_manager = SimpleNamespace(data={"projects": {root: {} for root in project_roots}})
+
+    async def override_get_config_manager():
+        return config_manager
+
+    app.dependency_overrides[files_routes.get_config_manager] = override_get_config_manager
+    return TestClient(app)
+
+
 def _make_file(tmp_path, name: str):
     target = tmp_path / name
     target.write_text("hello", encoding="utf-8")
@@ -108,3 +121,66 @@ def test_open_file_reports_open_failure(monkeypatch, tmp_path):
     response = _client().post("/api/v1/files/open", json={"path": str(target)})
 
     assert response.status_code == 500
+
+
+def test_list_directory_lists_only_project_workspace(tmp_path):
+    root = tmp_path / "proj"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "main.py").write_text("x = 1", encoding="utf-8")
+    (root / ".hidden").mkdir()
+    (root / ".git").mkdir()
+    (root / "readme.md").write_text("hi", encoding="utf-8")
+
+    response = _project_client([str(root)]).get("/api/v1/files/list", params={"path": str(root)})
+
+    assert response.status_code == 200
+    names = [entry["name"] for entry in response.json()["entries"]]
+    assert names == ["src", "readme.md"]
+
+
+def test_list_directory_rejects_path_outside_workspace(tmp_path):
+    root = tmp_path / "proj"
+    root.mkdir()
+    outside = tmp_path / "other"
+    outside.mkdir()
+
+    response = _project_client([str(root)]).get("/api/v1/files/list", params={"path": str(outside)})
+
+    assert response.status_code == 403
+
+
+def test_read_file_content_within_workspace(tmp_path):
+    root = tmp_path / "proj"
+    root.mkdir()
+    target = root / "app.py"
+    target.write_text("print('hi')", encoding="utf-8")
+
+    response = _project_client([str(root)]).get("/api/v1/files/content", params={"path": str(target)})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["binary"] is False
+    assert body["content"] == "print('hi')"
+
+
+def test_read_binary_file_flags_binary(tmp_path):
+    root = tmp_path / "proj"
+    root.mkdir()
+    target = root / "data.bin"
+    target.write_bytes(b"\x00\x01\x02")
+
+    response = _project_client([str(root)]).get("/api/v1/files/content", params={"path": str(target)})
+
+    assert response.status_code == 200
+    assert response.json()["binary"] is True
+
+
+def test_read_file_rejects_path_outside_workspace(tmp_path):
+    root = tmp_path / "proj"
+    root.mkdir()
+    outside = tmp_path / "secret.txt"
+    outside.write_text("secret", encoding="utf-8")
+
+    response = _project_client([str(root)]).get("/api/v1/files/content", params={"path": str(outside)})
+
+    assert response.status_code == 403

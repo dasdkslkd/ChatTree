@@ -35,7 +35,7 @@ import {
 import {
   Plus, X, MoreHorizontal, ChevronRight, Square,
   Check, Pencil, Loader2, Network, MessageSquare, FileText, Download, FolderOpen, Search, Settings,
-  PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, ArrowLeft,
+  PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, ArrowLeft, Folder,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { conversationApi } from '../api/conversation';
@@ -112,6 +112,7 @@ import {
 import { ChatInput } from '../components/ChatInput';
 import { TranscriptList } from '../components/transcript/TranscriptList';
 import TreeView from './TreeView';
+import { FileBrowser } from '../components/FileBrowser';
 import {
   getVisibleProjectConversations,
   getWorkspaceForNewConversation,
@@ -190,7 +191,7 @@ export default function ChatPage() {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [outlineCollapsed, setOutlineCollapsed] = useState(false);
-  const [rightPanelView, setRightPanelView] = useState<'outline' | 'side' | 'tasks'>('outline');
+  const [rightPanelView, setRightPanelView] = useState<'outline' | 'side' | 'tasks' | 'files'>('outline');
   const [selectedSideRunId, setSelectedSideRunId] = useState<string | null>(null);
   const [leftSidebarWidth, setLeftSidebarWidth] = useState(() =>
     readStoredSidebarWidth(getBrowserStorage(), PROFILE_LEFT_SIDEBAR_STORAGE_KEY, LEFT_SIDEBAR_WIDTH),
@@ -874,6 +875,14 @@ export default function ChatPage() {
   const selectedNewConversationWorkspace = useMemo(
     () => getWorkspaceForNewConversation(allProjectGroups, selectedProjectId, defaultWorkspace),
     [allProjectGroups, selectedProjectId, defaultWorkspace],
+  );
+
+  const fileBrowserRoot = useMemo(
+    () => currentConversation?.workspace?.cwd
+      || selectedNewConversationWorkspace.cwd
+      || defaultWorkspace?.cwd
+      || '',
+    [currentConversation?.workspace?.cwd, selectedNewConversationWorkspace.cwd, defaultWorkspace?.cwd],
   );
 
   useEffect(() => {
@@ -2683,6 +2692,16 @@ export default function ChatPage() {
                     </span>
                   )}
                 </Button>
+                <Button
+                  variant={rightPanelView === 'files' ? 'secondary' : 'ghost'}
+                  size="sm"
+                  className="h-8 min-w-0 gap-1.5 px-2 text-xs"
+                  onClick={() => setRightPanelView('files')}
+                  aria-label="文件"
+                >
+                  <Folder className="h-3.5 w-3.5" />
+                  <span className="min-w-0 truncate">文件</span>
+                </Button>
               </div>
             )}
             <TextTooltip content={outlineCollapsed ? '展开大纲' : '收起大纲'}>
@@ -2722,6 +2741,16 @@ export default function ChatPage() {
                 </div>
               ) : rightPanelView === 'tasks' ? (
                 renderTaskPanel()
+              ) : rightPanelView === 'files' ? (
+                <div className="flex min-h-0 flex-1 flex-col">
+                  {fileBrowserRoot ? (
+                    <FileBrowser key={fileBrowserRoot} root={fileBrowserRoot} />
+                  ) : (
+                    <div className="px-3 py-4 text-xs" style={{ color: 'var(--fg-tertiary)' }}>
+                      暂无可浏览的项目目录。
+                    </div>
+                  )}
+                </div>
               ) : selectedSideRunItem ? (
                 <div className="flex min-h-0 flex-1 flex-col">
                   <div className="flex shrink-0 items-center gap-2 px-3 pb-3">
