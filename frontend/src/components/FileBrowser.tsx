@@ -230,7 +230,11 @@ export function FileBrowser({ root }: { root: string }) {
                   type="button"
                   onClick={() => setActivePath(file.path)}
                   className="group flex max-w-44 shrink-0 items-center gap-1 rounded px-2 py-1 text-xs"
-                  style={{ background: active ? 'var(--bg-button-secondary)' : 'transparent', color: 'var(--fg-85)' }}
+                  style={{
+                    background: active ? 'var(--accent)' : 'transparent',
+                    color: active ? 'var(--primary)' : 'var(--fg-85)',
+                    boxShadow: active ? 'inset 0 -2px 0 var(--primary)' : undefined,
+                  }}
                   title={file.path}
                 >
                   <span className="truncate">{file.name}</span>
