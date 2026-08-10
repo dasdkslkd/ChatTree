@@ -2,17 +2,24 @@ import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } fro
 import {
   ArrowLeft,
   ChevronRight,
+  Copy,
   File,
   Folder,
   FolderOpen,
   FolderTree,
+  Pencil,
+  Trash2,
   X,
 } from 'lucide-react';
+import { toast } from 'sonner';
 import { filesApi, type FileEntry } from '../api/files';
 import { getApiErrorMessage } from '../api/errors';
 import { MarkdownView } from './markdown/MarkdownView';
 import { SyntaxHighlighter, oneDark } from './markdown/languages';
 import { Button } from './ui/button';
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from './ui/dialog';
+import { Input } from './ui/input';
+import { FileContextMenu, type ContextMenuItem } from './FileContextMenu';
 
 interface TreeNode {
   name: string;
@@ -22,6 +29,14 @@ interface TreeNode {
   expanded: boolean;
   loading: boolean;
   children: TreeNode[];
+}
+
+interface MenuTarget {
+  x: number;
+  y: number;
+  kind: 'file' | 'dir' | 'tab';
+  path: string;
+  name: string;
 }
 
 function extToLanguage(name: string): string | null {
@@ -102,6 +117,11 @@ export function FileBrowser({ root }: { root: string }) {
   const [activePath, setActivePath] = useState<string | null>(null);
   const [treeOpen, setTreeOpen] = useState(true);
   const [treeWidth, setTreeWidth] = useState(260);
+  const [menu, setMenu] = useState<MenuTarget | null>(null);
+  const [renameNode, setRenameNode] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [deleteTarget, setDeleteTarget] = useState<{ path: string; name: string } | null>(null);
+  const [busy, setBusy] = useState(false);
   const tabBarRef = useRef<HTMLDivElement | null>(null);
   const treeDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
 
@@ -196,6 +216,131 @@ export function FileBrowser({ root }: { root: string }) {
     treeDragRef.current = null;
   }, []);
 
+  // ── 右键菜单 ─────────────────────────────────────────────────────────
+  const reloadTop = useCallback((dirPath: string) => {
+    filesApi
+      .list(dirPath)
+      .then((data) => setNodes(data.entries.map((entry) => toNode(entry, dirPath))))
+      .catch((loadError) => setError(getApiErrorMessage(loadError, '加载目录失败')));
+  }, []);
+
+  const openRowMenu = useCallback((node: TreeNode, event: React.MouseEvent) => {
+    event.preventDefault();
+    setMenu({ x: event.clientX, y: event.clientY, kind: node.type, path: node.path, name: node.name });
+  }, []);
+
+  const openTabMenu = useCallback((file: { path: string; name: string }, event: React.MouseEvent) => {
+    event.preventDefault();
+    setMenu({ x: event.clientX, y: event.clientY, kind: 'tab', path: file.path, name: file.name });
+  }, []);
+
+  const renameRef = useRef({ path: '', original: '', value: '' });
+
+  const openRename = useCallback((target: MenuTarget) => {
+    renameRef.current = { path: target.path, original: target.name, value: target.name };
+    setRenameNode(target.path);
+    setRenameValue(target.name);
+  }, []);
+
+  const openDelete = useCallback((target: MenuTarget) => {
+    setDeleteTarget({ path: target.path, name: target.name });
+  }, []);
+
+  const copyText = useCallback(async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      toast.error('复制失败');
+    }
+  }, []);
+
+  const relativePath = (path: string) => {
+    const base = root.replace(/\\/g, '/');
+    const p = path.replace(/\\/g, '/');
+    return p.startsWith(`${base}/`) ? p.slice(base.length + 1) : p;
+  };
+
+  const confirmRename = useCallback(async () => {
+    const { path, original, value } = renameRef.current;
+    const newName = value.trim();
+    setRenameNode(null);
+    if (!newName || newName === original) return;
+    setBusy(true);
+    try {
+      const res = await filesApi.rename(path, newName);
+      setOpenFiles((files) => files.map((f) => (f.path === path ? { ...f, path: res.path, name: newName } : f)));
+      setActivePath((p) => (p === path ? res.path : p));
+      setSelectedPath((p) => (p === path ? res.path : p));
+      reloadTop(currentPath);
+    } catch (loadError) {
+      toast.error(getApiErrorMessage(loadError, '重命名失败'));
+    } finally {
+      setBusy(false);
+    }
+  }, [currentPath, reloadTop]);
+
+  const cancelRename = useCallback(() => setRenameNode(null), []);
+
+  const confirmDelete = async () => {
+    if (!deleteTarget) return;
+    setBusy(true);
+    try {
+      const target = deleteTarget.path;
+      const isRemoved = (p: string) => p === target || p.startsWith(`${target}/`);
+      await filesApi.delete(target);
+      setOpenFiles((files) => files.filter((f) => !isRemoved(f.path)));
+      setActivePath((p) => (p && isRemoved(p) ? null : p));
+      setSelectedPath((p) => (p && isRemoved(p) ? null : p));
+      reloadTop(currentPath);
+    } catch (loadError) {
+      toast.error(getApiErrorMessage(loadError, '删除失败'));
+    } finally {
+      setBusy(false);
+      setDeleteTarget(null);
+    }
+  };
+
+  const menuItems: ContextMenuItem[] = menu
+    ? [
+        {
+          key: 'reveal',
+          label: '在文件资源管理器中显示',
+          icon: <FolderOpen className="h-3.5 w-3.5" />,
+          onSelect: () =>
+            filesApi.reveal(menu.path).catch((loadError) => toast.error(getApiErrorMessage(loadError, '定位失败'))),
+        },
+        {
+          key: 'copy',
+          label: '复制路径',
+          icon: <Copy className="h-3.5 w-3.5" />,
+          onSelect: () => copyText(menu.path.replace(/\\/g, '/')),
+        },
+        {
+          key: 'copyRelative',
+          label: '复制相对路径',
+          icon: <Copy className="h-3.5 w-3.5" />,
+          disabled: !menu.path.startsWith(`${root}/`),
+          onSelect: () => copyText(relativePath(menu.path)),
+        },
+        ...(menu.kind !== 'tab'
+          ? [{
+              key: 'rename',
+              label: '重命名',
+              icon: <Pencil className="h-3.5 w-3.5" />,
+              separatorBefore: true,
+              onSelect: () => openRename(menu),
+            }]
+          : []),
+        {
+          key: 'delete',
+          label: '删除',
+          icon: <Trash2 className="h-3.5 w-3.5" />,
+          destructive: true,
+          onSelect: () => openDelete(menu),
+        },
+      ]
+    : [];
+
   const treeBody = useMemo(() => {
     if (loading) return <Empty text="加载中..." />;
     if (error) return <Empty text={error} />;
@@ -208,9 +353,15 @@ export function FileBrowser({ root }: { root: string }) {
         selectedPath={selectedPath}
         onSelect={selectNode}
         onToggleDir={toggleDir}
+        onContextMenu={openRowMenu}
+        editingPath={renameNode}
+        renameValue={renameValue}
+        onRenameChange={setRenameValue}
+        onRenameCommit={confirmRename}
+        onRenameCancel={cancelRename}
       />
     ));
-  }, [loading, error, nodes, selectedPath, selectNode, toggleDir]);
+  }, [loading, error, nodes, selectedPath, selectNode, toggleDir, renameNode, renameValue, confirmRename, cancelRename]);
 
   return (
     <div className="flex min-h-0 w-full min-w-0 flex-1 flex-col">
@@ -229,6 +380,7 @@ export function FileBrowser({ root }: { root: string }) {
                   key={file.path}
                   type="button"
                   onClick={() => setActivePath(file.path)}
+                  onContextMenu={(event) => openTabMenu(file, event)}
                   className="group flex max-w-44 shrink-0 items-center gap-1 rounded px-2 py-1 text-xs"
                   style={{
                     background: active ? 'var(--accent)' : 'transparent',
@@ -320,6 +472,28 @@ export function FileBrowser({ root }: { root: string }) {
           </div>
         )}
       </div>
+
+      {menu && (
+        <FileContextMenu x={menu.x} y={menu.y} items={menuItems} onClose={() => setMenu(null)} />
+      )}
+
+      <Dialog
+        open={!!deleteTarget}
+        onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>删除确认</DialogTitle>
+          </DialogHeader>
+          <div className="text-sm" style={{ color: 'var(--fg-85)' }}>
+            确定删除「{deleteTarget?.name}」吗？此操作不可撤销。
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>取消</Button>
+            <Button onClick={confirmDelete} disabled={busy}>删除</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -330,14 +504,27 @@ const TreeRow = memo(function TreeRow({
   selectedPath,
   onSelect,
   onToggleDir,
+  onContextMenu,
+  editingPath,
+  renameValue,
+  onRenameChange,
+  onRenameCommit,
+  onRenameCancel,
 }: {
   node: TreeNode;
   depth: number;
   selectedPath: string | null;
   onSelect: (node: TreeNode) => void;
   onToggleDir: (path: string) => void;
+  onContextMenu: (node: TreeNode, event: React.MouseEvent) => void;
+  editingPath: string | null;
+  renameValue: string;
+  onRenameChange: (value: string) => void;
+  onRenameCommit: () => void;
+  onRenameCancel: () => void;
 }) {
   const isDir = node.type === 'dir';
+  const editing = node.path === editingPath;
   return (
     <Fragment>
       <div
@@ -347,6 +534,7 @@ const TreeRow = memo(function TreeRow({
         onKeyDown={(event) => {
           if (event.key === 'Enter') (isDir ? onToggleDir(node.path) : onSelect(node));
         }}
+        onContextMenu={(event) => onContextMenu(node, event)}
         className="flex cursor-pointer select-none items-center gap-1 py-1 pr-2 text-sm hover:bg-[var(--bg-button-tertiary-hover)]"
         style={{
           paddingLeft: 8 + depth * 14,
@@ -365,7 +553,25 @@ const TreeRow = memo(function TreeRow({
         ) : (
           <File className="h-4 w-4 shrink-0" style={{ color: 'var(--fg-secondary)' }} />
         )}
-        <span className="min-w-0 truncate">{node.name}</span>
+        {editing ? (
+          <Input
+            value={renameValue}
+            onChange={(event) => onRenameChange(event.target.value)}
+            onFocus={(event) => event.currentTarget.select()}
+            onClick={(event) => event.stopPropagation()}
+            onContextMenu={(event) => event.stopPropagation()}
+            onKeyDown={(event) => {
+              event.stopPropagation();
+              if (event.key === 'Enter') onRenameCommit();
+              else if (event.key === 'Escape') onRenameCancel();
+            }}
+            onBlur={onRenameCommit}
+            autoFocus
+            className="h-6 min-w-0 flex-1 px-1 py-0 text-sm"
+          />
+        ) : (
+          <span className="min-w-0 truncate">{node.name}</span>
+        )}
       </div>
       {isDir && node.expanded && (
         <div>
@@ -379,6 +585,12 @@ const TreeRow = memo(function TreeRow({
                 selectedPath={selectedPath}
                 onSelect={onSelect}
                 onToggleDir={onToggleDir}
+                onContextMenu={onContextMenu}
+                editingPath={editingPath}
+                renameValue={renameValue}
+                onRenameChange={onRenameChange}
+                onRenameCommit={onRenameCommit}
+                onRenameCancel={onRenameCancel}
               />
             ))}
         </div>

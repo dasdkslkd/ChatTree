@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -147,3 +148,70 @@ async def read_file(
         "truncated": len(raw) < size,
         "content": raw.decode("utf-8", errors="replace"),
     }
+
+
+class RenameFileRequest(BaseModel):
+    path: str = Field(min_length=1)
+    new_name: str = Field(min_length=1)
+
+
+def _reject_root(path: Path, config_manager) -> None:
+    """拒绝删除/重命名任一 workspace 根目录。"""
+    for root in (_workspace_roots(config_manager) or []):
+        if path == Path(root).expanduser().resolve():
+            raise ApiError(403, "protected_root", "Cannot modify a workspace root", False, {"path": str(path)})
+
+
+@router.post("/files/reveal", response_model=OpenFileResponse)
+def reveal_file(body: OpenFileRequest, config_manager=Depends(get_config_manager)) -> OpenFileResponse:
+    """在系统文件管理器中定位显示文件或目录。"""
+    path = _resolve_project_path(body.path, config_manager)
+    if not path.exists():
+        raise ApiError(404, "file_not_found", "Path does not exist", False, {"path": str(path)})
+    try:
+        if sys.platform == "win32":
+            subprocess.Popen(["explorer", "/select,", str(path)])
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", str(path)])
+        else:
+            subprocess.Popen(["xdg-open", str(path.parent)])
+    except OSError as exc:
+        raise ApiError(500, "reveal_failed", f"Failed to reveal path: {exc}", True, {"path": str(path)}) from exc
+    return OpenFileResponse(path=str(path))
+
+
+@router.post("/files/rename", response_model=OpenFileResponse)
+def rename_file(body: RenameFileRequest, config_manager=Depends(get_config_manager)) -> OpenFileResponse:
+    """重命名文件或目录（仅改名，不改变父目录）。"""
+    path = _resolve_project_path(body.path, config_manager)
+    name = body.new_name.strip()
+    if not name or "/" in name or "\\" in name or name in (".", ".."):
+        raise ApiError(400, "invalid_name", "Name must be a single non-empty entry name", False)
+    if not path.exists():
+        raise ApiError(404, "file_not_found", "Path does not exist", False, {"path": str(path)})
+    _reject_root(path, config_manager)
+    target = path.parent / name
+    if target.exists():
+        raise ApiError(409, "target_exists", "A path with that name already exists", False, {"path": str(target)})
+    try:
+        path.rename(target)
+    except OSError as exc:
+        raise ApiError(500, "rename_failed", f"Failed to rename path: {exc}", True, {"path": str(path)}) from exc
+    return OpenFileResponse(path=str(target))
+
+
+@router.post("/files/delete", response_model=OpenFileResponse)
+def delete_file(body: OpenFileRequest, config_manager=Depends(get_config_manager)) -> OpenFileResponse:
+    """删除文件或目录（递归）。"""
+    path = _resolve_project_path(body.path, config_manager)
+    if not path.exists():
+        raise ApiError(404, "file_not_found", "Path does not exist", False, {"path": str(path)})
+    _reject_root(path, config_manager)
+    try:
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    except OSError as exc:
+        raise ApiError(500, "delete_failed", f"Failed to delete path: {exc}", True, {"path": str(path)}) from exc
+    return OpenFileResponse(path=str(path))

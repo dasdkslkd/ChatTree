@@ -39,4 +39,19 @@ export const filesApi = {
     const response = await apiClient.get('/files/content', { params: { path } });
     return response.data;
   },
+  // 在系统文件管理器中定位显示
+  reveal: async (path: string): Promise<OpenFileResponse> => {
+    const response = await apiClient.post('/files/reveal', { path });
+    return response.data;
+  },
+  // 重命名文件或目录
+  rename: async (path: string, newName: string): Promise<OpenFileResponse> => {
+    const response = await apiClient.post('/files/rename', { path, new_name: newName });
+    return response.data;
+  },
+  // 删除文件或目录
+  delete: async (path: string): Promise<OpenFileResponse> => {
+    const response = await apiClient.post('/files/delete', { path });
+    return response.data;
+  },
 };

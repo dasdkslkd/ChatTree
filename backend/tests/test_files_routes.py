@@ -184,3 +184,94 @@ def test_read_file_rejects_path_outside_workspace(tmp_path):
     response = _project_client([str(root)]).get("/api/v1/files/content", params={"path": str(outside)})
 
     assert response.status_code == 403
+
+
+def test_rename_file(tmp_path):
+    root = tmp_path / "proj"
+    root.mkdir()
+    target = root / "old.py"
+    target.write_text("x = 1", encoding="utf-8")
+
+    response = _project_client([str(root)]).post(
+        "/api/v1/files/rename", json={"path": str(target), "new_name": "new.py"}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["path"].endswith("new.py")
+    assert not target.exists()
+    assert (root / "new.py").exists()
+
+
+def test_rename_rejects_name_with_separator(tmp_path):
+    root = tmp_path / "proj"
+    root.mkdir()
+    target = root / "old.py"
+    target.write_text("x = 1", encoding="utf-8")
+
+    response = _project_client([str(root)]).post(
+        "/api/v1/files/rename", json={"path": str(target), "new_name": "a/b"}
+    )
+
+    assert response.status_code == 400
+
+
+def test_rename_rejects_workspace_root(tmp_path):
+    root = tmp_path / "proj"
+    root.mkdir()
+
+    response = _project_client([str(root)]).post(
+        "/api/v1/files/rename", json={"path": str(root), "new_name": "proj2"}
+    )
+
+    assert response.status_code == 403
+
+
+def test_delete_file(tmp_path):
+    root = tmp_path / "proj"
+    root.mkdir()
+    target = root / "drop.py"
+    target.write_text("x = 1", encoding="utf-8")
+
+    response = _project_client([str(root)]).post("/api/v1/files/delete", json={"path": str(target)})
+
+    assert response.status_code == 200
+    assert not target.exists()
+
+
+def test_delete_directory_recursive(tmp_path):
+    root = tmp_path / "proj"
+    root.mkdir()
+    target = root / "pkg"
+    (target / "sub").mkdir(parents=True)
+    (target / "sub" / "mod.py").write_text("x = 1", encoding="utf-8")
+
+    response = _project_client([str(root)]).post("/api/v1/files/delete", json={"path": str(target)})
+
+    assert response.status_code == 200
+    assert not target.exists()
+
+
+def test_delete_rejects_workspace_root(tmp_path):
+    root = tmp_path / "proj"
+    root.mkdir()
+
+    response = _project_client([str(root)]).post("/api/v1/files/delete", json={"path": str(root)})
+
+    assert response.status_code == 403
+    assert root.exists()
+
+
+def test_reveal_file(tmp_path, monkeypatch):
+    import subprocess as _subprocess
+
+    calls = []
+    monkeypatch.setattr(_subprocess, "Popen", lambda cmd, **kw: calls.append(cmd))
+    root = tmp_path / "proj"
+    root.mkdir()
+    target = root / "view.py"
+    target.write_text("x = 1", encoding="utf-8")
+
+    response = _project_client([str(root)]).post("/api/v1/files/reveal", json={"path": str(target)})
+
+    assert response.status_code == 200
+    assert calls and str(target) in calls[0]
