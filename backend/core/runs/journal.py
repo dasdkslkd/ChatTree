@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
@@ -47,3 +48,14 @@ class RunJournal:
         for event in self.read_events(conversation_id, run_id):
             if int(event.get("event_index") or 0) >= from_event:
                 yield event
+
+    def delete_journal(self, conversation_id: str, run_id: str) -> None:
+        with contextlib.suppress(FileNotFoundError):
+            self._path_for(conversation_id, run_id).unlink()
+
+    def list_run_files(self) -> List[Path]:
+        """List every residual `conversations/*/runs/*.jsonl` journal file."""
+        files: List[Path] = []
+        for runs_dir in self.root.glob("*/runs"):
+            files.extend(runs_dir.glob("*.jsonl"))
+        return files

@@ -196,39 +196,6 @@ def test_create_run_hydration_failure_terminalizes_committed_row():
     asyncio.run(scenario())
 
 
-def test_create_run_event_publication_failure_interrupts_committed_row():
-    class FailingRunStartedRepository(MemoryRunRepository):
-        def append_indexed_events(self, run_id, events):
-            if any(
-                event["payload"].get("type") == "run_started"
-                for event in events
-            ):
-                raise OSError("run_started persistence failed")
-            return super().append_events(
-                run_id,
-                [dict(event["payload"]) for event in events],
-            )
-
-    async def scenario() -> None:
-        repository = FailingRunStartedRepository()
-        manager = RunManager(repository=repository)
-
-        with pytest.raises(RuntimeError, match="run event writer failed"):
-            await manager.create_run(
-                conversation_id="conv-1",
-                kind=RunKind.SUBAGENT,
-            )
-
-        persisted = repository.list_runs()
-        assert len(persisted) == 1
-        assert persisted[0]["status"] == RunStatus.INTERRUPTED.value
-        events = repository.read_events(persisted[0]["run_id"], 0)
-        assert events[-1]["payload"]["status"] == RunStatus.INTERRUPTED.value
-        await manager.close()
-
-    asyncio.run(scenario())
-
-
 def test_event_writer_failure_isolated_and_failed_run_can_terminalize(caplog):
     class FailOneRunOnceRepository(MemoryRunRepository):
         def __init__(self) -> None:
@@ -256,15 +223,12 @@ def test_event_writer_failure_isolated_and_failed_run_can_terminalize(caplog):
             conversation_id="conv-1",
             kind=RunKind.SUBAGENT,
         )
-        await manager.flush_events()
         repository.fail_run_id = failed_run.run_id
 
         await manager.append_event(
             failed_run.run_id,
             {"status": "content", "content": "not persisted"},
         )
-        with pytest.raises(RuntimeError, match=failed_run.run_id):
-            await manager.flush_run_events(failed_run.run_id)
 
         healthy = await manager.finish_run(
             healthy_run.run_id,

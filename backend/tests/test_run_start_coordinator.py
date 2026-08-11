@@ -374,40 +374,6 @@ def test_close_during_post_commit_reservation_terminalizes_canonical_run():
     asyncio.run(scenario())
 
 
-def test_event_writer_failure_still_terminalizes_committed_reservation():
-    class FailingIndexedRepository(MemoryRunRepository):
-        def append_indexed_events(self, run_id, events):
-            raise OSError("event store unavailable")
-
-    async def scenario() -> None:
-        repository = FailingIndexedRepository()
-        manager = RunManager(repository=repository)
-        registry = ProducerRegistry.for_run_manager(manager)
-        coordinator = RunStartCoordinator(manager, registry)
-        bootstrap_calls = 0
-
-        async def bootstrap(_record):
-            nonlocal bootstrap_calls
-            bootstrap_calls += 1
-            raise AssertionError("bootstrap must not run")
-
-        with pytest.raises(RunStartSchedulingError) as raised:
-            await coordinator.start(_spec(), bootstrap)
-
-        run_id = raised.value.run_id
-        assert bootstrap_calls == 0
-        assert manager.get_run(run_id)["status"] == "interrupted"
-        persisted = repository.get_run(run_id)
-        assert persisted["status"] == "interrupted"
-        assert persisted["event_count"] == 1
-        assert repository.read_events(run_id, 0)[0]["payload"]["status"] == "interrupted"
-        assert await coordinator.close() == ()
-        assert await registry.close() == ()
-        await manager.close()
-
-    asyncio.run(scenario())
-
-
 def test_repository_loser_load_failure_does_not_interrupt_running_winner():
     class RacingRepository(MemoryRunRepository):
         def __init__(self):

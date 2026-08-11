@@ -11,6 +11,7 @@ from backend.core.persistence.repository import ChatRepository
 from backend.core.persistence.run_repository import SQLiteRunRepository
 from backend.core.runs import (
     RunIdempotencyConflictError,
+    RunJournal,
     RunManager,
     RunReferenceConversationMismatchError,
     RunReferenceNotFoundError,
@@ -707,7 +708,7 @@ def test_run_manager_restores_semantic_terminal_result_after_restart(tmp_path):
 def test_run_manager_publishes_events_before_background_flush(tmp_path):
     async def scenario():
         _persistence, _chat, runs, conv_id, node_id = _repositories(tmp_path)
-        manager = RunManager(repository=runs)
+        manager = RunManager(repository=runs, journal=RunJournal(tmp_path))
         record = await manager.create_run(
             conversation_id=conv_id,
             kind="chat",
@@ -727,17 +728,24 @@ def test_run_manager_publishes_events_before_background_flush(tmp_path):
             "chunk-3",
             "chunk-4",
         ]
-
-        await manager.flush_run_events(record.run_id)
-        stored_events = runs.read_events(record.run_id)
-        assert [event["event_index"] for event in stored_events] == list(range(6))
-        assert [event["payload"].get("content") for event in stored_events[1:]] == [
+        # 流式期间事件只写入 JSONL 兜底，SQLite 尚未落库。
+        journal_events = manager.journal.read_events(conv_id, record.run_id)
+        assert [event["payload"].get("content") for event in journal_events[1:]] == [
             "chunk-0",
             "chunk-1",
             "chunk-2",
             "chunk-3",
             "chunk-4",
         ]
+        assert runs.read_events(record.run_id) == []
+
+        # finish 时一次性落库，SQLite 只剩终态事件，JSONL 被删除。
+        await manager.finish_run(record.run_id, RunStatus.COMPLETED)
+        stored_events = runs.read_events(record.run_id)
+        assert [event["payload"].get("type") for event in stored_events] == [
+            "run_finished",
+        ]
+        assert manager.journal.list_run_files() == []
 
     asyncio.run(scenario())
 
@@ -774,7 +782,7 @@ def test_run_manager_bind_target_node_persists_sqlite_run_record(tmp_path):
     async def scenario():
         _persistence, chat, runs, conv_id, node_id = _repositories(tmp_path)
         target_node_id = chat.create_node(conv_id, parent_id=node_id)
-        manager = RunManager(repository=runs)
+        manager = RunManager(repository=runs, journal=RunJournal(tmp_path))
         record = await manager.create_run(
             conversation_id=conv_id,
             kind="chat",
@@ -786,10 +794,13 @@ def test_run_manager_bind_target_node_persists_sqlite_run_record(tmp_path):
         assert updated.target_node_id == target_node_id
         assert manager.get_run(record.run_id)["target_node_id"] == target_node_id
         assert runs.get_run(record.run_id)["target_node_id"] == target_node_id
-        await manager.flush_run_events(record.run_id)
-        events = runs.read_events(record.run_id)
-        assert events[-1]["payload"]["type"] == "run_target_bound"
-        assert events[-1]["payload"]["target_node_id"] == target_node_id
+        bound_events = [
+            event["payload"]
+            for event in manager.journal.read_events(conv_id, record.run_id)
+            if event["payload"].get("type") == "run_target_bound"
+        ]
+        assert bound_events[-1]["type"] == "run_target_bound"
+        assert bound_events[-1]["target_node_id"] == target_node_id
 
     asyncio.run(scenario())
 
@@ -798,7 +809,7 @@ def test_run_manager_bind_anchor_node_persists_once(tmp_path):
     async def scenario():
         _persistence, chat, runs, conv_id, node_id = _repositories(tmp_path)
         next_anchor_id = chat.create_node(conv_id, parent_id=node_id)
-        manager = RunManager(repository=runs)
+        manager = RunManager(repository=runs, journal=RunJournal(tmp_path))
         record = await manager.create_run(
             conversation_id=conv_id,
             kind="workflow",
@@ -812,10 +823,9 @@ def test_run_manager_bind_anchor_node_persists_once(tmp_path):
         assert repeated.anchor_node_id == next_anchor_id
         assert manager.get_run(record.run_id)["anchor_node_id"] == next_anchor_id
         assert runs.get_run(record.run_id)["anchor_node_id"] == next_anchor_id
-        await manager.flush_run_events(record.run_id)
         bound_events = [
             event["payload"]
-            for event in runs.read_events(record.run_id)
+            for event in manager.journal.read_events(conv_id, record.run_id)
             if event["payload"].get("type") == "run_anchor_bound"
         ]
         assert len(bound_events) == 1
@@ -878,7 +888,7 @@ def test_run_manager_bind_anchor_node_preserves_missing_anchor_fk(tmp_path):
 def test_run_manager_rehydrates_repository_runs_after_restart(tmp_path):
     async def scenario():
         _persistence, _chat, runs, conv_id, node_id = _repositories(tmp_path)
-        first = RunManager(repository=runs)
+        first = RunManager(repository=runs, journal=RunJournal(tmp_path))
         record = await first.create_run(
             conversation_id=conv_id,
             kind="chat",
@@ -888,7 +898,7 @@ def test_run_manager_rehydrates_repository_runs_after_restart(tmp_path):
         await first.append_event(record.run_id, {"status": "content", "content": "persisted"})
         await first.close()
 
-        restarted = RunManager(repository=runs)
+        restarted = RunManager(repository=runs, journal=RunJournal(tmp_path))
 
         assert restarted.get_run(record.run_id)["status"] == "running"
         assert [run["run_id"] for run in restarted.list_active(conv_id)] == [record.run_id]
