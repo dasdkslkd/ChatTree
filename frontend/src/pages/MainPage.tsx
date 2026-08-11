@@ -24,6 +24,7 @@ import {
   DialogContent,
   DialogHeader,
   DialogTitle,
+  DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog';
 import {
@@ -34,7 +35,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import {
   Plus, X, MoreHorizontal, ChevronRight, Square,
-  Check, Pencil, Loader2, Network, MessageSquare, FileText, Download, FolderOpen, Search, Settings,
+  Check, Pencil, Loader2, Network, MessageSquare, FileText, Download, FolderOpen, Search, Settings, Trash2,
   PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, ArrowLeft, Folder,
 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -189,6 +190,7 @@ type QueuedMessage = {
 /* ---------- Component ---------- */
 export default function ChatPage() {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const [hoveredProjectId, setHoveredProjectId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [outlineCollapsed, setOutlineCollapsed] = useState(false);
   const [rightPanelView, setRightPanelView] = useState<'outline' | 'side' | 'tasks' | 'files'>('outline');
@@ -477,6 +479,10 @@ export default function ChatPage() {
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
   const [renameConversationId, setRenameConversationId] = useState<string | null>(null);
   const [renameTitle, setRenameTitle] = useState('');
+  const [projectRenameDialogOpen, setProjectRenameDialogOpen] = useState(false);
+  const [projectRenamePath, setProjectRenamePath] = useState<string | null>(null);
+  const [projectRenameLabel, setProjectRenameLabel] = useState('');
+  const [projectDeletePath, setProjectDeletePath] = useState<string | null>(null);
 
   const handleRenameClick = (id: string, currentTitle: string) => {
     setRenameConversationId(id);
@@ -521,6 +527,64 @@ export default function ChatPage() {
     setRenameDialogOpen(false);
     setRenameConversationId(null);
     setRenameTitle('');
+  };
+
+  const openProjectRename = (path: string, currentLabel: string) => {
+    setProjectRenamePath(path);
+    setProjectRenameLabel(currentLabel || '');
+    setProjectRenameDialogOpen(true);
+  };
+
+  const confirmProjectRename = async () => {
+    const path = projectRenamePath;
+    if (path && projectRenameLabel.trim()) {
+      try {
+        await configApi.updateProject(path, { label: projectRenameLabel.trim() });
+        await loadProjects();
+        await loadConversations();
+      } catch (error) {
+        toast.error(getApiErrorMessage(error, '重命名项目失败'));
+      }
+    }
+    setProjectRenameDialogOpen(false);
+    setProjectRenamePath(null);
+    setProjectRenameLabel('');
+  };
+
+  const cancelProjectRename = () => {
+    setProjectRenameDialogOpen(false);
+    setProjectRenamePath(null);
+    setProjectRenameLabel('');
+  };
+
+  const toggleProjectVisible = async (path: string, visible: boolean) => {
+    try {
+      await configApi.updateProject(path, { visible });
+      await loadProjects();
+    } catch (error) {
+      toast.error(getApiErrorMessage(error, '更新项目可见性失败'));
+    }
+  };
+
+  const handleDeleteProjectFromMenu = (path: string) => {
+    setProjectDeletePath(path);
+  };
+
+  const confirmProjectDelete = async () => {
+    const path = projectDeletePath;
+    setProjectDeletePath(null);
+    if (!path) return;
+    try {
+      await configApi.deleteProject(path);
+      await loadProjects();
+      await loadConversations();
+      if (selectedProjectId === encodeProjectId(path)) {
+        setSelectedProjectId(null);
+      }
+      toast.success('项目已删除');
+    } catch (error) {
+      toast.error(getApiErrorMessage(error, '删除项目失败'));
+    }
   };
 
   const activeRunStates = useRunManager(currentConversation?.id ?? null);
@@ -876,13 +940,16 @@ export default function ChatPage() {
     [allProjectGroups, selectedProjectId, defaultWorkspace],
   );
 
-  const fileBrowserRoot = useMemo(
-    () => currentConversation?.workspace?.cwd
-      || selectedNewConversationWorkspace.cwd
-      || defaultWorkspace?.cwd
-      || '',
-    [currentConversation?.workspace?.cwd, selectedNewConversationWorkspace.cwd, defaultWorkspace?.cwd],
-  );
+  const fileBrowserRoots = useMemo(() => {
+    const workspace = currentConversation?.workspace
+      || selectedNewConversationWorkspace
+      || defaultWorkspace
+      || null;
+    const roots = workspace?.workspace_roots?.length
+      ? workspace.workspace_roots
+      : (workspace?.cwd ? [workspace.cwd] : []);
+    return [...new Set(roots.filter(Boolean))];
+  }, [currentConversation?.workspace, selectedNewConversationWorkspace, defaultWorkspace]);
 
   useEffect(() => {
     if (!allProjectGroups.length) return;
@@ -985,8 +1052,56 @@ export default function ChatPage() {
     }
   };
 
+  /** 把选中的目录持久化写入所选主项目配置的 workspace_roots（多根工作区）。 */
+  const handleAppendProjectFolder = async () => {
+    setProjectPickerOpen(false);
+    if (!window.electronAPI) {
+      toast.error('请在桌面客户端中添加项目文件夹');
+      return;
+    }
+    const base = selectedNewConversationWorkspace;
+    const cwd = base?.cwd;
+    if (!cwd) {
+      toast.error('请先选择主项目');
+      return;
+    }
+    setProjectFolderSubmitting(true);
+    try {
+      const path = await window.electronAPI.selectProjectFolder();
+      if (!path) return;
+      const existingRoots = base?.workspace_roots?.length ? base.workspace_roots : [cwd];
+      const roots = [...new Set([...existingRoots, path].filter(Boolean))];
+      await configApi.updateProject(cwd, { workspace_roots: roots });
+      await loadProjects();
+    } catch (error) {
+      toast.error(getApiErrorMessage(error, '追加文件夹失败'));
+    } finally {
+      setProjectFolderSubmitting(false);
+    }
+  };
+
+  /** 从所选主项目配置的 workspace_roots 中移除一个追加目录（主根不可移除）。 */
+  const handleRemoveWorkspaceRoot = async (rootToRemove: string) => {
+    const base = selectedNewConversationWorkspace;
+    const cwd = base?.cwd;
+    if (!cwd || rootToRemove === cwd) return;
+    const remaining = (base?.workspace_roots || [cwd]).filter((r) => r !== rootToRemove);
+    try {
+      await configApi.updateProject(cwd, { workspace_roots: remaining });
+      await loadProjects();
+    } catch (error) {
+      toast.error(getApiErrorMessage(error, '移除目录失败'));
+    }
+  };
+
   const selectedProjectGroup = allProjectGroups.find((group) => group.id === selectedProjectId) || allProjectGroups[0] || null;
   const newChatProjectLabel = selectedNewConversationWorkspace.label || '默认项目';
+  // 所选项目除主根外的追加工作区目录（用于展示与逐个移除）。
+  const appendedWorkspaceRoots = useMemo(() => {
+    const base = selectedNewConversationWorkspace;
+    const roots = base?.workspace_roots?.length ? base.workspace_roots : (base?.cwd ? [base.cwd] : []);
+    return roots.filter((root) => root !== base?.cwd);
+  }, [selectedNewConversationWorkspace]);
   const filteredProjectGroups = projectPickerSearch.trim()
     ? allProjectGroups.filter((group) => {
         const query = projectPickerSearch.trim().toLowerCase();
@@ -1068,6 +1183,43 @@ export default function ChatPage() {
               </span>
             </span>
           </button>
+          <button
+            type="button"
+            className="new-chat-project-option"
+            disabled={projectFolderSubmitting}
+            onClick={() => void handleAppendProjectFolder()}
+          >
+            {projectFolderSubmitting
+              ? <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+              : <Plus className="h-4 w-4 shrink-0" />}
+            <span className="min-w-0 flex-1 text-left">
+              <span className="block truncate text-sm">追加工作区目录</span>
+              <span className="block truncate text-[11px]" style={{ color: 'var(--fg-tertiary)' }}>
+                {appendedWorkspaceRoots.length > 0
+                  ? `已追加 ${appendedWorkspaceRoots.length} 个目录，与所选项目组成多根工作区`
+                  : '为当前所选项目追加更多目录（持久化保存）'}
+              </span>
+            </span>
+          </button>
+          {appendedWorkspaceRoots.length > 0 && (
+            <div className="border-t px-3 py-2" style={{ borderColor: 'var(--border)' }}>
+              {appendedWorkspaceRoots.map((folder) => (
+                <div key={folder} className="flex items-center gap-1 py-0.5 text-[11px]" style={{ color: 'var(--fg-secondary)' }}>
+                  <Folder className="h-3 w-3 shrink-0" />
+                  <span className="min-w-0 flex-1 truncate">{folder}</span>
+                  <button
+                    type="button"
+                    aria-label="移除该追加目录"
+                    className="shrink-0 opacity-0 hover:opacity-100"
+                    style={{ color: 'var(--fg-tertiary)' }}
+                    onClick={() => void handleRemoveWorkspaceRoot(folder)}
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </DropdownMenuContent>
     </DropdownMenu>
@@ -2319,28 +2471,63 @@ export default function ChatPage() {
                     onDrop={(event) => event.preventDefault()}
                   >
                     <TextTooltip content={group.path} side="right">
-                      <button
-                        type="button"
+                      <div
                         className={cn('app-project-row', selectedProject && 'is-active')}
-                        draggable
-                        onDragStart={(event) => handleProjectDragStart(event, group.id)}
-                        onDragEnd={handleProjectDragEnd}
-                        onClick={(event) => {
-                          if (projectDragMovedRef.current) {
-                            event.preventDefault();
-                            return;
-                          }
-                          setSelectedProjectId(group.id);
-                          toggleProjectCollapsed(group.id);
-                        }}
+                        onMouseEnter={() => setHoveredProjectId(group.id)}
+                        onMouseLeave={() => setHoveredProjectId(null)}
                       >
                         <ChevronRight
                           className={cn('h-3.5 w-3.5 shrink-0 transition-transform', !group.isCollapsed && 'rotate-90')}
+                          onClick={toggleProjectCollapsed.bind(null, group.id)}
                         />
-                        <FolderOpen className="h-4 w-4 shrink-0" />
-                        <span className="app-project-name">{group.label}</span>
-                        <span className="app-project-count">{group.conversations.length}</span>
-                      </button>
+                        <button
+                          type="button"
+                          className="min-w-0 flex flex-1 items-center gap-0.5"
+                          draggable
+                          onDragStart={(event) => handleProjectDragStart(event, group.id)}
+                          onDragEnd={handleProjectDragEnd}
+                          onClick={(event) => {
+                            if (projectDragMovedRef.current) {
+                              event.preventDefault();
+                              return;
+                            }
+                            setSelectedProjectId(group.id);
+                          }}
+                        >
+                          <FolderOpen className="h-4 w-4 shrink-0" />
+                          <span className="app-project-name">{group.label}</span>
+                          <span className="app-project-count">{group.conversations.length}</span>
+                        </button>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className={cn(
+                                'app-session-more',
+                                hoveredProjectId === group.id || selectedProject ? 'opacity-100' : 'opacity-0'
+                              )}
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <MoreHorizontal className="h-4 w-4" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent>
+                            <DropdownMenuItem onClick={() => openProjectRename(group.path, group.label)}>
+                              <Pencil className="h-4 w-4 mr-2" />
+                              重命名
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => toggleProjectVisible(group.path, (projectConfigs[group.path]?.visible ?? true) === false)}>
+                              <FolderOpen className="h-4 w-4 mr-2" />
+                              {projectConfigs[group.path]?.visible === false ? '显示项目' : '隐藏项目'}
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => handleDeleteProjectFromMenu(group.path)}>
+                              <Trash2 className="h-4 w-4 mr-2" />
+                              删除项目
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </div>
                     </TextTooltip>
                     {!group.isCollapsed && (
                       <div className="app-session-list">
@@ -2737,8 +2924,8 @@ export default function ChatPage() {
                 renderTaskPanel()
               ) : rightPanelView === 'files' ? (
                 <div className="flex min-h-0 flex-1 flex-col">
-                  {fileBrowserRoot ? (
-                    <FileBrowser key={fileBrowserRoot} root={fileBrowserRoot} />
+                  {fileBrowserRoots.length > 0 ? (
+                    <FileBrowser key={fileBrowserRoots.join('|')} roots={fileBrowserRoots} />
                   ) : (
                     <div className="px-3 py-4 text-xs" style={{ color: 'var(--fg-tertiary)' }}>
                       暂无可浏览的项目目录。
@@ -2856,6 +3043,41 @@ export default function ChatPage() {
           <DialogFooter>
             <Button variant="outline" onClick={handleRenameCancel}>取消</Button>
             <Button onClick={handleRenameConfirm}>确认</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Project rename dialog */}
+      <Dialog open={projectRenameDialogOpen} onOpenChange={(open) => !open && cancelProjectRename()}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>重命名项目</DialogTitle>
+          </DialogHeader>
+          <Input
+            value={projectRenameLabel}
+            onChange={(e) => setProjectRenameLabel(e.target.value)}
+            placeholder="请输入项目名称"
+            onKeyDown={(e) => e.key === 'Enter' && confirmProjectRename()}
+          />
+          <DialogFooter>
+            <Button variant="outline" onClick={cancelProjectRename}>取消</Button>
+            <Button onClick={confirmProjectRename}>确认</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Project delete confirm dialog */}
+      <Dialog open={!!projectDeletePath} onOpenChange={(open) => !open && setProjectDeletePath(null)}>
+        <DialogContent className="max-w-[420px]">
+          <DialogHeader>
+            <DialogTitle>删除项目</DialogTitle>
+            <DialogDescription>
+              将删除项目「{allProjectGroups.find((g) => g.path === projectDeletePath)?.label || projectDeletePath}」及其全部对话历史。此操作不可撤销。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setProjectDeletePath(null)}>取消</Button>
+            <Button variant="destructive" onClick={() => void confirmProjectDelete()}>删除项目</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

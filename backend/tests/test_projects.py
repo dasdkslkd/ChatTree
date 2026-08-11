@@ -2,7 +2,13 @@
 import asyncio
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+import backend.api.routes.conversations as conversations_route
+from backend.api.errors import install_error_handlers
 from backend.api.routes import config as config_route
 from backend.core import projects as projects_mod
 from backend.core.command_runtime import _command_env
@@ -144,3 +150,41 @@ def test_detected_endpoint_returns_path_lookups(monkeypatch):
     result = asyncio.run(config_route.get_dev_environment_detected())
     assert result["python"] == str(Path("/usr/bin/python.exe"))
     assert set(result) == set(config_route.DEV_ENVIRONMENT_DETECT_TOOLS)
+
+
+def test_delete_project_removes_config_and_history(monkeypatch, tmp_path):
+    project_a = str(tmp_path / "proj_a")
+    project_b = str(tmp_path / "proj_b")
+    config_data = {
+        "provider": {},
+        "default_provider": "",
+        "default_model": "",
+        "projects": {project_a: {"label": "A"}, project_b: {"label": "B"}},
+    }
+    app = FastAPI()
+    app.state.config_manager = SimpleNamespace(data=config_data, save=lambda: None)
+    deleted: list[str] = []
+    app.state.chat_manager = SimpleNamespace(
+        list_conversations=lambda: [{
+            "id": "c1",
+            "workspace": {"cwd": project_a, "workspace_roots": [project_a]},
+        }],
+        delete_conversation=lambda cid: deleted.append(cid),
+    )
+    app.state.run_manager = SimpleNamespace(
+        list_active=lambda cid: [],
+        request_stop=lambda rid: None,
+    )
+    app.state.tool_manager = SimpleNamespace(_config=config_data)
+    # 避免写入全局 cfg 单例
+    monkeypatch.setattr(conversations_route, "cfg", SimpleNamespace())
+    install_error_handlers(app)
+    app.include_router(conversations_route.router, prefix="/api/v1")
+    client = TestClient(app)
+
+    resp = client.delete(f"/api/v1/projects/{project_a}")
+    assert resp.status_code == 200
+    assert resp.json()["deleted_ids"] == ["c1"]
+    # 该项目配置被删除，其它项目保留
+    assert project_a not in config_data["projects"]
+    assert project_b in config_data["projects"]

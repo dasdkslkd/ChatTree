@@ -35,6 +35,8 @@ export function ProjectsSection() {
   const [draft, setDraft] = useState<ProjectCapabilityConfig | null>(null);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [deleteProjectDialogOpen, setDeleteProjectDialogOpen] = useState(false);
+  const [deletingProject, setDeletingProject] = useState(false);
 
   const loadProjects = useCallback(async () => {
     try {
@@ -145,6 +147,23 @@ export function ProjectsSection() {
       toast.error('删除失败: ' + (err instanceof Error ? err.message : ''));
     } finally {
       setDeleting(false);
+    }
+  };
+
+  const handleDeleteProject = async () => {
+    if (!selectedProject) return;
+    try {
+      setDeletingProject(true);
+      await configApi.deleteProject(selectedProject.path);
+      setDeleteProjectDialogOpen(false);
+      toast.success('项目已删除');
+      window.dispatchEvent(new Event('chattree-projects-updated'));
+      setSelectedPath(null);
+      await loadProjects();
+    } catch (err) {
+      toast.error('删除项目失败: ' + (err instanceof Error ? err.message : ''));
+    } finally {
+      setDeletingProject(false);
     }
   };
 
@@ -285,6 +304,28 @@ export function ProjectsSection() {
                     </Button>
                   </div>
                 </div>
+
+                <div className="rounded-xl p-4" style={{ border: '0.5px solid var(--destructive, #ef4444)' }}>
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 text-sm font-medium" style={{ color: 'var(--destructive, #ef4444)' }}>
+                        <Trash2 className="h-4 w-4" />
+                        删除项目
+                      </div>
+                      <div className="mt-1 text-xs" style={{ color: 'var(--fg-tertiary)' }}>
+                        移除该项目及其全部对话历史，此操作不可撤销
+                      </div>
+                    </div>
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      onClick={() => setDeleteProjectDialogOpen(true)}
+                    >
+                      <Trash2 className="h-4 w-4 mr-1" />
+                      删除项目
+                    </Button>
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -312,6 +353,24 @@ export function ProjectsSection() {
             <Button variant="destructive" onClick={handleDeleteHistory} disabled={deleting}>
               {deleting ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Trash2 className="h-4 w-4 mr-1" />}
               删除
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={deleteProjectDialogOpen} onOpenChange={setDeleteProjectDialogOpen}>
+        <DialogContent className="max-w-[420px]">
+          <DialogHeader>
+            <DialogTitle>删除项目</DialogTitle>
+            <DialogDescription>
+              将删除项目「{selectedProject?.label}」及其全部对话历史；运行中的任务会先请求停止。此操作不可撤销。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteProjectDialogOpen(false)} disabled={deletingProject}>取消</Button>
+            <Button variant="destructive" onClick={handleDeleteProject} disabled={deletingProject}>
+              {deletingProject ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Trash2 className="h-4 w-4 mr-1" />}
+              删除项目
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -145,4 +145,9 @@ export const configApi = {
     const response = await apiClient.post('/projects/history/delete', { path, force });
     return response.data;
   },
+
+  deleteProject: async (path: string): Promise<{ project_path: string; deleted_count: number; deleted_ids: string[]; skipped_active_ids: string[] }> => {
+    const response = await apiClient.delete(`/projects/${encodeURIComponent(path)}`);
+    return response.data;
+  },
 };

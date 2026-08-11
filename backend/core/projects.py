@@ -34,6 +34,10 @@ def normalize_project_config(raw: Any) -> dict[str, Any]:
         "visible": source.get("visible", True) is not False,
         "dev_environment": normalize_dev_environment(source.get("dev_environment")),
     }
+    roots = source.get("workspace_roots")
+    if isinstance(roots, list):
+        normalized_roots = [normalize_project_path(item) for item in roots]
+        result["workspace_roots"] = [root for root in normalized_roots if root]
     for key in ("enabled_skills", "enabled_mcp_servers", "enabled_agents"):
         result[key] = _normalize_optional_string_list(source.get(key))
     return result

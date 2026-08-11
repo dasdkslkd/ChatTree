@@ -234,6 +234,7 @@ export interface DevEnvironmentConfig {
 export interface ProjectCapabilityConfig {
   label?: string;
   visible?: boolean;
+  workspace_roots?: string[];
   enabled_skills?: string[] | null;
   enabled_mcp_servers?: string[] | null;
   enabled_agents?: string[] | null;

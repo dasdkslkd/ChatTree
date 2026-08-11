@@ -32,11 +32,12 @@ class ProjectFolderRequest(BaseModel):
 class ProjectConfigUpdateRequest(BaseModel):
     path: str
     label: Optional[str] = None
-    visible: Optional[bool] = True
+    visible: Optional[bool] = None
     enabled_skills: Optional[List[str]] = None
     enabled_mcp_servers: Optional[List[str]] = None
     enabled_agents: Optional[List[str]] = None
     dev_environment: Optional[Dict[str, Any]] = None
+    workspace_roots: Optional[List[str]] = None
 
 class ProjectHistoryDeleteRequest(BaseModel):
     path: str
@@ -178,7 +179,7 @@ async def list_projects(
                 "label": project_config.get("label") or Path(path).name or "默认项目",
                 "workspace": normalize_workspace({
                     "cwd": path,
-                    "workspace_roots": [path],
+                    "workspace_roots": project_config.get("workspace_roots") or [path],
                     "label": project_config.get("label") or Path(path).name,
                 }),
                 "conversation_count": 0,
@@ -186,14 +187,26 @@ async def list_projects(
             }
 
         for path, project in projects_by_path.items():
-            project["config"] = configured.get(path, {
-                "label": project.get("label") or "",
-                "visible": True,
-                "enabled_skills": None,
-                "enabled_mcp_servers": None,
-                "enabled_agents": None,
-                "dev_environment": {"tools": {}, "environments": {}, "default_environment": ""},
-            })
+            project_config = configured.get(path, {})
+            if project_config.get("label"):
+                project["label"] = project_config.get("label")
+            # 项目的工作区目录（含多根）以配置为准：配置是持久化源，会话快照可能滞后。
+            roots = project_config.get("workspace_roots")
+            if roots:
+                project["workspace"] = normalize_workspace({
+                    "cwd": project.get("path") or path,
+                    "workspace_roots": roots,
+                    "label": project.get("label") or Path(path).name,
+                })
+            project["config"] = {
+                "label": project_config.get("label") or "",
+                "visible": project_config.get("visible", True),
+                "workspace_roots": roots or [project.get("path") or path],
+                "enabled_skills": project_config.get("enabled_skills"),
+                "enabled_mcp_servers": project_config.get("enabled_mcp_servers"),
+                "enabled_agents": project_config.get("enabled_agents"),
+                "dev_environment": project_config.get("dev_environment", {"tools": {}, "environments": {}, "default_environment": ""}),
+            }
 
         return {
             "projects": sorted(
@@ -218,16 +231,26 @@ async def update_project_config(
     if not path:
         raise HTTPException(status_code=400, detail="Project path is required")
     projects = normalize_projects_config(config_manager.data.get("projects"))
+    existing = projects.get(path, {})
+    if payload.workspace_roots is not None:
+        roots = [normalize_project_path(item) for item in payload.workspace_roots]
+        roots = [root for root in roots if root]
+        # 主项目 cwd 恒为第一根，避免 roots 与项目身份错位。
+        if roots and path not in roots:
+            roots.insert(0, path)
+    else:
+        roots = existing.get("workspace_roots", [path])
     projects[path] = {
-        "label": payload.label or projects.get(path, {}).get("label") or Path(path).name,
-        "visible": payload.visible is not False,
+        "label": payload.label or existing.get("label") or Path(path).name,
+        "visible": payload.visible if payload.visible is not None else existing.get("visible", True),
+        "workspace_roots": roots,
         "enabled_skills": payload.enabled_skills,
         "enabled_mcp_servers": payload.enabled_mcp_servers,
         "enabled_agents": payload.enabled_agents,
         "dev_environment": (
             normalize_dev_environment(payload.dev_environment)
             if payload.dev_environment is not None
-            else projects.get(path, {}).get("dev_environment"),
+            else existing.get("dev_environment"),
         ),
     }
     config_manager.data["projects"] = normalize_projects_config(projects)
@@ -279,6 +302,56 @@ async def delete_project_history(
         deleted.append(str(conversation_id))
     return {
         "project_path": target_path,
+        "deleted_count": len(deleted),
+        "deleted_ids": deleted,
+        "skipped_active_ids": skipped_active,
+    }
+
+
+@router.delete("/projects/{project_path:path}", response_model=Dict[str, Any])
+async def delete_project(
+    project_path: str,
+    http_request: Request,
+    chat_manager: ChatManager = Depends(get_chat_manager),
+    run_manager: RunManager = Depends(get_run_manager),
+    config_manager: Config = Depends(get_config_manager),
+):
+    """删除项目配置及其全部对话历史。"""
+    path = normalize_project_path(project_path)
+    if not path:
+        raise HTTPException(status_code=400, detail="Project path is required")
+    deleted: list[str] = []
+    skipped_active: list[str] = []
+    for item in chat_manager.list_conversations():
+        workspace = item.get("workspace")
+        workspace = workspace if isinstance(workspace, dict) else {}
+        if workspace_project_path(workspace) != path and path not in [
+            normalize_project_path(root)
+            for root in (workspace.get("workspace_roots") or [])
+        ]:
+            continue
+        conversation_id = item.get("id")
+        if not conversation_id:
+            continue
+        active_runs = run_manager.list_active(str(conversation_id))
+        if active_runs:
+            for run in active_runs:
+                await run_manager.request_stop(str(run.get("run_id")))
+            skipped_active.append(str(conversation_id))
+            continue
+        chat_manager.delete_conversation(str(conversation_id))
+        deleted.append(str(conversation_id))
+    projects = normalize_projects_config(config_manager.data.get("projects"))
+    if path in projects:
+        del projects[path]
+    config_manager.data["projects"] = normalize_projects_config(projects)
+    config_manager.save()
+    cfg.data = config_manager.data
+    tool_manager = getattr(http_request.app.state, "tool_manager", None)
+    if tool_manager is not None and hasattr(tool_manager, "_config"):
+        tool_manager._config = config_manager.data
+    return {
+        "project_path": path,
         "deleted_count": len(deleted),
         "deleted_ids": deleted,
         "skipped_active_ids": skipped_active,

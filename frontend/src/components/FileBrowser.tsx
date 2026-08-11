@@ -1,6 +1,5 @@
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ArrowLeft,
   ChevronRight,
   Copy,
   File,
@@ -64,12 +63,17 @@ function joinPath(parent: string, name: string): string {
   return `${parent.replace(/[\\/]+$/, '')}/${name}`;
 }
 
-function pathParent(path: string): string | null {
-  const trimmed = path.replace(/[\\/]+$/, '');
-  if (!trimmed) return null;
-  const idx = trimmed.lastIndexOf('/');
-  if (idx < 0) return null;
-  return trimmed.slice(0, idx) || null;
+/** 取目录/文件路径的显示名（末段）。 */
+function baseName(path: string): string {
+  const cleaned = path.replace(/[\\/]+$/, '');
+  const parts = cleaned.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] || cleaned;
+}
+
+/** 判断路径是否落在某个根目录之下。 */
+function isUnderAnyRoot(path: string, roots: string[]): boolean {
+  const p = path.replace(/\\/g, '/');
+  return roots.some((root) => p.startsWith(`${root.replace(/\\/g, '/')}/`));
 }
 
 function toNode(entry: FileEntry, parentPath: string): TreeNode {
@@ -108,8 +112,9 @@ function updateNodeInTree(nodes: TreeNode[], path: string, updater: (node: TreeN
   });
 }
 
-export function FileBrowser({ root }: { root: string }) {
-  const [currentPath, setCurrentPath] = useState(root);
+export function FileBrowser({ roots: rawRoots }: { roots: string[] }) {
+  // 去重、去空后的多根目录（森林的顶级节点来源于此）。
+  const roots = useMemo(() => [...new Set(rawRoots.filter(Boolean))], [rawRoots]);
   const [nodes, setNodes] = useState<TreeNode[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -126,19 +131,38 @@ export function FileBrowser({ root }: { root: string }) {
   const tabBarRef = useRef<HTMLDivElement | null>(null);
   const treeDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
 
+  /** 列出所有根目录，构建森林顶级节点（每根一个已展开目录节点）。 */
+  const listForest = useCallback((): Promise<void> => {
+    if (roots.length === 0) {
+      setNodes([]);
+      return Promise.resolve();
+    }
+    return Promise.all(
+      roots.map(async (root) => {
+        const data = await filesApi.list(root);
+        return {
+          name: baseName(root),
+          path: root,
+          type: 'dir' as const,
+          size: 0,
+          expanded: true,
+          loading: false,
+          children: data.entries.map((entry) => toNode(entry, root)),
+        };
+      }),
+    )
+      .then((forest) => setNodes(forest))
+      .catch((loadError) => setError(getApiErrorMessage(loadError, '加载目录失败')));
+  }, [roots]);
+
   useEffect(() => {
     setLoading(true);
     setError(null);
-    setNodes(null);
     setSelectedPath(null);
     setOpenFiles([]);
     setActivePath(null);
-    filesApi
-      .list(currentPath)
-      .then((data) => setNodes(data.entries.map((entry) => toNode(entry, currentPath))))
-      .catch((loadError) => setError(getApiErrorMessage(loadError, '加载目录失败')))
-      .finally(() => setLoading(false));
-  }, [currentPath]);
+    listForest().finally(() => setLoading(false));
+  }, [listForest]);
 
   const openNode = useCallback((node: TreeNode) => {
     if (node.type === 'dir') return;
@@ -218,12 +242,25 @@ export function FileBrowser({ root }: { root: string }) {
   }, []);
 
   // ── 右键菜单 ─────────────────────────────────────────────────────────
-  const reloadTop = useCallback((dirPath: string) => {
-    filesApi
-      .list(dirPath)
-      .then((data) => setNodes(data.entries.map((entry) => toNode(entry, dirPath))))
+  const reloadTop = useCallback(() => {
+    if (roots.length === 0) return;
+    Promise.all(
+      roots.map(async (root) => {
+        const data = await filesApi.list(root);
+        return {
+          name: baseName(root),
+          path: root,
+          type: 'dir' as const,
+          size: 0,
+          expanded: true,
+          loading: false,
+          children: data.entries.map((entry) => toNode(entry, root)),
+        };
+      }),
+    )
+      .then(setNodes)
       .catch((loadError) => setError(getApiErrorMessage(loadError, '加载目录失败')));
-  }, []);
+  }, [roots]);
 
   const openRowMenu = useCallback((node: TreeNode, event: React.MouseEvent) => {
     event.preventDefault();
@@ -256,9 +293,12 @@ export function FileBrowser({ root }: { root: string }) {
   }, []);
 
   const relativePath = (path: string) => {
-    const base = root.replace(/\\/g, '/');
     const p = path.replace(/\\/g, '/');
-    return p.startsWith(`${base}/`) ? p.slice(base.length + 1) : p;
+    for (const root of roots) {
+      const base = root.replace(/\\/g, '/');
+      if (p.startsWith(`${base}/`)) return p.slice(base.length + 1);
+    }
+    return p;
   };
 
   const confirmRename = useCallback(async () => {
@@ -272,13 +312,13 @@ export function FileBrowser({ root }: { root: string }) {
       setOpenFiles((files) => files.map((f) => (f.path === path ? { ...f, path: res.path, name: newName } : f)));
       setActivePath((p) => (p === path ? res.path : p));
       setSelectedPath((p) => (p === path ? res.path : p));
-      reloadTop(currentPath);
+      reloadTop();
     } catch (loadError) {
       toast.error(getApiErrorMessage(loadError, '重命名失败'));
     } finally {
       setBusy(false);
     }
-  }, [currentPath, reloadTop]);
+  }, [reloadTop]);
 
   const cancelRename = useCallback(() => setRenameNode(null), []);
 
@@ -292,7 +332,7 @@ export function FileBrowser({ root }: { root: string }) {
       setOpenFiles((files) => files.filter((f) => !isRemoved(f.path)));
       setActivePath((p) => (p && isRemoved(p) ? null : p));
       setSelectedPath((p) => (p && isRemoved(p) ? null : p));
-      reloadTop(currentPath);
+      reloadTop();
     } catch (loadError) {
       toast.error(getApiErrorMessage(loadError, '删除失败'));
     } finally {
@@ -320,7 +360,7 @@ export function FileBrowser({ root }: { root: string }) {
           key: 'copyRelative',
           label: '复制相对路径',
           icon: <Copy className="h-3.5 w-3.5" />,
-          disabled: !menu.path.startsWith(`${root}/`),
+          disabled: !isUnderAnyRoot(menu.path, roots),
           onSelect: () => copyText(relativePath(menu.path)),
         },
         ...(menu.kind !== 'tab'
@@ -453,21 +493,9 @@ export function FileBrowser({ root }: { root: string }) {
         {treeOpen && (
           <div className="flex shrink-0 flex-col" style={{ width: treeWidth }}>
             <div className="flex shrink-0 items-center gap-2 border-b px-3 py-2" style={{ borderColor: 'var(--border)' }}>
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                className="shrink-0"
-                disabled={!pathParent(currentPath)}
-                onClick={() => { const p = pathParent(currentPath); if (p) setCurrentPath(p); }}
-                aria-label="上级目录"
-              >
-                <ArrowLeft className="h-4 w-4" />
-              </Button>
-              <TextTooltip content={currentPath}>
-                <div className="min-w-0 flex-1 truncate text-xs" style={{ color: 'var(--fg-secondary)' }}>
-                  {currentPath}
-                </div>
-              </TextTooltip>
+              <span className="min-w-0 flex-1 truncate text-xs" style={{ color: 'var(--fg-tertiary)' }}>
+                {roots.length > 0 ? `${roots.length} 个工作区目录` : '文件树'}
+              </span>
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden py-1 custom-scrollbar">
               {treeBody}
