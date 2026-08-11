@@ -122,6 +122,7 @@ export interface ToolsConfig {
   enabled?: boolean;
   max_result_length?: number;
   default_permission_mode?: 'auto_approve' | 'modify_only' | 'ask_always' | 'plan';
+  default_multi_agent_mode?: 'none' | 'explicit_request_only' | 'proactive';
   enabled_tools?: string[] | null;
   disabled_tools?: string[];
   wait_agent_timeout_seconds?: number;

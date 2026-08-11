@@ -18,7 +18,7 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { ArrowRight, Bot, Share2, StickyNote, X, Settings, Square, Plus, FileText, Pencil, Trash2, Check, Loader2, Workflow } from 'lucide-react'
+import { ArrowRight, Bot, Share2, StickyNote, X, Settings, Square, Plus, FileText, Pencil, Trash2, Check, Loader2 } from 'lucide-react'
 import { useState, useEffect, useMemo, useRef, type ReactNode } from 'react'
 import { useModelStore } from '../store/modelStore'
 import { usePromptStore } from '../store/promtStore'
@@ -26,7 +26,6 @@ import { useNavigationStore } from '../store/navigationStore'
 import { useConversationStore } from '../store/conversationStore'
 import { slashRegistry } from '../services/slashRegistry'
 import type { ToolPermissionMode } from '../types/message'
-import type { MultiAgentMode } from '../types/conversation'
 import type { SlashCommandInfo } from '../types/slash'
 import {
   getPendingToolPermissionMode,
@@ -47,12 +46,6 @@ type SuggestionItem =
   | { kind: 'slash'; key: string; command: SlashCommandInfo }
   | { kind: 'node'; key: string; node: ReturnType<typeof getReferNodeCompletionCandidates>[number] };
 
-const MULTI_AGENT_MODE_OPTIONS: Array<{ value: MultiAgentMode; label: string; title: string }> = [
-  { value: 'explicit_request_only', label: '显式', title: '显式请求时启用 subagent/workflow 工具' },
-  { value: 'proactive', label: '自动', title: '允许模型主动使用 subagent/workflow 工具' },
-  { value: 'none', label: '关闭', title: '不向模型提供 subagent/workflow 工具' },
-];
-
 interface Props {
   onSend: (
     value: string,
@@ -61,7 +54,6 @@ interface Props {
     toolPermissionMode?: ToolPermissionMode,
     promptId?: string | null,
     promptMode?: SystemPromptMode,
-    multiAgentMode?: MultiAgentMode,
   ) => Promise<void>;
   onStop?: () => void;
   isStreaming?: boolean;
@@ -82,8 +74,6 @@ interface Props {
   toolPermissionDraft: ToolPermissionDraft;
   getToolPermissionDraft: () => ToolPermissionDraft;
   onToolPermissionDraftChange: (draft: ToolPermissionDraft) => void;
-  pendingMultiAgentMode?: MultiAgentMode;
-  onPendingMultiAgentModeChange?: (mode: MultiAgentMode) => void;
   variant?: 'dock' | 'composer';
 }
 
@@ -108,8 +98,6 @@ export function ChatInput({
   toolPermissionDraft,
   getToolPermissionDraft,
   onToolPermissionDraftChange,
-  pendingMultiAgentMode = 'explicit_request_only',
-  onPendingMultiAgentModeChange,
   variant = 'dock',
 }: Props) {
   const { openSettings } = useNavigationStore();
@@ -154,11 +142,7 @@ export function ChatInput({
   const currentConversation = useConversationStore((s) => s.currentConversation);
   const treeData = useConversationStore((s) => s.treeData);
   const loadTree = useConversationStore((s) => s.loadTree);
-  const updateMultiAgentMode = useConversationStore((s) => s.updateMultiAgentMode);
   const updateConversationModel = useConversationStore((s) => s.updateConversationModel);
-  const currentMultiAgentMode: MultiAgentMode = currentConversation?.multi_agent_mode ?? pendingMultiAgentMode;
-  const currentMultiAgentModeOption = MULTI_AGENT_MODE_OPTIONS.find((option) => option.value === currentMultiAgentMode)
-    ?? MULTI_AGENT_MODE_OPTIONS[0];
 
   // 初始加载（loadConfig 已由 ServerSessionApp 完成）
   useEffect(() => {
@@ -231,7 +215,6 @@ export function ChatInput({
       pendingToolPermissionMode,
       selectedPromptId,
       selectedPromptId ? selectedPromptMode : undefined,
-      currentMultiAgentMode,
     );
     onToolPermissionDraftChange(markToolPermissionModeSent(getToolPermissionDraft(), pendingToolPermissionMode));
   };
@@ -242,15 +225,6 @@ export function ChatInput({
   };
 
   const handleFilePick = () => { fileInputRef.current?.click(); };
-
-  const handleMultiAgentModeChange = (mode: string) => {
-    const nextMode = mode as MultiAgentMode;
-    if (!currentConversation) {
-      onPendingMultiAgentModeChange?.(nextMode);
-      return;
-    }
-    void updateMultiAgentMode(currentConversation.id, nextMode);
-  };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -870,33 +844,6 @@ export function ChatInput({
               </button>
             )}
 
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <button
-                  type="button"
-                  className="flex items-center gap-1 text-xs font-normal h-7 px-2 rounded-full cursor-pointer transition-colors"
-                  style={{ color: currentMultiAgentMode === 'none' ? 'var(--fg-tertiary)' : 'var(--icon-accent)' }}
-                  aria-label={`Agent 模式：${currentMultiAgentModeOption.label}`}
-                  onMouseEnter={(e) => {
-                    (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-hover)';
-                  }}
-                  onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = ''; }}
-                >
-                  <Workflow className="h-4 w-4 mr-1" />
-                  Agent {currentMultiAgentModeOption.label}
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="w-56">
-                <DropdownMenuRadioGroup value={currentMultiAgentMode} onValueChange={handleMultiAgentModeChange}>
-                  {MULTI_AGENT_MODE_OPTIONS.map((option) => (
-                    <DropdownMenuRadioItem key={option.value} value={option.value} className="flex-col items-start gap-0.5">
-                      <span>{option.label}</span>
-                      <span className="text-[11px] leading-4" style={{ color: 'var(--fg-tertiary)' }}>{option.title}</span>
-                    </DropdownMenuRadioItem>
-                  ))}
-                </DropdownMenuRadioGroup>
-              </DropdownMenuContent>
-            </DropdownMenu>
           </div>
 
           <div className="flex items-center gap-1">

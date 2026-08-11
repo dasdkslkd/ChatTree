@@ -1,20 +1,40 @@
 import { useEffect, useState, useCallback } from 'react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
+import { Label } from '@/components/ui/label';
 import { TextTooltip } from '@/components/ui/text-tooltip';
-import { Sparkles, Bot, Package, Boxes, Loader2, RefreshCw, Settings } from 'lucide-react';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { Sparkles, Bot, Package, Boxes, Loader2, RefreshCw, Save, Settings } from 'lucide-react';
 import { toast } from 'sonner';
 import { configApi } from '@/api/config';
+import { normalizeToolsConfig } from '../constants';
 import type {
   CapabilityInventory,
   CapabilityPlugin,
+  ConfigData,
+  ToolsConfig,
 } from '@/types/model';
+
+const MULTI_AGENT_MODE_OPTIONS: { value: 'none' | 'explicit_request_only' | 'proactive'; label: string; description: string }[] = [
+  { value: 'explicit_request_only', label: '显式', description: '显式请求时启用 subagent/workflow 工具' },
+  { value: 'proactive', label: '自动', description: '允许模型主动使用 subagent/workflow 工具' },
+  { value: 'none', label: '关闭', description: '不向模型提供 subagent/workflow 工具' },
+];
 
 export function CapabilitiesSection({ view }: { view: 'skills' | 'agents' | 'plugins' }) {
   const [inventory, setInventory] = useState<CapabilityInventory | null>(null);
   const [loading, setLoading] = useState(true);
   const [reloading, setReloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [config, setConfig] = useState<ConfigData | null>(null);
+  const [agentsForm, setAgentsForm] = useState<ToolsConfig>(() => normalizeToolsConfig());
+  const [saving, setSaving] = useState(false);
   const meta = {
     skills: {
       title: 'Skill',
@@ -24,7 +44,7 @@ export function CapabilitiesSection({ view }: { view: 'skills' | 'agents' | 'plu
     },
     agents: {
       title: 'Agent',
-      description: '查看当前可用的代理',
+      description: '配置 subagent/workflow 可见性并查看可用代理',
       icon: Bot,
       empty: '暂无 Agent',
     },
@@ -42,13 +62,18 @@ export function CapabilitiesSection({ view }: { view: 'skills' | 'agents' | 'plu
       setError(null);
       const nextInventory = await configApi.getCapabilities();
       setInventory(nextInventory);
+      if (view === 'agents') {
+        const data = await configApi.get();
+        setConfig(data);
+        setAgentsForm(normalizeToolsConfig(data.tools));
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : '加载能力信息失败');
       setInventory(null);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [view]);
 
   useEffect(() => { loadCapabilities(); }, [loadCapabilities]);
 
@@ -67,6 +92,20 @@ export function CapabilitiesSection({ view }: { view: 'skills' | 'agents' | 'plu
       setReloading(false);
     }
   }, [inventory]);
+
+  const handleSaveAgents = async () => {
+    try {
+      setSaving(true);
+      const committed = normalizeToolsConfig(agentsForm);
+      setAgentsForm(committed);
+      await configApi.update({ tools: committed });
+      toast.success('subagent/workflow 可见性已保存');
+    } catch (err) {
+      toast.error('保存失败: ' + (err instanceof Error ? err.message : ''));
+    } finally {
+      setSaving(false);
+    }
+  };
 
   if (loading) {
     return (
@@ -132,6 +171,42 @@ export function CapabilitiesSection({ view }: { view: 'skills' | 'agents' | 'plu
         <div className="grid grid-cols-1 gap-3">
           <CapabilityCountCard label={meta.title} value={count} icon={meta.icon} />
         </div>
+
+        {view === 'agents' && (
+          <div className="rounded-xl overflow-hidden" style={{ border: '0.5px solid var(--border)' }}>
+            <div className="flex items-center justify-between px-4 py-2.5" style={{ borderBottom: '0.5px solid var(--border)' }}>
+              <span className="text-sm font-medium" style={{ color: 'var(--fg-85)' }}>subagent/workflow 可见性</span>
+              <span className="text-xs" style={{ color: 'var(--fg-tertiary)' }}>新对话默认</span>
+            </div>
+            <div className="grid grid-cols-1 gap-4 px-4 py-3">
+              <div className="space-y-1.5">
+                <Label className="text-xs">模式</Label>
+                <Select
+                  value={agentsForm.default_multi_agent_mode || 'explicit_request_only'}
+                  onValueChange={(value) => setAgentsForm(current => ({ ...current, default_multi_agent_mode: value as 'none' | 'explicit_request_only' | 'proactive' }))}
+                >
+                  <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {MULTI_AGENT_MODE_OPTIONS.map(option => (
+                      <SelectItem key={option.value} value={option.value} textValue={option.label}>
+                        <div className="flex flex-col">
+                          <span>{option.label}</span>
+                          <span className="text-xs opacity-70">{option.description}</span>
+                        </div>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex justify-end">
+                <Button variant="outline" size="sm" onClick={handleSaveAgents} disabled={saving || !config}>
+                  {saving ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <Save className="h-3.5 w-3.5 mr-1" />}
+                  保存
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {count === 0 ? (
           <div className="rounded-xl px-4 py-10 text-center" style={{ border: '0.5px solid var(--border)' }}>

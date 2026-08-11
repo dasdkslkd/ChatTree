@@ -4,6 +4,7 @@ export const DEFAULT_TOOLS_CONFIG: ToolsConfig = {
   enabled: true,
   max_result_length: 8000,
   default_permission_mode: 'auto_approve',
+  default_multi_agent_mode: 'explicit_request_only',
   wait_agent_timeout_seconds: 30,
   builtin: {
     enabled: true,

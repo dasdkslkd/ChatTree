@@ -61,7 +61,7 @@ import type {
 } from '../types/message';
 import type { ActiveTaskRecord } from '../types/task';
 import type { PlanApprovalItem, PlanQuestionItem, ToolApprovalItem, TranscriptItem, TranscriptPatch, UserMessageItem, RunStatusItem } from '../types/transcript';
-import type { MultiAgentMode, WorkspaceContext } from '../types/conversation';
+import type { WorkspaceContext } from '../types/conversation';
 import type { ProjectCapabilityConfig } from '../types/model';
 import { useConversationStore } from '../store/conversationStore';
 import { useModelStore } from '../store/modelStore';
@@ -221,7 +221,6 @@ export default function ChatPage() {
   const [toolApprovalError, setToolApprovalError] = useState<string | null>(null);
   const [, setCopiedTranscriptRunId] = useState<string | null>(null);
   const [toolPermissionDraft, setToolPermissionDraftState] = useState<ToolPermissionDraft>(() => createToolPermissionDraft());
-  const [newConversationMultiAgentMode, setNewConversationMultiAgentMode] = useState<MultiAgentMode>('explicit_request_only');
   const [previewImage, setPreviewImage] = useState<{ name: string; url: string } | null>(null);
   const [conversationSearch, setConversationSearch] = useState('');
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
@@ -1713,7 +1712,6 @@ export default function ChatPage() {
     toolPermissionMode?: ToolPermissionMode,
     promptId?: string | null,
     promptMode?: 'override' | 'append',
-    multiAgentMode?: MultiAgentMode,
   ) => {
     if (!val.trim()) return;
     autoScrollRef.current = true;
@@ -1755,7 +1753,7 @@ export default function ChatPage() {
         prompt_id: promptId || undefined,
         prompt_mode: promptId ? promptMode : undefined,
         workspace: workspaceForCreateRequest(),
-        multi_agent_mode: multiAgentMode ?? newConversationMultiAgentMode,
+        multi_agent_mode: modelConfig?.tools?.default_multi_agent_mode,
       });
       if (!newConv) {
         console.error('Failed to create conversation');
@@ -2529,8 +2527,6 @@ export default function ChatPage() {
                     toolPermissionDraft={toolPermissionDraft}
                     getToolPermissionDraft={getToolPermissionDraft}
                     onToolPermissionDraftChange={updateToolPermissionDraft}
-                    pendingMultiAgentMode={newConversationMultiAgentMode}
-                    onPendingMultiAgentModeChange={setNewConversationMultiAgentMode}
                   />
                 </div>
               </div>
@@ -2600,8 +2596,6 @@ export default function ChatPage() {
                   toolPermissionDraft={toolPermissionDraft}
                   getToolPermissionDraft={getToolPermissionDraft}
                   onToolPermissionDraftChange={updateToolPermissionDraft}
-                  pendingMultiAgentMode={newConversationMultiAgentMode}
-                  onPendingMultiAgentModeChange={setNewConversationMultiAgentMode}
                 />
               </footer>
             </>

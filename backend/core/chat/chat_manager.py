@@ -154,6 +154,14 @@ def _configured_default_tool_permission_mode() -> PermissionMode:
     return normalize_permission_mode(configured if configured not in (None, "") else "auto_approve")
 
 
+def _configured_default_multi_agent_mode() -> str:
+    tools_config = cfg.data.get("tools", {}) if isinstance(cfg.data, dict) else {}
+    configured = None
+    if isinstance(tools_config, dict):
+        configured = tools_config.get("default_multi_agent_mode")
+    return ChatManager._normalize_multi_agent_mode(configured)
+
+
 def _estimate_stream_tokens(text: str) -> int:
     """Cheap output-token estimate for live throughput telemetry."""
     if not text:
@@ -354,7 +362,9 @@ class ChatManager:
             build_default_workspace(cfg.data if isinstance(cfg.data, dict) else None),
         )
         conversation = Conversation(title=title, workspace=workspace_context)
-        conversation.metadata["multi_agent_mode"] = self._normalize_multi_agent_mode(multi_agent_mode)
+        conversation.metadata["multi_agent_mode"] = self._normalize_multi_agent_mode(
+            multi_agent_mode or _configured_default_multi_agent_mode()
+        )
         
         # 初始化系统消息
         conversation.initialize_with_system_message(None)
