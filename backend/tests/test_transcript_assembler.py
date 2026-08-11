@@ -223,14 +223,14 @@ def test_snapshot_assembles_plan_question_and_answer_with_same_id(tmp_path):
         node_id,
         tool_call_id="call-question",
         name="ask_user_question",
-        arguments={"question": "默认显示什么？", "options": [{"label": "默认显示"}]},
+        arguments={"questions": [{"question": "默认显示什么？", "options": [{"label": "默认显示"}]}]},
     )
     repository.add_tool_result(
         conversation_id,
         node_id,
         tool_result_id="result-question",
         tool_call_id="call-question",
-        output=json.dumps({"answer": "默认显示"}, ensure_ascii=False),
+        output=json.dumps({"answers": ["默认显示"]}, ensure_ascii=False),
     )
 
     question = _snapshot(persistence, conversation_id, node_id)["items"][0]
@@ -238,8 +238,43 @@ def test_snapshot_assembles_plan_question_and_answer_with_same_id(tmp_path):
     assert question["type"] == "plan_question"
     assert question["id"] == "plan-question:call-question"
     assert question["status"] == "answered"
-    assert question["question"] == "默认显示什么？"
-    assert question["answer"] == "默认显示"
+    assert question["questions"] == [{"question": "默认显示什么？", "options": [{"label": "默认显示"}]}]
+    assert question["answers"] == ["默认显示"]
+
+
+def test_snapshot_assembles_multiple_plan_questions_and_answers(tmp_path):
+    persistence, repository = _repo(tmp_path)
+    conversation_id, node_id = _conversation(repository)
+    repository.add_tool_call(
+        conversation_id,
+        node_id,
+        tool_call_id="call-question",
+        name="ask_user_question",
+        arguments={
+            "questions": [
+                {"question": "目标是什么？", "options": [{"label": "A"}, {"label": "B"}]},
+                {"question": "范围多大？"},
+            ]
+        },
+    )
+    repository.add_tool_result(
+        conversation_id,
+        node_id,
+        tool_result_id="result-question",
+        tool_call_id="call-question",
+        output=json.dumps({"answers": ["A", "整个仓库"], "plan_id": "plan-multi"}, ensure_ascii=False),
+    )
+
+    question = _snapshot(persistence, conversation_id, node_id)["items"][0]
+
+    assert question["type"] == "plan_question"
+    assert question["status"] == "answered"
+    assert question["plan_id"] == "plan-multi"
+    assert question["questions"] == [
+        {"question": "目标是什么？", "options": [{"label": "A"}, {"label": "B"}]},
+        {"question": "范围多大？", "options": []},
+    ]
+    assert question["answers"] == ["A", "整个仓库"]
 
 
 def test_snapshot_reads_plan_question_answer_from_tool_result_blob(tmp_path):
@@ -250,7 +285,7 @@ def test_snapshot_reads_plan_question_answer_from_tool_result_blob(tmp_path):
         node_id,
         tool_call_id="call-question",
         name="ask_user_question",
-        arguments={"question": "请详细确认？"},
+        arguments={"questions": [{"question": "请详细确认？"}]},
     )
     long_answer = "A" * 5000
     repository.add_tool_result(
@@ -258,7 +293,7 @@ def test_snapshot_reads_plan_question_answer_from_tool_result_blob(tmp_path):
         node_id,
         tool_result_id="result-question",
         tool_call_id="call-question",
-        output=json.dumps({"answer": long_answer, "plan_id": "plan-long"}, ensure_ascii=False),
+        output=json.dumps({"answers": [long_answer], "plan_id": "plan-long"}, ensure_ascii=False),
     )
 
     question = _snapshot(persistence, conversation_id, node_id)["items"][0]
@@ -266,7 +301,7 @@ def test_snapshot_reads_plan_question_answer_from_tool_result_blob(tmp_path):
     assert question["type"] == "plan_question"
     assert question["status"] == "answered"
     assert question["plan_id"] == "plan-long"
-    assert question["answer"] == long_answer
+    assert question["answers"] == [long_answer]
 
 
 def test_repository_replaces_tool_result_by_tool_call_id(tmp_path):

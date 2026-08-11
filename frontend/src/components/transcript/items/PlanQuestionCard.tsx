@@ -13,16 +13,21 @@ export function PlanQuestionCard({
   planActionPending?: string | null;
   planError?: string | null;
 }) {
-  const [draftAnswer, setDraftAnswer] = useState('');
+  const questions = Array.isArray(item.questions) ? item.questions : [];
+  const [drafts, setDrafts] = useState<string[]>(() => questions.map(() => ''));
   const answered = item.status === 'answered';
-  const options = Array.isArray(item.options) ? item.options : [];
   const answering = planActionPending === 'answer';
+  const allAnswered = drafts.length > 0 && drafts.every((draft) => draft.trim().length > 0);
+  const answers = item.answers ?? [];
+
+  const setDraft = (index: number, value: string) => {
+    setDrafts((prev) => prev.map((draft, i) => (i === index ? value : draft)));
+  };
 
   const submit = async () => {
-    const answer = draftAnswer.trim();
-    if (!answer) return;
-    await onAnswerPlanQuestion?.(item, answer);
-    setDraftAnswer('');
+    if (!allAnswered) return;
+    await onAnswerPlanQuestion?.(item, drafts.map((draft) => draft.trim()));
+    setDrafts(questions.map(() => ''));
   };
 
   return (
@@ -39,57 +44,69 @@ export function PlanQuestionCard({
           <MessageSquare className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--icon-accent)' }} />
           <span>计划澄清 · {answered ? '已回答' : '等待回答'}</span>
         </div>
-        <div className="text-sm leading-6" style={{ color: 'var(--fg-primary)' }}>{item.question || ''}</div>
-        {answered && item.answer && (
-          <div
-            className="rounded-md px-2.5 py-2 text-sm"
-            style={{
-              border: '0.5px solid var(--border)',
-              background: 'var(--bg-input)',
-              color: 'var(--fg-primary)',
-            }}
-          >
-            {item.answer}
-          </div>
-        )}
-        {!answered && options.length > 0 && (
-          <div className="flex flex-wrap gap-2">
-            {options.map((option, index) => {
-              const label = (option.label || '').trim();
-              if (!label) return null;
-              return (
-                <button
-                  key={`${label}-${index}`}
-                  type="button"
-                  className="inline-flex min-h-7 max-w-full items-center justify-start gap-1 rounded-md border px-2 py-1 text-left text-xs transition-colors"
+        {questions.map((entry, index) => {
+          const options = Array.isArray(entry.options) ? entry.options : [];
+          return (
+            <div key={index} className="flex w-full flex-col gap-2">
+              <div className="text-sm leading-6" style={{ color: 'var(--fg-primary)' }}>
+                {questions.length > 1 ? `${index + 1}. ` : ''}{entry.question || ''}
+              </div>
+              {answered && answers[index] != null && (
+                <div
+                  className="rounded-md px-2.5 py-2 text-sm"
                   style={{
-                    borderColor: 'var(--border)',
-                    background: 'var(--bg-button-secondary)',
+                    border: '0.5px solid var(--border)',
+                    background: 'var(--bg-input)',
                     color: 'var(--fg-primary)',
                   }}
-                  onClick={() => setDraftAnswer(label)}
-                  disabled={planActionPending !== null}
                 >
-                  {draftAnswer.trim() === label ? <Check className="h-3.5 w-3.5 shrink-0" /> : <span className="h-3.5 w-3.5 shrink-0" />}
-                  <span className="min-w-0 truncate">{label}</span>
-                </button>
-              );
-            })}
-          </div>
-        )}
+                  {answers[index]}
+                </div>
+              )}
+              {!answered && options.length > 0 && (
+                <div className="flex flex-wrap gap-2">
+                  {options.map((option, optionIndex) => {
+                    const label = (option.label || '').trim();
+                    if (!label) return null;
+                    return (
+                      <button
+                        key={`${label}-${optionIndex}`}
+                        type="button"
+                        className="inline-flex min-h-7 max-w-full items-center justify-start gap-1 rounded-md border px-2 py-1 text-left text-xs transition-colors"
+                        style={{
+                          borderColor: 'var(--border)',
+                          background: 'var(--bg-button-secondary)',
+                          color: 'var(--fg-primary)',
+                        }}
+                        onClick={() => setDraft(index, label)}
+                        disabled={planActionPending !== null}
+                      >
+                        {drafts[index].trim() === label ? <Check className="h-3.5 w-3.5 shrink-0" /> : <span className="h-3.5 w-3.5 shrink-0" />}
+                        <span className="min-w-0 truncate">{label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              {!answered && (
+                <textarea
+                  value={drafts[index]}
+                  onChange={(event) => setDraft(index, event.target.value)}
+                  disabled={planActionPending !== null}
+                  placeholder="输入回答"
+                  className="min-h-[64px] w-full resize-none rounded-md px-2.5 py-2 text-sm outline-none"
+                  style={{
+                    border: '0.5px solid var(--border)',
+                    background: 'var(--bg-input)',
+                    color: 'var(--fg-primary)',
+                  }}
+                />
+              )}
+            </div>
+          );
+        })}
         {!answered && (
           <>
-            <textarea
-              value={draftAnswer}
-              onChange={(event) => setDraftAnswer(event.target.value)}
-              placeholder="输入回答"
-              className="min-h-[64px] w-full resize-none rounded-md px-2.5 py-2 text-sm outline-none"
-              style={{
-                border: '0.5px solid var(--border)',
-                background: 'var(--bg-input)',
-                color: 'var(--fg-primary)',
-              }}
-            />
             {planError && <div className="text-xs" style={{ color: 'var(--destructive)' }}>{planError}</div>}
             <button
               type="button"
@@ -99,10 +116,10 @@ export function PlanQuestionCard({
                 color: 'var(--fg-on-primary)',
               }}
               onClick={() => { void submit(); }}
-              disabled={planActionPending !== null || !draftAnswer.trim()}
+              disabled={planActionPending !== null || !allAnswered}
             >
               {answering ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
-              提交回答
+              提交全部回答
             </button>
           </>
         )}

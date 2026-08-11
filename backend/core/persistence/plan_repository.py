@@ -123,8 +123,6 @@ class SQLitePlanRepository:
         self,
         conversation_id: str,
         plan_id: str,
-        *,
-        answer: str,
     ) -> dict[str, Any]:
         now = time()
         self._require_plan(conversation_id, plan_id)

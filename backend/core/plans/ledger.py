@@ -58,17 +58,15 @@ class PlanLedger:
         self,
         *,
         conversation_id: str,
-        question: str,
-        options: Optional[Sequence[dict[str, Any]]] = None,
+        questions: Sequence[dict[str, Any]],
         node_id: Optional[str] = None,
         run_id: Optional[str] = None,
         tool_call_id: Optional[str] = None,
     ) -> PlanSession:
-        question_text = str(question or "").strip()
         if not conversation_id:
             raise ValueError("conversation_id is required")
-        if not question_text:
-            raise ValueError("question is required")
+        if not questions:
+            raise ValueError("questions is required")
         async with self._lock:
             record = self._repository.get_active_or_awaiting(conversation_id)
             if record is None or record.get("status") not in (
@@ -118,11 +116,10 @@ class PlanLedger:
         *,
         conversation_id: str,
         plan_id: str,
-        answer: str,
+        answers: Sequence[str],
     ) -> PlanSession:
-        answer_text = str(answer or "").strip()
-        if not answer_text:
-            raise ValueError("answer is required")
+        if not answers:
+            raise ValueError("answers is required")
         async with self._lock:
             record = self._repository.get_plan(conversation_id, plan_id)
             if record is None:
@@ -132,7 +129,6 @@ class PlanLedger:
             updated_record = self._repository.answer_question(
                 conversation_id,
                 plan_id,
-                answer=answer_text,
             )
             return self._session_from_record(updated_record)
 

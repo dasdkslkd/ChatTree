@@ -11,7 +11,7 @@ export function getItemText(item: TranscriptItem, fallback = ''): string {
       case 'plan_approval':
         return [item.plan, item.feedback];
       case 'plan_question':
-        return [item.question, item.answer];
+        return [...item.questions.map((entry) => entry.question), ...(item.answers ?? [])];
       case 'tool_approval':
         return [item.args_preview, item.result_preview];
       case 'assistant_process':

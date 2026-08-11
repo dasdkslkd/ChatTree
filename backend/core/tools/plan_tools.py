@@ -119,25 +119,36 @@ class AskUserQuestionTool(PlanLedgerTool):
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "question": {
-                    "type": "string",
-                    "description": "A concise question that is necessary to continue planning.",
-                },
-                "options": {
+                "questions": {
                     "type": "array",
-                    "description": "Optional mutually exclusive choices for the user.",
+                    "description": "One or more concise questions to answer together in a single round.",
                     "items": {
                         "type": "object",
                         "additionalProperties": False,
                         "properties": {
-                            "label": {"type": "string"},
-                            "description": {"type": "string"},
+                            "question": {
+                                "type": "string",
+                                "description": "A concise question that is necessary to continue planning.",
+                            },
+                            "options": {
+                                "type": "array",
+                                "description": "Optional mutually exclusive choices for the user.",
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "properties": {
+                                        "label": {"type": "string"},
+                                        "description": {"type": "string"},
+                                    },
+                                    "required": ["label"],
+                                },
+                            },
                         },
-                        "required": ["label"],
+                        "required": ["question"],
                     },
                 },
             },
-            "required": ["question"],
+            "required": ["questions"],
         }
 
     async def execute(self, **kwargs) -> str:
@@ -145,20 +156,22 @@ class AskUserQuestionTool(PlanLedgerTool):
         if context is None:
             return _missing_context_error()
         conversation_id = _conversation_id(context)
-        question = str(kwargs.get("question") or "").strip()
-        options = kwargs.get("options")
         if not conversation_id:
             return _invalid_arguments("conversation_id is required")
-        if not question:
-            return _invalid_arguments("question is required")
-        if options is not None and not isinstance(options, list):
-            return _invalid_arguments("options must be an array")
+        questions = kwargs.get("questions")
+        if not isinstance(questions, list) or not questions:
+            return _invalid_arguments("questions must be a non-empty array")
+        for entry in questions:
+            if not isinstance(entry, dict) or not str(entry.get("question") or "").strip():
+                return _invalid_arguments("each question requires a non-empty question string")
+            options = entry.get("options")
+            if options is not None and not isinstance(options, list):
+                return _invalid_arguments("options must be an array")
         try:
             tool_call_id = str(context.get("tool_call_id") or "") or None
             session = await self._plan_ledger.ask_user_question(
                 conversation_id=conversation_id,
-                question=question,
-                options=options,
+                questions=questions,
                 node_id=str(context.get("node_id") or "") or None,
                 run_id=str(context.get("run_id") or "") or None,
                 tool_call_id=tool_call_id,

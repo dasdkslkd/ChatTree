@@ -70,6 +70,11 @@ export interface PlanQuestionOption {
   description?: string | null;
 }
 
+export interface PlanQuestionEntry {
+  question: string;
+  options: PlanQuestionOption[];
+}
+
 export interface PlanQuestionItem extends TranscriptItemBase {
   type: 'plan_question';
   node_id: string;
@@ -77,9 +82,8 @@ export interface PlanQuestionItem extends TranscriptItemBase {
   plan_id: string;
   tool_call_id: string;
   status: 'awaiting_answer' | 'answered';
-  question: string;
-  options: PlanQuestionOption[];
-  answer: string | null;
+  questions: PlanQuestionEntry[];
+  answers: string[] | null;
 }
 
 export interface PlanApprovalItem extends TranscriptItemBase {
@@ -167,7 +171,7 @@ export interface TranscriptPatch {
 }
 
 export type TranscriptPlanActionHandler = (item: PlanApprovalItem) => void | Promise<void>;
-export type TranscriptPlanQuestionAnswerHandler = (item: PlanQuestionItem, answer: string) => void | Promise<void>;
+export type TranscriptPlanQuestionAnswerHandler = (item: PlanQuestionItem, answers: string[]) => void | Promise<void>;
 export type TranscriptToolApprovalActionHandler = (item: ToolApprovalItem) => void | Promise<void>;
 export type TranscriptCopyHandler = (item: TranscriptItem, text: string) => void | Promise<void>;
 export type TranscriptUserMessageActionHandler = (item: UserMessageItem, text: string) => void | Promise<void>;

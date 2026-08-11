@@ -287,10 +287,10 @@ export const messageApi = {
   answerPlanQuestion: async function* (
     conversationId: string,
     planId: string,
-    answer: string,
+    answers: string[],
     options: PlanActionStreamOptions = {},
   ): AsyncGenerator<TranscriptPatch, void> {
-    yield* postPlanActionStream(conversationId, planId, 'answer', { answer }, options);
+    yield* postPlanActionStream(conversationId, planId, 'answer', { answers }, options);
   },
 
   approvePlan: async function* (

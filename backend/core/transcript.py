@@ -792,16 +792,27 @@ class TranscriptAssembler:
     ) -> dict[str, Any]:
         args = self._tool_args(call)
         result_payload = self._tool_result_payload(result)
-        answer = result_payload.get("answer") if isinstance(result_payload, dict) else None
-        if answer is None and isinstance(result_payload, dict) and isinstance(result_payload.get("question"), dict):
-            answer = result_payload["question"].get("answer")
-        question = args.get("question")
-        if isinstance(question, dict):
-            question_text = str(question.get("question") or "")
-            options = question.get("options") if isinstance(question.get("options"), list) else []
-        else:
-            question_text = str(question or args.get("prompt") or "")
-            options = args.get("options") if isinstance(args.get("options"), list) else []
+        answers = result_payload.get("answers") if isinstance(result_payload, dict) else None
+        if not isinstance(answers, list):
+            answers = None
+        questions = args.get("questions")
+        if not isinstance(questions, list):
+            single = args.get("question")
+            questions = (
+                [{"question": single.get("question") if isinstance(single, dict) else single,
+                  "options": single.get("options") if isinstance(single, dict) else args.get("options")}]
+                if single
+                else []
+            )
+        entries = []
+        for raw in questions:
+            if not isinstance(raw, dict):
+                raw = {"question": raw}
+            options = raw.get("options")
+            entries.append({
+                "question": str(raw.get("question") or ""),
+                "options": options if isinstance(options, list) else [],
+            })
         return {
             "type": "plan_question",
             "id": f"plan-question:{call['id']}",
@@ -810,10 +821,9 @@ class TranscriptAssembler:
             "run_id": call.get("run_id"),
             "plan_id": (plan or {}).get("id") or args.get("plan_id") or result_payload.get("plan_id") or "",
             "tool_call_id": call.get("id"),
-            "status": "answered" if answer is not None else "awaiting_answer",
-            "question": question_text,
-            "options": options,
-            "answer": str(answer) if answer is not None else None,
+            "status": "answered" if answers is not None else "awaiting_answer",
+            "questions": entries,
+            "answers": [str(a) for a in answers] if answers is not None else None,
             "created_at": call.get("created_at"),
         }
 

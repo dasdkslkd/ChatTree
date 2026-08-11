@@ -1264,11 +1264,11 @@ export default function ChatPage() {
     );
   }, [runPlanActionStream]);
 
-  const handleAnswerPlanQuestion = useCallback(async (item: PlanQuestionItem, answer: string) => {
+  const handleAnswerPlanQuestion = useCallback(async (item: PlanQuestionItem, answers: string[]) => {
     await runPlanActionStream(
       'answer',
       item,
-      (conversationId, signal) => messageApi.answerPlanQuestion(conversationId, item.plan_id, answer, { signal }),
+      (conversationId, signal) => messageApi.answerPlanQuestion(conversationId, item.plan_id, answers, { signal }),
     );
   }, [runPlanActionStream]);
 

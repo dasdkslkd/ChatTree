@@ -29,7 +29,7 @@ router = APIRouter()
 
 
 class PlanAnswerRequest(BaseModel):
-    answer: str
+    answers: list[str]
 
 
 class PlanRejectRequest(BaseModel):
@@ -364,7 +364,7 @@ async def answer_plan_question(
         await ledger.answer_question(
             conversation_id=conversation_id,
             plan_id=plan_id,
-            answer=body.answer,
+            answers=body.answers,
         )
         tool_message = _write_plan_action_result(
             persistence,
@@ -373,7 +373,7 @@ async def answer_plan_question(
             {
                 "plan_id": plan_id,
                 "status": "answered",
-                "answer": body.answer,
+                "answers": body.answers,
             },
         )
         return await _start_plan_action_response(
