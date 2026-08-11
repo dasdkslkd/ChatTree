@@ -19,6 +19,7 @@ import { SyntaxHighlighter, oneDark } from './markdown/languages';
 import { Button } from './ui/button';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from './ui/dialog';
 import { Input } from './ui/input';
+import { TextTooltip } from './ui/text-tooltip';
 import { FileContextMenu, type ContextMenuItem } from './FileContextMenu';
 
 interface TreeNode {
@@ -376,30 +377,30 @@ export function FileBrowser({ root }: { root: string }) {
             {openFiles.map((file) => {
               const active = file.path === activePath;
               return (
-                <button
-                  key={file.path}
-                  type="button"
-                  onClick={() => setActivePath(file.path)}
-                  onContextMenu={(event) => openTabMenu(file, event)}
-                  className="group flex max-w-44 shrink-0 items-center gap-1 rounded px-2 py-1 text-xs"
-                  style={{
-                    background: active ? 'var(--accent)' : 'transparent',
-                    color: active ? 'var(--primary)' : 'var(--fg-85)',
-                    boxShadow: active ? 'inset 0 -2px 0 var(--primary)' : undefined,
-                  }}
-                  title={file.path}
-                >
-                  <span className="truncate">{file.name}</span>
-                  <span
-                    role="button"
-                    tabIndex={-1}
-                    onClick={(event) => { event.stopPropagation(); closeFile(file.path); }}
-                    aria-label={`关闭 ${file.name}`}
-                    className="shrink-0 rounded opacity-0 hover:bg-[var(--bg-button-tertiary-hover)] group-hover:opacity-100"
+                <TextTooltip key={file.path} content={file.path}>
+                  <button
+                    type="button"
+                    onClick={() => setActivePath(file.path)}
+                    onContextMenu={(event) => openTabMenu(file, event)}
+                    className="group flex max-w-44 shrink-0 items-center gap-1 rounded px-2 py-1 text-xs"
+                    style={{
+                      background: active ? 'var(--accent)' : 'transparent',
+                      color: active ? 'var(--primary)' : 'var(--fg-85)',
+                      boxShadow: active ? 'inset 0 -2px 0 var(--primary)' : undefined,
+                    }}
                   >
-                    <X className="h-3 w-3" style={{ color: 'var(--fg-tertiary)' }} />
-                  </span>
-                </button>
+                    <span className="truncate">{file.name}</span>
+                    <span
+                      role="button"
+                      tabIndex={-1}
+                      onClick={(event) => { event.stopPropagation(); closeFile(file.path); }}
+                      aria-label={`关闭 ${file.name}`}
+                      className="shrink-0 rounded opacity-0 hover:bg-[var(--bg-button-tertiary-hover)] group-hover:opacity-100"
+                    >
+                      <X className="h-3 w-3" style={{ color: 'var(--fg-tertiary)' }} />
+                    </span>
+                  </button>
+                </TextTooltip>
               );
             })}
             {openFiles.length === 0 && (
@@ -462,9 +463,11 @@ export function FileBrowser({ root }: { root: string }) {
               >
                 <ArrowLeft className="h-4 w-4" />
               </Button>
-              <div className="min-w-0 flex-1 truncate text-xs" style={{ color: 'var(--fg-secondary)' }} title={currentPath}>
-                {currentPath}
-              </div>
+              <TextTooltip content={currentPath}>
+                <div className="min-w-0 flex-1 truncate text-xs" style={{ color: 'var(--fg-secondary)' }}>
+                  {currentPath}
+                </div>
+              </TextTooltip>
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden py-1 custom-scrollbar">
               {treeBody}

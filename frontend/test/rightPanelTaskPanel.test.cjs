@@ -4,7 +4,7 @@ const path = require('node:path');
 
 const mainPage = fs.readFileSync(path.join(__dirname, '../src/pages/MainPage.tsx'), 'utf8');
 
-assert.match(mainPage, /rightPanelView,\s*setRightPanelView\]\s*=\s*useState<'outline' \| 'side' \| 'tasks'>/);
+assert.match(mainPage, /rightPanelView,\s*setRightPanelView\]\s*=\s*useState<'outline' \| 'side' \| 'tasks' \| 'files'>/);
 assert.match(mainPage, /taskStateCoordinator\.refresh\(conversationId\)/);
 assert.match(mainPage, /taskStateCoordinator\.subscribe\(conversationId/);
 assert.match(mainPage, /createTaskPanelItem\(activeTask\)/);
