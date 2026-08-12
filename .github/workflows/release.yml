@@ -140,6 +140,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          shopt -s nullglob
           gh release upload "$GITHUB_REF_NAME" \
             dist-electron/*.exe dist-electron/*.blockmap \
             dist-electron/latest*.yml dist-electron/*.dmg dist-electron/*.zip \
