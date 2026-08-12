@@ -181,3 +181,10 @@ jobs:
             --draft=false \
             "${RELEASE_FLAGS[@]}" \
             --notes-file release-notes.md
+
+      - name: Delete intermediate artifacts
+        shell: bash
+        run: |
+          for id in $(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" --paginate --jq '.artifacts[] | select(.name | startswith("release-")) | .id'); do
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id"
+          done
