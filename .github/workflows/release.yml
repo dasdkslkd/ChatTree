@@ -135,20 +135,16 @@ jobs:
           fi
           cp "$SOURCE" "dist-electron/$ASSET"
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: release-${{ matrix.target }}
-          if-no-files-found: error
-          retention-days: 7
-          path: |
-            dist-electron/*.exe
-            dist-electron/*.blockmap
-            dist-electron/latest*.yml
-            dist-electron/*.dmg
-            dist-electron/*.zip
-            dist-electron/*.AppImage
-            dist-electron/*.zsync
-            dist-electron/ChatTree-Runtime-*
+      - name: Upload release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" \
+            dist-electron/*.exe dist-electron/*.blockmap \
+            dist-electron/latest*.yml dist-electron/*.dmg dist-electron/*.zip \
+            dist-electron/*.AppImage dist-electron/*.zsync \
+            dist-electron/ChatTree-Runtime-* --clobber
 
   publish-release:
     needs: build
@@ -157,16 +153,9 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: release-*
-          path: release-assets
-          merge-multiple: true
-
       - name: Publish release
         shell: bash
         run: |
-          gh release upload "$GITHUB_REF_NAME" release-assets/* --clobber
           gh api \
             --method POST \
             "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
@@ -181,10 +170,3 @@ jobs:
             --draft=false \
             "${RELEASE_FLAGS[@]}" \
             --notes-file release-notes.md
-
-      - name: Delete intermediate artifacts
-        shell: bash
-        run: |
-          for id in $(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" --paginate --jq '.artifacts[] | select(.name | startswith("release-")) | .id'); do
-            gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id"
-          done
