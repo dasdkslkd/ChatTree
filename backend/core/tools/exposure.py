@@ -16,6 +16,7 @@ CANONICAL_CODING_TOOLS = {
     "shell",
     "agent",
     "web",
+    "memory",
     "enter_plan_mode",
     "ask_user_question",
     "exit_plan_mode",
@@ -23,7 +24,7 @@ CANONICAL_CODING_TOOLS = {
 
 DISCOVERY_TOOLS = {"tools"}
 
-PLAN_MUTATING_TOOLS = {"agent", "edit", "shell"}
+PLAN_MUTATING_TOOLS = {"agent", "edit", "memory", "shell"}
 
 INTERNAL_MODEL_TOOL_NAMES = {
     "create_task",
@@ -207,6 +208,8 @@ class ToolExposureResolver:
             visible -= _names_matching(visible, context.disallowed_tools)
 
         visible -= self._hidden
+        if context.run_kind != "chat" or context.permission_mode in {"plan", "plan_mode"}:
+            visible.discard("memory")
         return visible
 
     def mcp_visible(self, context: Optional[ToolExposureContext] = None) -> bool:
@@ -278,9 +281,15 @@ def descriptor_for_tool_name(name: str) -> ToolDescriptor:
         return ToolDescriptor(name=name, category="web", capabilities=frozenset({"network_read"}), exposure_tags=frozenset({"coding", "plan_safe"}))
     if name == "tools":
         return ToolDescriptor(name=name, category="utility", capabilities=frozenset({"read"}), exposure_tags=frozenset({"discovery"}))
+    if name == "memory":
+        return ToolDescriptor(name=name, category="housekeeping", capabilities=frozenset({"write"}), exposure_tags=frozenset({"housekeeping"}))
     if name in INTERNAL_MODEL_TOOL_NAMES:
         return ToolDescriptor(name=name, internal=True, model_visible=False)
     return ToolDescriptor(name=name)
+
+
+def is_housekeeping_tool(name: str) -> bool:
+    return descriptor_for_tool_name(name).category == "housekeeping"
 
 
 def _optional_tuple(value: Any) -> Optional[tuple[str, ...]]:

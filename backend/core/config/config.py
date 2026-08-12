@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from backend.core.home import resolve_chattree_home
+from backend.core.projects import normalize_projects_config
 from .types import ModelProviderConfig
 
 
@@ -89,6 +90,13 @@ class Config:
                 data = self._fresh_config()
                 self._save_data(data)
             data['model_transport'] = normalize_model_transport(data['model_transport'])
+            normalized_projects = normalize_projects_config(data.get('projects'))
+            memory = data.get('memory') if isinstance(data.get('memory'), dict) else {}
+            normalized_memory = {'enabled': memory.get('enabled', True) is not False}
+            if data.get('projects') != normalized_projects or data.get('memory') != normalized_memory:
+                data['projects'] = normalized_projects
+                data['memory'] = normalized_memory
+                self._save_data(data)
             return data
         return self._fresh_config()
 
@@ -110,6 +118,7 @@ class Config:
             'model_transport': dict(DEFAULT_MODEL_TRANSPORT),
             'dev_environment': {},
             'projects': {},
+            'memory': {'enabled': True},
         }
 
     def _save_data(self, data: Dict[str, Any]):

@@ -8,6 +8,7 @@ from .tools.security.logical_sandbox import DEFAULT_PROTECTED_PATHS
 
 
 class WorkspaceContext(TypedDict):
+    project_id: str
     cwd: str
     workspace_roots: list[str]
     protected_paths: list[str]
@@ -37,6 +38,7 @@ def normalize_workspace(raw: Mapping[str, Any] | None, default: Mapping[str, Any
     label = str(source.get("label") or cwd.name or str(cwd))
 
     return {
+        "project_id": str(source.get("project_id") or ""),
         "cwd": str(cwd),
         "workspace_roots": workspace_roots,
         "protected_paths": [str(path) for path in protected],

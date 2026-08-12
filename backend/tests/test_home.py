@@ -39,6 +39,8 @@ def test_main_wires_legacy_chat_files_and_canonical_tool_results():
     assert 'PromptStorage(str(persistence.home / "prompts"))' in main_source
     assert "ToolResultStorage" not in main_source
     assert "ToolManager(runtime_config, chat_repository=chat_repository)" in main_source
+    assert "tool_manager.register(MemoryTool(memory_store))" in main_source
+    assert "app.state.memory_store = memory_store" in main_source
     assert "run_repository.mark_unfinished_as_interrupted()" in main_source
 
 

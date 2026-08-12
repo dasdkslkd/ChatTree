@@ -7,6 +7,7 @@ from typing import Any
 from .persistence.blob_store import BlobStore
 from .persistence.database import SQLitePersistence
 from .persistence.repository import tool_result_preview
+from .tools.exposure import is_housekeeping_tool
 
 
 PLAN_QUESTION_TOOLS = {"ask_user_question"}
@@ -249,6 +250,7 @@ class TranscriptAssembler:
         stream: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         node_id = str(node["id"] if isinstance(node, dict) else node["id"])
+        tool_calls = [call for call in tool_calls if not is_housekeeping_tool(str(call.get("name") or ""))]
         compact = self._compact_item(conversation_id, node, messages)
         if compact:
             return [compact]
@@ -1160,6 +1162,9 @@ class TranscriptPatchSession:
         usage_info: dict[str, Any] | None = None
 
         def upsert_tool_call(call: dict[str, Any]) -> None:
+            name = str(call.get("name") or (call.get("function") or {}).get("name") or "")
+            if is_housekeeping_tool(name):
+                return
             for existing in tool_calls:
                 if existing.get("id") == call.get("id"):
                     existing.update({key: value for key, value in call.items() if value not in (None, "")})

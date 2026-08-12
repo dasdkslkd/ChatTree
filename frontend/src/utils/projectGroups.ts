@@ -35,20 +35,20 @@ export function groupConversationsByProject(
 ): ProjectGroup[] {
   const defaultWorkspace = normalizeWorkspace(options.defaultWorkspace);
   const query = (options.searchQuery || '').trim().toLowerCase();
-  const byPath = new Map<string, ProjectGroup>();
+  const byId = new Map<string, ProjectGroup>();
 
   for (const conversation of conversations) {
     if (query && !conversationMatches(conversation, query)) continue;
     const workspace = normalizeWorkspace(conversation.workspace, defaultWorkspace);
     const path = workspace.cwd;
     if (!isProjectVisible(path, options.projectVisibility)) continue;
-    const existing = byPath.get(path);
+    const id = workspace.project_id || encodeProjectId(path);
+    const existing = byId.get(id);
     if (existing) {
       existing.conversations.push(conversation);
       continue;
     }
-    const id = encodeProjectId(path);
-    byPath.set(path, {
+    byId.set(id, {
       id,
       label: workspace.label || labelFromPath(path),
       path,
@@ -61,11 +61,11 @@ export function groupConversationsByProject(
 
   for (const extraWorkspace of options.extraWorkspaces || []) {
     const workspace = normalizeWorkspace(extraWorkspace, defaultWorkspace);
-    if (!workspace.cwd || byPath.has(workspace.cwd)) continue;
+    const id = workspace.project_id || encodeProjectId(workspace.cwd);
+    if (!workspace.cwd || byId.has(id)) continue;
     if (!isProjectVisible(workspace.cwd, options.projectVisibility)) continue;
     if (query && !workspaceMatches(workspace, query)) continue;
-    const id = encodeProjectId(workspace.cwd);
-    byPath.set(workspace.cwd, {
+    byId.set(id, {
       id,
       label: workspace.label || labelFromPath(workspace.cwd),
       path: workspace.cwd,
@@ -76,7 +76,7 @@ export function groupConversationsByProject(
     });
   }
 
-  const groups = [...byPath.values()];
+  const groups = [...byId.values()];
   for (const group of groups) {
     group.conversations.sort(sortByUpdatedAtDesc);
   }
@@ -140,6 +140,7 @@ export function normalizeWorkspace(
   const cwd = source?.cwd || '';
   const roots = source?.workspace_roots?.length ? source.workspace_roots : (cwd ? [cwd] : []);
   return {
+    project_id: source?.project_id,
     cwd,
     workspace_roots: roots,
     protected_paths: source?.protected_paths || [],

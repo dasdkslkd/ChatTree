@@ -201,6 +201,19 @@ function testProjectVisibilityNormalizesSlashAndCase() {
   assert.equal(isProjectVisible('D:/Projects/Visible', { 'd:\\projects\\hidden\\': false }), true);
 }
 
+function testStableProjectIdGroupsDifferentWorkspaceRootsTogether() {
+  const first = conv('first', 'First', 2, 'D:/Projects/Main', 'Project');
+  const second = conv('second', 'Second', 1, 'D:/Projects/Extra', 'Project');
+  first.workspace.project_id = 'stable-project-id';
+  second.workspace.project_id = 'stable-project-id';
+
+  const groups = groupConversationsByProject([first, second]);
+
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].id, 'stable-project-id');
+  assert.deepEqual(groups[0].conversations.map((item) => item.id), ['first', 'second']);
+}
+
 testGroupsByWorkspaceAndSortsConversationsByRecentConversation();
 testProjectOrderOverridesRecentConversationSort();
 testUnknownProjectsSinkAfterSavedOrder();
@@ -210,5 +223,6 @@ testNewConversationWorkspaceFallsBackInPriorityOrder();
 testExtraWorkspacesShowAsEmptyProjectGroups();
 testProjectVisibilityHidesConversationAndManualGroups();
 testProjectVisibilityNormalizesSlashAndCase();
+testStableProjectIdGroupsDifferentWorkspaceRootsTogether();
 
 console.log('PASS projectGroups');

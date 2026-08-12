@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Literal
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from ...core.capabilities.bootstrap import build_runtime_config_with_plugin_mcp
 from ...core.agents import AgentMailbox, AgentRuntime
 from ...core.auth import subscription as sub_mod
@@ -21,10 +21,17 @@ from ...core.tools.security.approval import ApprovalManager
 from ...core.tools.security.logical_sandbox import LogicalSandbox
 from ...core.tools.security.permissions import PermissionEngine
 from ...core.tools.tool_manager import ToolManager
+from ...core.tools.memory import MemoryTool
 from ...core.command_runtime import CommandExecutor
 from ..dependencies import get_config_manager, get_tool_manager
 
 router = APIRouter()
+
+
+class MemoryConfigUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
 
 
 class ConfigUpdateRequest(BaseModel):
@@ -38,6 +45,7 @@ class ConfigUpdateRequest(BaseModel):
     tools: Optional[Dict[str, Any]] = None
     projects: Optional[Dict[str, Dict[str, Any]]] = None
     dev_environment: Optional[Dict[str, Any]] = None
+    memory: Optional[MemoryConfigUpdateRequest] = None
 
 
 class AddProviderRequest(BaseModel):
@@ -69,6 +77,9 @@ def _provider_config_without_default_model(conf: Dict[str, Any]) -> Dict[str, An
 
 
 def _sync_runtime_managers(app, config_data: Dict[str, Any], model_manager, tool_manager: ToolManager) -> None:
+    memory_store = getattr(app.state, 'memory_store', None)
+    if memory_store is not None and tool_manager._enabled:
+        tool_manager.register(MemoryTool(memory_store))
     app.state.model_manager = model_manager
     app.state.tool_manager = tool_manager
     chat_manager = getattr(app.state, 'chat_manager', None)
@@ -331,6 +342,8 @@ async def update_config(
             config_manager.data['projects'] = normalize_projects_config(request.projects)
         if request.dev_environment is not None:
             config_manager.data['dev_environment'] = normalize_dev_environment(request.dev_environment)
+        if request.memory is not None:
+            config_manager.data['memory'] = {'enabled': request.memory.enabled}
         if request.model_transport is not None:
             config_manager.data['model_transport'] = normalize_model_transport({
                 **config_manager.data['model_transport'],
@@ -353,6 +366,9 @@ async def update_config(
         cfg.data = config_manager.data
 
         if not rebuild_runtime:
+            tool_manager = getattr(http_request.app.state, 'tool_manager', None)
+            if tool_manager is not None:
+                tool_manager._config = config_manager.data
             return {"message": "配置已更新"}
 
         model_manager = ModelManager()

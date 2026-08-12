@@ -87,6 +87,9 @@ class PermissionEngine:
                 return PermissionDecision("allow", "plan mode allows read-only planning tools", matched)
             return PermissionDecision("deny", "plan mode blocks implementation tools until the plan is approved", matched)
 
+        if context.tool_name == "memory" and (context.run_kind or "chat") == "chat":
+            return PermissionDecision("allow", "Memory housekeeping tool allowed", matched)
+
         if _is_plan_control_tool(context.tool_name):
             allow = self._first_behavior(matched, "allow")
             return PermissionDecision(

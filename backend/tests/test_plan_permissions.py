@@ -48,6 +48,7 @@ def test_plan_mode_allows_read_only_and_plan_tools(tool_name):
         "create_task",
         "set_task_step",
         "cancel_task",
+        "memory",
         "plan",
     ],
 )

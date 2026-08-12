@@ -10,10 +10,16 @@ from backend.api.dependencies import get_chat_manager, get_config_manager, get_r
 from backend.api.errors import ApiError, ErrorEnvelope
 from backend.core.chat.chat_manager import ChatManager
 from backend.core.config.config import Config, cfg
-from backend.core.projects import normalize_dev_environment, normalize_project_path, normalize_projects_config, workspace_project_path
+from backend.core.projects import (
+    normalize_dev_environment,
+    normalize_project_path,
+    normalize_projects_config,
+    project_id_for_workspace,
+    workspace_project_path,
+)
 from backend.core.runs import RunManager
 from backend.core.transcript import TranscriptAssembler
-from backend.core.workspace import normalize_workspace
+from backend.core.workspace import build_default_workspace, normalize_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +43,7 @@ class ProjectConfigUpdateRequest(BaseModel):
     enabled_mcp_servers: Optional[List[str]] = None
     enabled_agents: Optional[List[str]] = None
     dev_environment: Optional[Dict[str, Any]] = None
-    workspace_roots: Optional[List[str]] = None
+    roots: Optional[List[str]] = None
 
 class ProjectHistoryDeleteRequest(BaseModel):
     path: str
@@ -121,30 +127,21 @@ def _remember_workspace_project(config_manager: Config, workspace: Dict[str, Any
     if not path:
         return
     projects = normalize_projects_config(config_manager.data.get("projects"))
-    current = projects.get(path, {})
-    projects[path] = {
+    project_id = project_id_for_workspace({"projects": projects}, workspace)
+    project_path = next(
+        (key for key, project in projects.items() if project["id"] == project_id),
+        path,
+    )
+    current = projects.get(project_path, {})
+    projects[project_path] = {
         **current,
-        "label": str((workspace or {}).get("label") or current.get("label") or Path(path).name),
+        "label": str(current.get("label") or (workspace or {}).get("label") or Path(path).name),
+        "roots": current.get("roots") or [path],
     }
     config_manager.data["projects"] = normalize_projects_config(projects)
+    workspace["project_id"] = config_manager.data["projects"][project_path]["id"]
     config_manager.save()
     cfg.data = config_manager.data
-
-
-def _project_summary_from_conversation(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    workspace = item.get("workspace")
-    if not isinstance(workspace, dict):
-        return None
-    path = workspace_project_path(workspace)
-    if not path:
-        return None
-    return {
-        "path": path,
-        "label": workspace.get("label") or Path(path).name or "默认项目",
-        "workspace": normalize_workspace(workspace),
-        "conversation_count": 1,
-        "latest_updated_at": item.get("updated_at", 0) or 0,
-    }
 
 
 @router.get("/projects", response_model=Dict[str, Any])
@@ -154,63 +151,61 @@ async def list_projects(
 ):
     """列出项目、项目配置与对话数量。"""
     try:
-        projects_by_path: Dict[str, Dict[str, Any]] = {}
-        for item in chat_manager.list_conversations():
-            summary = _project_summary_from_conversation(item)
-            if not summary:
-                continue
-            path = summary["path"]
-            existing = projects_by_path.get(path)
-            if existing:
-                existing["conversation_count"] += 1
-                existing["latest_updated_at"] = max(existing["latest_updated_at"], summary["latest_updated_at"])
-            else:
-                projects_by_path[path] = summary
-
+        conversations = chat_manager.list_conversations()
         configured = normalize_projects_config(config_manager.data.get("projects"))
-        for path, project_config in configured.items():
-            existing = projects_by_path.get(path)
-            if existing:
-                if project_config.get("label"):
-                    existing["label"] = project_config.get("label")
+        changed = configured != config_manager.data.get("projects")
+        for item in conversations:
+            workspace = item.get("workspace")
+            if not isinstance(workspace, dict) or project_id_for_workspace({"projects": configured}, workspace):
                 continue
-            projects_by_path[path] = {
+            path = workspace_project_path(workspace)
+            if path:
+                configured[path] = normalize_projects_config({
+                    path: {"label": workspace.get("label") or Path(path).name},
+                })[path]
+                changed = True
+        if changed:
+            config_manager.data["projects"] = configured
+            config_manager.save()
+            cfg.data = config_manager.data
+
+        projects_by_id: Dict[str, Dict[str, Any]] = {}
+        for path, project_config in configured.items():
+            project_id = project_config["id"]
+            label = project_config.get("label") or Path(path).name or "默认项目"
+            roots = project_config["roots"]
+            projects_by_id[project_id] = {
+                "id": project_id,
                 "path": path,
-                "label": project_config.get("label") or Path(path).name or "默认项目",
+                "label": label,
                 "workspace": normalize_workspace({
+                    "project_id": project_id,
                     "cwd": path,
-                    "workspace_roots": project_config.get("workspace_roots") or [path],
-                    "label": project_config.get("label") or Path(path).name,
+                    "workspace_roots": roots,
+                    "label": label,
                 }),
                 "conversation_count": 0,
                 "latest_updated_at": 0,
+                "config": project_config,
             }
 
-        for path, project in projects_by_path.items():
-            project_config = configured.get(path, {})
-            if project_config.get("label"):
-                project["label"] = project_config.get("label")
-            # 项目的工作区目录（含多根）以配置为准：配置是持久化源，会话快照可能滞后。
-            roots = project_config.get("workspace_roots")
-            if roots:
-                project["workspace"] = normalize_workspace({
-                    "cwd": project.get("path") or path,
-                    "workspace_roots": roots,
-                    "label": project.get("label") or Path(path).name,
-                })
-            project["config"] = {
-                "label": project_config.get("label") or "",
-                "visible": project_config.get("visible", True),
-                "workspace_roots": roots or [project.get("path") or path],
-                "enabled_skills": project_config.get("enabled_skills"),
-                "enabled_mcp_servers": project_config.get("enabled_mcp_servers"),
-                "enabled_agents": project_config.get("enabled_agents"),
-                "dev_environment": project_config.get("dev_environment", {"tools": {}, "environments": {}, "default_environment": ""}),
-            }
+        for item in conversations:
+            workspace = item.get("workspace")
+            project_id = project_id_for_workspace(
+                {"projects": configured},
+                workspace if isinstance(workspace, dict) else None,
+            )
+            project = projects_by_id.get(project_id)
+            if project is not None:
+                project["conversation_count"] += 1
+                project["latest_updated_at"] = max(
+                    project["latest_updated_at"],
+                    item.get("updated_at", 0) or 0,
+                )
 
         return {
             "projects": sorted(
-                projects_by_path.values(),
+                projects_by_id.values(),
                 key=lambda item: item.get("label") or "",
             ),
             "config": configured,
@@ -232,21 +227,22 @@ async def update_project_config(
         raise HTTPException(status_code=400, detail="Project path is required")
     projects = normalize_projects_config(config_manager.data.get("projects"))
     existing = projects.get(path, {})
-    if payload.workspace_roots is not None:
-        roots = [normalize_project_path(item) for item in payload.workspace_roots]
+    if payload.roots is not None:
+        roots = [normalize_project_path(item) for item in payload.roots]
         roots = [root for root in roots if root]
         # 主项目 cwd 恒为第一根，避免 roots 与项目身份错位。
         if roots and path not in roots:
             roots.insert(0, path)
     else:
-        roots = existing.get("workspace_roots", [path])
+        roots = existing.get("roots", [path])
     projects[path] = {
+        "id": existing.get("id"),
         "label": payload.label or existing.get("label") or Path(path).name,
         "visible": payload.visible if payload.visible is not None else existing.get("visible", True),
-        "workspace_roots": roots,
-        "enabled_skills": payload.enabled_skills,
-        "enabled_mcp_servers": payload.enabled_mcp_servers,
-        "enabled_agents": payload.enabled_agents,
+        "roots": roots,
+        "enabled_skills": payload.enabled_skills if "enabled_skills" in payload.model_fields_set else existing.get("enabled_skills"),
+        "enabled_mcp_servers": payload.enabled_mcp_servers if "enabled_mcp_servers" in payload.model_fields_set else existing.get("enabled_mcp_servers"),
+        "enabled_agents": payload.enabled_agents if "enabled_agents" in payload.model_fields_set else existing.get("enabled_agents"),
         "dev_environment": (
             normalize_dev_environment(payload.dev_environment)
             if payload.dev_environment is not None
@@ -273,12 +269,22 @@ async def delete_project_history(
     target_path = normalize_project_path(request.path)
     if not target_path:
         raise HTTPException(status_code=400, detail="Project path is required")
+    projects = normalize_projects_config(config_manager.data.get("projects"))
+    target_project_id = project_id_for_workspace(
+        {"projects": projects},
+        {"cwd": target_path},
+    )
+    if not target_project_id:
+        raise HTTPException(status_code=404, detail="Project not found")
     deleted: list[str] = []
     skipped_active: list[str] = []
     project_remembered = False
     for item in chat_manager.list_conversations():
         workspace = item.get("workspace")
-        if workspace_project_path(workspace if isinstance(workspace, dict) else None) != target_path:
+        if project_id_for_workspace(
+            {"projects": projects},
+            workspace if isinstance(workspace, dict) else None,
+        ) != target_project_id:
             continue
         if not project_remembered:
             _remember_workspace_project(
@@ -320,15 +326,16 @@ async def delete_project(
     path = normalize_project_path(project_path)
     if not path:
         raise HTTPException(status_code=400, detail="Project path is required")
+    projects = normalize_projects_config(config_manager.data.get("projects"))
+    target_project_id = project_id_for_workspace({"projects": projects}, {"cwd": path})
+    if not target_project_id:
+        raise HTTPException(status_code=404, detail="Project not found")
     deleted: list[str] = []
     skipped_active: list[str] = []
     for item in chat_manager.list_conversations():
         workspace = item.get("workspace")
         workspace = workspace if isinstance(workspace, dict) else {}
-        if workspace_project_path(workspace) != path and path not in [
-            normalize_project_path(root)
-            for root in (workspace.get("workspace_roots") or [])
-        ]:
+        if project_id_for_workspace({"projects": projects}, workspace) != target_project_id:
             continue
         conversation_id = item.get("id")
         if not conversation_id:
@@ -341,9 +348,11 @@ async def delete_project(
             continue
         chat_manager.delete_conversation(str(conversation_id))
         deleted.append(str(conversation_id))
-    projects = normalize_projects_config(config_manager.data.get("projects"))
-    if path in projects:
-        del projects[path]
+    projects = {
+        key: project
+        for key, project in projects.items()
+        if project["id"] != target_project_id
+    }
     config_manager.data["projects"] = normalize_projects_config(projects)
     config_manager.save()
     cfg.data = config_manager.data
@@ -378,14 +387,18 @@ async def create_conversation(
     """创建新对话"""
     try:
         logger.info(f"收到创建对话请求: {request}")
+        workspace = normalize_workspace(
+            request.workspace,
+            build_default_workspace(config_manager.data),
+        )
+        _remember_workspace_project(config_manager, workspace)
         conversation = chat_manager.create_conversation(
             request.title,
             request.prompt_id,
             prompt_mode=request.prompt_mode,
-            workspace=request.workspace,
+            workspace=workspace,
             multi_agent_mode=request.multi_agent_mode,
         )
-        _remember_workspace_project(config_manager, conversation.metadata.get("workspace"))
         logger.info(f"对话创建成功并已保存: {conversation.metadata['id']}")
         return _conversation_response(conversation)
     except Exception as e:

@@ -7,9 +7,9 @@ import {
 } from '@/components/ui/dialog';
 import {
   Settings, StickyNote, Server, Wrench, Link2,
-  Sparkles, Bot, Package, MessageSquare, FolderOpen, Terminal, HardDrive, Coins,
+  Sparkles, Bot, Package, MessageSquare, FolderOpen, Terminal, HardDrive, Coins, Brain,
 } from 'lucide-react';
-import { useNavigationStore } from '../store/navigationStore';
+import { useNavigationStore, type SettingsSection } from '../store/navigationStore';
 import { SshHostsSection } from './settings/sections/ssh';
 import { ProvidersSection } from './settings/sections/providers';
 import { ProjectsSection } from './settings/sections/projects';
@@ -20,12 +20,12 @@ import { McpSection } from './settings/sections/mcp';
 import { PromptsSection } from './settings/sections/prompts';
 import { StorageSection } from './settings/sections/storage';
 import { UsageStatsSection } from './settings/sections/usage_stats';
-
-type SettingsSection = 'providers' | 'projects' | 'ssh' | 'prompts' | 'builtin_tools' | 'dev_environment' | 'skills' | 'mcp' | 'agents' | 'plugins' | 'storage' | 'usage_stats';
+import { MemorySection } from './settings/sections/memory';
 
 const SETTINGS_NAV: { key: SettingsSection; label: string; icon: typeof Settings; group: string }[] = [
   { key: 'providers', label: '供应商', icon: Server, group: '应用' },
   { key: 'projects', label: '项目', icon: FolderOpen, group: '应用' },
+  { key: 'memory', label: '记忆', icon: Brain, group: '应用' },
   { key: 'ssh', label: 'SSH Hosts', icon: Link2, group: '应用' },
   { key: 'builtin_tools', label: '内置工具', icon: Wrench, group: '工具与能力' },
   { key: 'dev_environment', label: '开发环境', icon: Terminal, group: '工具与能力' },
@@ -120,6 +120,7 @@ export function SettingsPageView({ defaultSection = 'providers' }: { defaultSect
       <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
         {section === 'providers' && <ProvidersSection />}
         {section === 'projects' && <ProjectsSection />}
+        {section === 'memory' && <MemorySection />}
         {section === 'ssh' && <SshHostsSection />}
         {section === 'builtin_tools' && <BuiltinToolsSection />}
         {section === 'dev_environment' && <DevEnvironmentSection />}

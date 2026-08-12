@@ -1043,7 +1043,7 @@ export default function ChatPage() {
       if (!path) return;
       const workspace = await conversationApi.resolveProjectFolder(path);
       await loadProjects();
-      setSelectedProjectId(encodeProjectId(workspace.cwd));
+      setSelectedProjectId(workspace.project_id || encodeProjectId(workspace.cwd));
       setProjectPickerSearch('');
     } catch (error) {
       toast.error(getApiErrorMessage(error, '项目文件夹处理失败'));
@@ -1052,7 +1052,7 @@ export default function ChatPage() {
     }
   };
 
-  /** 把选中的目录持久化写入所选主项目配置的 workspace_roots（多根工作区）。 */
+  /** 把选中的目录加入当前项目 roots。 */
   const handleAppendProjectFolder = async () => {
     setProjectPickerOpen(false);
     if (!window.electronAPI) {
@@ -1071,7 +1071,7 @@ export default function ChatPage() {
       if (!path) return;
       const existingRoots = base?.workspace_roots?.length ? base.workspace_roots : [cwd];
       const roots = [...new Set([...existingRoots, path].filter(Boolean))];
-      await configApi.updateProject(cwd, { workspace_roots: roots });
+      await configApi.updateProject(cwd, { roots });
       await loadProjects();
     } catch (error) {
       toast.error(getApiErrorMessage(error, '追加文件夹失败'));
@@ -1080,14 +1080,14 @@ export default function ChatPage() {
     }
   };
 
-  /** 从所选主项目配置的 workspace_roots 中移除一个追加目录（主根不可移除）。 */
+  /** 从当前项目 roots 中移除一个追加目录（主根不可移除）。 */
   const handleRemoveWorkspaceRoot = async (rootToRemove: string) => {
     const base = selectedNewConversationWorkspace;
     const cwd = base?.cwd;
     if (!cwd || rootToRemove === cwd) return;
     const remaining = (base?.workspace_roots || [cwd]).filter((r) => r !== rootToRemove);
     try {
-      await configApi.updateProject(cwd, { workspace_roots: remaining });
+      await configApi.updateProject(cwd, { roots: remaining });
       await loadProjects();
     } catch (error) {
       toast.error(getApiErrorMessage(error, '移除目录失败'));

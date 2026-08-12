@@ -21,6 +21,10 @@ class ToolCapability(str, Enum):
 DEFAULT_TOOL_CAPABILITIES: Mapping[str, Set[ToolCapability]] = {
     "web": {ToolCapability.NETWORK_READ, ToolCapability.READ_ONLY, ToolCapability.PARALLEL_SAFE},
     "tools": {ToolCapability.READ_ONLY, ToolCapability.PARALLEL_SAFE},
+    "memory": {
+        ToolCapability.CONFIG_WRITE,
+        ToolCapability.MUTATES_RUNTIME_STATE,
+    },
     "enter_plan_mode": {ToolCapability.MUTATES_RUNTIME_STATE},
     "ask_user_question": {ToolCapability.MUTATES_RUNTIME_STATE},
     "exit_plan_mode": {ToolCapability.MUTATES_RUNTIME_STATE},

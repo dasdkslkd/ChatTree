@@ -74,9 +74,8 @@ def _workspace_roots(config_manager) -> list[str] | None:
     """返回当前配置中所有项目 workspace 的根目录列表；无可用项目时返回 None。"""
     projects = normalize_projects_config(getattr(config_manager, "data", None).get("projects"))
     roots: list[str] = []
-    for project_path in projects:
-        workspace = normalize_workspace({"cwd": project_path, "workspace_roots": [project_path]})
-        roots.extend(workspace["workspace_roots"])
+    for project in projects.values():
+        roots.extend(project["roots"])
     return roots or None
 
 

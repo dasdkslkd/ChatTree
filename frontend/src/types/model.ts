@@ -232,9 +232,10 @@ export interface DevEnvironmentConfig {
 }
 
 export interface ProjectCapabilityConfig {
+  id?: string;
   label?: string;
   visible?: boolean;
-  workspace_roots?: string[];
+  roots?: string[];
   enabled_skills?: string[] | null;
   enabled_mcp_servers?: string[] | null;
   enabled_agents?: string[] | null;
@@ -242,9 +243,11 @@ export interface ProjectCapabilityConfig {
 }
 
 export interface ProjectSettingsItem {
+  id: string;
   path: string;
   label: string;
   workspace: {
+    project_id: string;
     cwd: string;
     workspace_roots: string[];
     protected_paths?: string[];
@@ -274,6 +277,7 @@ export interface ConfigData {
   tools?: ToolsConfig;
   dev_environment?: DevEnvironmentConfig;
   projects?: Record<string, ProjectCapabilityConfig>;
+  memory: MemoryConfig;
 }
 
 // 配置更新请求
@@ -288,6 +292,31 @@ export interface ConfigUpdateRequest {
   tools?: ToolsConfig;
   dev_environment?: DevEnvironmentConfig;
   projects?: Record<string, ProjectCapabilityConfig>;
+  memory?: MemoryConfig;
+}
+
+export interface MemoryConfig {
+  enabled: boolean;
+}
+
+export interface MemoryFileView {
+  scope: 'user' | 'machine' | 'project';
+  name: string;
+  path: string;
+  exists: boolean;
+  valid: boolean;
+  truncated: boolean;
+  content: string;
+  error: string | null;
+}
+
+export interface MemoryViewResponse {
+  enabled: boolean;
+  global: {
+    user: MemoryFileView;
+    machine: MemoryFileView;
+  };
+  project: MemoryFileView | null;
 }
 
 export interface ModelTransportConfig {

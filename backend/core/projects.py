@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import shutil
+import os
+import uuid
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -27,17 +29,26 @@ def workspace_project_path(workspace: Mapping[str, Any] | None) -> str:
     return normalize_project_path(workspace.get("cwd"))
 
 
-def normalize_project_config(raw: Any) -> dict[str, Any]:
+def normalize_project_config(raw: Any, project_path: str = "") -> dict[str, Any]:
     source = raw if isinstance(raw, Mapping) else {}
+    try:
+        project_id = str(uuid.UUID(str(source.get("id") or "")))
+    except ValueError:
+        project_id = str(
+            uuid.uuid5(uuid.NAMESPACE_URL, f"chattree-project:{os.path.normcase(project_path)}")
+            if project_path
+            else uuid.uuid4()
+        )
     result: dict[str, Any] = {
+        "id": project_id,
         "label": str(source.get("label") or ""),
         "visible": source.get("visible", True) is not False,
         "dev_environment": normalize_dev_environment(source.get("dev_environment")),
     }
-    roots = source.get("workspace_roots")
+    roots = source.get("roots")
     if isinstance(roots, list):
         normalized_roots = [normalize_project_path(item) for item in roots]
-        result["workspace_roots"] = [root for root in normalized_roots if root]
+        result["roots"] = list(dict.fromkeys(root for root in normalized_roots if root))
     for key in ("enabled_skills", "enabled_mcp_servers", "enabled_agents"):
         result[key] = _normalize_optional_string_list(source.get(key))
     return result
@@ -51,18 +62,57 @@ def normalize_projects_config(raw: Any) -> dict[str, dict[str, Any]]:
         path = normalize_project_path(path_value)
         if not path:
             continue
-        projects[path] = normalize_project_config(config)
+        project = normalize_project_config(config, path)
+        project["roots"] = list(dict.fromkeys([path, *project.get("roots", [])]))
+        projects[path] = project
     return projects
+
+
+def project_id_for_workspace(
+    config_data: Mapping[str, Any] | None,
+    workspace: Mapping[str, Any] | None,
+) -> str:
+    if not isinstance(config_data, Mapping) or not isinstance(workspace, Mapping):
+        return ""
+    projects = normalize_projects_config(config_data.get(PROJECTS_CONFIG_KEY))
+    explicit = str(workspace.get("project_id") or "")
+    if explicit and any(project["id"] == explicit for project in projects.values()):
+        return explicit
+
+    cwd = normalize_project_path(workspace.get("cwd"))
+    if not cwd:
+        return ""
+    matches: list[tuple[int, str]] = []
+    for project in projects.values():
+        for root in project["roots"]:
+            try:
+                if os.path.commonpath([os.path.normcase(cwd), os.path.normcase(root)]) != os.path.normcase(root):
+                    continue
+            except ValueError:
+                continue
+            matches.append((len(root), project["id"]))
+    if not matches:
+        return ""
+    longest = max(length for length, _ in matches)
+    project_ids = {project_id for length, project_id in matches if length == longest}
+    return project_ids.pop() if len(project_ids) == 1 else ""
 
 
 def project_config_for_workspace(
     config_data: Mapping[str, Any] | None,
     workspace: Mapping[str, Any] | None,
 ) -> Optional[dict[str, Any]]:
-    path = workspace_project_path(workspace)
-    if not path or not isinstance(config_data, Mapping):
+    project_id = project_id_for_workspace(config_data, workspace)
+    if not project_id or not isinstance(config_data, Mapping):
         return None
-    return normalize_projects_config(config_data.get(PROJECTS_CONFIG_KEY)).get(path)
+    return next(
+        (
+            project
+            for project in normalize_projects_config(config_data.get(PROJECTS_CONFIG_KEY)).values()
+            if project["id"] == project_id
+        ),
+        None,
+    )
 
 
 def project_is_visible(

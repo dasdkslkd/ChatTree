@@ -15,7 +15,7 @@ from backend.core.config.types import Message, Role, StreamController, StreamSta
 from backend.core.instructions import build_agents_instruction_section
 from backend.core.projects import filter_capability_registry_for_workspace
 from backend.core.prompts import PromptBuilder, PromptBuildRequest
-from backend.core.prompts.runtime_context import build_dev_environment_section
+from backend.core.prompts.runtime_context import build_dev_environment_section, build_memory_section
 from backend.core.prompts.catalog import load_prompt_template
 from backend.core.prompts.types import RuntimePromptContext
 from backend.core.runs import (
@@ -822,12 +822,12 @@ class SubagentExecutor:
                     runtime_context=self._runtime_prompt_context(agent, is_workflow_worker),
                     include_core_prompt=False,
                     include_available_capabilities=False,
-                    extra_sections=self._agents_instruction_sections(workspace),
+                    extra_sections=self._workspace_prompt_sections(workspace),
                 )
             )
         ]
 
-    def _agents_instruction_sections(self, workspace: Optional[dict[str, Any]]) -> list[Any]:
+    def _workspace_prompt_sections(self, workspace: Optional[dict[str, Any]]) -> list[Any]:
         config_data = cfg.data if isinstance(cfg.data, dict) else None
         sections: list[Any] = []
         section = build_agents_instruction_section(workspace, config_data)
@@ -836,6 +836,13 @@ class SubagentExecutor:
         dev_section = build_dev_environment_section(workspace, config_data)
         if dev_section is not None:
             sections.append(dev_section)
+        memory_section = build_memory_section(
+            workspace,
+            config_data,
+            getattr(self.chat_manager, "memory_store", None),
+        )
+        if memory_section is not None:
+            sections.append(memory_section)
         return sections
 
     def _format_parent_context(self, conversation: Any, parent_node_id: Optional[str]) -> str:

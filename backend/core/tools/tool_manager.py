@@ -305,9 +305,15 @@ class ToolManager:
         tools: List[Dict[str, Any]] = []
         context = exposure_context or self._exposure_resolver.context()
         visible = self._visible_local_tool_names(context)
+        memory_config = self._config.get("memory")
+        memory_enabled = not isinstance(memory_config, dict) or memory_config.get("enabled") is not False
         for name in sorted(self._tools):
             tool = self._tools[name]
-            if name in visible and self._filter.is_allowed(name):
+            if (
+                name in visible
+                and self._filter.is_allowed(name)
+                and (name != "memory" or memory_enabled)
+            ):
                 tools.append(tool.to_openai_tool())
         if self._exposure_resolver.mcp_visible(context):
             for info in self._connection_manager.list_all_tools():
@@ -360,7 +366,16 @@ class ToolManager:
                 logger.error(f"Tool not found: {name}")
                 return json.dumps({"error": f"Tool '{name}' not found"}, ensure_ascii=False)
 
-            logger.info(f"Executing tool: {name} with args: {json.dumps(arguments, ensure_ascii=False)[:200]}")
+            if name == "memory":
+                logger.info(
+                    "Executing memory tool: action=%s scope=%s content_chars=%d old_text_chars=%d",
+                    arguments.get("action"),
+                    arguments.get("scope"),
+                    len(str(arguments.get("content") or "")),
+                    len(str(arguments.get("old_text") or "")),
+                )
+            else:
+                logger.info(f"Executing tool: {name} with args: {json.dumps(arguments, ensure_ascii=False)[:200]}")
             execute_arguments = dict(arguments)
             if (
                 runtime_context is not None

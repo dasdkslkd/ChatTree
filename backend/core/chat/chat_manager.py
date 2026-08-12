@@ -78,13 +78,14 @@ from ..perf import get_profiler
 from ..utils.logger import setup_logger
 from ..config.config import cfg
 from ..workspace import build_default_workspace, normalize_workspace
-from ..projects import filter_capability_registry_for_workspace
+from ..projects import filter_capability_registry_for_workspace, project_id_for_workspace
 from ..capabilities.prompting import (
     collect_skill_injection_names,
 )
 from ..prompts import PromptBuilder, PromptBuildRequest
 from ..prompts.runtime_context import (
-    agents_instruction_sections,
+    build_memory_section,
+    workspace_prompt_sections,
     format_task_turn_context_for_prompt,
     normalize_selected_system_prompt_mode,
     plan_mode_runtime_lines,
@@ -99,7 +100,7 @@ from ..slash import (
     SlashDispatchResult,
     SlashToolPolicy,
 )
-from ..tools.exposure import ToolExposureContext
+from ..tools.exposure import ToolExposureContext, is_housekeeping_tool
 from ..tools.perf_attrs import summarize_tool_arguments, summarize_tool_result
 from ..tools.security.permissions import PermissionMode, normalize_permission_mode
 from ..tools.tool_call_scheduler import plan_tool_call_waves, tool_call_function_name
@@ -198,6 +199,7 @@ class ChatManager:
         task_service=None,
         plan_ledger=None,
         chat_repository=None,
+        memory_store=None,
     ):
         self.model_manager = model_manager
         self.storage = storage
@@ -205,6 +207,7 @@ class ChatManager:
         self.tool_manager = tool_manager
         self.task_service = task_service
         self.plan_ledger = plan_ledger
+        self.memory_store = memory_store
         if chat_repository is None:
             from ..persistence.database import SQLitePersistence
             from ..persistence.repository import ChatRepository
@@ -402,6 +405,10 @@ class ChatManager:
         conversations = self.chat_repository.list_conversations() if self.chat_repository is not None else []
         for item in conversations:
             item["workspace"] = normalize_workspace(item.get("workspace"), default_workspace)
+            item["workspace"]["project_id"] = project_id_for_workspace(
+                cfg.data if isinstance(cfg.data, dict) else None,
+                item["workspace"],
+            )
             item["node_count"] = str(item.get("node_count", 0))
             if not item.get("model_id") or not item.get("provider_id"):
                 loaded = self.get_conversation(item["id"])
@@ -687,7 +694,7 @@ class ChatManager:
                     task_context_mode=self._current_node_task_context_mode(conversation),
                     plan_ledger=getattr(self, "plan_ledger", None),
                 ),
-                extra_sections=agents_instruction_sections(conversation),
+                extra_sections=workspace_prompt_sections(conversation, self.memory_store),
                 custom_system_prompt=custom_prompt,
                 custom_system_prompt_mode=custom_mode,
             )
@@ -724,7 +731,11 @@ class ChatManager:
                         permission_mode=self._current_node_permission_mode(conversation),
                         task_context_mode=self._current_node_task_context_mode(conversation),
                     ),
-                    extra_sections=agents_instruction_sections(conversation),
+                    extra_sections=workspace_prompt_sections(
+                        conversation,
+                        self.memory_store,
+                        include_memory=False,
+                    ),
                     custom_system_prompt=custom_prompt,
                     custom_system_prompt_mode=custom_mode,
                 )
@@ -1959,20 +1970,26 @@ class ChatManager:
                             status="running",
                             run_id=run_id,
                         )
-                yield StreamChunk(
-                    status=StreamStatus.CONTENT,
-                    content=None,
-                    node_id=new_node["id"],
-                    target_node_id=new_node["id"],
-                    conversation_id=conversation_id,
-                    run_id=run_id,
-                    error=None,
-                    tokens_used=0,
-                    event_type="tool_calls_committed",
-                    tool_calls=round_tool_calls,
-                    tool_round=tool_round,
-                    tool_round_id=tool_round_id,
-                )
+                public_tool_calls = [
+                    call
+                    for call in round_tool_calls
+                    if not is_housekeeping_tool(str((call.get("function") or {}).get("name") or ""))
+                ]
+                if public_tool_calls:
+                    yield StreamChunk(
+                        status=StreamStatus.CONTENT,
+                        content=None,
+                        node_id=new_node["id"],
+                        target_node_id=new_node["id"],
+                        conversation_id=conversation_id,
+                        run_id=run_id,
+                        error=None,
+                        tokens_used=0,
+                        event_type="tool_calls_committed",
+                        tool_calls=public_tool_calls,
+                        tool_round=tool_round,
+                        tool_round_id=tool_round_id,
+                    )
                 approval_events: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
                 round_run_context = {
                     **tool_run_context,
@@ -2914,6 +2931,19 @@ class ChatManager:
             "content": get_compact_prompt(custom_instructions),
         }
         compact_messages = [*messages_to_summarize, summary_request]
+        memory_section = build_memory_section(
+            normalize_workspace(
+                conversation.metadata.get("workspace"),
+                build_default_workspace(cfg.data if isinstance(cfg.data, dict) else None),
+            ),
+            cfg.data if isinstance(cfg.data, dict) else None,
+            self.memory_store,
+        )
+        if memory_section is not None and memory_section.content:
+            insert_at = 0
+            while insert_at < len(compact_messages) and compact_messages[insert_at].get("role") == "system":
+                insert_at += 1
+            compact_messages.insert(insert_at, {"role": "system", "content": memory_section.content})
         restored_files = self._restore_import_file_context(
             conversation_id,
             self._import_reference_scan_messages(conversation, include_messages_to_keep=False),
@@ -3618,7 +3648,7 @@ class ChatManager:
         pending_observation_futures: list[Any] = []
 
         async def emit_tool_observation(event: Dict[str, Any]) -> None:
-            if emit_event is None:
+            if emit_event is None or is_housekeeping_tool(name):
                 return
             event = dict(event)
             event.setdefault("run_id", call_run_context.get("run_id"))

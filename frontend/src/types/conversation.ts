@@ -1,4 +1,5 @@
 export interface WorkspaceContext {
+  project_id?: string;
   cwd: string;
   workspace_roots: string[];
   protected_paths?: string[];

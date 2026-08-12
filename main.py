@@ -29,6 +29,8 @@ from backend.core.capabilities.bootstrap import (
     build_runtime_config_with_plugin_mcp,
 )
 from backend.core.model.model_manager import ModelManager
+from backend.core.memory import MemoryStore
+from backend.core.tools.memory import MemoryTool
 from backend.core.model.model_metadata import initialize_model_metadata
 from backend.core.config.config import Config, cfg
 from backend.core.agents import AgentMailbox, AgentRuntime, SubagentExecutor
@@ -295,7 +297,10 @@ async def _initialize_server() -> None:
     model_manager = ModelManager()
     chat_storage = ChatStorage(str(persistence.home / "conversations"))
     prompt_storage = PromptStorage(str(persistence.home / "prompts"))
+    memory_store = MemoryStore(persistence.home)
     tool_manager = ToolManager(runtime_config, chat_repository=chat_repository)
+    if tool_manager._enabled:
+        tool_manager.register(MemoryTool(memory_store))
     app.state.tool_manager = tool_manager
     await tool_manager.init()
     approval_manager = ApprovalManager()
@@ -330,6 +335,7 @@ async def _initialize_server() -> None:
         task_service=task_service,
         plan_ledger=plan_ledger,
         chat_repository=chat_repository,
+        memory_store=memory_store,
     )
     chat_manager.plan_ledger = plan_ledger
     chat_manager.capability_registry = capability_registry
@@ -374,6 +380,7 @@ async def _initialize_server() -> None:
     app.state.plan_repository = plan_repository
     app.state.task_repository = task_repository
     app.state.config_manager = config_manager
+    app.state.memory_store = memory_store
     app.state.perf_profiler = perf_profiler
     app.state.project_root = PROJECT_ROOT
     app.state.capability_registry = capability_registry

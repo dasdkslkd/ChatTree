@@ -5,7 +5,8 @@ from typing import Any, List, Mapping, Optional
 
 from ..config.config import cfg
 from ..instructions import build_agents_instruction_section
-from ..projects import resolve_dev_environment
+from ..memory import MemoryStore
+from ..projects import project_config_for_workspace, project_id_for_workspace, resolve_dev_environment
 from ..tasks import TaskContextMode, TaskOutcome, TaskTurnContext
 from ..tools.task_contract import TASK_RUNTIME_RULES
 from ..workspace import build_default_workspace, normalize_workspace
@@ -109,7 +110,48 @@ def build_dev_environment_section(
     )
 
 
-def agents_instruction_sections(conversation) -> list[Any]:
+def build_memory_section(
+    workspace: Mapping[str, Any] | None,
+    config_data: Mapping[str, Any] | None,
+    store: MemoryStore | None,
+) -> Optional[PromptSection]:
+    if store is None or not isinstance(config_data, Mapping):
+        return None
+    memory_config = config_data.get("memory")
+    if isinstance(memory_config, Mapping) and memory_config.get("enabled") is False:
+        return None
+    project_id = project_id_for_workspace(config_data, workspace)
+    snapshot = store.snapshot(project_id)
+    if not snapshot:
+        return None
+    lines = [
+        "## Memory",
+        "",
+        "Current user instructions, project files, and live runtime facts override these prior facts. Save durable new facts with `memory` automatically; never save secrets, task state, raw outputs, or transient environment data.",
+    ]
+    labels = {"user": "User", "machine": "Machine", "project": "Project"}
+    project = project_config_for_workspace(config_data, workspace)
+    if project is not None:
+        project_label = " ".join(str(project.get("label") or "Current project").split())[:80]
+        labels["project"] = f"Project: {project_label}"
+    for scope in ("user", "machine", "project"):
+        entries = snapshot.get(scope)
+        if entries:
+            lines.extend(["", f"### {labels[scope]}", *[f"- {entry}" for entry in entries]])
+    return PromptSection(
+        name="persistent_memory",
+        role="system",
+        content="\n".join(lines),
+        priority=13,
+    )
+
+
+def workspace_prompt_sections(
+    conversation,
+    memory_store: MemoryStore | None = None,
+    *,
+    include_memory: bool = True,
+) -> list[Any]:
     if conversation is None:
         return []
     workspace = normalize_workspace(
@@ -124,6 +166,9 @@ def agents_instruction_sections(conversation) -> list[Any]:
     dev_section = build_dev_environment_section(workspace, config_data)
     if dev_section is not None:
         sections.append(dev_section)
+    memory_section = build_memory_section(workspace, config_data, memory_store) if include_memory else None
+    if memory_section is not None:
+        sections.append(memory_section)
     return sections
 
 

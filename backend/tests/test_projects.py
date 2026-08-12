@@ -17,8 +17,10 @@ from backend.core.projects import (
     detect_tool_path,
     normalize_dev_environment,
     normalize_projects_config,
+    project_id_for_workspace,
     resolve_dev_environment,
 )
+from backend.core.workspace import normalize_workspace
 from backend.core.prompts.runtime_context import build_dev_environment_section
 
 
@@ -47,6 +49,26 @@ def test_normalize_project_config_carries_dev_environment():
     })
     entry = project[list(project)[0]]
     assert set(entry["dev_environment"]["tools"]) == {"node"}
+
+
+def test_project_id_is_stable_and_roots_resolve_by_longest_match(tmp_path):
+    root = str(tmp_path / "project")
+    nested = str(tmp_path / "project" / "nested")
+    raw = {
+        root: {"label": "outer", "roots": [root]},
+        nested: {"label": "inner", "roots": [nested]},
+    }
+    first = normalize_projects_config(raw)
+    second = normalize_projects_config(raw)
+
+    assert first[root]["id"] == second[root]["id"]
+    assert project_id_for_workspace(
+        {"projects": first},
+        {"cwd": str(tmp_path / "project" / "nested" / "src")},
+    ) == first[nested]["id"]
+
+    workspace = normalize_workspace({"cwd": root, "project_id": first[root]["id"]})
+    assert workspace["project_id"] == first[root]["id"]
 
 
 def test_resolve_merges_project_over_global(tmp_path, monkeypatch):
