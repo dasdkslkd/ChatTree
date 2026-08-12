@@ -29,9 +29,9 @@ function testPlanCardsUseDirectDtoFields() {
   const question = read('src/components/transcript/items/PlanQuestionCard.tsx');
   const approval = read('src/components/transcript/items/PlanApprovalCard.tsx');
 
-  assert.match(question, /item\.question/);
-  assert.match(question, /item\.options/);
-  assert.match(question, /item\.answer/);
+  assert.match(question, /item\.questions/);
+  assert.match(question, /entry\.options/);
+  assert.match(question, /item\.answers/);
   assert.match(approval, /item\.plan/);
   assert.match(approval, /item\.feedback/);
 }
