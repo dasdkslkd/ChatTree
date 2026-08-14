@@ -142,7 +142,7 @@ jobs:
         run: |
           shopt -s nullglob
           gh release upload "$GITHUB_REF_NAME" \
-            dist-electron/*.exe dist-electron/*.blockmap \
+            dist-electron/ChatTree-[0-9]*.exe dist-electron/*.blockmap \
             dist-electron/latest*.yml dist-electron/*.dmg dist-electron/*.zip \
             dist-electron/*.AppImage dist-electron/*.zsync \
             dist-electron/ChatTree-Runtime-* --clobber
