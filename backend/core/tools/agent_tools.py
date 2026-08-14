@@ -77,8 +77,9 @@ class AgentTool(AgentRuntimeTool):
     @property
     def description(self) -> str:
         return (
-            "Manage delegated ChatTree agent and workflow runs. Use this for explicit subagent, agent, forked-agent, "
-            "or workflow requests instead of simulating delegation with shell, file tools, or prose."
+            "Manage delegated ChatTree agent and workflow runs. The wait action accepts agent/workflow run ids only; "
+            "it cannot wait for shell command runs. Use this for explicit subagent, agent, forked-agent, or workflow "
+            "requests instead of simulating delegation with shell, file tools, or prose."
         )
 
     def parameters_schema(self) -> Dict[str, Any]:
@@ -239,6 +240,7 @@ class WaitAgentTool(AgentRuntimeTool):
     def description(self) -> str:
         return (
             "Wait for one or more spawned ChatTree agent/workflow runs and read their terminal run results. "
+            "This tool accepts agent/workflow run ids only; it cannot wait for shell command runs. "
             "A wait timeout only means this wait call expired; it does not mean the run failed."
         )
 

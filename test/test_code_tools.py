@@ -1726,30 +1726,21 @@ def test_run_command_does_not_use_event_loop_subprocess(tmp_path, monkeypatch):
     assert result["timed_out"] is False
 
 
-def test_run_command_returns_structured_timeout(tmp_path, monkeypatch):
-    def raise_timeout(*args, **kwargs):
-        raise subprocess.TimeoutExpired(
-            cmd=kwargs["args"],
-            timeout=kwargs["timeout"],
-            output=b"partial stdout",
-            stderr=b"partial stderr",
-        )
+def test_run_command_does_not_pass_timeout_to_subprocess(tmp_path, monkeypatch):
+    captured = {}
 
-    monkeypatch.setattr(subprocess, "run", raise_timeout)
+    def capture_run(*args, **kwargs):
+        captured["kwargs"] = kwargs
+        return subprocess.CompletedProcess(args=kwargs["args"], returncode=0, stdout=b"ok", stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", capture_run)
     tool = RunCommandTool(make_config(tmp_path))
 
-    command = f'"{sys.executable}" -c "print(\'slow\')"'
+    result = load(run(tool.execute(command="echo ok", timeout_seconds=1)))
 
-    result = load(run(tool.execute(command=command, timeout_seconds=1)))
-
-    assert result == {
-        "command": command,
-        "cwd": ".",
-        "exit_code": None,
-        "stdout": "partial stdout",
-        "stderr": "partial stderr",
-        "timed_out": True,
-    }
+    assert "timeout" not in captured["kwargs"]
+    assert result["exit_code"] == 0
+    assert result["stdout"].strip() == "ok"
 
 
 def test_run_command_returns_structured_error_when_execution_fails(tmp_path, monkeypatch):

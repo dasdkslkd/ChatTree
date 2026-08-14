@@ -14,6 +14,7 @@ CANONICAL_CODING_TOOLS = {
     "read",
     "edit",
     "shell",
+    "wait_command",
     "agent",
     "web",
     "memory",
@@ -273,7 +274,7 @@ def descriptor_for_tool_name(name: str) -> ToolDescriptor:
         return ToolDescriptor(name=name, category="code", capabilities=frozenset({"read"}), exposure_tags=frozenset({"coding", "plan_safe"}))
     if name == "edit":
         return ToolDescriptor(name=name, category="code", capabilities=frozenset({"write"}), exposure_tags=frozenset({"coding"}))
-    if name == "shell":
+    if name in {"shell", "wait_command"}:
         return ToolDescriptor(name=name, category="code", capabilities=frozenset({"command"}), exposure_tags=frozenset({"coding"}))
     if name == "agent":
         return ToolDescriptor(name=name, category="agent", capabilities=frozenset({"agent"}), exposure_tags=frozenset({"coding"}))

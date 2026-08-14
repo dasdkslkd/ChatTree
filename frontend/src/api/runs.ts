@@ -180,6 +180,11 @@ export const runsApi = {
     await apiClient.post(`/runs/${encodeURIComponent(runId)}/stop`);
   },
 
+  observe: async (runId: string): Promise<RunRecord> => {
+    const response = await apiClient.post<RunRecord>(`/runs/${encodeURIComponent(runId)}/observe`);
+    return response.data;
+  },
+
   stopConversation: async (conversationId: string): Promise<{ run_ids: string[] }> => {
     const response = await apiClient.post(`/conversations/${conversationId}/runs/stop`);
     return response.data;

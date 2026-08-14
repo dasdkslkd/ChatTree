@@ -288,6 +288,9 @@ class TaskNotificationService:
                 "workflow_result",
                 "workflow_error",
                 "workflow_cancelled",
+                "command_exited",
+                "command_stopped",
+                "command_error",
             }:
                 return payload
         return {}

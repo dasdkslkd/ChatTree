@@ -97,7 +97,6 @@ class CommandExecutor:
         created_by_run_id: Optional[str] = None,
         cancellation_parent_run_id: Optional[str] = None,
         summary: str = "",
-        timeout_seconds: Optional[int] = None,
         metadata: Optional[Dict[str, Any]] = None,
         step: Optional[int] = None,
         task_context_mode: str = "attached",
@@ -115,7 +114,6 @@ class CommandExecutor:
                     created_by_run_id=created_by_run_id,
                     cancellation_parent_run_id=cancellation_parent_run_id,
                     summary=summary,
-                    timeout_seconds=timeout_seconds,
                     metadata=metadata,
                     step=step,
                     task_context_mode=task_context_mode,
@@ -135,7 +133,6 @@ class CommandExecutor:
         created_by_run_id: Optional[str] = None,
         cancellation_parent_run_id: Optional[str] = None,
         summary: str = "",
-        timeout_seconds: Optional[int] = None,
         metadata: Optional[Dict[str, Any]] = None,
         step: Optional[int] = None,
         task_context_mode: str = "attached",
@@ -172,7 +169,6 @@ class CommandExecutor:
                 "shell": shell_snapshot,
                 "shell_id": self.shell_profile.id,
                 "platform": self.shell_profile.platform,
-                "timeout_seconds": timeout_seconds,
                 **run_metadata,
             },
             task_binding=task_binding,
@@ -189,7 +185,6 @@ class CommandExecutor:
                 command=command,
                 cwd=cwd_path,
                 shell_snapshot=shell_snapshot,
-                timeout_seconds=timeout_seconds,
                 anchor_node_id=anchor_node_id,
             )
             async with self._lock:
@@ -537,7 +532,6 @@ class CommandExecutor:
         command: str,
         cwd: str,
         shell_snapshot: Dict[str, Any],
-        timeout_seconds: Optional[int],
         anchor_node_id: Optional[str],
     ) -> None:
         final_status = RunStatus.COMPLETED
@@ -564,7 +558,6 @@ class CommandExecutor:
                     command=command,
                     cwd=cwd,
                     shell=shell_snapshot,
-                    timeout_seconds=timeout_seconds,
                     started_at=started_at,
                     anchor_node_id=anchor_node_id,
                 )
@@ -592,20 +585,12 @@ class CommandExecutor:
                 asyncio.create_task(self._read_stream(run_id, process.stderr, "stderr")),
             ]
             try:
-                if timeout_seconds and timeout_seconds > 0:
-                    exit_code = await asyncio.wait_for(process.wait(), timeout=timeout_seconds)
-                else:
-                    exit_code = await process.wait()
+                exit_code = await process.wait()
             except asyncio.CancelledError:
                 final_status = RunStatus.CANCELLED
                 error = "command producer cancelled"
                 await self._kill_process_tree(process)
                 raise
-            except asyncio.TimeoutError:
-                final_status = RunStatus.FAILED
-                error = f"command timed out after {timeout_seconds} seconds"
-                await self._kill_process_tree(process)
-                exit_code = process.returncode
             finally:
                 await asyncio.gather(*readers, return_exceptions=True)
 
@@ -701,7 +686,6 @@ class CommandExecutor:
         command: str,
         cwd: str,
         shell: Dict[str, Any],
-        timeout_seconds: Optional[int],
         started_at: float,
         anchor_node_id: Optional[str],
     ) -> None:
@@ -740,20 +724,12 @@ class CommandExecutor:
         exit_code: int | None = None
         try:
             try:
-                if timeout_seconds and timeout_seconds > 0:
-                    exit_code = await asyncio.to_thread(process.wait, timeout=timeout_seconds)
-                else:
-                    exit_code = await asyncio.to_thread(process.wait)
+                exit_code = await asyncio.to_thread(process.wait)
             except asyncio.CancelledError:
                 final_status = RunStatus.CANCELLED
                 error = "command producer cancelled"
                 await self._kill_process_tree(process)
                 raise
-            except subprocess.TimeoutExpired:
-                final_status = RunStatus.FAILED
-                error = f"command timed out after {timeout_seconds} seconds"
-                await self._kill_process_tree(process)
-                exit_code = process.returncode
         finally:
             await asyncio.gather(*readers, return_exceptions=True)
             for stream in (process.stdout, process.stderr):

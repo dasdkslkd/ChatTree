@@ -197,8 +197,10 @@ class PromptCatalogTests(unittest.TestCase):
         self.assertIn("auto-background", text)
         self.assertIn("active shell declared by the command tool description", text)
         self.assertNotIn("start_background_command", text)
-        self.assertNotIn("wait_command", text)
+        self.assertIn("wait_command", text)
         self.assertNotIn("run_command", text)
+        self.assertIn("its timeout applies only to that wait call", text)
+        self.assertIn("`wait_agent`", text)
         self.assertIn("Plan the complete tool wave before emitting it", text)
         self.assertIn("use one batched `read` without a preceding `glob`", text)
         self.assertIn("run one consolidated validation", text)
@@ -1531,6 +1533,7 @@ class ChatManagerRuntimeContextTests(unittest.IsolatedAsyncioTestCase):
             eff_effort=None,
             eff_thinking=None,
             run_id="run-1",
+            node_id="side-node",
         ):
             pass
 
@@ -1911,6 +1914,40 @@ class DetachedSlashStopRouteTests(unittest.TestCase):
         self.assertIn(child.run_id, subagent_executor.stopped_run_ids)
         self.assertEqual(run_manager.get_run(parent.run_id)["status"], "stopping")
         self.assertEqual(run_manager.get_run(child.run_id)["status"], "stopping")
+
+    def test_observe_only_consumes_terminal_auto_background_commands(self):
+        run_manager = RunManager()
+        client = self._runs_client(
+            run_manager,
+            self.FakeChatManager(),
+            self.FakeSubagentExecutor(),
+            self.FakeWorkflowManager(),
+        )
+
+        foreground = asyncio.run(run_manager.create_run(
+            conversation_id="conversation-1",
+            kind=RunKind.COMMAND,
+            metadata={"shell_auto_backgrounded": False},
+        ))
+        self.assertEqual(client.post(f"/runs/{foreground.run_id}/observe").status_code, 400)
+
+        running = asyncio.run(run_manager.create_run(
+            conversation_id="conversation-1",
+            kind=RunKind.COMMAND,
+            metadata={"shell_auto_backgrounded": True},
+        ))
+        self.assertEqual(client.post(f"/runs/{running.run_id}/observe").status_code, 409)
+
+        finished = asyncio.run(run_manager.create_run(
+            conversation_id="conversation-1",
+            kind=RunKind.COMMAND,
+            metadata={"shell_auto_backgrounded": True},
+        ))
+        asyncio.run(run_manager.finish_run(finished.run_id, RunStatus.COMPLETED))
+        response = client.post(f"/runs/{finished.run_id}/observe")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNotNone(response.json()["metadata"].get("result_observed_at"))
 
 
 class AgentRolePromptTests(unittest.TestCase):

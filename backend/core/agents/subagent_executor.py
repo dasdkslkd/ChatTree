@@ -727,12 +727,12 @@ class SubagentExecutor:
                             raise asyncio.CancelledError()
                         if event_get_task in done:
                             event = event_get_task.result()
-                            await self.run_manager.append_event(run_id, self._tool_event_payload(event, agent_name))
+                            await self.run_manager.append_event(run_id, self._tool_event_payload(event, agent_name, tool_node_id))
                             event_get_task = asyncio.create_task(approval_events.get())
                         if execute_task in done:
                             while not approval_events.empty():
                                 event = approval_events.get_nowait()
-                                await self.run_manager.append_event(run_id, self._tool_event_payload(event, agent_name))
+                                await self.run_manager.append_event(run_id, self._tool_event_payload(event, agent_name, tool_node_id))
                             tool_messages = await execute_task
                             break
                 finally:
@@ -1055,13 +1055,17 @@ class SubagentExecutor:
             return value is None
         return True
 
-    def _tool_event_payload(self, event: Dict[str, Any], agent_name: str) -> Dict[str, Any]:
+    def _tool_event_payload(
+        self,
+        event: Dict[str, Any],
+        agent_name: str,
+        node_id: str,
+    ) -> Dict[str, Any]:
         chunk = self.chat_manager._tool_event_stream_chunk(
             event,
-            node_id=str(event.get("run_id") or ""),
+            node_id=node_id,
             conversation_id=str(event.get("conversation_id") or ""),
         )
         payload = dict(chunk)
         payload["agent_name"] = agent_name
-        payload["target_node_id"] = None
         return payload

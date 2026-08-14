@@ -37,6 +37,7 @@ def make_manager(registry=None):
     manager.capability_registry = registry
     manager.chat_repository = None
     manager.slash_dispatcher = SlashCommandDispatcher()
+    manager.memory_store = None
     return manager
 
 
@@ -624,7 +625,7 @@ def test_send_message_stream_allows_final_after_real_agent_workflow(tmp_path: Pa
     assert assistant["content"] == "workflow done"
 
 
-def test_send_message_stream_btw_runs_isolated_side_question_without_tools(tmp_path: Path):
+def test_send_message_stream_btw_creates_visible_side_node_without_tools(tmp_path: Path):
     skill_path = tmp_path / "tools" / "SKILL.md"
     skill_path.parent.mkdir()
     skill_path.write_text("# Tools\n\nThis injected skill mentions shell.", encoding="utf-8")
@@ -643,7 +644,6 @@ def test_send_message_stream_btw_runs_isolated_side_question_without_tools(tmp_p
     manager, model_manager = make_stream_manager(tmp_path)
     manager.capability_registry = registry
     conversation = manager.create_conversation("slash btw")
-    original_current_node_id = conversation.current_node_id
     original_node_ids = set(conversation.nodes)
 
     chunks = asyncio.run(
@@ -658,8 +658,10 @@ def test_send_message_stream_btw_runs_isolated_side_question_without_tools(tmp_p
     )
 
     assert chunks[-1]["status"] == StreamStatus.COMPLETE
-    assert all(chunk.get("target_node_id") is None for chunk in chunks)
-    assert all(chunk.get("node_id") is None for chunk in chunks)
+    side_node_id = chunks[0]["node_id"]
+    assert side_node_id not in original_node_ids
+    assert all(chunk.get("node_id") == side_node_id for chunk in chunks)
+    assert all(chunk.get("target_node_id") == side_node_id for chunk in chunks)
     assert model_manager.provider.messages is not None
     assert model_manager.provider.kwargs["tools"] is None
     assert model_manager.provider.kwargs["tool_choice"] is None
@@ -674,8 +676,10 @@ def test_send_message_stream_btw_runs_isolated_side_question_without_tools(tmp_p
     assert "Do not call tools" in sent_user_messages[-1]["content"]
     assert "what changed here?" in sent_user_messages[-1]["content"]
     reloaded = manager.get_conversation(conversation.metadata["id"])
-    assert reloaded.current_node_id == original_current_node_id
-    assert set(reloaded.nodes) == original_node_ids
+    assert reloaded.current_node_id == side_node_id
+    assert set(reloaded.nodes) == original_node_ids | {side_node_id}
+    assert latest_node_message(manager, conversation.metadata["id"], side_node_id, Role.USER)["content"]
+    assert latest_node_message(manager, conversation.metadata["id"], side_node_id, Role.ASSISTANT)["content"]
 
 
 def test_send_message_stream_removed_side_command_is_plain_message(tmp_path: Path):

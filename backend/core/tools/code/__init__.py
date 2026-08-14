@@ -11,7 +11,7 @@ from .read_file import ReadFileTool
 from .search_files import SearchFilesTool
 from .edit_file import EditFileTool
 from .write_file import WriteFileTool
-from .run_command import RunCommandTool
+from .run_command import RunCommandTool, WaitCommandTool
 from .apply_patch import ApplyPatchTool
 
 __all__ = [
@@ -26,6 +26,7 @@ __all__ = [
     "EditFileTool",
     "WriteFileTool",
     "RunCommandTool",
+    "WaitCommandTool",
     "ApplyPatchTool",
     "default_code_workspace",
 ]

@@ -162,6 +162,24 @@ function testAutoBackgroundedRunCommandRendersAsDraft() {
   })), true);
 }
 
+function testForegroundCommandWithOutputDoesNotRenderAsDraft() {
+  assert.equal(shouldRenderRunDraft(run({
+    kind: 'command',
+    status: 'error',
+    command: { stdout: 'output', stderr: 'error', events: [{ eventType: 'command_exited' }] },
+    metadata: { tool_name: 'shell', shell_managed: true },
+  })), false);
+}
+
+function testUnobservedCompletedBackgroundCommandRendersAsDraft() {
+  assert.equal(shouldRenderRunDraft(run({
+    kind: 'command',
+    status: 'completed',
+    command: { stdout: 'done', stderr: '', events: [] },
+    metadata: { shell_auto_backgrounded: true },
+  })), true);
+}
+
 function testExplicitBackgroundCommandRendersAsDraft() {
   assert.equal(shouldRenderRunDraft(run({
     kind: 'command',
@@ -248,6 +266,8 @@ testForkWorkflowPendingSlashRunsRenderAsDrafts();
 testRunningSubagentWithoutContentRendersAsDraft();
 testForegroundManagedRunCommandDoesNotRenderAsDraft();
 testAutoBackgroundedRunCommandRendersAsDraft();
+testForegroundCommandWithOutputDoesNotRenderAsDraft();
+testUnobservedCompletedBackgroundCommandRendersAsDraft();
 testExplicitBackgroundCommandRendersAsDraft();
 testBtwSideQuestionRunsRenderAsDrafts();
 testDirectResponseRunsRenderAsDrafts();

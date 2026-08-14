@@ -4,7 +4,7 @@ import json
 from typing import Any, Dict
 
 
-COMMAND_ARGUMENT_TOOLS = {"shell"}
+COMMAND_ARGUMENT_TOOLS = {"shell", "wait_command"}
 
 
 def normalize_tool_arguments(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -49,6 +49,8 @@ def _compact_argument_for_tool(tool_name: str, raw: str) -> Dict[str, Any] | Non
         return {"pattern": raw}
     if name == "shell":
         return {"command": raw}
+    if name == "wait_command":
+        return {"command_run_id": raw}
     if name == "edit":
         return {"operation": "patch", "patch": raw} if raw.lstrip().startswith(("--- ", "diff ")) else None
     if name == "web":

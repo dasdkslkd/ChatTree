@@ -41,6 +41,9 @@ DEFAULT_TOOL_CAPABILITIES: Mapping[str, Set[ToolCapability]] = {
         ToolCapability.MUTATES_RUNTIME_STATE,
         ToolCapability.REQUIRES_APPROVAL,
     },
+    "wait_command": {
+        ToolCapability.MUTATES_RUNTIME_STATE,
+    },
     "agent": {ToolCapability.MUTATES_RUNTIME_STATE},
     "create_task": {ToolCapability.MUTATES_RUNTIME_STATE},
     "set_task_step": {ToolCapability.MUTATES_RUNTIME_STATE},

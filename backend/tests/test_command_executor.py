@@ -13,9 +13,10 @@ from backend.core.persistence.database import SQLitePersistence
 from backend.core.persistence.repository import ChatRepository
 from backend.core.persistence.run_repository import SQLiteRunRepository
 from backend.core.runs import RunKind, RunManager, RunStatus
+from backend.core.runs.journal import RunJournal
 from backend.core.runs.repository import MemoryRunRepository
 from backend.core.tasks import ActiveTaskService, TaskContextDisabledError
-from backend.core.tools.code import CodeToolConfig, RunCommandTool
+from backend.core.tools.code import CodeToolConfig, RunCommandTool, WaitCommandTool
 from backend.core.tools.tool_manager import ToolManager
 
 
@@ -30,39 +31,10 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertIn("auto-backgrounds", run_tool.description)
             self.assertIn("active shell", run_tool.description)
+            self.assertIn("do not time out on their own", run_tool.description)
+            self.assertIn("Use `wait_command`", run_tool.description)
+            self.assertNotIn("timeout_seconds", run_tool.parameters_schema()["properties"])
             self.assertNotIn("start_terminal", run_tool.description)
-
-    @unittest.skip("legacy command control tools removed; shell auto-background is the only model-visible command API")
-    async def test_background_start_result_is_explicitly_launch_only(self):
-        class StartOnlyExecutor:
-            async def start(self, **kwargs):
-                return {
-                    "run_id": "run-background",
-                    "metadata": {"shell": {"id": "powershell"}},
-                }
-
-            def snapshot(self, run_id):
-                return {"status": "running", "shell": {"id": "powershell"}}
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tool = StartBackgroundCommandTool(CodeToolConfig.from_dict({
-                "workspace_roots": [tmpdir],
-                "command_timeout_seconds": 10,
-            }))
-            payload = json.loads(await tool.execute(
-                command="Write-Output 1",
-                cwd=".",
-                _runtime_context={
-                    "conversation_id": "conv_1",
-                    "node_id": "node_1",
-                    "run_id": "parent_run_1",
-                    "command_executor": StartOnlyExecutor(),
-                },
-            ))
-
-        self.assertEqual(payload["status"], "running")
-        self.assertIs(payload["result_observed"], False)
-        self.assertIn("does not contain the command result", payload["message"])
 
     async def test_shell_short_managed_command_truncates_output(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -94,7 +66,7 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_shell_long_managed_command_auto_backgrounds(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            run_manager = RunManager()
+            run_manager = RunManager(journal=RunJournal(tmpdir))
             command_executor = CommandExecutor(run_manager)
             tool = RunCommandTool(CodeToolConfig.from_dict({
                 "workspace_roots": [tmpdir],
@@ -103,7 +75,7 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             }))
 
             raw = await tool.execute(
-                command=f"{sys.executable} -c \"import time; print('managed-started', flush=True); time.sleep(30)\"",
+                command=f"{sys.executable} -c \"import time; print('managed-started', flush=True); time.sleep(0.5)\"",
                 cwd=".",
                 _runtime_context={
                     "conversation_id": "conv_1",
@@ -112,24 +84,55 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
                     "command_executor": command_executor,
                 },
             )
-            payload = json.loads(raw)
-
-            self.assertEqual(payload["status"], "running")
-            self.assertEqual(payload["kind"], RunKind.COMMAND.value)
-            self.assertEqual(payload["background"], True)
-            self.assertEqual(payload["auto_backgrounded"], True)
-            self.assertIn("command_run_id", payload)
-            self.assertNotIn("terminal_run_id", payload)
-            self.assertNotIn("shell", payload)
-            run = run_manager.get_run(payload["command_run_id"])
+            self.assertFalse(raw.lstrip().startswith("{"))
+            self.assertIn("Command moved to background.", raw)
+            self.assertIn("Use `wait_command` to wait for it", raw)
+            self.assertIn("end the conversation", raw)
+            run = run_manager.list_runs("conv_1")[0]
+            command_run_id = run["run_id"]
+            self.assertIn(command_run_id, raw)
             self.assertTrue((run.get("metadata") or {}).get("shell_auto_backgrounded"))
+            await asyncio.sleep(0.2)
+            self.assertEqual(run_manager.get_run(command_run_id)["status"], RunStatus.RUNNING.value)
 
-            try:
-                await command_executor.stop(payload["command_run_id"])
-                await command_executor.wait(payload["command_run_id"], timeout=5)
-            finally:
-                await command_executor.stop(payload["command_run_id"])
-            self.assertEqual(run_manager.get_run(payload["command_run_id"])["status"], RunStatus.CANCELLED.value)
+            await command_executor.wait(command_run_id, timeout=5)
+            self.assertEqual(run_manager.get_run(command_run_id)["status"], RunStatus.COMPLETED.value)
+
+    async def test_wait_command_timeout_does_not_stop_command_and_terminal_wait_consumes_result(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_manager = RunManager(journal=RunJournal(tmpdir))
+            command_executor = CommandExecutor(run_manager)
+            wait_tool = WaitCommandTool(CodeToolConfig.from_dict({"workspace_roots": [tmpdir]}))
+            started = await command_executor.start(
+                conversation_id="conv_1",
+                command=f'{sys.executable} -c "import time; print(\'done\', flush=True); time.sleep(0.2)"',
+                cwd=tmpdir,
+                summary="waitable command",
+            )
+            context = {
+                "command_executor": command_executor,
+                "run_id": "parent_run_1",
+            }
+
+            expired = json.loads(await wait_tool.execute(
+                command_run_id=started["run_id"],
+                timeout_seconds=0.01,
+                _runtime_context=context,
+            ))
+            self.assertTrue(expired["wait_expired"])
+            self.assertFalse(expired["result_observed"])
+            self.assertEqual(run_manager.get_run(started["run_id"])["status"], RunStatus.RUNNING.value)
+
+            completed = json.loads(await wait_tool.execute(
+                command_run_id=started["run_id"],
+                timeout_seconds=5,
+                _runtime_context=context,
+            ))
+            self.assertFalse(completed["wait_expired"])
+            self.assertTrue(completed["result_observed"])
+            self.assertEqual(completed["exit_code"], 0)
+            self.assertIn("done", completed["stdout"])
+            self.assertIsNotNone(run_manager.get_run(started["run_id"])["metadata"].get("result_observed_at"))
 
     async def test_command_named_tools_are_model_visible_and_legacy_names_are_removed(self):
         manager = ToolManager({
@@ -144,7 +147,7 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
         })
 
         visible = set(manager.list_tools())
-        self.assertTrue({"shell", "shell", "shell", "shell", "shell"} <= visible)
+        self.assertTrue({"shell", "wait_command"} <= visible)
         for legacy_name in {"start_command", "start_terminal", "read_terminal", "wait_terminal", "stop_terminal"}:
             self.assertNotIn(legacy_name, visible)
             self.assertIsNone(manager.get_tool(legacy_name))
@@ -167,51 +170,6 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
         web = manager.get_tool("web")
         self.assertIsNotNone(web)
         self.assertEqual(web._search_tool.searxng_url, "http://searxng.example.test")
-
-    @unittest.skip("legacy command control tools removed")
-    async def test_command_control_tools_wait_read_and_stop(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            run_manager = RunManager()
-            command_executor = CommandExecutor(run_manager)
-            start_tool = StartBackgroundCommandTool(CodeToolConfig.from_dict({
-                "workspace_roots": [tmpdir],
-                "command_timeout_seconds": 10,
-            }))
-
-            started = json.loads(await start_tool.execute(
-                command=f"{sys.executable} -c \"import sys; print('out'); print('err', file=sys.stderr)\"",
-                cwd=".",
-                _runtime_context={
-                    "conversation_id": "conv_1",
-                    "node_id": "node_1",
-                    "run_id": "parent_run_1",
-                    "command_executor": command_executor,
-                },
-            ))
-            waited = json.loads(await WaitCommandTool().execute(
-                command_run_id=started["command_run_id"],
-                timeout_seconds=5,
-                _runtime_context={
-                    "command_executor": command_executor,
-                    "run_id": "parent_run_1",
-                },
-            ))
-            read = json.loads(await ReadCommandTool().execute(
-                command_run_id=started["command_run_id"],
-                _runtime_context={
-                    "command_executor": command_executor,
-                    "run_id": "parent_run_1",
-                },
-            ))
-            stopped = json.loads(await StopCommandTool().execute(
-                command_run_id=started["command_run_id"],
-                _runtime_context={"command_executor": command_executor},
-            ))
-
-            self.assertEqual(waited["status"], RunStatus.COMPLETED.value)
-            self.assertIn("out", read["stdout"])
-            self.assertIn("err", read["stderr"])
-            self.assertFalse(stopped["stopped"])
 
     async def test_command_snapshot_reads_repository_events(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -376,8 +334,7 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(run_manager.list_runs("conv_1"), [])
 
-    @unittest.skip("legacy command control tools removed")
-    async def test_shell_marks_stopped_result_observed(self):
+    async def test_wait_command_marks_stopped_result_observed(self):
         class StoppedExecutor:
             def __init__(self):
                 self.observed = None
@@ -386,20 +343,27 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
                 return None
 
             def snapshot(self, run_id):
-                return {"command_run_id": run_id, "status": RunStatus.STOPPED.value}
+                return {
+                    "command_run_id": run_id,
+                    "kind": RunKind.COMMAND.value,
+                    "status": RunStatus.STOPPED.value,
+                }
 
             async def mark_observed(self, run_id, *, observer_run_id, via):
                 self.observed = (run_id, observer_run_id, via)
 
         executor = StoppedExecutor()
-        result = json.loads(await WaitCommandTool().execute(
-            command_run_id="run_stopped",
-            timeout_seconds=5,
-            _runtime_context={
-                "command_executor": executor,
-                "run_id": "run_parent",
-            },
-        ))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = json.loads(await WaitCommandTool(CodeToolConfig.from_dict({
+                "workspace_roots": [tmpdir],
+            })).execute(
+                command_run_id="run_stopped",
+                timeout_seconds=5,
+                _runtime_context={
+                    "command_executor": executor,
+                    "run_id": "run_parent",
+                },
+            ))
 
         self.assertEqual(result["status"], RunStatus.STOPPED.value)
         self.assertEqual(executor.observed, ("run_stopped", "run_parent", "wait_command"))
@@ -766,10 +730,9 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
             await run_manager.finish_run(run_id, RunStatus.INTERRUPTED)
             await run_manager.close()
 
-    @unittest.skip("legacy command control tools removed; shell auto-background is the only model-visible command API")
     async def test_model_started_background_command_is_not_stopped_with_creator_stream(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            run_manager = RunManager()
+            run_manager = RunManager(journal=RunJournal(tmpdir))
             command_executor = CommandExecutor(run_manager)
             parent = await run_manager.create_run(
                 conversation_id="conv_1",
@@ -778,8 +741,11 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
                 target_node_id="node_2",
             )
 
-            config = CodeToolConfig(workspace_roots=[Path(tmpdir)], protected_paths=[])
-            started = json.loads(await StartBackgroundCommandTool(config).execute(
+            tool = RunCommandTool(CodeToolConfig.from_dict({
+                "workspace_roots": [tmpdir],
+                "shell_initial_wait_seconds": 0.01,
+            }))
+            result = await tool.execute(
                 command=f"{sys.executable} -c \"import time; time.sleep(0.2); print('still-running')\"",
                 cwd=tmpdir,
                 _runtime_context={
@@ -790,9 +756,10 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
                     "run_kind": "chat",
                     "command_executor": command_executor,
                 },
-            ))
+            )
 
-            child = run_manager.get_run(started["run_id"])
+            child = next(run for run in run_manager.list_runs("conv_1") if run["kind"] == RunKind.COMMAND.value)
+            self.assertIn(child["run_id"], result)
             self.assertEqual(child["created_by_run_id"], parent.run_id)
             self.assertIsNone(child["cancellation_parent_run_id"])
 
@@ -801,11 +768,11 @@ class CommandExecutorTests(unittest.IsolatedAsyncioTestCase):
                 run_manager=run_manager,
                 command_executor=command_executor,
             )
-            await command_executor.wait(started["run_id"], timeout=5)
+            await command_executor.wait(child["run_id"], timeout=5)
 
             self.assertIn(parent.run_id, stopped)
-            self.assertNotIn(started["run_id"], stopped)
-            self.assertEqual(run_manager.get_run(started["run_id"])["status"], RunStatus.COMPLETED.value)
+            self.assertNotIn(child["run_id"], stopped)
+            self.assertEqual(run_manager.get_run(child["run_id"])["status"], RunStatus.COMPLETED.value)
 
 
 if __name__ == "__main__":

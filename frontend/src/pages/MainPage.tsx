@@ -34,7 +34,7 @@ import {
   DropdownMenuItem,
 } from '@/components/ui/dropdown-menu';
 import {
-  Plus, X, MoreHorizontal, ChevronRight, Square,
+  Plus, X, MoreHorizontal, ChevronRight, Square, Bell,
   Check, Pencil, Loader2, Network, MessageSquare, FileText, Download, FolderOpen, Search, Settings, Trash2,
   PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, ArrowLeft, Folder,
 } from 'lucide-react';
@@ -43,6 +43,8 @@ import { conversationApi } from '../api/conversation';
 import { configApi } from '../api/config';
 import { getApiErrorMessage } from '../api/errors';
 import { messageApi } from '../api/message';
+import { runsApi } from '../api/runs';
+import { taskNotificationsApi, type TaskNotificationRecord } from '../api/taskNotifications';
 import type { TaskStateSnapshot } from '../api/taskState';
 import { transcriptService } from '../services/transcript';
 import {
@@ -212,6 +214,7 @@ export default function ChatPage() {
   const [attachedImageRefs, setAttachedImageRefs] = useState<Array<{ filename: string; mime_type?: string }>>([]);
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([]);
   const [hiddenSideRunIdsByConversation, setHiddenSideRunIdsByConversation] = useState<Record<string, string[]>>({});
+  const [taskNotifications, setTaskNotifications] = useState<TaskNotificationRecord[]>([]);
   const [activeTask, setActiveTask] = useState<ActiveTaskRecord | null>(null);
   const [taskContextMode, setTaskContextMode] = useState<TaskContextMode>('attached');
   const [transcriptItems, setTranscriptItems] = useState<TranscriptItem[]>([]);
@@ -702,6 +705,60 @@ export default function ChatPage() {
   const projectFlipFirstRef = useRef<Map<string, number> | null>(null);
 
   const selectedBranchTipId = currentNodeId || currentConversation?.current_node_id || null;
+  const refreshTaskNotifications = useCallback(async (conversationId: string | null | undefined) => {
+    if (!conversationId) {
+      setTaskNotifications([]);
+      return;
+    }
+    try {
+      setTaskNotifications((await taskNotificationsApi.list(conversationId)).notifications);
+    } catch (error) {
+      console.error('刷新 task notification 失败:', error);
+    }
+  }, []);
+  useEffect(() => {
+    void refreshTaskNotifications(currentConversation?.id);
+  }, [currentConversation?.id, refreshTaskNotifications]);
+  useEffect(() => {
+    if (!currentConversation?.id) return;
+    const conversationId = currentConversation.id;
+    const timer = window.setInterval(() => {
+      if (document.hidden) return;
+      void refreshTaskNotifications(conversationId);
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [currentConversation?.id, refreshTaskNotifications]);
+  const handleBindTaskNotification = useCallback(async (notificationId: string) => {
+    const conversationId = currentConversation?.id;
+    const deliveryNodeId = selectedBranchTipId || currentConversation?.current_node_id || null;
+    if (!conversationId || !deliveryNodeId) return;
+    try {
+      await taskNotificationsApi.bind(conversationId, notificationId, deliveryNodeId);
+      await refreshTaskNotifications(conversationId);
+      void refreshVisibleTranscriptSnapshot(conversationId);
+    } catch (error) {
+      toast.error(getApiErrorMessage(error, '绑定通知失败'));
+    }
+  }, [currentConversation?.current_node_id, currentConversation?.id, refreshTaskNotifications, refreshVisibleTranscriptSnapshot, selectedBranchTipId]);
+  const handleDeleteTaskNotification = useCallback(async (notificationId: string) => {
+    const conversationId = currentConversation?.id;
+    if (!conversationId) return;
+    try {
+      await taskNotificationsApi.delete(conversationId, notificationId);
+      await refreshTaskNotifications(conversationId);
+      void refreshVisibleTranscriptSnapshot(conversationId);
+    } catch (error) {
+      toast.error(getApiErrorMessage(error, '删除通知失败'));
+    }
+  }, [currentConversation?.id, refreshTaskNotifications, refreshVisibleTranscriptSnapshot]);
+  const visibleTaskNotifications = useMemo(
+    () => taskNotifications.filter((item) => {
+      const status = typeof item.status === 'string' ? item.status : '';
+      return item.source_run_kind !== 'command'
+        && (status === 'unbound' || status === 'bound' || status === 'delivering');
+    }),
+    [taskNotifications],
+  );
   const currentBranchNodeIds = useMemo(() => {
     const transcriptState = transcriptStateRef.current;
     if (
@@ -775,8 +832,8 @@ export default function ChatPage() {
     [sideRunDrafts],
   );
   const sideRunTopLevelCount = useMemo(
-    () => sideRunGroups.reduce((total, group) => total + group.runs.length, 0),
-    [sideRunGroups],
+    () => sideRunGroups.reduce((total, group) => total + group.runs.length, 0) + visibleTaskNotifications.length,
+    [sideRunGroups, visibleTaskNotifications.length],
   );
   const selectedSideRunItem = useMemo((): SideRunGroupItem<SideRunDraft> | null => {
     if (!selectedSideRunId) return null;
@@ -2067,6 +2124,73 @@ export default function ChatPage() {
     return kind;
   };
 
+  const renderTaskNotificationList = () => (
+    <section className="flex flex-col gap-2">
+      <div className="px-1 text-xs font-semibold" style={{ color: 'var(--fg-tertiary)' }}>
+        通知
+      </div>
+      {visibleTaskNotifications.map((notification) => {
+        const status = typeof notification.status === 'string' ? notification.status : '';
+        const summary = typeof notification.summary === 'string' && notification.summary
+          ? notification.summary
+          : `${typeof notification.source_run_kind === 'string' ? notification.source_run_kind : ''} ${status}`.trim();
+        return (
+          <div
+            key={String(notification.id)}
+            className="rounded-lg border px-3 py-2"
+            style={{ borderColor: 'var(--border)', background: 'var(--bg-elevated-secondary, rgba(255,255,255,0.03))' }}
+          >
+            <div className="flex min-w-0 items-start gap-2">
+              <Bell className="mt-0.5 h-3.5 w-3.5 shrink-0" style={{ color: 'var(--icon-accent)' }} />
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-sm font-semibold" style={{ color: 'var(--fg-secondary)' }}>
+                  {summary}
+                </div>
+                <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs" style={{ color: 'var(--fg-tertiary)' }}>
+                  <span className="truncate">
+                    {typeof notification.source_run_kind === 'string' ? notification.source_run_kind : ''} · {status}
+                  </span>
+                </div>
+              </div>
+              <div className="flex shrink-0 items-center gap-1">
+                {status === 'unbound' && (
+                  <TextTooltip content="绑定到所选节点">
+                    <button
+                      type="button"
+                      className="rounded border-0 bg-transparent p-1"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void handleBindTaskNotification(String(notification.id));
+                      }}
+                      style={{ color: 'var(--fg-tertiary)' }}
+                      aria-label="绑定通知"
+                    >
+                      <MessageSquare className="h-3.5 w-3.5" />
+                    </button>
+                  </TextTooltip>
+                )}
+                <TextTooltip content="删除通知">
+                  <button
+                    type="button"
+                    className="rounded border-0 bg-transparent p-1"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void handleDeleteTaskNotification(String(notification.id));
+                    }}
+                    style={{ color: 'var(--fg-tertiary)' }}
+                    aria-label="删除通知"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </TextTooltip>
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </section>
+  );
+
   const getSideRunTitle = (run: StreamState): string => {
     const metadata = run.metadata || {};
     const candidates = [
@@ -2118,23 +2242,34 @@ export default function ChatPage() {
           </Button>
         </TextTooltip>
       )}
-      <TextTooltip content="关闭">
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-xs"
-          className="app-run-action-button"
-          onClick={(event) => {
-            event.stopPropagation();
-            if (selectedSideRunId === draft.run.runId) setSelectedSideRunId(null);
-            if (currentConversation?.id) hideSideRun(currentConversation.id, draft.run.runId);
-            streamManager.cleanupRun(draft.run.runId);
-          }}
-          aria-label="关闭"
-        >
-          <X className="h-3.5 w-3.5" />
-        </Button>
-      </TextTooltip>
+      {(draft.run.kind !== 'command' || ['completed', 'error', 'stopped'].includes(draft.run.status)) && (
+        <TextTooltip content="关闭">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            className="app-run-action-button"
+            onClick={(event) => {
+              event.stopPropagation();
+              if (draft.run.kind === 'command') {
+                void runsApi.observe(draft.run.runId).then(() => {
+                  if (selectedSideRunId === draft.run.runId) setSelectedSideRunId(null);
+                  streamManager.cleanupRun(draft.run.runId);
+                }).catch((error) => {
+                  toast.error(getApiErrorMessage(error, '消费命令结果失败'));
+                });
+                return;
+              }
+              if (selectedSideRunId === draft.run.runId) setSelectedSideRunId(null);
+              if (currentConversation?.id) hideSideRun(currentConversation.id, draft.run.runId);
+              streamManager.cleanupRun(draft.run.runId);
+            }}
+            aria-label="关闭"
+          >
+            <X className="h-3.5 w-3.5" />
+          </Button>
+        </TextTooltip>
+      )}
     </>
   );
 
@@ -2976,6 +3111,7 @@ export default function ChatPage() {
                       暂无运行任务。
                     </div>
                   )}
+                  {visibleTaskNotifications.length > 0 && renderTaskNotificationList()}
                   {sideRunGroups.map((group) => (
                     <section key={group.kind} className="flex flex-col gap-2">
                       <div className="px-1 text-xs font-semibold" style={{ color: 'var(--fg-tertiary)' }}>

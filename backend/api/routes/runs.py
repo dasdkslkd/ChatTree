@@ -36,6 +36,30 @@ def _format_sse_data(payload: Dict[str, Any] | str) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
+def _public_run_payload(run: Dict[str, Any], command_executor: Any = None) -> Dict[str, Any]:
+    item = public_run_dict(run)
+    metadata = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
+    if (
+        command_executor is not None
+        and run.get("kind") == "command"
+        and metadata.get("shell_auto_backgrounded") is True
+        and "result_observed_at" not in metadata
+    ):
+        snapshot = command_executor.snapshot(str(item.get("run_id") or ""))
+        if snapshot is not None:
+            item["command"] = {
+                "command": snapshot.get("command"),
+                "cwd": snapshot.get("cwd"),
+                "stdout": snapshot.get("stdout_tail") or "",
+                "stderr": snapshot.get("stderr_tail") or "",
+                "exit_code": snapshot.get("exit_code"),
+                "duration_seconds": snapshot.get("duration_seconds"),
+                "status": snapshot.get("command_status") or snapshot.get("status"),
+                "error": snapshot.get("error"),
+            }
+    return item
+
+
 async def _subscribe_sse(
     run_manager: RunManager,
     transcript_assembler: TranscriptAssembler,
@@ -134,19 +158,40 @@ async def list_active_runs(
 async def list_conversation_runs(
     conversation_id: str,
     run_manager: RunManager = Depends(get_run_manager),
+    command_executor: Any = Depends(get_command_executor),
 ):
-    return [public_run_dict(run) for run in run_manager.list_runs(conversation_id)]
+    return [_public_run_payload(run, command_executor) for run in run_manager.list_runs(conversation_id)]
 
 
 @router.get("/runs/{run_id}", response_model=Dict[str, Any])
 async def get_run(
     run_id: str,
     run_manager: RunManager = Depends(get_run_manager),
+    command_executor: Any = Depends(get_command_executor),
 ):
     run = run_manager.get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="运行不存在")
-    return public_run_dict(run)
+    return _public_run_payload(run, command_executor)
+
+
+@router.post("/runs/{run_id}/observe", response_model=Dict[str, Any])
+async def observe_run(
+    run_id: str,
+    run_manager: RunManager = Depends(get_run_manager),
+):
+    run = run_manager.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="运行不存在")
+    if run.get("kind") != "command":
+        raise HTTPException(status_code=400, detail="只有 command 运行可以被消费")
+    metadata = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
+    if metadata.get("shell_auto_backgrounded") is not True:
+        raise HTTPException(status_code=400, detail="只有自动转后台的 command 可以被消费")
+    if run.get("status") not in {status.value for status in FINISHED_RUN_STATUSES}:
+        raise HTTPException(status_code=409, detail="运行尚未结束")
+    observed = await run_manager.mark_observed(run_id, via="side_panel")
+    return public_run_dict(observed.to_dict())
 
 
 @router.get("/runs/{run_id}/events")

@@ -712,6 +712,7 @@ class ChatManager:
         eff_effort: Optional[str],
         eff_thinking: Optional[bool],
         run_id: Optional[str],
+        node_id: str,
     ) -> AsyncIterator[StreamChunk]:
         base_messages = self._prepare_messages_for_api_with_conversation(
             conversation,
@@ -754,14 +755,15 @@ class ChatManager:
             yield StreamChunk(
                 status=StreamStatus.START,
                 content=None,
-                node_id=None,
-                target_node_id=None,
+                node_id=node_id,
+                target_node_id=node_id,
                 conversation_id=conversation.metadata["id"],
                 run_id=run_id,
                 tokens_used=0,
             )
 
             tokens_used = 0
+            answer_parts: list[str] = []
             async for chunk in provider.generate_response_stream(
                 model=target_model,
                 messages=messages,
@@ -775,16 +777,16 @@ class ChatManager:
                     yield StreamChunk(
                         status=StreamStatus.STOPPED,
                         content="",
-                        node_id=None,
-                        target_node_id=None,
+                        node_id=node_id,
+                        target_node_id=node_id,
                         conversation_id=conversation.metadata["id"],
                         run_id=run_id,
                         error=None,
                         tokens_used=tokens_used,
                     )
                     break
-                chunk["node_id"] = None
-                chunk["target_node_id"] = None
+                chunk["node_id"] = node_id
+                chunk["target_node_id"] = node_id
                 chunk["conversation_id"] = conversation.metadata["id"]
                 if run_id:
                     chunk["run_id"] = run_id
@@ -792,8 +794,29 @@ class ChatManager:
                     tokens_used = chunk.get("tokens_used", tokens_used) or tokens_used
                 if chunk.get("status") == StreamStatus.START:
                     continue
-                if chunk.get("status") == StreamStatus.COMPLETE and not chunk.get("tokens_used"):
-                    chunk["tokens_used"] = tokens_used
+                if chunk.get("content"):
+                    answer_parts.append(str(chunk.get("content") or ""))
+                if chunk.get("status") == StreamStatus.COMPLETE:
+                    if not chunk.get("tokens_used"):
+                        chunk["tokens_used"] = tokens_used
+                    node = conversation.nodes.get(node_id)
+                    if node is not None and answer_parts:
+                        self.chat_repository.persist_assistant_turn(
+                            conversation=conversation,
+                            node=node,
+                            assistant_msg={
+                                "id": f"side_{run_id or uuid.uuid4().hex}",
+                                "role": Role.ASSISTANT.value,
+                                "content": "".join(answer_parts),
+                                "model_id": target_model,
+                            },
+                            provider_id=conversation.metadata.get("provider_id"),
+                            model_id=target_model,
+                            run_id=run_id,
+                            tool_messages=[],
+                            rounds=[{"round_index": 0}],
+                            model_route_id=model_route["route_id"],
+                        )
                 yield chunk
         finally:
             self._active_controllers.pop(controller_key, None)
@@ -1319,8 +1342,16 @@ class ChatManager:
         eff_thinking = preload["eff_thinking"]
 
         if slash_result.kind == SlashDispatchKind.SIDE_QUESTION:
-            side_run_context = Conversation.from_dict(preview.to_dict())
-            side_run_context.switch_to_node(requested_parent_node_id)
+            side_node_id = await self.create_visible_user_anchor_node(
+                conversation_id=conversation_id,
+                content=model_content,
+                parent_node_id=requested_parent_node_id,
+                model_id=target_model,
+            )
+            side_run_context = self.get_conversation(conversation_id)
+            if side_run_context is None:
+                raise ValueError("对话不存在")
+            side_run_context.switch_to_node(side_node_id)
             async for chunk in self._send_side_question_stream(
                 conversation=side_run_context,
                 content=model_content,
@@ -1330,6 +1361,7 @@ class ChatManager:
                 eff_effort=eff_effort,
                 eff_thinking=eff_thinking,
                 run_id=run_id,
+                node_id=side_node_id,
             ):
                 yield chunk
             return
@@ -1480,6 +1512,7 @@ class ChatManager:
             "node_id": new_node["id"],
             "task_summary": model_content[:160],
             "task_context_mode": new_node.get("task_context_mode") or TaskContextMode.ATTACHED.value,
+            "permission_mode": new_node.get("tool_permission_mode") or "default",
             "task_generation_id": task_turn_context.generation_id,
             "task_revision": task_turn_context.revision,
             "workspace": workspace_context,

@@ -9,6 +9,7 @@ from .code import (
     ListFilesTool,
     ReadFileTool,
     RunCommandTool,
+    WaitCommandTool,
     SearchFilesTool,
 )
 from .connection_manager import ConnectionManager
@@ -45,6 +46,7 @@ BUILTIN_CODE_TOOL_CLASSES = {
     "grep": SearchFilesTool,
     "edit": EditFileTool,
     "shell": RunCommandTool,
+    "wait_command": WaitCommandTool,
 }
 
 
@@ -192,6 +194,7 @@ class ToolManager:
         if include_command:
             tools.extend([
                 RunCommandTool(command_tool_config),
+                WaitCommandTool(command_tool_config),
             ])
         for tool in tools:
             self.register(tool)
@@ -402,7 +405,11 @@ class ToolManager:
 
     def _tool_for_execution(self, name: str, workspace: Optional[Dict[str, Any]]) -> Optional[BaseTool]:
         if workspace and name in BUILTIN_CODE_TOOL_CLASSES:
-            source_config = self._command_tools_config if name == "shell" else self._code_tools_config
+            source_config = (
+                self._command_tools_config
+                if name in {"shell", "wait_command"}
+                else self._code_tools_config
+            )
             config = CodeToolConfig.for_workspace(source_config, workspace)
             if name == "read":
                 return ReadFileTool(config)
