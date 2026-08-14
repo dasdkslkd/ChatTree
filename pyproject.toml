@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "chattree-server"
-version = "0.1.16"
+version = "0.1.17"
 description = "ChatTree local and remote server runtime"
 requires-python = ">=3.11"
 dependencies = [
