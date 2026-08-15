@@ -171,6 +171,8 @@ class ModelProviderConfig(TypedDict, total=False):
     custom_user_agent: str
     # 反向代理来源标识：'reverse_proxy' 表示由 launcher 通过 SSH 反向隧道注入
     source: str
+    # 自动探测得到的模型级协议格式：{模型名: {protocol, endpoint, base_url}}
+    model_routes: Dict[str, Dict[str, str]]
 
 # class MultiModelConfig(TypedDict, total=False):
 #     """多模型配置"""

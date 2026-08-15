@@ -917,8 +917,11 @@ class ChatManager:
                 return None, str(exc)
 
         try:
-            model_route = self.model_manager.get_route(target_provider, target_model)
             provider = self.model_manager.get_model(target_provider, target_model, True)
+            model_route = self.model_manager.get_route(
+                target_provider,
+                target_model,
+            )
         except ModelRouteError as exc:
             return None, str(exc)
         if not provider:
@@ -2949,10 +2952,10 @@ class ChatManager:
         if not target_provider:
             raise ValueError(f"无法找到模型 {target_model} 对应的提供商")
 
-        model_route = self.model_manager.get_route(target_provider, target_model)
         provider = self.model_manager.get_model(target_provider, target_model, False)
         if not provider:
             raise ValueError(f"无法初始化提供商 {target_provider}")
+        model_route = self.model_manager.get_route(target_provider, target_model)
 
         messages_to_summarize = self._prepare_messages_for_api_with_conversation(
             conversation,

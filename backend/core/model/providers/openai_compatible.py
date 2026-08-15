@@ -31,9 +31,77 @@ class OpenAICompatibleProvider(BaseProvider):
 
     def __init__(self, config: Dict[str, Any], route: ModelRoute):
         super().__init__(config, route)
+        self._resolved_chat_base: Optional[Tuple[str, str]] = None
 
     def _api_base(self) -> str:
         return (self.config.get("base_url") or "https://api.openai.com/v1").rstrip("/")
+
+    def _chat_base_candidates(self) -> List[str]:
+        base = self._api_base()
+        candidates = [base]
+        last = base.rsplit("/", 1)[-1]
+        if not (last.startswith("v") and last[1:].isdigit()):
+            candidates.append(f"{base}/v1")
+        return candidates
+
+    def _probe_chat_endpoint(self, model: str) -> str:
+        """用最短对话请求确认未版本化 base URL 的真实 OpenAI 端点。"""
+        base = self._api_base()
+        if self._resolved_chat_base and self._resolved_chat_base[0] == base:
+            return self._resolved_chat_base[1]
+        self._resolved_chat_base = None
+
+        candidates = self._chat_base_candidates()
+        if len(candidates) == 1:
+            self._resolved_chat_base = (base, candidates[0])
+            return candidates[0]
+
+        body = {
+            "model": model,
+            "messages": [{"role": "user", "content": "ping"}],
+            "stream": False,
+            "max_tokens": 1,
+        }
+        last_error: Optional[ProviderHTTPError] = None
+        timeout = int(float((self.config.get("model_transport") or {}).get(
+            "connect_timeout_seconds", 10,
+        )))
+        for candidate in candidates:
+            request = urllib.request.Request(
+                f"{candidate}{self.route['endpoint']}",
+                data=json.dumps(body).encode("utf-8"),
+                headers=self._headers(),
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=timeout) as response:
+                    raw = response.read()
+                    content_type = response.headers.get("Content-Type")
+                if isinstance(content_type, str) and content_type and "json" not in content_type.lower():
+                    continue
+                try:
+                    payload = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(payload, dict) or not isinstance(payload.get("choices"), list):
+                    continue
+                self._resolved_chat_base = (base, candidate)
+                logger.info("Chat endpoint resolved: %s", candidate)
+                return candidate
+            except urllib.error.HTTPError as exc:
+                error_body = exc.read().decode("utf-8", errors="replace")
+                last_error = ProviderHTTPError(exc.code, error_body, dict(exc.headers or {}))
+                if exc.code in (404, 405) or 500 <= exc.code < 600:
+                    continue
+                self._resolved_chat_base = (base, candidate)
+                return candidate
+            except urllib.error.URLError as exc:
+                reason = str(exc.reason) if exc.reason else str(exc)
+                last_error = ProviderHTTPError(0, f"网络错误：{reason}", {"network": "error"})
+
+        if last_error:
+            raise last_error
+        raise ProviderHTTPError(0, "没有可用的 Chat Completions 地址", {})
 
     def _subscription_auth(self):
         """返回 (token, extra_headers)；无订阅时返回 (None, {})."""
@@ -82,9 +150,18 @@ class OpenAICompatibleProvider(BaseProvider):
                 else "https://api.githubcopilot.com"
             )
             return base + path
+        if (
+            self.route["protocol"] == ModelProtocol.OPENAI_CHAT_COMPLETIONS.value
+            and path == self.route.get("endpoint")
+            and self._resolved_chat_base
+            and self._resolved_chat_base[0] == self._api_base()
+        ):
+            return self._resolved_chat_base[1] + path
         return self._api_base() + path
 
     def _request_json(self, path: str, body: Dict[str, Any], timeout: int = 120) -> Dict[str, Any]:
+        if self.route["protocol"] == ModelProtocol.OPENAI_CHAT_COMPLETIONS.value:
+            self._probe_chat_endpoint(str(body.get("model") or ""))
         req = urllib.request.Request(
             self._url(path),
             data=json.dumps(self._clean_payload(body)).encode("utf-8"),
@@ -945,6 +1022,8 @@ class OpenAICompatibleProvider(BaseProvider):
         *,
         stream_controller: Optional[StreamController] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
+        if self.route["protocol"] == ModelProtocol.OPENAI_CHAT_COMPLETIONS.value:
+            await asyncio.to_thread(self._probe_chat_endpoint, str(body.get("model") or ""))
         async for line in iter_sse_lines(
             self._url(path),
             self._clean_payload(body),

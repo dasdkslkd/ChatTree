@@ -171,6 +171,7 @@ async def proxy_model_protocol(
     provider_id, model_id = _split_proxy_model(proxy_model)
 
     try:
+        adapter = model_manager.get_model(provider_id, model_id, is_async=True)
         route = model_manager.get_route(provider_id, model_id)
         if route["protocol"] != protocol:
             raise HTTPException(
@@ -180,7 +181,6 @@ async def proxy_model_protocol(
                     f"request used {protocol}"
                 ),
             )
-        adapter = model_manager.get_model(provider_id, model_id, is_async=True)
     except ModelRouteError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if adapter is None:

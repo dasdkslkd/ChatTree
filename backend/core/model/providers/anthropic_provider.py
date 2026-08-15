@@ -78,15 +78,18 @@ class AnthropicProvider(BaseProvider):
         system_text = ""
         anthropic_messages: List[Dict[str, Any]] = []
         for msg in messages:
-            native_items = [
-                item
-                for item in (msg.get("model_state_items") or [])
-                if item.get("route_id") == self.route["route_id"]
-                and item.get("kind") == "assistant_message"
-                and isinstance(item.get("native_payload"), dict)
-            ]
-            if native_items:
-                layout = (native_items[0]["native_payload"]).get("layout") or []
+            layout = None
+            for item in msg.get("model_state_items") or []:
+                payload = item.get("state_payload") or item.get("native_payload")
+                if (
+                    item.get("route_id") == self.route["route_id"]
+                    and item.get("kind") == "assistant_message"
+                    and isinstance(payload, dict)
+                    and isinstance(payload.get("layout"), list)
+                ):
+                    layout = payload["layout"]
+                    break
+            if layout is not None:
                 tool_calls = {
                     str(call.get("id") or ""): call
                     for call in (msg.get("tool_calls") or [])

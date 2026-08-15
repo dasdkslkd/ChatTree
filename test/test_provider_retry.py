@@ -1,4 +1,9 @@
 import asyncio
+import io
+import json
+import urllib.error
+import urllib.request
+from unittest.mock import MagicMock
 
 from backend.core.config.types import ModelRoute, StreamStatus
 from backend.core.model.providers.anthropic_provider import AnthropicHTTPError, AnthropicProvider
@@ -40,6 +45,137 @@ def _route(protocol: str) -> ModelRoute:
             "controls": {},
         },
     )
+
+
+def test_packy_chat_probe_falls_back_to_v1(monkeypatch):
+    provider = OpenAICompatibleProvider(
+        {"base_url": "https://cf.api.fan", "api_key": "test"},
+        _route("openai_chat_completions"),
+    )
+    calls = []
+    response = MagicMock()
+    response.__enter__.return_value = response
+    response.read.return_value = b'{"choices": []}'
+
+    def fake_urlopen(request, timeout):
+        calls.append(request)
+        if len(calls) == 1:
+            raise urllib.error.HTTPError(
+                request.full_url,
+                404,
+                "missing",
+                {},
+                io.BytesIO(b"not found"),
+            )
+        return response
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    assert provider._probe_chat_endpoint("kimi-k3") == "https://cf.api.fan/v1"
+    assert [request.full_url for request in calls] == [
+        "https://cf.api.fan/chat/completions",
+        "https://cf.api.fan/v1/chat/completions",
+    ]
+    assert json.loads(calls[0].data)["messages"] == [
+        {"role": "user", "content": "ping"},
+    ]
+    assert provider._url("/chat/completions") == "https://cf.api.fan/v1/chat/completions"
+
+
+def test_packy_chat_probe_skips_server_error_address(monkeypatch):
+    provider = OpenAICompatibleProvider(
+        {"base_url": "https://cf.api.fan", "api_key": "test"},
+        _route("openai_chat_completions"),
+    )
+    calls = []
+    response = MagicMock()
+    response.__enter__.return_value = response
+    response.read.return_value = b'{"choices": []}'
+
+    def fake_urlopen(request, timeout):
+        calls.append(request.full_url)
+        if len(calls) == 1:
+            raise urllib.error.HTTPError(
+                request.full_url,
+                500,
+                "server error",
+                {},
+                io.BytesIO(b"internal server error"),
+            )
+        return response
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    assert provider._probe_chat_endpoint("kimi-k3") == "https://cf.api.fan/v1"
+    assert calls == [
+        "https://cf.api.fan/chat/completions",
+        "https://cf.api.fan/v1/chat/completions",
+    ]
+
+
+def test_packy_chat_probe_keeps_first_address_on_auth_error(monkeypatch):
+    provider = OpenAICompatibleProvider(
+        {"base_url": "https://cf.api.fan", "api_key": "test"},
+        _route("openai_chat_completions"),
+    )
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        calls.append(request.full_url)
+        raise urllib.error.HTTPError(
+            request.full_url,
+            401,
+            "unauthorized",
+            {},
+            io.BytesIO(b"unauthorized"),
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    assert provider._probe_chat_endpoint("kimi-k3") == "https://cf.api.fan"
+    assert calls == ["https://cf.api.fan/chat/completions"]
+
+
+def test_packy_chat_probe_rejects_html_homepage(monkeypatch):
+    provider = OpenAICompatibleProvider(
+        {"base_url": "https://www.packyapi.ai", "api_key": "test"},
+        _route("openai_chat_completions"),
+    )
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        calls.append(request.full_url)
+        response = MagicMock()
+        response.__enter__.return_value = response
+        if len(calls) == 1:
+            response.headers = {"Content-Type": "text/html; charset=utf-8"}
+            response.read.return_value = b"<!doctype html>"
+        else:
+            response.headers = {"Content-Type": "application/json"}
+            response.read.return_value = b'{"choices": []}'
+        return response
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    assert provider._probe_chat_endpoint("kimi-k3") == "https://www.packyapi.ai/v1"
+    assert calls == [
+        "https://www.packyapi.ai/chat/completions",
+        "https://www.packyapi.ai/v1/chat/completions",
+    ]
+
+
+def test_morecode_versioned_base_is_not_duplicated(monkeypatch):
+    provider = OpenAICompatibleProvider(
+        {"base_url": "https://api.morecode.top/v1", "api_key": "test"},
+        _route("openai_chat_completions"),
+    )
+    urlopen = MagicMock()
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+
+    assert provider._chat_base_candidates() == ["https://api.morecode.top/v1"]
+    assert provider._probe_chat_endpoint("kimi-k3") == "https://api.morecode.top/v1"
+    urlopen.assert_not_called()
+    assert provider._url("/chat/completions") == "https://api.morecode.top/v1/chat/completions"
 
 
 def test_openai_non_stream_retries_503_then_succeeds(monkeypatch):

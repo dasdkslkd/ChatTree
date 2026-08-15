@@ -1,5 +1,8 @@
 import asyncio
+import io
 import json
+import urllib.error
+import urllib.request
 from copy import deepcopy
 from unittest.mock import MagicMock
 
@@ -18,7 +21,6 @@ from backend.core.config.types import (
     StreamStatus,
 )
 from backend.core.model.model_manager import ModelManager
-from backend.core.model.model_metadata import initialize_model_metadata
 from backend.core.model.providers import model_fetch
 from backend.core.model.providers.anthropic_provider import AnthropicProvider
 from backend.core.model.providers.gemini_provider import GeminiProvider
@@ -58,12 +60,7 @@ def route(
     )
 
 
-def test_one_connection_routes_each_model_from_server_home_metadata(
-    monkeypatch,
-    tmp_path,
-):
-    monkeypatch.setenv("CHATTREE_HOME", str(tmp_path))
-    initialize_model_metadata(tmp_path)
+def test_one_connection_routes_each_model_from_builtin_metadata(monkeypatch):
     monkeypatch.setattr(cfg, "data", {
         "model_transport": DEFAULT_MODEL_TRANSPORT,
         "provider": {
@@ -98,9 +95,246 @@ def test_one_connection_routes_each_model_from_server_home_metadata(
     assert kimi.route["route_id"] != other_chat.route["route_id"]
 
 
-def test_unknown_model_uses_plain_chat_fallback(monkeypatch, tmp_path):
-    monkeypatch.setenv("CHATTREE_HOME", str(tmp_path))
-    initialize_model_metadata(tmp_path)
+def test_model_manager_probes_default_then_alternate_api_formats(monkeypatch):
+    monkeypatch.setattr(cfg, "data", {
+        "model_transport": DEFAULT_MODEL_TRANSPORT,
+        "provider": {
+            "gateway": {
+                "base_url": "https://www.packyapi.ai",
+                "api_key": "test",
+                "enabled": True,
+                "models": ["kimi-k3"],
+            },
+        },
+    })
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        calls.append(request.full_url)
+        if request.full_url.endswith("/v1/messages"):
+            response = MagicMock()
+            response.__enter__.return_value = response
+            response.headers = {"Content-Type": "application/json"}
+            response.read.return_value = b'{"content": [{"type": "text", "text": "ok"}]}'
+            return response
+        if request.full_url.endswith("/chat/completions"):
+            if not request.full_url.endswith("/v1/chat/completions"):
+                response = MagicMock()
+                response.__enter__.return_value = response
+                response.headers = {"Content-Type": "text/html"}
+                response.read.return_value = b"<!doctype html>"
+                return response
+            raise urllib.error.HTTPError(
+                request.full_url,
+                400,
+                "unsupported",
+                {"Content-Type": "application/json"},
+                io.BytesIO(b'{"error":{"code":"protocol_not_supported"}}'),
+            )
+        if request.full_url.endswith("/responses"):
+            if not request.full_url.endswith("/v1/responses"):
+                response = MagicMock()
+                response.__enter__.return_value = response
+                response.headers = {"Content-Type": "text/html"}
+                response.read.return_value = b"<!doctype html>"
+                return response
+            raise urllib.error.HTTPError(
+                request.full_url,
+                400,
+                "unsupported",
+                {"Content-Type": "application/json"},
+                io.BytesIO(b'{"error":{"code":"protocol_not_supported"}}'),
+            )
+        raise AssertionError(request.full_url)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    manager = ModelManager()
+
+    model = manager.get_model("gateway", "kimi-k3")
+
+    assert isinstance(model, AnthropicProvider)
+    assert model.route["protocol"] == ModelProtocol.ANTHROPIC_MESSAGES.value
+    assert model.route["endpoint"] == "/v1/messages"
+    assert model.config["base_url"] == "https://www.packyapi.ai"
+    assert calls == [
+        "https://www.packyapi.ai/chat/completions",
+        "https://www.packyapi.ai/v1/chat/completions",
+        "https://www.packyapi.ai/responses",
+        "https://www.packyapi.ai/v1/responses",
+        "https://www.packyapi.ai/v1/messages",
+    ]
+
+def test_probe_persists_detected_format_to_provider_config(monkeypatch):
+    monkeypatch.setattr(cfg, "data", {
+        "model_transport": DEFAULT_MODEL_TRANSPORT,
+        "provider": {
+            "gateway": {
+                "base_url": "https://www.packyapi.ai",
+                "api_key": "test",
+                "enabled": True,
+                "models": ["kimi-k3"],
+            },
+        },
+    })
+    saves = []
+    monkeypatch.setattr(cfg, "save", lambda: saves.append(1))
+
+    def fake_urlopen(request, timeout):
+        if request.full_url.endswith("/v1/messages"):
+            response = MagicMock()
+            response.__enter__.return_value = response
+            response.headers = {"Content-Type": "application/json"}
+            response.read.return_value = b'{"content": [{"type": "text", "text": "ok"}]}'
+            return response
+        if request.full_url.endswith(("/v1/chat/completions", "/v1/responses")):
+            raise urllib.error.HTTPError(
+                request.full_url,
+                400,
+                "unsupported",
+                {"Content-Type": "application/json"},
+                io.BytesIO(b'{"error":{"code":"protocol_not_supported"}}'),
+            )
+        if request.full_url.endswith(("/chat/completions", "/responses")):
+            response = MagicMock()
+            response.__enter__.return_value = response
+            response.headers = {"Content-Type": "text/html"}
+            response.read.return_value = b"<!doctype html>"
+            return response
+        raise AssertionError(request.full_url)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    manager = ModelManager()
+
+    model = manager.get_model("gateway", "kimi-k3")
+
+    assert model.route["protocol"] == ModelProtocol.ANTHROPIC_MESSAGES.value
+    assert saves == [1]
+    assert cfg.data["provider"]["gateway"]["model_routes"] == {
+        "kimi-k3": {
+            "protocol": "anthropic_messages",
+            "endpoint": "/v1/messages",
+            "base_url": "https://www.packyapi.ai",
+        },
+    }
+
+
+def test_persisted_route_skips_network_probe(monkeypatch):
+    monkeypatch.setattr(cfg, "data", {
+        "model_transport": DEFAULT_MODEL_TRANSPORT,
+        "provider": {
+            "gateway": {
+                "base_url": "https://user.example.com",
+                "api_key": "test",
+                "enabled": True,
+                "models": ["kimi-k3"],
+                "model_routes": {
+                    "kimi-k3": {
+                        "protocol": "anthropic_messages",
+                        "endpoint": "/v1/messages",
+                        "base_url": "https://probed.example.com",
+                    },
+                },
+            },
+        },
+    })
+
+    def fail_urlopen(request, timeout):
+        raise AssertionError(request.full_url)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fail_urlopen)
+    manager = ModelManager()
+
+    model = manager.get_model("gateway", "kimi-k3")
+
+    assert isinstance(model, AnthropicProvider)
+    assert model.route["protocol"] == ModelProtocol.ANTHROPIC_MESSAGES.value
+    assert model.route["endpoint"] == "/v1/messages"
+    assert model.config["base_url"] == "https://probed.example.com"
+
+
+def test_probe_overwrites_user_base_url(monkeypatch):
+    monkeypatch.setattr(cfg, "data", {
+        "model_transport": DEFAULT_MODEL_TRANSPORT,
+        "provider": {
+            "gateway": {
+                "base_url": "https://www.packyapi.ai",
+                "api_key": "test",
+                "enabled": True,
+                "models": ["gpt-4o"],
+            },
+        },
+    })
+    saves = []
+    monkeypatch.setattr(cfg, "save", lambda: saves.append(1))
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        calls.append(request.full_url)
+        if request.full_url.endswith("/v1/chat/completions"):
+            response = MagicMock()
+            response.__enter__.return_value = response
+            response.headers = {"Content-Type": "application/json"}
+            response.read.return_value = b'{"choices": [{"message": {"role": "assistant", "content": "ok"}}]}'
+            return response
+        if request.full_url.endswith("/chat/completions"):
+            response = MagicMock()
+            response.__enter__.return_value = response
+            response.headers = {"Content-Type": "text/html"}
+            response.read.return_value = b"<!doctype html>"
+            return response
+        raise AssertionError(request.full_url)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    manager = ModelManager()
+
+    model = manager.get_model("gateway", "gpt-4o")
+
+    assert model.route["protocol"] == ModelProtocol.OPENAI_CHAT_COMPLETIONS.value
+    assert model.config["base_url"] == "https://www.packyapi.ai/v1"
+    assert saves == [1]
+    assert cfg.data["provider"]["gateway"]["base_url"] == "https://www.packyapi.ai/v1"
+    assert "detected_base_url" not in cfg.data["provider"]["gateway"]
+    assert calls == [
+        "https://www.packyapi.ai/chat/completions",
+        "https://www.packyapi.ai/v1/chat/completions",
+    ]
+
+    calls.clear()
+    second = ModelManager()
+    again = second.get_model("gateway", "gpt-4o")
+    assert again.config["base_url"] == "https://www.packyapi.ai/v1"
+    assert calls == ["https://www.packyapi.ai/v1/chat/completions"]
+
+
+def test_get_route_prefers_persisted_protocol(monkeypatch):
+    monkeypatch.setattr(cfg, "data", {
+        "model_transport": DEFAULT_MODEL_TRANSPORT,
+        "provider": {
+            "gateway": {
+                "base_url": "https://user.example.com",
+                "enabled": True,
+                "models": ["kimi-k3"],
+                "model_routes": {
+                    "kimi-k3": {
+                        "protocol": "anthropic_messages",
+                        "endpoint": "/v1/messages",
+                        "base_url": "https://probed.example.com",
+                    },
+                },
+            },
+        },
+    })
+    manager = ModelManager()
+
+    route = manager.get_route("gateway", "kimi-k3")
+
+    assert route["protocol"] == ModelProtocol.ANTHROPIC_MESSAGES.value
+    assert route["endpoint"] == "/v1/messages"
+
+
+
+
+def test_unknown_model_uses_plain_chat_fallback(monkeypatch):
     monkeypatch.setattr(cfg, "data", {
         "model_transport": DEFAULT_MODEL_TRANSPORT,
         "provider": {
@@ -243,6 +477,10 @@ def test_native_continuation_payloads_keep_private_state_and_order():
                 "kind": "assistant_message",
                 "native_payload": {
                     "role": "assistant",
+                    "content": blocks,
+                },
+                "state_payload": {
+                    "role": "assistant",
                     "layout": [
                         {"state": blocks[0]},
                         {"tool_call_id": "toolu_1"},
@@ -264,6 +502,36 @@ def test_native_continuation_payloads_keep_private_state_and_order():
     assert anthropic_messages[0]["content"] == blocks
     assert anthropic_messages[1]["content"][0]["tool_use_id"] == "toolu_1"
 
+    _, semantic_tool_messages = anthropic._convert_messages([
+        {
+            "role": "assistant",
+            "content": "",
+            "model_state_items": [{
+                "route_id": anthropic_route["route_id"],
+                "index": 0,
+                "kind": "assistant_message",
+                "native_payload": {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "call-live",
+                        "name": "lookup",
+                        "input": {},
+                    }],
+                },
+            }],
+            "tool_calls": [{
+                "id": "call-live",
+                "type": "function",
+                "function": {"name": "lookup", "arguments": "{}"},
+            }],
+        },
+        {"role": "tool", "content": "result", "tool_call_id": "call-live"},
+    ])
+    assert semantic_tool_messages[0]["content"][0]["type"] == "tool_use"
+    assert semantic_tool_messages[0]["content"][0]["name"] == "lookup"
+    assert semantic_tool_messages[1]["content"][0]["tool_use_id"] == "call-live"
+
     gemini_route = route(
         "gemini_generate_content",
         route_id="gateway:gemini:generate",
@@ -282,6 +550,10 @@ def test_native_continuation_payloads_keep_private_state_and_order():
                 "index": 0,
                 "kind": "assistant_message",
                 "native_payload": {
+                    "role": "model",
+                    "parts": [signed_part],
+                },
+                "state_payload": {
                     "role": "model",
                     "layout": [{
                         "tool_call_id": "call_1",

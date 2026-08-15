@@ -525,7 +525,6 @@ class SubagentExecutor:
             if not target_provider or not target_model:
                 raise ValueError("无法确定 subagent 模型")
 
-            route = self.chat_manager.model_manager.get_route(target_provider, target_model)
             provider = self.chat_manager.model_manager.get_model(
                 target_provider,
                 target_model,
@@ -533,6 +532,7 @@ class SubagentExecutor:
             )
             if provider is None:
                 raise ValueError(f"无法初始化提供商 {target_provider}")
+            route = self.chat_manager.model_manager.get_route(target_provider, target_model)
 
             messages = self._build_messages(
                 agent_name,
