@@ -1,19 +1,17 @@
 """模型级协议路由与能力目录。
 
-运行时只读取 Server Home 中的 ``model_metadata.toml``。随程序发布的文件
-仅用于首次初始化；未知模型统一退回 Chat Completions，不启用 reasoning。
+运行时只读取随程序发布的 ``model_metadata.toml``；未知模型统一退回
+Chat Completions，不启用 reasoning。
 """
 from functools import lru_cache
 import hashlib
 import json
 from pathlib import Path
 import re
-import shutil
 from typing import Any, Dict, List, Optional
 from typing_extensions import TypedDict
 
 from backend.core.config.types import ModelProtocol, ModelRoute, ReasoningProfile
-from backend.core.home import resolve_chattree_home
 
 try:
     import tomllib
@@ -65,13 +63,9 @@ _DEFAULT_ENDPOINTS = {
 _BUILTIN_METADATA_FILE = Path(__file__).with_name("model_metadata.toml")
 
 
-def initialize_model_metadata(home: str | Path | None = None) -> Path:
-    """首次启动时创建可独立更新的 Server Home 模型元数据。"""
-    metadata_file = resolve_chattree_home(home) / _BUILTIN_METADATA_FILE.name
-    if not metadata_file.is_file():
-        metadata_file.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(_BUILTIN_METADATA_FILE, metadata_file)
-    return metadata_file
+def initialize_model_metadata() -> Path:
+    """返回随程序发布的唯一模型元数据源。"""
+    return _BUILTIN_METADATA_FILE
 
 
 def _as_string_list(value: Any) -> List[str]:
@@ -228,7 +222,7 @@ def resolve_route(
     provider_id: str,
     model_name: str,
 ) -> ModelRoute:
-    """从 Server Home 元数据解析路由，未知模型退回普通 Chat 对话。"""
+    """从仓库内置元数据解析路由，未知模型退回普通 Chat 对话。"""
     catalog = _catalog()
     entry = _metadata_entry(model_name, catalog)
     if entry is None or not entry.get("protocol"):

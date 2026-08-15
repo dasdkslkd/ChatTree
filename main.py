@@ -280,7 +280,7 @@ async def _initialize_server() -> None:
     perf_profiler = configure_profiler(load_perf_config(config_manager.data))
     persistence = SQLitePersistence()
     persistence.initialize()
-    initialize_model_metadata(persistence.home)
+    initialize_model_metadata()
     server_identity_store = ServerIdentityStore(persistence)
     server_identity = server_identity_store.get_or_create()
     chat_repository = ChatRepository(persistence)

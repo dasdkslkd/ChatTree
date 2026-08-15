@@ -1,7 +1,6 @@
 # 模型能力元数据
 #
-# 此文件是 Server Home/model_metadata.toml 的首次初始化模板；运行时只读取
-# Server Home 副本，因此可单独替换该副本完成免安装更新。
+# 运行时直接读取此仓库内置文件，不再复制到 Server Home。
 # 数据来源优先级：官方模型/定价/迁移文档，其次为供应商官方集成示例。
 # 只在这里维护模型能力；业务代码只负责加载和匹配。
 
@@ -223,8 +222,7 @@ endpoint = "/chat/completions"
 reasoning_profile = "kimi_preserved_all"
 context_length = 262144
 supports_vision = true
-reasoning_effort = { levels = ["low", "medium", "high"] }
-thinking = { toggleable = false, default_enabled = true }
+reasoning_effort = { levels = ["low", "high", "max"], default = "high" }
 
 [[rules]]
 id = "qwen-reasoning-aliases"
