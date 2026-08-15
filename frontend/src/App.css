@@ -1055,6 +1055,12 @@
 .transcript-list > * {
   animation: msg-in 0.3s var(--ease-enter, ease) both;
 }
+
+/* ====== Long-session perf: skip off-screen item layout/paint ====== */
+.transcript-list > * {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 240px;
+}
 @media (prefers-reduced-motion: reduce) {
   .transcript-list > * { animation: none; }
 }

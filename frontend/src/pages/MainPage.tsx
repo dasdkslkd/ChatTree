@@ -777,6 +777,8 @@ export default function ChatPage() {
       .sort((a, b) => b.createdAt - a.createdAt);
     return normalizeToolPermissionMode(runs[0]?.toolPermissionMode);
   }, [activeRunStates, currentBranchNodeIds, selectedBranchTipId]);
+  const retryToolPermissionModeRef = useRef<ToolPermissionMode | null>(null);
+  retryToolPermissionModeRef.current = liveBranchToolPermissionMode ?? currentBranchToolPermissionMode ?? null;
   const currentBranchTaskContextMode = useMemo(
     () => getBranchTaskContextMode(transcriptItems, selectedBranchTipId),
     [transcriptItems, selectedBranchTipId],
@@ -1344,7 +1346,38 @@ export default function ChatPage() {
   scheduleConversationSyncRef.current = scheduleConversationSync;
 
   useEffect(() => {
-    return streamManager.onTranscriptPatch((patch, sourceRun) => {
+    // 流式 patch 按帧批量合并，避免每个 chunk 触发一次整树 setState。
+    let pendingPatches: TranscriptPatch[] = [];
+    let flushFrame: number | null = null;
+    const flushPatches = () => {
+      flushFrame = null;
+      if (pendingPatches.length === 0) return;
+      const patches = pendingPatches;
+      pendingPatches = [];
+      let state = transcriptStateRef.current;
+      const calibrations = new Set<string>();
+      for (const patch of patches) {
+        const result = applyTranscriptPatch(state, patch);
+        if (result.status !== 'ignored') state = result.state;
+        if (result.status === 'snapshot_needed') calibrations.add(patch.conversation_id);
+      }
+      if (state !== transcriptStateRef.current) {
+        transcriptStateRef.current = state;
+        setTranscriptItems(state.items);
+      }
+      for (const conversationId of calibrations) {
+        void scheduleConversationSync(conversationId, {
+          reason: 'transcript-patch-calibration',
+          include: ['transcript'],
+          messageRetries: 0,
+        });
+      }
+    };
+    const queuePatch = (patch: TranscriptPatch) => {
+      pendingPatches.push(patch);
+      if (flushFrame === null) flushFrame = requestAnimationFrame(flushPatches);
+    };
+    const unsubscribe = streamManager.onTranscriptPatch((patch, sourceRun) => {
       const visible = getCurrentVisibleTranscriptTip();
       if (!visible || visible.conversationId !== patch.conversation_id) return;
       if (!shouldPatchRunIntoMainConversation(sourceRun)) return;
@@ -1368,6 +1401,12 @@ export default function ChatPage() {
         }
       }
       if (visible.tipNodeId !== patch.node_id) {
+        // 分支切换走即时全量校准路径：丢弃排队中的旧 patch，避免与异步快照竞态。
+        pendingPatches = [];
+        if (flushFrame !== null) {
+          cancelAnimationFrame(flushFrame);
+          flushFrame = null;
+        }
         const targetLandedFromVisibleNode = patch.operations.some((operation) =>
           operation.op === 'upsert'
           && operation.item.type === 'user_message'
@@ -1395,19 +1434,12 @@ export default function ChatPage() {
         })();
         return;
       }
-      const result = applyTranscriptPatch(transcriptStateRef.current, patch);
-      if (result.status !== 'ignored') {
-        transcriptStateRef.current = result.state;
-        setTranscriptItems(result.state.items);
-      }
-      if (result.status === 'snapshot_needed') {
-        void scheduleConversationSync(patch.conversation_id, {
-          reason: 'transcript-patch-calibration',
-          include: ['transcript'],
-          messageRetries: 0,
-        });
-      }
+      queuePatch(patch);
     });
+    return () => {
+      if (flushFrame !== null) cancelAnimationFrame(flushFrame);
+      unsubscribe();
+    };
   }, [loadTranscriptSnapshot, scheduleConversationSync]);
 
   const handleCopyTranscriptItem = useCallback(async (_item: TranscriptItem, text: string) => {
@@ -2100,19 +2132,29 @@ export default function ChatPage() {
     });
   };
 
+  const handleSendRef = useRef<typeof handleSend>(handleSend);
+  handleSendRef.current = handleSend;
+
   // AI 回答操作行：重试 = 以对应用户节点为父节点原样重新发送；
   // 编辑分叉 = 将对应用户文本填入输入框进入编辑态（与编辑用户消息同一条通路）。
-  const handleRetryAnswer = async (item: AssistantAnswerItem) => {
-    const { treeData: tree } = useConversationStore.getState();
-    if (!tree || !currentConversation?.id) return;
+  const handleRetryAnswer = useCallback(async (item: AssistantAnswerItem) => {
+    const { treeData: tree, currentConversation: conversation } = useConversationStore.getState();
+    if (!tree || !conversation?.id) return;
     const node = tree.nodes.find((entry) => entry.id === item.node_id);
     const parentNodeId = node?.parent_id;
     const parentNode = parentNodeId ? tree.nodes.find((entry) => entry.id === parentNodeId) : null;
     const userText = parentNode?.user_content ?? '';
     if (!parentNodeId || !userText) return;
-    const inheritedToolPermissionMode = liveBranchToolPermissionMode ?? currentBranchToolPermissionMode ?? null;
-    await handleSend(userText, undefined, undefined, inheritedToolPermissionMode ?? undefined, undefined, undefined, parentNodeId);
-  };
+    await handleSendRef.current(
+      userText,
+      undefined,
+      undefined,
+      retryToolPermissionModeRef.current ?? undefined,
+      undefined,
+      undefined,
+      parentNodeId,
+    );
+  }, []);
 
   const handleEditBranchAnswer = useCallback(async (item: AssistantAnswerItem) => {
     const { treeData: tree } = useConversationStore.getState();

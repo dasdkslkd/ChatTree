@@ -13,9 +13,6 @@ interface TranscriptItemRendererProps extends TranscriptActionHandlers {
   item: TranscriptItem;
 }
 
-// 性能监控：统计每个 item 的重渲染次数
-const renderCounts: Record<string, number> = {};
-
 function UnknownTranscriptItem({ item }: { item: TranscriptItem }) {
   return (
     <div className="transcript-unknown-item w-full flex flex-col items-start" role="listitem">
@@ -84,12 +81,6 @@ export const TranscriptItemRenderer = memo(
     toolApprovalPending,
     toolApprovalError,
   }: TranscriptItemRendererProps) {
-  // 性能监控：memo 之后函数体执行即真实重渲染，便于观察频率
-  const renderKey = `${item.type}:${item.id}`;
-  const count = (renderCounts[renderKey] ?? 0) + 1;
-  renderCounts[renderKey] = count;
-  // eslint-disable-next-line no-console
-  console.log(`[rerender] ${renderKey} #${count}`);
   switch (item.type) {
     case 'user_message':
       return (
