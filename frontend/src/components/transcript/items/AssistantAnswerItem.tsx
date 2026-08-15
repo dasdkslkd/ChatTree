@@ -1,18 +1,45 @@
-import { useState } from 'react';
-import { Check, Copy } from 'lucide-react';
-import { Button } from '@/components/ui/button';
+import { useMemo, useState } from 'react';
+import { Check, ChevronLeft, ChevronRight, Copy, Network, Pencil, RotateCw } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import MarkdownContent from '../../MarkdownContent';
+import { useConversationStore } from '../../../store/conversationStore';
+import { useNavigationStore } from '../../../store/navigationStore';
 import type { AssistantAnswerItem as AssistantAnswerTranscriptItem, TranscriptCopyHandler } from '../../../types/transcript';
 import { getItemText } from './itemText';
 import { getStreamStatusText } from '../../../utils/streaming';
+import { formatClockTime } from '../../../utils/time';
 
-export function AssistantAnswerItem({ item, onCopy }: { item: AssistantAnswerTranscriptItem; onCopy?: TranscriptCopyHandler }) {
+export function AssistantAnswerItem({
+  item,
+  onCopy,
+  onRetry,
+  onEditBranch,
+}: {
+  item: AssistantAnswerTranscriptItem;
+  onCopy?: TranscriptCopyHandler;
+  onRetry?: (item: AssistantAnswerTranscriptItem) => void | Promise<void>;
+  onEditBranch?: (item: AssistantAnswerTranscriptItem) => void | Promise<void>;
+}) {
   const [copied, setCopied] = useState(false);
+  const treeData = useConversationStore((state) => state.treeData);
+  const switchNode = useConversationStore((state) => state.switchNode);
+  const setChatViewMode = useNavigationStore((state) => state.setChatViewMode);
   const text = getItemText(item);
   const statusLabel = item.status === 'error' && item.finish_reason
     ? `生成未完成：${item.finish_reason}`
     : getStreamStatusText(item.status || '', null);
+
+  // 兄弟分支翻页器：复用树数据 children_ids 与 switchNode，原地切换分支；
+  // parentNode.user_content 即该回答对应的用户输入，供重试/编辑分叉使用
+  const { treeNode, parentNode, branchSiblings, branchIndex } = useMemo(() => {
+    const node = treeData?.nodes.find((entry) => entry.id === item.node_id) ?? null;
+    const parent = node?.parent_id
+      ? treeData?.nodes.find((entry) => entry.id === node.parent_id) ?? null
+      : null;
+    const siblings = parent?.children_ids ?? [];
+    return { treeNode: node, parentNode: parent, branchSiblings: siblings, branchIndex: siblings.indexOf(item.node_id) };
+  }, [treeData, item.node_id]);
+
   if (!text) return null;
 
   const handleCopy = async () => {
@@ -20,6 +47,11 @@ export function AssistantAnswerItem({ item, onCopy }: { item: AssistantAnswerTra
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1600);
   };
+
+  const showBranchPager = branchSiblings.length > 1 && branchIndex !== -1;
+  const showBranchActions = Boolean(parentNode?.user_content && (onRetry || onEditBranch));
+  const metaParts = [treeNode?.model_id, formatClockTime(treeNode?.timestamp)].filter(Boolean);
+  const showActionBar = Boolean(onCopy || showBranchPager || showBranchActions || metaParts.length > 0);
 
   return (
     <div className={cn('w-full flex flex-col group items-start')} role="listitem">
@@ -34,17 +66,72 @@ export function AssistantAnswerItem({ item, onCopy }: { item: AssistantAnswerTra
         >
           <MarkdownContent enableMermaid>{text}</MarkdownContent>
         </div>
-        {onCopy && (
-          <div className="flex items-center gap-1 mt-0.5 self-start justify-start">
-            <Button
-              variant="ghost"
-              size="sm"
-              className="opacity-0 group-hover:opacity-100 transition-opacity p-0 h-5 w-5"
-              onClick={handleCopy}
-              aria-label="复制消息"
-            >
-              {copied ? <Check className="h-3.5 w-3.5 text-green-500" /> : <Copy className="h-3.5 w-3.5" />}
-            </Button>
+        {showActionBar && (
+          <div className="msg-action-bar">
+            {onCopy && (
+              <button
+                type="button"
+                className={cn('msg-action-btn', copied && 'is-copied')}
+                onClick={handleCopy}
+                aria-label="复制消息"
+              >
+                {copied ? <Check /> : <Copy />}
+                {copied ? '已复制' : '复制'}
+              </button>
+            )}
+            {showBranchActions && onRetry && (
+              <button
+                type="button"
+                className="msg-action-btn"
+                onClick={() => void onRetry(item)}
+                aria-label="重试"
+              >
+                <RotateCw />重试
+              </button>
+            )}
+            {showBranchActions && onEditBranch && (
+              <button
+                type="button"
+                className="msg-action-btn"
+                onClick={() => void onEditBranch(item)}
+                aria-label="编辑分叉"
+              >
+                <Pencil />编辑分叉
+              </button>
+            )}
+            {showBranchPager && (
+              <span className="branch-pager">
+                <button
+                  type="button"
+                  className="branch-pager-btn"
+                  disabled={branchIndex <= 0}
+                  onClick={() => void switchNode(branchSiblings[branchIndex - 1])}
+                  aria-label="上一分支"
+                >
+                  <ChevronLeft />
+                </button>
+                <span className="branch-pager-label">{branchIndex + 1} / {branchSiblings.length}</span>
+                <button
+                  type="button"
+                  className="branch-pager-btn"
+                  disabled={branchIndex >= branchSiblings.length - 1}
+                  onClick={() => void switchNode(branchSiblings[branchIndex + 1])}
+                  aria-label="下一分支"
+                >
+                  <ChevronRight />
+                </button>
+                <button
+                  type="button"
+                  className="branch-tree-btn"
+                  onClick={() => setChatViewMode('tree')}
+                >
+                  <Network />在树中查看
+                </button>
+              </span>
+            )}
+            {metaParts.length > 0 && (
+              <span className="msg-action-meta">{metaParts.join(' · ')}</span>
+            )}
           </div>
         )}
         {statusLabel && (

@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
+import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -658,11 +659,8 @@ export function ProvidersSection() {
             </span>
           </div>
           <button
-            className="flex items-center gap-1 text-xs px-2.5 py-1 rounded-lg cursor-pointer transition-colors"
-            style={{ background: 'var(--bg-button-secondary, rgba(255,247,240,0.06))', color: 'var(--fg-secondary)', border: 'none' }}
+            className="btn-secondary flex items-center gap-1 text-xs px-2.5 py-1 rounded-lg cursor-pointer"
             onClick={() => openEditDialog(null)}
-            onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-secondary-hover, rgba(255,247,240,0.10))'; }}
-            onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-secondary, rgba(255,247,240,0.06))'; }}
           >
             <Plus className="h-3.5 w-3.5" />
             添加
@@ -678,10 +676,8 @@ export function ProvidersSection() {
               return (
                 <div
                   key={pid}
-                  className="flex items-center justify-between px-4 py-2.5 cursor-pointer transition-colors"
+                  className="hover-row flex items-center justify-between px-4 py-2.5 cursor-pointer"
                   onClick={() => openEditDialog(pid)}
-                  onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-hover)'; }}
-                  onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = ''; }}
                 >
                   <div className="flex items-center gap-3">
                     <Settings className="h-4 w-4" style={{ color: 'var(--icon-tertiary)' }} />
@@ -931,10 +927,7 @@ export function ProvidersSection() {
                       return (
                         <div
                           key={model}
-                          className="flex items-center justify-between px-2 py-1.5 rounded text-[13px] transition-colors"
-                          style={{ background: hidden ? 'var(--muted)' : 'transparent', opacity: hidden ? 0.6 : 1 }}
-                          onMouseEnter={(e) => { if (!hidden) (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-hover)'; }}
-                          onMouseLeave={(e) => { if (!hidden) (e.currentTarget as HTMLElement).style.background = ''; }}
+                          className={cn('hover-row flex items-center justify-between px-2 py-1.5 rounded text-[13px]', hidden && 'is-muted')}
                         >
                           <span style={hidden ? { textDecoration: 'line-through', color: 'var(--fg-tertiary)' } : { color: 'var(--fg-85)' }}>{model}</span>
                           <TextTooltip content={hidden ? '显示此模型' : '隐藏此模型'}>

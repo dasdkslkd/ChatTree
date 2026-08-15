@@ -77,6 +77,8 @@ export const TranscriptItemRenderer = memo(
     onCopyItem,
     onEditUserMessage,
     onDeleteUserMessage,
+    onRetryAnswer,
+    onEditBranchAnswer,
     planActionPending,
     planError,
     toolApprovalPending,
@@ -99,7 +101,14 @@ export const TranscriptItemRenderer = memo(
         />
       );
     case 'assistant_answer':
-      return <AssistantAnswerItem item={item} onCopy={onCopyItem} />;
+      return (
+        <AssistantAnswerItem
+          item={item}
+          onCopy={onCopyItem}
+          onRetry={onRetryAnswer}
+          onEditBranch={onEditBranchAnswer}
+        />
+      );
     case 'assistant_process':
       return (
         <AssistantProcessItem item={item} />

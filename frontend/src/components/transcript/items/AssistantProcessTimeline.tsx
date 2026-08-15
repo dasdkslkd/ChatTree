@@ -3,6 +3,7 @@ import { ChevronRight, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { TranscriptItem } from '../../../types/transcript';
 import MarkdownContent from '../../MarkdownContent';
+import { useUiPreferencesStore } from '../../../store/uiPreferencesStore';
 import { ToolCallCard } from './ToolCallRenderer';
 
 export type ToolRenderItem = {
@@ -80,7 +81,8 @@ function ToolCallGroup({ items }: { items: ToolRenderItem[] }) {
   );
 }
 
-function ContentBlock({ block }: { block: Extract<ProcessRenderBlock, { type: 'content' }> }) {
+function ContentBlock({ block, isTail }: { block: Extract<ProcessRenderBlock, { type: 'content' }>; isTail: boolean }) {
+  const streamCursorEnabled = useUiPreferencesStore((state) => state.streamCursor);
   return (
     <div
       key={block.key}
@@ -88,11 +90,35 @@ function ContentBlock({ block }: { block: Extract<ProcessRenderBlock, { type: 'c
       style={{ color: 'var(--fg-secondary)' }}
     >
       <MarkdownContent enableMermaid>{block.content}</MarkdownContent>
+      {streamCursorEnabled && isTail && <StreamCursor active={block.streaming} />}
     </div>
   );
 }
 
-function renderTimelineBlock(block: ProcessRenderBlock) {
+// 流式块状光标：输出中闪烁，输出完成后 600ms 渐隐，避免界面突变
+function StreamCursor({ active }: { active: boolean }) {
+  const [phase, setPhase] = useState<'live' | 'fading' | 'hidden'>(active ? 'live' : 'hidden');
+  const [prevActive, setPrevActive] = useState(active);
+  if (active !== prevActive) {
+    setPrevActive(active);
+    if (active) {
+      setPhase('live');
+    } else if (phase === 'live') {
+      setPhase('fading');
+    }
+  }
+  if (phase === 'hidden') return null;
+  return (
+    <span
+      className={cn('stream-cursor', phase === 'fading' && 'is-fading')}
+      onAnimationEnd={(event) => {
+        if (event.animationName === 'stream-cursor-fade') setPhase('hidden');
+      }}
+    />
+  );
+}
+
+function renderTimelineBlock(block: ProcessRenderBlock, isTail: boolean) {
   if (block.type === 'reasoning') {
     return (
       <ThoughtBlock
@@ -103,7 +129,7 @@ function renderTimelineBlock(block: ProcessRenderBlock) {
     );
   }
   if (block.type === 'tools') return <ToolCallGroup key={block.key} items={block.items} />;
-  return <ContentBlock key={block.key} block={block} />;
+  return <ContentBlock key={block.key} block={block} isTail={isTail} />;
 }
 
 export function AssistantProcessTimeline({
@@ -121,22 +147,13 @@ export function AssistantProcessTimeline({
         <div className="flex flex-col items-start max-w-full w-full min-w-0">
           <div className="processed-blocks-shell expanded">
             <div className="processed-blocks-inner">
-              {timeline.map((block) => renderTimelineBlock(block))}
+              {timeline.map((block, index) => renderTimelineBlock(block, index === timeline.length - 1))}
             </div>
           </div>
           {timeline.length === 0 && props.status === 'running' && (
-            <div
-              className="max-w-full w-fit px-3 py-2 rounded-2xl rounded-bl-sm leading-relaxed prose prose-sm max-w-none [&_p]:m-0"
-              style={{
-                color: 'var(--fg-secondary)',
-                fontSize: 'var(--codex-chat-font-size)',
-                lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
-              }}
-            >
-              <div className="flex items-center gap-2">
-                <Loader2 className="h-4 w-4 animate-spin" style={{ color: 'var(--icon-accent)' }} />
-                <span className="text-sm" style={{ color: 'var(--fg-tertiary)' }}>思考中...</span>
-              </div>
+            <div className="stream-stage" role="status">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              <span className="stream-stage-text">思考中…</span>
             </div>
           )}
           {statusLabel && (

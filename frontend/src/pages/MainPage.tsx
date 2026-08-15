@@ -13,11 +13,6 @@ import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from '@/components/ui/tooltip';
 import { TextTooltip } from '@/components/ui/text-tooltip';
 import {
   Dialog,
@@ -63,7 +58,7 @@ import type {
   TaskContextMode,
 } from '../types/message';
 import type { ActiveTaskRecord } from '../types/task';
-import type { PlanApprovalItem, PlanQuestionItem, ToolApprovalItem, TranscriptItem, TranscriptPatch, UserMessageItem, RunStatusItem } from '../types/transcript';
+import type { AssistantAnswerItem, PlanApprovalItem, PlanQuestionItem, ToolApprovalItem, TranscriptItem, TranscriptPatch, UserMessageItem, RunStatusItem } from '../types/transcript';
 import type { WorkspaceContext } from '../types/conversation';
 import type { ProjectCapabilityConfig } from '../types/model';
 import { useConversationStore } from '../store/conversationStore';
@@ -191,8 +186,6 @@ type QueuedMessage = {
 
 /* ---------- Component ---------- */
 export default function ChatPage() {
-  const [hoveredId, setHoveredId] = useState<string | null>(null);
-  const [hoveredProjectId, setHoveredProjectId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [outlineCollapsed, setOutlineCollapsed] = useState(false);
   const [rightPanelView, setRightPanelView] = useState<'outline' | 'side' | 'tasks' | 'files'>('outline');
@@ -393,7 +386,7 @@ export default function ChatPage() {
     };
   }, [resizingSidebar]);
 
-  const { chatViewMode, toggleChatViewMode, openSettings } = useNavigationStore();
+  const { chatViewMode, setChatViewMode, toggleChatViewMode, openSettings } = useNavigationStore();
 
   const updateToolPermissionDraft = useCallback((draft: ToolPermissionDraft) => {
     toolPermissionDraftRef.current = draft;
@@ -411,7 +404,8 @@ export default function ChatPage() {
   const isAtBottom = useCallback(() => {
     if (!historyRef.current) return true;
     const { scrollTop, scrollHeight, clientHeight } = historyRef.current;
-    return scrollHeight - scrollTop - clientHeight <= 8;
+    // 滚底阈值 48px：用户上翻阅读时不被自动滚动打断
+    return scrollHeight - scrollTop - clientHeight <= 48;
   }, []);
 
   const scrollToBottom = useCallback(() => {
@@ -1830,6 +1824,64 @@ export default function ChatPage() {
     requestAnimationFrame(tryScroll);
   }, [pendingScrollNodeId, transcriptItems, chatViewMode, clearPendingScroll]);
 
+  // 对话切换后预载树数据：驱动消息操作行的分支翻页器与节点引用补全
+  const activeConversationId = currentConversation?.id;
+  useEffect(() => {
+    if (!activeConversationId) return;
+    void loadTree(activeConversationId).catch(() => {});
+  }, [activeConversationId, loadTree]);
+
+  // 兄弟分支原地切换：与消息操作行翻页器共用同一数据通路（children_ids + switchNode）
+  const switchSiblingBranch = useCallback((direction: -1 | 1) => {
+    const { treeData: tree, currentNodeId: tipNodeId } = useConversationStore.getState();
+    if (!tree || !tipNodeId) return;
+    const node = tree.nodes.find((entry) => entry.id === tipNodeId);
+    if (!node?.parent_id) return;
+    const siblings = tree.nodes.find((entry) => entry.id === node.parent_id)?.children_ids ?? [];
+    const index = siblings.indexOf(tipNodeId);
+    const target = index === -1 ? undefined : siblings[index + direction];
+    if (target) void switchNode(target);
+  }, [switchNode]);
+
+  // 快捷键闭环：Ctrl+←/→ 兄弟分支切换，Ctrl+T 对话/树视图互切，Esc 停止流式
+  useEffect(() => {
+    const handleGlobalKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
+      const target = event.target as HTMLElement | null;
+      const isEditable = Boolean(
+        target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable),
+      );
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey) {
+        if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+          if (isEditable) return; // 保留输入框内的光标移动
+          event.preventDefault();
+          switchSiblingBranch(event.key === 'ArrowLeft' ? -1 : 1);
+          return;
+        }
+        if (event.key.toLowerCase() === 't') {
+          event.preventDefault();
+          toggleChatViewMode();
+          return;
+        }
+        if (event.key.toLowerCase() === 'k') {
+          event.preventDefault();
+          if (sidebarCollapsed) setSidebarCollapsed(false);
+          // 侧边栏从折叠态展开时，等待渲染与宽度过渡后再聚焦搜索框
+          requestAnimationFrame(() => conversationSearchInputRef.current?.focus());
+          window.setTimeout(() => conversationSearchInputRef.current?.focus(), 320);
+          return;
+        }
+      }
+      if (event.key === 'Escape' && currentBranchHasStreamingChat) {
+        // 弹层（对话框 / 菜单）打开时，Esc 优先用于关闭弹层
+        if (document.querySelector('[role="dialog"][data-state="open"], [role="alertdialog"][data-state="open"], [role="menu"]')) return;
+        handleStopStreaming();
+      }
+    };
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [switchSiblingBranch, toggleChatViewMode, handleStopStreaming, currentBranchHasStreamingChat, sidebarCollapsed]);
+
   const handleExportMarkdown = () => {
     if (!transcriptItems.length || !currentConversation) return;
     const title = currentConversation.title || '未命名对话';
@@ -1921,6 +1973,7 @@ export default function ChatPage() {
     toolPermissionMode?: ToolPermissionMode,
     promptId?: string | null,
     promptMode?: 'override' | 'append',
+    sendParentNodeId?: string | null,
   ) => {
     if (!val.trim()) return;
     autoScrollRef.current = true;
@@ -1986,7 +2039,7 @@ export default function ChatPage() {
         return;
       }
     }
-    const sendNodeId = resolveSendNodeId({
+    const sendNodeId = sendParentNodeId ?? resolveSendNodeId({
       editTargetNodeId,
       currentNodeId,
       // 新对话是发送内 await 创建的，闭包里的 currentConversation 仍是本次 render 快照（null），
@@ -2046,6 +2099,36 @@ export default function ChatPage() {
       console.error('发送失败:', err);
     });
   };
+
+  // AI 回答操作行：重试 = 以对应用户节点为父节点原样重新发送；
+  // 编辑分叉 = 将对应用户文本填入输入框进入编辑态（与编辑用户消息同一条通路）。
+  const handleRetryAnswer = async (item: AssistantAnswerItem) => {
+    const { treeData: tree } = useConversationStore.getState();
+    if (!tree || !currentConversation?.id) return;
+    const node = tree.nodes.find((entry) => entry.id === item.node_id);
+    const parentNodeId = node?.parent_id;
+    const parentNode = parentNodeId ? tree.nodes.find((entry) => entry.id === parentNodeId) : null;
+    const userText = parentNode?.user_content ?? '';
+    if (!parentNodeId || !userText) return;
+    const inheritedToolPermissionMode = liveBranchToolPermissionMode ?? currentBranchToolPermissionMode ?? null;
+    await handleSend(userText, undefined, undefined, inheritedToolPermissionMode ?? undefined, undefined, undefined, parentNodeId);
+  };
+
+  const handleEditBranchAnswer = useCallback(async (item: AssistantAnswerItem) => {
+    const { treeData: tree } = useConversationStore.getState();
+    if (!tree) return;
+    const node = tree.nodes.find((entry) => entry.id === item.node_id);
+    const parentNodeId = node?.parent_id;
+    const parentNode = parentNodeId ? tree.nodes.find((entry) => entry.id === parentNodeId) : null;
+    const userText = parentNode?.user_content ?? '';
+    if (!parentNodeId || !userText) return;
+    const inheritedToolPermissionMode = liveBranchToolPermissionMode ?? currentBranchToolPermissionMode ?? null;
+    setEditValue(userText);
+    setEditTargetNodeId(parentNodeId);
+    setEditToolPermissionMode(inheritedToolPermissionMode);
+    setEditReturnNodeId(selectedBranchTipId);
+    await switchNode(parentNodeId);
+  }, [liveBranchToolPermissionMode, currentBranchToolPermissionMode, selectedBranchTipId, switchNode]);
 
   const handleJumpToMessage = (target: TranscriptScrollTarget) => {
     const element = findTranscriptAnchorElement(historyRef.current, target);
@@ -2588,6 +2671,7 @@ export default function ChatPage() {
                 placeholder="搜索项目或对话"
                 className="h-8 border-0 bg-transparent px-1 text-xs shadow-none focus-visible:ring-0"
               />
+              <kbd className="app-search-kbd">⌘K</kbd>
             </div>
             <div className="app-sidebar-project-heading">项目</div>
             <div className="app-sidebar-projects custom-scrollbar">
@@ -2608,8 +2692,6 @@ export default function ChatPage() {
                     <TextTooltip content={group.path} side="right">
                       <div
                         className={cn('app-project-row', selectedProject && 'is-active')}
-                        onMouseEnter={() => setHoveredProjectId(group.id)}
-                        onMouseLeave={() => setHoveredProjectId(null)}
                       >
                         <ChevronRight
                           className={cn('h-3.5 w-3.5 shrink-0 transition-transform', !group.isCollapsed && 'rotate-90')}
@@ -2638,10 +2720,7 @@ export default function ChatPage() {
                             <Button
                               variant="ghost"
                               size="sm"
-                              className={cn(
-                                'app-session-more',
-                                hoveredProjectId === group.id || selectedProject ? 'opacity-100' : 'opacity-0'
-                              )}
+                              className="app-session-more"
                               onClick={(e) => e.stopPropagation()}
                             >
                               <MoreHorizontal className="h-4 w-4" />
@@ -2675,8 +2754,6 @@ export default function ChatPage() {
                               <div
                                 className={cn('app-session-row', isSelected && 'is-active')}
                                 onClick={() => handleSelectConversation(c.id)}
-                                onMouseEnter={() => setHoveredId(c.id)}
-                                onMouseLeave={() => setHoveredId(null)}
                               >
                                 <span className="app-session-title">{c.title || '未命名'}</span>
                                 {isRunning && (
@@ -2691,10 +2768,7 @@ export default function ChatPage() {
                                     <Button
                                       variant="ghost"
                                       size="sm"
-                                      className={cn(
-                                        'app-session-more',
-                                        hoveredId === c.id || isSelected ? 'opacity-100' : 'opacity-0'
-                                      )}
+                                      className="app-session-more"
                                       onClick={(e) => e.stopPropagation()}
                                     >
                                       <MoreHorizontal className="h-4 w-4" />
@@ -2772,35 +2846,33 @@ export default function ChatPage() {
 
       {/* Center: title bar + content (chat or tree) */}
       <section className="flex-1 flex flex-col overflow-hidden relative" style={{ background: 'var(--bg-surface)' }}>
-        {/* Title bar with view toggle */}
+        {/* Title bar with segmented view toggle */}
         <div
-          className="flex items-center justify-between p-3 sticky top-0 z-[1] min-h-[56px]"
+          className="flex items-center justify-between gap-2 p-3 sticky top-0 z-[1] min-h-[56px]"
           style={{ background: 'var(--bg-surface)', borderBottom: '0.5px solid var(--border)' }}
         >
-          <span className="w-8" />
+          <span className="min-w-0 truncate font-semibold" style={{ color: 'var(--fg-secondary)' }}>{currentConversation?.title || '请选择对话'}</span>
           <div className="flex items-center gap-2">
-            <span className="font-semibold" style={{ color: 'var(--fg-secondary)' }}>{currentConversation?.title || '请选择对话'}</span>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-8 w-8 p-0"
-                  onClick={toggleChatViewMode}
-                >
-                  {chatViewMode === 'chat' ? (
-                    <Network className="h-4 w-4" />
-                  ) : (
-                    <MessageSquare className="h-4 w-4" />
-                  )}
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>
-                {chatViewMode === 'chat' ? '切换到树视图' : '切换到对话视图'}
-              </TooltipContent>
-            </Tooltip>
-          </div>
-          <div className="flex items-center gap-1">
+            <div className="view-toggle" role="tablist" aria-label="视图切换">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={chatViewMode === 'chat'}
+                className={cn('view-toggle-btn', chatViewMode === 'chat' && 'is-active')}
+                onClick={() => setChatViewMode('chat')}
+              >
+                <MessageSquare />对话
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={chatViewMode === 'tree'}
+                className={cn('view-toggle-btn', chatViewMode === 'tree' && 'is-active')}
+                onClick={() => setChatViewMode('tree')}
+              >
+                <Network />树
+              </button>
+            </div>
             <TextTooltip content="导出为 Markdown">
               <Button
                 variant="ghost"
@@ -2873,6 +2945,8 @@ export default function ChatPage() {
                     onCopyItem={handleCopyTranscriptItem}
                     onEditUserMessage={handleEditUserMessage}
                     onDeleteUserMessage={handleDeleteUserMessage}
+                    onRetryAnswer={handleRetryAnswer}
+                    onEditBranchAnswer={handleEditBranchAnswer}
                     onApprovePlan={handleApprovePlan}
                     onRejectPlan={handleRejectPlan}
                     onAnswerPlanQuestion={handleAnswerPlanQuestion}
@@ -3040,15 +3114,12 @@ export default function ChatPage() {
                   {outline.map((item, idx) => (
                     <TextTooltip key={idx} content={item.text} side="left">
                       <div
-                        className="flex items-center py-2 px-3 cursor-pointer rounded-lg mx-2 my-0.5 transition-colors"
-                        style={{ color: 'var(--fg-85)' }}
+                        className="app-outline-item flex items-center py-2 px-3 cursor-pointer rounded-lg mx-2 my-0.5"
                         onClick={() => handleJumpToMessage({
                           messageId: item.messageId,
                           nodeId: item.nodeId,
                           legacyIndex: item.originalIndex,
                         })}
-                        onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-hover)'; }}
-                        onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = ''; }}
                       >
                         <span className="truncate text-sm">{item.text}</span>
                       </div>

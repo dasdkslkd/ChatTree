@@ -98,6 +98,8 @@ export function TranscriptList({
   onCopyItem,
   onEditUserMessage,
   onDeleteUserMessage,
+  onRetryAnswer,
+  onEditBranchAnswer,
   planActionPending,
   planError,
   toolApprovalPending,
@@ -132,6 +134,8 @@ export function TranscriptList({
       onCopyItem={onCopyItem}
       onEditUserMessage={onEditUserMessage}
       onDeleteUserMessage={onDeleteUserMessage}
+      onRetryAnswer={onRetryAnswer}
+      onEditBranchAnswer={onEditBranchAnswer}
       planActionPending={planActionPending}
       planError={planError}
       toolApprovalPending={toolApprovalPending}

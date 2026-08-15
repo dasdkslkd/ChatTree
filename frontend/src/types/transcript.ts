@@ -186,6 +186,8 @@ export interface TranscriptActionHandlers {
   onCopyItem?: TranscriptCopyHandler;
   onEditUserMessage?: TranscriptUserMessageActionHandler;
   onDeleteUserMessage?: TranscriptUserMessageDeleteHandler;
+  onRetryAnswer?: (item: AssistantAnswerItem) => void | Promise<void>;
+  onEditBranchAnswer?: (item: AssistantAnswerItem) => void | Promise<void>;
   planActionPending?: string | null;
   planError?: string | null;
   toolApprovalPending?: string | null;

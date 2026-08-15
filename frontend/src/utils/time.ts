@@ -10,6 +10,15 @@ export function formatConversationTime(timestamp: number | undefined): string {
   return `${diffDays} 天`;
 }
 
+export function formatClockTime(timestamp: number | undefined): string {
+  if (!timestamp) return '';
+  const timeMs = timestamp > 1_000_000_000_000 ? timestamp : timestamp * 1000;
+  const time = new Date(timeMs);
+  const hours = String(time.getHours()).padStart(2, '0');
+  const minutes = String(time.getMinutes()).padStart(2, '0');
+  return `${hours}:${minutes}`;
+}
+
 export function formatProcessedDuration(ms: number | null | undefined): string | null {
   if (typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) return null;
 

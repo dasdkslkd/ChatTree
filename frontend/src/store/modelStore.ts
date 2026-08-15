@@ -206,7 +206,12 @@ export const useModelStore = create<ModelState & ModelActions>()(
     },
 
     setPendingProvider: (provider) => {
-      set({ pendingProvider: provider });
+      set({
+        pendingProvider: provider,
+        pendingModel: null,
+        pendingReasoningEffort: null,
+        pendingThinkingEnabled: null,
+      });
     },
 
     setPendingModel: (model) => {

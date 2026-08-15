@@ -213,26 +213,17 @@ export default function ServerSessionApp({
             <div className="w-px h-3" style={{ background: 'var(--border)' }} />
 
             <div
-              className="flex items-center"
+              className="hover-row flex items-center"
               style={{
                 gap: '5px',
                 padding: '2px 7px',
                 borderRadius: 'var(--radius-sm)',
                 whiteSpace: 'nowrap',
                 position: 'relative',
-                transition: 'background var(--transition-basic), color var(--transition-basic)',
               }}
               aria-label={contextTitle}
-              onMouseEnter={(e) => {
-                setContextHovered(true);
-                e.currentTarget.style.background = 'var(--bg-button-tertiary-hover)';
-                e.currentTarget.style.color = 'var(--fg-secondary)';
-              }}
-              onMouseLeave={(e) => {
-                setContextHovered(false);
-                e.currentTarget.style.background = '';
-                e.currentTarget.style.color = '';
-              }}
+              onMouseEnter={() => setContextHovered(true)}
+              onMouseLeave={() => setContextHovered(false)}
             >
               {contextLoading ? (
                 <Loader2 className="w-3 h-3 animate-spin" style={{ color: 'var(--fg-tertiary)' }} />
@@ -453,11 +444,9 @@ export default function ServerSessionApp({
             {/* Current model — click to open settings */}
             <TextTooltip content="点击打开设置">
               <div
-                className="flex items-center gap-1.5 px-1.5 py-0.5 rounded cursor-pointer transition-opacity"
+                className="hover-row flex items-center gap-1.5 px-1.5 py-0.5 rounded cursor-pointer"
                 style={{ borderRadius: '6px' }}
                 onClick={() => openSettings('providers')}
-                onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-hover)'; }}
-                onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = ''; }}
               >
                 {isCurrentProxy && <Share2 className="h-3.5 w-3.5" style={{ color: 'var(--icon-accent)' }} />}
                 <span style={isCurrentProxy ? { color: 'var(--icon-accent)' } : undefined}>{getModelDisplay()}</span>

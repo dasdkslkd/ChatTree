@@ -7,9 +7,10 @@ import {
 } from '@/components/ui/dialog';
 import {
   Settings, StickyNote, Server, Wrench, Link2,
-  Sparkles, Bot, Package, MessageSquare, FolderOpen, Terminal, HardDrive, Coins, Brain,
+  Sparkles, Bot, Package, MessageSquare, FolderOpen, Terminal, HardDrive, Coins, Brain, Palette,
 } from 'lucide-react';
 import { useNavigationStore, type SettingsSection } from '../store/navigationStore';
+import { AppearanceSection } from './settings/sections/appearance';
 import { SshHostsSection } from './settings/sections/ssh';
 import { ProvidersSection } from './settings/sections/providers';
 import { ProjectsSection } from './settings/sections/projects';
@@ -23,6 +24,7 @@ import { UsageStatsSection } from './settings/sections/usage_stats';
 import { MemorySection } from './settings/sections/memory';
 
 const SETTINGS_NAV: { key: SettingsSection; label: string; icon: typeof Settings; group: string }[] = [
+  { key: 'appearance', label: '外观', icon: Palette, group: '应用' },
   { key: 'providers', label: '供应商', icon: Server, group: '应用' },
   { key: 'projects', label: '项目', icon: FolderOpen, group: '应用' },
   { key: 'memory', label: '记忆', icon: Brain, group: '应用' },
@@ -118,6 +120,7 @@ export function SettingsPageView({ defaultSection = 'providers' }: { defaultSect
 
       {/* Content */}
       <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+        {section === 'appearance' && <AppearanceSection />}
         {section === 'providers' && <ProvidersSection />}
         {section === 'projects' && <ProjectsSection />}
         {section === 'memory' && <MemorySection />}

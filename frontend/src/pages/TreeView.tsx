@@ -423,9 +423,8 @@ export default function TreeView() {
               key={`edge-${i}`}
               d={buildEdgePath(edge)}
               fill="none"
-              stroke="var(--color-muted-foreground)"
+              stroke="var(--border-heavy)"
               strokeWidth={1.5}
-              opacity={0.5}
             />
           ))}
         </svg>
@@ -475,15 +474,7 @@ export default function TreeView() {
                 </div>
               ) : (
                 <div
-                  className={`
-                    group relative w-full h-full rounded-xl border px-3 py-2 flex flex-col justify-center
-                    transition-all duration-150
-                    hover:shadow-lg hover:scale-[1.03]
-                    ${isActive
-                      ? 'border-primary bg-primary/10 shadow-md ring-2 ring-primary/30'
-                      : 'border-border bg-card shadow-sm hover:border-primary/40'
-                    }
-                  `}
+                  className={`tree-node-card group relative w-full h-full rounded-xl px-3 py-2 flex flex-col justify-center${isActive ? ' is-active' : ''}`}
                 >
                   {activeChatRun && (
                     <svg
@@ -637,56 +628,52 @@ export default function TreeView() {
       {/* Controls */}
       <div className="absolute bottom-4 right-4 flex flex-col gap-1.5 z-10">
         <TextTooltip content={direction === 'TB' ? '切换为水平排列' : '切换为垂直排列'} side="left">
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-8 w-8 p-0 bg-background/80 backdrop-blur-sm"
+          <button
+            type="button"
+            className="tree-tool-btn"
             onClick={() => setDirection(d => d === 'TB' ? 'LR' : 'TB')}
             aria-label={direction === 'TB' ? '切换为水平排列' : '切换为垂直排列'}
           >
             {direction === 'TB' ? (
-              <ArrowRight className="h-4 w-4" />
+              <ArrowRight />
             ) : (
-              <ArrowDown className="h-4 w-4" />
+              <ArrowDown />
             )}
-          </Button>
+          </button>
         </TextTooltip>
         <TextTooltip content="放大" side="left">
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-8 w-8 p-0 bg-background/80 backdrop-blur-sm"
+          <button
+            type="button"
+            className="tree-tool-btn"
             onClick={() =>
               setTransform((prev) => ({ ...prev, scale: Math.min(prev.scale * 1.2, 3) }))
             }
             aria-label="放大"
           >
-            <ZoomIn className="h-4 w-4" />
-          </Button>
+            <ZoomIn />
+          </button>
         </TextTooltip>
         <TextTooltip content="缩小" side="left">
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-8 w-8 p-0 bg-background/80 backdrop-blur-sm"
+          <button
+            type="button"
+            className="tree-tool-btn"
             onClick={() =>
               setTransform((prev) => ({ ...prev, scale: Math.max(prev.scale * 0.8, 0.1) }))
             }
             aria-label="缩小"
           >
-            <ZoomOut className="h-4 w-4" />
-          </Button>
+            <ZoomOut />
+          </button>
         </TextTooltip>
         <TextTooltip content="适应视图" side="left">
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-8 w-8 p-0 bg-background/80 backdrop-blur-sm"
+          <button
+            type="button"
+            className="tree-tool-btn"
             onClick={fitToView}
             aria-label="适应视图"
           >
-            <Maximize2 className="h-4 w-4" />
-          </Button>
+            <Maximize2 />
+          </button>
         </TextTooltip>
       </div>
     </div>

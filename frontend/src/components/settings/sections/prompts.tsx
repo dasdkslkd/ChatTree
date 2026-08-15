@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -93,11 +94,9 @@ export function PromptsSection() {
         >
           <span className="text-sm font-medium" style={{ color: 'var(--fg-85)' }}>提示词</span>
           <button
-            className="w-6 h-6 flex items-center justify-center rounded cursor-pointer bg-transparent border-none"
+            className="hover-row w-6 h-6 flex items-center justify-center rounded cursor-pointer bg-transparent border-none"
             style={{ color: 'var(--icon-tertiary)' }}
             onClick={handleCreateNew}
-            onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-hover)'; }}
-            onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = ''; }}
           >
             <Plus className="h-4 w-4" />
           </button>
@@ -115,18 +114,12 @@ export function PromptsSection() {
             prompts.map((prompt) => (
               <div
                 key={prompt.id}
-                className="flex items-center justify-between px-2.5 py-1.5 rounded-lg cursor-pointer transition-colors group"
-                style={{
-                  background: currentPrompt?.id === prompt.id ? 'var(--bg-button-tertiary-active)' : undefined,
-                  color: 'var(--fg-85)',
-                }}
+                className={cn(
+                  'hover-row flex items-center justify-between px-2.5 py-1.5 rounded-lg cursor-pointer group',
+                  currentPrompt?.id === prompt.id && 'is-active',
+                )}
+                style={{ color: 'var(--fg-85)' }}
                 onClick={() => handleSelectPrompt(prompt)}
-                onMouseEnter={(e) => {
-                  if (currentPrompt?.id !== prompt.id) (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-hover)';
-                }}
-                onMouseLeave={(e) => {
-                  if (currentPrompt?.id !== prompt.id) (e.currentTarget as HTMLElement).style.background = '';
-                }}
               >
                 <span className="flex-1 truncate text-sm">{prompt.title}</span>
                 <button

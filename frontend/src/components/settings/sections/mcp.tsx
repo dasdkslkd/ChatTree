@@ -420,11 +420,9 @@ export function McpSection() {
                 return (
                   <div
                     key={id}
-                    className="flex w-full items-center gap-3 border-0 bg-transparent px-4 py-3 text-left transition-colors"
+                    className="hover-row flex w-full items-center gap-3 border-0 bg-transparent px-4 py-3 text-left"
                     style={{ color: 'var(--fg-secondary)' }}
                     onClick={() => openServerDialog(id)}
-                    onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-button-tertiary-hover)'; }}
-                    onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
                   >
                     <Icon className="h-4 w-4 flex-shrink-0" style={{ color: 'var(--icon-tertiary)' }} />
                     <div className="min-w-0 flex-1">

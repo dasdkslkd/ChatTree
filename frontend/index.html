@@ -1,7 +1,23 @@
 <!doctype html>
-<html lang="zh-CN" class="dark">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
+    <script>
+      // 首屏主题注水：与 store/themeStore.ts 的 persist key 保持一致，避免闪烁
+      (function () {
+        var theme = 'system';
+        try {
+          var raw = window.localStorage.getItem('chattree.theme');
+          var stored = raw ? JSON.parse(raw) : null;
+          var value = stored && stored.state && stored.state.theme;
+          if (value === 'light' || value === 'dark') theme = value;
+        } catch (error) { /* localStorage 不可用时回退到跟随系统 */ }
+        var resolved = theme === 'system'
+          ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+          : theme;
+        document.documentElement.classList.add(resolved);
+      })();
+    </script>
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ChatTree</title>
