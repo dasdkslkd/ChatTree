@@ -637,130 +637,136 @@ async def start_message_run(
     subagent_executor: SubagentExecutor = Depends(get_subagent_executor),
     workflow_manager: WorkflowManager = Depends(get_workflow_manager),
 ):
-    try:
-        run_manager.validate_run_references(
-            conversation_id,
-            anchor_node_id=body.parent_node_id,
-        )
-        slash_result = SlashCommandDispatcher().dispatch(body.content)
-        if slash_result.kind == SlashDispatchKind.ERROR:
-            raise RunStartValidationError(
-                slash_result.error or "Slash command error"
-            )
-        idempotency = RunIdempotency(
-            key=idempotency_key,
-            request_fingerprint=fingerprint_run_request(
-                operation="message",
-                conversation_id=conversation_id,
+    profiler = get_profiler()
+    with profiler.span(
+        "message.run.start_post",
+        conversation_id=conversation_id,
+        route="messages",
+    ):
+        try:
+            run_manager.validate_run_references(
+                conversation_id,
                 anchor_node_id=body.parent_node_id,
-                payload=body.model_dump(mode="json"),
-            ),
-        )
-
-        async def winner_anchor_factory(_run: RunRecord) -> str:
-            return await _create_visible_slash_anchor_node(
-                conversation_id=conversation_id,
-                request=body,
-                chat_manager=chat_manager,
-                slash_result=slash_result,
             )
-
-        if slash_result.kind == SlashDispatchKind.SUBAGENT:
-            result = await subagent_executor.start_idempotent(
-                conversation_id=conversation_id,
-                agent_name="implementer",
-                input_data=slash_result.args,
-                idempotency=idempotency,
-                request_id=http_request.state.request_id,
-                parent_node_id=body.parent_node_id,
-                provider_id=body.provider_id,
-                model_id=body.model_id,
-                permission_mode=body.tool_permission_mode,
-                delegated_task=slash_result.args,
-                original_slash_input=slash_result.original_input,
-                winner_anchor_factory=winner_anchor_factory,
-            )
-            return run_start_response(result)
-
-        if slash_result.kind == SlashDispatchKind.WORKFLOW:
-            result = await workflow_manager.start_idempotent(
-                conversation_id=conversation_id,
-                script=slash_result.args,
-                args={},
-                idempotency=idempotency,
-                request_id=http_request.state.request_id,
-                parent_node_id=body.parent_node_id,
-                permission_mode=body.tool_permission_mode,
-                delegated_task=slash_result.args,
-                original_slash_input=slash_result.original_input,
-                winner_anchor_factory=winner_anchor_factory,
-            )
-            return run_start_response(result)
-
-        run_kind = RunKind(str(slash_result.run_kind or RunKind.CHAT.value))
-        anchor_node_id = body.parent_node_id
-        if (
-            slash_result.kind == SlashDispatchKind.DIRECT_RESPONSE
-            and slash_result.canonical_name == "prune-summary"
-        ):
-            target_node_id, _instructions = _parse_prune_summary_args(
-                slash_result.args,
-                body.parent_node_id,
-            )
-            anchor_node_id = target_node_id or body.parent_node_id
-
-        spec = RunStartSpec(
-            conversation_id=conversation_id,
-            kind=run_kind,
-            anchor_node_id=anchor_node_id,
-            summary=body.content[:80],
-            metadata=_message_run_metadata(body, slash_result),
-            idempotency=idempotency,
-            request_id=http_request.state.request_id,
-        )
-
-        async def bootstrap(run: RunRecord) -> asyncio.Task[Any]:
-            if slash_result.kind == SlashDispatchKind.DIRECT_RESPONSE:
-                producer = (
-                    _produce_prune_summary(
-                        run=run,
-                        conversation_id=conversation_id,
-                        request=body,
-                        slash_result=slash_result,
-                        chat_manager=chat_manager,
-                        run_manager=run_manager,
-                    )
-                    if slash_result.canonical_name == "prune-summary"
-                    else _produce_direct_response(
-                        run=run,
-                        conversation_id=conversation_id,
-                        request=body,
-                        slash_result=slash_result,
-                        chat_manager=chat_manager,
-                        run_manager=run_manager,
-                    )
+            slash_result = SlashCommandDispatcher().dispatch(body.content)
+            if slash_result.kind == SlashDispatchKind.ERROR:
+                raise RunStartValidationError(
+                    slash_result.error or "Slash command error"
                 )
-            else:
-                producer = _produce_chat_run(
-                    run=run,
+            idempotency = RunIdempotency(
+                key=idempotency_key,
+                request_fingerprint=fingerprint_run_request(
+                    operation="message",
+                    conversation_id=conversation_id,
+                    anchor_node_id=body.parent_node_id,
+                    payload=body.model_dump(mode="json"),
+                ),
+            )
+
+            async def winner_anchor_factory(_run: RunRecord) -> str:
+                return await _create_visible_slash_anchor_node(
                     conversation_id=conversation_id,
                     request=body,
                     chat_manager=chat_manager,
-                    run_manager=run_manager,
+                    slash_result=slash_result,
                 )
-            return asyncio.create_task(
-                producer,
-                name=f"message-producer:{run.run_id}",
+
+            if slash_result.kind == SlashDispatchKind.SUBAGENT:
+                result = await subagent_executor.start_idempotent(
+                    conversation_id=conversation_id,
+                    agent_name="implementer",
+                    input_data=slash_result.args,
+                    idempotency=idempotency,
+                    request_id=http_request.state.request_id,
+                    parent_node_id=body.parent_node_id,
+                    provider_id=body.provider_id,
+                    model_id=body.model_id,
+                    permission_mode=body.tool_permission_mode,
+                    delegated_task=slash_result.args,
+                    original_slash_input=slash_result.original_input,
+                    winner_anchor_factory=winner_anchor_factory,
+                )
+                return run_start_response(result)
+
+            if slash_result.kind == SlashDispatchKind.WORKFLOW:
+                result = await workflow_manager.start_idempotent(
+                    conversation_id=conversation_id,
+                    script=slash_result.args,
+                    args={},
+                    idempotency=idempotency,
+                    request_id=http_request.state.request_id,
+                    parent_node_id=body.parent_node_id,
+                    permission_mode=body.tool_permission_mode,
+                    delegated_task=slash_result.args,
+                    original_slash_input=slash_result.original_input,
+                    winner_anchor_factory=winner_anchor_factory,
+                )
+                return run_start_response(result)
+
+            run_kind = RunKind(str(slash_result.run_kind or RunKind.CHAT.value))
+            anchor_node_id = body.parent_node_id
+            if (
+                slash_result.kind == SlashDispatchKind.DIRECT_RESPONSE
+                and slash_result.canonical_name == "prune-summary"
+            ):
+                target_node_id, _instructions = _parse_prune_summary_args(
+                    slash_result.args,
+                    body.parent_node_id,
+                )
+                anchor_node_id = target_node_id or body.parent_node_id
+
+            spec = RunStartSpec(
+                conversation_id=conversation_id,
+                kind=run_kind,
+                anchor_node_id=anchor_node_id,
+                summary=body.content[:80],
+                metadata=_message_run_metadata(body, slash_result),
+                idempotency=idempotency,
+                request_id=http_request.state.request_id,
             )
 
-        return run_start_response(await coordinator.start(spec, bootstrap))
-    except (
-        RunRequestFingerprintError,
-        RunReferenceNotFoundError,
-        RunReferenceConversationMismatchError,
-        RunIdempotencyConflictError,
-        RunStartReservationError,
-        RunStartSchedulingError,
-        RunStartValidationError,
-    ) as exc:
-        raise run_start_api_error(exc) from exc
+            async def bootstrap(run: RunRecord) -> asyncio.Task[Any]:
+                if slash_result.kind == SlashDispatchKind.DIRECT_RESPONSE:
+                    producer = (
+                        _produce_prune_summary(
+                            run=run,
+                            conversation_id=conversation_id,
+                            request=body,
+                            slash_result=slash_result,
+                            chat_manager=chat_manager,
+                            run_manager=run_manager,
+                        )
+                        if slash_result.canonical_name == "prune-summary"
+                        else _produce_direct_response(
+                            run=run,
+                            conversation_id=conversation_id,
+                            request=body,
+                            slash_result=slash_result,
+                            chat_manager=chat_manager,
+                            run_manager=run_manager,
+                        )
+                    )
+                else:
+                    producer = _produce_chat_run(
+                        run=run,
+                        conversation_id=conversation_id,
+                        request=body,
+                        chat_manager=chat_manager,
+                        run_manager=run_manager,
+                    )
+                return asyncio.create_task(
+                    producer,
+                    name=f"message-producer:{run.run_id}",
+                )
+
+            return run_start_response(await coordinator.start(spec, bootstrap))
+        except (
+            RunRequestFingerprintError,
+            RunReferenceNotFoundError,
+            RunReferenceConversationMismatchError,
+            RunIdempotencyConflictError,
+            RunStartReservationError,
+            RunStartSchedulingError,
+            RunStartValidationError,
+        ) as exc:
+            raise run_start_api_error(exc) from exc

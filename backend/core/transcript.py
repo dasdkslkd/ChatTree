@@ -5,6 +5,7 @@ import time
 from collections import defaultdict
 from typing import Any
 
+from .perf import get_profiler
 from .persistence.blob_store import BlobStore
 from .persistence.database import SQLitePersistence
 from .persistence.repository import tool_result_preview
@@ -1083,73 +1084,84 @@ class TranscriptPatchSession:
         self.node_id = str(payload.get("target_node_id") or payload.get("node_id") or self.node_id or "")
         if not emit or not self.conversation_id or not self.node_id:
             return None
-        stream = self._stream_state()
-        stream["node_id"] = self.node_id
-        stream["target_node_id"] = self.node_id
-        items = self.assembler.live_node_items(self.conversation_id, self.node_id, stream)
-        snapshot_items = self.assembler.snapshot(
-            self.conversation_id,
-            self.node_id,
-            active_streams=[stream],
-        )["items"]
-        index_by_id = {
-            str(item.get("id") or ""): index
-            for index, item in enumerate(snapshot_items)
-            if item.get("id")
-        }
-        # snapshot 中缺失项的插入位置：放在同节点已知项之前，避免用户消息追加到流式内容末尾
-        fallback_index = next(
-            (
-                index
-                for index, candidate in enumerate(snapshot_items)
-                if str(candidate.get("node_id") or "") == str(self.node_id)
-            ),
-            len(snapshot_items),
-        )
-        current_ids = {str(item.get("id") or "") for item in items if item.get("id")}
-        emitted = self.assembler._emitted_by_node.setdefault((self.conversation_id, self.node_id), {})
-        remove_ids = set(emitted) - current_ids
-        operations = [{"op": "remove", "id": item_id} for item_id in sorted(remove_ids)]
-        fallback_offset = 0
-        for item in items:
-            item_id = str(item.get("id") or "")
-            if not item_id:
-                continue
-            serialized = json.dumps(item, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-            if emitted.get(item_id) != serialized:
-                index = index_by_id.get(item_id)
-                if index is None:
-                    index = fallback_index + fallback_offset
-                    fallback_offset += 1
-                operations.append({
-                    "op": "upsert",
-                    "item": item,
-                    "index": index,
-                })
-        emitted.clear()
-        emitted.update({
-            str(item.get("id") or ""): json.dumps(item, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-            for item in items
-            if item.get("id")
-        })
-        is_terminal_event = (
-            payload.get("type") == "run_finished"
-            or str(payload.get("status") or "") in {"complete", "completed", "error", "failed", "stopped", "cancelled", "interrupted"}
-        )
-        if not operations and not is_terminal_event:
-            return None
-        revision = self.assembler.next_revision(
-            self.conversation_id,
-            self.node_id,
-            self.revision_floor,
-        )
-        return {
-            "type": "transcript_patch",
-            "conversation_id": self.conversation_id,
-            "node_id": self.node_id,
-            "revision": revision,
-            "operations": operations,
-        }
+        profiler = get_profiler()
+        with profiler.span(
+            "transcript.patch.feed",
+            run_id=self.run_id,
+            conversation_id=self.conversation_id,
+            node_id=self.node_id,
+        ):
+            with profiler.span("transcript.patch.state"):
+                stream = self._stream_state()
+            stream["node_id"] = self.node_id
+            stream["target_node_id"] = self.node_id
+            with profiler.span("transcript.patch.live_items"):
+                items = self.assembler.live_node_items(self.conversation_id, self.node_id, stream)
+            with profiler.span("transcript.patch.snapshot"):
+                snapshot_items = self.assembler.snapshot(
+                    self.conversation_id,
+                    self.node_id,
+                    active_streams=[stream],
+                )["items"]
+            index_by_id = {
+                str(item.get("id") or ""): index
+                for index, item in enumerate(snapshot_items)
+                if item.get("id")
+            }
+            # snapshot 中缺失项的插入位置：放在同节点已知项之前，避免用户消息追加到流式内容末尾
+            fallback_index = next(
+                (
+                    index
+                    for index, candidate in enumerate(snapshot_items)
+                    if str(candidate.get("node_id") or "") == str(self.node_id)
+                ),
+                len(snapshot_items),
+            )
+            current_ids = {str(item.get("id") or "") for item in items if item.get("id")}
+            emitted = self.assembler._emitted_by_node.setdefault((self.conversation_id, self.node_id), {})
+            remove_ids = set(emitted) - current_ids
+            operations = [{"op": "remove", "id": item_id} for item_id in sorted(remove_ids)]
+            fallback_offset = 0
+            for item in items:
+                item_id = str(item.get("id") or "")
+                if not item_id:
+                    continue
+                serialized = json.dumps(item, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+                if emitted.get(item_id) != serialized:
+                    index = index_by_id.get(item_id)
+                    if index is None:
+                        index = fallback_index + fallback_offset
+                        fallback_offset += 1
+                    operations.append({
+                        "op": "upsert",
+                        "item": item,
+                        "index": index,
+                    })
+            emitted.clear()
+            emitted.update({
+                str(item.get("id") or ""): json.dumps(item, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+                for item in items
+                if item.get("id")
+            })
+            is_terminal_event = (
+                payload.get("type") == "run_finished"
+                or str(payload.get("status") or "") in {"complete", "completed", "error", "failed", "stopped", "cancelled", "interrupted"}
+            )
+            if not operations and not is_terminal_event:
+                return None
+            with profiler.span("transcript.patch.revision"):
+                revision = self.assembler.next_revision(
+                    self.conversation_id,
+                    self.node_id,
+                    self.revision_floor,
+                )
+            return {
+                "type": "transcript_patch",
+                "conversation_id": self.conversation_id,
+                "node_id": self.node_id,
+                "revision": revision,
+                "operations": operations,
+            }
 
     def _stream_state(self) -> dict[str, Any]:
         status = "running"

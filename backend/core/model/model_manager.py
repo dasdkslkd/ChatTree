@@ -18,6 +18,7 @@ from .providers.gemini_provider import GeminiProvider
 from .providers.openai_compatible import OpenAICompatibleProvider
 from ..config.config import cfg
 from ..config.types import ModelProtocol, ModelRoute
+from ..perf import get_profiler
 from ..utils.logger import setup_logger
 
 logger = setup_logger("ModelManager")
@@ -60,10 +61,9 @@ class ModelManager:
         detected = self._detected_routes.get((provider_id, model_name, base_url))
         if detected:
             return detected[0]
-        entry = (provider_config.get("model_routes") or {}).get(model_name)
-        if isinstance(entry, dict) and entry.get("protocol"):
-            return self._route_from_entry(provider_id, model_name, entry)
-        return resolve_route(provider_id, model_name)
+        route, resolved_base = self._resolve_route(provider_config, provider_id, model_name)
+        self._detected_routes[(provider_id, model_name, base_url)] = (route, resolved_base)
+        return route
 
     def get_model_metadata(self, provider_id: str, model_name: str) -> ModelMetadata:
         return resolve_metadata(self.get_route(provider_id, model_name))
@@ -80,6 +80,7 @@ class ModelManager:
         model: str,
         is_async: bool = False,
     ) -> Optional[BaseProvider]:
+        profiler = get_profiler()
         provider_config = cfg.get_provider_config(provider)
         if provider_config is None:
             raise ModelRouteError(f"供应商 {provider} 不存在")
@@ -87,35 +88,28 @@ class ModelManager:
             raise ModelRouteError(f"供应商 {provider} 未启用")
         base_url = str(provider_config.get("base_url") or "").rstrip("/")
         cache_key = (provider, model, base_url)
-        detected = self._detected_routes.get(cache_key)
-        if detected:
-            route, resolved_base = detected
-        else:
-            entry = (provider_config.get("model_routes") or {}).get(model)
-            if isinstance(entry, dict) and entry.get("protocol"):
-                route = self._route_from_entry(provider, model, entry)
-                resolved_base = str(entry.get("base_url") or provider_config.get("base_url") or "")
+        with profiler.span("model.route_resolve"):
+            detected = self._detected_routes.get(cache_key)
+            if detected:
+                route, resolved_base = detected
             else:
-                route = resolve_route(provider, model)
-                route, resolved_base = self._probe_api_format(
-                    provider_config,
-                    route,
-                    model,
-                )
-            self._detected_routes[cache_key] = (route, resolved_base)
+                route, resolved_base = self._resolve_route(provider_config, provider, model)
+                self._detected_routes[cache_key] = (route, resolved_base)
         cache_key = (provider, route["route_id"], is_async)
         if cache_key in self.provider_instances:
-            cached = self.provider_instances[cache_key]
-            latest = dict(cfg.get_provider_config(provider) or {})
-            cached.config.clear()
-            cached.config.update(latest)
-            if resolved_base:
-                cached.config["base_url"] = resolved_base
-            cached.config["model_transport"] = dict(cfg.data["model_transport"])
-            cached.config["is_async"] = is_async
-            cached.route = route
-            return cached
-        return self._create_model_instance(provider, route, is_async, resolved_base)
+            with profiler.span("model.instance_cached"):
+                cached = self.provider_instances[cache_key]
+                latest = dict(cfg.get_provider_config(provider) or {})
+                cached.config.clear()
+                cached.config.update(latest)
+                if resolved_base:
+                    cached.config["base_url"] = resolved_base
+                cached.config["model_transport"] = dict(cfg.data["model_transport"])
+                cached.config["is_async"] = is_async
+                cached.route = route
+                return cached
+        with profiler.span("model.instance_create"):
+            return self._create_model_instance(provider, route, is_async, resolved_base)
 
     def _route_from_entry(
         self,
@@ -135,6 +129,37 @@ class ModelManager:
         if protocol != route["protocol"] or endpoint != route["endpoint"]:
             detected["route_id"] = f"{route['route_id']}:detected:{protocol}:{endpoint}"
         return detected
+
+    def _resolve_route(
+        self,
+        provider_config: Dict[str, object],
+        provider: str,
+        model: str,
+    ) -> Tuple[ModelRoute, str]:
+        """路由优先级：持久化探测结果 > 供应商级 api_format > 模型元数据默认。"""
+        entry = (provider_config.get("model_routes") or {}).get(model)
+        if isinstance(entry, dict) and entry.get("protocol"):
+            route = self._route_from_entry(provider, model, entry)
+            resolved_base = str(entry.get("base_url") or provider_config.get("base_url") or "")
+        else:
+            route = resolve_route(provider, model)
+            api_format = provider_config.get("api_format")
+            if isinstance(api_format, str) and api_format in self._PROTOCOL_ENDPOINTS:
+                route = self._route_from_entry(provider, model, {"protocol": api_format})
+            resolved_base = str(provider_config.get("base_url") or "")
+        return route, resolved_base
+
+    def _probe_route(
+        self,
+        provider: str,
+        model: str,
+        route: ModelRoute,
+    ) -> Tuple[ModelRoute, str]:
+        """真实请求协议失败时探测正确格式并持久化到供应商配置。"""
+        provider_config = cfg.get_provider_config(provider)
+        if provider_config is None:
+            return route, ""
+        return self._probe_api_format(provider_config, route, model)
 
     def _probe_api_format(
         self,
@@ -268,16 +293,14 @@ class ModelManager:
                         protocol,
                         resolved_base,
                     )
-                    if protocol != route["protocol"]:
-                        provider_config.setdefault("model_routes", {})[model] = {
-                            "protocol": protocol,
-                            "endpoint": resolved_endpoint,
-                            "base_url": resolved_base,
-                        }
+                    provider_config.setdefault("model_routes", {})[model] = {
+                        "protocol": protocol,
+                        "endpoint": resolved_endpoint,
+                        "base_url": resolved_base,
+                    }
                     if resolved_base != configured_base:
                         provider_config["base_url"] = resolved_base
-                    if protocol != route["protocol"] or resolved_base != configured_base:
-                        cfg.save()
+                    cfg.save()
                     return detected, resolved_base
                 except urllib.error.HTTPError as exc:
                     error_body = exc.read().decode("utf-8", errors="replace")
@@ -317,12 +340,9 @@ class ModelManager:
         config["model_transport"] = dict(cfg.data["model_transport"])
         config["is_async"] = is_async
         instance = provider_class(config, route)
-        if (
-            route["protocol"] == ModelProtocol.OPENAI_CHAT_COMPLETIONS.value
-            and isinstance(instance, OpenAICompatibleProvider)
-            and resolved_base
-        ):
-            instance._resolved_chat_base = (resolved_base, resolved_base)
+        instance._route_probe = lambda current_route, model_name: self._probe_route(
+            provider, model_name, current_route,
+        )
         instance._is_async = is_async
         self.provider_instances[(provider, route["route_id"], is_async)] = instance
         return instance

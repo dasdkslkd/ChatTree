@@ -349,3 +349,118 @@ def test_start_returns_nonzero_when_spawn_fails(tmp_path, monkeypatch, capsys):
 
     assert result == 1
     assert "spawn failed" in capsys.readouterr().err
+
+
+def test_perf_report_writes_reports(tmp_path, monkeypatch, capsys):
+    run_dir = tmp_path / "perf" / "runs" / "perf_abc"
+    run_dir.mkdir(parents=True)
+    (run_dir / "backend-events.jsonl").write_text(
+        json.dumps({"type": "span", "name": "a", "duration_ms": 1}) + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "frontend-events.jsonl").write_text(
+        json.dumps({"type": "mark", "name": "b"}) + "\n",
+        encoding="utf-8",
+    )
+    captured = {}
+    def fake_summarize(paths):
+        captured["paths"] = paths
+        return {"event_count": 2, "span_event_count": 1}
+
+    monkeypatch.setattr(server_cli, "summarize_events", fake_summarize)
+    monkeypatch.setattr(
+        server_cli,
+        "write_reports",
+        lambda summary, output_dir: captured.update({"output_dir": output_dir}),
+    )
+    out_dir = tmp_path / "out"
+
+    result = server_cli.main(
+        [
+            "perf-report",
+            "--home",
+            str(tmp_path),
+            "--run",
+            "perf_abc",
+            "--output",
+            str(out_dir),
+        ]
+    )
+
+    assert result == 0
+    assert [str(path) for path in captured["paths"]] == [
+        str(run_dir / "backend-events.jsonl"),
+        str(run_dir / "frontend-events.jsonl"),
+    ]
+    assert captured["output_dir"] == out_dir
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["run_id"] == "perf_abc"
+    assert payload["event_count"] == 2
+    assert payload["output_dir"] == str(out_dir)
+
+
+def test_perf_report_defaults_to_latest_run(tmp_path, monkeypatch, capsys):
+    older = tmp_path / "perf" / "runs" / "perf_old"
+    newer = tmp_path / "perf" / "runs" / "perf_new"
+    older.mkdir(parents=True)
+    newer.mkdir(parents=True)
+    (older / "backend-events.jsonl").write_text("{}" + "\n", encoding="utf-8")
+    (newer / "backend-events.jsonl").write_text("{}" + "\n", encoding="utf-8")
+    import os as _os
+    _os.utime(older, (1, 1))
+    _os.utime(newer, (2, 2))
+    monkeypatch.setattr(server_cli, "summarize_events", lambda paths: {"event_count": 0})
+    monkeypatch.setattr(server_cli, "write_reports", lambda summary, output_dir: None)
+
+    result = server_cli.main(["perf-report", "--home", str(tmp_path)])
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["run_id"] == "perf_new"
+    assert payload["output_dir"] == str(newer / "report")
+
+
+def test_perf_report_errors_without_runs(tmp_path, monkeypatch, capsys):
+    result = server_cli.main(["perf-report", "--home", str(tmp_path)])
+
+    assert result == 1
+    assert "No perf runs found" in capsys.readouterr().err
+
+
+def test_perf_report_errors_without_events(tmp_path, monkeypatch, capsys):
+    run_dir = tmp_path / "perf" / "runs" / "perf_empty"
+    run_dir.mkdir(parents=True)
+
+    result = server_cli.main(
+        ["perf-report", "--home", str(tmp_path), "--run", "perf_empty"]
+    )
+
+    assert result == 1
+    assert "No perf events found" in capsys.readouterr().err
+
+
+def test_perf_report_accepts_event_dir(tmp_path, monkeypatch, capsys):
+    run_dir = tmp_path / "custom-perf"
+    run_dir.mkdir(parents=True)
+    (run_dir / "backend-events.jsonl").write_text(
+        json.dumps({"type": "span", "name": "a", "duration_ms": 1}) + "\n",
+        encoding="utf-8",
+    )
+    captured = {}
+    def fake_summarize(paths):
+        captured["paths"] = paths
+        return {"event_count": 1}
+
+    monkeypatch.setattr(server_cli, "summarize_events", fake_summarize)
+    monkeypatch.setattr(server_cli, "write_reports", lambda summary, output_dir: None)
+
+    result = server_cli.main(["perf-report", "--dir", str(run_dir)])
+
+    assert result == 0
+    assert [str(path) for path in captured["paths"]] == [
+        str(run_dir / "backend-events.jsonl"),
+        str(run_dir / "frontend-events.jsonl"),
+    ]
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["run_id"] == run_dir.name
+    assert payload["output_dir"] == str(run_dir / "report")

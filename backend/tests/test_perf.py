@@ -11,6 +11,9 @@ from backend.core.perf import NoopProfiler, configure_profiler
 from backend.core.perf.aggregate import summarize_events, write_reports
 from backend.core.perf.config import PerfConfig
 from backend.core.runs import RunKind, RunManager, RunStatus
+from backend.core.persistence.database import SQLitePersistence
+from backend.core.persistence.repository import ChatRepository
+from backend.core.transcript import TranscriptAssembler, TranscriptPatchSession
 
 
 def test_noop_profiler_does_not_write(tmp_path):
@@ -135,3 +138,43 @@ def test_perf_aggregate_writes_reports(tmp_path):
     assert (tmp_path / "summary.json").exists()
     assert (tmp_path / "hotspots.md").exists()
     assert (tmp_path / "hotspots.html").exists()
+
+
+def test_transcript_patch_session_feed_records_perf_span(tmp_path):
+    configure_profiler(PerfConfig(enabled=True, perf_run_id="feed-test", output_dir=tmp_path))
+    try:
+        persistence = SQLitePersistence(tmp_path / "feed-db")
+        persistence.initialize()
+        repository = ChatRepository(persistence)
+        conversation_id = repository.create_conversation(title="feed")
+        node_id = repository.create_node(conversation_id, parent_id=None, child_order=0)
+        session = TranscriptPatchSession(TranscriptAssembler(persistence), run_id="run-1")
+        patch = session.feed({
+            "conversation_id": conversation_id,
+            "node_id": node_id,
+            "type": "text",
+            "status": "content",
+            "content": "hello",
+        })
+        assert patch is not None
+        assert patch["type"] == "transcript_patch"
+    finally:
+        configure_profiler(PerfConfig(enabled=False, output_dir=tmp_path))
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "backend-events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    names = {row["name"] for row in rows}
+    assert {
+        "transcript.patch.feed",
+        "transcript.patch.feed.start",
+        "transcript.patch.state",
+        "transcript.patch.live_items",
+        "transcript.patch.snapshot",
+        "transcript.patch.revision",
+    } <= names
+    span = next(row for row in rows if row["name"] == "transcript.patch.feed")
+    assert span["attrs"]["run_id"] == "run-1"
+    assert span["attrs"]["conversation_id"] == conversation_id
+    assert span["attrs"]["node_id"] == node_id

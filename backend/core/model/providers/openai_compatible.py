@@ -103,6 +103,36 @@ class OpenAICompatibleProvider(BaseProvider):
             raise last_error
         raise ProviderHTTPError(0, "没有可用的 Chat Completions 地址", {})
 
+    @staticmethod
+    def _is_protocol_error(exc: ProviderHTTPError) -> bool:
+        """判定错误是否源于 API format 不匹配（404/405 或显式 protocol_not_supported）。"""
+        return (
+            exc.status in (404, 405)
+            or "protocol_not_supported" in (exc.body or "").lower()
+        )
+
+    def _recover_protocol(self, model: str, exc: ProviderHTTPError) -> bool:
+        """真实请求协议失败时探测正确格式并更新自身，成功返回 True。"""
+        probe = getattr(self, "_route_probe", None)
+        if probe is None or not self._is_protocol_error(exc):
+            return False
+        route, resolved_base = probe(self.route, model)
+        if (
+            route["protocol"] == self.route["protocol"]
+            and route["endpoint"] == self.route["endpoint"]
+            and resolved_base == self._api_base()
+        ):
+            return False
+        self.route = route
+        if resolved_base:
+            self.config["base_url"] = resolved_base
+        self._resolved_chat_base = None
+        logger.info(
+            "Protocol recovered: model=%s protocol=%s base=%s",
+            model, route["protocol"], resolved_base,
+        )
+        return True
+
     def _subscription_auth(self):
         """返回 (token, extra_headers)；无订阅时返回 (None, {})."""
         auth = self.config.get("auth") or {}
@@ -173,14 +203,18 @@ class OpenAICompatibleProvider(BaseProvider):
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             error_body = exc.read().decode("utf-8", errors="replace")
-            raise ProviderHTTPError(exc.code, error_body, dict(exc.headers or {})) from exc
+            error = ProviderHTTPError(exc.code, error_body, dict(exc.headers or {}))
         except urllib.error.URLError as exc:
             reason = str(exc.reason) if exc.reason else str(exc)
             if "timed out" in reason.lower() or "timeout" in reason.lower():
-                raise ProviderHTTPError(0, f"连接超时：{reason}", {"network": "timeout"}) from exc
-            if "ssl" in reason.lower() or "certificate" in reason.lower():
-                raise ProviderHTTPError(0, f"SSL 握手失败，可能需要配置代理：{reason}", {"network": "ssl"}) from exc
-            raise ProviderHTTPError(0, f"网络错误：{reason}", {"network": "error"}) from exc
+                error = ProviderHTTPError(0, f"连接超时：{reason}", {"network": "timeout"})
+            elif "ssl" in reason.lower() or "certificate" in reason.lower():
+                error = ProviderHTTPError(0, f"SSL 握手失败，可能需要配置代理：{reason}", {"network": "ssl"})
+            else:
+                error = ProviderHTTPError(0, f"网络错误：{reason}", {"network": "error"})
+        if self._recover_protocol(str(body.get("model") or ""), error):
+            return self._request_json(self.route["endpoint"], body, timeout)
+        raise error
 
     def generate_response(
         self,
@@ -1024,23 +1058,31 @@ class OpenAICompatibleProvider(BaseProvider):
     ) -> AsyncIterator[Dict[str, Any]]:
         if self.route["protocol"] == ModelProtocol.OPENAI_CHAT_COMPLETIONS.value:
             await asyncio.to_thread(self._probe_chat_endpoint, str(body.get("model") or ""))
-        async for line in iter_sse_lines(
-            self._url(path),
-            self._clean_payload(body),
-            self._headers(stream=True),
-            self.config,
-            ProviderHTTPError,
-            stream_controller,
-        ):
-            if not line.startswith("data: "):
-                continue
-            payload = line[6:].strip()
-            if not payload or payload == "[DONE]":
-                continue
+        for attempt in (0, 1):
             try:
-                yield json.loads(payload)
-            except json.JSONDecodeError:
-                logger.warning(f"Invalid SSE payload ignored: {payload[:200]}")
+                async for line in iter_sse_lines(
+                    self._url(path),
+                    self._clean_payload(body),
+                    self._headers(stream=True),
+                    self.config,
+                    ProviderHTTPError,
+                    stream_controller,
+                ):
+                    if not line.startswith("data: "):
+                        continue
+                    payload = line[6:].strip()
+                    if not payload or payload == "[DONE]":
+                        continue
+                    try:
+                        yield json.loads(payload)
+                    except json.JSONDecodeError:
+                        logger.warning(f"Invalid SSE payload ignored: {payload[:200]}")
+                return
+            except ProviderHTTPError as exc:
+                if attempt or not await asyncio.to_thread(
+                    self._recover_protocol, str(body.get("model") or ""), exc,
+                ):
+                    raise
 
     def _use_responses_api(self) -> bool:
         return self.route["protocol"] == ModelProtocol.OPENAI_RESPONSES.value

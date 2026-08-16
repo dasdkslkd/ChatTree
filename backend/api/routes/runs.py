@@ -88,10 +88,11 @@ async def _subscribe_sse(
         profiler.mark("sse.done", run_id=run_id, route="runs", emitted_events=emitted)
         yield _format_sse_data("[DONE]")
         return
-    for payload in run_manager.read_events(run_id, 0):
-        if int(payload.get("event_index") or 0) >= max(0, int(from_event or 0)):
-            break
-        patch_session.feed(payload, emit=False)
+    with profiler.span("sse.replay", run_id=run_id, from_event=from_event, route="runs"):
+        for payload in run_manager.read_events(run_id, 0):
+            if int(payload.get("event_index") or 0) >= max(0, int(from_event or 0)):
+                break
+            patch_session.feed(payload, emit=False)
     heartbeat_seconds = float(cfg.data["model_transport"]["sse_heartbeat_seconds"])
     with profiler.span("sse.subscribe", run_id=run_id, from_event=from_event, route="runs"):
         subscription = run_manager.subscribe(run_id, from_event)

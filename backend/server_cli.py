@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from backend.core.home import resolve_chattree_home
+from backend.core.perf.aggregate import summarize_events, write_reports
 from backend.core.server import (
     SERVER_HOME_LOCK_FILENAME,
     SERVER_VERSION,
@@ -39,6 +40,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _serve(args)
     if command == "start":
         return _start(args)
+    if command == "perf-report":
+        return _perf_report(args)
     parser.print_help()
     return 2
 
@@ -60,6 +63,31 @@ def _build_parser() -> argparse.ArgumentParser:
         help="start ChatTree Server as a detached background process",
     )
     _add_server_options(start, allow_auto_port=True)
+
+    perf_report = subparsers.add_parser(
+        "perf-report",
+        help="generate performance reports from recorded perf runs",
+    )
+    perf_report.add_argument(
+        "--home",
+        default=None,
+        help="CHATTREE_HOME containing perf runs",
+    )
+    perf_report.add_argument(
+        "--run",
+        default=None,
+        help="perf run id (defaults to the most recent run)",
+    )
+    perf_report.add_argument(
+        "--dir",
+        default=None,
+        help="directory containing backend/frontend perf event files",
+    )
+    perf_report.add_argument(
+        "--output",
+        default=None,
+        help="directory to write report files into (defaults to <run>/report)",
+    )
     return parser
 
 
@@ -338,6 +366,42 @@ def _serve_command(host: str, port: int) -> list[str]:
 
 def _load_main_module() -> Any:
     return import_module("main")
+
+
+def _perf_report(args: argparse.Namespace) -> int:
+    _apply_home(args.home)
+    if args.dir:
+        run_dir = Path(args.dir).expanduser()
+        run_id = run_dir.name
+    else:
+        runs_dir = resolve_chattree_home() / "perf" / "runs"
+        run_id = args.run
+        if not run_id and runs_dir.is_dir():
+            run_id = max(
+                (entry.name for entry in runs_dir.iterdir() if entry.is_dir()),
+                key=lambda name: (runs_dir / name).stat().st_mtime,
+                default=None,
+            )
+        if not run_id:
+            print(f"No perf runs found under {runs_dir}", file=sys.stderr)
+            return 1
+        run_dir = runs_dir / run_id
+    events_paths = [
+        run_dir / "backend-events.jsonl",
+        run_dir / "frontend-events.jsonl",
+    ]
+    if not any(path.exists() for path in events_paths):
+        print(f"No perf events found in {run_dir}", file=sys.stderr)
+        return 1
+    summary = summarize_events(events_paths)
+    output_dir = Path(args.output) if args.output else run_dir / "report"
+    write_reports(summary, output_dir)
+    print(json.dumps({
+        "run_id": run_id,
+        "event_count": summary["event_count"],
+        "output_dir": str(output_dir),
+    }, ensure_ascii=False))
+    return 0
 
 
 if __name__ == "__main__":

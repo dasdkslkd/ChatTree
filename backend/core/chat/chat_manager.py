@@ -189,7 +189,7 @@ def _usage_output_tokens(usage_info: Any) -> int:
 
 class ChatManager:
     """延迟加载模型的聊天管理器"""
-    
+
     def __init__(
         self,
         model_manager: ModelManager,
@@ -347,7 +347,7 @@ class ChatManager:
                 run_id=None,
             )
             return str(new_node["id"])
-    
+
     def create_conversation(
         self,
         title: str = '',
@@ -368,7 +368,7 @@ class ChatManager:
         conversation.metadata["multi_agent_mode"] = self._normalize_multi_agent_mode(
             multi_agent_mode or _configured_default_multi_agent_mode()
         )
-        
+
         # 初始化系统消息
         conversation.initialize_with_system_message(None)
         if prompt_id:
@@ -385,7 +385,7 @@ class ChatManager:
         self.current_conversation = conversation
         logger.info(f"对话创建成功 id: {conversation.metadata['id']}")
         return conversation
-    
+
     def load_conversation(self, conversation_id: str) -> bool:
         """加载对话"""
         conversation = self.get_conversation(conversation_id)
@@ -393,12 +393,12 @@ class ChatManager:
             self.current_conversation = conversation
             return True
         return False
-    
+
     def save_conversation(self):
         """保存当前对话"""
         if self.current_conversation:
             self.chat_repository.save(self.current_conversation)
-    
+
     def list_conversations(self) -> List[Dict[str, Any]]:
         """列出所有对话"""
         default_workspace = build_default_workspace(cfg.data if isinstance(cfg.data, dict) else None)
@@ -417,7 +417,7 @@ class ChatManager:
                     item["model_id"] = item.get("model_id") or model_id or ""
                     item["provider_id"] = item.get("provider_id") or provider_id or ""
         return conversations
-    
+
     def delete_conversation(self, conversation_id: str):
         """删除对话"""
         if self.chat_repository is not None:
@@ -425,7 +425,7 @@ class ChatManager:
                 self.chat_repository.delete_conversation(conversation_id)
         if self.current_conversation and self.current_conversation.metadata["id"] == conversation_id:
             self.current_conversation = None
-    
+
     async def update_conversation_title(self, conversation_id: str, title: str) -> bool:
         """更新对话标题（锁内 load-modify-save）"""
         async with self._lock_for(conversation_id):
@@ -870,7 +870,8 @@ class ChatManager:
         if not target_provider:
             return None, f"无法找到模型 {target_model} 对应的提供商"
 
-        slash_result = self._dispatch_slash_content(content)
+        with profiler.span("chat.preload.slash"):
+            slash_result = self._dispatch_slash_content(content)
         if slash_result.kind in {
             SlashDispatchKind.SUBAGENT,
             SlashDispatchKind.WORKFLOW,
@@ -879,75 +880,81 @@ class ChatManager:
             return None, self._slash_runtime_error(slash_result)
         model_content = slash_result.model_input or content
         refer_bundle: Optional[Dict[str, Any]] = None
-        if slash_result.kind == SlashDispatchKind.REFER_PROMPT:
-            try:
-                refer_args = parse_refer_prompt_args(slash_result.args)
-                refer_node_ids = [str(node_id) for node_id in preview.nodes.keys()]
-                prune_by_node = prune_summaries_by_node(self.chat_repository,
-                    preview.metadata["id"],
-                    refer_node_ids,
-                )
-                refer_bundle = build_refer_bundle(
-                    preview,
-                    refer_args["selectors"],
-                    {
-                        node_id: [dict(message) for message in messages]
-                        for node_id, messages in _canonical_messages_by_node(self.chat_repository,
+        with profiler.span("chat.preload.refer"):
+            if slash_result.kind == SlashDispatchKind.REFER_PROMPT:
+                try:
+                    refer_args = parse_refer_prompt_args(slash_result.args)
+                    refer_node_ids = [str(node_id) for node_id in preview.nodes.keys()]
+                    prune_by_node = prune_summaries_by_node(self.chat_repository,
+                        preview.metadata["id"],
+                        refer_node_ids,
+                    )
+                    refer_bundle = build_refer_bundle(
+                        preview,
+                        refer_args["selectors"],
+                        {
+                            node_id: [dict(message) for message in messages]
+                            for node_id, messages in _canonical_messages_by_node(self.chat_repository,
+                                preview.metadata["id"],
+                                refer_node_ids,
+                            ).items()
+                        },
+                        tool_context_by_node(self.chat_repository,
                             preview.metadata["id"],
                             refer_node_ids,
-                        ).items()
-                    },
-                    tool_context_by_node(self.chat_repository,
-                        preview.metadata["id"],
-                        refer_node_ids,
-                    ),
-                    compact_metadata_by_node(self.chat_repository,
-                        preview.metadata["id"],
-                        refer_node_ids,
-                    ),
-                    {
-                        str(summary.get("id")): summary
-                        for summaries in prune_by_node.values()
-                        for summary in summaries
-                    },
-                )
-                refer_bundle["prompt"] = refer_args["prompt"]
-                model_content = refer_args["prompt"]
-            except ReferContextError as exc:
-                return None, str(exc)
+                        ),
+                        compact_metadata_by_node(self.chat_repository,
+                            preview.metadata["id"],
+                            refer_node_ids,
+                        ),
+                        {
+                            str(summary.get("id")): summary
+                            for summaries in prune_by_node.values()
+                            for summary in summaries
+                        },
+                    )
+                    refer_bundle["prompt"] = refer_args["prompt"]
+                    model_content = refer_args["prompt"]
+                except ReferContextError as exc:
+                    return None, str(exc)
 
-        try:
-            provider = self.model_manager.get_model(target_provider, target_model, True)
-            model_route = self.model_manager.get_route(
-                target_provider,
-                target_model,
-            )
-        except ModelRouteError as exc:
-            return None, str(exc)
+        with profiler.span("chat.preload.provider"):
+            try:
+                with profiler.span("chat.preload.get_model"):
+                    provider = self.model_manager.get_model(target_provider, target_model, True)
+                with profiler.span("chat.preload.get_route"):
+                    model_route = self.model_manager.get_route(
+                        target_provider,
+                        target_model,
+                    )
+            except ModelRouteError as exc:
+                return None, str(exc)
         if not provider:
             logger.error(f"无法初始化提供商 {target_provider} (is_async=True)")
             return None, f"无法初始化提供商 {target_provider}"
-        if append_to_existing_node:
-            existing_route_ids = {
-                str(message.get("model_route_id") or "")
-                for message in _canonical_messages_by_node(
-                    self.chat_repository,
-                    conversation_id,
-                    [requested_parent_node_id],
-                ).get(requested_parent_node_id, [])
-                if message.get("model_route_id")
-            }
-            if existing_route_ids and existing_route_ids != {model_route["route_id"]}:
-                return None, "continuation_invalid: 追加生成必须使用产生当前模型状态的原路由"
+        with profiler.span("chat.preload.continuation"):
+            if append_to_existing_node:
+                existing_route_ids = {
+                    str(message.get("model_route_id") or "")
+                    for message in _canonical_messages_by_node(
+                        self.chat_repository,
+                        conversation_id,
+                        [requested_parent_node_id],
+                    ).get(requested_parent_node_id, [])
+                    if message.get("model_route_id")
+                }
+                if existing_route_ids and existing_route_ids != {model_route["route_id"]}:
+                    return None, "continuation_invalid: 追加生成必须使用产生当前模型状态的原路由"
 
         # 解析有效推理参数：请求传入 > 对话 metadata > 模型默认；再按模型元数据校验。
         # metadata 不支持的档位/开关会被规范化为 None（不发送），保护配错的第三方模型。
         from ..model.model_metadata import normalize_effort, normalize_thinking
-        if hasattr(self.model_manager, "get_model_metadata"):
-            meta = self.model_manager.get_model_metadata(target_provider, target_model)
-        else:
-            meta = {}
-        context_window = self._effective_context_window(meta.get("context_length"))
+        with profiler.span("chat.preload.metadata"):
+            if hasattr(self.model_manager, "get_model_metadata"):
+                meta = self.model_manager.get_model_metadata(target_provider, target_model)
+            else:
+                meta = {}
+            context_window = self._effective_context_window(meta.get("context_length"))
 
         if not append_to_existing_node:
             with profiler.span(
@@ -1309,17 +1316,18 @@ class ChatManager:
         """
         profiler = get_profiler()
         # ── 阶段 1：预加载（只读）── 解析模型/提供商/slash/refer/reasoning，不做修改。
-        preload, error = await self._resolve_stream_preload(
-            conversation_id=conversation_id,
-            content=content,
-            model_id=model_id,
-            provider_id=provider_id,
-            parent_node_id=parent_node_id,
-            reasoning_effort=reasoning_effort,
-            thinking_enabled=thinking_enabled,
-            append_to_existing_node=append_to_existing_node,
-            run_id=run_id,
-        )
+        with profiler.span("chat.preload", conversation_id=conversation_id, run_id=run_id):
+            preload, error = await self._resolve_stream_preload(
+                conversation_id=conversation_id,
+                content=content,
+                model_id=model_id,
+                provider_id=provider_id,
+                parent_node_id=parent_node_id,
+                reasoning_effort=reasoning_effort,
+                thinking_enabled=thinking_enabled,
+                append_to_existing_node=append_to_existing_node,
+                run_id=run_id,
+            )
         if error is not None:
             yield StreamChunk(
                 status=StreamStatus.ERROR,

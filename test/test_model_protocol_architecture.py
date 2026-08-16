@@ -24,7 +24,10 @@ from backend.core.model.model_manager import ModelManager
 from backend.core.model.providers import model_fetch
 from backend.core.model.providers.anthropic_provider import AnthropicProvider
 from backend.core.model.providers.gemini_provider import GeminiProvider
-from backend.core.model.providers.openai_compatible import OpenAICompatibleProvider
+from backend.core.model.providers.openai_compatible import (
+    OpenAICompatibleProvider,
+    ProviderHTTPError,
+)
 from backend.core.persistence.database import SQLitePersistence
 from backend.core.persistence.repository import ChatRepository
 from backend.core.storage.chat_storage import ChatStorage
@@ -95,6 +98,60 @@ def test_one_connection_routes_each_model_from_builtin_metadata(monkeypatch):
     assert kimi.route["route_id"] != other_chat.route["route_id"]
 
 
+def test_get_model_uses_metadata_default_without_probe(monkeypatch):
+    monkeypatch.setattr(cfg, "data", {
+        "model_transport": DEFAULT_MODEL_TRANSPORT,
+        "provider": {
+            "gateway": {
+                "base_url": "https://www.packyapi.ai",
+                "api_key": "test",
+                "enabled": True,
+                "models": ["kimi-k3"],
+            },
+        },
+    })
+
+    def fail_urlopen(request, timeout):
+        raise AssertionError(request.full_url)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fail_urlopen)
+    manager = ModelManager()
+
+    model = manager.get_model("gateway", "kimi-k3")
+
+    assert isinstance(model, OpenAICompatibleProvider)
+    assert model.route["protocol"] == ModelProtocol.OPENAI_CHAT_COMPLETIONS.value
+    assert model.route["endpoint"] == "/chat/completions"
+    assert model.config["base_url"] == "https://www.packyapi.ai"
+
+
+def test_get_model_prefers_provider_api_format(monkeypatch):
+    monkeypatch.setattr(cfg, "data", {
+        "model_transport": DEFAULT_MODEL_TRANSPORT,
+        "provider": {
+            "gateway": {
+                "base_url": "https://www.packyapi.ai",
+                "api_key": "test",
+                "enabled": True,
+                "models": ["kimi-k3"],
+                "api_format": "anthropic_messages",
+            },
+        },
+    })
+
+    def fail_urlopen(request, timeout):
+        raise AssertionError(request.full_url)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fail_urlopen)
+    manager = ModelManager()
+
+    model = manager.get_model("gateway", "kimi-k3")
+
+    assert isinstance(model, AnthropicProvider)
+    assert model.route["protocol"] == ModelProtocol.ANTHROPIC_MESSAGES.value
+    assert model.route["endpoint"] == "/v1/messages"
+
+
 def test_model_manager_probes_default_then_alternate_api_formats(monkeypatch):
     monkeypatch.setattr(cfg, "data", {
         "model_transport": DEFAULT_MODEL_TRANSPORT,
@@ -150,17 +207,32 @@ def test_model_manager_probes_default_then_alternate_api_formats(monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     manager = ModelManager()
 
+    # 没有 api_format / model_routes 时不立即探测，先使用元数据默认协议。
     model = manager.get_model("gateway", "kimi-k3")
+    assert isinstance(model, OpenAICompatibleProvider)
+    assert model.route["protocol"] == ModelProtocol.OPENAI_CHAT_COMPLETIONS.value
+    assert calls == []
 
-    assert isinstance(model, AnthropicProvider)
+    # 真实请求协议失败后才探测，并把结果持久化到供应商配置。
+    model.generate_response("kimi-k3", [{"role": "user", "content": "hi"}])
     assert model.route["protocol"] == ModelProtocol.ANTHROPIC_MESSAGES.value
     assert model.route["endpoint"] == "/v1/messages"
-    assert model.config["base_url"] == "https://www.packyapi.ai"
+    assert cfg.data["provider"]["gateway"]["model_routes"] == {
+        "kimi-k3": {
+            "protocol": "anthropic_messages",
+            "endpoint": "/v1/messages",
+            "base_url": "https://www.packyapi.ai",
+        },
+    }
     assert calls == [
+        "https://www.packyapi.ai/chat/completions",
+        "https://www.packyapi.ai/v1/chat/completions",
+        "https://www.packyapi.ai/v1/chat/completions",
         "https://www.packyapi.ai/chat/completions",
         "https://www.packyapi.ai/v1/chat/completions",
         "https://www.packyapi.ai/responses",
         "https://www.packyapi.ai/v1/responses",
+        "https://www.packyapi.ai/v1/messages",
         "https://www.packyapi.ai/v1/messages",
     ]
 
@@ -172,50 +244,60 @@ def test_probe_persists_detected_format_to_provider_config(monkeypatch):
                 "base_url": "https://www.packyapi.ai",
                 "api_key": "test",
                 "enabled": True,
-                "models": ["kimi-k3"],
+                "models": ["gpt-5.6"],
             },
         },
     })
     saves = []
     monkeypatch.setattr(cfg, "save", lambda: saves.append(1))
+    calls = []
 
     def fake_urlopen(request, timeout):
-        if request.full_url.endswith("/v1/messages"):
+        calls.append(request.full_url)
+        if request.full_url.endswith("/v1/responses"):
             response = MagicMock()
             response.__enter__.return_value = response
             response.headers = {"Content-Type": "application/json"}
-            response.read.return_value = b'{"content": [{"type": "text", "text": "ok"}]}'
+            response.read.return_value = (
+                b'{"output": [{"type": "message", "content": '
+                b'[{"type": "output_text", "text": "ok"}]}], "status": "completed"}'
+            )
             return response
-        if request.full_url.endswith(("/v1/chat/completions", "/v1/responses")):
+        if request.full_url.endswith("/responses"):
             raise urllib.error.HTTPError(
                 request.full_url,
-                400,
-                "unsupported",
+                404,
+                "not found",
                 {"Content-Type": "application/json"},
-                io.BytesIO(b'{"error":{"code":"protocol_not_supported"}}'),
+                io.BytesIO(b"not found"),
             )
-        if request.full_url.endswith(("/chat/completions", "/responses")):
-            response = MagicMock()
-            response.__enter__.return_value = response
-            response.headers = {"Content-Type": "text/html"}
-            response.read.return_value = b"<!doctype html>"
-            return response
         raise AssertionError(request.full_url)
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     manager = ModelManager()
 
-    model = manager.get_model("gateway", "kimi-k3")
+    model = manager.get_model("gateway", "gpt-5.6")
+    assert model.route["protocol"] == ModelProtocol.OPENAI_RESPONSES.value
+    assert calls == []
 
-    assert model.route["protocol"] == ModelProtocol.ANTHROPIC_MESSAGES.value
-    assert saves == [1]
+    content, _ = model.generate_response("gpt-5.6", [{"role": "user", "content": "hi"}])
+    assert content == "ok"
+    # 探测确认默认协议可用时同样无条件持久化；base 变化覆盖到供应商配置。
     assert cfg.data["provider"]["gateway"]["model_routes"] == {
-        "kimi-k3": {
-            "protocol": "anthropic_messages",
-            "endpoint": "/v1/messages",
-            "base_url": "https://www.packyapi.ai",
+        "gpt-5.6": {
+            "protocol": "openai_responses",
+            "endpoint": "/responses",
+            "base_url": "https://www.packyapi.ai/v1",
         },
     }
+    assert cfg.data["provider"]["gateway"]["base_url"] == "https://www.packyapi.ai/v1"
+    assert saves == [1]
+    assert calls == [
+        "https://www.packyapi.ai/responses",
+        "https://www.packyapi.ai/responses",
+        "https://www.packyapi.ai/v1/responses",
+        "https://www.packyapi.ai/v1/responses",
+    ]
 
 
 def test_persisted_route_skips_network_probe(monkeypatch):
@@ -252,7 +334,7 @@ def test_persisted_route_skips_network_probe(monkeypatch):
     assert model.config["base_url"] == "https://probed.example.com"
 
 
-def test_probe_overwrites_user_base_url(monkeypatch):
+def test_chat_base_probe_uses_v1_without_protocol_persist(monkeypatch):
     monkeypatch.setattr(cfg, "data", {
         "model_transport": DEFAULT_MODEL_TRANSPORT,
         "provider": {
@@ -274,7 +356,9 @@ def test_probe_overwrites_user_base_url(monkeypatch):
             response = MagicMock()
             response.__enter__.return_value = response
             response.headers = {"Content-Type": "application/json"}
-            response.read.return_value = b'{"choices": [{"message": {"role": "assistant", "content": "ok"}}]}'
+            response.read.return_value = (
+                b'{"choices": [{"message": {"role": "assistant", "content": "ok"}}]}'
+            )
             return response
         if request.full_url.endswith("/chat/completions"):
             response = MagicMock()
@@ -288,22 +372,102 @@ def test_probe_overwrites_user_base_url(monkeypatch):
     manager = ModelManager()
 
     model = manager.get_model("gateway", "gpt-4o")
-
     assert model.route["protocol"] == ModelProtocol.OPENAI_CHAT_COMPLETIONS.value
-    assert model.config["base_url"] == "https://www.packyapi.ai/v1"
-    assert saves == [1]
-    assert cfg.data["provider"]["gateway"]["base_url"] == "https://www.packyapi.ai/v1"
-    assert "detected_base_url" not in cfg.data["provider"]["gateway"]
+    assert calls == []
+
+    content, _ = model.generate_response("gpt-4o", [{"role": "user", "content": "hi"}])
+    assert content == "ok"
+    # base 探测找到 /v1 地址并直接使用；协议未失败时不触发协议探测，不持久化。
+    assert model.config["base_url"] == "https://www.packyapi.ai"
+    assert saves == []
+    assert "model_routes" not in cfg.data["provider"]["gateway"]
     assert calls == [
         "https://www.packyapi.ai/chat/completions",
         "https://www.packyapi.ai/v1/chat/completions",
+        "https://www.packyapi.ai/v1/chat/completions",
     ]
 
-    calls.clear()
-    second = ModelManager()
-    again = second.get_model("gateway", "gpt-4o")
-    assert again.config["base_url"] == "https://www.packyapi.ai/v1"
-    assert calls == ["https://www.packyapi.ai/v1/chat/completions"]
+
+def test_recover_protocol_skips_retry_when_probe_unchanged(monkeypatch):
+    monkeypatch.setattr(cfg, "data", {
+        "model_transport": DEFAULT_MODEL_TRANSPORT,
+        "provider": {
+            "gateway": {
+                "base_url": "https://www.packyapi.ai/v1",
+                "api_key": "test",
+                "enabled": True,
+                "models": ["gpt-4o"],
+            },
+        },
+    })
+    manager = ModelManager()
+    model = manager.get_model("gateway", "gpt-4o")
+    original_route = dict(model.route)
+    model._route_probe = lambda route, name: (route, model._api_base())
+
+    assert not model._recover_protocol(
+        "gpt-4o",
+        ProviderHTTPError(404, "not found", {}),
+    )
+    assert model.route == original_route
+
+
+def test_stream_failure_triggers_protocol_recovery(monkeypatch):
+    monkeypatch.setattr(cfg, "data", {
+        "model_transport": DEFAULT_MODEL_TRANSPORT,
+        "provider": {
+            "gateway": {
+                "base_url": "https://www.packyapi.ai/v1",
+                "api_key": "test",
+                "enabled": True,
+                "models": ["kimi-k3"],
+            },
+        },
+    })
+    manager = ModelManager()
+    model = manager.get_model("gateway", "kimi-k3")
+    probed = []
+
+    def fake_probe(route, name):
+        probed.append(name)
+        detected = dict(route)
+        detected["protocol"] = ModelProtocol.OPENAI_RESPONSES.value
+        detected["endpoint"] = "/responses"
+        detected["route_id"] = f"{route['route_id']}:detected:openai_responses:/responses"
+        return detected, "https://www.packyapi.ai/v1"
+
+    model._route_probe = fake_probe
+    urls = []
+
+    async def fake_iter_sse_lines(
+        url, body, headers, config, error_cls, stream_controller,
+    ):
+        urls.append(url)
+        if len(urls) == 1:
+            raise error_cls(404, "not found", {})
+        yield 'data: {"choices": [{"delta": {"content": "ok"}}]}'
+        yield "data: [DONE]"
+
+    monkeypatch.setattr(
+        "backend.core.model.providers.openai_compatible.iter_sse_lines",
+        fake_iter_sse_lines,
+    )
+
+    async def collect():
+        events = []
+        async for event in model._iter_sse_events(
+            model.route["endpoint"],
+            {"model": "kimi-k3", "messages": []},
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(collect())
+
+    assert probed == ["kimi-k3"]
+    assert model.route["protocol"] == ModelProtocol.OPENAI_RESPONSES.value
+    assert len(urls) == 2
+    assert events == [{"choices": [{"delta": {"content": "ok"}}]}]
 
 
 def test_get_route_prefers_persisted_protocol(monkeypatch):
