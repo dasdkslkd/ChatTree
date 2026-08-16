@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { diffLines } from 'diff';
 import { RotateCcw } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/utils/toast';
 import { messageApi } from '../../../api/message';
 
 interface FileDiffViewProps {

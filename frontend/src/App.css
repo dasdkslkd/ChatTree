@@ -1354,3 +1354,25 @@
     animation: none;
   }
 }
+
+
+/* ====== Toast 生命周期：停留 1s + 渐变消失 1s，hover 暂停 ====== */
+/* sonner duration=2000 与下方动画同步：前 1s（delay）停留，后 1s 渐变到透明 */
+[data-sonner-toast]:not([data-type="loading"]) {
+  animation: sonner-toast-auto-fade 1s ease forwards;
+  animation-delay: 1s;
+}
+[data-sonner-toast]:not([data-type="loading"]):hover {
+  animation-play-state: paused;
+}
+
+@keyframes sonner-toast-auto-fade {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-sonner-toast]:not([data-type="loading"]) {
+    animation: none;
+  }
+}

@@ -11,7 +11,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Sparkles, Bot, Package, Boxes, Loader2, RefreshCw, Save, Settings } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/utils/toast';
 import { configApi } from '@/api/config';
 import { normalizeToolsConfig } from '../constants';
 import type {

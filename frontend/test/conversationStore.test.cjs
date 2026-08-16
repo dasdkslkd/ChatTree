@@ -136,6 +136,8 @@ require.cache[require.resolve(conversationApiModule)] = {
   },
 };
 
+const conversationApi = require(conversationApiModule).conversationApi;
+
 require.cache[require.resolve(transcriptServiceModule)] = {
   id: transcriptServiceModule,
   filename: transcriptServiceModule,
@@ -269,7 +271,6 @@ async function testDeleteNodeRetriesForceWhenActiveRunBlocksDeletion() {
     ['conv-1', 'node-2', { force: true }],
   ]);
   assert.equal(getTreeCalls, 1);
-  assert.equal(state.error, null);
   assert.equal(state.currentNodeId, 'node-1');
 }
 
@@ -739,7 +740,40 @@ async function testLoadTreeDeduplicatesConcurrentRequests() {
   await useConversationStore.getState().loadTree('conv-1');
   assert.equal(getTreeCalls, 2);
 }
+async function testCreateConversationRejectsOnApiFailure() {
+  createCalls = [];
+  updateModelCalls = [];
+  listCalls = 0;
+  createdConversation = null;
+  conversationApi.create = async () => { throw new Error('create failed'); };
+  try {
+    await assert.rejects(
+      () => useConversationStore.getState().createConversation({ title: '失败对话' }),
+      /create failed/,
+    );
+  } finally {
+    conversationApi.create = async (request) => {
+      createCalls.push(request);
+      return createdConversation;
+    };
+  }
+}
+
+async function testDeleteConversationRejectsOnApiFailure() {
+  conversationApi.delete = async () => { throw new Error('delete failed'); };
+  try {
+    await assert.rejects(
+      () => useConversationStore.getState().deleteConversation('conv-1'),
+      /delete failed/,
+    );
+  } finally {
+    delete conversationApi.delete;
+  }
+}
+
 async function main() {
+  await testCreateConversationRejectsOnApiFailure();
+  await testDeleteConversationRejectsOnApiFailure();
   await testDeleteNodeRefreshesTreeData();
   await testDeleteNodeRetriesForceWhenActiveRunBlocksDeletion();
   await testRefreshMessagesUsesTranscriptTipInsteadOfMessageHistory();

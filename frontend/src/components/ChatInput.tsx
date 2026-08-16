@@ -19,8 +19,9 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { ArrowRight, Bot, Share2, StickyNote, X, Settings, Square, Plus, FileText, Pencil, Trash2, Check, Loader2 } from 'lucide-react'
+import { getApiErrorMessage } from '../api/errors';
 import { useState, useEffect, useLayoutEffect, useMemo, useRef, useDeferredValue, type ReactNode } from 'react'
-import { toast } from 'sonner'
+import { toast } from '@/utils/toast'
 import { useModelStore } from '../store/modelStore'
 import { usePromptStore } from '../store/promtStore'
 import { useNavigationStore } from '../store/navigationStore'
@@ -116,6 +117,7 @@ export function ChatInput({
   const [slashCommands, setSlashCommands] = useState<SlashCommandInfo[]>(() => slashRegistry.list());
   const [slashHighlightIndex, setSlashHighlightIndex] = useState(0);
   const [slashDismissedForValue, setSlashDismissedForValue] = useState<string | null>(null);
+  const [isSending, setIsSending] = useState(false);
 
   const {
     models,
@@ -207,19 +209,27 @@ export function ChatInput({
   }, [conversationId, currentConversation?.current_node_id, referNodeCompletionState.active, loadTree]);
 
   const handleSend = async () => {
-    if (!value.trim() || (disabled && !isStreaming)) return;
+    if (isSending || !value.trim() || (disabled && !isStreaming)) return;
     const draftAtSend = getToolPermissionDraft();
     const pendingToolPermissionMode = getPendingToolPermissionMode(draftAtSend);
-    setValue('');
-    await onSend(
-      value,
-      currentModel || undefined,
-      currentProvider || undefined,
-      pendingToolPermissionMode,
-      selectedPromptId,
-      selectedPromptId ? selectedPromptMode : undefined,
-    );
-    onToolPermissionDraftChange(markToolPermissionModeSent(getToolPermissionDraft(), pendingToolPermissionMode));
+    const message = value;
+    setIsSending(true);
+    try {
+      await onSend(
+        message,
+        currentModel || undefined,
+        currentProvider || undefined,
+        pendingToolPermissionMode,
+        selectedPromptId,
+        selectedPromptId ? selectedPromptMode : undefined,
+      );
+      setValue('');
+      onToolPermissionDraftChange(markToolPermissionModeSent(getToolPermissionDraft(), pendingToolPermissionMode));
+    } catch (error) {
+      toast.error(getApiErrorMessage(error, '发送失败'));
+    } finally {
+      setIsSending(false);
+    }
   };
 
   const handleCancelEdit = () => {
@@ -332,7 +342,7 @@ export function ChatInput({
   const hiddenModels = activeDialogProvider ? (config?.provider?.[activeDialogProvider]?.hidden_models || []) : [];
   const dialogModels = (activeDialogProvider ? models[activeDialogProvider] || [] : []).filter(m => !hiddenModels.includes(m));
   const inputDisabled = disabled && !isStreaming;
-  const sendDisabled = !value.trim() || (disabled && !isStreaming);
+  const sendDisabled = !value.trim() || (disabled && !isStreaming) || isSending;
   const showStreamingSend = !!isStreaming && !!value.trim();
   const referNodeCandidates = useMemo(
     () => (referNodeCompletionState.active ? getReferNodeCompletionCandidates(deferredValue, treeData) : []),
@@ -738,7 +748,7 @@ export function ChatInput({
               }
               if (!e.ctrlKey && !e.shiftKey) {
                 e.preventDefault();
-                handleSend();
+                void handleSend();
               }
             }
           }}
@@ -889,7 +899,11 @@ export function ChatInput({
                 disabled={sendDisabled}
                 aria-label={isStreaming ? '加入发送队列' : '发送消息'}
               >
-                <ArrowRight className="h-4 w-4" style={{ transform: 'scaleX(1.14)' }} />
+                {isSending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <ArrowRight className="h-4 w-4" style={{ transform: 'scaleX(1.14)' }} />
+                )}
               </button>
             )}
           </div>

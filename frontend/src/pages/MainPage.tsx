@@ -33,7 +33,7 @@ import {
   Check, Pencil, Loader2, Network, MessageSquare, FileText, Download, FolderOpen, Search, Settings, Trash2,
   PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, ArrowLeft, Folder,
 } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/utils/toast';
 import { conversationApi } from '../api/conversation';
 import { configApi } from '../api/config';
 import { getApiErrorMessage } from '../api/errors';
@@ -486,6 +486,7 @@ export default function ChatPage() {
   const [projectRenamePath, setProjectRenamePath] = useState<string | null>(null);
   const [projectRenameLabel, setProjectRenameLabel] = useState('');
   const [projectDeletePath, setProjectDeletePath] = useState<string | null>(null);
+  const [conversationDeleteTarget, setConversationDeleteTarget] = useState<string | null>(null);
 
   const handleRenameClick = (id: string, currentTitle: string) => {
     setRenameConversationId(id);
@@ -495,7 +496,12 @@ export default function ChatPage() {
 
   const handleRenameConfirm = async () => {
     if (renameConversationId && renameTitle.trim()) {
-      await updateConversationTitle(renameConversationId, renameTitle.trim());
+      try {
+        await updateConversationTitle(renameConversationId, renameTitle.trim());
+      } catch (error) {
+        toast.error(getApiErrorMessage(error, '重命名对话失败'));
+        return;
+      }
     }
     setRenameDialogOpen(false);
     setRenameConversationId(null);
@@ -547,6 +553,7 @@ export default function ChatPage() {
         await loadConversations();
       } catch (error) {
         toast.error(getApiErrorMessage(error, '重命名项目失败'));
+        return;
       }
     }
     setProjectRenameDialogOpen(false);
@@ -587,6 +594,17 @@ export default function ChatPage() {
       toast.success('项目已删除');
     } catch (error) {
       toast.error(getApiErrorMessage(error, '删除项目失败'));
+    }
+  };
+
+  const confirmConversationDelete = async () => {
+    const id = conversationDeleteTarget;
+    setConversationDeleteTarget(null);
+    if (!id) return;
+    try {
+      await deleteConversation(id);
+    } catch (error) {
+      toast.error(getApiErrorMessage(error, '删除对话失败'));
     }
   };
 
@@ -1565,7 +1583,11 @@ export default function ChatPage() {
     setEditReturnNodeId(selectedBranchTipId);
     setAttachedFiles(attachmentRefs.importFiles);
     setAttachedImageRefs(attachmentRefs.imageRefs);
-    await switchNode(parentNodeId);
+    try {
+      await switchNode(parentNodeId);
+    } catch (error) {
+      toast.error(getApiErrorMessage(error, '切换节点失败'));
+    }
   }, [
     currentBranchNodeIds,
     currentBranchToolPermissionMode,
@@ -1585,7 +1607,11 @@ export default function ChatPage() {
     setAttachedFiles([]);
     setAttachedImageRefs([]);
     if (conversationId && returnNodeId) {
-      await switchNode(returnNodeId);
+      try {
+        await switchNode(returnNodeId);
+      } catch (error) {
+        toast.error(getApiErrorMessage(error, '切换节点失败'));
+      }
     }
   }, [currentConversation?.id, editReturnNodeId, switchNode]);
 
@@ -1594,7 +1620,12 @@ export default function ChatPage() {
     const nodeId = getTranscriptItemNodeId(item);
     if (!nodeId || !currentConversation?.id) return;
     if (!window.confirm('确定删除这条消息及其后续分支？')) return;
-    await deleteNode(nodeId);
+    try {
+      await deleteNode(nodeId);
+    } catch (error) {
+      toast.error(getApiErrorMessage(error, '删除消息失败'));
+      return;
+    }
     await refreshVisibleTranscriptSnapshot(currentConversation.id);
   }, [currentConversation?.id, deleteNode, refreshVisibleTranscriptSnapshot, selectedBranchTipId]);
 
@@ -1833,7 +1864,11 @@ export default function ChatPage() {
       const group = allProjectGroups.find((item) => item.path === selected.workspace?.cwd);
       if (group) setSelectedProjectId(group.id);
     }
-    await selectConversation(id);
+    try {
+      await selectConversation(id);
+    } catch (error) {
+      toast.error(getApiErrorMessage(error, '选择对话失败'));
+    }
   };
 
   useLayoutEffect(() => {
@@ -1885,7 +1920,7 @@ export default function ChatPage() {
     const siblings = tree.nodes.find((entry) => entry.id === node.parent_id)?.children_ids ?? [];
     const index = siblings.indexOf(tipNodeId);
     const target = index === -1 ? undefined : siblings[index + direction];
-    if (target) void switchNode(target);
+    if (target) void switchNode(target).catch(() => {});
   }, [switchNode]);
 
   // 快捷键闭环：Ctrl+←/→ 兄弟分支切换，Ctrl+T 对话/树视图互切，Esc 停止流式
@@ -2062,10 +2097,6 @@ export default function ChatPage() {
         workspace: workspaceForCreateRequest(),
         multi_agent_mode: modelConfig?.tools?.default_multi_agent_mode,
       });
-      if (!newConv) {
-        console.error('Failed to create conversation');
-        return;
-      }
       conversationId = newConv.id;
       createdConversationId = newConv.id;
       createdConversationNodeId = newConv.current_node_id;
@@ -2123,8 +2154,7 @@ export default function ChatPage() {
     }
 
     if (!conversationId || !sendNodeId || !request) {
-      console.error('无法确定消息父节点');
-      return;
+      throw new Error('无法确定消息父节点');
     }
 
     clearAttachments();
@@ -2182,7 +2212,11 @@ export default function ChatPage() {
     setEditTargetNodeId(parentNodeId);
     setEditToolPermissionMode(inheritedToolPermissionMode);
     setEditReturnNodeId(selectedBranchTipId);
-    await switchNode(parentNodeId);
+    try {
+      await switchNode(parentNodeId);
+    } catch (error) {
+      toast.error(getApiErrorMessage(error, '切换节点失败'));
+    }
   }, [liveBranchToolPermissionMode, currentBranchToolPermissionMode, selectedBranchTipId, switchNode]);
 
   const handleJumpToMessage = (target: TranscriptScrollTarget) => {
@@ -2822,7 +2856,7 @@ export default function ChatPage() {
                                       <Pencil className="h-4 w-4 mr-2" />
                                       重命名
                                     </DropdownMenuItem>
-                                    <DropdownMenuItem onClick={() => deleteConversation(c.id)}>
+                                    <DropdownMenuItem onClick={() => setConversationDeleteTarget(c.id)}>
                                       <X className="h-4 w-4 mr-2" />
                                       删除对话
                                     </DropdownMenuItem>
@@ -3329,6 +3363,22 @@ export default function ChatPage() {
           <DialogFooter>
             <Button variant="outline" onClick={() => setProjectDeletePath(null)}>取消</Button>
             <Button variant="destructive" onClick={() => void confirmProjectDelete()}>删除项目</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Conversation delete confirm dialog */}
+      <Dialog open={!!conversationDeleteTarget} onOpenChange={(open) => !open && setConversationDeleteTarget(null)}>
+        <DialogContent className="max-w-[420px]">
+          <DialogHeader>
+            <DialogTitle>删除对话</DialogTitle>
+            <DialogDescription>
+              将删除对话「{conversations.find((c) => c.id === conversationDeleteTarget)?.title || '未命名'}」及其全部历史。此操作不可撤销。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConversationDeleteTarget(null)}>取消</Button>
+            <Button variant="destructive" onClick={() => void confirmConversationDelete()}>删除对话</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

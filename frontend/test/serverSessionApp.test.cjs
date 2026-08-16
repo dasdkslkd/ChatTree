@@ -3,6 +3,20 @@ const fs = require('node:fs');
 const Module = require('node:module');
 const ts = require('typescript');
 
+require.extensions['.ts'] = function loadTs(module, filename) {
+  const source = fs.readFileSync(filename, 'utf8');
+  const output = ts.transpileModule(source, {
+    compilerOptions: {
+      module: ts.ModuleKind.CommonJS,
+      target: ts.ScriptTarget.ES2022,
+      esModuleInterop: true,
+      importsNotUsedAsValues: ts.ImportsNotUsedAsValues.Remove,
+    },
+    fileName: filename,
+  }).outputText;
+  module._compile(output, filename);
+};
+
 require.extensions['.tsx'] = function loadTsx(module, filename) {
   const source = fs.readFileSync(filename, 'utf8');
   const output = ts.transpileModule(source, {
@@ -158,7 +172,7 @@ Module._load = function loadStub(request, parent, isMain) {
   if (request === '../store/modelStore') return { useModelStore };
   if (request === '../store/conversationStore') return { useConversationStore: () => ({ messages: [] }) };
   if (request === '../components/SettingsDialog') return { SettingsPageView: genericComponent };
-  if (request === 'lucide-react') return { Wifi: genericComponent, WifiOff: genericComponent };
+  if (request === 'lucide-react') return { Share2: genericComponent, Wifi: genericComponent, WifiOff: genericComponent, Loader2: genericComponent, AlertCircle: genericComponent, History: genericComponent };
   if (request.startsWith('@/components/')) {
     return new Proxy({}, { get: () => genericComponent });
   }

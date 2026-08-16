@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertCircle, CheckCircle2, FileText, Loader2, RefreshCw } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/utils/toast';
 
 import { configApi } from '@/api/config';
 import { memoryApi } from '@/api/memory';

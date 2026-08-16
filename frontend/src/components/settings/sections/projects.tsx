@@ -15,7 +15,7 @@ import {
   Loader2, Save, RefreshCw,
   type LucideIcon,
 } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/utils/toast';
 import { configApi } from '@/api/config';
 import { DevEnvironmentEditor } from './dev_environment';
 import type {

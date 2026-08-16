@@ -109,7 +109,7 @@ export function AssistantAnswerItem({
                   type="button"
                   className="branch-pager-btn"
                   disabled={branchIndex <= 0}
-                  onClick={() => void switchNode(branchSiblings[branchIndex - 1])}
+                  onClick={() => void switchNode(branchSiblings[branchIndex - 1]).catch(() => {})}
                   aria-label="上一分支"
                 >
                   <ChevronLeft />
@@ -119,7 +119,7 @@ export function AssistantAnswerItem({
                   type="button"
                   className="branch-pager-btn"
                   disabled={branchIndex >= branchSiblings.length - 1}
-                  onClick={() => void switchNode(branchSiblings[branchIndex + 1])}
+                  onClick={() => void switchNode(branchSiblings[branchIndex + 1]).catch(() => {})}
                   aria-label="下一分支"
                 >
                   <ChevronRight />

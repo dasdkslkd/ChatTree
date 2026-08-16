@@ -55,7 +55,7 @@ function testProjectFolderUsesNativePickerWithoutPathInput() {
 }
 
 function testDeletingConversationDoesNotReloadProjectCatalog() {
-  assert.match(source, /onClick=\{\(\) => deleteConversation\(c\.id\)\}/);
+  assert.match(source, /onClick=\{\(\) => setConversationDeleteTarget\(c\.id\)\}/);
   assert.doesNotMatch(
     source,
     /deleteConversation\(c\.id\);[\s\S]{0,120}loadProjects\(\)/,

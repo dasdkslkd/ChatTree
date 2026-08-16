@@ -3,7 +3,7 @@ import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Loader2, Save, Link2, RefreshCw } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/utils/toast';
 import { createLauncherApi, type LauncherProfileStatus } from '@/api/launcher';
 import { ChatTreeApiError } from '@/api/errors';
 import { getProfileContext } from '@/runtime/profileContext';

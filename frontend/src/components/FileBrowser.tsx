@@ -10,7 +10,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/utils/toast';
 import { filesApi, type FileEntry } from '../api/files';
 import { getApiErrorMessage } from '../api/errors';
 import { useThemeStore } from '../store/themeStore';

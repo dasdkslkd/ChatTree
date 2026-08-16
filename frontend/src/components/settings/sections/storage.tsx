@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Loader2, Database, Archive, HardDrive, Play, LogOut } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/utils/toast';
 import { storageApi, type StorageStats } from '@/api/storage';
 import { createLauncherApi } from '@/api/launcher';
 import { getProfileContext } from '@/runtime/profileContext';

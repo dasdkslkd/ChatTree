@@ -12,7 +12,7 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog';
 import { Plus, Trash2, Loader2, Save, Pencil } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/utils/toast';
 import { usePromptStore } from '@/store/promtStore';
 import type { Prompt, PromptResponse } from '@/types/prompt';
 

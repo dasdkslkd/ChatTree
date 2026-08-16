@@ -5,7 +5,7 @@ import { Label } from '@/components/ui/label';
 import { TextTooltip } from '@/components/ui/text-tooltip';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Loader2, Save, Plus, Trash2, Terminal, FolderOpen, X } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/utils/toast';
 import { configApi } from '@/api/config';
 import type { ConfigData, DevEnvironmentConfig } from '@/types/model';
 

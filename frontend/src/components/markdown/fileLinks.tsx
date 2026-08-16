@@ -1,6 +1,6 @@
 import { createElement, type MouseEvent, type ReactNode } from 'react';
 import type { Components } from 'react-markdown';
-import { toast } from 'sonner';
+import { toast } from '@/utils/toast';
 import { getApiErrorMessage } from '../../api/errors';
 import { filesApi } from '../../api/files';
 import { useConversationStore } from '../../store/conversationStore';

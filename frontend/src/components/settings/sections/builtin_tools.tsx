@@ -12,7 +12,7 @@ import {
 } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import { Loader2, Save, RefreshCw, RotateCw } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/utils/toast';
 import { configApi } from '@/api/config';
 import type {
   BuiltinToolExposure,

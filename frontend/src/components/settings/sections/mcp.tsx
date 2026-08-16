@@ -21,7 +21,7 @@ import {
 } from '@/components/ui/dialog';
 import { Switch } from '@/components/ui/switch';
 import { Plus, Trash2, Loader2, Save, RefreshCw, Wrench, Link2 } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/utils/toast';
 import { configApi } from '@/api/config';
 import type {
   ConfigData,

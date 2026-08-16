@@ -21,7 +21,7 @@ import {
 } from '@/components/ui/dialog';
 import { Switch } from '@/components/ui/switch';
 import { Settings, Plus, Trash2, Eye, EyeOff, Loader2, ExternalLink, RefreshCw, CheckCircle2 } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/utils/toast';
 import { configApi, type SubscriptionLoginHandle } from '@/api/config';
 import { getApiErrorMessage } from '@/api/errors';
 import { useModelStore } from '@/store/modelStore';

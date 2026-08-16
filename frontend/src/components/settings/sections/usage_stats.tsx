@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Loader2, Coins, BarChart3 } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/utils/toast';
 import { usageApi, type ModelUsage, type UsageRange, type UsageStats } from '@/api/usage';
 
 const RANGES: { key: UsageRange; label: string }[] = [

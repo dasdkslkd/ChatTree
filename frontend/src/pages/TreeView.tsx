@@ -17,6 +17,7 @@ import type { TreeNode } from '../api/conversation';
 import { useRunManager } from '../hooks/useRunManager';
 import { streamManager, type StreamState } from '../services/streamManager';
 import { getApiErrorMessage } from '../api/errors';
+import { toast } from '@/utils/toast';
 import { stripFileMention } from '../utils/fileMention';
 
 interface LayoutNode {
@@ -264,8 +265,12 @@ export default function TreeView() {
     const node = treeData?.nodes.find(n => n.id === nodeId);
     if (!node || isRootNode(node)) return;
     const { switchNode } = conversationStore.getState();
-    await switchNode(nodeId);
-    setChatViewMode('chat');
+    try {
+      await switchNode(nodeId);
+      setChatViewMode('chat');
+    } catch (error) {
+      toast.error(getApiErrorMessage(error, '切换节点失败'));
+    }
   }, [currentConversation, treeData, setChatViewMode]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent, nodeId: string) => {
@@ -296,10 +301,10 @@ export default function TreeView() {
     if (!confirm(`确定删除「${contextMenu.label}」及其所有后续分支？`)) return;
     try {
       await deleteNode(contextMenu.nodeId);
-    } catch (err) {
-      console.error('删除失败:', err);
+      setContextMenu(null);
+    } catch (error) {
+      toast.error(getApiErrorMessage(error, '删除节点失败'));
     }
-    setContextMenu(null);
   }, [contextMenu, currentConversation, deleteNode]);
 
   const handleGeneratePruneSummary = useCallback(() => {

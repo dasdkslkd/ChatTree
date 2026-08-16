@@ -1,8 +1,10 @@
 import '../App.css'
 import { Toaster } from '@/components/ui/sonner'
+import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { TextTooltip } from '@/components/ui/text-tooltip'
 import { TooltipProvider } from '@/components/ui/tooltip'
-import { Share2, Wifi, WifiOff, Loader2, AlertCircle } from 'lucide-react'
+import { Share2, Wifi, WifiOff, Loader2, AlertCircle, History } from 'lucide-react'
 import { SettingsPageView } from '../components/SettingsDialog'
 import { useNavigationStore } from '../store/navigationStore'
 import { useModelStore } from '../store/modelStore'
@@ -12,6 +14,7 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import type { NodeUsage, UsageInfo } from '../types/message'
 import type { BoundServerContext } from './connectionIdentity'
 import { installPageLifecycleFlush } from './pageLifecycle'
+import { clearErrorHistory, getErrorHistory, subscribeErrorHistory, type ErrorHistoryEntry } from '../utils/errorHistory'
 import {
   initializeServerSessionStores,
   ServerSessionInitializationOwner,
@@ -40,6 +43,8 @@ export default function ServerSessionApp({
   const initializationOwnerRef = useRef<ServerSessionInitializationOwner | null>(null);
   const [contextHovered, setContextHovered] = useState(false);
   const [treeError, setTreeError] = useState<string | null>(null);
+  const [errorHistoryOpen, setErrorHistoryOpen] = useState(false);
+  const [errorHistory, setErrorHistory] = useState<readonly ErrorHistoryEntry[]>(getErrorHistory());
   const currentConversationId = currentConversation?.id ?? null;
 
   useEffect(() => {
@@ -89,6 +94,8 @@ export default function ServerSessionApp({
       });
     return () => { cancelled = true; };
   }, [currentConversationId, loadTree]);
+
+  useEffect(() => subscribeErrorHistory(() => setErrorHistory(getErrorHistory())), []);
 
   const isCurrentProxy = currentProvider ? config?.provider?.[currentProvider]?.source === 'reverse_proxy' : false;
   const getModelDisplay = (): string => {
@@ -209,6 +216,27 @@ export default function ServerSessionApp({
             </div>
 
             <div className="flex-1" />
+
+            <div
+              className="hover-row flex items-center gap-1.5 px-1.5 py-0.5 rounded cursor-pointer"
+              style={{ borderRadius: '6px' }}
+              onClick={() => setErrorHistoryOpen(true)}
+              aria-label="查看错误历史"
+            >
+              <History className="w-3 h-3" style={{ color: errorHistory.length > 0 ? 'var(--accent-red)' : undefined }} />
+              <span>错误记录</span>
+              {errorHistory.length > 0 && (
+                <span
+                  className="text-xs px-1 py-0 rounded-full"
+                  style={{
+                    background: 'color-mix(in srgb, var(--accent-red) 15%, transparent)',
+                    color: 'var(--accent-red)',
+                  }}
+                >
+                  {errorHistory.length}
+                </span>
+              )}
+            </div>
 
             <div className="w-px h-3" style={{ background: 'var(--border)' }} />
 
@@ -459,6 +487,59 @@ export default function ServerSessionApp({
         </div>
 
       </div>
+
+      {/* 错误历史对话框 */}
+      <Dialog open={errorHistoryOpen} onOpenChange={setErrorHistoryOpen}>
+        <DialogContent className="max-w-[560px] max-h-[72vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle>错误历史</DialogTitle>
+            <DialogDescription>本次运行中出现的所有错误消息。</DialogDescription>
+          </DialogHeader>
+          <div className="flex-1 min-h-0 overflow-y-auto pr-1" style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            {errorHistory.length === 0 ? (
+              <div style={{ color: 'var(--fg-tertiary)', fontSize: 'var(--text-sm)', padding: '28px 0', textAlign: 'center' }}>
+                暂无错误消息
+              </div>
+            ) : (
+              errorHistory.map((entry) => (
+                <div
+                  key={entry.id}
+                  style={{
+                    display: 'flex',
+                    gap: '10px',
+                    padding: '10px 12px',
+                    borderRadius: 'var(--radius-md)',
+                    background: 'var(--bg-elevated)',
+                    border: '0.5px solid var(--border)',
+                  }}
+                >
+                  <span
+                    style={{
+                      color: 'var(--fg-tertiary)',
+                      fontSize: 'var(--text-xs)',
+                      fontVariantNumeric: 'tabular-nums',
+                      whiteSpace: 'nowrap',
+                      paddingTop: '1px',
+                    }}
+                  >
+                    {new Date(entry.time).toLocaleTimeString()}
+                  </span>
+                  <span style={{ color: 'var(--fg-secondary)', fontSize: 'var(--text-sm)', lineHeight: 1.5, wordBreak: 'break-word', minWidth: 0 }}>
+                    {entry.message}
+                  </span>
+                </div>
+              ))
+            )}
+          </div>
+          <DialogFooter>
+            {errorHistory.length > 0 && (
+              <Button variant="outline" onClick={clearErrorHistory}>清空</Button>
+            )}
+            <Button onClick={() => setErrorHistoryOpen(false)}>关闭</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Toaster />
     </TooltipProvider>
   );

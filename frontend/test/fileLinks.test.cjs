@@ -55,7 +55,9 @@ function loadFileLinks(currentConversation = null) {
   const opened = [];
   const requireMock = (name) => {
     if (name === 'react') return createMockReact();
-    if (name === 'sonner') return { toast: { error: () => {} } };
+    if (name === 'sonner') return { toast: { error: () => {}, success: () => {}, info: () => {}, warning: () => {}, message: () => {}, loading: () => {}, dismiss: () => {} } };
+    if (name === './errorHistory') return { recordError: () => {} };
+    if (name === '@/utils/toast') return { toast: { error: () => {} } };
     if (name === '../../api/errors') return { getApiErrorMessage: (_error, fallback) => fallback };
     if (name === '../../api/files') {
       return { filesApi: { open: async (p) => { opened.push(p); return { path: p }; } } };
