@@ -17,13 +17,13 @@ export function PlanApprovalCard({
   onApprovePlan,
   onRejectPlan,
   planActionPending = null,
-  planError = null,
+  planErrorByItem = {},
 }: {
   item: PlanApprovalItem;
   onApprovePlan?: TranscriptPlanActionHandler;
   onRejectPlan?: TranscriptPlanActionHandler;
   planActionPending?: string | null;
-  planError?: string | null;
+  planErrorByItem?: Record<string, string>;
 }) {
   const awaiting = item.status === 'awaiting_approval';
   const [expanded, setExpanded] = useState(awaiting);
@@ -94,7 +94,7 @@ export function PlanApprovalCard({
             </button>
           </div>
         )}
-        {planError && <div className="text-xs" style={{ color: 'var(--destructive)' }}>{planError}</div>}
+        {planErrorByItem[item.id] && <div className="text-xs" style={{ color: 'var(--destructive)' }}>{planErrorByItem[item.id]}</div>}
       </div>
     </div>
   );

@@ -47,9 +47,13 @@ export function AssistantAnswerItem({
   if (!text) return null;
 
   const handleCopy = async () => {
-    await onCopy?.(item, text);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1600);
+    try {
+      await onCopy?.(item, text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1600);
+    } catch {
+      // onCopy 失败已由调用方 toast，这里保持未复制状态
+    }
   };
 
   const showBranchPager = branchSiblings.length > 1 && branchIndex !== -1;

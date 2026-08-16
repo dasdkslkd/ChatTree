@@ -220,9 +220,9 @@ export default function ChatPage() {
   const [transcriptLoading, setTranscriptLoading] = useState(false);
   const [transcriptError, setTranscriptError] = useState<string | null>(null);
   const [planActionPending, setPlanActionPending] = useState<string | null>(null);
-  const [planError, setPlanError] = useState<string | null>(null);
+  const [planError, setPlanError] = useState<Record<string, string>>({});
   const [toolApprovalPending, setToolApprovalPending] = useState<string | null>(null);
-  const [toolApprovalError, setToolApprovalError] = useState<string | null>(null);
+  const [toolApprovalError, setToolApprovalError] = useState<Record<string, string>>({});
   const [, setCopiedTranscriptRunId] = useState<string | null>(null);
   const [toolPermissionDraft, setToolPermissionDraftState] = useState<ToolPermissionDraft>(() => createToolPermissionDraft());
   const [previewImage, setPreviewImage] = useState<{ name: string; url: string } | null>(null);
@@ -487,6 +487,9 @@ export default function ChatPage() {
   const [projectRenameLabel, setProjectRenameLabel] = useState('');
   const [projectDeletePath, setProjectDeletePath] = useState<string | null>(null);
   const [conversationDeleteTarget, setConversationDeleteTarget] = useState<string | null>(null);
+  const [deleteMessageTarget, setDeleteMessageTarget] = useState<UserMessageItem | null>(null);
+  const [renameSubmitting, setRenameSubmitting] = useState(false);
+  const [projectRenameSubmitting, setProjectRenameSubmitting] = useState(false);
 
   const handleRenameClick = (id: string, currentTitle: string) => {
     setRenameConversationId(id);
@@ -495,13 +498,17 @@ export default function ChatPage() {
   };
 
   const handleRenameConfirm = async () => {
-    if (renameConversationId && renameTitle.trim()) {
-      try {
+    if (renameSubmitting) return;
+    setRenameSubmitting(true);
+    try {
+      if (renameConversationId && renameTitle.trim()) {
         await updateConversationTitle(renameConversationId, renameTitle.trim());
-      } catch (error) {
-        toast.error(getApiErrorMessage(error, '重命名对话失败'));
-        return;
       }
+    } catch (error) {
+      toast.error(getApiErrorMessage(error, '重命名对话失败'));
+      return;
+    } finally {
+      setRenameSubmitting(false);
     }
     setRenameDialogOpen(false);
     setRenameConversationId(null);
@@ -513,9 +520,8 @@ export default function ChatPage() {
       const data = await configApi.getProjects();
       setProjectConfigs(data.config || {});
       setProjectWorkspaces(data.projects.map((project) => project.workspace));
-    } catch {
-      setProjectConfigs({});
-      setProjectWorkspaces([]);
+    } catch (error) {
+      toast.error(getApiErrorMessage(error, '加载项目配置失败'));
     }
   }, []);
 
@@ -545,20 +551,23 @@ export default function ChatPage() {
   };
 
   const confirmProjectRename = async () => {
-    const path = projectRenamePath;
-    if (path && projectRenameLabel.trim()) {
-      try {
+    if (projectRenameSubmitting) return;
+    setProjectRenameSubmitting(true);
+    try {
+      const path = projectRenamePath;
+      if (path && projectRenameLabel.trim()) {
         await configApi.updateProject(path, { label: projectRenameLabel.trim() });
         await loadProjects();
         await loadConversations();
-      } catch (error) {
-        toast.error(getApiErrorMessage(error, '重命名项目失败'));
-        return;
       }
+      setProjectRenameDialogOpen(false);
+      setProjectRenamePath(null);
+      setProjectRenameLabel('');
+    } catch (error) {
+      toast.error(getApiErrorMessage(error, '重命名项目失败'));
+    } finally {
+      setProjectRenameSubmitting(false);
     }
-    setProjectRenameDialogOpen(false);
-    setProjectRenamePath(null);
-    setProjectRenameLabel('');
   };
 
   const cancelProjectRename = () => {
@@ -1314,6 +1323,10 @@ export default function ChatPage() {
   );
 
   const handleNewConversation = () => {
+    if (editTargetNodeId) {
+      toast.info('请先完成或取消当前消息编辑');
+      return;
+    }
     setEditValue(null);
     setEditTargetNodeId(null);
     setEditToolPermissionMode(null);
@@ -1483,7 +1496,8 @@ export default function ChatPage() {
       setCopiedTranscriptRunId(_item.id);
       window.setTimeout(() => setCopiedTranscriptRunId(null), 1600);
     } catch (error) {
-      console.error('Failed to copy transcript item:', error);
+      toast.error(getApiErrorMessage(error, '复制失败'));
+      throw error;
     }
   }, []);
 
@@ -1494,11 +1508,11 @@ export default function ChatPage() {
   ) => {
     const conversationId = item.conversation_id || currentConversation?.id;
     if (!conversationId || !item.node_id || !item.plan_id) {
-      setPlanError('计划动作缺少必要上下文，无法继续。');
+      setPlanError({ [item.id]: '计划动作缺少必要上下文，无法继续。' });
       return;
     }
     setPlanActionPending(action);
-    setPlanError(null);
+    setPlanError({});
     try {
       await streamManager.startPlanActionStream(
         conversationId,
@@ -1512,7 +1526,7 @@ export default function ChatPage() {
         include: ['transcript'],
         messageRetries: 0,
       });
-      setPlanError(error instanceof Error ? error.message : '计划动作执行失败');
+      setPlanError({ [item.id]: error instanceof Error ? error.message : '计划动作执行失败' });
     } finally {
       setPlanActionPending(null);
     }
@@ -1548,19 +1562,19 @@ export default function ChatPage() {
   ) => {
     const conversationId = item.conversation_id || currentConversation?.id;
     if (!conversationId || !item.node_id) {
-      setToolApprovalError('工具审批缺少会话或节点信息，无法继续。');
+      setToolApprovalError({ [item.id]: '工具审批缺少会话或节点信息，无法继续。' });
       return;
     }
     if (!item.tool_call_id) {
-      setToolApprovalError('工具审批缺少 tool_call_id，无法继续。');
+      setToolApprovalError({ [item.id]: '工具审批缺少 tool_call_id，无法继续。' });
       return;
     }
     if (!item.run_id) {
-      setToolApprovalError('工具审批缺少 run_id，无法接收后续流。');
+      setToolApprovalError({ [item.id]: '工具审批缺少 run_id，无法接收后续流。' });
       return;
     }
     setToolApprovalPending(`${item.id}:${action}`);
-    setToolApprovalError(null);
+    setToolApprovalError({});
     try {
       if (action === 'approve') {
         await messageApi.approveTool(conversationId, item.tool_call_id, item.node_id);
@@ -1574,10 +1588,10 @@ export default function ChatPage() {
         item.node_id,
         'chat',
       ).catch((error) => {
-        setToolApprovalError(error instanceof Error ? error.message : '工具审批后接收流失败');
+        setToolApprovalError({ [item.id]: error instanceof Error ? error.message : '工具审批后接收流失败' });
       });
     } catch (error) {
-      setToolApprovalError(error instanceof Error ? error.message : '工具审批失败');
+      setToolApprovalError({ [item.id]: error instanceof Error ? error.message : '工具审批失败' });
     } finally {
       setToolApprovalPending(null);
     }
@@ -1635,11 +1649,20 @@ export default function ChatPage() {
     }
   }, [currentConversation?.id, editReturnNodeId, switchNode]);
 
-  const handleDeleteUserMessage = useCallback(async (item: UserMessageItem) => {
+  const handleDeleteUserMessage = useCallback((item: UserMessageItem) => {
     if (!isTranscriptItemVisibleNow(item, currentConversation?.id ?? null, selectedBranchTipId)) return;
     const nodeId = getTranscriptItemNodeId(item);
     if (!nodeId || !currentConversation?.id) return;
-    if (!window.confirm('确定删除这条消息及其后续分支？')) return;
+    setDeleteMessageTarget(item);
+  }, [currentConversation?.id, selectedBranchTipId]);
+
+  const confirmDeleteMessage = async () => {
+    const item = deleteMessageTarget;
+    setDeleteMessageTarget(null);
+    if (!item) return;
+    if (!isTranscriptItemVisibleNow(item, currentConversation?.id ?? null, selectedBranchTipId)) return;
+    const nodeId = getTranscriptItemNodeId(item);
+    if (!nodeId || !currentConversation?.id) return;
     try {
       await deleteNode(nodeId);
     } catch (error) {
@@ -1647,7 +1670,7 @@ export default function ChatPage() {
       return;
     }
     await refreshVisibleTranscriptSnapshot(currentConversation.id);
-  }, [currentConversation?.id, deleteNode, refreshVisibleTranscriptSnapshot, selectedBranchTipId]);
+  };
 
   const handleStopStreaming = useCallback(() => {
     if (currentConversation?.id) {
@@ -1868,6 +1891,10 @@ export default function ChatPage() {
   }, []);
 
   const handleSelectConversation = async (id: string) => {
+    if (editTargetNodeId) {
+      toast.info('请先完成或取消当前消息编辑');
+      return;
+    }
     if (currentConversation && historyRef.current) {
       setScrollPositions(prev => ({
         ...prev,
@@ -1951,9 +1978,9 @@ export default function ChatPage() {
       const isEditable = Boolean(
         target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable),
       );
+      if (isEditable || event.isComposing) return; // 输入框/IME 组合输入期间不触发全局快捷键
       if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey) {
         if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
-          if (isEditable) return; // 保留输入框内的光标移动
           event.preventDefault();
           switchSiblingBranch(event.key === 'ArrowLeft' ? -1 : 1);
           return;
@@ -3052,9 +3079,9 @@ export default function ChatPage() {
                     onApproveTool={handleApproveTool}
                     onRejectTool={handleRejectTool}
                     planActionPending={planActionPending}
-                    planError={planError}
+                    planErrorByItem={planError}
                     toolApprovalPending={toolApprovalPending}
-                    toolApprovalError={toolApprovalError}
+                    toolApprovalErrorByItem={toolApprovalError}
                     renderItem={renderTranscriptItem}
                   />
                 </div>
@@ -3341,14 +3368,16 @@ export default function ChatPage() {
             <DialogTitle>重命名对话</DialogTitle>
           </DialogHeader>
           <Input
+            autoFocus
             value={renameTitle}
             onChange={(e) => setRenameTitle(e.target.value)}
             placeholder="请输入新标题"
+            onFocus={(e) => e.currentTarget.select()}
             onKeyDown={(e) => e.key === 'Enter' && handleRenameConfirm()}
           />
           <DialogFooter>
             <Button variant="outline" onClick={handleRenameCancel}>取消</Button>
-            <Button onClick={handleRenameConfirm}>确认</Button>
+            <Button onClick={handleRenameConfirm} disabled={renameSubmitting}>{renameSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : '确认'}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -3360,14 +3389,16 @@ export default function ChatPage() {
             <DialogTitle>重命名项目</DialogTitle>
           </DialogHeader>
           <Input
+            autoFocus
             value={projectRenameLabel}
             onChange={(e) => setProjectRenameLabel(e.target.value)}
             placeholder="请输入项目名称"
+            onFocus={(e) => e.currentTarget.select()}
             onKeyDown={(e) => e.key === 'Enter' && confirmProjectRename()}
           />
           <DialogFooter>
             <Button variant="outline" onClick={cancelProjectRename}>取消</Button>
-            <Button onClick={confirmProjectRename}>确认</Button>
+            <Button onClick={confirmProjectRename} disabled={projectRenameSubmitting}>{projectRenameSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : '确认'}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -3400,6 +3431,22 @@ export default function ChatPage() {
           <DialogFooter>
             <Button variant="outline" onClick={() => setConversationDeleteTarget(null)}>取消</Button>
             <Button variant="destructive" onClick={() => void confirmConversationDelete()}>删除对话</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Message delete confirm dialog */}
+      <Dialog open={!!deleteMessageTarget} onOpenChange={(open) => !open && setDeleteMessageTarget(null)}>
+        <DialogContent className="max-w-[420px]">
+          <DialogHeader>
+            <DialogTitle>删除消息</DialogTitle>
+            <DialogDescription>
+              将删除这条消息及其后续分支。此操作不可撤销。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteMessageTarget(null)}>取消</Button>
+            <Button variant="destructive" onClick={() => void confirmDeleteMessage()}>删除消息</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -189,7 +189,7 @@ export interface TranscriptActionHandlers {
   onRetryAnswer?: (item: AssistantAnswerItem) => void | Promise<void>;
   onEditBranchAnswer?: (item: AssistantAnswerItem) => void | Promise<void>;
   planActionPending?: string | null;
-  planError?: string | null;
+  planErrorByItem?: Record<string, string>;
   toolApprovalPending?: string | null;
-  toolApprovalError?: string | null;
+  toolApprovalErrorByItem?: Record<string, string>;
 }

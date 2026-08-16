@@ -7,13 +7,13 @@ export function ToolApprovalCard({
   onApproveTool,
   onRejectTool,
   toolApprovalPending = null,
-  toolApprovalError = null,
+  toolApprovalErrorByItem = {},
 }: {
   item: ToolApprovalItem;
   onApproveTool?: TranscriptToolApprovalActionHandler;
   onRejectTool?: TranscriptToolApprovalActionHandler;
   toolApprovalPending?: string | null;
-  toolApprovalError?: string | null;
+  toolApprovalErrorByItem?: Record<string, string>;
 }) {
   const status = item.status === 'approved'
     ? '已批准'
@@ -80,7 +80,7 @@ export function ToolApprovalCard({
             </button>
           </div>
         )}
-        {toolApprovalError && <div className="text-xs" style={{ color: 'var(--destructive)' }}>{toolApprovalError}</div>}
+        {toolApprovalErrorByItem[item.id] && <div className="text-xs" style={{ color: 'var(--destructive)' }}>{toolApprovalErrorByItem[item.id]}</div>}
       </div>
     </div>
   );

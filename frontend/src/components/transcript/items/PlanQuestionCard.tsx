@@ -6,12 +6,12 @@ export function PlanQuestionCard({
   item,
   onAnswerPlanQuestion,
   planActionPending = null,
-  planError = null,
+  planErrorByItem = {},
 }: {
   item: PlanQuestionItem;
   onAnswerPlanQuestion?: TranscriptPlanQuestionAnswerHandler;
   planActionPending?: string | null;
-  planError?: string | null;
+  planErrorByItem?: Record<string, string>;
 }) {
   const questions = Array.isArray(item.questions) ? item.questions : [];
   const [drafts, setDrafts] = useState<string[]>(() => questions.map(() => ''));
@@ -107,7 +107,7 @@ export function PlanQuestionCard({
         })}
         {!answered && (
           <>
-            {planError && <div className="text-xs" style={{ color: 'var(--destructive)' }}>{planError}</div>}
+            {planErrorByItem[item.id] && <div className="text-xs" style={{ color: 'var(--destructive)' }}>{planErrorByItem[item.id]}</div>}
             <button
               type="button"
               className="inline-flex h-7 w-fit items-center gap-1 rounded-md px-2 text-xs transition-colors"

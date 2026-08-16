@@ -32,3 +32,4 @@ dist-server-binary-*/
 /CAPABILITIES.md
 /chattree.sqlite*
 /test.json
+.perf/

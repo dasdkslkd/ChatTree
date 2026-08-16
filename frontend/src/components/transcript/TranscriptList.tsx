@@ -143,9 +143,9 @@ export function TranscriptList({
   onRetryAnswer,
   onEditBranchAnswer,
   planActionPending,
-  planError,
+  planErrorByItem,
   toolApprovalPending,
-  toolApprovalError,
+  toolApprovalErrorByItem,
   renderItem,
 }: TranscriptListProps) {
   // 数据契约：MainPage 入口（onSnapshot / applyTranscriptPatch）已逐 item 归一化（幂等），此处直接消费
@@ -165,12 +165,12 @@ export function TranscriptList({
         onRetryAnswer={onRetryAnswer}
         onEditBranchAnswer={onEditBranchAnswer}
         planActionPending={planActionPending}
-        planError={planError}
+        planErrorByItem={planErrorByItem}
         toolApprovalPending={toolApprovalPending}
-        toolApprovalError={toolApprovalError}
+        toolApprovalErrorByItem={toolApprovalErrorByItem}
       />
     ),
-    [onApprovePlan, onRejectPlan, onAnswerPlanQuestion, onApproveTool, onRejectTool, onCopyItem, onEditUserMessage, onDeleteUserMessage, onRetryAnswer, onEditBranchAnswer, planActionPending, planError, toolApprovalPending, toolApprovalError],
+    [onApprovePlan, onRejectPlan, onAnswerPlanQuestion, onApproveTool, onRejectTool, onCopyItem, onEditUserMessage, onDeleteUserMessage, onRetryAnswer, onEditBranchAnswer, planActionPending, planErrorByItem, toolApprovalPending, toolApprovalErrorByItem],
   );
 
   if (items.length === 0) {

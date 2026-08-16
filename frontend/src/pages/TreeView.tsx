@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -86,6 +87,7 @@ export default function TreeView() {
   const [isPanning, setIsPanning] = useState(false);
   const [direction, setDirection] = useState<'TB' | 'LR'>('TB');
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [deleteBranchTarget, setDeleteBranchTarget] = useState<{ nodeId: string; label: string } | null>(null);
   const [prunePrompt, setPrunePrompt] = useState<PrunePromptState | null>(null);
   const [copiedNodeId, setCopiedNodeId] = useState<string | null>(null);
   const panStartRef = useRef({ x: 0, y: 0, tx: 0, ty: 0 });
@@ -131,12 +133,19 @@ export default function TreeView() {
     }
   }, []);
 
-  // Close context menu on outside click
+  // 关闭右键菜单：外部点击或 Esc
   useEffect(() => {
     if (!contextMenu) return;
     const close = () => setContextMenu(null);
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') close();
+    };
     window.addEventListener('click', close);
-    return () => window.removeEventListener('click', close);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('keydown', onKeyDown);
+    };
   }, [contextMenu]);
 
   const topologyKey = useMemo(() => {
@@ -296,16 +305,22 @@ export default function TreeView() {
     }
   }, []);
 
-  const handleDeleteBranch = useCallback(async () => {
-    if (!contextMenu || !currentConversation) return;
-    if (!confirm(`确定删除「${contextMenu.label}」及其所有后续分支？`)) return;
+  const handleDeleteBranch = useCallback(() => {
+    if (!contextMenu) return;
+    setDeleteBranchTarget({ nodeId: contextMenu.nodeId, label: contextMenu.label });
+    setContextMenu(null);
+  }, [contextMenu]);
+
+  const confirmDeleteBranch = async () => {
+    if (!deleteBranchTarget) return;
+    const { nodeId } = deleteBranchTarget;
+    setDeleteBranchTarget(null);
     try {
-      await deleteNode(contextMenu.nodeId);
-      setContextMenu(null);
+      await deleteNode(nodeId);
     } catch (error) {
       toast.error(getApiErrorMessage(error, '删除节点失败'));
     }
-  }, [contextMenu, currentConversation, deleteNode]);
+  };
 
   const handleGeneratePruneSummary = useCallback(() => {
     if (!contextMenu || !currentConversation) return;
@@ -562,6 +577,7 @@ export default function TreeView() {
       {/* Context Menu */}
       {contextMenu && (
         <div
+          role="menu"
           className="fixed z-50 min-w-[10rem] rounded-md border bg-popover p-1 shadow-md"
           style={{ left: contextMenu.x, top: contextMenu.y }}
           onClick={(e) => e.stopPropagation()}
@@ -593,6 +609,21 @@ export default function TreeView() {
           </button>
         </div>
       )}
+
+      <Dialog open={!!deleteBranchTarget} onOpenChange={(open) => !open && setDeleteBranchTarget(null)}>
+        <DialogContent className="max-w-[420px]">
+          <DialogHeader>
+            <DialogTitle>删除分支</DialogTitle>
+            <DialogDescription>
+              将删除「{deleteBranchTarget?.label}」及其所有后续分支。此操作不可撤销。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteBranchTarget(null)}>取消</Button>
+            <Button variant="destructive" onClick={() => void confirmDeleteBranch()}>删除分支</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={!!prunePrompt} onOpenChange={(open) => {
         if (!open) setPrunePrompt(null);

@@ -77,9 +77,9 @@ export const TranscriptItemRenderer = memo(
     onRetryAnswer,
     onEditBranchAnswer,
     planActionPending,
-    planError,
+    planErrorByItem,
     toolApprovalPending,
-    toolApprovalError,
+    toolApprovalErrorByItem,
   }: TranscriptItemRendererProps) {
   switch (item.type) {
     case 'user_message':
@@ -110,7 +110,7 @@ export const TranscriptItemRenderer = memo(
           item={item}
           onAnswerPlanQuestion={onAnswerPlanQuestion}
           planActionPending={planActionPending}
-          planError={planError}
+          planErrorByItem={planErrorByItem}
         />
       );
     case 'plan_approval':
@@ -120,7 +120,7 @@ export const TranscriptItemRenderer = memo(
           onApprovePlan={onApprovePlan}
           onRejectPlan={onRejectPlan}
           planActionPending={planActionPending}
-          planError={planError}
+          planErrorByItem={planErrorByItem}
         />
       );
     case 'tool_approval':
@@ -130,7 +130,7 @@ export const TranscriptItemRenderer = memo(
           onApproveTool={onApproveTool}
           onRejectTool={onRejectTool}
           toolApprovalPending={toolApprovalPending}
-          toolApprovalError={toolApprovalError}
+          toolApprovalErrorByItem={toolApprovalErrorByItem}
         />
       );
     case 'task_notification':
@@ -147,8 +147,8 @@ export const TranscriptItemRenderer = memo(
     // 行组件按 item 内容跳过重渲染：未变化的历史消息不再重建 Markdown/折叠等 DOM
     return prevProps.item === nextProps.item
       && prevProps.planActionPending === nextProps.planActionPending
-      && prevProps.planError === nextProps.planError
+      && prevProps.planErrorByItem === nextProps.planErrorByItem
       && prevProps.toolApprovalPending === nextProps.toolApprovalPending
-      && prevProps.toolApprovalError === nextProps.toolApprovalError;
+      && prevProps.toolApprovalErrorByItem === nextProps.toolApprovalErrorByItem;
   },
 );

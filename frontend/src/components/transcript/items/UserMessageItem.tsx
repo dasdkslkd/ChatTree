@@ -32,6 +32,7 @@ export function UserMessageItem({
 }) {
   const [copied, setCopied] = useState(false);
   const [imageUrls, setImageUrls] = useState<Record<string, string>>({});
+  const [failedImages, setFailedImages] = useState<Record<string, boolean>>({});
   const [preview, setPreview] = useState<PreviewTarget | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewText, setPreviewText] = useState<string | null>(null);
@@ -58,7 +59,9 @@ export function UserMessageItem({
           objectUrls.push(url);
           setImageUrls((prev) => ({ ...prev, [ref.filename]: url }));
         })
-        .catch(() => undefined);
+        .catch(() => {
+          setFailedImages((prev) => ({ ...prev, [ref.filename]: true }));
+        });
     }
     return () => {
       cancelled = true;
@@ -94,16 +97,20 @@ export function UserMessageItem({
         setPreviewText(await blob.text());
       }
     } catch {
-      if (!target.isImage) setPreviewText('附件内容加载失败');
+      setPreviewText(target.isImage ? '图片加载失败' : '附件内容加载失败');
     }
   };
 
   if (!text && !hasAttachments) return null;
 
   const handleCopy = async () => {
-    await onCopy?.(item, text);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1600);
+    try {
+      await onCopy?.(item, text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1600);
+    } catch {
+      // onCopy 失败已由调用方 toast，这里保持未复制状态
+    }
   };
 
   const handleEdit = async () => {
@@ -149,6 +156,16 @@ export function UserMessageItem({
                   className="h-20 max-w-[160px] object-cover rounded-md cursor-pointer hover:opacity-80 transition-opacity"
                   style={{ border: '0.5px solid color-mix(in srgb, var(--icon-accent) 28%, transparent)' }}
                 />
+              ) : failedImages[ref.filename] ? (
+                <button
+                  type="button"
+                  key={ref.filename}
+                  onClick={() => openPreview({ filename: ref.filename, isImage: true })}
+                  className="h-20 w-20 flex items-center justify-center rounded-md text-[10px] leading-tight cursor-pointer hover:opacity-80 transition-opacity"
+                  style={{ border: '0.5px solid color-mix(in srgb, var(--icon-accent) 28%, transparent)', color: 'var(--destructive)' }}
+                >
+                  图片加载失败
+                </button>
               ) : (
                 <div
                   key={ref.filename}
@@ -253,6 +270,8 @@ export function UserMessageItem({
             {preview?.isImage ? (
               previewUrl ? (
                 <img src={previewUrl} alt={preview.filename} className="max-w-full" />
+              ) : previewText !== null ? (
+                <div className="flex justify-center py-8 text-sm" style={{ color: 'var(--destructive)' }}>{previewText}</div>
               ) : (
                 <div className="flex justify-center py-8">
                   <Loader2 className="h-5 w-5 animate-spin" style={{ color: 'var(--fg-tertiary)' }} />
