@@ -1,18 +1,39 @@
+/* 壳层（标签页 / 导航页）主题：默认亮色，暗色由 prefers-color-scheme 驱动。
+   main.cjs 通过 nativeTheme.themeSource 同步应用外观偏好，因此本页跟随
+   window 边框与主界面主题，无需在壳层内单独维护偏好。 */
 :root {
-  --background: #100e0c;
-  --foreground: #fbf7f4;
-  --card: #1c1917;
-  --primary: #d97757;
-  --primary-foreground: #fff5ef;
-  --secondary: #2a2723;
-  --muted: #2a2723;
-  --muted-foreground: rgba(251,247,244,0.52);
-  --accent: rgba(217,119,87,0.14);
-  --accent-foreground: #fbf7f4;
-  --border: rgba(255,247,240,0.09);
-  --accent-green: #5fb98a;
-  --accent-red: #e8705f;
-  --accent-yellow: #e8c45a;
+  --background: #f6f2ee;
+  --foreground: #2a1c14;
+  --card: #ffffff;
+  --primary: #c25f3f;
+  --primary-foreground: #ffffff;
+  --secondary: rgba(60,40,30,0.06);
+  --muted: rgba(60,40,30,0.06);
+  --muted-foreground: rgba(42,28,20,0.65);
+  --accent: rgba(194,95,63,0.12);
+  --accent-foreground: #2a1c14;
+  --border: rgba(60,40,30,0.10);
+  --accent-green: #2e9e6b;
+  --accent-red: #d2452e;
+  --accent-yellow: #c79320;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #100e0c;
+    --foreground: #fbf7f4;
+    --card: #1c1917;
+    --primary: #d97757;
+    --primary-foreground: #fff5ef;
+    --secondary: #2a2723;
+    --muted: #2a2723;
+    --muted-foreground: rgba(251,247,244,0.52);
+    --accent: rgba(217,119,87,0.14);
+    --accent-foreground: #fbf7f4;
+    --border: rgba(255,247,240,0.09);
+    --accent-green: #5fb98a;
+    --accent-red: #e8705f;
+    --accent-yellow: #e8c45a;
+  }
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--background); color: var(--foreground); height: 100vh; display: flex; flex-direction: column; overflow: hidden; }

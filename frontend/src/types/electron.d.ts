@@ -9,6 +9,7 @@ declare global {
       getNavigatorData: () => Promise<{ sshHosts: string[] }>;
       selectProjectFolder: () => Promise<string | null>;
       quitApp: () => Promise<void>;
+      setTheme: (theme: 'light' | 'dark' | 'system') => void;
       getPathForFile: (file: File) => string;
       onTabsUpdated: (callback: (tabs: Array<{ id: string; label: string; status: string; error: string | null }>, activeId: string | null) => void) => void;
     };

@@ -137,3 +137,13 @@ assert.match(
   /selectProjectFolder: \(\) => ipcRenderer\.invoke\("project:select-folder"\)/,
   'The native directory picker should be exposed to profile views',
 );
+assert.match(
+  source,
+  /ipcMain\.on\("theme:set",[\s\S]*nativeTheme\.themeSource = theme/,
+  'The appearance preference should drive the native window frame',
+);
+assert.match(
+  preloadSource,
+  /setTheme: \(theme\) => ipcRenderer\.send\("theme:set", theme\)/,
+  'Profile views should report the appearance preference to the native shell',
+);

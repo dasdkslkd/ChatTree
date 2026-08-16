@@ -29,6 +29,13 @@ function applyResolvedTheme(resolved: ResolvedTheme, animate: boolean): void {
   root.classList.toggle('light', resolved === 'light');
 }
 
+// 同步外观偏好到 Electron 原生窗口：nativeTheme 驱动壳层标签页与窗口边框主题
+function syncNativeTheme(theme: ThemePreference): void {
+  if (typeof window !== 'undefined' && window.electronAPI?.setTheme) {
+    window.electronAPI.setTheme(theme);
+  }
+}
+
 interface ThemeState {
   theme: ThemePreference;
   resolvedTheme: ResolvedTheme;
@@ -44,6 +51,7 @@ export const useThemeStore = create<ThemeState>()(
         const resolvedTheme = resolveTheme(theme);
         applyResolvedTheme(resolvedTheme, resolvedTheme !== get().resolvedTheme);
         set({ theme, resolvedTheme });
+        syncNativeTheme(theme);
       },
     }),
     {
@@ -57,6 +65,7 @@ export const useThemeStore = create<ThemeState>()(
 const initialResolvedTheme = resolveTheme(useThemeStore.getState().theme);
 applyResolvedTheme(initialResolvedTheme, false);
 useThemeStore.setState({ resolvedTheme: initialResolvedTheme });
+syncNativeTheme(useThemeStore.getState().theme);
 
 // 跟随系统主题变化（仅当偏好为 system 时生效）
 if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {

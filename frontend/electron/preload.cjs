@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getNavigatorData: () => ipcRenderer.invoke("navigator:get-data"),
   selectProjectFolder: () => ipcRenderer.invoke("project:select-folder"),
   quitApp: () => ipcRenderer.invoke("app:quit"),
+  setTheme: (theme) => ipcRenderer.send("theme:set", theme),
   getPathForFile: (file) => webUtils.getPathForFile(file),
   onTabsUpdated: (callback) => {
     ipcRenderer.on("tabs:updated", (_event, tabs, activeId) => {

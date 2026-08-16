@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, WebContentsView, Menu, dialog, shell } = require("electron");
+const { app, BrowserWindow, ipcMain, WebContentsView, Menu, dialog, shell, nativeTheme } = require("electron");
 const { autoUpdater } = require("electron-updater");
 const path = require("path");
 const fs = require("fs");
@@ -541,6 +541,13 @@ function registerIpc() {
   });
   ipcMain.handle("app:quit", () => {
     app.quit();
+  });
+
+  // 外观偏好 → 原生窗口：nativeTheme 驱动窗口边框与所有渲染进程的
+  // prefers-color-scheme，壳层标签页（shell.css 媒体查询）随之切换
+  ipcMain.on("theme:set", (_event, theme) => {
+    if (theme !== "light" && theme !== "dark" && theme !== "system") return;
+    nativeTheme.themeSource = theme;
   });
 }
 
