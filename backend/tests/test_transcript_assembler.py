@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 
 from backend.api.routes import messages as messages_route
 from backend.api.routes import runs as runs_route
@@ -2251,3 +2252,33 @@ def test_continuation_session_clears_stale_run_status_error(tmp_path):
         if operation["op"] == "remove"
     ]
     assert {operation["id"] for operation in removed} == {f"run-status:{failed_run}"}
+
+
+def test_patch_reports_live_duration_for_running_process(tmp_path):
+    """运行中的 assistant_process 必须携带动态 duration_ms，
+    让前端"已处理"标签在流式期间即可显示实时等待用时。"""
+    persistence, repository = _repo(tmp_path)
+    conversation_id, node_id = _conversation(repository)
+    run_id = SQLiteRunRepository(persistence).create_run(
+        conversation_id,
+        kind="chat",
+        target_node_id=node_id,
+        summary="live duration",
+    )
+    with persistence.connect() as conn:
+        conn.execute("UPDATE runs SET created_at = ? WHERE id = ?", (time.time() - 5, run_id))
+
+    session = TranscriptAssembler(persistence).patch_session(run_id)
+    patch = session.feed({
+        "status": "content",
+        "conversation_id": conversation_id,
+        "node_id": node_id,
+        "content": "live",
+    })
+    process = next(
+        operation["item"]
+        for operation in patch["operations"]
+        if operation["op"] == "upsert" and operation["item"]["type"] == "assistant_process"
+    )
+    assert process["duration_ms"] is not None
+    assert process["duration_ms"] >= 4000

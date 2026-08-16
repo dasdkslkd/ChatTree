@@ -39,6 +39,17 @@ function testProcessedFoldTracksStreaming() {
   assert.match(source, /useEffect\(\(\) =>/);
 }
 
+function testProcessedFoldShowsLiveDurationWhileStreaming() {
+  // 运行中：以 totalDuration 为起点叠加本地秒级计时，标签实时刷新等待用时
+  const source = readSource('src/components/transcript/TranscriptList.tsx');
+  assert.match(source, /const \[durationMs, setDurationMs\] = useState\(totalDuration\);/);
+  assert.match(source, /const baseAt = Date\.now\(\) - totalDuration;/);
+  assert.match(source, /setInterval\(\(\) => \{\s*setDurationMs\(Math\.max\(totalDuration, Date\.now\(\) - baseAt\)\);\s*\}, 1000\)/);
+  assert.match(source, /const duration = streaming \? durationMs : totalDuration;/);
+  assert.match(source, /duration > 0 \? `已处理 \$\{formatProcessedDuration\(duration\) \?\? ''\}`\.trim\(\) : '已处理'/);
+}
+
 testFormatsProcessedDurationWithHours();
 testProcessedFoldTracksStreaming();
+testProcessedFoldShowsLiveDurationWhileStreaming();
 console.log('assistantTimelineFolding tests passed');

@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { ChevronRight } from 'lucide-react';
+import { ChevronRight, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import MarkdownContent from '../MarkdownContent';
 import type { TranscriptActionHandlers, TranscriptItem } from '../../types/transcript';
 import { formatProcessedDuration } from '../../utils/time';
 import { TranscriptItemRenderer } from './TranscriptItemRenderer';
@@ -14,10 +15,41 @@ const PROCESS_ITEM_TYPES = new Set<TranscriptItem['type']>([
   'task_notification',
 ]);
 
+function PendingUserMessage({ content }: { content: string }) {
+  return (
+    <div className="w-full flex flex-col group items-end" role="listitem">
+      <div className="flex flex-col max-w-full min-w-0 items-end">
+        <div
+          className="max-w-full min-w-0 break-words px-3 py-2 rounded-2xl rounded-br-sm leading-relaxed prose prose-sm prose-invert [&_p]:m-0 [&_p:not(:last-child)]:mb-2"
+          style={{
+            background: 'linear-gradient(160deg, color-mix(in srgb, var(--accent-soft) 45%, transparent), color-mix(in srgb, var(--accent-soft) 25%, transparent))',
+            border: '0.5px solid color-mix(in srgb, var(--icon-accent) 28%, transparent)',
+            boxShadow: 'var(--highlight-top)',
+            color: 'var(--fg-85)',
+            fontSize: 'var(--codex-chat-font-size)',
+            lineHeight: 'calc(var(--codex-chat-font-size) + 9px)',
+          }}
+        >
+          <MarkdownContent enableMermaid>{content}</MarkdownContent>
+        </div>
+        <span
+          className="mt-1 flex items-center gap-1 self-end text-[11px]"
+          style={{ color: 'var(--fg-tertiary)' }}
+          role="status"
+        >
+          <Loader2 className="h-3 w-3 animate-spin" />
+          发送中
+        </span>
+      </div>
+    </div>
+  );
+}
+
 interface TranscriptListProps extends TranscriptActionHandlers {
   items: TranscriptItem[];
   isLoading?: boolean;
   transcriptError?: string | null;
+  pendingUserItems?: Array<{ id: string; content: string }>;
   renderItem?: (item: TranscriptItem, defaultItem: ReactNode) => ReactNode;
 }
 
@@ -32,9 +64,19 @@ function ProcessedItemsFold({
 }) {
   const streaming = items.some((item) => (item as { status?: string }).status === 'running');
   const [expanded, setExpanded] = useState(streaming);
+  const [durationMs, setDurationMs] = useState(totalDuration);
   useEffect(() => {
     if (!streaming) setExpanded(false);
   }, [streaming]);
+  useEffect(() => {
+    if (!streaming) return;
+    const baseAt = Date.now() - totalDuration;
+    const timer = window.setInterval(() => {
+      setDurationMs(Math.max(totalDuration, Date.now() - baseAt));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [streaming, totalDuration]);
+  const duration = streaming ? durationMs : totalDuration;
   return (
     <div className="w-full flex flex-col items-start" role="listitem">
       <div className={cn('processed-fold', expanded && 'expanded')}>
@@ -44,7 +86,7 @@ function ProcessedItemsFold({
           aria-expanded={expanded}
           onClick={() => setExpanded((value) => !value)}
         >
-          <span>{totalDuration > 0 ? `已处理 ${formatProcessedDuration(totalDuration) ?? ''}`.trim() : '已处理'}</span>
+          <span>{duration > 0 ? `已处理 ${formatProcessedDuration(duration) ?? ''}`.trim() : '已处理'}</span>
           <ChevronRight className="processed-fold-chevron" />
         </button>
       </div>
@@ -89,6 +131,7 @@ export function TranscriptList({
   items,
   isLoading = false,
   transcriptError = null,
+  pendingUserItems = [],
   onApprovePlan,
   onRejectPlan,
   onAnswerPlanQuestion,
@@ -171,6 +214,9 @@ export function TranscriptList({
           />
         );
       })}
+      {pendingUserItems.map((pending) => (
+        <PendingUserMessage key={pending.id} content={pending.content} />
+      ))}
     </div>
   );
 }

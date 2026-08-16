@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections import defaultdict
 from typing import Any
 
@@ -295,7 +296,7 @@ class TranscriptAssembler:
                 "node_id": node_id,
                 "run_id": process_run_id,
                 "status": status,
-                "duration_ms": None if use_live_stream else self._run_duration_ms(
+                "duration_ms": self._run_duration_ms(
                     [run_by_id[process_run_id]] if process_run_id in run_by_id else runs
                 ),
                 "blocks": process_blocks,
@@ -995,8 +996,9 @@ class TranscriptAssembler:
         run = runs[-1]
         start = run.get("created_at")
         end = run.get("finished_at")
-        if isinstance(start, (int, float)) and isinstance(end, (int, float)):
-            return max(0, int((end - start) * 1000))
+        if isinstance(start, (int, float)):
+            end_ms = end if isinstance(end, (int, float)) else time.time()
+            return max(0, int((end_ms - start) * 1000))
         return None
 
     def _message_sort_key(self, message: dict[str, Any], run_time_by_id: dict[str, float]) -> tuple[float, float, float, int]:

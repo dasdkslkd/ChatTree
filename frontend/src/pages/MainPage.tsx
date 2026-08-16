@@ -894,6 +894,26 @@ export default function ChatPage() {
   const taskPanelItem = useMemo(() => createTaskPanelItem(activeTask), [activeTask]);
   const taskPanelOpenCount = taskPanelItem ? 1 : 0;
   const displayTranscriptItems = transcriptItems;
+  const pendingUserItems = useMemo(() => {
+    if (!currentConversation) return [];
+    const landedNodeIds = new Set(
+      transcriptItems
+        .filter((item): item is UserMessageItem => item.type === 'user_message')
+        .map((item) => item.node_id),
+    );
+    return activeRunStates
+      .filter((run) =>
+        run.conversationId === currentConversation.id
+        && run.pendingUserMessage
+        && (run.status === 'streaming' || run.status === 'waiting_approval')
+        && shouldPatchRunIntoMainConversation(run)
+        && (!run.nodeId || !landedNodeIds.has(run.nodeId)),
+      )
+      .map((run) => ({
+        id: `pending:${run.runId}`,
+        content: run.pendingUserMessage as string,
+      }));
+  }, [activeRunStates, currentConversation, transcriptItems]);
 
   useEffect(() => {
     const conversationId = currentConversation?.id;
@@ -3018,6 +3038,7 @@ export default function ChatPage() {
                 >
                   <TranscriptList
                     items={displayTranscriptItems}
+                    pendingUserItems={pendingUserItems}
                     isLoading={transcriptLoading}
                     transcriptError={transcriptError}
                     onCopyItem={handleCopyTranscriptItem}
