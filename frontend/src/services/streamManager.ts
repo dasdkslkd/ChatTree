@@ -9,11 +9,11 @@ import { slashRegistry } from './slashRegistry';
 import { flushPerfEvents } from '../perf/client';
 import { perfNow, recordMark, recordSpan } from '../perf/marks';
 
-export const STREAM_DURATION_UPDATE_MS = 1000;
 const STREAM_RECONNECT_DELAYS_MS = [1000, 2000, 5000, 10000];
 
 export interface StreamState {
   runId: string;
+  version: number;
   status: 'idle' | 'streaming' | 'waiting_approval' | 'stopping' | 'completed' | 'error' | 'stopped';
   content: string;
   reasoning: string;
@@ -30,7 +30,6 @@ export interface StreamState {
   workflowEvents: WorkflowEventState[];
   command: CommandRunState;
   tokensUsed: number;
-  duration: number;
   errorMessage: string | null;
   abortController: AbortController | null;
   pendingUserMessage: string | null;
@@ -163,7 +162,6 @@ export class StreamManager {
   private listeners = new Set<StatusListener>();
   private finishListeners = new Set<FinishListener>();
   private transcriptPatchListeners = new Set<TranscriptPatchListener>();
-  private durationTimers = new Map<string, number>();
   private pendingNotifyHandles = new Map<string, { handle: number; kind: 'animationFrame' | 'timeout' }>();
   private runAliases = new Map<string, string>();
   private tempSeq = 0;
@@ -183,25 +181,7 @@ export class StreamManager {
     const states = ids ? [...ids]
       .map((id) => this.streams.get(id))
       .filter((state): state is StreamState => Boolean(state)) : [];
-    const signature = states.map((state) => [
-      state.runId,
-      state.kind,
-      state.status,
-      state.createdByRunId ?? '',
-      state.cancellationParentRunId ?? '',
-      state.summary,
-      JSON.stringify(state.metadata || {}),
-      state.workflowEvents.length,
-      state.anchorNodeId ?? '',
-      state.nodeId ?? '',
-      state.targetNodeId ?? '',
-      state.duration,
-      state.content,
-      state.reasoning,
-      state.errorMessage ?? '',
-      state.pendingUserMessage ?? '',
-      state.toolPermissionMode ?? '',
-    ].join(':')).join('|');
+    const signature = states.map((state) => `${state.runId}:${state.version}`).join('|');
     const cached = this.conversationSnapshots.get(conversationId);
     if (cached?.signature === signature) return cached.states;
     this.conversationSnapshots.set(conversationId, { signature, states });
@@ -317,11 +297,6 @@ export class StreamManager {
       set.delete(oldRunId);
       set.add(newRunId);
     }
-    const timer = this.durationTimers.get(oldRunId);
-    if (timer !== undefined) {
-      this.durationTimers.delete(oldRunId);
-      this.durationTimers.set(newRunId, timer);
-    }
     return newRunId;
   }
 
@@ -377,6 +352,7 @@ export class StreamManager {
 
     const nextState = {
       ...state,
+      version: state.version + 1,
       status: nextStatus,
       content: typeof answerItem?.content === 'string' ? answerItem.content : state.content,
       nodeId,
@@ -403,6 +379,7 @@ export class StreamManager {
   ): StreamState {
     return {
       runId,
+      version: 1,
       status: 'streaming',
       content: '',
       reasoning: '',
@@ -419,7 +396,6 @@ export class StreamManager {
       workflowEvents: [],
       command: createCommandState(),
       tokensUsed: 0,
-      duration: 0,
       errorMessage: null,
       abortController: controller,
       pendingUserMessage,
@@ -474,6 +450,7 @@ export class StreamManager {
       if (!state) return;
       const finalState = {
         ...state,
+        version: state.version + 1,
         status,
         errorMessage: status === 'error' && err instanceof Error ? err.message : state.errorMessage,
         reasoningActive: false,
@@ -566,15 +543,6 @@ export class StreamManager {
     let runId = initialRunId;
     let drained = false;
     let finishStatus: 'completed' | 'error' | 'stopped' = 'completed';
-    const start = Date.now();
-    const timer = window.setInterval(() => {
-      const state = this.streams.get(runId);
-      if (state?.status === 'streaming') {
-        this.streams.set(runId, { ...state, duration: Date.now() - start });
-        this.notify(state.conversationId);
-      }
-    }, STREAM_DURATION_UPDATE_MS);
-    this.durationTimers.set(runId, timer);
 
     try {
       let streamFactory = openStream;
@@ -634,6 +602,7 @@ export class StreamManager {
       if (state) {
         this.streams.set(runId, {
           ...state,
+          version: state.version + 1,
           status: finishStatus === 'error' ? 'error' : 'stopped',
           errorMessage: finishStatus === 'error' && err instanceof Error ? err.message : state.errorMessage,
           reasoningActive: false,
@@ -641,8 +610,6 @@ export class StreamManager {
         this.notify(state.conversationId, true);
       }
     } finally {
-      clearInterval(timer);
-      this.durationTimers.delete(runId);
       const state = this.streams.get(runId);
       if (state) {
         const finalStatus = state.status === 'streaming'
@@ -652,8 +619,8 @@ export class StreamManager {
             : state.status;
         const finalState = {
           ...state,
+          version: state.version + 1,
           status: finalStatus,
-          duration: Date.now() - start,
           reasoningActive: false,
         };
         this.streams.set(runId, finalState);
@@ -679,15 +646,6 @@ export class StreamManager {
     let runId = initialRunId;
     let finishStatus: 'completed' | 'error' | 'stopped' = 'completed';
     let caughtError: unknown = null;
-    const start = Date.now();
-    const timer = window.setInterval(() => {
-      const state = this.streams.get(runId);
-      if (state?.status === 'streaming') {
-        this.streams.set(runId, { ...state, duration: Date.now() - start });
-        this.notify(state.conversationId);
-      }
-    }, STREAM_DURATION_UPDATE_MS);
-    this.durationTimers.set(runId, timer);
 
     try {
       for await (const patch of openStream()) {
@@ -711,6 +669,7 @@ export class StreamManager {
       if (state) {
         this.streams.set(runId, {
           ...state,
+          version: state.version + 1,
           status: finishStatus === 'error' ? 'error' : 'stopped',
           errorMessage: finishStatus === 'error' && err instanceof Error ? err.message : state.errorMessage,
           reasoningActive: false,
@@ -718,8 +677,6 @@ export class StreamManager {
         this.notify(state.conversationId, true);
       }
     } finally {
-      clearInterval(timer);
-      this.durationTimers.delete(runId);
       const state = this.streams.get(runId);
       if (state) {
         const finalStatus = state.status === 'streaming'
@@ -729,8 +686,8 @@ export class StreamManager {
             : state.status;
         this.streams.set(runId, {
           ...state,
+          version: state.version + 1,
           status: finalStatus,
-          duration: Date.now() - start,
           reasoningActive: false,
         });
         this.notify(state.conversationId, true);
@@ -746,7 +703,7 @@ export class StreamManager {
   async stopRun(runId: string): Promise<void> {
     const state = this.streams.get(runId);
     if (!state || (state.status !== 'streaming' && state.status !== 'waiting_approval' && state.status !== 'stopping')) return;
-    this.streams.set(runId, { ...state, status: 'stopping', reasoningActive: false });
+    this.streams.set(runId, { ...state, version: state.version + 1, status: 'stopping', reasoningActive: false });
     this.notify(state.conversationId, true);
     const stopRequest = !runId.startsWith('client_') && !runId.startsWith('attach_')
       ? runsApi.stop(runId)
@@ -769,9 +726,6 @@ export class StreamManager {
   cleanupRun(runId: string): void {
     const state = this.streams.get(runId);
     if (!state) return;
-    const timer = this.durationTimers.get(runId);
-    if (timer !== undefined) clearInterval(timer);
-    this.durationTimers.delete(runId);
     state.abortController?.abort();
     this.streams.delete(runId);
     const set = this.runsByConversation.get(state.conversationId);
@@ -808,7 +762,6 @@ export class StreamManager {
     for (const state of this.streams.values()) {
       state.abortController?.abort();
     }
-    for (const timer of this.durationTimers.values()) clearInterval(timer);
     for (const conversationId of this.pendingNotifyHandles.keys()) {
       this.clearPendingNotify(conversationId);
     }
@@ -819,7 +772,6 @@ export class StreamManager {
     this.listeners.clear();
     this.finishListeners.clear();
     this.transcriptPatchListeners.clear();
-    this.durationTimers.clear();
     this.pendingNotifyHandles.clear();
   }
 }

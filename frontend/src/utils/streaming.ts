@@ -1,16 +1,13 @@
 import type { GenerationInfo } from '../types/message';
 
 export const ACTIVE_STREAM_VISIBLE_POLL_MS = 5000;
-export const ACTIVE_STREAM_IDLE_POLL_MS = 30000;
 
 export function getActiveStreamPollingDelay(options: {
   activeStreamCount: number;
   documentHidden: boolean;
 }): number | null {
   if (options.documentHidden) return null;
-  return options.activeStreamCount > 0
-    ? ACTIVE_STREAM_VISIBLE_POLL_MS
-    : ACTIVE_STREAM_IDLE_POLL_MS;
+  return options.activeStreamCount > 0 ? ACTIVE_STREAM_VISIBLE_POLL_MS : null;
 }
 
 export function getGenerationStatusText(generationInfo?: Pick<GenerationInfo, 'status' | 'error_message'> | null): string | null {

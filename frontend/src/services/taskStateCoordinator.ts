@@ -19,6 +19,7 @@ type TaskStateEntry = {
   dirty: boolean;
   timer: ReturnType<typeof setTimeout> | null;
   attempt: number;
+  lastRefreshedVersion: string | null;
 };
 
 function shouldContinueRefreshing(state: TaskStateSnapshot): boolean {
@@ -108,7 +109,10 @@ export class TaskStateCoordinator {
 
   private scheduleNext(conversationId: string, entry: TaskStateEntry): void {
     this.clearTimer(entry);
-    if (!entry.state || !shouldContinueRefreshing(entry.state) || entry.listeners.size === 0) {
+    const state = entry.state;
+    const changed = state !== null && state.version !== entry.lastRefreshedVersion;
+    entry.lastRefreshedVersion = state?.version ?? null;
+    if (!state || !changed || !shouldContinueRefreshing(state) || entry.listeners.size === 0) {
       entry.attempt = 0;
       return;
     }
@@ -134,6 +138,7 @@ export class TaskStateCoordinator {
         dirty: false,
         timer: null,
         attempt: 0,
+        lastRefreshedVersion: null,
       };
       this.entries.set(conversationId, entry);
     }

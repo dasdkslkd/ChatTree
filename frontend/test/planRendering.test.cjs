@@ -19,7 +19,8 @@ function testPlanRenderingIsTypedAndTopLevel() {
   assert.doesNotMatch(timeline, new RegExp(removedCard));
   assert.doesNotMatch(transcriptItems, /rawType|plan_card/);
   const list = read('src/components/transcript/TranscriptList.tsx');
-  assert.match(list, /normalizeTranscriptItems\(items\)/);
+  assert.match(read('src/pages/MainPage.tsx'), /normalizeTranscriptItems\(next\.items\)/);
+  assert.doesNotMatch(list, /normalizeTranscriptItems/);
   assert.doesNotMatch(list, /mergeNodeProcessItems|processByNode/);
   assert.doesNotMatch(list, /compact_with_next_answer|compact_after_process/);
   assert.doesNotMatch(timeline, /allowProcessOnly: true/);

@@ -713,15 +713,6 @@ export default function ChatPage() {
   useEffect(() => {
     void refreshTaskNotifications(currentConversation?.id);
   }, [currentConversation?.id, refreshTaskNotifications]);
-  useEffect(() => {
-    if (!currentConversation?.id) return;
-    const conversationId = currentConversation.id;
-    const timer = window.setInterval(() => {
-      if (document.hidden) return;
-      void refreshTaskNotifications(conversationId);
-    }, 2500);
-    return () => window.clearInterval(timer);
-  }, [currentConversation?.id, refreshTaskNotifications]);
   const handleBindTaskNotification = useCallback(async (notificationId: string) => {
     const conversationId = currentConversation?.id;
     const deliveryNodeId = selectedBranchTipId || currentConversation?.current_node_id || null;
@@ -1639,6 +1630,9 @@ export default function ChatPage() {
   // 不依赖当前查看的是哪个对话，因此切走的对话流完成也能正确落地。
   useEffect(() => {
     const unsubscribe = streamManager.onFinish(async ({ conversationId: finishedId, runId, drained, nodeId, targetNodeId, controller }) => {
+      if (finishedId === currentConversationIdRef.current) {
+        void refreshTaskNotifications(finishedId);
+      }
       const finishedRun = streamManager.getConversationStates(finishedId).find((state) => state.runId === runId);
       const shouldPatchMainConversation = finishedRun ? shouldPatchRunIntoMainConversation(finishedRun) : true;
       void scheduleConversationSync(finishedId, {
@@ -1681,6 +1675,7 @@ export default function ChatPage() {
   }, [
     scheduleConversationSync,
     sendNextQueuedMessage,
+    refreshTaskNotifications,
   ]);
 
   useLayoutEffect(() => {

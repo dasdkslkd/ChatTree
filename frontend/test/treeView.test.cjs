@@ -12,13 +12,13 @@ function testRootDetectionUsesBackendFlag() {
 
 function testEmptyNonRootNodeGetsPlanContinuationLabel() {
   assert.match(source, /return node\.is_root \? '对话开始' : '计划续跑'/);
-  assert.match(source, /getTreeNodePrimaryText\(node\.data\)/);
+  assert.match(source, /getTreeNodePrimaryText\(treeNode\)/);
 }
 
 function testActiveChatTargetRefreshesAndRendersInTree() {
   assert.match(source, /run\.kind === 'chat' && runNodeId/);
   assert.match(source, /loadTree\(conversationId\)/);
-  assert.match(source, /activeChatRun\?\.content \|\| node\.data\.assistant_content/);
+  assert.match(source, /activeChatRun\?\.content \|\| treeNode\.assistant_content/);
   assert.match(source, /className="tree-streaming-border"/);
   assert.match(source, /回复中/);
   assert.match(styles, /stroke-dasharray: 18 82/);

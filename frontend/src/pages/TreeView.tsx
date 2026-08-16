@@ -24,7 +24,6 @@ interface LayoutNode {
   y: number;
   width: number;
   height: number;
-  data: TreeNode;
 }
 
 interface LayoutEdge {
@@ -121,13 +120,12 @@ export default function TreeView() {
       activePruneSummaryNodeIds: ids,
     };
   }, [runStates]);
-  const activeChatTargetKey = [...activeChatRunsByNode.keys()].sort().join(':');
 
   useEffect(() => {
     const conversationId = currentConversation?.id;
     if (!conversationId) return;
     void loadTree(conversationId).catch(() => {});
-  }, [activeChatTargetKey, currentConversation?.id, loadTree]);
+  }, [currentConversation?.id, loadTree]);
 
   useEffect(() => () => {
     if (copiedTimerRef.current != null) {
@@ -142,6 +140,14 @@ export default function TreeView() {
     window.addEventListener('click', close);
     return () => window.removeEventListener('click', close);
   }, [contextMenu]);
+
+  const topologyKey = useMemo(() => {
+    if (!treeData) return '';
+    return treeData.nodes
+      .map((node) => `${node.id}:${node.parent_id ?? ''}:${isRootNode(node) ? 1 : 0}`)
+      .sort()
+      .join('|');
+  }, [treeData]);
 
   const { nodes: layoutNodes, edges: layoutEdges, graphWidth, graphHeight } = useMemo(() => {
     if (!treeData || treeData.nodes.length === 0) {
@@ -176,7 +182,6 @@ export default function TreeView() {
           y: dagNode.y - h / 2,
           width: NODE_WIDTH,
           height: h,
-          data: node,
         });
       }
     }
@@ -197,7 +202,7 @@ export default function TreeView() {
     const graphHeight = g.graph().height || 0;
 
     return { nodes: layoutNodes, edges: layoutEdges, graphWidth, graphHeight };
-  }, [treeData, direction]);
+  }, [topologyKey, direction]);
 
   useEffect(() => {
     if (graphWidth > 0 && graphHeight > 0 && containerRef.current) {
@@ -430,12 +435,14 @@ export default function TreeView() {
         </svg>
 
         {layoutNodes.map((node) => {
-          const isActive = node.data.is_current;
-          const isRoot = isRootNode(node.data);
-          const userContent = getTreeUserContent(node.data);
-          const primaryText = getTreeNodePrimaryText(node.data);
+          const treeNode = treeData?.nodes.find((n) => n.id === node.id);
+          if (!treeNode) return null;
+          const isActive = treeNode.is_current;
+          const isRoot = isRootNode(treeNode);
+          const userContent = getTreeUserContent(treeNode);
+          const primaryText = getTreeNodePrimaryText(treeNode);
           const activeChatRun = activeChatRunsByNode.get(node.id);
-          const assistantContent = activeChatRun?.content || node.data.assistant_content;
+          const assistantContent = activeChatRun?.content || treeNode.assistant_content;
           return (
             <div
               key={node.id}
@@ -504,9 +511,9 @@ export default function TreeView() {
                       {truncate(assistantContent, 50)}
                     </p>
                   )}
-                  {node.data.model_id && (
+                  {treeNode.model_id && (
                     <span className="absolute top-1 left-2 max-w-[150px] truncate text-[9px] text-muted-foreground/60">
-                      {node.data.model_id}
+                      {treeNode.model_id}
                     </span>
                   )}
                   <TextTooltip content={copiedNodeId === node.id ? '已复制' : '复制节点 ID'}>

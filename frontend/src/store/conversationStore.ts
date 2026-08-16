@@ -21,6 +21,9 @@ const conversationStorageKey = profileStorageKey(
   CONVERSATION_STORAGE_KEY,
 );
 
+// loadTree 同 conversation 并发去重：in-flight Promise 共享，完成后清理（失败也清理以便重试）
+const loadTreeInFlight = new Map<string, Promise<void>>();
+
 interface ConversationState {
   conversations: Conversation[];
   currentConversation: Conversation | null;
@@ -106,35 +109,35 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
           set({ loading: true, error: null });
           try {
             const conversation = await conversationApi.create(request);
-            set({
+            // 本地插入列表头部（避免整表重拉）；下次 loadConversations 会与后端排序对齐
+            set((state) => ({
+              conversations: [conversation, ...state.conversations],
               currentConversation: conversation,
               treeData: null,
               streamingContent: '',
               currentNodeId: null,
               pendingScrollNodeId: null,
-            });
-            await get().loadConversations();
+            }));
             // 保留用户已选模型：新建对话前若用户已在模型框里选过模型（store 里有
             // current 值），把它持久化到新对话，并保持 store 不变——否则
             // resetToDefault() 会把按钮显示回退到默认模型（请求仍用已选模型，但
             // 显示串掉）。仅当 store 没有任何选择时才回退默认作为初始化。
             const ms = useModelStore.getState();
             if (ms.currentProvider && ms.currentModel) {
-              try {
-                await conversationApi.updateModel(
-                  conversation.id,
-                  ms.currentModel,
-                  ms.currentProvider,
-                  ms.currentReasoningEffort,
-                  ms.currentThinkingEnabled,
-                );
-                const updatedConversation = {
-                  ...conversation,
-                  model_id: ms.currentModel,
-                  provider_id: ms.currentProvider,
-                  reasoning_effort: ms.currentReasoningEffort,
-                  thinking_enabled: ms.currentThinkingEnabled,
-                };
+              const updatedConversation = {
+                ...conversation,
+                model_id: ms.currentModel,
+                provider_id: ms.currentProvider,
+                reasoning_effort: ms.currentReasoningEffort,
+                thinking_enabled: ms.currentThinkingEnabled,
+              };
+              void conversationApi.updateModel(
+                conversation.id,
+                ms.currentModel,
+                ms.currentProvider,
+                ms.currentReasoningEffort,
+                ms.currentThinkingEnabled,
+              ).then(() => {
                 set((state) => ({
                   conversations: state.conversations.map((item) => (
                     item.id === conversation.id ? { ...item, ...updatedConversation } : item
@@ -143,12 +146,11 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
                     ? { ...state.currentConversation, ...updatedConversation }
                     : state.currentConversation,
                 }));
-                return updatedConversation;
-              } catch {
+              }).catch(() => {
                 // 持久化失败不阻断创建；store 选择仍保留，显示不会串
-              }
+              });
             } else {
-              await ms.resetToDefault();
+              void ms.resetToDefault();
             }
             return conversation;
           } catch (err) {
@@ -160,30 +162,35 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
         },
 
         selectConversation: async (id) => {
-          set({ loading: true, error: null });
+          const conversation = get().conversations.find((c) => c.id === id);
+          const currentNodeId = conversation?.current_node_id || null;
+          // 本地会话立即切换（先切 UI、不卡 loading），branches 后台并行填充
+          set({
+            currentConversation: conversation
+              ? { ...conversation, current_node_id: currentNodeId || conversation.current_node_id }
+              : null,
+            branches: [],
+            treeData: null,
+            streamingContent: '',
+            currentNodeId,
+            pendingScrollNodeId: null,
+            error: null,
+          });
           try {
-            const branches = await conversationApi.getBranches(id);
-            const conversation = get().conversations.find((c) => c.id === id);
-            const currentNodeId = conversation?.current_node_id || null;
-            set({
-              currentConversation: conversation
-                ? { ...conversation, current_node_id: currentNodeId || conversation.current_node_id }
-                : null,
-              branches,
-              treeData: null,
-              streamingContent: '',
-              currentNodeId,
-              pendingScrollNodeId: null,
-            });
-            // 同步模型选择到 modelStore
-            await useModelStore.getState().syncFromConversation(
-              conversation?.provider_id || null,
-              conversation?.model_id || null,
-            );
+            const [branches] = await Promise.all([
+              conversationApi.getBranches(id),
+              // 同步模型选择到 modelStore
+              useModelStore.getState().syncFromConversation(
+                conversation?.provider_id || null,
+                conversation?.model_id || null,
+              ),
+            ]);
+            // await 期间用户可能已切走，避免旧会话 branches 覆盖当前会话
+            if (get().currentConversation?.id === id) {
+              set({ branches });
+            }
           } catch (err) {
             set({ error: getApiErrorMessage(err, '选择对话失败') });
-          } finally {
-            set({ loading: false });
           }
         },
 
@@ -377,8 +384,8 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
                 }));
                 return ok;
               }
-              // 后端尚未保存完成，稍候重试（保留乐观气泡）
-              await new Promise((r) => setTimeout(r, 150));
+              // 后端尚未保存完成，指数退避重试（保留乐观气泡）
+              await new Promise((r) => setTimeout(r, 150 * 2 ** attempt));
             } catch (err) {
               set({ error: getApiErrorMessage(err, '刷新消息失败') });
               return false;
@@ -447,13 +454,21 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
         },
 
         loadTree: async (conversationId: string) => {
-          try {
-            const data = await conversationApi.getTree(conversationId);
-            set({ treeData: data, error: null });
-          } catch (err) {
-            set({ error: getApiErrorMessage(err, '加载对话树失败') });
-            throw err;
-          }
+          const inFlight = loadTreeInFlight.get(conversationId);
+          if (inFlight) return inFlight;
+          const request = (async () => {
+            try {
+              const data = await conversationApi.getTree(conversationId);
+              set({ treeData: data, error: null });
+            } catch (err) {
+              set({ error: getApiErrorMessage(err, '加载对话树失败') });
+              throw err;
+            } finally {
+              loadTreeInFlight.delete(conversationId);
+            }
+          })();
+          loadTreeInFlight.set(conversationId, request);
+          return request;
         },
 
       }),

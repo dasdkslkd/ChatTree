@@ -1,4 +1,4 @@
-import { lazy, Suspense } from 'react';
+import { lazy, Suspense, memo, useMemo } from 'react';
 import { type Components } from 'react-markdown';
 import MarkdownBasic from './markdown/MarkdownBasic';
 import { fileLinkComponents } from './markdown/fileLinks';
@@ -12,12 +12,13 @@ interface MarkdownContentProps {
   enableMermaid?: boolean;
 }
 
-export default function MarkdownContent({ children, components, enableMermaid = false }: MarkdownContentProps) {
-  const features = detectMarkdownFeatures(children);
+function MarkdownContent({ children, components, enableMermaid = false }: MarkdownContentProps) {
+  const features = useMemo(() => detectMarkdownFeatures(children), [children]);
   const shouldLoadMermaid = enableMermaid && features.hasMermaid;
-  const mergedComponents: Components = components
-    ? { ...fileLinkComponents, ...components }
-    : fileLinkComponents;
+  const mergedComponents: Components = useMemo(
+    () => (components ? { ...fileLinkComponents, ...components } : fileLinkComponents),
+    [components],
+  );
 
   if (shouldLoadMermaid) {
     return (
@@ -39,3 +40,5 @@ export default function MarkdownContent({ children, components, enableMermaid = 
     <MarkdownBasic components={mergedComponents}>{children}</MarkdownBasic>
   );
 }
+
+export default memo(MarkdownContent);

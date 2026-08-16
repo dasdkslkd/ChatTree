@@ -6,9 +6,11 @@ export interface MarkdownRendererProps {
   components?: Components;
 }
 
+const remarkPlugins = [remarkGfm];
+
 export default function MarkdownBasic({ children, components }: MarkdownRendererProps) {
   return (
-    <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+    <ReactMarkdown remarkPlugins={remarkPlugins} components={components}>
       {children}
     </ReactMarkdown>
   );

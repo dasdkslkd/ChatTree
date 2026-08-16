@@ -18,7 +18,6 @@ require.extensions['.ts'] = function loadTs(module, filename) {
 };
 
 const {
-  ACTIVE_STREAM_IDLE_POLL_MS,
   ACTIVE_STREAM_VISIBLE_POLL_MS,
   getActiveStreamPollingDelay,
 } = require(path.join(__dirname, '../src/utils/streaming.ts'));
@@ -27,8 +26,8 @@ function testUsesFastPollingWhenStreamsAreActive() {
   assert.equal(getActiveStreamPollingDelay({ activeStreamCount: 2, documentHidden: false }), ACTIVE_STREAM_VISIBLE_POLL_MS);
 }
 
-function testUsesSlowPollingWhenIdle() {
-  assert.equal(getActiveStreamPollingDelay({ activeStreamCount: 0, documentHidden: false }), ACTIVE_STREAM_IDLE_POLL_MS);
+function testStopsPollingWhenIdle() {
+  assert.equal(getActiveStreamPollingDelay({ activeStreamCount: 0, documentHidden: false }), null);
 }
 
 function testPausesPollingWhenDocumentIsHidden() {
@@ -37,7 +36,7 @@ function testPausesPollingWhenDocumentIsHidden() {
 
 function main() {
   testUsesFastPollingWhenStreamsAreActive();
-  testUsesSlowPollingWhenIdle();
+  testStopsPollingWhenIdle();
   testPausesPollingWhenDocumentIsHidden();
   console.log('activeStreamPolling tests passed');
 }

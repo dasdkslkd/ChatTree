@@ -1,9 +1,8 @@
-import { Fragment, useEffect, useState, type ReactNode } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { ChevronRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { TranscriptActionHandlers, TranscriptItem } from '../../types/transcript';
 import { formatProcessedDuration } from '../../utils/time';
-import { normalizeTranscriptItems } from '../../utils/transcriptItems';
 import { TranscriptItemRenderer } from './TranscriptItemRenderer';
 
 const PROCESS_ITEM_TYPES = new Set<TranscriptItem['type']>([
@@ -106,9 +105,32 @@ export function TranscriptList({
   toolApprovalError,
   renderItem,
 }: TranscriptListProps) {
-  const normalizedItems = normalizeTranscriptItems(items);
+  // 数据契约：MainPage 入口（onSnapshot / applyTranscriptPatch）已逐 item 归一化（幂等），此处直接消费
+  const groups = useMemo(() => groupTranscriptItems(items), [items]);
+  const renderDefault = useCallback(
+    (item: TranscriptItem) => (
+      <TranscriptItemRenderer
+        item={item}
+        onApprovePlan={onApprovePlan}
+        onRejectPlan={onRejectPlan}
+        onAnswerPlanQuestion={onAnswerPlanQuestion}
+        onApproveTool={onApproveTool}
+        onRejectTool={onRejectTool}
+        onCopyItem={onCopyItem}
+        onEditUserMessage={onEditUserMessage}
+        onDeleteUserMessage={onDeleteUserMessage}
+        onRetryAnswer={onRetryAnswer}
+        onEditBranchAnswer={onEditBranchAnswer}
+        planActionPending={planActionPending}
+        planError={planError}
+        toolApprovalPending={toolApprovalPending}
+        toolApprovalError={toolApprovalError}
+      />
+    ),
+    [onApprovePlan, onRejectPlan, onAnswerPlanQuestion, onApproveTool, onRejectTool, onCopyItem, onEditUserMessage, onDeleteUserMessage, onRetryAnswer, onEditBranchAnswer, planActionPending, planError, toolApprovalPending, toolApprovalError],
+  );
 
-  if (normalizedItems.length === 0) {
+  if (items.length === 0) {
     return (
       <div className="transcript-list flex w-full flex-col" role="list">
         {transcriptError && (
@@ -122,28 +144,6 @@ export function TranscriptList({
       </div>
     );
   }
-
-  const renderDefault = (item: TranscriptItem) => (
-    <TranscriptItemRenderer
-      item={item}
-      onApprovePlan={onApprovePlan}
-      onRejectPlan={onRejectPlan}
-      onAnswerPlanQuestion={onAnswerPlanQuestion}
-      onApproveTool={onApproveTool}
-      onRejectTool={onRejectTool}
-      onCopyItem={onCopyItem}
-      onEditUserMessage={onEditUserMessage}
-      onDeleteUserMessage={onDeleteUserMessage}
-      onRetryAnswer={onRetryAnswer}
-      onEditBranchAnswer={onEditBranchAnswer}
-      planActionPending={planActionPending}
-      planError={planError}
-      toolApprovalPending={toolApprovalPending}
-      toolApprovalError={toolApprovalError}
-    />
-  );
-
-  const groups = groupTranscriptItems(normalizedItems);
 
   return (
     <div className="transcript-list flex w-full flex-col" role="list">

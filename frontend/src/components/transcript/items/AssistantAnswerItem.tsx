@@ -21,24 +21,28 @@ export function AssistantAnswerItem({
   onEditBranch?: (item: AssistantAnswerTranscriptItem) => void | Promise<void>;
 }) {
   const [copied, setCopied] = useState(false);
-  const treeData = useConversationStore((state) => state.treeData);
+  // 按 node_id 细粒度订阅树节点：流式 usage patch 重建 treeData 时，只要本节点
+  // 与父节点引用未变，组件即不重渲染（selector 返回既有节点对象，引用稳定）
+  const treeNode = useConversationStore(
+    (state) => state.treeData?.nodes.find((entry) => entry.id === item.node_id) ?? null,
+  );
+  const parentNode = useConversationStore((state) => {
+    const node = state.treeData?.nodes.find((entry) => entry.id === item.node_id);
+    return node?.parent_id
+      ? state.treeData?.nodes.find((entry) => entry.id === node.parent_id) ?? null
+      : null;
+  });
   const switchNode = useConversationStore((state) => state.switchNode);
   const setChatViewMode = useNavigationStore((state) => state.setChatViewMode);
-  const text = getItemText(item);
+  const text = useMemo(() => getItemText(item), [item]);
   const statusLabel = item.status === 'error' && item.finish_reason
     ? `生成未完成：${item.finish_reason}`
     : getStreamStatusText(item.status || '', null);
 
   // 兄弟分支翻页器：复用树数据 children_ids 与 switchNode，原地切换分支；
   // parentNode.user_content 即该回答对应的用户输入，供重试/编辑分叉使用
-  const { treeNode, parentNode, branchSiblings, branchIndex } = useMemo(() => {
-    const node = treeData?.nodes.find((entry) => entry.id === item.node_id) ?? null;
-    const parent = node?.parent_id
-      ? treeData?.nodes.find((entry) => entry.id === node.parent_id) ?? null
-      : null;
-    const siblings = parent?.children_ids ?? [];
-    return { treeNode: node, parentNode: parent, branchSiblings: siblings, branchIndex: siblings.indexOf(item.node_id) };
-  }, [treeData, item.node_id]);
+  const branchSiblings = parentNode?.children_ids ?? [];
+  const branchIndex = branchSiblings.indexOf(item.node_id);
 
   if (!text) return null;
 

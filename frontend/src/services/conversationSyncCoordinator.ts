@@ -182,21 +182,23 @@ export class ConversationSyncCoordinator {
       }
     }
 
+    const parallel: Promise<boolean>[] = [];
     if (pending.include.has('tree')) {
-      await runBestEffort(() => operations.loadTree(conversationId));
+      parallel.push(runBestEffort(() => operations.loadTree(conversationId)));
     }
     if (pending.include.has('branches')) {
-      await runBestEffort(() => operations.refreshBranches(conversationId));
+      parallel.push(runBestEffort(() => operations.refreshBranches(conversationId)));
     }
     if (pending.include.has('transcript')) {
-      await runBestEffort(() => operations.refreshTranscript(conversationId));
+      parallel.push(runBestEffort(() => operations.refreshTranscript(conversationId)));
     }
     if (pending.include.has('conversations')) {
-      await runBestEffort(() => operations.loadConversations());
+      parallel.push(runBestEffort(() => operations.loadConversations()));
     }
     if (pending.include.has('taskState')) {
-      await runBestEffort(() => operations.refreshTaskState(conversationId));
+      parallel.push(runBestEffort(() => operations.refreshTaskState(conversationId)));
     }
+    await Promise.allSettled(parallel);
     return { messagesConfirmed };
   }
 }
