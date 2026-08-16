@@ -49,7 +49,7 @@ export function PlanApprovalCard({
         </div>
         {expanded && item.plan && (
           <div
-            className="min-w-0 prose prose-sm max-w-none [&_p]:m-0 [&_p:not(:last-child)]:mb-2"
+            className="plan-markdown-panel min-w-0 prose prose-sm max-w-none [&_p]:m-0 [&_p:not(:last-child)]:mb-2"
             style={{
               color: 'var(--fg-secondary)',
               fontSize: 'var(--codex-chat-font-size)',
@@ -70,7 +70,7 @@ export function PlanApprovalCard({
               style={{
                 borderColor: 'var(--border)',
                 background: 'var(--bg-button-secondary)',
-                color: 'var(--fg-primary)',
+                color: 'var(--fg-85)',
               }}
               onClick={() => onApprovePlan?.(item)}
               disabled={planActionPending !== null}
@@ -83,7 +83,7 @@ export function PlanApprovalCard({
               className="inline-flex h-7 items-center gap-1 rounded-md border px-2 text-xs transition-colors"
               style={{
                 borderColor: 'var(--border)',
-                background: 'var(--bg-button-tertiary)',
+                background: 'var(--bg-button-secondary)',
                 color: 'var(--fg-secondary)',
               }}
               onClick={() => onRejectPlan?.(item)}

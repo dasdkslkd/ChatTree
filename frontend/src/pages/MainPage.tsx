@@ -2263,7 +2263,7 @@ export default function ChatPage() {
           <div
             key={String(notification.id)}
             className="rounded-lg border px-3 py-2"
-            style={{ borderColor: 'var(--border)', background: 'var(--bg-elevated-secondary, rgba(255,255,255,0.03))' }}
+            style={{ borderColor: 'var(--border)', background: 'var(--bg-button-secondary)' }}
           >
             <div className="flex min-w-0 items-start gap-2">
               <Bell className="mt-0.5 h-3.5 w-3.5 shrink-0" style={{ color: 'var(--icon-accent)' }} />
@@ -2573,8 +2573,8 @@ export default function ChatPage() {
         <div
           className="max-w-full rounded-lg px-3 py-2 text-sm prose prose-sm prose-invert max-w-none [&_p]:m-0"
           style={{
-            background: 'linear-gradient(160deg, rgba(217,119,87,0.16), rgba(217,119,87,0.08))',
-            border: '0.5px solid rgba(217,119,87,0.28)',
+            background: 'linear-gradient(160deg, color-mix(in srgb, var(--accent-soft) 45%, transparent), color-mix(in srgb, var(--accent-soft) 25%, transparent))',
+            border: '0.5px solid color-mix(in srgb, var(--icon-accent) 28%, transparent)',
             color: 'var(--fg-85)',
           }}
         >
@@ -2615,7 +2615,7 @@ export default function ChatPage() {
     const progressSteps = getWorkflowProgressSteps(item.run);
     return (
       <div className="flex flex-col gap-3">
-        <div className="rounded-lg border p-3" style={{ borderColor: 'var(--border)', background: 'var(--bg-elevated-secondary, rgba(255,255,255,0.03))' }}>
+        <div className="rounded-lg border p-3" style={{ borderColor: 'var(--border)', background: 'var(--bg-button-secondary)' }}>
           <div className="mb-2 text-xs font-semibold" style={{ color: 'var(--fg-secondary)' }}>流程进度</div>
           {progressSteps.length === 0 ? (
             <div className="text-sm" style={{ color: 'var(--fg-tertiary)' }}>等待 workflow 事件。</div>
@@ -2634,7 +2634,7 @@ export default function ChatPage() {
             </div>
           )}
         </div>
-        <div className="rounded-lg border p-3" style={{ borderColor: 'var(--border)', background: 'var(--bg-elevated-secondary, rgba(255,255,255,0.03))' }}>
+        <div className="rounded-lg border p-3" style={{ borderColor: 'var(--border)', background: 'var(--bg-button-secondary)' }}>
           <div className="mb-2 text-xs font-semibold" style={{ color: 'var(--fg-secondary)' }}>子步骤</div>
           {item.steps.length === 0 ? (
             <div className="text-sm" style={{ color: 'var(--fg-tertiary)' }}>暂无可展开的步骤详情。</div>
@@ -2978,7 +2978,8 @@ export default function ChatPage() {
                 onScroll={handleScroll}
               >
                 <div
-                  className="w-[800px] max-w-full flex flex-col px-4"
+                  className="flex flex-col px-4"
+                  style={{ width: 'min(var(--content-max-width), 100%)' }}
                 >
                   <TranscriptList
                     items={displayTranscriptItems}
@@ -3009,7 +3010,7 @@ export default function ChatPage() {
                   background: 'linear-gradient(180deg, color-mix(in srgb, var(--bg-surface) 0%, transparent), var(--bg-surface) 72%)',
                 }}
               />
-              <footer className="absolute bottom-4 left-1/2 -translate-x-1/2 w-[800px] max-w-[calc(100%-48px)] z-10">
+              <footer className="absolute bottom-4 left-1/2 -translate-x-1/2 max-w-[calc(100%-48px)] z-10" style={{ width: 'min(var(--content-max-width), 100%)' }}>
                 <ChatInput
                   key={`${currentConversation?.id ?? 'new'}:${editTargetNodeId ?? ''}:${editValue ?? ''}`}
                   onSend={handleSend}

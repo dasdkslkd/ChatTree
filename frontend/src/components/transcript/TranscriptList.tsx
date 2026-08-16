@@ -110,7 +110,7 @@ export function TranscriptList({
 
   if (normalizedItems.length === 0) {
     return (
-      <div className="transcript-list flex w-full flex-col gap-2" role="list">
+      <div className="transcript-list flex w-full flex-col" role="list">
         {transcriptError && (
           <div className="transcript-error py-4 text-center text-sm" style={{ color: 'var(--destructive)' }} role="status">
             {transcriptError}
@@ -146,7 +146,7 @@ export function TranscriptList({
   const groups = groupTranscriptItems(normalizedItems);
 
   return (
-    <div className="transcript-list flex w-full flex-col gap-2" role="list">
+    <div className="transcript-list flex w-full flex-col" role="list">
       {transcriptError && (
         <div className="transcript-error py-2 text-center text-xs" style={{ color: 'var(--destructive)' }} role="status">
           {transcriptError}

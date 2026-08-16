@@ -24,7 +24,7 @@ export function TaskNotificationCard({ item }: { item: TaskNotificationItem }) {
         className="flex max-w-[760px] w-full min-w-0 flex-col gap-2 rounded-md px-3 py-2 text-sm"
         style={{
           border: '0.5px solid var(--border)',
-          background: 'var(--bg-secondary)',
+          background: 'var(--bg-button-secondary)',
           color: 'var(--fg-secondary)',
         }}
       >
@@ -34,7 +34,7 @@ export function TaskNotificationCard({ item }: { item: TaskNotificationItem }) {
           <span className="min-w-0 truncate">{item.source_run_kind}</span>
         </div>
         {item.summary && (
-          <div className="text-sm font-medium leading-5" style={{ color: 'var(--fg-primary)' }}>
+          <div className="text-sm font-medium leading-5" style={{ color: 'var(--fg-85)' }}>
             {item.summary}
           </div>
         )}

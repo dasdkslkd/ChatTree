@@ -122,8 +122,8 @@ export default function ServerSessionApp({
   const contextBarColor = contextPercent >= 90
     ? 'var(--accent-red)'
     : contextPercent >= 80
-      ? 'var(--accent-yellow, #d9a441)'
-      : 'var(--accent-blue)';
+      ? 'color-mix(in srgb, var(--accent-green) 45%, transparent)'
+      : 'var(--accent-green)';
   const contextTitle = treeError
     ? `上下文用量加载失败：${treeError}`
     : `上下文用量：${formatTokens(contextUsed)} / ${formatTokens(contextLimit)}${contextLimit ? ` (${contextPercent.toFixed(1)}%)` : ''}`;
@@ -133,8 +133,8 @@ export default function ServerSessionApp({
     const cache = (usage?.cached_tokens ?? 0) + (usage?.cache_read_input_tokens ?? 0) + (usage?.cache_creation_input_tokens ?? 0);
     const segments = [
       { key: 'input', label: '输入', tokens: Math.max(0, usage?.input_tokens ?? 0), color: 'var(--accent-green)' },
-      { key: 'output', label: '输出', tokens: Math.max(0, usage?.output_tokens ?? 0), color: 'var(--accent-blue)' },
-      { key: 'reasoning', label: '推理', tokens: Math.max(0, usage?.reasoning_tokens ?? 0), color: 'var(--accent-yellow)' },
+      { key: 'output', label: '输出', tokens: Math.max(0, usage?.output_tokens ?? 0), color: 'var(--accent-green)' },
+      { key: 'reasoning', label: '推理', tokens: Math.max(0, usage?.reasoning_tokens ?? 0), color: 'color-mix(in srgb, var(--accent-green) 45%, transparent)' },
       { key: 'cache', label: '缓存', tokens: Math.max(0, cache), color: 'var(--fg-tertiary)' },
     ].filter((segment) => segment.tokens > 0);
 
@@ -155,10 +155,10 @@ export default function ServerSessionApp({
   }, [contextUsage.usage]);
   const contextFlag = contextLevel === 'danger' ? '临界' : contextLevel === 'warn' ? '偏高' : '健康';
   const contextFlagStyle = contextLevel === 'danger'
-    ? { color: 'var(--accent-red)', background: 'rgba(255,103,100,0.14)' }
+    ? { color: 'var(--accent-red)', background: 'color-mix(in srgb, var(--accent-red) 14%, transparent)' }
     : contextLevel === 'warn'
-      ? { color: 'var(--accent-yellow)', background: 'rgba(255,210,64,0.14)' }
-      : { color: 'var(--accent-green)', background: 'rgba(64,201,119,0.14)' };
+      ? { color: 'color-mix(in srgb, var(--accent-green) 45%, transparent)', background: 'color-mix(in srgb, var(--accent-green) 14%, transparent)' }
+      : { color: 'var(--accent-green)', background: 'color-mix(in srgb, var(--accent-green) 14%, transparent)' };
 
   return (
     <TooltipProvider>
@@ -239,7 +239,7 @@ export default function ServerSessionApp({
                     style={{
                       width: '54px',
                       height: '4px',
-                      borderRadius: 'var(--radius-full)',
+                      borderRadius: '9999px',
                       background: 'var(--bg-button-secondary)',
                       overflow: 'hidden',
                     }}
@@ -302,7 +302,7 @@ export default function ServerSessionApp({
                         style={{
                           marginLeft: 'auto',
                           padding: '1px 7px',
-                          borderRadius: 'var(--radius-full)',
+                          borderRadius: '9999px',
                           fontSize: '10px',
                           fontWeight: 500,
                           ...contextFlagStyle,
@@ -451,7 +451,7 @@ export default function ServerSessionApp({
                 {isCurrentProxy && <Share2 className="h-3.5 w-3.5" style={{ color: 'var(--icon-accent)' }} />}
                 <span style={isCurrentProxy ? { color: 'var(--icon-accent)' } : undefined}>{getModelDisplay()}</span>
                 {isCurrentProxy && (
-                  <span className="text-[10px] px-1 py-0 rounded-full" style={{ background: 'rgba(99,179,237,0.15)', color: 'var(--icon-accent)' }}>代理</span>
+                  <span className="text-xs px-1 py-0 rounded-full" style={{ background: 'color-mix(in srgb, var(--icon-accent) 15%, transparent)', color: 'var(--icon-accent)' }}>代理</span>
                 )}
               </div>
             </TextTooltip>

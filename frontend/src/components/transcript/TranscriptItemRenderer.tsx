@@ -52,7 +52,7 @@ function RunStatusTranscriptItem({ item }: { item: RunStatusItem }) {
         className="flex max-w-[760px] min-w-0 items-center gap-2 rounded-md px-2.5 py-1.5 text-xs"
         style={{
           border: '0.5px solid var(--border)',
-          background: 'var(--bg-secondary)',
+          background: 'var(--bg-button-secondary)',
           color: item.status === 'error' ? 'var(--destructive)' : 'var(--fg-tertiary)',
         }}
       >

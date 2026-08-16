@@ -63,9 +63,8 @@
 
     /* Spacing & sizing tokens */
     --spacing: 0.25rem;
-    --height-toolbar: 48px;
     --height-statusbar: 30px;
-    --content-max-width: 49rem;
+    --content-max-width: 40rem;
 
     /* Transitions */
     --transition-basic: 0.15s;
@@ -76,12 +75,11 @@
     --shadow-md: 0 2px 8px -2px rgba(0,0,0,0.40);
     --shadow-xl: 0 10px 28px -8px rgba(0,0,0,0.50);
     --shadow-2xl: 0 22px 50px -12px rgba(0,0,0,0.62);
-    --glow-accent: 0 4px 16px -2px rgba(217,119,87,0.32);
-    --highlight-top: inset 0 1px 0 rgba(255,250,245,0.05);
 
     /* Chat sizing */
     --codex-chat-font-size: 14.5px;
     --codex-chat-code-font-size: 13px;
+    --text-xs: 11.5px;
     --conversation-block-gap: 14px;
 
     /* Light theme (default for :root, overridden by .dark) */
@@ -127,7 +125,6 @@
     --fg-secondary: rgba(42,28,20,0.70);
     --fg-tertiary: rgba(42,28,20,0.65); /* WCAG AA on --background */
     --fg-placeholder: rgba(42,28,20,0.40);
-    --icon-secondary: rgba(42,28,20,0.70);
     --icon-tertiary: rgba(42,28,20,0.50);
     --icon-accent: #c25f3f;
     --accent-soft: rgba(194,95,63,0.12);
@@ -141,6 +138,8 @@
     --bg-button-secondary: rgba(60,40,30,0.06);
     --bg-button-tertiary-hover: rgba(60,40,30,0.06);
     --bg-button-tertiary-active: rgba(217,119,87,0.14);
+    --hover-bg: rgba(60,40,30,0.055);
+    --bg-scrollbar: rgba(60,40,30,0.10);
     --glow-accent: 0 4px 16px -2px rgba(194,95,63,0.28);
     --highlight-top: inset 0 1px 0 rgba(255,255,255,0.6);
 }
@@ -188,7 +187,6 @@
     --fg-secondary: rgba(251,247,244,0.72);
     --fg-tertiary: rgba(251,247,244,0.52);
     --fg-placeholder: rgba(251,247,244,0.40);
-    --icon-secondary: rgba(251,247,244,0.72);
     --icon-tertiary: rgba(251,247,244,0.52);
     --icon-accent: #d97757;
     --accent-soft: rgba(217,119,87,0.14);
@@ -202,6 +200,8 @@
     --bg-button-secondary: rgba(255,247,240,0.06);
     --bg-button-tertiary-hover: rgba(255,247,240,0.075);
     --bg-button-tertiary-active: rgba(217,119,87,0.12);
+    --hover-bg: rgba(255,247,240,0.065);
+    --bg-scrollbar: rgba(255,247,240,0.07);
     --glow-accent: 0 4px 16px -2px rgba(217,119,87,0.32);
     --highlight-top: inset 0 1px 0 rgba(255,250,245,0.05);
 }
@@ -243,40 +243,22 @@
   background-color: transparent;
 }
 .custom-scrollbar:hover::-webkit-scrollbar-thumb {
-  background-color: var(--bg-scrollbar, rgba(255,247,240,0.07));
+  background-color: var(--bg-scrollbar);
 }
 .custom-scrollbar {
   scrollbar-width: thin;
   scrollbar-color: transparent transparent;
 }
 .custom-scrollbar:hover {
-  scrollbar-color: var(--bg-scrollbar, rgba(255,247,240,0.07)) transparent;
+  scrollbar-color: var(--bg-scrollbar) transparent;
 }
 
 /* Scrollbar visible on scroll */
 .scrollbar-visible::-webkit-scrollbar-thumb {
-  background-color: var(--bg-scrollbar, rgba(255,247,240,0.07));
+  background-color: var(--bg-scrollbar);
 }
 .scrollbar-visible {
-  scrollbar-color: var(--bg-scrollbar, rgba(255,247,240,0.07)) transparent;
-}
-
-/* Dark scrollbar override */
-.dark .custom-scrollbar:hover::-webkit-scrollbar-thumb,
-.dark .scrollbar-visible::-webkit-scrollbar-thumb {
-  background-color: rgba(255,247,240,0.07);
-}
-.dark .custom-scrollbar:hover,
-.dark .scrollbar-visible {
-  scrollbar-color: rgba(255,247,240,0.07) transparent;
-}
-.light .custom-scrollbar:hover::-webkit-scrollbar-thumb,
-.light .scrollbar-visible::-webkit-scrollbar-thumb {
-  background-color: rgba(60,40,30,0.10);
-}
-.light .custom-scrollbar:hover,
-.light .scrollbar-visible {
-  scrollbar-color: rgba(60,40,30,0.10) transparent;
+  scrollbar-color: var(--bg-scrollbar) transparent;
 }
 
 /* App sidebar — neutral-first navigation with warm accent emphasis. */
@@ -514,12 +496,12 @@
 }
 
 .app-project-row:hover {
-  background: color-mix(in srgb, var(--bg-elevated) 72%, transparent);
+  background: var(--hover-bg);
   color: var(--fg-85);
 }
 
 .app-project-row.is-active {
-  background: color-mix(in srgb, var(--bg-elevated) 78%, var(--accent-soft) 22%);
+  background: color-mix(in srgb, var(--hover-bg) 60%, var(--accent-soft) 40%);
   color: var(--fg-85);
 }
 
@@ -591,19 +573,19 @@
 }
 
 .app-session-row:hover {
-  background: color-mix(in srgb, var(--bg-elevated) 66%, transparent);
+  background: var(--hover-bg);
   color: var(--fg-85);
 }
 
 .app-session-row.is-active {
-  background: color-mix(in srgb, var(--bg-elevated) 84%, var(--accent-soft) 16%);
+  background: color-mix(in srgb, var(--hover-bg) 60%, var(--accent-soft) 40%);
   color: var(--fg-85);
 }
 
 .app-run-list-row {
   border: 0.5px solid var(--border);
   border-radius: 8px;
-  background: var(--bg-elevated-secondary, rgba(255,255,255,0.03));
+  background: var(--bg-button-secondary);
   color: var(--fg-secondary);
   cursor: pointer;
   transition:
@@ -613,13 +595,13 @@
 }
 
 .app-run-list-row:hover {
-  background: color-mix(in srgb, var(--bg-elevated) 66%, transparent);
+  background: var(--hover-bg);
   color: var(--fg-85);
 }
 
 .app-run-list-row.is-active {
   border-color: var(--icon-accent);
-  background: color-mix(in srgb, var(--bg-elevated) 84%, var(--accent-soft) 16%);
+  background: color-mix(in srgb, var(--hover-bg) 60%, var(--accent-soft) 40%);
   color: var(--fg-85);
 }
 
@@ -640,7 +622,7 @@
 
 .app-run-action-button.is-active {
   border-color: var(--icon-accent);
-  background: color-mix(in srgb, var(--bg-elevated) 78%, var(--accent-soft) 22%);
+  background: color-mix(in srgb, var(--hover-bg) 60%, var(--accent-soft) 40%);
   color: var(--icon-accent);
 }
 
@@ -742,13 +724,13 @@
   flex-shrink: 0;
 }
 
-/* 紧凑模式（设置 · 外观）：减小消息间距与内边距 */
-.compact-ui {
-  --conversation-block-gap: 8px;
+/* 消息块间距：默认 --conversation-block-gap，紧凑模式在 .compact-ui 覆盖为 8px */
+.transcript-list {
+  gap: var(--conversation-block-gap);
 }
 
-.compact-ui .transcript-list {
-  gap: 0.25rem;
+.compact-ui {
+  --conversation-block-gap: 8px;
 }
 
 .compact-ui .msg-action-bar {
@@ -775,7 +757,7 @@
 }
 
 .new-chat-center {
-  width: min(860px, 100%);
+  width: min(var(--content-max-width), 100%);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -800,7 +782,7 @@
 }
 
 .new-chat-composer-wrap {
-  width: min(880px, 100%);
+  width: min(var(--content-max-width), 100%);
 }
 
 .new-chat-composer-shell {

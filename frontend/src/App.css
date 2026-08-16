@@ -11,7 +11,7 @@
 
 /* ====== Message body base (reference: --codex-chat-font-size: 14.5px) ====== */
 .prose {
-  font-size: 14.5px;
+  font-size: var(--codex-chat-font-size);
   line-height: 23.5px; /* calc(14.5 + 9) */
   color: var(--fg-secondary, rgba(251,247,244,0.72));
   --tw-prose-body: var(--fg-secondary, rgba(251,247,244,0.72));
@@ -25,8 +25,8 @@
   --tw-prose-quotes: var(--fg-85, rgba(251,247,244,0.88));
   --tw-prose-quote-borders: var(--border-heavy, rgba(255,247,240,0.17));
   --tw-prose-captions: var(--fg-tertiary, rgba(251,247,244,0.52));
-  --tw-prose-code: var(--fg, #fbf7f4);
-  --tw-prose-pre-code: var(--fg, #fbf7f4);
+  --tw-prose-code: var(--fg-85, rgba(251,247,244,0.88));
+  --tw-prose-pre-code: var(--fg-85, rgba(251,247,244,0.88));
   --tw-prose-pre-bg: transparent;
   --tw-prose-th-borders: var(--border, rgba(255,247,240,0.09));
   --tw-prose-td-borders: var(--border, rgba(255,247,240,0.09));
@@ -49,12 +49,6 @@
 }
 .prose a:hover {
   color: var(--accent-hover, #d97757);
-}
-.prose-invert a {
-  color: #f0a888;
-}
-.prose-invert a:hover {
-  color: #f5c0a8;
 }
 
 /* ====== Strong / Em ====== */
@@ -154,7 +148,7 @@
   background: var(--bg-elevated, #2a2723);
   border-bottom: 0.5px solid var(--border-light, rgba(255,247,240,0.05));
   box-sizing: border-box;
-  font-size: 11.5px;
+  font-size: var(--text-xs);
 }
 
 .code-toolbar > span {
@@ -191,9 +185,9 @@
 
 /* Code inside code blocks */
 .prose pre code {
-  font-size: 13px;
+  font-size: var(--codex-chat-code-font-size);
   line-height: 20px;
-  color: var(--fg, #fbf7f4);
+  color: var(--fg-85, rgba(251,247,244,0.88));
   font-family: var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
   background: none;
   padding: 0;
@@ -205,7 +199,7 @@
   font-size: 0.92em;
   color: inherit;
   font-family: var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
-  background: color-mix(in srgb, var(--bg-button-tertiary-hover, rgba(255,247,240,0.075)) 60%, var(--fg, #fbf7f4) 6%);
+  background: color-mix(in srgb, var(--bg-button-tertiary-hover, rgba(255,247,240,0.075)) 60%, var(--fg-85, rgba(251,247,244,0.88)) 6%);
   padding: 1px 6px;
   border-radius: 6px;
   white-space: nowrap;
@@ -213,28 +207,34 @@
 
 /* ====== Inverted mode (user messages) ====== */
 .prose-invert a {
-  color: #f0a888;
+  color: var(--icon-accent);
 }
 .prose-invert a:hover {
-  color: #f5c0a8;
+  color: var(--accent-hover);
 }
 .prose-invert :not(pre) > code {
-  background: rgba(255, 255, 255, 0.12);
+  background: color-mix(in srgb, var(--icon-accent) 12%, transparent);
   color: inherit;
 }
 .prose-invert .code-block-wrapper {
-  border-color: rgba(255, 255, 255, 0.08);
-  background: rgba(0, 0, 0, 0.15);
+  border-color: color-mix(in srgb, var(--icon-accent) 8%, transparent);
+  background: color-mix(in srgb, var(--icon-accent) 6%, transparent);
 }
 .prose-invert .code-toolbar {
-  background: rgba(0, 0, 0, 0.25);
-  border-bottom-color: rgba(255, 255, 255, 0.08);
+  background: color-mix(in srgb, var(--icon-accent) 10%, transparent);
+  border-bottom-color: color-mix(in srgb, var(--icon-accent) 8%, transparent);
 }
 .prose-invert pre {
   background: transparent;
 }
 .prose-invert pre code {
-  color: rgba(255, 255, 255, 0.9);
+  color: var(--fg-85, rgba(251,247,244,0.88));
+}
+
+/* ====== Chat input focus ring ====== */
+.chat-input-shell:focus-within {
+  border-color: var(--border-focus);
+  box-shadow: var(--shadow-xl), 0 0 0 3px var(--accent-soft);
 }
 
 .plan-markdown-panel {
@@ -278,18 +278,6 @@
   border-radius: 0.24em;
 }
 
-/* ====== File preview dialog ====== */
-.file-preview-panel {
-  min-height: 0;
-  flex: 1 1 auto;
-  margin-top: 8px;
-  border: 0.5px solid var(--border, rgba(255,247,240,0.09));
-  border-radius: 8px;
-  overflow: hidden;
-  background: color-mix(in srgb, var(--bg-editor, #221f1c) 82%, transparent);
-  box-shadow: var(--highlight-top);
-}
-
 .file-preview-code-shell {
   height: min(68vh, 720px);
   overflow: auto;
@@ -302,19 +290,6 @@
 
 .file-preview-code-shell code {
   font-family: var(--font-mono, "JetBrains Mono", ui-monospace, monospace) !important;
-}
-
-.file-preview-code-fallback {
-  min-width: max-content;
-  min-height: 100%;
-  margin: 0;
-  padding: 14px 16px;
-  color: var(--fg-secondary, rgba(251,247,244,0.72));
-  background: transparent;
-  font-family: var(--font-mono, "JetBrains Mono", ui-monospace, monospace);
-  font-size: 13px;
-  line-height: 20px;
-  white-space: pre;
 }
 
 /* ====== Tables ====== */
@@ -366,7 +341,7 @@
 
 /* ====== Assistant processed fold separator ====== */
 .processed-fold {
-  width: min(100%, 760px);
+  width: min(var(--content-max-width), 100%);
   display: flex;
   align-items: center;
   margin: 0;
@@ -404,7 +379,7 @@
 }
 
 .processed-blocks-shell {
-  width: min(100%, 760px);
+  width: min(var(--content-max-width), 100%);
   display: grid;
   grid-template-rows: 0fr;
   opacity: 0;
@@ -430,21 +405,14 @@
   gap: 4px;
 }
 
-.processed-answer-divider {
-  width: min(100%, 760px);
-  height: 1px;
-  margin: 4px 0 6px;
-  background: var(--border-heavy, rgba(255,247,240,0.17));
-}
-
 /* ====== Tool calls (reference/gui components.css) ====== */
 .tool-call {
-  width: min(100%, 760px);
+  width: min(var(--content-max-width), 100%);
   margin: 2px 0;
   border-radius: var(--radius-md, 8px);
   overflow: hidden;
   border: 0.5px solid var(--border, rgba(255,247,240,0.09));
-  background: var(--bg-elevated-secondary, rgba(255,247,240,0.035));
+  background: var(--bg-button-secondary);
   transition: border-color var(--transition-basic, 0.15s);
 }
 
@@ -468,7 +436,7 @@
 .tc-name {
   flex-shrink: 0;
   color: var(--fg-85, rgba(251,247,244,0.88));
-  font-size: var(--text-xs, 11.5px);
+  font-size: var(--text-xs);
   font-weight: 500;
 }
 
@@ -477,7 +445,7 @@
   min-width: 0;
   overflow: hidden;
   color: var(--fg-tertiary, rgba(251,247,244,0.52));
-  font-size: var(--text-xs, 11.5px);
+  font-size: var(--text-xs);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -487,12 +455,6 @@
   align-items: center;
   gap: 5px;
   flex-shrink: 0;
-}
-
-.tc-duration {
-  flex-shrink: 0;
-  color: var(--fg-tertiary, rgba(251,247,244,0.52));
-  font-size: 10px;
 }
 
 .tc-chevron {
@@ -558,7 +520,7 @@
 
 .tc-copy:hover {
   background: var(--bg-button-tertiary-hover, rgba(255,247,240,0.075));
-  color: var(--fg-primary, rgba(251,247,244,0.95));
+  color: var(--fg-85);
 }
 
 .tc-copy-subtle {
@@ -582,7 +544,7 @@
 .tc-pre-cmd {
   white-space: pre;
   overflow-x: auto;
-  border-left: 2px solid var(--accent-blue, #60a5fa);
+  border-left: 2px solid var(--accent-green);
 }
 
 .tc-pre-error {
@@ -755,7 +717,7 @@
 }
 
 .tc-match-path {
-  color: var(--accent-blue, #60a5fa);
+  color: var(--accent-green);
   flex-shrink: 0;
 }
 
@@ -781,7 +743,7 @@
 }
 
 .tc-result-title {
-  color: var(--accent-blue, #60a5fa);
+  color: var(--accent-green);
   font-size: 11px;
   font-weight: 500;
   word-break: break-word;
@@ -815,11 +777,11 @@
 
 .tc-plan-body {
   padding: 4px 8px;
-  border-left: 2px solid var(--accent-blue, #60a5fa);
+  border-left: 2px solid var(--accent-green);
   background: var(--bg-editor, #221f1c);
   border-radius: var(--radius-xs, 4px);
   color: var(--fg-secondary, rgba(251,247,244,0.72));
-  font-size: var(--codex-chat-font-size, 12px);
+  font-size: var(--codex-chat-font-size);
   line-height: 1.6;
   max-height: 320px;
   overflow-y: auto;
@@ -845,12 +807,12 @@
 }
 
 .tool-group {
-  width: min(100%, 760px);
+  width: min(var(--content-max-width), 100%);
   margin: 6px 0;
   border-radius: var(--radius-md, 8px);
   overflow: hidden;
   border: 0.5px solid var(--border, rgba(255,247,240,0.09));
-  background: var(--bg-elevated-secondary, rgba(255,247,240,0.035));
+  background: var(--bg-button-secondary);
 }
 
 .tool-group-header {
@@ -864,7 +826,7 @@
   background: transparent;
   color: var(--fg-tertiary, rgba(251,247,244,0.52));
   cursor: pointer;
-  font-size: var(--text-xs, 11.5px);
+  font-size: var(--text-xs);
   text-align: left;
 }
 
@@ -935,7 +897,7 @@
 .tool-approval-reason {
   margin-bottom: 5px;
   color: var(--fg-secondary, rgba(251,247,244,0.72));
-  font-size: var(--text-xs, 11.5px);
+  font-size: var(--text-xs);
   line-height: 1.45;
 }
 
@@ -946,19 +908,15 @@
   margin-top: 6px;
 }
 
-.tool-approval-group .tg-chevron {
-  transform: rotate(90deg);
-}
-
 .pulsing-dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--accent-blue, #60a5fa);
-  animation: pulse 1.5s ease-in-out infinite;
+  background: var(--icon-accent);
+  animation: pulse-dot 1.5s ease-in-out infinite;
 }
 
-@keyframes pulse {
+@keyframes pulse-dot {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
 }
@@ -1002,13 +960,6 @@
 
 .thought.expanded .thought-chevron {
   transform: rotate(90deg);
-}
-
-.thought-spinner {
-  width: 12px;
-  height: 12px;
-  color: var(--icon-accent, #d97757);
-  flex-shrink: 0;
 }
 
 .thought-body-shell {
@@ -1330,7 +1281,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 11.5px;
+  font-size: var(--text-xs);
   font-weight: 700;
   color: var(--fg-85);
 }

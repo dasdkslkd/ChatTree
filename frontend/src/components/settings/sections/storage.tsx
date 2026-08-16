@@ -136,7 +136,7 @@ export function StorageSection() {
                     {reclaimablePercent.toFixed(1)}%
                   </span>
                 </div>
-                <div className="h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--bg-elevated, rgba(255,247,240,0.06))' }}>
+                <div className="h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--bg-button-secondary)' }}>
                   <div
                     className="h-full rounded-full transition-all"
                     style={{

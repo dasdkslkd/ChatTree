@@ -86,7 +86,7 @@ export function PromptsSection() {
       {/* Left: prompt list */}
       <div
         className="flex flex-col flex-shrink-0 overflow-hidden"
-        style={{ width: '220px', borderRight: '0.5px solid var(--border)' }}
+        style={{ width: '180px', borderRight: '0.5px solid var(--border)' }}
       >
         <div
           className="flex items-center justify-between px-3 py-2.5 flex-shrink-0"

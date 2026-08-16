@@ -523,7 +523,7 @@ export function ChatInput({
       )}
       <div
         className={cn(
-          'flex flex-col overflow-hidden transition-all',
+          'chat-input-shell flex flex-col overflow-hidden transition-all',
           variant === 'composer' && 'new-chat-composer-shell',
         )}
         style={{
@@ -532,18 +532,6 @@ export function ChatInput({
           boxShadow: 'var(--shadow-xl), var(--highlight-top)',
           backdropFilter: 'blur(12px)',
           borderRadius: variant === 'composer' ? '20px' : '16px',
-        }}
-        onFocus={(e) => {
-          const el = e.currentTarget;
-          el.style.borderColor = 'var(--border-focus)';
-          el.style.boxShadow = 'var(--shadow-xl), 0 0 0 3px var(--accent-soft)';
-        }}
-        onBlur={(e) => {
-          if (!e.currentTarget.contains(e.relatedTarget as Node)) {
-            const el = e.currentTarget;
-            el.style.borderColor = 'var(--border)';
-            el.style.boxShadow = 'var(--shadow-xl), var(--highlight-top)';
-          }
         }}
       >
         {queuedMessages.length > 0 && (
@@ -794,7 +782,7 @@ export function ChatInput({
                     {isCurrentProxy ? (
                       <>
                         <span className="truncate" style={{ color: 'var(--icon-accent)' }}>{currentModel}</span>
-                        <span className="text-[10px] px-1 py-0 rounded-full flex-shrink-0" style={{ background: 'rgba(99,179,237,0.15)', color: 'var(--icon-accent)' }}>
+                        <span className="text-xs px-1 py-0 rounded-full flex-shrink-0" style={{ background: 'color-mix(in srgb, var(--icon-accent) 15%, transparent)', color: 'var(--icon-accent)' }}>
                           代理
                         </span>
                       </>
@@ -907,7 +895,7 @@ export function ChatInput({
 
       {/* 模型选择对话框 */}
       <Dialog open={modelDialogOpen} onOpenChange={(open) => { if (!open) handleCancelModel(); }}>
-        <DialogContent className="flex flex-col" style={{ width: '480px', height: '420px' }} showCloseButton={false}>
+        <DialogContent className="flex flex-col" style={{ width: 'min(560px, 92%)', height: 'min(420px, 88%)', borderRadius: 'var(--radius-2xl)' }} showCloseButton={false}>
           <DialogHeader>
             <DialogTitle>选择模型</DialogTitle>
           </DialogHeader>
@@ -927,7 +915,7 @@ export function ChatInput({
                       <Label htmlFor={`provider-${provider}`} className="cursor-pointer flex items-center gap-1.5">
                         <span>{getProviderDisplayName(provider)}</span>
                         {isReverseProxy && (
-                          <span className="text-[10px] px-1 py-0 rounded-full" style={{ background: 'rgba(99,179,237,0.15)', color: 'var(--icon-accent)' }}>
+                          <span className="text-xs px-1 py-0 rounded-full" style={{ background: 'color-mix(in srgb, var(--icon-accent) 15%, transparent)', color: 'var(--icon-accent)' }}>
                             代理
                           </span>
                         )}

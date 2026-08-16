@@ -17,7 +17,7 @@ export const LEFT_SIDEBAR_WIDTH_STORAGE_KEY = LEFT_SIDEBAR_STORAGE_KEY;
 export const RIGHT_PANEL_WIDTH_STORAGE_KEY = RIGHT_PANEL_STORAGE_KEY;
 
 export const LEFT_SIDEBAR_WIDTH: SidebarWidthConfig = {
-  defaultWidth: 300,
+  defaultWidth: 224,
   minWidth: 220,
   maxWidth: 520,
 };

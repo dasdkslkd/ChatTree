@@ -283,7 +283,7 @@ function CapabilityGroup({ title, count, emptyText, children }: {
     <div className="rounded-xl overflow-hidden" style={{ border: '0.5px solid var(--border)' }}>
       <div
         className="flex items-center justify-between px-4 py-2.5"
-        style={{ background: 'var(--bg-elevated-secondary, rgba(255,247,240,0.035))', borderBottom: '0.5px solid var(--border)' }}
+        style={{ background: 'var(--bg-button-secondary)', borderBottom: '0.5px solid var(--border)' }}
       >
         <span className="text-sm font-medium" style={{ color: 'var(--fg-85)' }}>{title}</span>
         <span className="text-xs px-1.5 py-0.5 rounded-full" style={{ background: 'var(--accent-soft)', color: 'var(--icon-accent)' }}>

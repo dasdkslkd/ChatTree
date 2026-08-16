@@ -58,7 +58,7 @@ export function FileContextMenu({ x, y, items, onClose }: FileContextMenuProps) 
       <div
         ref={ref}
         role="menu"
-        className="min-w-[9.5rem] rounded-md border bg-popover p-1 shadow-md"
+        className="min-w-[10rem] rounded-md border bg-popover p-1 shadow-md"
         style={{ borderColor: 'var(--border)', position: 'fixed', left: pos.x, top: pos.y }}
         onMouseDown={(event) => event.stopPropagation()}
         onContextMenu={(event) => {

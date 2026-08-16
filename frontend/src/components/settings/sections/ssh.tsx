@@ -166,7 +166,7 @@ export function SshHostsSection() {
             spellCheck={false}
           />
           {warnings.length > 0 && (
-            <div className="space-y-1 text-xs" style={{ color: 'var(--accent-yellow)' }}>
+            <div className="space-y-1 text-xs" style={{ color: 'color-mix(in srgb, var(--accent-green) 45%, transparent)' }}>
               {warnings.map((warning) => <div key={warning}>{warning}</div>)}
             </div>
           )}

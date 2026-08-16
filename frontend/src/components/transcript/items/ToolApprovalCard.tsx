@@ -56,7 +56,7 @@ export function ToolApprovalCard({
               style={{
                 borderColor: 'var(--border)',
                 background: 'var(--bg-button-secondary)',
-                color: 'var(--fg-primary)',
+                color: 'var(--fg-85)',
               }}
               onClick={() => onApproveTool?.(item)}
               disabled={disabled || !onApproveTool}
@@ -69,7 +69,7 @@ export function ToolApprovalCard({
               className="inline-flex h-7 items-center gap-1 rounded-md border px-2 text-xs transition-colors"
               style={{
                 borderColor: 'var(--border)',
-                background: 'var(--bg-button-tertiary)',
+                background: 'var(--bg-button-secondary)',
                 color: 'var(--fg-secondary)',
               }}
               onClick={() => onRejectTool?.(item)}

@@ -178,7 +178,7 @@ export function ProjectsSection() {
 
   return (
     <div className="flex h-full" style={{ fontFamily: 'var(--font-sans)' }}>
-      <div className="flex w-[260px] flex-shrink-0 flex-col overflow-hidden" style={{ borderRight: '0.5px solid var(--border)' }}>
+      <div className="flex w-[200px] flex-shrink-0 flex-col overflow-hidden" style={{ borderRight: '0.5px solid var(--border)' }}>
         <div className="flex-shrink-0 px-4 pt-5 pb-3">
           <h1 className="text-xl font-semibold" style={{ color: 'var(--fg-85)' }}>项目</h1>
           <p className="mt-1 text-xs" style={{ color: 'var(--fg-secondary)' }}>管理主页面显示与项目能力</p>

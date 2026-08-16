@@ -36,7 +36,7 @@ export function PlanQuestionCard({
         className="flex max-w-[760px] w-full min-w-0 flex-col gap-3 rounded-md px-3 py-3 text-sm"
         style={{
           border: '0.5px solid var(--border)',
-          background: 'var(--bg-secondary)',
+          background: 'var(--bg-button-secondary)',
           color: 'var(--fg-secondary)',
         }}
       >
@@ -48,7 +48,7 @@ export function PlanQuestionCard({
           const options = Array.isArray(entry.options) ? entry.options : [];
           return (
             <div key={index} className="flex w-full flex-col gap-2">
-              <div className="text-sm leading-6" style={{ color: 'var(--fg-primary)' }}>
+              <div className="text-sm leading-6" style={{ color: 'var(--fg-85)' }}>
                 {questions.length > 1 ? `${index + 1}. ` : ''}{entry.question || ''}
               </div>
               {answered && answers[index] != null && (
@@ -57,7 +57,7 @@ export function PlanQuestionCard({
                   style={{
                     border: '0.5px solid var(--border)',
                     background: 'var(--bg-input)',
-                    color: 'var(--fg-primary)',
+                    color: 'var(--fg-85)',
                   }}
                 >
                   {answers[index]}
@@ -76,7 +76,7 @@ export function PlanQuestionCard({
                         style={{
                           borderColor: 'var(--border)',
                           background: 'var(--bg-button-secondary)',
-                          color: 'var(--fg-primary)',
+                          color: 'var(--fg-85)',
                         }}
                         onClick={() => setDraft(index, label)}
                         disabled={planActionPending !== null}
@@ -98,7 +98,7 @@ export function PlanQuestionCard({
                   style={{
                     border: '0.5px solid var(--border)',
                     background: 'var(--bg-input)',
-                    color: 'var(--fg-primary)',
+                    color: 'var(--fg-85)',
                   }}
                 />
               )}
@@ -112,8 +112,8 @@ export function PlanQuestionCard({
               type="button"
               className="inline-flex h-7 w-fit items-center gap-1 rounded-md px-2 text-xs transition-colors"
               style={{
-                background: 'var(--bg-button-primary)',
-                color: 'var(--fg-on-primary)',
+                background: 'var(--bg-button-secondary)',
+                color: 'var(--fg-85)',
               }}
               onClick={() => { void submit(); }}
               disabled={planActionPending !== null || !allAnswered}

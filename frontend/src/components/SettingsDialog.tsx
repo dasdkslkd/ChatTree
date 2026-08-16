@@ -59,7 +59,7 @@ export function SettingsPageView({ defaultSection = 'providers' }: { defaultSect
       {/* Left nav */}
       <nav
         className="app-sidebar flex-shrink-0"
-        style={{ width: '300px' }}
+        style={{ width: '200px' }}
       >
         <div className="app-sidebar-topbar">
           <span className="text-base font-semibold" style={{ color: 'var(--fg-85)' }}>设置</span>
@@ -145,13 +145,11 @@ export function SettingsDialog({ open, onOpenChange, defaultSection = 'providers
       <DialogContent
         className="p-0 gap-0 overflow-hidden border-0"
         style={{
-          width: '90vw',
-          maxWidth: '860px',
-          height: '80vh',
-          maxHeight: '640px',
+          width: 'min(760px, 94%)',
+          height: 'min(540px, 88%)',
           background: 'var(--bg-elevated)',
           border: '0.5px solid var(--border)',
-          borderRadius: '20px',
+          borderRadius: 'var(--radius-2xl)',
           boxShadow: 'var(--shadow-2xl)',
         }}
       >

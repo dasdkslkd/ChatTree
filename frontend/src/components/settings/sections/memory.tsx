@@ -117,7 +117,7 @@ export function MemorySection() {
       </div>
 
       <div className="flex flex-shrink-0 flex-wrap items-center justify-between gap-3 px-6 py-3" style={{ borderBottom: '0.5px solid var(--border)' }}>
-        <div className="inline-flex rounded-md p-0.5" style={{ background: 'var(--bg-muted)' }}>
+        <div className="inline-flex rounded-md p-0.5" style={{ background: 'var(--bg-button-secondary)' }}>
           {(['global', 'project'] as const).map(item => (
             <button
               key={item}
@@ -192,7 +192,7 @@ function MemoryFile({ file }: { file: MemoryFileView }) {
       </header>
       <pre
         className="min-h-[160px] max-h-[320px] overflow-auto whitespace-pre-wrap break-words p-4 font-mono text-xs leading-5 custom-scrollbar"
-        style={{ background: 'var(--bg-muted)', color: 'var(--fg-secondary)' }}
+        style={{ background: 'var(--bg-button-secondary)', color: 'var(--fg-secondary)' }}
       >
         {file.content || (file.exists ? '' : '尚未生成')}
       </pre>

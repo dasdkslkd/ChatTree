@@ -46,7 +46,7 @@ function ModelRow({ usage, maxTotal }: { usage: ModelUsage; maxTotal: number }) 
           {formatTokens(usage.total_tokens)} tokens
         </span>
       </div>
-      <div className="h-1.5 rounded-full overflow-hidden mb-2" style={{ background: 'var(--bg-elevated, rgba(255,247,240,0.06))' }}>
+      <div className="h-1.5 rounded-full overflow-hidden mb-2" style={{ background: 'var(--bg-button-secondary)' }}>
         <div
           className="h-full rounded-full"
           style={{ width: `${width}%`, background: 'var(--accent-green)' }}

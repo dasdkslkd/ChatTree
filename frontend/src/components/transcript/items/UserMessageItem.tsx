@@ -128,7 +128,7 @@ export function UserMessageItem({
                   onClick={() => openPreview({ filename, isImage: false })}
                   className="flex max-w-[240px] items-center gap-1 rounded-md px-2 py-1 text-xs cursor-pointer hover:opacity-80 transition-opacity"
                   style={{
-                    border: '0.5px solid rgba(217,119,87,0.28)',
+                    border: '0.5px solid color-mix(in srgb, var(--icon-accent) 28%, transparent)',
                     background: 'rgba(217,119,87,0.08)',
                     color: 'var(--fg-85)',
                   }}
@@ -147,13 +147,13 @@ export function UserMessageItem({
                   alt={ref.filename}
                   onClick={() => openPreview({ filename: ref.filename, isImage: true })}
                   className="h-20 max-w-[160px] object-cover rounded-md cursor-pointer hover:opacity-80 transition-opacity"
-                  style={{ border: '0.5px solid rgba(217,119,87,0.28)' }}
+                  style={{ border: '0.5px solid color-mix(in srgb, var(--icon-accent) 28%, transparent)' }}
                 />
               ) : (
                 <div
                   key={ref.filename}
                   className="h-20 w-20 flex items-center justify-center rounded-md"
-                  style={{ border: '0.5px solid rgba(217,119,87,0.28)' }}
+                  style={{ border: '0.5px solid color-mix(in srgb, var(--icon-accent) 28%, transparent)' }}
                 >
                   <Loader2 className="h-4 w-4 animate-spin" style={{ color: 'var(--fg-tertiary)' }} />
                 </div>
@@ -165,8 +165,8 @@ export function UserMessageItem({
           <div
             className="max-w-full min-w-0 break-words px-3 py-2 rounded-2xl rounded-br-sm leading-relaxed prose prose-sm prose-invert [&_p]:m-0 [&_p:not(:last-child)]:mb-2"
             style={{
-              background: 'linear-gradient(160deg, rgba(217,119,87,0.16), rgba(217,119,87,0.08))',
-              border: '0.5px solid rgba(217,119,87,0.28)',
+              background: 'linear-gradient(160deg, color-mix(in srgb, var(--accent-soft) 45%, transparent), color-mix(in srgb, var(--accent-soft) 25%, transparent))',
+              border: '0.5px solid color-mix(in srgb, var(--icon-accent) 28%, transparent)',
               boxShadow: 'var(--highlight-top)',
               color: 'var(--fg-85)',
               fontSize: 'var(--codex-chat-font-size)',

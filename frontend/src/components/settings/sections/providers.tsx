@@ -543,7 +543,7 @@ export function ProvidersSection() {
       >
         <div
           className="px-4 py-2.5 text-sm font-medium"
-          style={{ background: 'var(--bg-elevated-secondary, rgba(255,247,240,0.035))', borderBottom: '0.5px solid var(--border)' }}
+          style={{ background: 'var(--bg-button-secondary)', borderBottom: '0.5px solid var(--border)' }}
         >
           全局设置
         </div>
@@ -650,7 +650,7 @@ export function ProvidersSection() {
       >
         <div
           className="px-4 py-2.5 flex items-center justify-between"
-          style={{ background: 'var(--bg-elevated-secondary, rgba(255,247,240,0.035))', borderBottom: '0.5px solid var(--border)' }}
+          style={{ background: 'var(--bg-button-secondary)', borderBottom: '0.5px solid var(--border)' }}
         >
           <div className="flex items-center gap-2">
             <span className="text-sm font-medium" style={{ color: 'var(--fg-85)' }}>提供商</span>
@@ -683,12 +683,12 @@ export function ProvidersSection() {
                     <Settings className="h-4 w-4" style={{ color: 'var(--icon-tertiary)' }} />
                     <span className="text-sm font-medium" style={{ color: 'var(--fg-85)' }}>{pc.name || pid}</span>
                     {isReverseProxy ? (
-                      <span className="text-xs px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(99,179,237,0.15)', color: 'var(--icon-accent)' }}>
+                      <span className="text-xs px-1.5 py-0.5 rounded-full" style={{ background: 'color-mix(in srgb, var(--icon-accent) 15%, transparent)', color: 'var(--icon-accent)' }}>
                         本地代理
                       </span>
                     ) : null}
                     {pc.enabled && (
-                      <span className="text-xs px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(95,185,138,0.15)', color: 'var(--accent-green)' }}>
+                      <span className="text-xs px-1.5 py-0.5 rounded-full" style={{ background: 'color-mix(in srgb, var(--accent-green) 15%, transparent)', color: 'var(--accent-green)' }}>
                         已启用
                       </span>
                     )}
@@ -705,7 +705,7 @@ export function ProvidersSection() {
                 <>
                   <div
                     className="px-4 py-1.5 text-xs font-medium"
-                    style={{ background: 'var(--bg-elevated-secondary, rgba(255,247,240,0.02))', color: 'var(--fg-tertiary)' }}
+                    style={{ background: 'var(--bg-button-secondary)', color: 'var(--fg-tertiary)' }}
                   >
                     {label} ({ids.length})
                   </div>
@@ -752,7 +752,7 @@ export function ProvidersSection() {
               <div className="h-px" style={{ background: 'var(--border)' }} />
 
               {isReverseProxy ? (
-                <div className="space-y-3 p-3 rounded-lg text-xs" style={{ background: 'var(--bg-elevated-secondary, rgba(255,247,240,0.035))', border: '0.5px solid var(--border)' }}>
+                <div className="space-y-3 p-3 rounded-lg text-xs" style={{ background: 'var(--bg-button-secondary)', border: '0.5px solid var(--border)' }}>
                   <div className="flex items-center gap-1.5" style={{ color: 'var(--icon-accent)' }}>
                     <span className="font-medium">反向代理</span>
                   </div>
@@ -816,7 +816,7 @@ export function ProvidersSection() {
 
               {/* 订阅登录/导入 + 账号信息 */}
               {isSubscribed && (
-                <div className="space-y-2 p-3 rounded-lg" style={{ background: 'var(--bg-elevated-secondary, rgba(255,247,240,0.035))', border: '0.5px solid var(--border)' }}>
+                <div className="space-y-2 p-3 rounded-lg" style={{ background: 'var(--bg-button-secondary)', border: '0.5px solid var(--border)' }}>
                   {currentSubscription === 'copilot' && !isLoggedIn && (
                     <Input
                       value={enterpriseDomain}
@@ -953,7 +953,7 @@ export function ProvidersSection() {
 
               {/* 额度显示 */}
               {isSubscribed && (
-                <div className="p-3 rounded-lg text-xs space-y-2" style={{ background: 'var(--bg-elevated-secondary, rgba(255,247,240,0.035))', border: '0.5px solid var(--border)' }}>
+                <div className="p-3 rounded-lg text-xs space-y-2" style={{ background: 'var(--bg-button-secondary)', border: '0.5px solid var(--border)' }}>
                   <div className="flex items-center justify-between">
                     <span className="font-medium" style={{ color: 'var(--fg-85)' }}>订阅额度</span>
                     <button
@@ -1040,7 +1040,7 @@ export function ProvidersSection() {
                 <Label>用户代码</Label>
                 <div
                   className="text-2xl font-mono font-bold text-center py-4 rounded-lg tracking-[0.3em]"
-                  style={{ background: 'var(--bg-elevated-secondary, rgba(255,247,240,0.035))', border: '0.5px solid var(--border)', color: 'var(--fg-85)' }}
+                  style={{ background: 'var(--bg-button-secondary)', border: '0.5px solid var(--border)', color: 'var(--fg-85)' }}
                 >
                   {loginHandle.user_code}
                 </div>
@@ -1092,7 +1092,7 @@ function QuotaDisplay({ quota }: { quota: Record<string, unknown> }) {
                   {usedPercent}%
                 </span>
               </div>
-              <div className="h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--bg-elevated, rgba(255,247,240,0.06))' }}>
+              <div className="h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--bg-button-secondary)' }}>
                 <div
                   className="h-full rounded-full transition-all"
                   style={{
