@@ -13,7 +13,7 @@ import {
 } from '@/components/ui/dialog';
 import { Plus, Trash2, Loader2, Save, Pencil } from 'lucide-react';
 import { toast } from '@/utils/toast';
-import { usePromptStore } from '@/store/promtStore';
+import { usePromptStore } from '@/store/promptStore';
 import type { Prompt, PromptResponse } from '@/types/prompt';
 
 export function PromptsSection() {

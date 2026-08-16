@@ -23,13 +23,14 @@ import { getApiErrorMessage } from '../api/errors';
 import { useState, useEffect, useLayoutEffect, useMemo, useRef, useDeferredValue, type ReactNode } from 'react'
 import { toast } from '@/utils/toast'
 import { useModelStore } from '../store/modelStore'
-import { usePromptStore } from '../store/promtStore'
+import { usePromptStore } from '../store/promptStore'
 import { useNavigationStore } from '../store/navigationStore'
 import { useConversationStore } from '../store/conversationStore'
 import { slashRegistry } from '../services/slashRegistry'
 import type { ToolPermissionMode } from '../types/message'
 import type { SlashCommandInfo } from '../types/slash'
 import {
+  TOOL_PERMISSION_MODE_OPTIONS,
   getPendingToolPermissionMode,
   markToolPermissionModeSent,
   selectToolPermissionMode,
@@ -360,12 +361,8 @@ export function ChatInput({
   const highlightedSuggestion = suggestionOpen
     ? suggestionItems[Math.min(slashHighlightIndex, suggestionItems.length - 1)]
     : null;
-  const currentPermissionLabel = {
-    auto_approve: '自动批准',
-    modify_only: '仅修改',
-    ask_always: '全部需批准',
-    plan: '计划模式',
-  }[toolPermissionDraft.mode];
+  const currentPermissionLabel = TOOL_PERMISSION_MODE_OPTIONS
+    .find((option) => option.value === toolPermissionDraft.mode)?.label ?? toolPermissionDraft.mode;
 
   // 所选模型的元数据 → 决定是否渲染推理强度/思考开关控件
   const activeMeta = getMetadata(activeDialogProvider, activeDialogModel);
@@ -872,9 +869,9 @@ export function ChatInput({
                     );
                   }}
                 >
-                  <DropdownMenuRadioItem value="auto_approve">自动批准</DropdownMenuRadioItem>
-                  <DropdownMenuRadioItem value="modify_only">仅修改</DropdownMenuRadioItem>
-                  <DropdownMenuRadioItem value="ask_always">全部需批准</DropdownMenuRadioItem>
+                  {TOOL_PERMISSION_MODE_OPTIONS.map((option) => (
+                    <DropdownMenuRadioItem key={option.value} value={option.value}>{option.label}</DropdownMenuRadioItem>
+                  ))}
                 </DropdownMenuRadioGroup>
               </DropdownMenuContent>
             </DropdownMenu>

@@ -1,4 +1,5 @@
 import type { TranscriptItem, TranscriptPatch, TranscriptSnapshot, UserMessageItem } from '../types/transcript';
+import { parseFileMention } from './fileMention';
 
 export interface TranscriptState {
   conversationId: string | null;
@@ -10,7 +11,6 @@ export interface TranscriptState {
 export type TranscriptScrollTarget = {
   messageId?: string | null;
   nodeId?: string | null;
-  legacyIndex?: number | null;
 };
 
 export function getTranscriptItemNodeId(item: TranscriptItem): string | null {
@@ -36,9 +36,7 @@ export function findTranscriptAnchorElement(
     const byNode = anchors.find((element) => element.dataset.transcriptNodeId === target.nodeId);
     if (byNode) return byNode;
   }
-  return target.legacyIndex === undefined || target.legacyIndex === null
-    ? null
-    : document.getElementById(`message-${target.legacyIndex}`);
+  return null;
 }
 
 export function isTranscriptItemVisibleNow(
@@ -75,6 +73,27 @@ export function getEditableUserMessageAttachmentRefs(
       .filter((file) => Boolean(file.filename))
       .map((file) => ({ filename: file.filename, mime_type: file.mime_type ?? undefined })),
   };
+}
+
+function getUserImportFileNames(message: UserMessageItem): string[] {
+  const structured = (message.import_files ?? [])
+    .map((file) => file.filename)
+    .filter(Boolean);
+  if (structured.length > 0) return structured;
+  return parseFileMention(message.content)?.fileNames ?? [];
+}
+
+function getUserImageRefs(message: UserMessageItem): Array<{ filename: string; mime_type?: string }> {
+  return (message.image_refs ?? [])
+    .filter((file) => Boolean(file.filename))
+    .map((file) => ({ filename: file.filename, mime_type: file.mime_type ?? undefined }));
+}
+
+export function getUserAttachmentNames(message: UserMessageItem): string[] {
+  return [
+    ...getUserImportFileNames(message),
+    ...getUserImageRefs(message).map(file => file.filename),
+  ];
 }
 
 export type TranscriptPatchResult =

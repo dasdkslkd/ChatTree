@@ -1,6 +1,5 @@
 export type ConversationSyncInclude =
   | 'messages'
-  | 'branches'
   | 'transcript'
   | 'conversations'
   | 'tree'
@@ -26,7 +25,6 @@ export type ConversationSyncResult = {
 
 export type ConversationSyncOperations = {
   refreshMessages: (conversationId: string, opts?: MessageRefreshOptions) => Promise<boolean>;
-  refreshBranches: (conversationId: string) => Promise<boolean>;
   refreshTranscript: (conversationId: string) => Promise<void>;
   loadConversations: () => Promise<void>;
   loadTree: (conversationId: string) => Promise<void>;
@@ -182,9 +180,6 @@ export class ConversationSyncCoordinator {
     const parallel: Promise<boolean>[] = [];
     if (pending.include.has('tree')) {
       parallel.push(runBestEffort(() => operations.loadTree(conversationId)));
-    }
-    if (pending.include.has('branches')) {
-      parallel.push(runBestEffort(() => operations.refreshBranches(conversationId)));
     }
     if (pending.include.has('transcript')) {
       parallel.push(runBestEffort(() => operations.refreshTranscript(conversationId)));

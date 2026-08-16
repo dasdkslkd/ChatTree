@@ -664,10 +664,11 @@ export function ProvidersSection() {
         </div>
         <div className="divide-y" style={{ '--tw-divide-opacity': 1, '--tw-divide-color': 'var(--border-light, rgba(255,247,240,0.05))' } as React.CSSProperties}>
           {providerIds.length > 0 ? (() => {
-            const reverseProxyIds = providerIds.filter((pid) => config!.provider[pid]?.source === 'reverse_proxy');
-            const remoteIds = providerIds.filter((pid) => config!.provider[pid]?.source !== 'reverse_proxy');
+            if (!config) return null;
+            const reverseProxyIds = providerIds.filter((pid) => config.provider[pid]?.source === 'reverse_proxy');
+            const remoteIds = providerIds.filter((pid) => config.provider[pid]?.source !== 'reverse_proxy');
             const renderRow = (pid: string) => {
-              const pc = config!.provider[pid];
+              const pc = config.provider[pid];
               const isReverseProxy = pc.source === 'reverse_proxy';
               return (
                 <div

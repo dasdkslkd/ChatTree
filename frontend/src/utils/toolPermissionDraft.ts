@@ -1,6 +1,13 @@
 import type { ToolPermissionMode } from '../types/message';
 import type { ConfigData } from '../types/model';
 
+export const TOOL_PERMISSION_MODE_OPTIONS: { value: ToolPermissionMode; label: string; description: string }[] = [
+  { value: 'auto_approve', label: '自动批准', description: '除显式删除外自动执行工具' },
+  { value: 'modify_only', label: '修改前询问', description: '读取自动执行，修改需确认' },
+  { value: 'ask_always', label: '总是询问', description: '每次工具调用都需确认' },
+  { value: 'plan', label: '计划模式', description: '仅允许只读规划工具' },
+];
+
 export type ToolPermissionDraft = {
   mode: ToolPermissionMode;
   explicit: boolean;

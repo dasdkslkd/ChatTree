@@ -5,7 +5,7 @@ import type {
   ConversationCreateRequest,
   MultiAgentMode,
 } from '../types/conversation';
-import { conversationApi, type AvailableBranch, type TreeData } from '../api/conversation';
+import { conversationApi, type TreeData } from '../api/conversation';
 import { ChatTreeApiError } from '../api/errors';
 import { transcriptService } from '../services/transcript';
 import type { TranscriptItem } from '../types/transcript';
@@ -27,7 +27,6 @@ const loadTreeInFlight = new Map<string, Promise<void>>();
 interface ConversationState {
   conversations: Conversation[];
   currentConversation: Conversation | null;
-  branches: AvailableBranch[];
   treeData: TreeData | null;
   currentNodeId: string | null;
   pendingScrollNodeId: string | null;
@@ -55,7 +54,6 @@ interface ConversationActions {
   loadTree: (conversationId: string) => Promise<void>;
   clearPendingScroll: () => void;
   refreshMessages: (conversationId: string, opts?: { awaitNodeId?: string; awaitRole?: 'assistant' | 'user'; retries?: number }) => Promise<boolean>;
-  refreshBranches: (conversationId: string) => Promise<boolean>;
 }
 
 function isActiveRunDeleteConflict(err: unknown): boolean {
@@ -79,7 +77,6 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
       (set, get) => ({
         conversations: [],
         currentConversation: null,
-        branches: [],
         treeData: null,
         currentNodeId: null,
         pendingScrollNodeId: null,
@@ -152,28 +149,19 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
         selectConversation: async (id) => {
           const conversation = get().conversations.find((c) => c.id === id);
           const currentNodeId = conversation?.current_node_id || null;
-          // 本地会话立即切换（先切 UI、不卡 loading），branches 后台并行填充
+          // 本地会话立即切换（先切 UI、不卡 loading），模型选择后台同步
           set({
             currentConversation: conversation
               ? { ...conversation, current_node_id: currentNodeId || conversation.current_node_id }
               : null,
-            branches: [],
             treeData: null,
             currentNodeId,
             pendingScrollNodeId: null,
           });
-          const [branches] = await Promise.all([
-            conversationApi.getBranches(id),
-            // 同步模型选择到 modelStore
-            useModelStore.getState().syncFromConversation(
-              conversation?.provider_id || null,
-              conversation?.model_id || null,
-            ),
-          ]);
-          // await 期间用户可能已切走，避免旧会话 branches 覆盖当前会话
-          if (get().currentConversation?.id === id) {
-            set({ branches });
-          }
+          await useModelStore.getState().syncFromConversation(
+            conversation?.provider_id || null,
+            conversation?.model_id || null,
+          );
         },
 
         deleteConversation: async (id) => {
@@ -182,7 +170,6 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
           set((state) => ({
             conversations: state.conversations.filter((c) => c.id !== id),
             currentConversation: isCurrent ? null : state.currentConversation,
-            branches: isCurrent ? [] : state.branches,
             treeData: isCurrent ? null : state.treeData,
             currentNodeId: isCurrent ? null : state.currentNodeId,
             pendingScrollNodeId: isCurrent ? null : state.pendingScrollNodeId,
@@ -268,13 +255,9 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
           set({ loading: true });
           try {
             await conversationApi.switchNode(currentConversation.id, nodeId);
-            const [branches, treeData] = await Promise.all([
-              conversationApi.getBranches(currentConversation.id),
-              conversationApi.getTree(currentConversation.id),
-            ]);
+            const treeData = await conversationApi.getTree(currentConversation.id);
 
             set((state) => ({
-              branches,
               treeData,
               currentNodeId: nodeId,
               currentConversation: state.currentConversation
@@ -361,22 +344,9 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
           return false;
         },
 
-        refreshBranches: async (conversationId: string): Promise<boolean> => {
-          if (get().currentConversation?.id !== conversationId) return false;
-          try {
-            const branches = await conversationApi.getBranches(conversationId);
-            if (get().currentConversation?.id !== conversationId) return false;
-            set({ branches });
-            return true;
-          } catch {
-            return false;
-          }
-        },
-
         clearCurrentConversation: () => {
           set({
             currentConversation: null,
-            branches: [],
             treeData: null,
             currentNodeId: null,
             pendingScrollNodeId: null,
@@ -391,15 +361,11 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
           set({ loading: true });
           try {
             const result = await deleteNodeAllowingActiveRuns(currentConversation.id, nodeId);
-            const [branches, treeData] = await Promise.all([
-              conversationApi.getBranches(currentConversation.id),
-              conversationApi.getTree(currentConversation.id),
-            ]);
+            const treeData = await conversationApi.getTree(currentConversation.id);
             // await 期间用户可能已切走，避免把旧对话的删除结果写入新对话。
             if (get().currentConversation?.id !== currentConversation.id) return;
             const newCurrentNodeId = treeData.current_node_id || result.new_current_node_id;
             set((state) => ({
-              branches,
               treeData,
               currentNodeId: newCurrentNodeId,
               currentConversation: state.currentConversation
@@ -443,9 +409,8 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
   )
 );
 
-// 直接导出 zustand store hook（与 conversationStore 别名、modelStore/navigationStore 一致），
-// 保留 selector 重载 useConversationStore((s) => ...) 与静态 useConversationStore.getState()。
-// 此前用 `() => useConversationStoreBase()` 包装会丢失这两者，导致按 selector 订阅失效
-// 且 .getState() 不存在（ChatInput/TreeView/MainPage 多处调用）。
+// 直接导出 zustand store hook，保留 selector 重载 useConversationStore((s) => ...)
+// 与静态 useConversationStore.getState()。此前用 `() => useConversationStoreBase()`
+// 包装会丢失这两者，导致按 selector 订阅失效且 .getState() 不存在
+// （ChatInput/TreeView/MainPage 多处调用）。
 export const useConversationStore = useConversationStoreBase;
-export const conversationStore = useConversationStoreBase;

@@ -27,10 +27,6 @@ function createOperations(calls, overrides = {}) {
       calls.push(`messages:${options.awaitNodeId || ''}:${options.awaitRole || ''}:${options.retries ?? ''}`);
       return true;
     },
-    refreshBranches: async () => {
-      calls.push('branches');
-      return true;
-    },
     refreshTranscript: async () => {
       calls.push('transcript');
     },
@@ -52,13 +48,13 @@ async function testCoalescesSameTickRequests() {
   const coordinator = new ConversationSyncCoordinator(createOperations(calls));
   const first = coordinator.schedule('conv-1', {
     reason: 'first',
-    include: ['messages', 'branches', 'transcript'],
+    include: ['messages', 'transcript'],
     awaitNodeId: 'node-1',
     messageRetries: 6,
   });
   const second = coordinator.schedule('conv-1', {
     reason: 'second',
-    include: ['messages', 'branches', 'conversations', 'taskState'],
+    include: ['messages', 'conversations', 'taskState'],
     awaitNodeId: 'node-1',
     messageRetries: 6,
   });
@@ -67,7 +63,6 @@ async function testCoalescesSameTickRequests() {
   assert.equal(secondResult.messagesConfirmed, true);
   assert.deepEqual(calls, [
     'messages:node-1::6',
-    'branches',
     'transcript',
     'conversations',
     'taskState',
@@ -84,13 +79,12 @@ async function testSpecificMessageRequestSuppressesGenericDuplicate() {
       messageRetries: 0,
     }),
     coordinator.schedule('conv-1', {
-      include: ['messages', 'branches', 'transcript'],
+      include: ['messages', 'transcript'],
       messageRetries: 0,
     }),
   ]);
   assert.deepEqual(calls, [
     'messages:node-1::0',
-    'branches',
     'transcript',
   ]);
 }
@@ -99,12 +93,12 @@ async function testMergesDistinctAwaitNodeIdsToLatest() {
   const calls = [];
   const coordinator = new ConversationSyncCoordinator(createOperations(calls));
   const first = coordinator.schedule('conv-1', {
-    include: ['messages', 'branches', 'transcript'],
+    include: ['messages', 'transcript'],
     awaitNodeId: 'node-1',
     messageRetries: 0,
   });
   const second = coordinator.schedule('conv-1', {
-    include: ['messages', 'branches', 'transcript'],
+    include: ['messages', 'transcript'],
     awaitNodeId: 'node-2',
     messageRetries: 0,
   });
@@ -113,7 +107,6 @@ async function testMergesDistinctAwaitNodeIdsToLatest() {
   assert.equal(secondResult.messagesConfirmed, true);
   assert.deepEqual(calls, [
     'messages:node-2::0',
-    'branches',
     'transcript',
   ]);
 }
@@ -139,30 +132,28 @@ async function testSchedulesNextRoundWhileRunning() {
   assert.deepEqual(calls, ['messages', 'transcript']);
 }
 
-
 async function testRunsNonMessageOperationsInParallel() {
   const calls = [];
-  let releaseBranches;
-  const branchesBlocked = new Promise((resolve) => {
-    releaseBranches = resolve;
+  let releaseTree;
+  const treeBlocked = new Promise((resolve) => {
+    releaseTree = resolve;
   });
   const coordinator = new ConversationSyncCoordinator(createOperations(calls, {
-    refreshBranches: async () => {
-      calls.push('branches:start');
-      await branchesBlocked;
-      calls.push('branches:end');
-      return true;
+    loadTree: async () => {
+      calls.push('tree:start');
+      await treeBlocked;
+      calls.push('tree:end');
     },
   }));
-  const done = coordinator.schedule('conv-1', { include: ['messages', 'branches', 'transcript'] });
+  const done = coordinator.schedule('conv-1', { include: ['messages', 'tree', 'transcript'] });
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.ok(calls.includes('messages:::'), 'messages should run immediately');
-  assert.ok(calls.includes('transcript'), 'transcript must not wait for branches');
-  assert.ok(calls.includes('branches:start'));
-  assert.ok(!calls.includes('branches:end'));
-  releaseBranches();
+  assert.ok(calls.includes('transcript'), 'transcript must not wait for tree');
+  assert.ok(calls.includes('tree:start'));
+  assert.ok(!calls.includes('tree:end'));
+  releaseTree();
   await done;
-  assert.deepEqual(calls, ['messages:::', 'branches:start', 'transcript', 'branches:end']);
+  assert.deepEqual(calls, ['messages:::', 'tree:start', 'transcript', 'tree:end']);
 }
 (async () => {
   await testCoalescesSameTickRequests();

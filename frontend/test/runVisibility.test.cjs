@@ -20,7 +20,6 @@ require.extensions['.ts'] = function loadTs(module, filename) {
 const {
   isDetachedRunView,
   getStoppableRunIdsForSelectedBranch,
-  isRunVisibleInMainTranscript,
   isRunBlockingSelectedBranch,
   isRunStoppableFromSelectedBranch,
   isRunVisibleInSelectedTranscript,
@@ -106,7 +105,6 @@ function testDetachedBackgroundRunIsSideViewNotMainTranscript() {
   });
 
   assert.equal(isDetachedRunView(run, 'node-hello', new Set(['node-hello'])), true);
-  assert.equal(isRunVisibleInMainTranscript(run, 'node-hello', new Set(['node-hello'])), false);
 }
 
 function testDirectResponseRunIsSideViewNotMainTranscriptWithoutNode() {
@@ -118,7 +116,6 @@ function testDirectResponseRunIsSideViewNotMainTranscriptWithoutNode() {
   });
 
   assert.equal(isDetachedRunView(run, 'node-hello', new Set(['node-hello'])), true);
-  assert.equal(isRunVisibleInMainTranscript(run, 'node-hello', new Set(['node-hello'])), false);
 }
 
 function testDirectResponseRunNeverEntersMainTranscriptEvenWithTargetNode() {
@@ -129,7 +126,6 @@ function testDirectResponseRunNeverEntersMainTranscriptEvenWithTargetNode() {
     targetNodeId: 'node-response',
   });
 
-  assert.equal(isRunVisibleInMainTranscript(run, 'node-response', new Set(['node-hello'])), false);
   assert.equal(isRunBlockingSelectedBranch(run, 'node-response', new Set(['node-hello'])), false);
 }
 
@@ -142,7 +138,6 @@ function testDetachedChatRunStaysInMainTranscriptDuringPreTargetPhase() {
   });
 
   assert.equal(isDetachedRunView(run, 'node-hello', new Set(['node-hello'])), false);
-  assert.equal(isRunVisibleInMainTranscript(run, 'node-hello', new Set(['node-hello'])), true);
 }
 
 function testPendingChatRunStopsBlockingAnchorAfterTargetLands() {
@@ -156,7 +151,6 @@ function testPendingChatRunStopsBlockingAnchorAfterTargetLands() {
   });
 
   assert.equal(isRunVisibleInSelectedTranscript(run, 'node-hello', new Set(['node-hello'])), false);
-  assert.equal(isRunVisibleInMainTranscript(run, 'node-hello', new Set(['node-hello'])), false);
   assert.equal(isRunBlockingSelectedBranch(run, 'node-hello', new Set(['node-hello'])), false);
 }
 
@@ -183,7 +177,6 @@ function testDetachedRunIsVisibleWhenAnchorIsInSelectedBranchHistory() {
   });
 
   assert.equal(isDetachedRunView(run, 'node-child', new Set(['node-root', 'node-hello', 'node-child'])), true);
-  assert.equal(isRunVisibleInMainTranscript(run, 'node-child', new Set(['node-root', 'node-hello', 'node-child'])), false);
   assert.equal(isRunStoppableFromSelectedBranch(run, 'node-child', new Set(['node-root', 'node-hello', 'node-child'])), false);
 }
 
@@ -210,7 +203,6 @@ function testCommandRunIsSideViewAndStoppableFromAnchor() {
   });
 
   assert.equal(isDetachedRunView(run, 'node-hello', new Set(['node-hello'])), true);
-  assert.equal(isRunVisibleInMainTranscript(run, 'node-hello', new Set(['node-hello'])), false);
   assert.equal(isRunStoppableFromSelectedBranch(run, 'node-hello', new Set(['node-hello'])), false);
 }
 
@@ -224,7 +216,6 @@ function testSubagentWithTargetNodeStillUsesSideView() {
   });
 
   assert.equal(isDetachedRunView(run, 'node-hello', new Set(['node-hello'])), true);
-  assert.equal(isRunVisibleInMainTranscript(run, 'node-hello', new Set(['node-hello'])), false);
   assert.equal(isRunStoppableFromSelectedBranch(run, 'node-hello', new Set(['node-hello'])), false);
 }
 

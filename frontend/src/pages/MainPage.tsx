@@ -89,6 +89,10 @@ import {
   groupDetachedSideRuns,
   getWorkflowProgressSteps,
   buildSidePanelDraft,
+  getSideRunGroupLabel,
+  getSideRunTitle,
+  getSideRunStatusText,
+  getSideRunStatusColor,
   type SideRunGroupItem,
   type SideRunDraft,
 } from '../utils/sideRunGrouping';
@@ -138,6 +142,7 @@ import {
   getTranscriptItemNodeId,
   getTranscriptItemMessageId,
   getEditableUserMessageAttachmentRefs,
+  getUserAttachmentNames,
   type TranscriptState,
   type TranscriptScrollTarget,
 } from '../utils/transcriptItems';
@@ -209,6 +214,12 @@ export default function ChatPage() {
   const [editTargetNodeId, setEditTargetNodeId] = useState<string | null>(null);
   const [editToolPermissionMode, setEditToolPermissionMode] = useState<ToolPermissionMode | null>(null);
   const [editReturnNodeId, setEditReturnNodeId] = useState<string | null>(null);
+  const resetEditState = useCallback(() => {
+    setEditValue(null);
+    setEditTargetNodeId(null);
+    setEditToolPermissionMode(null);
+    setEditReturnNodeId(null);
+  }, []);
   const [attachedFiles, setAttachedFiles] = useState<string[]>([]);
   const [attachedImageRefs, setAttachedImageRefs] = useState<Array<{ filename: string; mime_type?: string }>>([]);
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([]);
@@ -431,7 +442,7 @@ export default function ChatPage() {
     conversations, currentConversation,
     currentNodeId, pendingScrollNodeId, clearPendingScroll,
     createConversation, selectConversation, deleteConversation, deleteNode, switchNode, loadConversations, loadTree,
-    clearCurrentConversation, updateConversationTitle, refreshMessages, refreshBranches,
+    clearCurrentConversation, updateConversationTitle, refreshMessages,
   } = useConversationStore();
 
   // 新对话页（无对话时）跟随全局默认设置变更：默认提供商/模型/思考/推理强度改变后，
@@ -1327,10 +1338,7 @@ export default function ChatPage() {
       toast.info('请先完成或取消当前消息编辑');
       return;
     }
-    setEditValue(null);
-    setEditTargetNodeId(null);
-    setEditToolPermissionMode(null);
-    setEditReturnNodeId(null);
+    resetEditState();
     clearCurrentConversation();
   };
   const sendNextQueuedMessage = useCallback(async (conversationId: string): Promise<boolean> => {
@@ -1378,7 +1386,6 @@ export default function ChatPage() {
   }
   conversationSyncCoordinatorRef.current.setOperations({
     refreshMessages,
-    refreshBranches,
     refreshTranscript: refreshVisibleTranscriptSnapshot,
     loadConversations,
     loadTree,
@@ -1634,10 +1641,7 @@ export default function ChatPage() {
   const handleCancelEdit = useCallback(async () => {
     const returnNodeId = editReturnNodeId;
     const conversationId = currentConversation?.id;
-    setEditValue(null);
-    setEditTargetNodeId(null);
-    setEditToolPermissionMode(null);
-    setEditReturnNodeId(null);
+    resetEditState();
     setAttachedFiles([]);
     setAttachedImageRefs([]);
     if (conversationId && returnNodeId) {
@@ -1902,10 +1906,7 @@ export default function ChatPage() {
       }));
     }
     pendingScrollId.current = id;
-    setEditValue(null);
-    setEditTargetNodeId(null);
-    setEditToolPermissionMode(null);
-    setEditReturnNodeId(null);
+    resetEditState();
     const selected = conversations.find((conversation) => conversation.id === id);
     if (selected?.workspace?.cwd) {
       const group = allProjectGroups.find((item) => item.path === selected.workspace?.cwd);
@@ -1934,12 +1935,11 @@ export default function ChatPage() {
   // 从树视图双击跳转：等待消息渲染后滚动到目标节点
   useEffect(() => {
     if (!pendingScrollNodeId || chatViewMode !== 'chat') return;
-    const idx = transcriptItems.findIndex((item) => getTranscriptItemNodeId(item) === pendingScrollNodeId);
-    if (idx === -1) return;
+    const pendingRendered = transcriptItems.some((item) => getTranscriptItemNodeId(item) === pendingScrollNodeId);
+    if (!pendingRendered) return;
     const tryScroll = () => {
       const el = findTranscriptAnchorElement(historyRef.current, {
         nodeId: pendingScrollNodeId,
-        legacyIndex: idx,
       });
       if (el) {
         el.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -2181,10 +2181,7 @@ export default function ChatPage() {
       const queuedConversationId = conversationId;
       const queuedRequest = request;
       clearAttachments();
-      setEditTargetNodeId(null);
-      setEditValue(null);
-      setEditToolPermissionMode(null);
-      setEditReturnNodeId(null);
+      resetEditState();
       updateQueuedMessages((messages) => [
         ...messages,
         {
@@ -2205,10 +2202,7 @@ export default function ChatPage() {
     }
 
     clearAttachments();
-    setEditTargetNodeId(null);
-    setEditValue(null);
-    setEditToolPermissionMode(null);
-    setEditReturnNodeId(null);
+    resetEditState();
     // 第三个参数是乐观渲染的用户气泡文本（显示用户输入的原文）。
     // 推理设置从 modelStore 的当前值读取（已确认值），随请求透传。
     void startStreaming(
@@ -2273,35 +2267,12 @@ export default function ChatPage() {
     }
   };
 
-  const getUserImportFileNames = (message: UserMessageItem): string[] => {
-    const structured = (message.import_files ?? [])
-      .map((file) => file.filename)
-      .filter(Boolean);
-    if (structured.length > 0) return structured;
-    return parseFileMention(message.content)?.fileNames ?? [];
-  };
-
-  const getUserImageRefs = (message: UserMessageItem): Array<{ filename: string; mime_type?: string }> => {
-    return (message.image_refs ?? [])
-      .filter((file) => Boolean(file.filename))
-      .map((file) => ({ filename: file.filename, mime_type: file.mime_type ?? undefined }));
-  };
-
-  const getUserAttachmentNames = (message: UserMessageItem): string[] => {
-    return [
-      ...getUserImportFileNames(message),
-      ...getUserImageRefs(message).map(file => file.filename),
-    ];
-  };
-
   const outline = useMemo(() => transcriptItems
-    .map((item, index) => ({ ...item, originalIndex: index }))
-    .filter((item): item is UserMessageItem & { originalIndex: number } => item.type === 'user_message')
+    .filter((item): item is UserMessageItem => item.type === 'user_message')
     .map((m) => {
       const clean = getUserDisplayContent(m);
       return {
         text: clean.slice(0, 20) + (clean.length > 20 ? '...' : ''),
-        originalIndex: m.originalIndex,
         messageId: m.id,
         nodeId: m.node_id,
       };
@@ -2320,15 +2291,6 @@ export default function ChatPage() {
         {defaultItem}
       </div>
     );
-  };
-
-  const getSideRunGroupLabel = (kind: string): string => {
-    if (kind === 'side_question') return '旁路问题';
-    if (kind === 'subagent') return '后台分支';
-    if (kind === 'command') return '后台命令';
-    if (kind === 'workflow') return 'Workflow';
-    if (kind === 'direct_response') return '命令响应';
-    return kind;
   };
 
   const renderTaskNotificationList = () => (
@@ -2397,38 +2359,6 @@ export default function ChatPage() {
       })}
     </section>
   );
-
-  const getSideRunTitle = (run: StreamState): string => {
-    const metadata = run.metadata || {};
-    const candidates = [
-      run.summary,
-      typeof metadata.command === 'string' ? metadata.command : '',
-      typeof metadata.workflow_step_name === 'string' ? metadata.workflow_step_name : '',
-      typeof metadata.agent_name === 'string' ? metadata.agent_name : '',
-      typeof metadata.original_slash_input === 'string' ? metadata.original_slash_input : '',
-      typeof metadata.delegated_task === 'string' ? metadata.delegated_task : '',
-      run.pendingUserMessage,
-    ];
-    return candidates.find((value) => typeof value === 'string' && value.trim().length > 0)?.trim()
-      || `${getSlashRunLabel(run.kind, run.pendingUserMessage)} · ${run.runId.slice(0, 12)}`;
-  };
-
-  const getSideRunStatusText = (run: StreamState): string => {
-    if (run.status === 'streaming') return '运行中';
-    if (run.status === 'waiting_approval') return '等待审批';
-    if (run.status === 'completed') return '已完成';
-    if (run.status === 'error') return '出错';
-    if (run.status === 'stopped') return '已停止';
-    return run.status;
-  };
-
-  const getSideRunStatusColor = (run: StreamState): string => {
-    if (run.status === 'completed') return 'var(--fg-tertiary)';
-    if (run.status === 'error') return 'var(--destructive)';
-    if (run.status === 'stopped') return 'var(--fg-tertiary)';
-    if (run.status === 'waiting_approval') return 'var(--icon-accent)';
-    return 'var(--icon-accent)';
-  };
 
   const renderSideRunActions = (draft: SideRunDraft) => (
     <>
@@ -3244,7 +3174,6 @@ export default function ChatPage() {
                         onClick={() => handleJumpToMessage({
                           messageId: item.messageId,
                           nodeId: item.nodeId,
-                          legacyIndex: item.originalIndex,
                         })}
                       >
                         <span className="truncate text-sm">{item.text}</span>

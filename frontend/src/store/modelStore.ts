@@ -304,39 +304,9 @@ export const useModelStore = create<ModelState & ModelActions>()(
     },
 
     resetToDefault: async () => {
-      const { config, loadModels: loadM, loadMetadata: loadMeta } = get();
+      const config = get().config;
       if (!config) return;
-
-      const pId = config.default_provider || null;
-      if (pId) {
-        const modelsMap = get().models;
-        if (!modelsMap[pId]) {
-          await loadM(pId);
-        }
-        await loadMeta(pId);
-        const updatedModels = get().models;
-        const providerModels = updatedModels[pId] || [];
-        const hiddenModels = config.provider?.[pId]?.hidden_models || [];
-        const visibleModels = providerModels.filter(m => !hiddenModels.includes(m));
-        const mId = selectVisibleDefaultModel(config.default_model, visibleModels);
-        const defs = defaultsFromMeta(get().getMetadata(pId, mId), {
-          effort: config.default_reasoning_effort ?? null,
-          thinking: config.default_thinking_enabled ?? null,
-        });
-        set({
-          currentProvider: pId,
-          currentModel: mId,
-          currentReasoningEffort: defs.effort,
-          currentThinkingEnabled: defs.thinking,
-        });
-      } else {
-        set({
-          currentProvider: null,
-          currentModel: null,
-          currentReasoningEffort: null,
-          currentThinkingEnabled: null,
-        });
-      }
+      await get().syncFromConversation(config.default_provider, config.default_model, null, null);
     },
 
     clearError: () => set({ error: null }),

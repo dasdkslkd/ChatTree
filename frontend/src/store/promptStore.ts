@@ -2,13 +2,11 @@ import { create } from 'zustand';
 import { devtools } from 'zustand/middleware';
 import type { Prompt, PromptResponse } from '../types/prompt';
 import { promptApi } from '../api/prompt';
-import { getApiErrorMessage } from '../api/errors';
 
 interface PromptState {
   prompts: PromptResponse[];         // 提示词列表（轻量数据）
   currentPrompt: Prompt | null;      // 当前选中的完整提示词
   loading: boolean;
-  error: string | null;
 }
 
 interface PromptActions {
@@ -17,8 +15,6 @@ interface PromptActions {
   savePrompt: (data: Prompt) => Promise<void>; // 保存提示词
   deletePrompt: (id: string) => Promise<void>; // 删除提示词
   clearCurrentPrompt: () => void; // 清除当前选中的提示词
-  clearError: () => void;
-  reset: () => void;
 }
 
 const usePromptStoreBase = create<PromptState & PromptActions>()(
@@ -28,16 +24,15 @@ const usePromptStoreBase = create<PromptState & PromptActions>()(
       prompts: [],
       currentPrompt: null,
       loading: false,
-      error: null,
 
       // 加载提示词列表
       loadPrompts: async () => {
-        set({ loading: true, error: null });
+        set({ loading: true });
         try {
           const response = await promptApi.list();
           set({ prompts: response.prompts });
-        } catch (err) {
-          set({ error: getApiErrorMessage(err, '加载提示词失败') });
+        } catch {
+          // 列表加载失败静默，由重试兜底
         } finally {
           set({ loading: false });
         }
@@ -45,12 +40,12 @@ const usePromptStoreBase = create<PromptState & PromptActions>()(
 
       // 加载单个提示词详情
       loadPrompt: async (id: string) => {
-        set({ loading: true, error: null });
+        set({ loading: true });
         try {
           const prompt = await promptApi.load(id);
           set({ currentPrompt: prompt });
-        } catch (err) {
-          set({ error: getApiErrorMessage(err, '加载提示词详情失败') });
+        } catch {
+          // 加载详情失败静默
         } finally {
           set({ loading: false });
         }
@@ -58,13 +53,13 @@ const usePromptStoreBase = create<PromptState & PromptActions>()(
 
       // 保存提示词
       savePrompt: async (data: Prompt) => {
-        set({ loading: true, error: null });
+        set({ loading: true });
         try {
           await promptApi.save(data);
           // 保存成功后刷新列表
           await get().loadPrompts();
-        } catch (err) {
-          set({ error: getApiErrorMessage(err, '保存提示词失败') });
+        } catch {
+          // 保存失败静默
         } finally {
           set({ loading: false });
         }
@@ -72,7 +67,7 @@ const usePromptStoreBase = create<PromptState & PromptActions>()(
 
       // 删除提示词
       deletePrompt: async (id: string) => {
-        set({ loading: true, error: null });
+        set({ loading: true });
         try {
           await promptApi.delete(id);
           // 如果删除的是当前选中的提示词，清除选中状态
@@ -81,27 +76,13 @@ const usePromptStoreBase = create<PromptState & PromptActions>()(
           }
           // 删除成功后刷新列表
           await get().loadPrompts();
-        } catch (err) {
-          set({ error: getApiErrorMessage(err, '删除提示词失败') });
-          throw err;
         } finally {
           set({ loading: false });
         }
       },
 
-      // 清除错误
-      clearError: () => set({ error: null }),
-
       // 清除当前选中的提示词
       clearCurrentPrompt: () => set({ currentPrompt: null }),
-
-      // 重置所有状态
-      reset: () => set({ 
-        prompts: [], 
-        currentPrompt: null, 
-        loading: false, 
-        error: null 
-      }),
     }),
     { name: 'prompt-store' } // 调试工具名称
   )

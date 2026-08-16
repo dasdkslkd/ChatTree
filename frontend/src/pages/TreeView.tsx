@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import dagre from 'dagre';
-import { useConversationStore, conversationStore } from '../store/conversationStore';
+import { useConversationStore } from '../store/conversationStore';
 import { useNavigationStore } from '../store/navigationStore';
 import { Button } from '@/components/ui/button';
 import {
@@ -273,7 +273,7 @@ export default function TreeView() {
     if (!currentConversation) return;
     const node = treeData?.nodes.find(n => n.id === nodeId);
     if (!node || isRootNode(node)) return;
-    const { switchNode } = conversationStore.getState();
+    const { switchNode } = useConversationStore.getState();
     try {
       await switchNode(nodeId);
       setChatViewMode('chat');

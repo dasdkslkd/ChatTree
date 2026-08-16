@@ -14,6 +14,7 @@ import { Switch } from '@/components/ui/switch';
 import { Loader2, Save, RefreshCw, RotateCw } from 'lucide-react';
 import { toast } from '@/utils/toast';
 import { configApi } from '@/api/config';
+import { TOOL_PERMISSION_MODE_OPTIONS } from '@/utils/toolPermissionDraft';
 import type {
   BuiltinToolExposure,
   ConfigData,
@@ -28,13 +29,6 @@ const BUILTIN_EXPOSURE_OPTIONS: { value: BuiltinToolExposure; label: string; des
   { value: 'coding', label: 'Coding', description: '代码读写、搜索、命令和网页工具' },
   { value: 'minimal', label: 'Minimal', description: '仅基础工具和网页工具' },
   { value: 'full', label: 'Full', description: '暴露完整 canonical 工具面' },
-];
-
-const TOOL_PERMISSION_MODE_OPTIONS: { value: ToolPermissionMode; label: string; description: string }[] = [
-  { value: 'auto_approve', label: '自动批准', description: '除显式删除外自动执行工具' },
-  { value: 'modify_only', label: '修改前询问', description: '读取自动执行，修改需确认' },
-  { value: 'ask_always', label: '总是询问', description: '每次工具调用都需确认' },
-  { value: 'plan', label: '计划模式', description: '仅允许只读规划工具' },
 ];
 
 export function BuiltinToolsSection() {

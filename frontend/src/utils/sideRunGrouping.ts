@@ -1,4 +1,5 @@
 import type { StreamState } from '../services/streamManager';
+import { getSlashRunLabel } from './slashRuntime';
 
 export const SIDE_RUN_GROUP_ORDER = ['side_question', 'subagent', 'command', 'workflow', 'direct_response'] as const;
 
@@ -180,4 +181,45 @@ export function buildSidePanelDraft(run: StreamState): SideRunDraft {
     showPendingBubble: !!run.pendingUserMessage,
     showStreamBlock: run.status !== 'idle',
   };
+}
+
+export function getSideRunGroupLabel(kind: string): string {
+  if (kind === 'side_question') return '旁路问题';
+  if (kind === 'subagent') return '后台分支';
+  if (kind === 'command') return '后台命令';
+  if (kind === 'workflow') return 'Workflow';
+  if (kind === 'direct_response') return '命令响应';
+  return kind;
+}
+
+export function getSideRunTitle(run: StreamState): string {
+  const metadata = run.metadata || {};
+  const candidates = [
+    run.summary,
+    typeof metadata.command === 'string' ? metadata.command : '',
+    typeof metadata.workflow_step_name === 'string' ? metadata.workflow_step_name : '',
+    typeof metadata.agent_name === 'string' ? metadata.agent_name : '',
+    typeof metadata.original_slash_input === 'string' ? metadata.original_slash_input : '',
+    typeof metadata.delegated_task === 'string' ? metadata.delegated_task : '',
+    run.pendingUserMessage,
+  ];
+  return candidates.find((value) => typeof value === 'string' && value.trim().length > 0)?.trim()
+    || `${getSlashRunLabel(run.kind, run.pendingUserMessage)} · ${run.runId.slice(0, 12)}`;
+}
+
+export function getSideRunStatusText(run: StreamState): string {
+  if (run.status === 'streaming') return '运行中';
+  if (run.status === 'waiting_approval') return '等待审批';
+  if (run.status === 'completed') return '已完成';
+  if (run.status === 'error') return '出错';
+  if (run.status === 'stopped') return '已停止';
+  return run.status;
+}
+
+export function getSideRunStatusColor(run: StreamState): string {
+  if (run.status === 'completed') return 'var(--fg-tertiary)';
+  if (run.status === 'error') return 'var(--destructive)';
+  if (run.status === 'stopped') return 'var(--fg-tertiary)';
+  if (run.status === 'waiting_approval') return 'var(--icon-accent)';
+  return 'var(--icon-accent)';
 }

@@ -9,11 +9,11 @@ export interface BranchRunLike {
   cancellationParentRunId?: string | null;
 }
 
-export function getRunTargetNodeId(run: BranchRunLike): string | null {
+function getRunTargetNodeId(run: BranchRunLike): string | null {
   return run.targetNodeId || run.nodeId || null;
 }
 
-export function isRunAnchorVisibleOnSelectedBranch(
+function isRunAnchorVisibleOnSelectedBranch(
   anchorNodeId: string | null,
   selectedBranchTipId: string | null,
   currentBranchNodeIds: Set<string>,
@@ -41,16 +41,6 @@ export function isDetachedRunView(
 ): boolean {
   if (!['side_question', 'subagent', 'command', 'workflow', 'workflow_step', 'direct_response'].includes(run.kind)) return false;
   return isRunAnchorVisibleOnSelectedBranch(run.anchorNodeId, selectedBranchTipId, currentBranchNodeIds);
-}
-
-export function isRunVisibleInMainTranscript(
-  run: BranchRunLike,
-  selectedBranchTipId: string | null,
-  currentBranchNodeIds: Set<string>,
-): boolean {
-  if (run.kind === 'direct_response') return false;
-  if (isDetachedRunView(run, selectedBranchTipId, currentBranchNodeIds)) return false;
-  return isRunVisibleInSelectedTranscript(run, selectedBranchTipId, currentBranchNodeIds);
 }
 
 export function shouldPatchRunIntoMainConversation(run: BranchRunLike): boolean {
