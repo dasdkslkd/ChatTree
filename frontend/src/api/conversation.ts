@@ -32,13 +32,13 @@ export interface DeleteNodeOptions {
 }
 
 export const conversationApi = {
-  // ��ȡ�Ի��б�
+  // 获取对话列表
   list: async (): Promise<Conversation[]> => {
     const response = await apiClient.get('/conversations');
     return response.data;
   },
 
-  // �����Ի�
+  // 创建对话
   create: async (data: ConversationCreateRequest = {}): Promise<Conversation> => {
     const response = await apiClient.post('/conversations', data);
     return response.data;
@@ -49,23 +49,23 @@ export const conversationApi = {
     return response.data;
   },
 
-  // ɾ���Ի�
+  // 删除对话
   delete: async (id: string): Promise<void> => {
     await apiClient.delete(`/conversations/${id}`);
   },
 
-  // �л��ڵ�
+  // 切换节点
   switchNode: async (conversationId: string, nodeId: string): Promise<void> => {
     await apiClient.post(`/conversations/${conversationId}/switch/${nodeId}`);
   },
 
-  // ��ȡ�������ṹ
+  // 获取会话树结构
   getTree: async (conversationId: string): Promise<TreeData> => {
     const response = await apiClient.get(`/conversations/${conversationId}/tree`);
     return response.data;
   },
 
-  // ���¶Ի�����
+  // 更新对话标题
   updateTitle: async (id: string, title: string): Promise<void> => {
     await apiClient.patch(`/conversations/${id}`, { title });
   },
@@ -102,8 +102,7 @@ export const conversationApi = {
     return response.data;
   },
 
-  // ɾ���ڵ�
-  // �ϴ������ļ�
+  // 上传导入文件
   uploadImport: async (
     conversationId: string,
     file: File,

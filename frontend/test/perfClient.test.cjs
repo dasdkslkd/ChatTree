@@ -32,7 +32,6 @@ require.cache[require.resolve(leaseFetchModule)] = {
 const {
   flushPerfEvents,
   flushPerfEventsSync,
-  getPerfConfig,
   loadPerfConfig,
   recordFrontendEvent,
   resetPerfForTests,
@@ -229,7 +228,6 @@ async function testConfigLoadFailureRetriesAndKeepsPreInitEvents() {
 
   recordFrontendEvent({ type: 'mark', name: 'stream.fetch', attrs: { attempt: 1 } });
   await nextTick();
-  assert.equal(getPerfConfig().enabled, false);
   recordFrontendEvent({ type: 'mark', name: 'stream.response_headers', attrs: { attempt: 2 } });
   await loadPerfConfig();
   await flushPerfEvents();

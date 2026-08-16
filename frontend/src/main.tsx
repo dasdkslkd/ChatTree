@@ -4,7 +4,9 @@ import './index.css'
 import { initializeProfileContext } from './runtime/profileContext'
 
 async function startFrontend(): Promise<void> {
-  const root = createRoot(document.getElementById('root')!)
+  const rootElement = document.getElementById('root')
+  if (!rootElement) throw new Error('启动失败：未找到 #root 挂载点')
+  const root = createRoot(rootElement)
   try {
     const profile = initializeProfileContext()
     const { default: App } = await import('./App')

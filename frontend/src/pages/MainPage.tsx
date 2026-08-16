@@ -1900,9 +1900,10 @@ export default function ChatPage() {
       return;
     }
     if (currentConversation && historyRef.current) {
+      const el = historyRef.current;
       setScrollPositions(prev => ({
         ...prev,
-        [currentConversation.id]: historyRef.current!.scrollTop
+        [currentConversation.id]: el.scrollTop
       }));
     }
     pendingScrollId.current = id;

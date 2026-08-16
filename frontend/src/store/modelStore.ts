@@ -67,7 +67,6 @@ interface ModelActions {
   ) => Promise<void>;
   /** 重置为默认提供商的默认模型（新建对话时调用） */
   resetToDefault: () => Promise<void>;
-  clearError: () => void;
 }
 
 /** 按模型元数据推导默认推理设置（无控件时为 null）。override 优先且仅在模型声明该能力时生效。 */
@@ -309,6 +308,5 @@ export const useModelStore = create<ModelState & ModelActions>()(
       await get().syncFromConversation(config.default_provider, config.default_model, null, null);
     },
 
-    clearError: () => set({ error: null }),
   }))
 );

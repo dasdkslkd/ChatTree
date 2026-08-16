@@ -130,11 +130,7 @@ export async function loadPerfConfig(): Promise<PerfConfig> {
   return configLoadPromise;
 }
 
-export function getPerfConfig(): PerfConfig {
-  return config;
-}
-
-export function isPerfEnabled(): boolean {
+function isPerfEnabled(): boolean {
   return initialized && config.enabled;
 }
 

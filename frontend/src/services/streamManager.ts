@@ -287,8 +287,8 @@ export class StreamManager {
   }
 
   private replaceRunId(oldRunId: string, newRunId: string) {
-    if (oldRunId === newRunId || !this.streams.has(oldRunId) || this.streams.has(newRunId)) return oldRunId;
-    const state = this.streams.get(oldRunId)!;
+    const state = this.streams.get(oldRunId);
+    if (!state || oldRunId === newRunId || this.streams.has(newRunId)) return oldRunId;
     this.streams.delete(oldRunId);
     this.streams.set(newRunId, { ...state, runId: newRunId });
     this.runAliases.set(oldRunId, newRunId);
@@ -303,9 +303,11 @@ export class StreamManager {
   resolveRunId(runId: string): string {
     let current = runId;
     const seen = new Set<string>();
-    while (this.runAliases.has(current) && !seen.has(current)) {
+    while (!seen.has(current)) {
+      const next = this.runAliases.get(current);
+      if (next === undefined) break;
       seen.add(current);
-      current = this.runAliases.get(current)!;
+      current = next;
     }
     return current;
   }
