@@ -16,6 +16,8 @@
           ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
           : theme;
         document.documentElement.classList.add(resolved);
+        // 同步到原生壳层：React bundle 加载前即让 nativeTheme/窗口边框进入正确主题
+        if (window.electronAPI && window.electronAPI.setTheme) window.electronAPI.setTheme(theme);
       })();
     </script>
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />

@@ -14,6 +14,7 @@ const FRONTEND_DIST = app.isPackaged
 const PROJECT_ROOT = path.join(__dirname, "..", "..");
 const LOG_DIR = path.join(app.getPath("userData"), "logs");
 const LOG_FILE = path.join(LOG_DIR, "launcher.log");
+const THEME_FILE = path.join(app.getPath("userData"), "theme.json");
 
 let launcherProcess = null;
 let launcherOrigin = null;
@@ -497,6 +498,24 @@ async function createShellWindow() {
   await shellWindow.loadFile(path.join(__dirname, "shell.html"));
 }
 
+// ── 外观主题持久化 ──────────────────────────────────────────────────
+// 偏好由 React（localStorage）经 theme:set 同步到主进程并落盘；重启后
+// whenReady 最先恢复 nativeTheme，保证 launcher 连接等待 / 壳层标签页 /
+// 窗口边框在 React 加载前即为正确主题
+function loadThemePreference() {
+  try {
+    const theme = JSON.parse(fs.readFileSync(THEME_FILE, "utf8")).theme;
+    if (theme === "light" || theme === "dark" || theme === "system") return theme;
+  } catch {}
+  return "system";
+}
+
+function saveThemePreference(theme) {
+  try {
+    fs.writeFileSync(THEME_FILE, JSON.stringify({ theme }), "utf8");
+  } catch {}
+}
+
 // ── IPC handlers ───────────────────────────────────────────────────────
 
 function registerIpc() {
@@ -548,6 +567,7 @@ function registerIpc() {
   ipcMain.on("theme:set", (_event, theme) => {
     if (theme !== "light" && theme !== "dark" && theme !== "system") return;
     nativeTheme.themeSource = theme;
+    saveThemePreference(theme);
   });
 }
 
@@ -572,6 +592,7 @@ app.on("web-contents-created", (_event, contents) => {
 
 app.whenReady().then(async () => {
   Menu.setApplicationMenu(null);
+  nativeTheme.themeSource = loadThemePreference();
   registerIpc();
   await startLauncher();
   await createShellWindow();

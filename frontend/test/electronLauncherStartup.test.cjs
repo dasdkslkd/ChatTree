@@ -5,6 +5,7 @@ const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '../electron/main.cjs'), 'utf8');
 const preloadSource = fs.readFileSync(path.join(__dirname, '../electron/preload.cjs'), 'utf8');
 const shellSource = fs.readFileSync(path.join(__dirname, '../electron/shell.js'), 'utf8');
+const indexSource = fs.readFileSync(path.join(__dirname, '../index.html'), 'utf8');
 const packageConfig = JSON.parse(fs.readFileSync(path.join(__dirname, '../package.json'), 'utf8'));
 const connectProfileSource = source.slice(
   source.indexOf('async function connectProfile'),
@@ -146,4 +147,30 @@ assert.match(
   preloadSource,
   /setTheme: \(theme\) => ipcRenderer\.send\("theme:set", theme\)/,
   'Profile views should report the appearance preference to the native shell',
+);
+// ── 启动期主题恢复：launcher 连接等待/壳层标签页/窗口边框在 React 加载前即为正确主题
+assert.match(
+  source,
+  /function loadThemePreference\(\)/,
+  'Electron should load the persisted appearance preference from disk',
+);
+assert.match(
+  source,
+  /function saveThemePreference\(theme\)/,
+  'Electron should persist the appearance preference to disk',
+);
+assert.match(
+  source,
+  /ipcMain\.on\("theme:set",[\s\S]*saveThemePreference\(theme\);/,
+  'theme:set should persist the native theme preference',
+);
+assert.match(
+  source,
+  /Menu\.setApplicationMenu\(null\);\s+nativeTheme\.themeSource = loadThemePreference\(\);\s+registerIpc\(\);/,
+  'whenReady should restore the theme before any window or IPC is set up',
+);
+assert.match(
+  indexSource,
+  /window\.electronAPI\.setTheme\(theme\);/,
+  'The first-paint inline script should push the theme to the native shell',
 );
