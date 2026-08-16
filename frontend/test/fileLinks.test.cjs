@@ -33,7 +33,11 @@ function createMockReact() {
     props: props || {},
     children: children.flat(),
   });
-  return { createElement };
+  const cloneElement = (element, config) => ({
+    type: element.type,
+    props: { ...element.props, ...config },
+  });
+  return { createElement, cloneElement };
 }
 
 function loadModule(relativePath, requireMock) {

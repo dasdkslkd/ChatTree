@@ -38,40 +38,6 @@ export interface AvailableBranch {
   message_count: number;
 }
 
-export interface PruneSummaryRecord {
-  id: string;
-  type: 'prune_summary';
-  parent_node_id: string;
-  created_at: number;
-  model_id?: string | null;
-  provider_id?: string | null;
-  user_instructions?: string | null;
-  summary: string;
-  covered_node_ids: string[];
-  covered_direct_child_ids: string[];
-  compact_node_ids: string[];
-  truncated_node_ids: string[];
-  coverage_notes: string[];
-  branch_digests?: Array<Record<string, unknown>>;
-  tokens_used?: number;
-  status: 'completed' | 'failed';
-}
-
-export interface PruneSummaryResult {
-  conversation_id: string;
-  parent_node_id: string;
-  summary_id: string;
-  covered_node_count: number;
-  covered_direct_child_count: number;
-  covered_node_ids?: string[];
-  covered_direct_child_ids?: string[];
-  compact_node_ids: string[];
-  truncated_node_ids: string[];
-  coverage_notes: string[];
-  summary_preview: string;
-  summary: string;
-}
-
 export const conversationApi = {
   // ��ȡ�Ի��б�
   list: async (): Promise<Conversation[]> => {
@@ -149,15 +115,6 @@ export const conversationApi = {
     return response.data;
   },
 
-  pruneSummary: async (
-    conversationId: string,
-    nodeId: string,
-    data: { custom_instructions?: string | null; model_id?: string | null; provider_id?: string | null } = {},
-  ): Promise<PruneSummaryResult> => {
-    const response = await apiClient.post(`/conversations/${conversationId}/nodes/${nodeId}/prune-summary`, data);
-    return response.data;
-  },
-
   // ɾ���ڵ�
   // �ϴ������ļ�
   uploadImport: async (
@@ -183,17 +140,6 @@ export const conversationApi = {
     );
     await requireSuccessfulResponse(response);
     return response.blob();
-  },
-
-  // �г������ļ�
-  listImports: async (conversationId: string): Promise<Array<{ filename: string; size: number }>> => {
-    const response = await apiClient.get(`/conversations/${conversationId}/imports`);
-    return response.data;
-  },
-
-  // ɾ�������ļ�
-  deleteImport: async (conversationId: string, filename: string): Promise<void> => {
-    await apiClient.delete(`/conversations/${conversationId}/imports/${encodeURIComponent(filename)}`);
   },
 
   deleteNode: async (conversationId: string, nodeId: string, options: DeleteNodeOptions = {}): Promise<{ deleted_node_id: string; new_current_node_id: string; parent_node_id: string }> => {

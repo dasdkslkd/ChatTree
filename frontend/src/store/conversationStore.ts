@@ -29,10 +29,8 @@ interface ConversationState {
   currentConversation: Conversation | null;
   branches: AvailableBranch[];
   treeData: TreeData | null;
-  streamingContent: string;
   currentNodeId: string | null;
   pendingScrollNodeId: string | null;
-  isStreaming: boolean;
   loading: boolean;
 }
 
@@ -54,7 +52,6 @@ interface ConversationActions {
   switchNode: (nodeId: string) => Promise<void>;
   setCurrentNodeIdLocal: (nodeId: string) => void;
   deleteNode: (nodeId: string) => Promise<void>;
-  abortStreaming: () => void;
   loadTree: (conversationId: string) => Promise<void>;
   clearPendingScroll: () => void;
   refreshMessages: (conversationId: string, opts?: { awaitNodeId?: string; awaitRole?: 'assistant' | 'user'; retries?: number }) => Promise<boolean>;
@@ -84,10 +81,8 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
         currentConversation: null,
         branches: [],
         treeData: null,
-        streamingContent: '',
         currentNodeId: null,
         pendingScrollNodeId: null,
-        isStreaming: false,
         loading: false,
 
         loadConversations: async () => {
@@ -111,7 +106,6 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
               conversations: [conversation, ...state.conversations],
               currentConversation: conversation,
               treeData: null,
-              streamingContent: '',
               currentNodeId: null,
               pendingScrollNodeId: null,
             }));
@@ -165,7 +159,6 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
               : null,
             branches: [],
             treeData: null,
-            streamingContent: '',
             currentNodeId,
             pendingScrollNodeId: null,
           });
@@ -191,7 +184,6 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
             currentConversation: isCurrent ? null : state.currentConversation,
             branches: isCurrent ? [] : state.branches,
             treeData: isCurrent ? null : state.treeData,
-            streamingContent: isCurrent ? '' : state.streamingContent,
             currentNodeId: isCurrent ? null : state.currentNodeId,
             pendingScrollNodeId: isCurrent ? null : state.pendingScrollNodeId,
           }));
@@ -293,7 +285,6 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
                   ? { ...conversation, current_node_id: nodeId }
                   : conversation
               ),
-              streamingContent: '',
               pendingScrollNodeId: nodeId,
             }));
           } finally {
@@ -318,7 +309,6 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
           }));
         },
 
-        abortStreaming: () => set({ isStreaming: false, streamingContent: '' }),
         clearPendingScroll: () => set({ pendingScrollNodeId: null }),
 
         // 流式结束后，用 canonical transcript 快照确认指定节点/角色已经落盘。
@@ -388,7 +378,6 @@ const useConversationStoreBase = create<ConversationState & ConversationActions>
             currentConversation: null,
             branches: [],
             treeData: null,
-            streamingContent: '',
             currentNodeId: null,
             pendingScrollNodeId: null,
           });

@@ -1,14 +1,12 @@
 import { apiClient } from './client';
 import type { SendMessageRequest } from '../types/message';
 import type { TranscriptPatch } from '../types/transcript';
-import { perfNow, recordMark, recordSpan } from '../perf/marks';
+import { perfNow, recordSpan } from '../perf/marks';
 import { leaseGuardedFetch } from './leaseFetch';
-import { runsApi } from './runs';
+import { runsApi, parseTranscriptPatchSseResponse } from './runs';
 import type { RunStartResponse } from './runs';
 import {
-  apiErrorFromResponse,
   ChatTreeApiError,
-  normalizeFetchError,
   unexpectedApiResponse,
 } from './errors';
 
@@ -53,161 +51,6 @@ export type ToolApprovalDecisionResponse = {
   status: 'approved' | 'denied' | 'expired' | 'cancelled';
   scope: 'once' | 'session' | null;
 };
-
-async function acquireSseReader(
-  response: Response,
-): Promise<ReadableStreamDefaultReader<Uint8Array>> {
-  try {
-    if (!response.ok) {
-      throw await apiErrorFromResponse(response);
-    }
-    const reader = response.body?.getReader();
-    if (!reader) {
-      throw unexpectedApiResponse(
-        response.status,
-        new Error('Response body is not readable'),
-      );
-    }
-    return reader;
-  } catch (error) {
-    try {
-      await response.body?.cancel();
-    } catch {
-      // The transport may already have closed or cancelled the body.
-    }
-    throw normalizeFetchError(error);
-  }
-}
-
-async function* parseSseResponse(
-  response: Response,
-  perfAttrs: Record<string, unknown> = {},
-): AsyncGenerator<TranscriptPatch, void> {
-  const reader = await acquireSseReader(response);
-  recordMark('stream.response_headers', {
-    ...perfAttrs,
-    status: response.status,
-  });
-  const decoder = new TextDecoder();
-
-  let buffer = '';
-  let firstChunk = true;
-  let eventCount = 0;
-
-  try {
-    while (true) {
-      const readStarted = perfNow();
-      let readResult: ReadableStreamReadResult<Uint8Array>;
-      try {
-        readResult = await reader.read();
-      } catch (error) {
-        throw normalizeFetchError(error);
-      }
-      const { done, value } = readResult;
-      recordSpan('stream.reader_read', readStarted, {
-        ...perfAttrs,
-        done,
-        bytes: value?.byteLength ?? 0,
-      });
-      if (done) {
-        buffer += decoder.decode();
-        break;
-      }
-      if (firstChunk) {
-        recordMark('stream.first_bytes', {
-          ...perfAttrs,
-          bytes: value?.byteLength ?? 0,
-        });
-        firstChunk = false;
-      }
-
-      buffer += decoder.decode(value, { stream: true });
-
-      const parts = buffer.split('\n\n');
-      buffer = parts.pop() || '';
-
-      for (const part of parts) {
-        const trimmed = part.trim();
-        if (!trimmed) continue;
-
-        if (trimmed.startsWith('data:')) {
-          const jsonData = trimmed.slice(5).trimStart();
-          if (jsonData === '[DONE]') {
-            recordMark('stream.done', { ...perfAttrs, event_count: eventCount });
-            return;
-          }
-          try {
-            const parseStarted = perfNow();
-            const parsed = JSON.parse(jsonData) as TranscriptPatch;
-            eventCount += 1;
-            recordSpan('stream.parse_event', parseStarted, {
-              ...perfAttrs,
-              event_type: parsed.type,
-              revision: parsed.revision,
-              operation_count: parsed.operations.length,
-            });
-            yield parsed;
-          } catch (e) {
-            recordMark('stream.parse_error', { ...perfAttrs });
-            throw unexpectedApiResponse(response.status, e);
-          }
-        }
-      }
-    }
-
-    if (buffer.trim()) {
-      const trimmed = buffer.trim();
-      if (trimmed.startsWith('data:')) {
-        const jsonData = trimmed.slice(5).trimStart();
-        if (jsonData === '[DONE]') {
-          recordMark('stream.done', { ...perfAttrs, event_count: eventCount });
-          return;
-        }
-        try {
-          const parseStarted = perfNow();
-          const parsed = JSON.parse(jsonData) as TranscriptPatch;
-          eventCount += 1;
-          recordSpan('stream.parse_event', parseStarted, {
-            ...perfAttrs,
-            event_type: parsed.type,
-            revision: parsed.revision,
-            operation_count: parsed.operations.length,
-          });
-          yield parsed;
-        } catch (e) {
-          recordMark('stream.parse_error', { ...perfAttrs, final_buffer: true });
-          throw unexpectedApiResponse(response.status, e);
-        }
-      }
-    }
-    throw unexpectedApiResponse(
-      response.status,
-      new Error('SSE stream ended before data:[DONE]'),
-    );
-  } finally {
-    try {
-      await reader.cancel();
-    } catch {
-      // The reader may already be closed or cancelled.
-    }
-  }
-}
-
-async function* parseTranscriptPatchSseResponse(
-  response: Response,
-  perfAttrs: Record<string, unknown> = {},
-): AsyncGenerator<TranscriptPatch, void> {
-  for await (const chunk of parseSseResponse(response, perfAttrs)) {
-    const payload = chunk as { type?: unknown };
-    if (payload?.type !== 'transcript_patch') {
-      throw unexpectedApiResponse(
-        response.status,
-        new Error('Plan action stream returned a non transcript_patch event'),
-      );
-    }
-    yield chunk as unknown as TranscriptPatch;
-  }
-}
 
 async function* postPlanActionStream(
   conversationId: string,

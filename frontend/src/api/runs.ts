@@ -89,6 +89,7 @@ async function* parseSseResponse(
         try {
           parsed = JSON.parse(data);
         } catch (error) {
+          recordMark('stream.parse_error', { ...perfAttrs });
           throw unexpectedApiResponse(response.status, error);
         }
         eventCount += 1;
@@ -114,6 +115,7 @@ async function* parseSseResponse(
         eventCount += 1;
         yield parsed;
       } catch (error) {
+        recordMark('stream.parse_error', { ...perfAttrs, final_buffer: true });
         throw unexpectedApiResponse(response.status, error);
       }
     }
@@ -130,7 +132,7 @@ async function* parseSseResponse(
   }
 }
 
-async function* parseTranscriptPatchSseResponse(
+export async function* parseTranscriptPatchSseResponse(
   response: Response,
   perfAttrs: Record<string, unknown> = {},
 ): AsyncGenerator<TranscriptPatch, void> {
@@ -139,7 +141,7 @@ async function* parseTranscriptPatchSseResponse(
     if (payload?.type !== 'transcript_patch') {
       throw unexpectedApiResponse(
         response.status,
-        new Error('Run attach stream returned a non transcript_patch event'),
+        new Error('SSE stream returned a non transcript_patch event'),
       );
     }
     yield chunk as unknown as TranscriptPatch;
@@ -147,16 +149,6 @@ async function* parseTranscriptPatchSseResponse(
 }
 
 export const runsApi = {
-  listActive: async (conversationId?: string): Promise<RunRecord[]> => {
-    const response = await apiClient.get('/runs/active', { params: conversationId ? { conversation_id: conversationId } : undefined });
-    return response.data;
-  },
-
-  listConversation: async (conversationId: string): Promise<RunRecord[]> => {
-    const response = await apiClient.get(`/conversations/${conversationId}/runs`);
-    return response.data;
-  },
-
   get: async (runId: string): Promise<RunRecord> => {
     const response = await apiClient.get(`/runs/${encodeURIComponent(runId)}`);
     return response.data;
@@ -182,11 +174,6 @@ export const runsApi = {
 
   observe: async (runId: string): Promise<RunRecord> => {
     const response = await apiClient.post<RunRecord>(`/runs/${encodeURIComponent(runId)}/observe`);
-    return response.data;
-  },
-
-  stopConversation: async (conversationId: string): Promise<{ run_ids: string[] }> => {
-    const response = await apiClient.post(`/conversations/${conversationId}/runs/stop`);
     return response.data;
   },
 

@@ -44,7 +44,6 @@ export function UserMessageItem({
   const importFiles = (item.import_files ?? []).map((file) => file.filename).filter(Boolean);
   const imageRefs = (item.image_refs ?? []).filter((file) => Boolean(file.filename));
   const hasAttachments = importFiles.length > 0 || imageRefs.length > 0;
-  const imageKey = imageRefs.map((file) => file.filename).join('|');
 
   useEffect(() => {
     if (!imageRefs.length) return;
@@ -67,8 +66,7 @@ export function UserMessageItem({
       cancelled = true;
       for (const url of objectUrls) URL.revokeObjectURL(url);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [item.conversation_id, imageKey]);
+  }, [item.conversation_id, imageRefs]);
 
   // 长消息折叠：内容超过 5 行时展示展开/收起按钮，并随懒加载内容尺寸变化重新判定
   useEffect(() => {

@@ -88,7 +88,7 @@ interface FinishInfo {
   drained: boolean;
   nodeId: string | null;
   targetNodeId: string | null;
-  controller: AbortController;
+  controller: AbortController | null;
 }
 type FinishListener = (info: FinishInfo) => void;
 
@@ -571,16 +571,17 @@ export class StreamManager {
           break;
         } catch (err) {
           const state = this.streams.get(runId);
-          const signal = state?.abortController?.signal;
           if (
             !state
-            || signal?.aborted
+            || !state.abortController
+            || state.abortController.signal.aborted
             || runId.startsWith('client_')
             || runId.startsWith('attach_')
             || (err instanceof ChatTreeApiError && !err.retryable)
           ) {
             throw err;
           }
+          const signal = state.abortController.signal;
           try {
             await runsApi.get(runId);
           } catch (statusError) {
@@ -592,7 +593,7 @@ export class StreamManager {
             Math.min(reconnectAttempt, STREAM_RECONNECT_DELAYS_MS.length - 1)
           ];
           reconnectAttempt += 1;
-          await waitForReconnect(delay, signal!);
+          await waitForReconnect(delay, signal);
           streamFactory = () => runsApi.attach(runId, { signal });
         }
       }
@@ -632,7 +633,7 @@ export class StreamManager {
           drained,
           nodeId: finalState.nodeId,
           targetNodeId: finalState.targetNodeId,
-          controller: finalState.abortController!,
+          controller: finalState.abortController,
         });
         void flushPerfEvents();
       }
@@ -749,7 +750,7 @@ export class StreamManager {
     return archived;
   }
 
-  cleanupIfController(conversationId: string, controller: AbortController, runId?: string): void {
+  cleanupIfController(conversationId: string, controller: AbortController | null, runId?: string): void {
     const states = runId ? [this.streams.get(runId)] : this.getConversationStates(conversationId);
     for (const state of states) {
       if (state?.abortController === controller) {

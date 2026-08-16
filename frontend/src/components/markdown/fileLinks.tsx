@@ -1,4 +1,4 @@
-import { createElement, type MouseEvent, type ReactNode } from 'react';
+import { cloneElement, createElement, type MouseEvent, type ReactElement, type ReactNode } from 'react';
 import type { Components } from 'react-markdown';
 import { toast } from '@/utils/toast';
 import { getApiErrorMessage } from '../../api/errors';
@@ -70,8 +70,9 @@ function walkChildrenForFileLinks(node: ReactNode): ReactNode {
     if (type === 'a') return node;
     const props = node.props as { children?: ReactNode };
     if (props.children != null) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return { ...node as any, props: { ...props, children: walkChildrenForFileLinks(props.children) } };
+      return cloneElement(node as ReactElement<{ children?: ReactNode }>, {
+        children: walkChildrenForFileLinks(props.children),
+      });
     }
   }
   return node;

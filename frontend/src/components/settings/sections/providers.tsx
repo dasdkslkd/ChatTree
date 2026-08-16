@@ -238,6 +238,13 @@ export function ProvidersSection() {
     setLoginError(null);
     setEnterpriseDomain('');
     setEditDialogOpen(true);
+    // 打开编辑弹窗时，若该提供商配置了订阅则自动查询额度
+    if (providerId) {
+      const pc = config?.provider?.[providerId];
+      if (pc?.auth?.subscription) {
+        void handleFetchQuota(providerId);
+      }
+    }
   };
 
   const handleNameInputChange = (name: string) => {
@@ -480,17 +487,6 @@ export function ProvidersSection() {
       setEditFetchingModels(false);
     }
   };
-
-  // 打开对话框时，若有订阅则自动查询额度
-  useEffect(() => {
-    if (editDialogOpen && editProviderId) {
-      const pc = config?.provider?.[editProviderId];
-      if (pc?.auth?.subscription) {
-        handleFetchQuota(editProviderId);
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editDialogOpen, editProviderId]);
 
   // 组件卸载时清理轮询定时器
   useEffect(() => {

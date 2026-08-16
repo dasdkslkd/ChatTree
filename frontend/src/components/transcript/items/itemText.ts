@@ -24,11 +24,3 @@ export function getItemText(item: TranscriptItem, fallback = ''): string {
   return candidates.find((value): value is string => typeof value === 'string' && value.trim().length > 0) || fallback;
 }
 
-export function getStringProp(item: TranscriptItem, key: string): string {
-  const value = (item as unknown as Record<string, unknown>)[key];
-  return typeof value === 'string' ? value : '';
-}
-
-export function getStatusText(item: TranscriptItem): string {
-  return 'status' in item ? item.status : getStringProp(item, 'status');
-}
