@@ -19,7 +19,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { ArrowRight, Bot, Share2, StickyNote, X, Settings, Square, Plus, FileText, Pencil, Trash2, Check, Loader2 } from 'lucide-react'
-import { useState, useEffect, useMemo, useRef, type ReactNode } from 'react'
+import { useState, useEffect, useLayoutEffect, useMemo, useRef, useDeferredValue, type ReactNode } from 'react'
 import { toast } from 'sonner'
 import { useModelStore } from '../store/modelStore'
 import { usePromptStore } from '../store/promtStore'
@@ -189,14 +189,15 @@ export function ChatInput({
   }, [activeDialogProvider, loadModels, modelDialogOpen]);
 
   // 自动调整 textarea 高度
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
       textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 200)}px`;
     }
   }, [value]);
 
-  const referNodeCompletionState = useMemo(() => getReferNodeCompletionState(value), [value]);
+  const deferredValue = useDeferredValue(value);
+  const referNodeCompletionState = useMemo(() => getReferNodeCompletionState(deferredValue), [deferredValue]);
 
   useEffect(() => {
     if (!conversationId || !referNodeCompletionState.active) return;
@@ -333,12 +334,14 @@ export function ChatInput({
   const inputDisabled = disabled && !isStreaming;
   const sendDisabled = !value.trim() || (disabled && !isStreaming);
   const showStreamingSend = !!isStreaming && !!value.trim();
-  const referNodeCandidates = referNodeCompletionState.active
-    ? getReferNodeCompletionCandidates(value, treeData)
-    : [];
-  const slashCandidates = referNodeCompletionState.active
-    ? []
-    : getSlashCompletionCandidates(value, slashCommands);
+  const referNodeCandidates = useMemo(
+    () => (referNodeCompletionState.active ? getReferNodeCompletionCandidates(deferredValue, treeData) : []),
+    [referNodeCompletionState, deferredValue, treeData],
+  );
+  const slashCandidates = useMemo(
+    () => (referNodeCompletionState.active ? [] : getSlashCompletionCandidates(deferredValue, slashCommands)),
+    [referNodeCompletionState, deferredValue, slashCommands],
+  );
   const suggestionItems: SuggestionItem[] = [
     ...slashCandidates.map((command) => ({ kind: 'slash' as const, key: `slash:${command.name}`, command })),
     ...referNodeCandidates.map((node) => ({ kind: 'node' as const, key: `node:${node.id}`, node })),

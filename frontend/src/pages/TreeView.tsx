@@ -17,6 +17,7 @@ import type { TreeNode } from '../api/conversation';
 import { useRunManager } from '../hooks/useRunManager';
 import { streamManager, type StreamState } from '../services/streamManager';
 import { getApiErrorMessage } from '../api/errors';
+import { stripFileMention } from '../utils/fileMention';
 
 interface LayoutNode {
   id: string;
@@ -62,10 +63,6 @@ function truncate(text: string, max: number): string {
   return clean.length > max ? clean.slice(0, max) + '...' : clean;
 }
 
-function stripFileMention(content: string): string {
-  const match = content.match(/^'''USER MENTIONED FILES:\s+.*?\s+'''\n\n[\s\S]*?\n---\n\n/s);
-  return match ? content.slice(match[0].length) : content;
-}
 
 function getTreeUserContent(node: TreeNode): string {
   return node.user_content ?? '';

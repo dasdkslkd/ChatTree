@@ -726,7 +726,8 @@ async def get_conversation_tree(
                 ),
                 {},
             )
-            assistant_content = str(assistant_message.get("content") or "")
+            # assistant_content 仅用于节点标签与 /refer 候选预览，截断为 200 字符
+            assistant_content = str(assistant_message.get("content") or "")[:200]
 
             # 处理 parent_id: 根节点的 parent_id 为 "None" 字符串，转为 null
             parent_id = node.get("parent_id")

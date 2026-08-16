@@ -86,6 +86,7 @@ def test_tree_endpoint_returns_200_with_usage(tmp_path: Path):
         assert "id" in node
         assert "parent_id" in node
         assert "children_ids" in node
+        assert len(node["assistant_content"]) <= 200
         assert "usage" in node
         usage = node["usage"]
         assert usage is not None

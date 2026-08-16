@@ -13,8 +13,9 @@ import {
 import { toast } from 'sonner';
 import { filesApi, type FileEntry } from '../api/files';
 import { getApiErrorMessage } from '../api/errors';
+import { useThemeStore } from '../store/themeStore';
 import { MarkdownView } from './markdown/MarkdownView';
-import { SyntaxHighlighter, oneDark } from './markdown/languages';
+import { SyntaxHighlighter, oneDark, oneLight } from './markdown/languages';
 import { Button } from './ui/button';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from './ui/dialog';
 import { Input } from './ui/input';
@@ -116,6 +117,8 @@ export function FileBrowser({ roots: rawRoots }: { roots: string[] }) {
   // 去重、去空后的多根目录（森林的顶级节点来源于此）。
   const roots = useMemo(() => [...new Set(rawRoots.filter(Boolean))], [rawRoots]);
   const [nodes, setNodes] = useState<TreeNode[] | null>(null);
+  const nodesRef = useRef<TreeNode[] | null>(null);
+  nodesRef.current = nodes;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -131,14 +134,22 @@ export function FileBrowser({ roots: rawRoots }: { roots: string[] }) {
   const tabBarRef = useRef<HTMLDivElement | null>(null);
   const treeDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
 
-  /** 列出所有根目录，构建森林顶级节点（每根一个已展开目录节点）。 */
-  const listForest = useCallback((): Promise<void> => {
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    setSelectedPath(null);
+    setOpenFiles([]);
+    setActivePath(null);
     if (roots.length === 0) {
       setNodes([]);
-      return Promise.resolve();
+      setLoading(false);
+      return;
     }
-    return Promise.all(
-      roots.map(async (root) => {
+    const existing = nodesRef.current ?? [];
+    const missing = roots.filter((root) => !existing.some((n) => n.path === root));
+    Promise.all(
+      missing.map(async (root) => {
         const data = await filesApi.list(root);
         return {
           name: baseName(root),
@@ -151,18 +162,24 @@ export function FileBrowser({ roots: rawRoots }: { roots: string[] }) {
         };
       }),
     )
-      .then((forest) => setNodes(forest))
-      .catch((loadError) => setError(getApiErrorMessage(loadError, '加载目录失败')));
+      .then((added) => {
+        if (cancelled) return;
+        setNodes((curr) => {
+          const keep = (curr ?? []).filter((n) => roots.includes(n.path));
+          const keepPaths = new Set(keep.map((n) => n.path));
+          return [...keep, ...added.filter((n) => !keepPaths.has(n.path))];
+        });
+      })
+      .catch((loadError) => {
+        if (!cancelled) setError(getApiErrorMessage(loadError, '加载目录失败'));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [roots]);
-
-  useEffect(() => {
-    setLoading(true);
-    setError(null);
-    setSelectedPath(null);
-    setOpenFiles([]);
-    setActivePath(null);
-    listForest().finally(() => setLoading(false));
-  }, [listForest]);
 
   const openNode = useCallback((node: TreeNode) => {
     if (node.type === 'dir') return;
@@ -631,6 +648,7 @@ const TreeRow = memo(function TreeRow({
 });
 
 const FileViewer = memo(function FileViewer({ path, name }: { path: string; name: string }) {
+  const resolvedTheme = useThemeStore((s) => s.resolvedTheme);
   const [state, setState] = useState<{ loading: boolean; error: string | null; data: { content: string; binary: boolean; truncated: boolean } | null }>({
     loading: true,
     error: null,
@@ -679,13 +697,13 @@ const FileViewer = memo(function FileViewer({ path, name }: { path: string; name
           <pre className="whitespace-pre-wrap break-words px-3 py-2 text-xs" style={{ color: 'var(--fg-85)' }}>{content}</pre>
         </div>
       ) : isMarkdown ? (
-        <div className="px-3 py-2 text-sm">
+        <div className="px-3 py-2 text-sm prose prose-sm max-w-none [&_p]:m-0 [&_p:not(:last-child)]:mb-2">
           <MarkdownView content={content} />
         </div>
       ) : language ? (
         <SyntaxHighlighter
           language={language}
-          style={oneDark}
+          style={resolvedTheme === 'dark' ? oneDark : oneLight}
           customStyle={{ margin: 0, padding: '10px 12px', background: 'transparent', fontSize: 13, lineHeight: '20px', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}
           codeTagProps={{ style: { fontFamily: 'var(--font-mono, "JetBrains Mono", ui-monospace, monospace)', display: 'block', width: '100%', whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }}
         >

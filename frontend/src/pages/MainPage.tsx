@@ -155,6 +155,7 @@ import {
   getBranchTaskContextMode,
 } from '../utils/branchMode';
 import { formatConversationTime } from '../utils/time';
+import { parseFileMention } from '../utils/fileMention';
 
 const PROFILE_ID = getProfileContext().profileId;
 const PROFILE_LEFT_SIDEBAR_STORAGE_KEY = profileStorageKey(PROFILE_ID, LEFT_SIDEBAR_STORAGE_KEY);
@@ -172,6 +173,11 @@ function getCurrentVisibleTranscriptTip(): { conversationId: string; tipNodeId: 
   const conversationId = state.currentConversation?.id;
   const tipNodeId = state.currentNodeId || state.currentConversation?.current_node_id || null;
   return conversationId && tipNodeId ? { conversationId, tipNodeId } : null;
+}
+
+
+function getUserDisplayContent(message: UserMessageItem): string {
+  return parseFileMention(message.content)?.cleanContent ?? message.content;
 }
 
 type QueuedMessage = {
@@ -1701,15 +1707,27 @@ export default function ChatPage() {
   }, [loadConversations]);
 
   useEffect(() => {
-    const updateLocalStreamingIds = () => {
-      const counts = new Map<string, number>();
-      for (const conversationId of streamManager.getStreamingConversationIds()) {
-        const count = streamManager.getConversationStates(conversationId)
-          .filter((state) => state.status === 'streaming' || state.status === 'waiting_approval')
-          .length;
-        if (count > 0) counts.set(conversationId, count);
+    const countStreaming = (conversationId: string): number =>
+      streamManager.getConversationStates(conversationId)
+        .filter((state) => state.status === 'streaming' || state.status === 'waiting_approval')
+        .length;
+    const updateLocalStreamingIds = (changedConversationId?: string) => {
+      if (changedConversationId === undefined) {
+        const counts = new Map<string, number>();
+        for (const conversationId of streamManager.getStreamingConversationIds()) {
+          const count = countStreaming(conversationId);
+          if (count > 0) counts.set(conversationId, count);
+        }
+        setLocalStreamingConversationCounts(counts);
+        return;
       }
-      setLocalStreamingConversationCounts(counts);
+      setLocalStreamingConversationCounts((prev) => {
+        const next = new Map(prev);
+        const count = countStreaming(changedConversationId);
+        if (count > 0) next.set(changedConversationId, count);
+        else next.delete(changedConversationId);
+        return next;
+      });
     };
     updateLocalStreamingIds();
     return streamManager.subscribe(updateLocalStreamingIds);
@@ -2174,14 +2192,6 @@ export default function ChatPage() {
     }
   };
 
-  const parseFileMention = (content: string): { fileNames: string[]; cleanContent: string } | null => {
-    const match = content.match(/^'''USER MENTIONED FILES:\s+(.*?)\s+'''\u000A\u000A[\s\S]*?\u000A---\u000A\u000A/s);
-    if (!match) return null;
-    const fileNames = match[1].split(/\s+/).filter(Boolean);
-    const cleanContent = content.slice(match[0].length);
-    return { fileNames, cleanContent };
-  };
-
   const getUserImportFileNames = (message: UserMessageItem): string[] => {
     const structured = (message.import_files ?? [])
       .map((file) => file.filename)
@@ -2203,11 +2213,7 @@ export default function ChatPage() {
     ];
   };
 
-  const getUserDisplayContent = (message: UserMessageItem): string => {
-    return parseFileMention(message.content)?.cleanContent ?? message.content;
-  };
-
-  const outline = transcriptItems
+  const outline = useMemo(() => transcriptItems
     .map((item, index) => ({ ...item, originalIndex: index }))
     .filter((item): item is UserMessageItem & { originalIndex: number } => item.type === 'user_message')
     .map((m) => {
@@ -2218,7 +2224,7 @@ export default function ChatPage() {
         messageId: m.id,
         nodeId: m.node_id,
       };
-    });
+    }), [transcriptItems]);
 
   const renderTranscriptItem = (item: TranscriptItem, defaultItem: React.ReactNode) => {
     const nodeId = getTranscriptItemNodeId(item);
@@ -3169,7 +3175,7 @@ export default function ChatPage() {
               ) : rightPanelView === 'files' ? (
                 <div className="flex min-h-0 flex-1 flex-col">
                   {fileBrowserRoots.length > 0 ? (
-                    <FileBrowser key={fileBrowserRoots.join('|')} roots={fileBrowserRoots} />
+                    <FileBrowser roots={fileBrowserRoots} />
                   ) : (
                     <div className="px-3 py-4 text-xs" style={{ color: 'var(--fg-tertiary)' }}>
                       暂无可浏览的项目目录。

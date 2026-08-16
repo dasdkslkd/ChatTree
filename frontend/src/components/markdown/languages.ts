@@ -60,3 +60,4 @@ SyntaxHighlighter.registerLanguage('yaml', yaml);
 
 export { default as SyntaxHighlighter } from 'react-syntax-highlighter/dist/esm/prism-light';
 export { default as oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism/one-dark';
+export { default as oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism/one-light';

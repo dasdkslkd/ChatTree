@@ -44,6 +44,13 @@ declare module 'react-syntax-highlighter/dist/esm/styles/prism/one-dark' {
   export default oneDark;
 }
 
+declare module 'react-syntax-highlighter/dist/esm/styles/prism/one-light' {
+  import type { CSSProperties } from 'react';
+
+  const oneLight: Record<string, CSSProperties>;
+  export default oneLight;
+}
+
 declare module 'react-syntax-highlighter/dist/esm/languages/prism/*' {
   const language: unknown;
   export default language;

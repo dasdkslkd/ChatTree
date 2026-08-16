@@ -70,16 +70,13 @@ function messageRequestKey(options: MessageRefreshOptions): string {
 
 function mergeMessageRequest(target: MessageRefreshOptions[], options: MessageRefreshOptions): void {
   const hasSpecificRequest = options.awaitNodeId || options.awaitRole;
-  if (!hasSpecificRequest && target.some((request) => request.awaitNodeId || request.awaitRole)) {
+  if (hasSpecificRequest) {
+    // 同 tick 只保留最新 specific 请求：branch 快照含整条分支线，最新落盘即覆盖前面请求的确认目标
+    target.length = 0;
+    target.push(options);
     return;
   }
-  if (hasSpecificRequest) {
-    for (let index = target.length - 1; index >= 0; index -= 1) {
-      const request = target[index];
-      if (!request.awaitNodeId && !request.awaitRole) target.splice(index, 1);
-    }
-  }
-
+  if (target.some((request) => request.awaitNodeId || request.awaitRole)) return;
   const key = messageRequestKey(options);
   if (target.some((request) => messageRequestKey(request) === key)) return;
   target.push(options);

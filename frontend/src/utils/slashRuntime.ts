@@ -1,5 +1,6 @@
 import type { SlashCommandInfo } from '../types/slash';
 import type { TreeData, TreeNode } from '../api/conversation';
+import { stripFileMention } from './fileMention';
 
 export interface SlashCompletionState {
   active: boolean;
@@ -67,10 +68,6 @@ function compactPreview(value: string | null | undefined, maxLength: number): st
   return `${compact.slice(0, Math.max(0, maxLength - 1)).trimEnd()}...`;
 }
 
-function stripFileMention(content: string): string {
-  const match = content.match(/^'''USER MENTIONED FILES:\s+.*?\s+'''\n\n[\s\S]*?\n---\n\n/s);
-  return match ? content.slice(match[0].length) : content;
-}
 
 function getTreeUserContent(node: Pick<TreeNode, 'user_content'>): string {
   return node.user_content ?? '';

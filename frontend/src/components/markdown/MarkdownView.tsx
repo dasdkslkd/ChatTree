@@ -9,7 +9,8 @@ import {
 } from 'react';
 import { Check, Copy, ChevronRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { SyntaxHighlighter, oneDark } from './languages';
+import { useThemeStore } from '@/store/themeStore';
+import { SyntaxHighlighter, oneDark, oneLight } from './languages';
 
 const MarkdownContent = lazy(() => import('../MarkdownContent'));
 
@@ -48,6 +49,7 @@ function getCodeBlockPayload(children: ReactNode): { code: string; language: str
 
 export function CodeBlockWrapper({ children, ...props }: HTMLAttributes<HTMLPreElement>) {
   const [copied, setCopied] = useState(false);
+  const resolvedTheme = useThemeStore((s) => s.resolvedTheme);
   const codeRef = useRef<HTMLDivElement>(null);
   const payload = getCodeBlockPayload(children);
   const languageLabel = payload?.language || '代码';
@@ -81,7 +83,7 @@ export function CodeBlockWrapper({ children, ...props }: HTMLAttributes<HTMLPreE
       {payload?.language ? (
         <SyntaxHighlighter
           language={payload.language}
-          style={oneDark}
+          style={resolvedTheme === 'dark' ? oneDark : oneLight}
           customStyle={{
             margin: 0,
             padding: '10px 12px',
