@@ -37,6 +37,10 @@ import {
   type ToolPermissionDraft,
 } from '../utils/toolPermissionDraft'
 import {
+  NEW_COMPOSER_DRAFT_KEY,
+  getComposerDraft,
+} from '../utils/composerDraft'
+import {
   applyReferNodeCompletion,
   applySlashCommandCompletion,
   getReferNodeCompletionCandidates,
@@ -77,6 +81,7 @@ interface Props {
   toolPermissionDraft: ToolPermissionDraft;
   getToolPermissionDraft: () => ToolPermissionDraft;
   onToolPermissionDraftChange: (draft: ToolPermissionDraft) => void;
+  onValueChange?: (value: string) => void;
   variant?: 'dock' | 'composer';
 }
 
@@ -101,13 +106,18 @@ export function ChatInput({
   toolPermissionDraft,
   getToolPermissionDraft,
   onToolPermissionDraftChange,
+  onValueChange,
   variant = 'dock',
 }: Props) {
   const { openSettings } = useNavigationStore();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const suggestionItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const [value, setValue] = useState(editValue ?? '');
+  // 输入框文本：编辑态以 editValue 为准，否则恢复该对话已保存的草稿
+  const [value, setValue] = useState(() => {
+    if (editValue != null) return editValue;
+    return getComposerDraft(conversationId ?? NEW_COMPOSER_DRAFT_KEY)?.text ?? '';
+  });
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const [modelSaving, setModelSaving] = useState(false);
   const [promptDialogOpen, setPromptDialogOpen] = useState(false);
@@ -119,6 +129,11 @@ export function ChatInput({
   const [slashHighlightIndex, setSlashHighlightIndex] = useState(0);
   const [slashDismissedForValue, setSlashDismissedForValue] = useState<string | null>(null);
   const [isSending, setIsSending] = useState(false);
+
+  // 上报当前文本：供 MainPage 在切换对话/分支时把输入框内容写回草稿
+  useEffect(() => {
+    onValueChange?.(value);
+  }, [value, onValueChange]);
 
   const {
     models,

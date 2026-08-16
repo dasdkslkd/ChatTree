@@ -108,6 +108,12 @@ import {
   type ToolPermissionDraft,
 } from '../utils/toolPermissionDraft';
 import {
+  NEW_COMPOSER_DRAFT_KEY,
+  getComposerDraft,
+  removeComposerDraft,
+  setComposerDraft,
+} from '../utils/composerDraft';
+import {
   getActiveStreamPollingDelay,
   getStreamStatusText as getStreamStatusLabel,
 } from '../utils/streaming';
@@ -219,6 +225,11 @@ export default function ChatPage() {
     setEditTargetNodeId(null);
     setEditToolPermissionMode(null);
     setEditReturnNodeId(null);
+  }, []);
+  // 输入框最新文本：由 ChatInput 上报，切换对话/分支时写回草稿
+  const composerValueRef = useRef('');
+  const handleComposerValueChange = useCallback((value: string) => {
+    composerValueRef.current = value;
   }, []);
   const [attachedFiles, setAttachedFiles] = useState<string[]>([]);
   const [attachedImageRefs, setAttachedImageRefs] = useState<Array<{ filename: string; mime_type?: string }>>([]);
@@ -1333,11 +1344,43 @@ export default function ChatPage() {
     </DropdownMenu>
   );
 
-  const handleNewConversation = () => {
-    if (editTargetNodeId) {
-      toast.info('请先完成或取消当前消息编辑');
-      return;
+  // 离开当前对话/分支前保存输入框草稿（含编辑态）
+  const saveComposerDraft = useCallback(() => {
+    const conversationId = currentConversation?.id ?? NEW_COMPOSER_DRAFT_KEY;
+    // 编辑态把最新编辑文本同步到 editValue，保证切树视图等重挂载场景不丢内容
+    if (editTargetNodeId) setEditValue(composerValueRef.current);
+    setComposerDraft(conversationId, {
+      text: composerValueRef.current,
+      editing: editTargetNodeId
+        ? {
+            targetNodeId: editTargetNodeId,
+            returnNodeId: editReturnNodeId,
+            toolPermissionMode: editToolPermissionMode,
+          }
+        : null,
+    });
+  }, [currentConversation?.id, editTargetNodeId, editReturnNodeId, editToolPermissionMode]);
+
+  // 回到某对话时恢复其草稿中的编辑态（普通文本由 ChatInput 挂载时读取草稿）
+  const restoreComposerDraft = useCallback(async (id: string) => {
+    const draft = getComposerDraft(id);
+    if (!draft?.editing) return;
+    setEditValue(draft.text);
+    setEditTargetNodeId(draft.editing.targetNodeId);
+    setEditToolPermissionMode(draft.editing.toolPermissionMode);
+    setEditReturnNodeId(draft.editing.returnNodeId);
+    const { currentNodeId } = useConversationStore.getState();
+    if (currentNodeId !== draft.editing.targetNodeId) {
+      try {
+        await switchNode(draft.editing.targetNodeId);
+      } catch (error) {
+        toast.error(getApiErrorMessage(error, '切换节点失败'));
+      }
     }
+  }, [switchNode]);
+
+  const handleNewConversation = () => {
+    saveComposerDraft();
     resetEditState();
     clearCurrentConversation();
   };
@@ -1641,6 +1684,7 @@ export default function ChatPage() {
   const handleCancelEdit = useCallback(async () => {
     const returnNodeId = editReturnNodeId;
     const conversationId = currentConversation?.id;
+    if (conversationId) removeComposerDraft(conversationId);
     resetEditState();
     setAttachedFiles([]);
     setAttachedImageRefs([]);
@@ -1651,7 +1695,7 @@ export default function ChatPage() {
         toast.error(getApiErrorMessage(error, '切换节点失败'));
       }
     }
-  }, [currentConversation?.id, editReturnNodeId, switchNode]);
+  }, [currentConversation?.id, editReturnNodeId, switchNode, resetEditState]);
 
   const handleDeleteUserMessage = useCallback((item: UserMessageItem) => {
     if (!isTranscriptItemVisibleNow(item, currentConversation?.id ?? null, selectedBranchTipId)) return;
@@ -1895,10 +1939,9 @@ export default function ChatPage() {
   }, []);
 
   const handleSelectConversation = async (id: string) => {
-    if (editTargetNodeId) {
-      toast.info('请先完成或取消当前消息编辑');
-      return;
-    }
+    if (id === currentConversation?.id && editTargetNodeId) return;
+    saveComposerDraft();
+    resetEditState();
     if (currentConversation && historyRef.current) {
       const el = historyRef.current;
       setScrollPositions(prev => ({
@@ -1915,6 +1958,7 @@ export default function ChatPage() {
     }
     try {
       await selectConversation(id);
+      await restoreComposerDraft(id);
     } catch (error) {
       toast.error(getApiErrorMessage(error, '选择对话失败'));
     }
@@ -1961,15 +2005,27 @@ export default function ChatPage() {
 
   // 兄弟分支原地切换：与消息操作行翻页器共用同一数据通路（children_ids + switchNode）
   const switchSiblingBranch = useCallback((direction: -1 | 1) => {
-    const { treeData: tree, currentNodeId: tipNodeId } = useConversationStore.getState();
+    const { treeData: tree, currentNodeId: tipNodeId, currentConversation: conversation } = useConversationStore.getState();
     if (!tree || !tipNodeId) return;
     const node = tree.nodes.find((entry) => entry.id === tipNodeId);
     if (!node?.parent_id) return;
     const siblings = tree.nodes.find((entry) => entry.id === node.parent_id)?.children_ids ?? [];
     const index = siblings.indexOf(tipNodeId);
     const target = index === -1 ? undefined : siblings[index + direction];
-    if (target) void switchNode(target).catch(() => {});
-  }, [switchNode]);
+    if (!target) return;
+    const draft = conversation ? getComposerDraft(conversation.id) : undefined;
+    saveComposerDraft();
+    resetEditState();
+    void switchNode(target).then(() => {
+      const state = useConversationStore.getState();
+      if (draft?.editing && state.currentNodeId === draft.editing.targetNodeId) {
+        setEditValue(draft.text);
+        setEditTargetNodeId(draft.editing.targetNodeId);
+        setEditToolPermissionMode(draft.editing.toolPermissionMode);
+        setEditReturnNodeId(draft.editing.returnNodeId);
+      }
+    }).catch(() => {});
+  }, [saveComposerDraft, switchNode, resetEditState]);
 
   // 快捷键闭环：Ctrl+←/→ 兄弟分支切换，Ctrl+T 对话/树视图互切，Esc 停止流式
   useEffect(() => {
@@ -1988,6 +2044,7 @@ export default function ChatPage() {
         }
         if (event.key.toLowerCase() === 't') {
           event.preventDefault();
+          saveComposerDraft();
           toggleChatViewMode();
           return;
         }
@@ -2008,7 +2065,7 @@ export default function ChatPage() {
     };
     window.addEventListener('keydown', handleGlobalKeyDown);
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
-  }, [switchSiblingBranch, toggleChatViewMode, handleStopStreaming, currentBranchHasStreamingChat, sidebarCollapsed]);
+  }, [switchSiblingBranch, toggleChatViewMode, saveComposerDraft, handleStopStreaming, currentBranchHasStreamingChat, sidebarCollapsed]);
 
   const handleExportMarkdown = () => {
     if (!transcriptItems.length || !currentConversation) return;
@@ -2108,6 +2165,7 @@ export default function ChatPage() {
     requestAnimationFrame(scrollToBottom);
 
     let conversationId = currentConversation?.id;
+    const composerDraftKey = currentConversation?.id ?? NEW_COMPOSER_DRAFT_KEY;
     const importFiles = attachedFiles.map(filename => ({ filename }));
     const imageRefs = attachedImageRefs.map(({ filename, mime_type }) => ({ filename, mime_type }));
     const hasPendingAttachments = pendingImportFilesRef.current.size > 0;
@@ -2183,6 +2241,7 @@ export default function ChatPage() {
       const queuedRequest = request;
       clearAttachments();
       resetEditState();
+      removeComposerDraft(composerDraftKey);
       updateQueuedMessages((messages) => [
         ...messages,
         {
@@ -2204,6 +2263,7 @@ export default function ChatPage() {
 
     clearAttachments();
     resetEditState();
+    removeComposerDraft(composerDraftKey);
     // 第三个参数是乐观渲染的用户气泡文本（显示用户输入的原文）。
     // 推理设置从 modelStore 的当前值读取（已确认值），随请求透传。
     void startStreaming(
@@ -2923,7 +2983,7 @@ export default function ChatPage() {
                 role="tab"
                 aria-selected={chatViewMode === 'tree'}
                 className={cn('view-toggle-btn', chatViewMode === 'tree' && 'is-active')}
-                onClick={() => setChatViewMode('tree')}
+                onClick={() => { saveComposerDraft(); setChatViewMode('tree'); }}
               >
                 <Network />树
               </button>
@@ -2959,6 +3019,7 @@ export default function ChatPage() {
                     isStreaming={currentBranchHasStreamingChat}
                     disabled={currentBranchHasStreamingChat}
                     conversationId={null}
+                    onValueChange={handleComposerValueChange}
                     editValue={editValue}
                     isEditing={Boolean(editTargetNodeId)}
                     onCancelEdit={handleCancelEdit}
@@ -3032,6 +3093,7 @@ export default function ChatPage() {
                   isStreaming={currentBranchHasStreamingChat}
                   disabled={currentBranchHasStreamingChat}
                   conversationId={currentConversation?.id || null}
+                  onValueChange={handleComposerValueChange}
                   editValue={editValue}
                   isEditing={Boolean(editTargetNodeId)}
                   onCancelEdit={handleCancelEdit}

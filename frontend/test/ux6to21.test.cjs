@@ -33,11 +33,16 @@ function testUx7GlobalShortcutImeGuard() {
   assert.match(mainPage, /if \(isEditable \|\| event\.isComposing\) return;/, '快捷键入口应统一早退');
 }
 
-function testUx11EditDraftGuardsConversationSwitch() {
-  // UX11：编辑消息草稿未完成时，切换/新建对话被阻断
-  assert.match(mainPage, /const handleSelectConversation = async \(id: string\) => \{\s*if \(editTargetNodeId\)/, '切换对话应先检查编辑态');
-  assert.match(mainPage, /const handleNewConversation = \(\) => \{\s*if \(editTargetNodeId\)/, '新建对话应先检查编辑态');
-  assert.match(mainPage, /toast\.info\('请先完成或取消当前消息编辑'\)/, '阻断时应有提示');
+function testUx11EditDraftSavedOnSwitch() {
+  // UX11：编辑消息草稿在切换对话/分支时保存，回到该对话/分支时恢复
+  assert.doesNotMatch(mainPage, /toast\.info\('请先完成或取消当前消息编辑'\)/, '不应再阻断切换');
+  assert.match(mainPage, /const handleSelectConversation = async \(id: string\) => \{\s*if \(id === currentConversation\?\.id && editTargetNodeId\) return;/, '编辑态点击当前对话不应退出编辑');
+  assert.match(mainPage, /saveComposerDraft\(\);\s*resetEditState\(\);\s*if \(currentConversation && historyRef\.current\)/, '切换对话应先保存草稿再清理编辑态');
+  assert.match(mainPage, /await selectConversation\(id\);\s*await restoreComposerDraft\(id\);/, '切换对话后应恢复目标草稿');
+  assert.match(mainPage, /const handleNewConversation = \(\) => \{\s*saveComposerDraft\(\);\s*resetEditState\(\);\s*clearCurrentConversation\(\);\s*\};/, '新建对话应先保存草稿');
+  assert.match(mainPage, /if \(!target\) return;\s*const draft = conversation \? getComposerDraft\(conversation\.id\) : undefined;\s*saveComposerDraft\(\);\s*resetEditState\(\);/, '切换分支应先保存草稿');
+  assert.match(mainPage, /removeComposerDraft\(conversationId\);/, '取消编辑应清除草稿');
+  assert.match(mainPage, /if \(editTargetNodeId\) setEditValue\(composerValueRef\.current\);/, '保存草稿时应同步编辑态最新文本到 editValue');
 }
 
 function testUx13ImageFailurePlaceholder() {
@@ -103,7 +108,7 @@ function testUx21ProjectLoadFailureKeepsOldData() {
 testUx5ErrorFieldRemoved();
 testUx6TreeViewEscClosesMenu();
 testUx7GlobalShortcutImeGuard();
-testUx11EditDraftGuardsConversationSwitch();
+testUx11EditDraftSavedOnSwitch();
 testUx13ImageFailurePlaceholder();
 testUx14CopyFailureNoFalseSuccess();
 testUx15DeleteMessageAndBranchConfirmDialog();
